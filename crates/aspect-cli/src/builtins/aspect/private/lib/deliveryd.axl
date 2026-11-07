@@ -4,8 +4,8 @@ expose over a Unix socket.
 deliveryd keys state by commit: each target's digest is `record`ed under the
 commit before `query` can answer for it, `deliver` stamps a digest with the
 build URL that delivered it, and `delete` clears one after a failed run. This
-is the `DeliveryState.connect` for a deployment without access to the delivery
-API, selected explicitly (see `delivery_state.axl`).
+is the default `DeliveryState.connect` on an Aspect Workflows runner, which
+sets `ENDPOINT_ENV` (see `delivery_state.axl`).
 
     dd = deliveryd.connect(ctx, delivery_state.Params(host = "gh", prefix = ctx.task.name, commit = sha, signature = build_url))
     dd.record(label, digest)

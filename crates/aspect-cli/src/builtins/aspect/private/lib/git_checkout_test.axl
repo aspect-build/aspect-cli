@@ -1,4 +1,4 @@
-"""Unit tests for lib/git_checkout.axl — repository and branch from `.git`.
+"""Unit tests for lib/git_checkout.axl — repository, branch and origin URL from `.git`.
 
 Run with:
   aspect dev test-git-checkout
@@ -37,6 +37,7 @@ def _test_a_clone(ctx):
     _eq("root", c.root, repo)
     _eq("repository from origin", c.repository, "aspect-build/aspect-cli")
     _eq("branch", c.branch, "main")
+    _eq("origin_url", git_checkout.origin_url(ctx.std, repo), "git@github.com:aspect-build/aspect-cli.git")
 
 def _test_a_directory_inside_a_clone(ctx):
     """A nested Bazel workspace reports the checkout around it."""
@@ -45,6 +46,7 @@ def _test_a_directory_inside_a_clone(ctx):
     c = git_checkout.checkout_of(ctx.std, repo + "/examples/large_bes")
     _eq("root", c.root, repo)
     _eq("no origin falls back to the directory name", c.repository, "repo")
+    _eq("no origin_url", git_checkout.origin_url(ctx.std, repo + "/examples/large_bes"), "")
 
 def _test_a_linked_worktree(ctx):
     repo = _repo(ctx, "https://github.com/aspect-build/aspect-cli")
@@ -54,6 +56,7 @@ def _test_a_linked_worktree(ctx):
     _eq("root", c.root, wt)
     _eq("repository through commondir", c.repository, "aspect-build/aspect-cli")
     _eq("the worktree's own branch", c.branch, "fix/login")
+    _eq("origin_url through commondir", git_checkout.origin_url(ctx.std, wt), "https://github.com/aspect-build/aspect-cli")
 
 def _test_a_detached_head(ctx):
     repo = _repo(ctx)
@@ -70,6 +73,7 @@ def _test_branch_display(ctx):
 def _test_outside_any_checkout(ctx):
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-git-none")
     _eq("none", git_checkout.checkout_of(ctx.std, tmp), None)
+    _eq("no origin_url", git_checkout.origin_url(ctx.std, tmp), "")
 
 def _test_repository_name(ctx):
     for url in [

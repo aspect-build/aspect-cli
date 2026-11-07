@@ -111,9 +111,9 @@ jobs:
           ; do
             val=$(printenv "$var") && echo "  $var=$val" || true
           done
-  # Delivery with the runner's deliveryd: on a Workflows runner, .aspect/config.axl
-  # selects `deliveryd.connect`, the explicit opt-out an air-gapped deployment
-  # uses in place of the delivery API.
+  # Delivery with the runner's deliveryd, the default state backend on a
+  # Workflows runner (the GitHub-hosted delivery jobs in ci.yaml cover the
+  # delivery API).
   delivery-deliveryd-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 10

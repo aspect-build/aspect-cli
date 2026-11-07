@@ -9,8 +9,8 @@ load(
     "version_gte",
     "version_tuple",
 )
-load("@aspect//delivery.axl", delivery_METADATA_MAX_BYTES = "METADATA_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_delivered_dict = "testonly_delivered_dict", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_metadata_to_store = "testonly_metadata_to_store", delivery_prior_deliveries = "testonly_prior_deliveries", delivery_read_metadata_file = "testonly_read_metadata_file", delivery_record_outcome = "testonly_record_outcome", delivery_resolve_skip_policies = "testonly_resolve_skip_policies", delivery_resolve_skip_policy = "testonly_resolve_skip_policy", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_skip_delivery = "testonly_skip_delivery")
-load("@aspect//delivery_state.axl", "delivery_state")
+load("@aspect//delivery.axl", delivery_METADATA_MAX_BYTES = "METADATA_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_default_connect = "testonly_default_connect", delivery_delivered_dict = "testonly_delivered_dict", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_metadata_to_store = "testonly_metadata_to_store", delivery_prior_deliveries = "testonly_prior_deliveries", delivery_read_metadata_file = "testonly_read_metadata_file", delivery_record_outcome = "testonly_record_outcome", delivery_resolve_skip_policies = "testonly_resolve_skip_policies", delivery_resolve_skip_policy = "testonly_resolve_skip_policy", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_skip_delivery = "testonly_skip_delivery")
+load("@aspect//delivery_state.axl", "delivery_api", "delivery_state", "deliveryd")
 load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
@@ -1979,6 +1979,15 @@ def test_delivery_metadata(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     shared = delivery_delivered_dict(delivery_state.Delivery(label = "//other", build_url = "u", commit_sha = "c", at = "2026-11-01T00:00:00Z"))
     tc = test_case(tc, shared == {"label": "//other", "build_url": "u", "commit_sha": "c", "at": "2026-11-01T00:00:00Z"}, "delivered: names the delivering target (got %r)" % shared)
     tc = test_case(tc, delivery_delivered_dict(delivery_state.Delivery())["label"] == None, "delivered: an unknown label is None")
+    return tc
+
+def test_delivery_default_backend(tc: int) -> int:
+    """With `DeliveryState.connect` unset, a Workflows runner's deliveryd,
+    else the delivery API."""
+    runner = struct(var = lambda name: "unix:///run/deliveryd.sock" if name == deliveryd.ENDPOINT_ENV else "")
+    elsewhere = struct(var = lambda name: "")
+    tc = test_case(tc, delivery_default_connect(runner) == deliveryd.connect, "default backend: deliveryd where the runner exposes one")
+    tc = test_case(tc, delivery_default_connect(elsewhere) == delivery_api.connect, "default backend: the delivery API elsewhere")
     return tc
 
 def test_delivery_skip_policy(tc: int) -> int:
@@ -4306,6 +4315,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_delivery_should_upload_grpc_log(tc)
     tc = test_delivery_metadata(ctx, tc, temp_dir)
     tc = test_delivery_skip_policy(tc)
+    tc = test_delivery_default_backend(tc)
     tc = test_delivery_count_unexplained_unresolved(tc)
     tc = test_delivery_should_surface_phase2_stderr(tc)
     tc = test_delivery_collect_blocking_culprits(tc)

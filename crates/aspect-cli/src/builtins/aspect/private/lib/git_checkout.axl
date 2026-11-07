@@ -1,4 +1,4 @@
-"""The git repository and branch a directory is checked out from, read from `.git`.
+"""The git repository, branch and `origin` URL a directory is checked out from, read from `.git`.
 
 No `git` process: a listing that attributes dozens of directories reads a few
 small files for each instead. The layouts covered:
@@ -89,22 +89,33 @@ def _branch(head: str) -> str:
         return ref[len(_BRANCH_REF):] if ref.startswith(_BRANCH_REF) else ref
     return "detached@" + head[:12] if head else ""
 
-def checkout_of(std, path: str):
-    """The `Checkout` that `path` sits in, or None when it is in none."""
+def _git_dirs(std, path: str):
+    """`(root, git_dir, common_dir)` for the checkout `path` sits in, or None
+    when it is in none."""
     dot_git = _find_dot_git(std, path)
     if not dot_git:
         return None
     root = dot_git[:-len("/.git")] or "/"
     if std.fs.is_dir(dot_git):
-        git_dir = dot_git
-        common_dir = dot_git
-    else:
-        text = std.fs.try_read_to_string(dot_git).strip()
-        if not text.startswith(_GITDIR_PREFIX):
-            return None
-        git_dir = _join(root, text[len(_GITDIR_PREFIX):].strip())
-        common = std.fs.try_read_to_string(git_dir + "/commondir").strip()
-        common_dir = _join(git_dir, common) if common else git_dir
+        return (root, dot_git, dot_git)
+    text = std.fs.try_read_to_string(dot_git).strip()
+    if not text.startswith(_GITDIR_PREFIX):
+        return None
+    git_dir = _join(root, text[len(_GITDIR_PREFIX):].strip())
+    common = std.fs.try_read_to_string(git_dir + "/commondir").strip()
+    return (root, git_dir, _join(git_dir, common) if common else git_dir)
+
+def origin_url(std, path: str) -> str:
+    """The `origin` remote's URL for the checkout `path` sits in, or ""."""
+    dirs = _git_dirs(std, path)
+    return _origin_url(std.fs.try_read_to_string(dirs[2] + "/config")) if dirs else ""
+
+def checkout_of(std, path: str):
+    """The `Checkout` that `path` sits in, or None when it is in none."""
+    dirs = _git_dirs(std, path)
+    if not dirs:
+        return None
+    root, git_dir, common_dir = dirs
 
     branch = _branch(std.fs.try_read_to_string(git_dir + "/HEAD").strip())
 
@@ -118,5 +129,6 @@ git_checkout = namespace(
     Checkout = Checkout,
     branch = _branch,
     checkout_of = checkout_of,
+    origin_url = origin_url,
     repository_name = repository_name,
 )

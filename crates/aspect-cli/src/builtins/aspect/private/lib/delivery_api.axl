@@ -1,4 +1,4 @@
-"""Delivery state from Aspect's delivery API — the default delivery state backend.
+"""Delivery state from Aspect's delivery API — the default delivery state backend off an Aspect Workflows runner.
 
 Speaks the `/deliveries` routes on Aspect Cloud's API with the Aspect Cloud
 credential (`aspect auth login`, or `ASPECT_API_TOKEN` in CI). Recording needs
@@ -7,8 +7,9 @@ the `aspect.delivery.write` permission; `aspect.delivery.read` alone serves a
 delivery, with the `metadata` stored with them, and every attempt, failures
 included, in the target's history. Transient failures (`retryable_status`) are
 retried, a record with its original `event_id` so the server applies it once.
-A job that cannot use the API gets a startup error; deliveryd is selected only
-explicitly, with `DeliveryState.connect = deliveryd.connect`:
+A job that cannot use the API gets a startup error. A Workflows runner's
+deliveryd is the default where it exists; a runner uses the API with
+`DeliveryState.connect = delivery_api.connect`:
 
     dd = delivery_api.connect(ctx, delivery_state.Params(host = "gh", repo = "org/repo", prefix = "delivery", commit = sha, signature = build_url))
     prior = dd.query({label: digest})            # -> {label: PriorDeliveries}
@@ -111,8 +112,8 @@ def _delivery(event) -> delivery_state.Delivery | None:
 
 def _query(conn: _Conn, params: delivery_state.Params, digests: dict) -> dict:
     """`{label: digest}` → `{label: PriorDeliveries}` for the targets the API
-    knows anything about. Labels the API left unanswered (its response size
-    limit) are asked again."""
+    knows anything about; an answer for a label not asked about is ignored.
+    Labels the API left unanswered (its response size limit) are asked again."""
     pending = {label: digest for label, digest in digests.items() if digest}
     prior = {}
     for _ in range(len(pending) + 1):
@@ -124,7 +125,7 @@ def _query(conn: _Conn, params: delivery_state.Params, digests: dict) -> dict:
             for label in labels
         })))
         for label, answer in (body.get("targets") or {}).items():
-            if type(answer) == "dict":
+            if label in pending and type(answer) == "dict":
                 prior[label] = delivery_state.PriorDeliveries(
                     latest_delivery = _delivery(answer.get("latest_delivery")),
                     digest_delivery = _delivery(answer.get("digest_delivery")),
@@ -192,13 +193,6 @@ def _new(http, base_url: str, token, params: delivery_state.Params, new_id, paus
         read_only = read_only,
     )
 
-# Appended to the startup errors a credential fixes.
-_KEEP_DELIVERYD = (
-    " To keep delivery state in the runner's deliveryd instead (an air-gapped" +
-    " deployment), set `ctx.traits[DeliveryState].connect = deliveryd.connect`" +
-    " in .aspect/config.axl."
-)
-
 def _open(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep) -> delivery_state.Backend:
     """Probe the API with an empty query, which checks the credential without
     reading any state, and answers whether it may record (`writable`). A
@@ -209,17 +203,17 @@ def _open(http, base_url: str, token, params: delivery_state.Params, new_id, pau
     if res.status >= 200 and res.status < 300:
         body = json.try_decode(res.body, None)
         if type(body) == "dict" and body.get("writable") == False:
-            read_only = "the Aspect Cloud credential can read delivery state but not record it. Grant the token's role `aspect.delivery.write`." + _KEEP_DELIVERYD
+            read_only = "the Aspect Cloud credential can read delivery state but not record it. Grant the token's role `aspect.delivery.write`."
             return _new(http, base_url, token, params, new_id, pause, read_only = read_only)
         return _new(http, base_url, token, params, new_id, pause)
     if res.status == 0:
         return _unavailable(base_url, res.failure + ": " + res.body)
     message = "HTTP {}: {}".format(res.status, aspect_cloud_error(res) or res.body.strip()[:200])
     if res.status == 401:
-        return _unavailable(base_url, "the delivery API rejected the Aspect Cloud credential ({}). Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.{}".format(message, _KEEP_DELIVERYD))
+        return _unavailable(base_url, "the delivery API rejected the Aspect Cloud credential ({}). Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.".format(message))
     if res.status == 403:
-        return _unavailable(base_url, "the delivery API refused the Aspect Cloud credential ({}). Grant the token's role `aspect.delivery.write` (or `aspect.delivery.read`, for `--dry-run` alone).{}".format(message, _KEEP_DELIVERYD))
-    return _unavailable(base_url, message + "." + _KEEP_DELIVERYD)
+        return _unavailable(base_url, "the delivery API refused the Aspect Cloud credential ({}). Grant the token's role `aspect.delivery.write` (or `aspect.delivery.read`, for `--dry-run` alone).".format(message))
+    return _unavailable(base_url, message)
 
 def _event_ids(nonce: str):
     """A `new_id` minting `<nonce>-<n>`: unique across runs by the random
@@ -251,13 +245,13 @@ def _access_token(creds) -> str:
     return creds.access_token
 
 def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.Backend:
-    """The default `DeliveryState.connect`: the delivery API with the Aspect
-    Cloud credential. A job that cannot use it gets a startup error naming the
-    fix, never another backend."""
+    """`DeliveryState.connect` for the delivery API with the Aspect Cloud
+    credential, the default off a Workflows runner. A job that cannot use it
+    gets a startup error naming the fix, never another backend."""
     base_url = aspect_cloud_url(ctx, "")
     creds = aspect_cloud_credentials(ctx, required = False)
     if not creds:
-        return _unavailable(base_url, "no Aspect Cloud credential. Run `aspect auth login`, or set ASPECT_API_TOKEN in CI." + _KEEP_DELIVERYD)
+        return _unavailable(base_url, "no Aspect Cloud credential. Run `aspect auth login`, or set ASPECT_API_TOKEN in CI.")
     token = lambda: _access_token(aspect_cloud_credentials(ctx, required = False))
     return _open(ctx.http(), base_url, token, params, _event_ids(random_hex(ctx)), _pause_with(params.heartbeat))
 

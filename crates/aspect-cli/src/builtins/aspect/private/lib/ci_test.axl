@@ -17,8 +17,9 @@ variables alone, without an authenticated API call:
                        (so the per-job URL `resolve_build_url` caches is
                        returned here too).
   - `repository_from_git_url` / `detect_repository` — `owner/name` from
-                       HTTPS and SSH remotes, per-host detection, and `""`
-                       off a recognized host.
+                       HTTPS and SSH remotes, per-host detection, the
+                       checkout's origin remote off a recognized host, and
+                       `""` when nothing names one.
   - `resolve_build_url` — delegation off GitHub Actions, cached job URLs,
                        run-level fallback upgrades, and stale-run rejection.
 
@@ -347,16 +348,22 @@ def _test_repository(ctx):
 
     snapshot = _snapshot_env(ctx)
     _clear_env(ctx)
-    _eq("repository — no host", detect_repository(ctx.std.env), "")
+    outside = ctx.std.fs.mkdtemp(prefix = "ci-test-repo-")
+    _eq("repository — no host, no checkout", detect_repository(ctx.std, outside), "")
+    ctx.std.fs.create_dir_all(outside + "/clone/.git")
+    ctx.std.fs.create_dir_all(outside + "/clone/pkg")
+    ctx.std.fs.write(outside + "/clone/.git/config", '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@gitlab.example.test:group/sub/web.git\n')
+    _eq("repository — no host, the origin remote", detect_repository(ctx.std, outside + "/clone/pkg"), "group/sub/web")
+    ctx.std.fs.remove_dir_all(outside)
     ctx.std.env.set_var("CI_PROJECT_PATH", "group/sub/web")
-    _eq("repository — GitLab", detect_repository(ctx.std.env), "group/sub/web")
+    _eq("repository — GitLab", detect_repository(ctx.std), "group/sub/web")
     ctx.std.env.set_var("CIRCLE_PROJECT_USERNAME", "acme")
     ctx.std.env.set_var("CIRCLE_PROJECT_REPONAME", "web")
-    _eq("repository — CircleCI", detect_repository(ctx.std.env), "acme/web")
+    _eq("repository — CircleCI", detect_repository(ctx.std), "acme/web")
     ctx.std.env.set_var("BUILDKITE_REPO", "git@github.com:acme/bk.git")
-    _eq("repository — Buildkite", detect_repository(ctx.std.env), "acme/bk")
+    _eq("repository — Buildkite", detect_repository(ctx.std), "acme/bk")
     ctx.std.env.set_var("GITHUB_REPOSITORY", "acme/gha")
-    _eq("repository — GitHub Actions", detect_repository(ctx.std.env), "acme/gha")
+    _eq("repository — GitHub Actions", detect_repository(ctx.std), "acme/gha")
     _restore_env(ctx, snapshot)
 
 def _test_impl(ctx):

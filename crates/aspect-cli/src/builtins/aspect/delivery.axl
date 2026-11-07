@@ -16,8 +16,9 @@ Up to three Bazel build phases plus a dispatch loop:
      `lib/remote_executor.axl`.
   3. State record/query — record (label, digest) pairs, query per-prefix
      state through the `DeliveryState` backend (`lib/delivery_state.axl`).
-     The default is Aspect's delivery API (`lib/delivery_api.axl`), which
-     needs no record step; deliveryd (`lib/deliveryd.axl`) records first.
+     The default is the runner's deliveryd (`lib/deliveryd.axl`) on an Aspect
+     Workflows runner, which records first, else Aspect's delivery API
+     (`lib/delivery_api.axl`), which needs no record step.
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.
@@ -68,22 +69,26 @@ State backend
 -------------
 
 The task gets its backend from `DeliveryState.connect` (`lib/delivery_state.axl`).
-Unset, that is Aspect's delivery API (`lib/delivery_api.axl`), authenticated
-with the Aspect Cloud credential. It keeps each target's latest delivery and
-each digest's, with their metadata, and records every attempt, failures
-included, in the target's history. A job that cannot use it
-(no credential, a refused one, an unreachable API) fails at startup; it never
-switches backend on its own. A deployment without access to the API, such as
-an air-gapped one, keeps the runner's deliveryd explicitly:
+Unset, it is chosen by where the job runs (`_default_connect`):
 
-    load("@aspect//delivery_state.axl", "DeliveryState", "deliveryd")
+  - On an Aspect Workflows runner, which exposes its deliveryd at
+    `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`, the runner's deliveryd, so an
+    upgrade keeps the state the runner already has.
+  - Elsewhere, Aspect's delivery API (`lib/delivery_api.axl`), authenticated
+    with the Aspect Cloud credential. It keeps each target's latest delivery
+    and each digest's, with their metadata, and records every attempt,
+    failures included, in the target's history.
+
+Either fails at startup when it cannot be used; the task never falls back to
+the other. A runner opts into the delivery API explicitly:
+
+    load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api")
     if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = deliveryd.connect
+        ctx.traits[DeliveryState].connect = delivery_api.connect
 
-deliveryd is the Unix-socket HTTP daemon Aspect Workflows runners start and
-expose via `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`. It keeps the delivered-by
-URL alone, and the task warns once when `metadata` it could not store is
-lost. `redis_state.connect` reads `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT`
+deliveryd is the Unix-socket HTTP daemon Aspect Workflows runners start. It
+keeps the delivered-by URL alone, and the task warns once when `metadata` it
+could not store is lost. `redis_state.connect` reads `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT`
 (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`, `_REDIS_LEGACY_TTL_SECONDS`), shares
 deliveryd's key scheme and stores `metadata`. Neither tracks a target's
 latest delivery.
@@ -239,6 +244,8 @@ Failure modes
     or DeliveryTrait.skip_policy raises           error + exit 1
   State write fails after a target ran            warned; loop continues;
                                                     exit 1
+  DeliveryTrait.delivery_start / delivery_end
+    raises                                        error + exit 1
   DeliveryTrait.delivery_target raises            no further deliveries
                                                     start; running ones are
                                                     recorded; unstarted FAIL
@@ -288,6 +295,7 @@ load("./private/lib/delivery_api.axl", "delivery_api")
 load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
+load("./private/lib/deliveryd.axl", "deliveryd")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -373,7 +381,9 @@ DeliveryTrait = trait(
         description = (
             "Hook that picks each target's skip policy, called once per target " +
             "before any is skipped or delivered (also under --mode=always or " +
-            "--track-state=false, where the policy only labels the entry). " +
+            "--track-state=false, where the policy only labels the entry). Tags " +
+            "come from the change-detection build, so they are empty when it " +
+            "does not run (--mode=always --track-state=false). " +
             "Receives {label, tags, policy}, where `policy` is what the target's " +
             "tags resolved to: `once_per_digest` with the tag " +
             "`delivery:once_per_digest`, else `when_changed`. Return " +
@@ -568,6 +578,13 @@ def _resolve_skip_policies(delivery_trait, targets: list, target_tags: dict) -> 
         label: _resolve_skip_policy(delivery_trait, label, tags_by_label.get(normalize_label(label), []))
         for label in targets
     }
+
+def _default_connect(env) -> typing.Callable:
+    """`DeliveryState.connect` when it is unset: the runner's deliveryd when
+    the job runs on an Aspect Workflows runner that exposes one
+    (`deliveryd.ENDPOINT_ENV`), so upgrading the CLI keeps the state it already
+    has, else Aspect's delivery API."""
+    return deliveryd.connect if env.var(deliveryd.ENDPOINT_ENV) else delivery_api.connect
 
 def _record_digests(dd, targets: list, output_shas: dict) -> None:
     """`dd.record` each target's digest, which deliveryd needs before `query`
@@ -1568,7 +1585,10 @@ def _delivery_impl(ctx):
     announce_version, announce_command = bzl.announce.resolve(ctx)
 
     delivery_trait = ctx.traits[DeliveryTrait]
-    delivery_trait.delivery_start()
+    err, _ = catch(delivery_trait.delivery_start)
+    if err:
+        error(ctx.std, "DeliveryTrait.delivery_start raised: {}".format(err.message))
+        return _emit_final(ph, exit_code = 1)
 
     # Three orthogonal flags shape this invocation. See the module docstring
     # for the full reference + combination matrix. `dry_run`/`dry_run_build`
@@ -1620,15 +1640,15 @@ def _delivery_impl(ctx):
     # identical across salt namespaces, hiding the per-salt separation.
     data["delivery"]["prefix"] = prefix
 
-    # The state backend, from the trait hook or the delivery API default.
+    # The state backend, from the trait hook or `_default_connect`.
     # Connecting probes reachability, so a dead or unconfigured backend fails
     # here rather than midway through the first record.
     dd = None
     if track_state:
-        connect = ctx.traits[DeliveryState].connect or delivery_api.connect
+        connect = ctx.traits[DeliveryState].connect or _default_connect(ctx.std.env)
         err, dd = catch(connect, ctx, delivery_state.Params(
             host = ci_host,
-            repo = detect_repository(ctx.std.env),
+            repo = detect_repository(ctx.std),
             prefix = prefix,
             commit = commit_sha,
             signature = build_url,
@@ -2410,7 +2430,9 @@ def _delivery_impl(ctx):
     ]
     print("{} {}  ({} total)".format(ansi.style("Summary:", ansi.BOLD, color), ", ".join(summary_parts), total_elapsed))
 
-    delivery_trait.delivery_end()
+    err, _ = catch(delivery_trait.delivery_end)
+    if err:
+        hook_errors.append("DeliveryTrait.delivery_end raised: {}".format(err.message))
 
     if unrecorded:
         warn(ctx.std, "{} not recorded in {}: {}.".format(pluralize(len(unrecorded), "outcome"), dd.describe, ", ".join(unrecorded)))
@@ -2428,7 +2450,7 @@ delivery = task(
     summary = "Build and deliver binary targets. Targets are built with stamping; change detection skips targets whose outputs were already delivered.",
     description = """Build and deliver binary targets. Targets are built with stamping; change detection skips targets whose outputs were already delivered, unless forced: by default a target's latest delivery, or any delivery of its digest under `delivery:once_per_digest`.
 
-Delivery state is kept in Aspect's delivery API, authenticated with `aspect auth login` or ASPECT_API_TOKEN. See https://aspect.build/docs/cli/guides/delivery-manifest.""",
+Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, and elsewhere in Aspect's delivery API, authenticated with `aspect auth login` or ASPECT_API_TOKEN. See https://aspect.build/docs/cli/guides/delivery-manifest.""",
     args = {
         "ci_host": args.string(
             default = "bk",
@@ -2542,6 +2564,7 @@ testonly_read_metadata_file = _read_metadata_file
 testonly_prior_deliveries = _prior_deliveries
 testonly_resolve_skip_policy = _resolve_skip_policy
 testonly_resolve_skip_policies = _resolve_skip_policies
+testonly_default_connect = _default_connect
 testonly_skip_delivery = _skip_delivery
 testonly_record_outcome = _record_outcome
 testonly_delivered_dict = _delivered_dict
