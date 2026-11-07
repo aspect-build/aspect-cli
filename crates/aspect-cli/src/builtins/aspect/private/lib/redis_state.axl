@@ -4,11 +4,12 @@ Deprecated, and to be removed from the CLI: use the runner's deliveryd (the
 default on an Aspect Workflows runner) or `delivery_api.connect`. The backend
 carries `DEPRECATION`, which the task warns with.
 
-Speaks deliveryd's own key scheme, so the two backends interoperate against one
-database and a fleet can move between them without a migration:
+Shares deliveryd API v1's signature keys, so this backend and a v1 deliveryd
+see each other's deliveries in one database; deliveryd's API v2 keeps separate
+state. Its keys:
 
     dd:sig:{host}:{prefix}:{digest}            HASH {sig, label, commit, at, meta?}, 365d TTL
-    delivery-signature:{host}:{digest}:{prefix} STRING, pre-v2 deliveryd; written alongside
+    delivery-signature:{host}:{digest}:{prefix} STRING, deliveryd API v1; written alongside
                                                 the hash so v1 readers still see deliveries,
                                                 read as a fallback and lazily copied into the hash
     {host}:{digest}:{prefix}                    artifact metadata written elsewhere; only
