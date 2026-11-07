@@ -25,7 +25,8 @@ coordinator (no credentials, opted out, or the API rejected the contribution)
 the state block is the only coordination (see `coordinator_enabled`): all
 live jobs together read and write it about once per
 `min_poll_interval_seconds`, and each final update re-reads the comment until
-its row is there.
+its row is there. A late job from an older push never resets the state block
+(see `_superseded`).
 
 A task's terminal update is its last contribution, so a post the server
 withholds for another job's grant is retried until granted (see
@@ -1522,6 +1523,27 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         "entries": entries,
     }
 
+def _superseded(existing_state, head_sha, run_id):
+    """True when `existing_state` holds a run newer than `run_id` on another SHA.
+
+    Such a writer is a late or cancelled job from an older push, or a re-run of
+    an older commit, and must not reset the comment. GitHub Actions run ids
+    increase across every workflow in a repo, GitLab pipeline ids across an
+    instance, and a re-run keeps its id, so a fresh push (even back to an
+    earlier SHA) still resets. Only numeric ids compare: a non-numeric id
+    (Buildkite, CircleCI, a local run) neither supersedes nor is superseded.
+    Mirrors the Aspect API's merge rule."""
+    if not existing_state or existing_state.get("head_sha") == head_sha:
+        return False
+    mine = str(run_id or "")
+    if not mine.isdigit():
+        return False
+    for r in existing_state.get("workflow_runs", []) or []:
+        rid = str(r.get("run_id", ""))
+        if rid.isdigit() and int(rid) > int(mine):
+            return True
+    return False
+
 def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries):
     """`_merge_state` for the comment-state-block fallback (no cross-job
     discovery): all jobs in a run share one run_id and `_merge_state` replaces
@@ -2132,6 +2154,9 @@ def _github_status_comments(ctx: FeatureContext):
             _state["_lease_until_s"] = lease_epoch + min_poll_interval_seconds
             return False
 
+        if _superseded(parsed, head_sha, run_id):
+            _LOG.trace("Run %s is older than the comment's, on another SHA; skipping the state-block post." % run_id)
+            return False
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
         stable_body, final_body = _render_state(ctx, parsed, new_state, now_epoch)
         if not force and _state.get("_last_stable_body") == stable_body:
@@ -2380,6 +2405,10 @@ def merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entrie
 def merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries):
     """Public test hook; see `_merge_comment_only_state`."""
     return _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries)
+
+def superseded(existing_state, head_sha, run_id):
+    """Public test hook + shared helper for GitLab; see `_superseded`."""
+    return _superseded(existing_state, head_sha, run_id)
 
 def lease_held(now_epoch, last_upsert_epoch, lease_window_s):
     """Public test hook; see `_lease_held`."""
