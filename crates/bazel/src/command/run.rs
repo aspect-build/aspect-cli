@@ -29,6 +29,7 @@ use crate::aspect::{self, Aspect};
 use crate::bes::BuildEventEnvelope;
 use crate::bes::outputs::{Outputs, Ready, Unsettled};
 use crate::fanout::Subscriber;
+use crate::label::LabelResolver;
 use crate::runfiles::{self, SymlinksMode};
 use crate::server::Server;
 
@@ -91,13 +92,11 @@ pub struct Dirs {
 }
 
 impl Dirs {
-    /// The workspace-relative package the task was invoked from, `""` at the
-    /// root or outside the workspace. Relative labels resolve against it.
-    pub fn current_package(&self) -> String {
-        match self.cwd.strip_prefix(&self.bazel_root) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-            Err(_) => String::new(),
-        }
+    /// A [`LabelResolver`] for a Bazel command spawned in `directory`
+    /// (relative to `cwd`), or in `cwd` when none is given.
+    pub fn labels(&self, directory: Option<&str>) -> LabelResolver {
+        let working_dir = directory.map_or_else(|| self.cwd.clone(), |d| self.cwd.join(d));
+        LabelResolver::new(&self.bazel_root, &working_dir)
     }
 }
 
@@ -650,24 +649,20 @@ mod run_tests {
     }
 
     #[test]
-    fn current_package_is_relative_to_the_workspace() {
+    fn labels_resolve_from_the_directory_bazel_runs_in() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
         let dirs = Dirs {
-            bazel_root: PathBuf::from("/ws"),
-            aspect_root: PathBuf::from("/ws"),
+            bazel_root: root.to_owned(),
+            aspect_root: root.to_owned(),
             git_root: None,
-            cwd: PathBuf::from("/ws/a/b"),
+            cwd: root.join("a"),
         };
-        assert_eq!(dirs.current_package(), "a/b");
-        let root = Dirs {
-            cwd: PathBuf::from("/ws"),
-            ..dirs.clone()
-        };
-        assert_eq!(root.current_package(), "");
-        let outside = Dirs {
-            cwd: PathBuf::from("/elsewhere"),
-            ..dirs
-        };
-        assert_eq!(outside.current_package(), "");
+        assert_eq!(dirs.labels(None).current_package(), "a");
+        assert_eq!(dirs.labels(Some("b")).current_package(), "a/b");
+        let abs = root.join("a/b").to_string_lossy().into_owned();
+        assert_eq!(dirs.labels(Some(&abs)).current_package(), "a/b");
     }
 
     #[test]
