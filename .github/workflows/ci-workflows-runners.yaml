@@ -63,7 +63,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.38.4
         with:
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: Runner smoke test
@@ -132,7 +132,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+      - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.38.4
         with:
           aspect-api-token: ${{ secrets.ASPECT_CLOUD_API_TOKEN }}
       - name: Delivery Task (deliveryd)
