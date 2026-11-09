@@ -14,9 +14,13 @@ use super::{Bazelrc, BazelrcError, RcOption};
 /// config in place, so its options rank where the request sits. `partition_expand_all`
 /// renders by section and source, so without this a caller's `--config=ci` would demote
 /// `build:ci` options to rc priority, and an rc `test --config=ci` would file them under
-/// `build`, where the `test` section's own entries beat them. Entries defined in a
-/// `common:{config}` section keep their own section, because `common` is what lets them
-/// reach commands that reject them.
+/// `build`, where the `test` section's own entries beat them. Two kinds of entry keep the
+/// section they were written in:
+///
+/// - those defined under `common:{config}`, because `common` is what lets them reach
+///   commands that reject them;
+/// - those of the implicit `--config=<os>` that `--enable_platform_specific_config` adds,
+///   which is no request of the user's and so has no section of its own to give.
 ///
 /// `skip_config_if_missing` lists config names that should be silently dropped when no
 /// matching section exists, rather than returning an `UndefinedConfig` error.
@@ -105,7 +109,9 @@ impl Expander<'_> {
                 index += 1;
                 continue;
             };
-            self.expand_config(config_name, &args[index], ancestor_chain, result)?;
+            let implicit = self.implicit_platform_config && ancestor_chain.is_empty() && index == 0;
+            let requester = (!implicit).then_some(&args[index]);
+            self.expand_config(config_name, requester, ancestor_chain, result)?;
             index += span;
         }
         Ok(())
@@ -117,11 +123,12 @@ impl Expander<'_> {
     /// Expanded options inherit `requester`'s `version_condition` when they carry
     /// none of their own, so version-gated config sections propagate correctly,
     /// and its section and source unless defined under `common` (see
-    /// [`expand_configs`]).
+    /// [`expand_configs`]). `requester` is `None` for the implicit platform
+    /// config, whose options keep everything they were written with.
     fn expand_config(
         &self,
         config_name: &str,
-        requester: &RcOption,
+        requester: Option<&RcOption>,
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
     ) -> Result<(), BazelrcError> {
@@ -159,13 +166,15 @@ impl Expander<'_> {
             });
         }
 
-        for opt in &mut config_opts {
-            if opt.version_condition.is_none() {
-                opt.version_condition = requester.version_condition.clone();
-            }
-            if opt.command.split(':').next() != Some("common") {
-                opt.command = requester.command.clone();
-                opt.source_index = requester.source_index;
+        if let Some(requester) = requester {
+            for opt in &mut config_opts {
+                if opt.version_condition.is_none() {
+                    opt.version_condition = requester.version_condition.clone();
+                }
+                if opt.section() != "common" {
+                    opt.command = requester.command.clone();
+                    opt.source_index = requester.source_index;
+                }
             }
         }
 

@@ -32,12 +32,12 @@
 //! Flags are read with `bazel::rc::last_flag_value` for the invocation's verb — the
 //! same resolver the CLI decides with, so the fake sees argv the way Bazel does:
 //! the `--flag=value` and `--flag value` forms alike, last occurrence winning, and
-//! the `--default_override=0:common=…` token the CLI restates a `common`-section rc
-//! entry as. Each of those matters to a test. A caller clearing
+//! the `--default_override=0:<section>=…` token the CLI restates an rc entry as.
+//! Each of those matters to a test. A caller clearing
 //! `--execution_log_compact_file=` while the CLI appends its own is the shape the
 //! reuse logic has to get right, and a fake blind to `--default_override` would
-//! write no log at all for a `common`-scoped path — reporting a working feature as
-//! a missing log.
+//! write no log at all for an rc-file path — reporting a working feature as a
+//! missing log.
 //!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
