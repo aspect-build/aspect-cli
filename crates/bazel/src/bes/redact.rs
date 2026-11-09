@@ -180,9 +180,11 @@ fn is_allowed_env(name: &str, allow_env: &[&str]) -> bool {
 }
 
 /// Extract the user's `--build_metadata=ALLOW_ENV=...` patterns from any flag
-/// string that looks like `--build_metadata=ALLOW_ENV=A,B,C_*`. Case-insensitive
-/// on the key portion because Bazel preserves user casing.
+/// string that looks like `--build_metadata=ALLOW_ENV=A,B,C_*`, bare or wrapped in a
+/// `--default_override`. Case-insensitive on the key portion because Bazel
+/// preserves user casing.
 fn parse_allow_env_flag(flag: &str) -> Option<Vec<String>> {
+    let flag = crate::rc::override_payload(flag).unwrap_or(flag);
     let rest = flag.strip_prefix("--build_metadata=")?;
     let (key, value) = rest.split_once('=')?;
     if !key.eq_ignore_ascii_case("ALLOW_ENV") {
@@ -470,7 +472,16 @@ pub fn redactor<'a>(flags: impl IntoIterator<Item = &'a str>) -> impl Fn(&str) -
 /// - `--env-like=KEY=VALUE`: redact VALUE unless KEY is on `allow_env` or
 ///   is a known-safe literal; strip URL creds when KEY is a known git URL var.
 /// - Other `--name=value`: strip URL creds from VALUE.
+/// - `--default_override=N:section=<option>`: `<option>` by the rules above,
+///   since that is how the CLI restates rc-file entries.
 pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
+    if let Some(payload) = crate::rc::override_payload(arg) {
+        let wrapper = &arg[..arg.len() - payload.len()];
+        return match redact_flag(payload, allow_env) {
+            Cow::Owned(redacted) => Cow::Owned(format!("{wrapper}{redacted}")),
+            Cow::Borrowed(_) => Cow::Borrowed(arg),
+        };
+    }
     // Positional / non-flag: only URL-creds scrub.
     if !arg.starts_with("--") {
         return strip_url_creds(arg);
@@ -500,9 +511,17 @@ pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
 }
 
 /// The raw value portion of a structured command-line option. Uses the same
-/// rules as `redact_flag` but starting from the `option_value` directly, so
-/// we don't have to reconstruct `--name=value`.
+/// rules as `redact_flag` but starting from the `option_value` directly; only a
+/// `--default_override`, whose value wraps a whole option, is rebuilt into a
+/// token and redacted as one.
 fn redact_option_value<'a>(name: &str, value: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
+    if name == crate::rc::DEFAULT_OVERRIDE_OPTION {
+        let token = format!("--{name}={value}");
+        return match redact_flag(&token, allow_env) {
+            Cow::Owned(redacted) => Cow::Owned(redacted[token.len() - value.len()..].to_owned()),
+            Cow::Borrowed(_) => Cow::Borrowed(value),
+        };
+    }
     if HEADER_OPTION_NAMES.contains(&name) {
         return Cow::Owned(redact_header_value(value));
     }
@@ -589,6 +608,59 @@ mod tests {
         BuildStarted as ProtoBuildStarted, UnstructuredCommandLine as ProtoUnstructured,
     };
     use prost::Message;
+
+    /// The CLI restates rc entries as `--default_override=N:section=<option>`,
+    /// so a secret set in an rc file reaches the command line inside one. The
+    /// wrapped option is redacted by the same rules as a literal one.
+    #[test]
+    fn a_default_override_payload_is_redacted_like_a_literal_flag() {
+        assert_eq!(
+            redact_flag(
+                "--default_override=0:build=--remote_header=Authorization: Bearer abc",
+                &[]
+            ),
+            "--default_override=0:build=--remote_header=Authorization:<REDACTED>"
+        );
+        assert_eq!(
+            redact_flag(
+                "--default_override=0:common=--action_env=API_TOKEN=xyz",
+                &[]
+            ),
+            "--default_override=0:common=--action_env=API_TOKEN=<REDACTED>"
+        );
+        assert_eq!(
+            redact_flag("--default_override=0:build=--jobs=4", &[]),
+            "--default_override=0:build=--jobs=4"
+        );
+    }
+
+    /// BEP's structured command line splits the same token into a name and a
+    /// value; the value carries the wrapped option.
+    #[test]
+    fn a_structured_default_override_value_is_redacted() {
+        assert_eq!(
+            redact_option_value(
+                "default_override",
+                "0:build=--remote_header=Authorization: Bearer abc",
+                &[]
+            ),
+            "0:build=--remote_header=Authorization:<REDACTED>"
+        );
+        assert_eq!(
+            redact_option_value("default_override", "0:build=--jobs=4", &[]),
+            "0:build=--jobs=4"
+        );
+    }
+
+    /// An ALLOW_ENV pattern set in an rc file arrives wrapped the same way and
+    /// still widens the allowlist.
+    #[test]
+    fn allow_env_is_read_out_of_a_default_override() {
+        assert_eq!(
+            collect_allow_env(["--default_override=0:build=--build_metadata=ALLOW_ENV=DEPLOY_ENV"]),
+            vec!["DEPLOY_ENV".to_string()]
+        );
+    }
 
     #[test]
     fn event_roundtrip_unstructured_command_line_redacts_and_reencodes() {

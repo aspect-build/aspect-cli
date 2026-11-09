@@ -828,6 +828,10 @@ impl fmt::Display for DefaultOverride<'_> {
     }
 }
 
+/// The name of Bazel's `--default_override` option, as BEP's structured command line
+/// reports it.
+pub const DEFAULT_OVERRIDE_OPTION: &str = "default_override";
+
 impl<'a> DefaultOverride<'a> {
     const PREFIX: &'static str = "--default_override=";
 
@@ -1074,6 +1078,12 @@ pub fn override_buckets<'a>(tokens: &[&'a str], command: &str) -> Vec<Vec<&'a st
 /// Whether `token` is a [`DefaultOverride`] rather than a literal command-line flag.
 pub fn is_default_override(token: &str) -> bool {
     token.starts_with(DefaultOverride::PREFIX)
+}
+
+/// The option a [`DefaultOverride`] token carries, or `None` for any other token. It is a
+/// suffix of `token`, so a caller can rewrite the option and keep the wrapper.
+pub fn override_payload(token: &str) -> Option<&str> {
+    DefaultOverride::parse(token).map(|over| over.option)
 }
 
 /// Whether a semver `constraint` is satisfied by the running Bazel `version`.

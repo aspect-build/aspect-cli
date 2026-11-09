@@ -9,7 +9,7 @@ Two task implementations live here:
 """
 
 load("@aspect//bazel/trait.axl", "exit_codes")
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "pick_status", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "pick_status", "process_event", "redact_flags", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
 load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
 load("./report.axl", "SCHEMA_VERSION", "build_report")
@@ -1961,6 +1961,21 @@ def _test_pick_status_ranks_aborted_above_every_other_verdict(ctx):
     data["bazel"]["flaky_test_total"] = 2
     _eq("abort outranks warning", pick_status("test", data, had_failure = False, terminal = True), "aborted")
 
+def _test_redact_flags_sees_inside_a_default_override(ctx):
+    """The CLI restates rc entries as `--default_override=N:section=<option>`,
+    so a secret from an rc file arrives wrapped; the option is redacted as if
+    it were literal and the wrapper kept."""
+    _eq(
+        "header inside an override",
+        redact_flags(["--default_override=0:build=--remote_header=Authorization=Bearer secret"]),
+        ["--default_override=0:build=--remote_header=Authorization=<REDACTED>"],
+    )
+    _eq(
+        "a harmless override is untouched",
+        redact_flags(["--default_override=0:common=--jobs=4"]),
+        ["--default_override=0:common=--jobs=4"],
+    )
+
 def _test_strip_url_creds_keeps_user_when_split(ctx):
     _eq(
         "user:password -> user kept, secret gone",
@@ -2452,6 +2467,7 @@ _UNIT_TESTS = [
     _test_overflow_note_agrees_its_noun_with_the_hidden_count,
     _test_overflow_note_formats_large_counts,
     _test_default_preset_renders_operator_configured_rows,
+    _test_redact_flags_sees_inside_a_default_override,
 ]
 
 def _unit_test_impl(ctx):

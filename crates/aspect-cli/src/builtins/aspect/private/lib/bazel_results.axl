@@ -2535,6 +2535,21 @@ def _redact_header_value(value):
     i = min(seps)
     return value[:i + 1] + _REDACTED
 
+_DEFAULT_OVERRIDE_PREFIX = "--default_override="
+
+def _override_payload_start(arg):
+    """Index of the option inside a `--default_override=N:section=<option>`
+    token — how the CLI restates rc-file entries — or -1 for any other token."""
+    if not arg.startswith(_DEFAULT_OVERRIDE_PREFIX):
+        return -1
+    colon = arg.find(":", len(_DEFAULT_OVERRIDE_PREFIX))
+    if colon < 0:
+        return -1
+    eq = arg.find("=", colon)
+    if eq <= colon + 1 or eq + 1 >= len(arg):
+        return -1
+    return eq + 1
+
 def _redact_arg(arg, allow_env):
     """Redact one command-line token:
 
@@ -2542,8 +2557,17 @@ def _redact_arg(arg, allow_env):
       2. Env-passthrough → value per allowlist/safe/git-URL (`_redact_env_value`).
       3. Other flag values → URL creds stripped.
 
-    Non-flag tokens pass through (subcommands, target patterns).
+    A `--default_override` token keeps its wrapper and has the option it
+    carries redacted by the same rules. Non-flag tokens pass through
+    (subcommands, target patterns).
     """
+    start = _override_payload_start(arg)
+    if start >= 0:
+        return arg[:start] + _redact_option(arg[start:], allow_env)
+    return _redact_option(arg, allow_env)
+
+def _redact_option(arg, allow_env):
+    """`_redact_arg` for a token that is not a `--default_override`."""
     if not arg.startswith("--"):
         return strip_url_creds(arg)
     name, value = _split_combined_form(arg)
