@@ -474,7 +474,6 @@ fn start<'v>(
         announce,
         env.signals.clone(),
         cancellation,
-        env.rt.clone(),
     )?;
 
     let recv = ours

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     thread::{self, JoinHandle},
 };
 
@@ -13,7 +13,6 @@ use axl_proto::{
 };
 use futures::FutureExt;
 use prost::bytes::Bytes;
-use tokio::runtime::Handle;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Streaming;
 
@@ -59,15 +58,41 @@ impl Grpc {
     /// Transport / BES errors never panic; they surface as `SinkOutcome`
     /// for the caller's `sink.wait()` to inspect.
     pub fn spawn(
-        rt: Handle,
         recv: Subscriber<Arc<BuildEventEnvelope>>,
         endpoint: String,
         headers: HashMap<String, String>,
         invocation_id: String,
         retry: RetryConfig,
     ) -> JoinHandle<(SinkStats, SinkOutcome)> {
-        thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
+        thread::spawn(move || match sink_runtime() {
+            Ok(rt) => rt.block_on(work(recv, endpoint, headers, invocation_id, retry)),
+            Err(e) => (
+                SinkStats::default(),
+                Err(fail(
+                    &endpoint,
+                    "could not start, build events will not be delivered",
+                    format!("sink runtime: {e}"),
+                )),
+            ),
+        })
     }
+}
+
+/// Never dropped, so a sink still delivering when the host runtime shuts
+/// down at exit keeps a live runtime under it.
+fn sink_runtime() -> Result<&'static tokio::runtime::Runtime, &'static str> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("bes-sink")
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(String::as_str)
 }
 
 /// Emit a sink-lifecycle log line as a `tracing` event on the `axl.log`
@@ -1920,6 +1945,50 @@ mod tests {
                 acked: 10
             }
         );
+    }
+
+    #[test]
+    fn sink_delivers_after_the_host_runtime_shuts_down() {
+        let server_rt = tokio::runtime::Runtime::new().unwrap();
+        let endpoint = server_rt.block_on(start_server(ServerMode::Ack));
+
+        let broadcaster = Broadcaster::new();
+        let recv = broadcaster.subscribe();
+        for _ in 0..5 {
+            broadcaster.send(envelope(progress_event(64)));
+        }
+        let host_rt = tokio::runtime::Runtime::new().unwrap();
+        let join = host_rt.block_on(async {
+            Grpc::spawn(
+                recv,
+                endpoint,
+                HashMap::new(),
+                "test-invocation".to_string(),
+                RetryConfig::default(),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let host_shutdown = std::thread::spawn(move || drop(host_rt));
+        std::thread::sleep(Duration::from_millis(200));
+
+        let mut last = progress_event(64);
+        last.last_message = true;
+        broadcaster.send(envelope(last));
+        broadcaster.close();
+        host_shutdown.join().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !join.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(join.is_finished(), "the sink did not finish delivering");
+        let (stats, outcome) = join.join().expect("the sink thread panicked");
+        assert!(
+            outcome.is_ok(),
+            "expected success, got {:?}",
+            outcome.unwrap_err()
+        );
+        assert_eq!(stats, SinkStats { sent: 6, acked: 6 });
     }
 
     #[test]

@@ -36,7 +36,6 @@ use starlark::values::starlark_value;
 use axl_proto::build_event_stream::BuildEvent;
 use bazel::stream::pid_pair::PidPair;
 
-use crate::engine::r#async::rt::AsyncRuntime;
 use crate::engine::cancellation::Signals;
 use crate::engine::children::{self, Bound, Recv, recv_cancellable};
 use tokio_util::sync::CancellationToken;
@@ -272,12 +271,7 @@ impl BuildEventSink {
         }
     }
 
-    fn bind_grpc(
-        &self,
-        rt: AsyncRuntime,
-        stream: &BuildEventStream,
-        invocation_id: String,
-    ) -> anyhow::Result<()> {
+    fn bind_grpc(&self, stream: &BuildEventStream, invocation_id: String) -> anyhow::Result<()> {
         let SinkConfig::Grpc {
             uri,
             metadata,
@@ -300,7 +294,6 @@ impl BuildEventSink {
         drop(outcome);
         bazel::bes::sink::set_warn(crate::diag::warn);
         let join = grpc::Grpc::spawn(
-            rt.0.clone(),
             stream.subscribe(),
             uri.clone(),
             metadata.clone(),
@@ -890,7 +883,6 @@ impl Build {
         announce: AnnounceSpawn,
         signals: Arc<Signals>,
         cancellation: &CancellationToken,
-        rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
@@ -1123,7 +1115,7 @@ impl Build {
             }
             let stream = build_event_stream.as_ref().unwrap();
             for sink in grpc_sinks {
-                sink.bind_grpc(rt.clone(), stream, invocation_id.clone())
+                sink.bind_grpc(stream, invocation_id.clone())
                     .map_err(io::Error::other)?;
             }
             Some(invocation_id)
