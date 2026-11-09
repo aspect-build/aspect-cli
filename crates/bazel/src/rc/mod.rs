@@ -64,8 +64,8 @@ pub struct RcOption {
     /// `"common"`, or `"always"`. On an option out of `expand_configs`, usually
     /// the section of the `--config=` request that pulled it in (see there).
     pub command: String,
-    /// Index into `Bazelrc::sources` identifying which file this came from; on
-    /// an expanded option, the requesting option's source, like `command`.
+    /// Index into `Bazelrc::sources` identifying which file this came from. On
+    /// an option out of `expand_configs`, follows `command`.
     pub source_index: usize,
     /// Set to `Some(cond)` when the option originates from a
     /// `try-import-if-bazel-version <cond> <path>` block.  The condition is an
@@ -1040,8 +1040,22 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
     if let Some(literal) = flag_values_in(&tokens, name).pop() {
         return Some(literal);
     }
-    let chunks = override_chunks(&tokens);
-    let mut value = None;
+    override_buckets(&tokens, command)
+        .iter()
+        .filter_map(|bucket| flag_values_in(bucket, name).pop())
+        .next_back()
+}
+
+/// The [`DefaultOverride`] payloads among `tokens` that apply to `command`, in the order
+/// Bazel parses them: a section at a time in [`sections_for`] order, and within a section
+/// one [`override_chunks`] bucket at a time. Empty buckets are dropped.
+///
+/// The order of the tokens themselves does not rank them — a `build` payload beats a
+/// `common` one wherever it sits — so any reader of a rendered command line that wants
+/// Bazel's answer reads overrides through this.
+pub fn override_buckets<'a>(tokens: &[&'a str], command: &str) -> Vec<Vec<&'a str>> {
+    let chunks = override_chunks(tokens);
+    let mut buckets = Vec::new();
     for section in sections_for(command) {
         for chunk in &chunks {
             let payloads: Vec<&str> = chunk
@@ -1049,12 +1063,17 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
                 .filter(|(scope, _)| *scope == section)
                 .map(|(_, option)| *option)
                 .collect();
-            if let Some(found) = flag_values_in(&payloads, name).pop() {
-                value = Some(found);
+            if !payloads.is_empty() {
+                buckets.push(payloads);
             }
         }
     }
-    value
+    buckets
+}
+
+/// Whether `token` is a [`DefaultOverride`] rather than a literal command-line flag.
+pub fn is_default_override(token: &str) -> bool {
+    token.starts_with(DefaultOverride::PREFIX)
 }
 
 /// Whether a semver `constraint` is satisfied by the running Bazel `version`.
@@ -2567,6 +2586,12 @@ build:opt --compilation_mode=opt
         );
         assert_eq!(
             last_flag_value(&rendered, "--remote_timeout", "build").as_deref(),
+            Some("2")
+        );
+        // The platform options render first; the `run` reader must still rank
+        // them by section, not by position.
+        assert_eq!(
+            crate::command::flags::effective_value(&rendered, "build", "remote_timeout").as_deref(),
             Some("2")
         );
     }

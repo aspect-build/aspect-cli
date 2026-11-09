@@ -167,8 +167,8 @@ pub enum PrepareError {
 /// remote cache before it writes the event that names them.
 const UPLOAD_STRATEGY: &str = "experimental_build_event_upload_strategy";
 
-/// The flags both verbs add to the rc-resolved command line, without the
-/// aspect, and the runfiles mode the rc implies. Every injected flag is a
+/// The flags both verbs add to the command line the rc resolved for `command`,
+/// without the aspect, and the runfiles mode the rc implies. Every injected flag is a
 /// command option; none is part of the configuration, which is what keeps the
 /// analysis cache.
 ///
@@ -184,8 +184,8 @@ const UPLOAD_STRATEGY: &str = "experimental_build_event_upload_strategy";
 ///   failed build (aspect-build/aspect-cli#1604). A caller's own strategy
 ///   cannot be honoured: `run` does not work under `remote`. Added last, so it
 ///   wins over an earlier literal flag and over rc content.
-fn inject_flags(flags: &mut Vec<String>) -> Result<SymlinksMode, PrepareError> {
-    if effective_bool(flags, "build_runfile_manifests") == Some(false) {
+fn inject_flags(flags: &mut Vec<String>, command: &str) -> Result<SymlinksMode, PrepareError> {
+    if effective_bool(flags, command, "build_runfile_manifests") == Some(false) {
         return Err(PrepareError::Refused(
             "--nobuild_runfile_manifests is incompatible with running a target: \
              the runfiles tree is built from the manifest. Remove it from the rc \
@@ -193,8 +193,9 @@ fn inject_flags(flags: &mut Vec<String>) -> Result<SymlinksMode, PrepareError> {
                 .to_owned(),
         ));
     }
-    let mode = SymlinksMode::from_enable_runfiles(effective_bool(flags, "enable_runfiles"));
-    if !download_outputs_sufficient(effective_download_outputs(flags).as_deref()) {
+    let mode =
+        SymlinksMode::from_enable_runfiles(effective_bool(flags, command, "enable_runfiles"));
+    if !download_outputs_sufficient(effective_download_outputs(flags, command).as_deref()) {
         flags.push("--remote_download_outputs=toplevel".to_owned());
     }
     flags.push(format!("--{UPLOAD_STRATEGY}=local"));
@@ -205,8 +206,9 @@ fn inject_flags(flags: &mut Vec<String>) -> Result<SymlinksMode, PrepareError> {
 pub fn prepare_flags(
     server: &Server,
     flags: &mut Vec<String>,
+    command: &str,
 ) -> Result<SymlinksMode, PrepareError> {
-    let mode = inject_flags(flags)?;
+    let mode = inject_flags(flags, command)?;
     flags.extend(aspect::materialize(server, &[runinfo_aspect()]).map_err(PrepareError::Other)?);
     Ok(mode)
 }
@@ -520,7 +522,7 @@ mod run_tests {
     #[test]
     fn a_run_asks_bazel_not_to_upload_what_it_reads_locally() {
         let mut f = flags(&["--remote_cache=grpcs://cache.example.com"]);
-        inject_flags(&mut f).unwrap();
+        inject_flags(&mut f, "build").unwrap();
         assert!(
             f.contains(&"--experimental_build_event_upload_strategy=local".to_owned()),
             "{f:?}"
@@ -534,7 +536,7 @@ mod run_tests {
         let name = "--experimental_build_event_upload_strategy=";
         for chosen in ["remote", "local"] {
             let mut f = flags(&[&format!("{name}{chosen}")]);
-            inject_flags(&mut f).unwrap();
+            inject_flags(&mut f, "build").unwrap();
             assert_eq!(
                 f.last().map(String::as_str),
                 Some("--experimental_build_event_upload_strategy=local")
@@ -545,10 +547,14 @@ mod run_tests {
         let mut f = flags(&[
             "--default_override=0:common=--experimental_build_event_upload_strategy=remote",
         ]);
-        inject_flags(&mut f).unwrap();
+        inject_flags(&mut f, "build").unwrap();
         assert_eq!(
-            crate::command::flags::effective_value(&f, "experimental_build_event_upload_strategy")
-                .as_deref(),
+            crate::command::flags::effective_value(
+                &f,
+                "build",
+                "experimental_build_event_upload_strategy"
+            )
+            .as_deref(),
             Some("local")
         );
     }
@@ -556,11 +562,11 @@ mod run_tests {
     #[test]
     fn minimal_downloads_are_raised_and_a_manifestless_rc_is_refused() {
         let mut f = flags(&["--remote_download_minimal"]);
-        inject_flags(&mut f).unwrap();
+        inject_flags(&mut f, "build").unwrap();
         assert!(f.contains(&"--remote_download_outputs=toplevel".to_owned()));
         let mut refused = flags(&["--nobuild_runfile_manifests"]);
         assert!(matches!(
-            inject_flags(&mut refused),
+            inject_flags(&mut refused, "build"),
             Err(PrepareError::Refused(_))
         ));
     }
