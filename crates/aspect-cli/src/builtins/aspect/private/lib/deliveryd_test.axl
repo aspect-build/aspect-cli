@@ -291,7 +291,7 @@ def _test_v2_verbs_on_the_wire(ctx):
 def _test_v2_sweep_failure_is_ignored(ctx):
     calls = []
     pauses = []
-    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": [_res(503, "unavailable"), None], "POST /deliveries/query": _EMPTY_QUERY}, calls, pauses)
+    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _res(503, "unavailable"), "POST /deliveries/query": _EMPTY_QUERY}, calls, pauses)
     _eq("sweep 503 → still v2", (dd.status.ok, dd.describe), (True, "API v2"))
     _eq("sweep 503 → not retried", len([c for c in calls if c.path == "/legacy/sweep"]), 1)
     _eq("sweep 503 → no pause", pauses, [])
@@ -307,6 +307,23 @@ def _test_v2_unhealthy_is_not_negotiated(ctx):
     # A 503 health answer carries the header too; it is still a startup error.
     dd = _client({"GET /health": _res(503, "unhealthy", headers = [("deliveryd-api", "2")])}, [])
     _eq("v2 503 → not ok", dd.status.ok, False)
+    _eq("v2 503 → described as v2", dd.describe, "API v2")
+
+def _test_advertised_version(ctx):
+    for (value, want) in [(None, "API v1"), ("2", "API v2"), (" 3 ", "API v2"), ("0", "API v1"), ("two", "API v1")]:
+        headers = [("deliveryd-api", value)] if value != None else []
+        responses = {"GET /health": _res(200, "ok", headers = headers), "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": _EMPTY_QUERY}
+        _eq("Deliveryd-Api %r" % value, _client(responses, []).describe, want)
+
+def _test_v2_rejection_names_no_credential(ctx):
+    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": _res(401, "denied")}, [])
+    _eq("v2 401 → not ok", dd.status.ok, False)
+    _eq("v2 401 → no credential hint", "auth login" in dd.status.error, False)
+
+def _test_v2_unwritable_names_the_server(ctx):
+    unwritable = _res(200, {"targets": {}, "unanswered_labels": [], "writable": False})
+    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": unwritable}, [])
+    _eq("v2 unwritable → read_only", dd.read_only, _SOCKET + " answers that it may not record.")
 
 _UNIT_TESTS = [
     _test_parse_endpoint,
@@ -330,6 +347,9 @@ _UNIT_TESTS = [
     _test_v2_sweep_failure_is_ignored,
     _test_v1_does_not_sweep,
     _test_v2_unhealthy_is_not_negotiated,
+    _test_advertised_version,
+    _test_v2_rejection_names_no_credential,
+    _test_v2_unwritable_names_the_server,
 ]
 
 def _test_impl(ctx):

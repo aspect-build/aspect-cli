@@ -43,12 +43,12 @@ _API_V2 = 2
 _API_HEADER = "Deliveryd-Api"
 
 _V1_DEPRECATION = (
-    "The runner's deliveryd ({}) serves only delivery API v1, which is deprecated " +
+    "The runner's deliveryd ({}) serves only deliveryd API v1, which is deprecated " +
     "and will be removed from the Aspect CLI. Upgrade Aspect Workflows so the " +
     "runner's deliveryd serves API v2, or set `DeliveryState.connect = delivery_api.connect`."
 )
 
-# Expires a bounded batch of v1 keys written without a TTL.
+# Gives a bounded batch of v1 keys written without a TTL their v1 TTLs.
 _LEGACY_SWEEP_ROUTE = "/legacy/sweep"
 
 _JSON_HEADERS = {"Content-Type": "application/json"}
@@ -283,7 +283,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", rep
     )
     return delivery_state.Backend(
         endpoint = endpoint,
-        describe = "API v{}".format(API_VERSION),
+        describe = "API v{}".format(_advertised_version(res)),
         status = _to_health(res),
         health = lambda: _do_health(c),
         record = lambda label, digest: _do_record(c, label, digest),

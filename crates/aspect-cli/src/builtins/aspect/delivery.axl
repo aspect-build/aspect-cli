@@ -72,8 +72,7 @@ The task gets its backend from `DeliveryState.connect` (`lib/delivery_state.axl`
 Unset, it is chosen by where the job runs (`_default_connect`):
 
   - On an Aspect Workflows runner, which exposes its deliveryd at
-    `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`, the runner's deliveryd, so an
-    upgrade keeps the state the runner already has.
+    `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`, the runner's deliveryd.
   - Elsewhere, Aspect's delivery API (`lib/delivery_api.axl`), authenticated
     with the Aspect Cloud credential. It keeps each target's latest delivery
     and each digest's, with their metadata, and records every attempt,
@@ -589,8 +588,7 @@ def _resolve_skip_policies(delivery_trait, targets: list, target_tags: dict) -> 
 def _default_connect(env) -> typing.Callable:
     """`DeliveryState.connect` when it is unset: the runner's deliveryd when
     the job runs on an Aspect Workflows runner that exposes one
-    (`deliveryd.ENDPOINT_ENV`), so upgrading the CLI keeps the state it already
-    has, else Aspect's delivery API."""
+    (`deliveryd.ENDPOINT_ENV`), else Aspect's delivery API."""
     return deliveryd.connect if env.var(deliveryd.ENDPOINT_ENV) else delivery_api.connect
 
 def _record_digests(dd, targets: list, output_shas: dict) -> None:

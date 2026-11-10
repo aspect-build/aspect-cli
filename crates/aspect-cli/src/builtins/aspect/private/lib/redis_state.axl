@@ -32,9 +32,8 @@ The connection is `redis.axl`'s client, configured from the runner's environment
     ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH       `password` or `user:password`; never in the URL
     ASPECT_WORKFLOWS_DELIVERY_REDIS_LEGACY_TTL_SECONDS
                                                lifetime of the legacy signature keys, set on
-                                               every write and on migration (default 7 days);
-                                               0 keeps them forever, for a fleet that still
-                                               has v1 deliveryd readers
+                                               every write and on migration (default 7 days;
+                                               0 sets none)
 """
 
 load("@std//time.axl", "sleep", "time")

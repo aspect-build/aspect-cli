@@ -234,11 +234,15 @@ def _open(http, base_url: str, token, params: delivery_state.Params, new_id, pau
     if res.status >= 200 and res.status < 300:
         body = json.try_decode(res.body, None)
         if type(body) == "dict" and body.get("writable") == False:
+            if token == None:
+                return backend("{} answers that it may not record.".format(server.endpoint))
             return backend("the Aspect Cloud credential can read delivery state but not record it. Grant the token's role `aspect.delivery.write`.")
         return backend()
     if res.status == 0:
         return unavailable(res.failure + ": " + res.body)
     message = "HTTP {}: {}".format(res.status, aspect_cloud_error(res) or res.body.strip()[:200])
+    if token == None:
+        return unavailable(message)
     if res.status == 401:
         return unavailable("the delivery API rejected the Aspect Cloud credential ({}). Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.".format(message))
     if res.status == 403:
