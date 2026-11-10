@@ -2240,8 +2240,8 @@ import {}
         }
     }
 
-    /// `cquery` reads `test` as well as `build`, as Bazel's `CqueryCommand` inherits
-    /// from `TestCommand`, so a `test --test_arg` rc line reaches it.
+    /// `cquery` reads `test` as well as `build`, so a `test --test_arg` rc
+    /// line reaches it.
     #[test]
     fn cquery_reads_the_test_and_build_sections() {
         let rc = rc_with(
@@ -2262,7 +2262,35 @@ import {}
             sections_for("cquery"),
             ["always", "common", "build", "test", "cquery"]
         );
-        assert_eq!(command_ancestors("canonicalize-flags"), ["build"]);
+    }
+
+    /// Each command's ancestry, as its `@Command(inheritsOptionsFrom = …)` in
+    /// Bazel declares it.
+    #[test]
+    fn command_ancestors_mirror_bazel() {
+        let build: &[&str] = &["build"];
+        let test: &[&str] = &["build", "test"];
+        for (command, ancestors) in [
+            ("build", &[][..]),
+            ("query", &[]),
+            ("mod", &[]),
+            ("version", &[]),
+            ("test", build),
+            ("run", build),
+            ("clean", build),
+            ("info", build),
+            ("print_action", build),
+            ("config", build),
+            ("aquery", build),
+            ("canonicalize-flags", build),
+            ("mobile-install", build),
+            ("coverage", test),
+            ("cquery", test),
+            ("fetch", test),
+            ("vendor", test),
+        ] {
+            assert_eq!(command_ancestors(command), ancestors, "{command}");
+        }
     }
 
     #[test]
