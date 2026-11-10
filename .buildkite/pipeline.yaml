@@ -128,6 +128,7 @@ steps:
       # the tests in crates/bazel/src/label.rs.
       $$LAUNCHER run //examples/deliverable:py_deliverable
       $$LAUNCHER run //examples/deliverable:sh_deliverable -- forwarded-arg
+      $$LAUNCHER run //examples/deliverable:non_default_executable
       # $$CLI, not $$LAUNCHER: the example is its own workspace, with no
       # .aspect/axl.axl pointing the launcher at this commit's CLI.
       echo "--- :aspect: delivery scheduler example (examples/delivery-scheduler)"

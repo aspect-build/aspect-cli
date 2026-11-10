@@ -233,7 +233,12 @@ pub fn resolve(
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| serde_json::from_str::<RunInfo>(&text).ok());
     let target_name = label.rsplit(':').next().unwrap_or(label).to_owned();
-    let Some(path) = pick_executable(&default_files, runinfo.as_ref(), &target_name) else {
+    let Some(path) = pick_executable(
+        &default_files,
+        &runinfo_files,
+        runinfo.as_ref(),
+        &target_name,
+    ) else {
         return Err(Failure::NotRunnable {
             target: label.to_owned(),
         });
@@ -461,12 +466,13 @@ fn yes() -> bool {
     true
 }
 
-/// The executable among `candidates`: the aspect's `files_to_run.executable`
-/// basename when the aspect ran, else a file named after the target, else
-/// the target name plus a script extension, else the first file with the
-/// executable bit.
+/// The executable from the aspect's output group (or a matching default
+/// output for an older aspect), when runinfo names it. Never guess another
+/// file in that case. Without runinfo, use the target name, a script extension,
+/// or the first executable default output.
 pub fn pick_executable(
-    candidates: &[PathBuf],
+    default_files: &[PathBuf],
+    runinfo_files: &[PathBuf],
     runinfo: Option<&RunInfo>,
     target_name: &str,
 ) -> Option<PathBuf> {
@@ -474,15 +480,14 @@ pub fn pick_executable(
     if let Some(info) = runinfo {
         let exe = info.executable.rsplit('/').next().unwrap_or("");
         if !exe.is_empty() {
-            if let Some(found) = candidates
+            return runinfo_files
                 .iter()
+                .chain(default_files)
                 .find(|c| basename(c).as_deref() == Some(exe))
-            {
-                return Some(found.clone());
-            }
+                .cloned();
         }
     }
-    if let Some(found) = candidates
+    if let Some(found) = default_files
         .iter()
         .find(|c| basename(c).as_deref() == Some(target_name))
     {
@@ -490,14 +495,14 @@ pub fn pick_executable(
     }
     for ext in SCRIPT_EXTENSIONS {
         let name = format!("{target_name}{ext}");
-        if let Some(found) = candidates
+        if let Some(found) = default_files
             .iter()
             .find(|c| basename(c).as_deref() == Some(&name))
         {
             return Some(found.clone());
         }
     }
-    candidates.iter().find(|c| is_executable(c)).cloned()
+    default_files.iter().find(|c| is_executable(c)).cloned()
 }
 
 #[cfg(unix)]
@@ -795,17 +800,74 @@ mod tests {
             executable: "pkg/tool.sh".to_owned(),
             ..Default::default()
         };
+        let authoritative = tmp.path().join("other_dir/tool.sh");
         assert_eq!(
-            pick_executable(&candidates, Some(&info), "tool"),
+            pick_executable(&candidates, &[authoritative.clone()], Some(&info), "tool"),
+            Some(authoritative)
+        );
+        assert_eq!(
+            pick_executable(&candidates, &[], Some(&info), "tool"),
             Some(tool_sh.clone())
         );
-        assert_eq!(pick_executable(&candidates, None, "tool"), Some(tool));
+        assert_eq!(pick_executable(&candidates, &[], None, "tool"), Some(tool));
         assert_eq!(
-            pick_executable(&[other.clone(), tool_sh.clone()], None, "tool"),
+            pick_executable(&[other.clone(), tool_sh.clone()], &[], None, "tool"),
             Some(tool_sh)
         );
         #[cfg(unix)]
-        assert_eq!(pick_executable(&[other.clone()], None, "tool"), Some(other));
+        assert_eq!(
+            pick_executable(&[other.clone()], &[], None, "tool"),
+            Some(other)
+        );
+    }
+
+    #[test]
+    fn aspect_executable_not_in_default_outputs_is_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("bazel_env_all_tools");
+        let script = tmp.path().join("bazel_env.sh");
+        let json = tmp.path().join("bazel_env.aspect_runinfo.json");
+        std::fs::write(&marker, "").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &json,
+            r#"{"executable":"tools/bazel_env.sh","runfiles":false,"runfiles_manifest":false}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let defaults = vec![marker.clone()];
+        let aspect_outputs = vec![json.clone(), script.clone()];
+        let resolved = resolve(
+            "//tools:bazel_env",
+            Some(tmp.path()),
+            "_main",
+            SymlinksMode::from_enable_runfiles(None),
+            defaults.clone(),
+            aspect_outputs,
+        )
+        .unwrap();
+        assert_eq!(resolved.path, script);
+        assert_eq!(resolved.default_outputs, defaults);
+
+        // If the aspect names a file that was not built, do not run a marker
+        // merely because it is executable or happens to match the target.
+        assert!(matches!(
+            resolve(
+                "//tools:bazel_env_all_tools",
+                Some(tmp.path()),
+                "_main",
+                SymlinksMode::from_enable_runfiles(None),
+                vec![marker],
+                vec![json],
+            ),
+            Err(Failure::NotRunnable { .. })
+        ));
     }
 
     #[test]
