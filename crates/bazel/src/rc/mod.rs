@@ -7,14 +7,15 @@ pub(crate) mod tokenize;
 /// Returns ancestor commands for `command` in Bazel's inheritance hierarchy,
 /// ordered from most general to most specific (excluding `common` / `always`).
 ///
-/// Mirrors Bazel's own command graph:
-/// - `test`, `run`, `clean`, `mobile-install`, `info`, `print_action`, `config`, `cquery`, `aquery` → `build`
-/// - `coverage`, `fetch`, `vendor` → `build`, `test`
+/// Mirrors Bazel's own command graph (each command's `@Command(inheritsOptionsFrom = …)`):
+/// - `test`, `run`, `clean`, `mobile-install`, `info`, `print_action`, `config`, `aquery`,
+///   `canonicalize-flags` → `build`
+/// - `coverage`, `cquery`, `fetch`, `vendor` → `build`, `test`
 pub(crate) fn command_ancestors(command: &str) -> &'static [&'static str] {
     match command {
         "test" | "run" | "clean" | "mobile-install" | "info" | "print_action" | "config"
-        | "cquery" | "aquery" => &["build"],
-        "coverage" | "fetch" | "vendor" => &["build", "test"],
+        | "aquery" | "canonicalize-flags" => &["build"],
+        "coverage" | "cquery" | "fetch" | "vendor" => &["build", "test"],
         _ => &[],
     }
 }
@@ -2237,6 +2238,31 @@ import {}
             sources: sources.iter().map(|p| p.to_path_buf()).collect(),
             ..Default::default()
         }
+    }
+
+    /// `cquery` reads `test` as well as `build`, as Bazel's `CqueryCommand` inherits
+    /// from `TestCommand`, so a `test --test_arg` rc line reaches it.
+    #[test]
+    fn cquery_reads_the_test_and_build_sections() {
+        let rc = rc_with(
+            &[Path::new("/work/repo/.bazelrc")],
+            &[
+                ("build", 0, "--compilation_mode=opt"),
+                ("test", 0, "--test_arg=--verbose"),
+                ("query", 0, "--output=label"),
+            ],
+        );
+        let values: Vec<&str> = rc
+            .options_for("cquery")
+            .into_iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, ["--compilation_mode=opt", "--test_arg=--verbose"]);
+        assert_eq!(
+            sections_for("cquery"),
+            ["always", "common", "build", "test", "cquery"]
+        );
+        assert_eq!(command_ancestors("canonicalize-flags"), ["build"]);
     }
 
     #[test]
