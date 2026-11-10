@@ -3698,6 +3698,61 @@ build --config=bar
         );
     }
 
+    /// Whether `--os-specific-flag` from `build:<os>` is applied, for an rc that
+    /// adds `rc` and a caller that passes `caller`.
+    fn platform_config_applies(rc: &str, caller: &[&str]) -> bool {
+        let dir = make_workspace();
+        let root = dir.path();
+        let os = std::env::consts::OS;
+        fs::write(
+            root.join(".bazelrc"),
+            format!("build:{os} --os-specific-flag\n{rc}"),
+        )
+        .unwrap();
+        let rc = Bazelrc::new(root, ISOLATE, &flags(caller)).unwrap();
+        rc.expand_configs("build", &[])
+            .unwrap()
+            .iter()
+            .any(|o| o.value == "--os-specific-flag")
+    }
+
+    /// The last `--enable_platform_specific_config` setting decides, in any of
+    /// Bazel's boolean spellings.
+    #[test]
+    fn enable_platform_specific_config_reads_every_spelling() {
+        assert!(platform_config_applies(
+            "",
+            &["--enable_platform_specific_config=true"]
+        ));
+        assert!(platform_config_applies(
+            "",
+            &["--enable_platform_specific_config=1"]
+        ));
+        assert!(!platform_config_applies(
+            "",
+            &["--enable_platform_specific_config=false"]
+        ));
+        assert!(!platform_config_applies("", &[]));
+        assert!(!platform_config_applies(
+            "build --enable_platform_specific_config\n",
+            &["--noenable_platform_specific_config"]
+        ));
+        assert!(platform_config_applies(
+            "build --noenable_platform_specific_config\n",
+            &["--enable_platform_specific_config"]
+        ));
+    }
+
+    /// Bazel reads the setting after expanding configs, so a config can turn
+    /// the platform config on.
+    #[test]
+    fn enable_platform_specific_config_set_by_a_config() {
+        assert!(platform_config_applies(
+            "build:ci --enable_platform_specific_config\n",
+            &["--config=ci"]
+        ));
+    }
+
     #[test]
     fn config_in_common_section_expands() {
         // common --config=foo with build:foo defined → build expansion includes foo's flags

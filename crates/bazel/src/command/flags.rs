@@ -26,27 +26,37 @@ pub fn effective_value(flags: &[String], command: &str, name: &str) -> Option<St
         .next_back()
 }
 
-/// The effective value of a boolean `--name`: `--name`, `--name=<bool>`,
-/// `--noname`. `None` when unset.
+/// The effective value of a boolean `--name` (see [`bool_setting`]). `None`
+/// when unset.
 pub fn effective_bool(flags: &[String], command: &str, name: &str) -> Option<bool> {
-    let bare = format!("--{name}");
-    let no = format!("--no{name}");
-    let eq = format!("--{name}=");
-    let mut value = None;
-    for token in option_tokens(flags, command) {
-        if token == bare {
-            value = Some(true);
-        } else if token == no {
-            value = Some(false);
-        } else if let Some(v) = token.strip_prefix(&eq) {
-            value = match v.to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "t" | "y" => Some(true),
-                "false" | "0" | "no" | "f" | "n" => Some(false),
-                _ => value,
-            };
-        }
+    option_tokens(flags, command)
+        .iter()
+        .filter_map(|token| bool_setting(token, name))
+        .next_back()
+}
+
+/// The value `token` sets the boolean `--name` to, in any spelling Bazel
+/// accepts: `--name`, `--noname`, or `--name=<bool>` with Bazel's boolean
+/// words. `None` when `token` does not set it, or names a value Bazel would
+/// reject.
+pub fn bool_setting(token: &str, name: &str) -> Option<bool> {
+    let option = token.strip_prefix("--")?;
+    if option == name {
+        return Some(true);
     }
-    value
+    if option.strip_prefix("no") == Some(name) {
+        return Some(false);
+    }
+    match option
+        .strip_prefix(name)?
+        .strip_prefix('=')?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" | "1" | "yes" | "t" | "y" => Some(true),
+        "false" | "0" | "no" | "f" | "n" => Some(false),
+        _ => None,
+    }
 }
 
 /// The effective `--remote_download_outputs` mode, reading the flag and its
@@ -124,6 +134,19 @@ mod tests {
             ),
             Some(true)
         );
+    }
+
+    #[test]
+    fn a_bool_setting_reads_every_spelling() {
+        let name = "enable_runfiles";
+        assert_eq!(bool_setting("--enable_runfiles", name), Some(true));
+        assert_eq!(bool_setting("--noenable_runfiles", name), Some(false));
+        assert_eq!(bool_setting("--enable_runfiles=1", name), Some(true));
+        assert_eq!(bool_setting("--enable_runfiles=False", name), Some(false));
+        assert_eq!(bool_setting("--enable_runfiles=maybe", name), None);
+        assert_eq!(bool_setting("--enable_runfiles_x", name), None);
+        assert_eq!(bool_setting("--enable_runfiles_x=1", name), None);
+        assert_eq!(bool_setting("enable_runfiles", name), None);
     }
 
     /// Among overrides the section ranks, not the token order: a `build`
