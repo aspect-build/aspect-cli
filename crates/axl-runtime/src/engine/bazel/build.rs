@@ -1002,7 +1002,11 @@ impl Build {
             let plan =
                 bazel::execlog::plan(injected_execlog_path, std::mem::take(&mut compact_paths));
             if plan.add_flag {
-                cmd.arg(bazel::execlog::COMPACT_FILE_FLAG).arg(&plan.path);
+                cmd.arg(format!(
+                    "{}={}",
+                    bazel::execlog::COMPACT_FILE_FLAG,
+                    plan.path.display()
+                ));
             }
             compact_paths = plan.tee;
             Some(plan.path)
