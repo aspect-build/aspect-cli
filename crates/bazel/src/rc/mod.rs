@@ -2592,7 +2592,7 @@ build:opt --compilation_mode=opt
 
     /// The platform config expands in place of the setting that turns it on, as
     /// Bazel's `ConfigExpander` does: `build:<os>` beats a `build` line above
-    /// that setting.
+    /// that setting and loses to one below it.
     #[test]
     fn platform_config_ranks_at_a_build_setting() {
         let rc = "common --remote_timeout=0\n\
@@ -2600,6 +2600,8 @@ build:opt --compilation_mode=opt
                   build:{os} --remote_timeout=2\n\
                   build --enable_platform_specific_config\n";
         assert_eq!(platform_remote_timeout(rc, &[]).as_deref(), Some("2"));
+        let below = format!("{rc}build --remote_timeout=3\n");
+        assert_eq!(platform_remote_timeout(&below, &[]).as_deref(), Some("3"));
     }
 
     /// Set under `common`, the platform config ranks at `common`, so a plain
