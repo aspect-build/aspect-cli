@@ -3,7 +3,7 @@
 A struct-based fake `ctx` (like `deployment_flags_test.axl`) serves canned HTTP
 responses keyed by `"<METHOD> <path>"` and records every request, so each verb
 can be asserted on the wire: which endpoint was called, with which field names,
-headers and socket. A `/health` answer carrying `Deliveryd-Api: 2` selects v2.
+headers and socket. A `/health` answer whose `Deliveryd-Api` lists `2` selects v2.
 
 `fail()` cannot be caught in Starlark, so the error paths (non-2xx, corrupt JSON)
 are not exercised here; an unreachable daemon is, since that surfaces through
@@ -290,10 +290,10 @@ def _test_v2_unhealthy_is_not_negotiated(ctx):
     # A 503 health answer carries the header too; it is still a startup error.
     dd = _client({"GET /health": _res(503, "unhealthy", headers = [("deliveryd-api", "2")])}, [])
     _eq("v2 503 → not ok", dd.status.ok, False)
-    _eq("v2 503 → described as v2", dd.describe, "API v2")
+    _eq("v2 503 → described as v2", (dd.describe, dd.status.version), ("API v2", 2))
 
 def _test_advertised_versions(ctx):
-    for (value, want) in [(None, (True, "API v1")), ("2", (True, "API v2")), ("2, 3", (True, "API v2")), (" 3 ,2", (True, "API v2")), ("two", (True, "API v1")), ("3", (False, "API v3"))]:
+    for (value, want) in [(None, (True, "API v1")), ("2", (True, "API v2")), ("2, 3", (True, "API v2")), (" 3 ,2", (True, "API v2")), ("two", (False, "deliveryd")), ("3", (False, "deliveryd"))]:
         headers = [("deliveryd-api", value)] if value != None else []
         dd = _client({"GET /health": _res(200, "ok", headers = headers), "POST /deliveries/query": _EMPTY_QUERY}, [])
         _eq("Deliveryd-Api %r" % value, (dd.status.ok, dd.describe), want)
@@ -301,7 +301,7 @@ def _test_advertised_versions(ctx):
 def _test_unspoken_versions_refuse_to_start(ctx):
     calls = []
     dd = _client({"GET /health": _res(200, "ok", headers = [("deliveryd-api", "3, 4")])}, calls)
-    _eq("v3,v4 → startup error", dd.status.error, "the runner's deliveryd serves API v3, v4, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.")
+    _eq("v3,v4 → startup error", dd.status.error, "the runner's deliveryd lists API versions `3, 4`, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.")
     _eq("v3,v4 → no deprecation", dd.deprecation, "")
     _eq("v3,v4 → only the probe", [c.path for c in calls], ["/health"])
 
@@ -313,7 +313,7 @@ def _test_v2_rejection_names_no_credential(ctx):
 def _test_v2_unwritable_names_the_server(ctx):
     unwritable = _res(200, {"targets": {}, "unanswered_labels": [], "writable": False})
     dd = _client({"GET /health": _V2_HEALTH, "POST /deliveries/query": unwritable}, [])
-    _eq("v2 unwritable → read_only", dd.read_only, _SOCKET + " answers that it may not record.")
+    _eq("v2 unwritable → read_only", dd.read_only, "the server answers that it may not record (`writable: false`).")
 
 _UNIT_TESTS = [
     _test_parse_endpoint,

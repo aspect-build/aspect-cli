@@ -32,8 +32,7 @@ ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT"
 API_VERSION = 1
 
 # The delivery API contract over the socket, when `_API_HEADER` on `/health`
-# lists it. Not `DeliveryD-Version`: CLIs 2026.37–2026.41 read that header and
-# speak an unreleased dialect when it is 2 or more.
+# lists it. This CLI never reads `DeliveryD-Version`.
 _API_V2 = 2
 _API_HEADER = "Deliveryd-Api"
 
@@ -134,11 +133,13 @@ def _probe(conn: _Conn, attempts: int, pause) -> _Response:
         res = _send(conn, "GET", "/health", None)
     return res
 
-def _advertised_versions(res: _Response) -> list[int]:
-    """The versions a `/health` answer lists in `_API_HEADER`, comma-separated;
-    empty without the header."""
-    listed = [v.strip() for v in header_value(res.headers, _API_HEADER).split(",")]
-    return [int(v) for v in listed if v.isdigit()]
+def _advertised_versions(res: _Response) -> list[int] | None:
+    """The versions a `/health` answer lists in `_API_HEADER`, comma-separated,
+    or None without the header. Entries that are not numbers are dropped."""
+    listed = header_value(res.headers, _API_HEADER).strip()
+    if not listed:
+        return None
+    return [int(v.strip()) for v in listed.split(",") if v.strip().isdigit()]
 
 def _to_health(res: _Response) -> Health:
     if res.status == 0:
@@ -210,27 +211,15 @@ def _do_delete(c: _Client, digest: str) -> None:
     })
     _check(c.conn, "delete", res)
 
-def _unusable(endpoint: str, describe: str, message: str) -> delivery_state.Backend:
-    """A backend whose `.status` reports `message` as a startup error."""
-
-    def unavailable(*args, **kwargs):
-        fail("deliveryd is unavailable: " + message)
-
-    status = Health(ok = False, version = API_VERSION, error = message)
-    return delivery_state.Backend(
-        endpoint = endpoint,
-        describe = describe,
-        status = status,
-        health = lambda: status,
-        record = unavailable,
-        query = unavailable,
-        deliver = unavailable,
-        delete = unavailable,
-    )
+def _unusable(endpoint: str, describe: str, version: int, message: str) -> delivery_state.Backend:
+    """A backend whose `.status` reports `message` as a startup error and
+    whose every verb refuses."""
+    name = "deliveryd ({})".format(endpoint) if endpoint else "deliveryd"
+    return delivery_api.unavailable(delivery_api.Server(endpoint = endpoint, describe = describe, version = version, name = name), message)
 
 def _unconfigured() -> delivery_state.Backend:
     """The backend for a runner without a daemon."""
-    return _unusable("", "deliveryd", "{} is not set. The delivery state backend must be running.".format(ENDPOINT_ENV))
+    return _unusable("", "deliveryd", API_VERSION, "{} is not set. The delivery state backend must be running.".format(ENDPOINT_ENV))
 
 def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = "", probe_attempts: int = _PROBE_ATTEMPTS, pause = sleep, repo: str = "", new_id: typing.Callable[[], str] | None = None) -> delivery_state.Backend:
     """Connect to deliveryd at `endpoint` (default `ENDPOINT_ENV`) and probe it.
@@ -250,12 +239,14 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
     conn = _Conn(http = ctx.http(), base_url = base_url, socket = socket, endpoint = endpoint)
     res = _probe(conn, probe_attempts, pause)
     versions = _advertised_versions(res)
-    if versions and _API_V2 not in versions:
-        listed = ", ".join(["v{}".format(v) for v in versions])
-        return _unusable(endpoint, "API " + listed, "the runner's deliveryd serves API {}, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.".format(listed))
+    if versions != None and _API_V2 not in versions:
+        listed = header_value(res.headers, _API_HEADER).strip()
+        return _unusable(endpoint, "deliveryd", API_VERSION, "the runner's deliveryd lists API versions `{}`, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.".format(listed))
     describe = "API v{}".format(_API_V2 if versions else API_VERSION)
+    if versions and not _ok(res):
+        return _unusable(endpoint, describe, _API_V2, _to_health(res).error)
 
-    if versions and _ok(res):
+    if versions:
         return delivery_api.open(
             conn.http,
             base_url,
@@ -282,7 +273,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
         query = lambda digests: _do_query(c, digests),
         deliver = lambda label, digest, meta = {}: _do_deliver(c, label, digest, meta),
         delete = lambda digest: _do_delete(c, digest),
-        deprecation = _V1_DEPRECATION.format(endpoint) if _ok(res) and not versions else "",
+        deprecation = _V1_DEPRECATION.format(endpoint) if _ok(res) else "",
     )
 
 def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.Backend:
