@@ -23,7 +23,6 @@ def _res(status, body = "", headers = []):
     return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = headers)
 
 _V2_HEALTH = _res(200, "ok", headers = [("deliveryd-api", "2")])
-_SWEEP = _res(200, {"expired": 0, "done": True})
 _EMPTY_QUERY = _res(200, {"targets": {}, "unanswered_labels": [], "writable": True})
 
 def _future(res):
@@ -233,8 +232,8 @@ def _test_old_version_header_stays_v1(ctx):
 
 def _test_v2_negotiated_from_health_header(ctx):
     calls = []
-    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": _EMPTY_QUERY}, calls, repo = "org/repo")
-    _eq("v2 → probes health, sweeps v1 keys, then probes the API", [c.path for c in calls], ["/health", "/legacy/sweep", "/deliveries/query"])
+    dd = _client({"GET /health": _V2_HEALTH, "POST /deliveries/query": _EMPTY_QUERY}, calls, repo = "org/repo")
+    _eq("v2 → probes health, then the API", [c.path for c in calls], ["/health", "/deliveries/query"])
     _eq("v2 → probe is an empty query", calls[-1].body, {"ci_host": "gh", "repo": "org/repo", "prefix": "deliver", "targets": {}})
     _eq("v2 → over the socket", calls[-1].socket, "/run/deliveryd.sock")
     _eq("v2 → no credential", "Authorization" in calls[-1].headers, False)
@@ -245,14 +244,13 @@ def _test_v2_negotiated_from_health_header(ctx):
     _eq("v2 → not deprecated", dd.deprecation, "")
 
 def _test_v2_header_case_insensitive(ctx):
-    dd = _client({"GET /health": _res(200, "ok", headers = [("Deliveryd-Api", "2")]), "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": _EMPTY_QUERY}, [])
+    dd = _client({"GET /health": _res(200, "ok", headers = [("Deliveryd-Api", "2")]), "POST /deliveries/query": _EMPTY_QUERY}, [])
     _eq("mixed-case header → v2", dd.describe, "API v2")
 
 def _test_v2_verbs_on_the_wire(ctx):
     calls = []
     dd = _client({
         "GET /health": _V2_HEALTH,
-        "POST /legacy/sweep": _SWEEP,
         "POST /deliveries/query": [_EMPTY_QUERY, _res(200, {
             "targets": {"//pkg:a": {
                 "latest_delivery": {"event_id": "e0", "label": "//pkg:a", "digest": "d-a", "outcome": "ok", "build_url": "https://ci/build/1", "commit_sha": "c0", "recorded_at": "2026-11-01T00:00:00Z", "metadata": {"image": "x"}},
@@ -288,41 +286,33 @@ def _test_v2_verbs_on_the_wire(ctx):
     dd.record_failure("//pkg:a", "d-a", {})
     _eq("v2 failure → a fail attempt", (calls[-1].path, calls[-1].body["outcome"]), ("/deliveries/record", "fail"))
 
-def _test_v2_sweep_failure_is_ignored(ctx):
-    calls = []
-    pauses = []
-    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _res(503, "unavailable"), "POST /deliveries/query": _EMPTY_QUERY}, calls, pauses)
-    _eq("sweep 503 → still v2", (dd.status.ok, dd.describe), (True, "API v2"))
-    _eq("sweep 503 → not retried", len([c for c in calls if c.path == "/legacy/sweep"]), 1)
-    _eq("sweep 503 → no pause", pauses, [])
-    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": None, "POST /deliveries/query": _EMPTY_QUERY}, [])
-    _eq("sweep transport error → still v2", dd.status.ok, True)
-
-def _test_v1_does_not_sweep(ctx):
-    calls = []
-    _client({"GET /health": _res(200, "ok")}, calls)
-    _eq("v1 → no sweep", [c.path for c in calls], ["/health"])
-
 def _test_v2_unhealthy_is_not_negotiated(ctx):
     # A 503 health answer carries the header too; it is still a startup error.
     dd = _client({"GET /health": _res(503, "unhealthy", headers = [("deliveryd-api", "2")])}, [])
     _eq("v2 503 → not ok", dd.status.ok, False)
     _eq("v2 503 → described as v2", dd.describe, "API v2")
 
-def _test_advertised_version(ctx):
-    for (value, want) in [(None, "API v1"), ("2", "API v2"), (" 3 ", "API v2"), ("0", "API v1"), ("two", "API v1")]:
+def _test_advertised_versions(ctx):
+    for (value, want) in [(None, (True, "API v1")), ("2", (True, "API v2")), ("2, 3", (True, "API v2")), (" 3 ,2", (True, "API v2")), ("two", (True, "API v1")), ("3", (False, "API v3"))]:
         headers = [("deliveryd-api", value)] if value != None else []
-        responses = {"GET /health": _res(200, "ok", headers = headers), "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": _EMPTY_QUERY}
-        _eq("Deliveryd-Api %r" % value, _client(responses, []).describe, want)
+        dd = _client({"GET /health": _res(200, "ok", headers = headers), "POST /deliveries/query": _EMPTY_QUERY}, [])
+        _eq("Deliveryd-Api %r" % value, (dd.status.ok, dd.describe), want)
+
+def _test_unspoken_versions_refuse_to_start(ctx):
+    calls = []
+    dd = _client({"GET /health": _res(200, "ok", headers = [("deliveryd-api", "3, 4")])}, calls)
+    _eq("v3,v4 → startup error", dd.status.error, "the runner's deliveryd serves API v3, v4, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.")
+    _eq("v3,v4 → no deprecation", dd.deprecation, "")
+    _eq("v3,v4 → only the probe", [c.path for c in calls], ["/health"])
 
 def _test_v2_rejection_names_no_credential(ctx):
-    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": _res(401, "denied")}, [])
+    dd = _client({"GET /health": _V2_HEALTH, "POST /deliveries/query": _res(401, "denied")}, [])
     _eq("v2 401 → not ok", dd.status.ok, False)
     _eq("v2 401 → no credential hint", "auth login" in dd.status.error, False)
 
 def _test_v2_unwritable_names_the_server(ctx):
     unwritable = _res(200, {"targets": {}, "unanswered_labels": [], "writable": False})
-    dd = _client({"GET /health": _V2_HEALTH, "POST /legacy/sweep": _SWEEP, "POST /deliveries/query": unwritable}, [])
+    dd = _client({"GET /health": _V2_HEALTH, "POST /deliveries/query": unwritable}, [])
     _eq("v2 unwritable → read_only", dd.read_only, _SOCKET + " answers that it may not record.")
 
 _UNIT_TESTS = [
@@ -344,10 +334,9 @@ _UNIT_TESTS = [
     _test_v2_negotiated_from_health_header,
     _test_v2_header_case_insensitive,
     _test_v2_verbs_on_the_wire,
-    _test_v2_sweep_failure_is_ignored,
-    _test_v1_does_not_sweep,
     _test_v2_unhealthy_is_not_negotiated,
-    _test_advertised_version,
+    _test_advertised_versions,
+    _test_unspoken_versions_refuse_to_start,
     _test_v2_rejection_names_no_credential,
     _test_v2_unwritable_names_the_server,
 ]

@@ -2,19 +2,14 @@
 expose over a Unix socket. This is the default `DeliveryState.connect` on an
 Aspect Workflows runner, which sets `ENDPOINT_ENV` (see `delivery_state.axl`).
 
-The startup probe, `GET /health`, picks the API:
+The startup probe, `GET /health`, picks the API from its `Deliveryd-Api`
+header (the "Runner deliveryd" section of silo's `docs/api/delivery.md`):
 
-  - **v2**, advertised by the `Deliveryd-Api: 2` response header: the delivery
-    API contract (`/deliveries/...`), driven by `delivery_api.axl` over the
-    socket without a credential. It stores metadata, tracks each target's
-    latest delivery and keeps attempt history, like Aspect's hosted API.
-    Connecting also calls `POST /legacy/sweep` once, so a store that served
-    v1 drains its never-expiring keys over normal runs. Its answer is ignored.
-  - **v1**, any deliveryd without the header. Deprecated, and to be removed
-    from the CLI: it keys state by commit, so each target's digest is
-    `record`ed under the commit before `query` can answer for it; `deliver`
-    stamps a digest with the build URL that delivered it, and `delete` clears
-    one after a failed run. The backend's `deprecation` says how to move off.
+  - **v2**, when the header lists `2`: the delivery API contract, driven by
+    `delivery_api.axl` over the socket without a credential.
+  - **v1**, without the header. Deprecated: it keys state by commit, so each
+    digest is `record`ed before `query` can answer for it.
+  - A header that lists no version this CLI speaks is a startup error.
 
     dd = deliveryd.connect(ctx, delivery_state.Params(host = "gh", repo = "org/repo", prefix = ctx.task.name, commit = sha, signature = build_url))
     dd.record(label, digest)                # needed by v1; a no-op on v2
@@ -36,20 +31,18 @@ ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT"
 # The daemon's `record` + commit-keyed `query` + `deliver` + `artifact/delete` API.
 API_VERSION = 1
 
-# The delivery API contract over the socket, advertised by `_API_HEADER` on
-# `/health`. Not `DeliveryD-Version`: CLIs 2026.37–2026.41 read that header
-# and speak an unreleased dialect when it is 2 or more.
+# The delivery API contract over the socket, when `_API_HEADER` on `/health`
+# lists it. Not `DeliveryD-Version`: CLIs 2026.37–2026.41 read that header and
+# speak an unreleased dialect when it is 2 or more.
 _API_V2 = 2
 _API_HEADER = "Deliveryd-Api"
 
 _V1_DEPRECATION = (
     "The runner's deliveryd ({}) serves only deliveryd API v1, which is deprecated " +
     "and will be removed from the Aspect CLI. Upgrade Aspect Workflows so the " +
-    "runner's deliveryd serves API v2, or set `DeliveryState.connect = delivery_api.connect`."
+    "runner's deliveryd serves API v2. (`DeliveryState.connect = delivery_api.connect` " +
+    "also works, but needs an Aspect Cloud credential, ASPECT_API_TOKEN, in the job.)"
 )
-
-# Gives a bounded batch of v1 keys written without a TTL their v1 TTLs.
-_LEGACY_SWEEP_ROUTE = "/legacy/sweep"
 
 _JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -141,11 +134,11 @@ def _probe(conn: _Conn, attempts: int, pause) -> _Response:
         res = _send(conn, "GET", "/health", None)
     return res
 
-def _advertised_version(res: _Response) -> int:
-    """The API version a `/health` answer advertises in `_API_HEADER`, or
-    `API_VERSION` without one."""
-    advertised = header_value(res.headers, _API_HEADER).strip()
-    return max(int(advertised), API_VERSION) if advertised.isdigit() else API_VERSION
+def _advertised_versions(res: _Response) -> list[int]:
+    """The versions a `/health` answer lists in `_API_HEADER`, comma-separated;
+    empty without the header."""
+    listed = [v.strip() for v in header_value(res.headers, _API_HEADER).split(",")]
+    return [int(v) for v in listed if v.isdigit()]
 
 def _to_health(res: _Response) -> Health:
     if res.status == 0:
@@ -217,18 +210,16 @@ def _do_delete(c: _Client, digest: str) -> None:
     })
     _check(c.conn, "delete", res)
 
-def _unconfigured() -> delivery_state.Backend:
-    """The backend for a runner without a daemon: every verb is unreachable,
-    and `status` says why, so the task reports it like any other startup error."""
-    message = "{} is not set. The delivery state backend must be running.".format(ENDPOINT_ENV)
+def _unusable(endpoint: str, describe: str, message: str) -> delivery_state.Backend:
+    """A backend whose `.status` reports `message` as a startup error."""
 
     def unavailable(*args, **kwargs):
-        fail("deliveryd is not configured: " + message)
+        fail("deliveryd is unavailable: " + message)
 
     status = Health(ok = False, version = API_VERSION, error = message)
     return delivery_state.Backend(
-        endpoint = "",
-        describe = "deliveryd",
+        endpoint = endpoint,
+        describe = describe,
         status = status,
         health = lambda: status,
         record = unavailable,
@@ -237,22 +228,19 @@ def _unconfigured() -> delivery_state.Backend:
         delete = unavailable,
     )
 
-def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", repo: str = "", endpoint: str = "", probe_attempts: int = _PROBE_ATTEMPTS, pause = sleep, new_id = None) -> delivery_state.Backend:
-    """Connect to deliveryd and probe it, once.
+def _unconfigured() -> delivery_state.Backend:
+    """The backend for a runner without a daemon."""
+    return _unusable("", "deliveryd", "{} is not set. The delivery state backend must be running.".format(ENDPOINT_ENV))
 
-    `host` is the CI host label ("gh", "bk", …), `repo` the repository
-    (`owner/name`, "" when unknown) and `prefix` the change-detection
-    namespace; v1 also keys state by `commit`. `commit` and `signature` (the
-    build URL) are stored with each delivery. `endpoint` defaults to
-    `ENDPOINT_ENV`.
+def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = "", probe_attempts: int = _PROBE_ATTEMPTS, pause = sleep, repo: str = "", new_id: typing.Callable[[], str] | None = None) -> delivery_state.Backend:
+    """Connect to deliveryd at `endpoint` (default `ENDPOINT_ENV`) and probe it.
 
-    The probe doubles as a reachability check, reported through `.status`
-    rather than raised — a dead daemon, like an unset endpoint, is a startup
-    error the caller concludes its own surface for, not a mid-run write
-    failure. A 503 or a transport error is re-probed up to `probe_attempts`
-    times; `pause` is the sleep between tries, and between v2's request
-    retries. `new_id` mints v2 event ids (default: random per run). Both are
-    replaceable in tests.
+    `host`, `repo` (`owner/name`, "" when unknown) and `prefix` scope the
+    state; v1 also keys it by `commit`. `commit` and `signature` (the build
+    URL) are stored with each delivery. A failed probe is a startup error in
+    `.status`; a 503 or transport error is re-probed up to `probe_attempts`
+    times. `pause` sleeps between tries and between v2's retries; `new_id`
+    mints v2 event ids. Both are replaceable in tests.
     """
     endpoint = endpoint or ctx.std.env.var(ENDPOINT_ENV)
     if not endpoint:
@@ -261,9 +249,13 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", rep
     (base_url, socket) = _parse_endpoint(endpoint)
     conn = _Conn(http = ctx.http(), base_url = base_url, socket = socket, endpoint = endpoint)
     res = _probe(conn, probe_attempts, pause)
+    versions = _advertised_versions(res)
+    if versions and _API_V2 not in versions:
+        listed = ", ".join(["v{}".format(v) for v in versions])
+        return _unusable(endpoint, "API " + listed, "the runner's deliveryd serves API {}, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.".format(listed))
+    describe = "API v{}".format(_API_V2 if versions else API_VERSION)
 
-    if _ok(res) and _advertised_version(res) >= _API_V2:
-        _send(conn, "POST", _LEGACY_SWEEP_ROUTE, {})
+    if versions and _ok(res):
         return delivery_api.open(
             conn.http,
             base_url,
@@ -271,7 +263,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", rep
             delivery_state.Params(host = host, repo = repo, prefix = prefix, commit = commit, signature = signature),
             new_id or delivery_api.event_ids(random_hex(ctx)),
             pause,
-            server = delivery_api.Server(endpoint = endpoint, describe = "API v{}".format(_API_V2), version = _API_V2, socket = socket),
+            server = delivery_api.Server(endpoint = endpoint, describe = describe, version = _API_V2, socket = socket, name = "deliveryd ({})".format(endpoint)),
         )
 
     c = _Client(
@@ -283,14 +275,14 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", rep
     )
     return delivery_state.Backend(
         endpoint = endpoint,
-        describe = "API v{}".format(_advertised_version(res)),
+        describe = describe,
         status = _to_health(res),
         health = lambda: _do_health(c),
         record = lambda label, digest: _do_record(c, label, digest),
         query = lambda digests: _do_query(c, digests),
         deliver = lambda label, digest, meta = {}: _do_deliver(c, label, digest, meta),
         delete = lambda digest: _do_delete(c, digest),
-        deprecation = _V1_DEPRECATION.format(endpoint) if _ok(res) else "",
+        deprecation = _V1_DEPRECATION.format(endpoint) if _ok(res) and not versions else "",
     )
 
 def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.Backend:
