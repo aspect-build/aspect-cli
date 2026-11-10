@@ -413,12 +413,11 @@ impl Case {
     }
 
     /// Every execution-log path the Bazel command line names, in order, counting
-    /// both forms the CLI renders rc content in: a literal flag, and the
-    /// `--default_override=0:common=…` it wraps a `common`-section entry in.
+    /// both forms the CLI renders flags in: a literal caller flag, and the
+    /// `--default_override=0:<section>=…` it wraps an rc-file entry in.
     ///
-    /// Collected together on purpose — the point of the `common` case is that the
-    /// two forms are one request, so a test that could see only literals would be
-    /// blind to exactly the bug.
+    /// Collected together on purpose — the two forms are one request, so a test
+    /// that could see only literals would be blind to exactly the bug.
     fn execution_log_paths(&self) -> Vec<String> {
         let argv = self.bazel_argv();
         let mut paths = Vec::new();
@@ -724,11 +723,9 @@ fn entries_arrive_without_a_bes_event_stream_to_pump_from() {
 /// and the path the CLI reads — whichever section it was written in.
 ///
 /// Running Bazel with `--ignore_all_rc_files` means the CLI restates rc content
-/// itself, in a form that depends on the section: `always` and `build` entries pass
-/// through as literal flags, while a `common` one is wrapped in
-/// `--default_override=0:common=…`, because it applies to commands that would reject
-/// the flag literally. All three sections are asserted together because sameness is
-/// the claim — exactly one request reaches Bazel, at the path the rc file named, and
+/// itself, wrapping each entry in `--default_override=0:<section>=…` under the
+/// section it was written in. All three sections are asserted together because
+/// sameness is the claim — exactly one request reaches Bazel, at the path the rc file named, and
 /// the hook still gets every entry. A second request would mean the CLI missed this
 /// one and repointed Bazel at a temp path of its own, leaving the user's file
 /// uncreated.

@@ -375,6 +375,10 @@ fn spawn_child(runnable: &bazel::command::run::Runnable, dirs: &Dirs, spec: Spaw
     let _ = tx.send(result);
 }
 
+/// The Bazel command both verbs build with: the rc is resolved for it, and the
+/// injected flags read that command line as it does.
+const BUILD_COMMAND: &str = "build";
+
 /// The flags both verbs add to the rc-resolved command line, and the
 /// runfiles mode the rc implies; see [`bazel::command::run::prepare_flags`].
 fn prepare_flags(
@@ -383,11 +387,11 @@ fn prepare_flags(
     startup_flags: &[String],
 ) -> anyhow::Result<SymlinksMode> {
     let runner = super::runner::SignalRunner(signals);
-    bazel::command::run::prepare_flags(&bazel::server::Server::new(&runner, startup_flags), flags)
-        .map_err(|e| match e {
-            PrepareError::Refused(message) => RunError { message }.into(),
-            PrepareError::Other(e) => e,
-        })
+    let server = bazel::server::Server::new(&runner, startup_flags);
+    bazel::command::run::prepare_flags(&server, flags, BUILD_COMMAND).map_err(|e| match e {
+        PrepareError::Refused(message) => RunError { message }.into(),
+        PrepareError::Other(e) => e,
+    })
 }
 
 /// What both verbs share after the build is spawned.
@@ -420,7 +424,7 @@ fn start<'v>(
     // `use_rc`, else none, in which case Bazel reads its own rc files.
     let (mut flags, startup_flags) = match rc.or_else(|| super::read_active_rc(this)) {
         Some(rc) => {
-            let (startup, cmd) = rc.resolve_for_command("build")?;
+            let (startup, cmd) = rc.resolve_for_command(BUILD_COMMAND)?;
             (cmd, startup)
         }
         None => (vec![], super::read_startup_flags(this)?),
