@@ -114,6 +114,9 @@ def _runinfo_aspect_impl(target, ctx):
 
     out = ctx.actions.declare_file(target.label.name + ".aspect_runinfo.json")
     ctx.actions.write(out, json.encode(info))
-    return [OutputGroupInfo(aspect_runinfo = depset([out]))]
+    # The executable need not be in DefaultInfo.files (for example, a rule
+    # may expose only a rebuild marker there). Request it explicitly so Bazel
+    # downloads it even with --remote_download_outputs=toplevel.
+    return [OutputGroupInfo(aspect_runinfo = depset([out, files_to_run.executable]))]
 
 runinfo = aspect(implementation = _runinfo_aspect_impl)

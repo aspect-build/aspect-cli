@@ -42,6 +42,22 @@ custom_deliverable = rule(
     attrs = {"data": attr.label_list(allow_files = True)},
 )
 
+def _non_default_executable_impl(ctx):
+    marker = ctx.actions.declare_file(ctx.label.name + "_all_tools")
+    runner = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(marker, "", is_executable = True)
+    ctx.actions.write(runner, "#!/bin/sh\nexit 0\n", is_executable = True)
+    return [DefaultInfo(
+        files = depset([marker]),
+        executable = runner,
+        runfiles = ctx.runfiles(),
+    )]
+
+non_default_executable = rule(
+    implementation = _non_default_executable_impl,
+    executable = True,
+)
+
 def _oci_like_deliverable_impl(ctx):
     """Sim of `rules_oci`'s push rule: an executable plus two sibling
     default outputs (.digest and .layer), where only .digest is exposed
