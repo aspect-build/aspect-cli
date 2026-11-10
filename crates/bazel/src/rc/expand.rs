@@ -4,10 +4,14 @@ use crate::command::flags::bool_setting;
 /// The option that adds the host OS's config, as `--config=<os>` would.
 const PLATFORM_CONFIG_OPTION: &str = "enable_platform_specific_config";
 
+/// The host OS's config name. Rust's names for the OSes Bazel names (`linux`,
+/// `macos`, `windows`, `freebsd`, `openbsd`) are Bazel's own.
+const PLATFORM_CONFIG: &str = std::env::consts::OS;
+
 /// Expand all `--config=` flags for the given command, returning a flat ordered list.
 ///
-/// CLI flags are passed during `Bazelrc::new` construction and stored as `always` options,
-/// so they are already included via `options_for`. No separate cli_args parameter is needed.
+/// Caller flags, passed to `Bazelrc::new`, are already among `options_for`'s options, under
+/// the section each names (`always` when none).
 ///
 /// Each `RcOption` in the result preserves its `version_condition`. When a version-gated
 /// `--config=` flag triggers expansion, its condition is inherited by expanded entries that
@@ -28,7 +32,9 @@ const PLATFORM_CONFIG_OPTION: &str = "enable_platform_specific_config";
 ///
 /// The platform config applies when the last `--enable_platform_specific_config` setting,
 /// in any boolean spelling and wherever it came from (a config included), turns it on and
-/// some section the command reads defines `<os>`, as in Bazel's `ConfigExpander`.
+/// some section the command reads defines `<os>`, as in Bazel's `ConfigExpander`. A
+/// version-gated setting counts only where its condition holds at the configured Bazel
+/// version, as when the options are rendered.
 ///
 /// `skip_config_if_missing` lists config names that should be silently dropped when no
 /// matching section exists, rather than returning an `UndefinedConfig` error.
@@ -46,20 +52,21 @@ pub(crate) fn expand_configs(
     let mut result = Vec::new();
     expander.expand(&base, &mut Vec::new(), &mut result)?;
 
-    let os = platform_config_name();
-    if platform_config_enabled(&result) && !expander.config_options(os).is_empty() {
+    if platform_config_enabled(rc, &result) && !expander.config_options(PLATFORM_CONFIG).is_empty()
+    {
         let mut platform = Vec::new();
-        expander.expand_config(os, None, &mut Vec::new(), &mut platform)?;
+        expander.expand_config(PLATFORM_CONFIG, None, &mut Vec::new(), &mut platform)?;
         result.splice(0..0, platform);
     }
     Ok(result)
 }
 
 /// Whether the last setting of `--enable_platform_specific_config` among `opts`
-/// turns it on. Bazel's default is off.
-fn platform_config_enabled(opts: &[RcOption]) -> bool {
+/// that applies at `rc`'s Bazel version turns it on. Bazel's default is off.
+fn platform_config_enabled(rc: &Bazelrc, opts: &[RcOption]) -> bool {
     opts.iter()
         .rev()
+        .filter(|opt| rc.version_condition_holds(&opt.version_condition))
         .find_map(|opt| bool_setting(&opt.value, PLATFORM_CONFIG_OPTION))
         .unwrap_or(false)
 }
@@ -174,15 +181,5 @@ impl Expander<'_> {
             .flat_map(|prefix| self.rc.raw_options(&format!("{prefix}:{config_name}")))
             .cloned()
             .collect()
-    }
-}
-
-/// Map std::env::consts::OS to Bazel's platform config name.
-fn platform_config_name() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "macos",
-        "linux" => "linux",
-        "windows" => "windows",
-        other => other,
     }
 }

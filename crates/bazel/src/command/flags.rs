@@ -1,7 +1,8 @@
 //! Reading the effective value of a flag off a rendered command line for one
 //! Bazel command: `--default_override` payloads in the order Bazel parses them
 //! (see [`crate::rc::override_buckets`]), then the literal tokens, so a literal
-//! wins and among overrides the more specific section does.
+//! wins and among overrides the more specific section does. [`bool_setting`]
+//! reads one token, for callers that rank options themselves.
 
 use crate::rc::{is_default_override, override_buckets};
 
