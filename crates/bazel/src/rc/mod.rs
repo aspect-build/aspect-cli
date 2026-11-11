@@ -2625,37 +2625,57 @@ build:opt --compilation_mode=opt
         );
     }
 
-    /// The implicit `--config=<os>` that `--enable_platform_specific_config`
-    /// adds is no request of the user's, so its options keep the sections they
-    /// were written in. Filing `build:<os>` under the synthetic request's
-    /// `always` would let a plain `common` entry beat it.
-    #[test]
-    fn platform_config_options_keep_their_sections() {
+    /// The effective `--remote_timeout` for `build`, read both ways off the
+    /// rendered command line, for an rc of `rc` (where `{os}` names the host's
+    /// platform config) and a caller passing `caller`.
+    fn platform_remote_timeout(rc: &str, caller: &[&str]) -> Option<String> {
         let dir = make_workspace();
         let root = dir.path();
-        fs::write(
-            root.join(".bazelrc"),
-            "common --remote_timeout=1\n\
-             build:linux --remote_timeout=2\n\
-             build:macos --remote_timeout=2\n\
-             build:windows --remote_timeout=2\n\
-             build --enable_platform_specific_config\n",
-        )
-        .unwrap();
-        let rc = Bazelrc::new(root, ISOLATE, &[]).unwrap();
+        let rc = rc.replace("{os}", std::env::consts::OS);
+        fs::write(root.join(".bazelrc"), rc).unwrap();
+        let rc = Bazelrc::new(root, ISOLATE, &flags(caller)).unwrap();
         let rendered = rc.resolve_for_command("build").unwrap().1;
-        assert!(
-            rendered.contains(&"--default_override=0:build=--remote_timeout=2".to_string()),
-            "{rendered:?}"
-        );
+        let value = last_flag_value(&rendered, "--remote_timeout", "build");
         assert_eq!(
-            last_flag_value(&rendered, "--remote_timeout", "build").as_deref(),
-            Some("2")
+            crate::command::flags::effective_value(&rendered, "build", "remote_timeout"),
+            value,
+            "the two readers disagree on {rendered:?}"
         );
-        // The platform options render first; the `run` reader must still rank
-        // them by section, not by position.
+        value
+    }
+
+    /// The platform config expands in place of the setting that turns it on, as
+    /// Bazel's `ConfigExpander` does: `build:<os>` beats a `build` line above
+    /// that setting and loses to one below it.
+    #[test]
+    fn platform_config_ranks_at_a_build_setting() {
+        let rc = "common --remote_timeout=0\n\
+                  build --remote_timeout=1\n\
+                  build:{os} --remote_timeout=2\n\
+                  build --enable_platform_specific_config\n";
+        assert_eq!(platform_remote_timeout(rc, &[]).as_deref(), Some("2"));
+        let below = format!("{rc}build --remote_timeout=3\n");
+        assert_eq!(platform_remote_timeout(&below, &[]).as_deref(), Some("3"));
+    }
+
+    /// Set under `common`, the platform config ranks at `common`, so a plain
+    /// `build` line beats `build:<os>`, as it would a `common --config=<os>`.
+    #[test]
+    fn platform_config_ranks_at_a_common_setting() {
+        let rc = "common --enable_platform_specific_config\n\
+                  build --remote_timeout=1\n\
+                  build:{os} --remote_timeout=2\n";
+        assert_eq!(platform_remote_timeout(rc, &[]).as_deref(), Some("1"));
+    }
+
+    /// Set by the caller, the platform config ranks on the command line, above
+    /// every rc section.
+    #[test]
+    fn platform_config_ranks_at_a_caller_setting() {
+        let rc = "build --remote_timeout=1\n\
+                  build:{os} --remote_timeout=2\n";
         assert_eq!(
-            crate::command::flags::effective_value(&rendered, "build", "remote_timeout").as_deref(),
+            platform_remote_timeout(rc, &["--enable_platform_specific_config"]).as_deref(),
             Some("2")
         );
     }

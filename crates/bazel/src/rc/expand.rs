@@ -22,19 +22,17 @@ const PLATFORM_CONFIG: &str = std::env::consts::OS;
 /// config in place, so its options rank where the request sits. `partition_expand_all`
 /// renders by section and source, so without this a caller's `--config=ci` would demote
 /// `build:ci` options to rc priority, and an rc `test --config=ci` would file them under
-/// `build`, where the `test` section's own entries beat them. Two kinds of entry keep the
-/// section they were written in:
-///
-/// - those defined under `common:{config}`, because `common` is what lets them reach
-///   commands that reject them;
-/// - those of the implicit `--config=<os>` that `--enable_platform_specific_config` adds,
-///   which is no request of the user's and so has no section of its own to give.
+/// `build`, where the `test` section's own entries beat them. Entries defined under
+/// `common:{config}` keep `common`, because `common` is what lets them reach commands that
+/// reject them.
 ///
 /// The platform config applies when the last `--enable_platform_specific_config` setting,
 /// in any boolean spelling and wherever it came from (a config included), turns it on and
 /// some section the command reads defines `<os>`, as in Bazel's `ConfigExpander`. A
 /// version-gated setting counts only where its condition holds at the configured Bazel
-/// version, as when the options are rendered.
+/// version, as when the options are rendered. Also as in Bazel, the platform config expands
+/// in place of that setting: right after it, with its section, source and version
+/// condition, as if it were `--config=<os>`.
 ///
 /// `skip_config_if_missing` lists config names that should be silently dropped when no
 /// matching section exists, rather than returning an `UndefinedConfig` error.
@@ -52,23 +50,28 @@ pub(crate) fn expand_configs(
     let mut result = Vec::new();
     expander.expand(&base, &mut Vec::new(), &mut result)?;
 
-    if platform_config_enabled(rc, &result) && !expander.config_options(PLATFORM_CONFIG).is_empty()
+    if let Some(enabler) = platform_config_enabler(rc, &result)
+        && !expander.config_options(PLATFORM_CONFIG).is_empty()
     {
+        let requester = result[enabler].clone();
         let mut platform = Vec::new();
-        expander.expand_config(PLATFORM_CONFIG, None, &mut Vec::new(), &mut platform)?;
-        result.splice(0..0, platform);
+        expander.expand_config(PLATFORM_CONFIG, &requester, &mut Vec::new(), &mut platform)?;
+        result.splice(enabler + 1..enabler + 1, platform);
     }
     Ok(result)
 }
 
-/// Whether the last setting of `--enable_platform_specific_config` among `opts`
-/// that applies at `rc`'s Bazel version turns it on. Bazel's default is off.
-fn platform_config_enabled(rc: &Bazelrc, opts: &[RcOption]) -> bool {
-    opts.iter()
+/// The index of the last `--enable_platform_specific_config` setting among
+/// `opts` that applies at `rc`'s Bazel version, when that setting turns it on.
+/// Bazel's default is off.
+fn platform_config_enabler(rc: &Bazelrc, opts: &[RcOption]) -> Option<usize> {
+    let (index, enabled) = opts
+        .iter()
+        .enumerate()
         .rev()
-        .filter(|opt| rc.version_condition_holds(&opt.version_condition))
-        .find_map(|opt| bool_setting(&opt.value, PLATFORM_CONFIG_OPTION))
-        .unwrap_or(false)
+        .filter(|(_, opt)| rc.version_condition_holds(&opt.version_condition))
+        .find_map(|(i, opt)| Some((i, bool_setting(&opt.value, PLATFORM_CONFIG_OPTION)?)))?;
+    enabled.then_some(index)
 }
 
 /// The config name the option at `index` requests, and how many options the
@@ -116,7 +119,7 @@ impl Expander<'_> {
                 index += 1;
                 continue;
             };
-            self.expand_config(config_name, Some(&args[index]), ancestor_chain, result)?;
+            self.expand_config(config_name, &args[index], ancestor_chain, result)?;
             index += span;
         }
         Ok(())
@@ -128,12 +131,11 @@ impl Expander<'_> {
     /// Expanded options inherit `requester`'s `version_condition` when they carry
     /// none of their own, so version-gated config sections propagate correctly,
     /// and its section and source unless defined under `common` (see
-    /// [`expand_configs`]). `requester` is `None` for the implicit platform
-    /// config, whose options keep everything they were written with.
+    /// [`expand_configs`]).
     fn expand_config(
         &self,
         config_name: &str,
-        requester: Option<&RcOption>,
+        requester: &RcOption,
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
     ) -> Result<(), BazelrcError> {
@@ -154,15 +156,13 @@ impl Expander<'_> {
             });
         }
 
-        if let Some(requester) = requester {
-            for opt in &mut config_opts {
-                if opt.version_condition.is_none() {
-                    opt.version_condition = requester.version_condition.clone();
-                }
-                if opt.section() != "common" {
-                    opt.command = requester.command.clone();
-                    opt.source_index = requester.source_index;
-                }
+        for opt in &mut config_opts {
+            if opt.version_condition.is_none() {
+                opt.version_condition = requester.version_condition.clone();
+            }
+            if opt.section() != "common" {
+                opt.command = requester.command.clone();
+                opt.source_index = requester.source_index;
             }
         }
 
