@@ -3673,29 +3673,91 @@ build --config=bar
         assert_eq!(values, vec!["--non-config", "--foo-flag", "--bar-flag"]);
     }
 
-    #[test]
-    fn enable_platform_specific_config() {
+    /// Whether `--os-specific-flag` from `build:<os>` is applied, for an rc that
+    /// adds `rc` and a caller that passes `caller`.
+    fn platform_config_applies(rc: &str, caller: &[&str]) -> bool {
+        platform_config_applies_at(rc, "", caller, None)
+    }
+
+    /// [`platform_config_applies`] at Bazel `version`, with `gated` in an rc
+    /// file imported only for Bazel 9 and later.
+    fn platform_config_applies_at(
+        rc: &str,
+        gated: &str,
+        caller: &[&str],
+        version: Option<&str>,
+    ) -> bool {
         let dir = make_workspace();
         let root = dir.path();
         let os = std::env::consts::OS;
+        let gated_rc = root.join("gated.bazelrc");
+        fs::write(&gated_rc, gated).unwrap();
         fs::write(
             root.join(".bazelrc"),
-            format!("build:{os} --os-specific-flag\n"),
+            format!(
+                "build:{os} --os-specific-flag\n{rc}try-import-if-bazel-version >=9.0.0 {}\n",
+                gated_rc.display()
+            ),
         )
         .unwrap();
+        let rc = Bazelrc::new(root, ISOLATE, &flags(caller))
+            .unwrap()
+            .with_version(version.map(|v| semver::Version::parse(v).unwrap()));
+        rc.expand_configs("build", &[])
+            .unwrap()
+            .iter()
+            .any(|o| o.value == "--os-specific-flag")
+    }
 
-        let rc = Bazelrc::new(
-            root,
-            &[] as &[&str],
-            &flags(&["--enable_platform_specific_config"]),
-        )
-        .unwrap();
-        let expanded = rc.expand_configs("build", &[]).unwrap();
-        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
-        assert!(
-            values.contains(&"--os-specific-flag"),
-            "expected --os-specific-flag in {values:?}"
-        );
+    /// The last `--enable_platform_specific_config` setting decides, in any of
+    /// Bazel's boolean spellings.
+    #[test]
+    fn enable_platform_specific_config_reads_every_spelling() {
+        assert!(platform_config_applies(
+            "",
+            &["--enable_platform_specific_config"]
+        ));
+        assert!(platform_config_applies(
+            "",
+            &["--enable_platform_specific_config=true"]
+        ));
+        assert!(platform_config_applies(
+            "",
+            &["--enable_platform_specific_config=1"]
+        ));
+        assert!(!platform_config_applies(
+            "",
+            &["--enable_platform_specific_config=false"]
+        ));
+        assert!(!platform_config_applies("", &[]));
+        assert!(!platform_config_applies(
+            "build --enable_platform_specific_config\n",
+            &["--noenable_platform_specific_config"]
+        ));
+        assert!(platform_config_applies(
+            "build --noenable_platform_specific_config\n",
+            &["--enable_platform_specific_config"]
+        ));
+    }
+
+    /// A version-gated setting counts only at a Bazel version it applies to.
+    #[test]
+    fn enable_platform_specific_config_follows_its_version_gate() {
+        let rc = "build --enable_platform_specific_config\n";
+        let off = "build --noenable_platform_specific_config\n";
+        assert!(platform_config_applies_at(rc, off, &[], Some("8.4.0")));
+        assert!(!platform_config_applies_at(rc, off, &[], Some("9.0.0")));
+        assert!(!platform_config_applies_at(rc, off, &[], None));
+    }
+
+    /// Bazel reads the setting after expanding configs, so a config can turn
+    /// the platform config on.
+    #[test]
+    fn enable_platform_specific_config_set_by_a_config() {
+        assert!(platform_config_applies(
+            "build:ci --enable_platform_specific_config\n",
+            &["--config=ci"]
+        ));
     }
 
     #[test]
@@ -3755,23 +3817,21 @@ build:foo --foo-flag
         assert!(values.contains(&"--always-only-flag"), "got: {values:?}");
     }
 
+    /// With no `<os>` section the platform config is skipped, not an
+    /// undefined-config error.
     #[test]
     fn enable_platform_specific_config_no_section_is_silent() {
-        // --enable_platform_specific_config with no build:<os> section must not error
         let dir = make_workspace();
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build --jobs=4\n").unwrap();
-
         let rc = Bazelrc::new(
             root,
-            &[] as &[&str],
+            ISOLATE,
             &flags(&["--enable_platform_specific_config"]),
         )
         .unwrap();
-        // Should succeed and return the regular flag, not UndefinedConfig
         let expanded = rc.expand_configs("build", &[]).unwrap();
-        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
-        assert!(values.contains(&"--jobs=4"));
+        assert!(expanded.iter().any(|o| o.value == "--jobs=4"));
     }
 
     #[test]
