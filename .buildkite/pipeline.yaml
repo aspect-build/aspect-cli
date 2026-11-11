@@ -411,6 +411,9 @@ steps:
         format: ^\s*(?:(?:@{1,2}[\w.~-]*)?\/\/(?:[\w.@-]+\/)*[\w.@-]*(?::(?:[\w\[\]!%@^"#\$&'()*+,;<=>?{|}~.-]+\/)*[\w\[\]!%@^"#\$&'()*+,;<=>?{|}~.-]*)?(?:\s+|$))*$
   - key: delivery-task
     label: ":package: Delivery Task"
+    # .aspect/config.axl keeps this repo's delivery state in Aspect Cloud; the
+    # setup-aspect plugin logs in with the token.
+    secrets: [ASPECT_API_TOKEN]
     depends_on:
       - pre-build
       # Per-dep allow_failure so a skipped input on non-UI builds doesn't

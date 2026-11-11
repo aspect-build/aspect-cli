@@ -33,7 +33,7 @@ The connection is `redis.axl`'s client, configured from the runner's environment
     ASPECT_WORKFLOWS_DELIVERY_REDIS_LEGACY_TTL_SECONDS
                                                lifetime of the legacy signature keys, set on
                                                every write and on migration (default 7 days;
-                                               0 sets none)
+                                               0 sets no TTL)
 """
 
 load("@std//time.axl", "sleep", "time")

@@ -133,13 +133,16 @@ def _probe(conn: _Conn, attempts: int, pause) -> _Response:
         res = _send(conn, "GET", "/health", None)
     return res
 
-def _advertised_versions(res: _Response) -> list[int] | None:
-    """The versions a `/health` answer lists in `_API_HEADER`, comma-separated,
-    or None without the header. Entries that are not numbers are dropped."""
-    listed = header_value(res.headers, _API_HEADER).strip()
+def _advertised_versions(listed: str) -> list[int] | None:
+    """The versions in a comma-separated `_API_HEADER` value, or None for an
+    empty one (no header). Entries that are not numbers are dropped."""
     if not listed:
         return None
     return [int(v.strip()) for v in listed.split(",") if v.strip().isdigit()]
+
+def _server_name(endpoint: str) -> str:
+    """How errors name the daemon."""
+    return "deliveryd ({})".format(endpoint) if endpoint else "deliveryd"
 
 def _to_health(res: _Response) -> Health:
     if res.status == 0:
@@ -214,8 +217,7 @@ def _do_delete(c: _Client, digest: str) -> None:
 def _unusable(endpoint: str, describe: str, version: int, message: str) -> delivery_state.Backend:
     """A backend whose `.status` reports `message` as a startup error and
     whose every verb refuses."""
-    name = "deliveryd ({})".format(endpoint) if endpoint else "deliveryd"
-    return delivery_api.unavailable(delivery_api.Server(endpoint = endpoint, describe = describe, version = version, name = name), message)
+    return delivery_api.unavailable(delivery_api.Server(endpoint = endpoint, describe = describe, version = version, name = _server_name(endpoint)), message)
 
 def _unconfigured() -> delivery_state.Backend:
     """The backend for a runner without a daemon."""
@@ -238,15 +240,14 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
     (base_url, socket) = _parse_endpoint(endpoint)
     conn = _Conn(http = ctx.http(), base_url = base_url, socket = socket, endpoint = endpoint)
     res = _probe(conn, probe_attempts, pause)
-    versions = _advertised_versions(res)
-    if versions != None and _API_V2 not in versions:
-        listed = header_value(res.headers, _API_HEADER).strip()
-        return _unusable(endpoint, "deliveryd", API_VERSION, "the runner's deliveryd lists API versions `{}`, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.".format(listed))
-    describe = "API v{}".format(_API_V2 if versions else API_VERSION)
-    if versions and not _ok(res):
-        return _unusable(endpoint, describe, _API_V2, _to_health(res).error)
-
-    if versions:
+    listed = header_value(res.headers, _API_HEADER).strip()
+    versions = _advertised_versions(listed)
+    if versions != None:
+        if _API_V2 not in versions:
+            return _unusable(endpoint, "deliveryd", API_VERSION, "the runner's deliveryd lists API versions `{}`, none of which this Aspect CLI speaks. Upgrade the Aspect CLI.".format(listed))
+        server = delivery_api.Server(endpoint = endpoint, describe = "API v{}".format(_API_V2), version = _API_V2, socket = socket, name = _server_name(endpoint))
+        if not _ok(res):
+            return delivery_api.unavailable(server, _to_health(res).error)
         return delivery_api.open(
             conn.http,
             base_url,
@@ -254,7 +255,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
             delivery_state.Params(host = host, repo = repo, prefix = prefix, commit = commit, signature = signature),
             new_id or delivery_api.event_ids(random_hex(ctx)),
             pause,
-            server = delivery_api.Server(endpoint = endpoint, describe = describe, version = _API_V2, socket = socket, name = "deliveryd ({})".format(endpoint)),
+            server = server,
         )
 
     c = _Client(
@@ -266,7 +267,7 @@ def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", end
     )
     return delivery_state.Backend(
         endpoint = endpoint,
-        describe = describe,
+        describe = "API v{}".format(API_VERSION),
         status = _to_health(res),
         health = lambda: _do_health(c),
         record = lambda label, digest: _do_record(c, label, digest),

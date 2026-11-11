@@ -226,7 +226,6 @@ def _test_unreachable_is_not_called_deprecated(ctx):
     _eq("unreachable → no deprecation", dd.deprecation, "")
 
 def _test_old_version_header_stays_v1(ctx):
-    # CLIs 2026.37–2026.41 read DeliveryD-Version; deliveryd v2 never sends it.
     dd = _client({"GET /health": _res(200, "ok", headers = [("deliveryd-version", "2")])}, [])
     _eq("DeliveryD-Version alone → v1", dd.describe, "API v1")
 
@@ -286,11 +285,18 @@ def _test_v2_verbs_on_the_wire(ctx):
     dd.record_failure("//pkg:a", "d-a", {})
     _eq("v2 failure → a fail attempt", (calls[-1].path, calls[-1].body["outcome"]), ("/deliveries/record", "fail"))
 
-def _test_v2_unhealthy_is_not_negotiated(ctx):
+def _test_v2_unhealthy_is_a_startup_error(ctx):
     # A 503 health answer carries the header too; it is still a startup error.
     dd = _client({"GET /health": _res(503, "unhealthy", headers = [("deliveryd-api", "2")])}, [])
     _eq("v2 503 → not ok", dd.status.ok, False)
     _eq("v2 503 → described as v2", (dd.describe, dd.status.version), ("API v2", 2))
+
+def _test_v2_reprobes_a_503(ctx):
+    calls, pauses = [], []
+    dd = _client({"GET /health": [_res(503, "starting", headers = [("deliveryd-api", "2")]), _V2_HEALTH], "POST /deliveries/query": _EMPTY_QUERY}, calls, pauses)
+    _eq("v2 503 then 200 → ok", (dd.status.ok, dd.describe), (True, "API v2"))
+    _eq("v2 503 then 200 → one pause", len(pauses), 1)
+    _eq("v2 503 then 200 → not deprecated", dd.deprecation, "")
 
 def _test_advertised_versions(ctx):
     for (value, want) in [(None, (True, "API v1")), ("2", (True, "API v2")), ("2, 3", (True, "API v2")), (" 3 ,2", (True, "API v2")), ("two", (False, "deliveryd")), ("3", (False, "deliveryd"))]:
@@ -334,7 +340,8 @@ _UNIT_TESTS = [
     _test_v2_negotiated_from_health_header,
     _test_v2_header_case_insensitive,
     _test_v2_verbs_on_the_wire,
-    _test_v2_unhealthy_is_not_negotiated,
+    _test_v2_unhealthy_is_a_startup_error,
+    _test_v2_reprobes_a_503,
     _test_advertised_versions,
     _test_unspoken_versions_refuse_to_start,
     _test_v2_rejection_names_no_credential,
