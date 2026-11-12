@@ -1485,16 +1485,13 @@ fn remove_deployment(name: &str) -> anyhow::Result<()> {
     write_user_config(existing)?;
     // Also clear its stored credential in every profile: the deployment is gone,
     // so no identity has anything left to say to it.
-    let mut all = load_all_credentials()?;
-    let mut changed = false;
-    for entries in all.values_mut() {
-        changed |= entries.remove(name).is_some();
-    }
-    if changed {
+    CredentialStore::resolve()?.update::<ProfileCredentials, _>(|all| {
+        for entries in all.values_mut() {
+            entries.remove(name);
+        }
         all.retain(|_, entries| !entries.is_empty());
-        save_all_credentials(&all)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1678,21 +1675,9 @@ fn load_all_credentials() -> anyhow::Result<AllCredentials> {
     CredentialStore::resolve()?.load_all()
 }
 
-fn save_all_credentials(map: &AllCredentials) -> anyhow::Result<()> {
-    CredentialStore::resolve()?.save_all(map)
-}
-
 /// The credentials filed under `profile`, empty when it holds none.
 fn load_profile_credentials(profile: &str) -> anyhow::Result<ProfileCredentials> {
     Ok(load_all_credentials()?.remove(profile).unwrap_or_default())
-}
-
-/// Read one deployment's credential from `profile`.
-fn load_credential(profile: &str, deployment: &str) -> anyhow::Result<Option<CredentialsEntry>> {
-    Ok(load_all_credentials()?
-        .get(profile)
-        .and_then(|p| p.get(deployment))
-        .cloned())
 }
 
 /// Put `entry` at `(profile, deployment)`, leaving every other profile and every
@@ -1732,19 +1717,15 @@ fn store_credential(
     deployment: &str,
     entry: CredentialsEntry,
 ) -> anyhow::Result<()> {
-    let mut all = load_all_credentials()?;
-    insert_credential(&mut all, profile, deployment, entry);
-    save_all_credentials(&all)
+    CredentialStore::resolve()?.update(|all| {
+        insert_credential(all, profile, deployment, entry);
+        Ok(())
+    })
 }
 
 /// Clear `profile`'s credential for `deployment`. Returns whether there was one.
 fn forget_credential(profile: &str, deployment: &str) -> anyhow::Result<bool> {
-    let mut all = load_all_credentials()?;
-    if !remove_credential(&mut all, profile, deployment) {
-        return Ok(false);
-    }
-    save_all_credentials(&all)?;
-    Ok(true)
+    CredentialStore::resolve()?.update(|all| Ok(remove_credential(all, profile, deployment)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2324,6 +2305,38 @@ async fn send_ok(
     request: reqwest::RequestBuilder,
     what: &str,
 ) -> anyhow::Result<reqwest::Response> {
+    send_checked(request, what, |body| body.to_string()).await
+}
+
+/// A non-2xx answer to a request [`send_checked`] sent.
+#[derive(Debug, thiserror::Error)]
+#[error("{what} failed (HTTP {status}): {detail}")]
+struct HttpRefusal {
+    what: String,
+    status: reqwest::StatusCode,
+    detail: String,
+}
+
+impl HttpRefusal {
+    /// Whether a token endpoint answering this way refused the grant itself (a
+    /// revoked, expired or foreign refresh token), as opposed to being briefly
+    /// unable to answer: any 4xx except a timeout or rate limit.
+    fn rejects_grant(&self) -> bool {
+        self.status.is_client_error()
+            && !matches!(
+                self.status,
+                reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+            )
+    }
+}
+
+/// [`send_ok`] with the refusal's body passed through `detail` before it goes
+/// into the error, for responses whose body should not be repeated verbatim.
+async fn send_checked(
+    request: reqwest::RequestBuilder,
+    what: &str,
+    detail: impl FnOnce(&str) -> String,
+) -> anyhow::Result<reqwest::Response> {
     let resp = request
         .send()
         .await
@@ -2331,9 +2344,30 @@ async fn send_ok(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("{what} failed (HTTP {status}): {body}"));
+        return Err(HttpRefusal {
+            what: what.to_string(),
+            status,
+            detail: detail(&body),
+        }
+        .into());
     }
     Ok(resp)
+}
+
+/// The standard OAuth error fields of a token endpoint's refusal (RFC 6749
+/// §5.2), which exist to be shown, and nothing else of the body.
+fn oauth_error_detail(body: &str) -> String {
+    #[derive(Deserialize)]
+    struct OAuthError {
+        error: String,
+        #[serde(default)]
+        error_description: String,
+    }
+    match serde_json::from_str::<OAuthError>(body) {
+        Ok(e) if e.error_description.is_empty() => e.error,
+        Ok(e) => format!("{}: {}", e.error, e.error_description),
+        Err(_) => "no OAuth error in the response".to_string(),
+    }
 }
 
 /// Exchange an authorization `code` for tokens at `token_url` (PKCE — sends
@@ -2678,18 +2712,30 @@ fn build_login_session(
 }
 
 /// Why a refresh did not yield a usable credential.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum RefreshFailure {
     /// The issuer minted a token for a different tenant than the credential was
     /// issued for, because the user's default organization changed elsewhere (a
     /// web session's organization switcher, say), and the default could not be
     /// set back ([`restore_default_tenant`]). Refused rather than adopted, so a
     /// CLI session never silently crosses into another organization.
+    #[error("refresh changed organization from {was} to {now}")]
     TenantChanged { was: String, now: String },
-    /// The refresh itself failed: a revoked or expired refresh token, a network
-    /// error, a response with no usable bearer. The cause goes to the runtime
-    /// log (`ASPECT_DEBUG=1`) where it happened; the user is told to log in
-    /// again.
+    /// An expired bearer with no refresh credentials.
+    #[error("session expired")]
+    Expired,
+    /// The token endpoint refused the grant: the refresh token is revoked,
+    /// expired, or already used.
+    #[error("refresh token rejected")]
+    Rejected,
+    /// The token endpoint accepted the grant but its answer can't be used (no
+    /// bearer of the kind this login needs, one that doesn't decode). A rotating
+    /// provider has spent the stored refresh token by now, so a retry can't work.
+    #[error("unusable refresh response: {reason}")]
+    Unusable { reason: String },
+    /// Transport error, timeout, or a server error: the grant never took effect,
+    /// so the stored credential is still good and a retry may work.
+    #[error("could not refresh credentials")]
     Failed,
 }
 
@@ -2701,7 +2747,18 @@ impl RefreshFailure {
             RefreshFailure::TenantChanged { was, now } => {
                 tenant_changed_message(deployment, was, now)
             }
-            RefreshFailure::Failed => session_expired_message(deployment),
+            RefreshFailure::Expired => session_expired_message(deployment),
+            RefreshFailure::Rejected => format!(
+                "the identity provider rejected the refresh token; run `{}` to re-authenticate",
+                login_hint(deployment)
+            ),
+            RefreshFailure::Unusable { reason } => format!(
+                "could not use the refreshed credential: {reason}\n\nRun `{}` to re-authenticate.",
+                login_hint(deployment)
+            ),
+            RefreshFailure::Failed => {
+                "could not refresh credentials; check the network and retry the command".to_string()
+            }
         }
     }
 }
@@ -2721,7 +2778,15 @@ async fn refresh_access_token(
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let failed = |cause: anyhow::Error| {
         crate::trace!("refreshing the stored credential failed: {cause:#}");
-        RefreshFailure::Failed
+        if let Some(unusable) = cause.downcast_ref::<UnusableGrant>() {
+            return RefreshFailure::Unusable {
+                reason: unusable.0.clone(),
+            };
+        }
+        match cause.downcast_ref::<HttpRefusal>() {
+            Some(refusal) if refusal.rejects_grant() => RefreshFailure::Rejected,
+            _ => RefreshFailure::Failed,
+        }
     };
     let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
@@ -2800,23 +2865,45 @@ fn tenant_moved(prior: &CredentialsEntry, fresh: &CredentialsEntry) -> Option<St
 
 /// The standard OAuth refresh grant against `token_url`, the issuer's token
 /// endpoint as [`resolve_oidc_endpoints`] found it.
+///
+/// A refusal carries its status and the OAuth error fields, never the rest of the
+/// body ([`oauth_error_detail`]). A 2xx whose answer can't be used is an
+/// [`UnusableGrant`]: the grant took effect, unlike any other failure here.
 async fn refresh_with_grant(
     entry: &CredentialsEntry,
     token_url: &str,
     client_id: &str,
 ) -> anyhow::Result<CredentialsEntry> {
-    let token_resp: TokenResponse = post_form(
-        token_url,
-        &[
+    let request = reqwest::Client::new()
+        .post(token_url)
+        .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", &entry.refresh_token),
             ("client_id", client_id),
-        ],
-        "token refresh",
-    )
-    .await?;
-    entry.renewed(token_resp)
+        ])
+        .timeout(REFRESH_REQUEST_TIMEOUT);
+    let response = send_checked(request, "token refresh", oauth_error_detail)
+        .await
+        .inspect_err(|e| crate::trace!("refresh grant at {token_url}: {e:#}"))?;
+    let token_resp = response.json::<TokenResponse>().await.map_err(|e| {
+        // reqwest's decode error names the position, not the body's tokens.
+        UnusableGrant(format!("the token response could not be parsed: {e}"))
+    })?;
+    entry
+        .renewed(token_resp)
+        .map_err(|e| UnusableGrant(format!("{e:#}")).into())
 }
+
+/// A refresh grant the token endpoint accepted with an answer that can't be used
+/// ([`RefreshFailure::Unusable`]); the reason never includes a token.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct UnusableGrant(String);
+
+/// The limit on each request a refresh makes. There is deliberately no limit on
+/// the refresh as a whole: cancelling it between a grant that rotated the
+/// refresh token and saving the result would lose the only valid refresh token.
+const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Set the user's default tenant at the issuer, the one its login and refresh
 /// grants mint for from now on. What the provider's tenant-switch SDK call does,
@@ -2831,7 +2918,8 @@ async fn set_default_tenant(
         reqwest::Client::new()
             .put(tenant_api_url(auth_domain, TENANT_API_SWITCH_PATH))
             .bearer_auth(bearer)
-            .json(&serde_json::json!({ "tenantId": tenant_id })),
+            .json(&serde_json::json!({ "tenantId": tenant_id }))
+            .timeout(REFRESH_REQUEST_TIMEOUT),
         "setting the default organization",
     )
     .await?;
@@ -3027,19 +3115,61 @@ pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<O
     if let Some(entry) = credentials_from_api_token_env(deployment)? {
         return Ok(Some(entry.access_token));
     }
-    let Some(entry) = load_credential(profile, deployment)? else {
+    let store = CredentialStore::resolve()?;
+    let Some(entry) = load_stored_credential(&store, profile, deployment)? else {
         return Ok(None);
     };
-    match classify_token(&entry) {
-        TokenAction::Use => Ok(Some(entry.access_token)),
-        TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
-        TokenAction::Refresh => {
-            let refreshed = block_on(refresh_access_token(&entry))
-                .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
-            store_credential(profile, deployment, refreshed.clone())?;
-            Ok(Some(refreshed.access_token))
-        }
+    if matches!(classify_token(&entry), TokenAction::Use) {
+        return Ok(Some(entry.access_token));
     }
+    refresh_stored_credential(&store, profile, deployment)
+        .map(|entry| entry.map(|entry| entry.access_token))
+        .map_err(|error| credential_error(error, deployment))
+}
+
+/// A refresh failure as the refusal it is: its message, no traceback. Any other
+/// error (the store unreadable, its lock unobtainable) passes through.
+fn credential_error(error: anyhow::Error, deployment: &str) -> anyhow::Error {
+    match error.downcast_ref::<RefreshFailure>() {
+        Some(failure) => TaskExit::error(failure.message(deployment)).into(),
+        None => error,
+    }
+}
+
+/// `profile`'s stored credential for `deployment`, as it is, without the lock:
+/// the fast path, enough whenever the bearer is still good.
+fn load_stored_credential(
+    store: &CredentialStore,
+    profile: &str,
+    deployment: &str,
+) -> anyhow::Result<Option<CredentialsEntry>> {
+    let mut all: AllCredentials = store.load_all()?;
+    Ok(all.remove(profile).and_then(|mut p| p.remove(deployment)))
+}
+
+/// Refresh `profile`'s credential for `deployment` holding the store lock, so
+/// concurrent processes (MCP, the credential helper, AXL) spend a rotating
+/// refresh token once. The credential is read again under the lock: another
+/// process may have refreshed, logged in, or logged out while this one waited.
+fn refresh_stored_credential(
+    store: &CredentialStore,
+    profile: &str,
+    deployment: &str,
+) -> anyhow::Result<Option<CredentialsEntry>> {
+    store.update(|all: &mut AllCredentials| {
+        let Some(entry) = all.get(profile).and_then(|p| p.get(deployment)) else {
+            return Ok(None);
+        };
+        match classify_token(entry) {
+            TokenAction::Use => Ok(Some(entry.clone())),
+            TokenAction::Expired => Err(RefreshFailure::Expired.into()),
+            TokenAction::Refresh => {
+                let refreshed = block_on(refresh_access_token(entry))?;
+                insert_credential(all, profile, deployment, refreshed.clone());
+                Ok(Some(refreshed))
+            }
+        }
+    })
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
@@ -4126,8 +4256,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         if all {
-            // Empties the file / deletes the keyring entry outright.
-            save_all_credentials(&AllCredentials::new())?;
+            // Empties the file / deletes the keyring entry without reading it,
+            // so even a store that can't be read or parsed is cleared.
+            CredentialStore::resolve()?.clear()?;
             return Ok(heap.alloc(""));
         }
         let deployments = load_deployments()?;
@@ -4226,33 +4357,34 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         if let Some(entry) = credentials_from_api_token_env(&deployment)? {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
-        let Some(entry) = load_credential(&profile, &deployment)? else {
+        let store = CredentialStore::resolve()?;
+        let Some(entry) = load_stored_credential(&store, &profile, &deployment)? else {
             return Ok(values::Value::new_none());
         };
         // Never hand back a known-expired token (an endpoint would 401 on it).
-        // Mirror `resolve_access_token`: refresh when possible, else fail —
-        // `required = False` callers (best-effort endpoint auth) get `None` and
-        // proceed unauthenticated instead of a hard error. A refresh stuck in
-        // another organization is a refusal, not an inability, and ends the task
-        // for every caller: proceeding unauthenticated would only hide it behind
-        // later 401s.
+        // Refresh when possible, else fail; `required = False` callers
+        // (best-effort endpoint auth) get `None` for anything that goes wrong
+        // getting a fresh one, the lock included, and proceed unauthenticated. A
+        // refresh stuck in another organization is a refusal, not an inability,
+        // and ends the task for every caller: proceeding unauthenticated would
+        // only hide it behind later 401s.
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
-            TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
-                Ok(refreshed) => {
-                    store_credential(&profile, &deployment, refreshed.clone())?;
-                    refreshed
+            _ => match refresh_stored_credential(&store, &profile, &deployment) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return Ok(values::Value::new_none()),
+                Err(error)
+                    if !required
+                        && !matches!(
+                            error.downcast_ref::<RefreshFailure>(),
+                            Some(RefreshFailure::TenantChanged { .. })
+                        ) =>
+                {
+                    crate::trace!("no usable credential for {deployment}: {error:#}");
+                    return Ok(values::Value::new_none());
                 }
-                Err(failure @ RefreshFailure::TenantChanged { .. }) => {
-                    return Err(TaskExit::error(failure.message(&deployment)).into());
-                }
-                Err(_) if !required => return Ok(values::Value::new_none()),
-                Err(_) => return Err(anyhow::anyhow!(session_expired_message(&deployment))),
+                Err(error) => return Err(credential_error(error, &deployment)),
             },
-            TokenAction::Expired if !required => return Ok(values::Value::new_none()),
-            TokenAction::Expired => {
-                return Err(anyhow::anyhow!(session_expired_message(&deployment)));
-            }
         };
         Ok(heap.alloc(AuthCredentials::from_entry(&entry)))
     }
@@ -7059,10 +7191,20 @@ mod tests {
             "{msg}"
         );
         assert!(msg.contains("set ASPECT_API_TOKEN_ACME."), "{msg}");
-        // Any other failure keeps the plain expiry message.
         assert_eq!(
-            RefreshFailure::Failed.message("acme"),
+            RefreshFailure::Expired.message("acme"),
             session_expired_message("acme")
+        );
+        assert!(
+            RefreshFailure::Rejected
+                .message("acme")
+                .contains("refresh token")
+        );
+        assert!(RefreshFailure::Failed.message("acme").contains("retry"));
+        assert!(
+            !RefreshFailure::Failed
+                .message("acme")
+                .contains("auth login")
         );
     }
 
@@ -7526,7 +7668,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_grant_is_reported_as_a_plain_failure() {
+    fn a_rejected_grant_is_distinct_from_a_transport_failure() {
         let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
             "/oauth/token" => (401, r#"{"errors":["invalid_grant"]}"#.into()),
             _ => respond_to_grant(request, "t1"),
@@ -7536,7 +7678,85 @@ mod tests {
         let failure = current_thread_runtime()
             .block_on(refresh_access_token(&entry))
             .unwrap_err();
-        assert_eq!(failure, RefreshFailure::Failed);
+        assert_eq!(failure, RefreshFailure::Rejected);
+        issuer.finish();
+    }
+
+    /// How the token endpoint's answer classifies a refresh: any 4xx but a
+    /// timeout or rate limit refuses the grant; those and 5xx are retryable.
+    #[test]
+    fn grant_statuses_split_into_rejected_and_retryable() {
+        for (status, expected) in [
+            (400, RefreshFailure::Rejected),
+            (403, RefreshFailure::Rejected),
+            (408, RefreshFailure::Failed),
+            (429, RefreshFailure::Failed),
+            (503, RefreshFailure::Failed),
+        ] {
+            let issuer = MockIssuer::start(2, move |request| match request.path.as_str() {
+                "/oauth/token" => (status, r#"{"error":"invalid_grant"}"#.into()),
+                _ => respond_to_grant(request, "t1"),
+            });
+            let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+            let failure = current_thread_runtime()
+                .block_on(refresh_access_token(&entry))
+                .unwrap_err();
+            assert_eq!(failure, expected, "HTTP {status}");
+            issuer.finish();
+        }
+    }
+
+    /// A 200 that can't be used has spent a rotating refresh token, so it asks
+    /// for a login (with the reason) rather than a retry.
+    #[test]
+    fn an_accepted_grant_with_an_unusable_answer_asks_for_a_login() {
+        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
+            "/oauth/token" => (
+                200,
+                r#"{"access_token":"x","refresh_token":"rotated"}"#.into(),
+            ),
+            _ => respond_to_grant(request, "t1"),
+        });
+        let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+        entry.prefer_id_token = true;
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        let RefreshFailure::Unusable { reason } = &failure else {
+            panic!("{failure:?}");
+        };
+        assert!(reason.contains("no id_token"), "{reason}");
+        let msg = failure.message("acme");
+        assert!(msg.contains("aspect auth login --deployment acme"), "{msg}");
+        assert!(!msg.contains("retry"), "{msg}");
+        issuer.finish();
+    }
+
+    /// A refused grant (as `login --org` reports it) names the status and the
+    /// OAuth error fields, never anything else the body carries.
+    #[test]
+    fn a_refused_grant_reports_only_the_oauth_error_fields() {
+        let issuer = MockIssuer::start(1, |_| {
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"tenant not permitted for client","refresh_token":"secret"}"#.into(),
+            )
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+        let error = current_thread_runtime()
+            .block_on(refresh_with_grant(
+                &entry,
+                &format!("{}/oauth/token", issuer.url()),
+                "client-id-1",
+            ))
+            .unwrap_err();
+        let msg = format!("{error:#}");
+        assert!(msg.contains("HTTP 400"), "{msg}");
+        assert!(
+            msg.contains("invalid_grant: tenant not permitted for client"),
+            "{msg}"
+        );
+        assert!(!msg.contains("secret"), "{msg}");
         issuer.finish();
     }
 
