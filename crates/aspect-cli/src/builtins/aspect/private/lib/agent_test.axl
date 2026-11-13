@@ -596,12 +596,14 @@ def _test_a_bridge_is_told_apart_by_its_subcommand(ctx):
     line, and the path its binary runs from, change nothing, and the word
     anywhere but the subcommand is not a bridge."""
     _eq("the bridge", testonly_hosts_sessions("/home/u/.local/bin/claude remote-control --name host"), True)
+    _eq("the bridge under its alias", testonly_hosts_sessions("claude rc"), True)
     _eq("a session the bridge started", testonly_hosts_sessions(
         "/home/u/.local/share/claude/versions/2.1.302 --print --session-id cse_01",
     ), False)
     _eq("an interactive session", testonly_hosts_sessions("claude"), False)
     _eq("the daemon, which keeps its own rule", testonly_hosts_sessions("claude daemon"), False)
     _eq("the word as an argument", testonly_hosts_sessions("claude --resume remote-control"), False)
+    _eq("the alias as an argument", testonly_hosts_sessions("claude --resume rc"), False)
 
 def _test_a_lease_taken_in_a_bridge_keeps_its_pid_and_names_the_bridge(ctx):
     """A hook a bridge runs, before the session it is for exists, sees the

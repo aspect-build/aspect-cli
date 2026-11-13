@@ -211,7 +211,9 @@ _GENERIC_KIND_VAR = "AI_AGENT"
 # The subcommand of a harness that runs a long-lived bridge, which starts each
 # session it hosts as a child process and runs that session's hooks itself,
 # before the session exists. A hook run there sees the bridge as its harness.
-_BRIDGE_SUBCOMMANDS = ["remote-control"]
+# `ps` prints the subcommand as it was typed, so each alias is listed too:
+# `claude rc` is `claude remote-control`.
+_BRIDGE_SUBCOMMANDS = ["remote-control", "rc"]
 
 def _hosts_sessions(args: str) -> bool:
     """Whether a command line, as `ps -o args=` prints it, is a bridge."""
