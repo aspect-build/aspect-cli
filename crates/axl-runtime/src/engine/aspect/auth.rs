@@ -1900,18 +1900,25 @@ fn extract_query_param(path: &str, key: &str) -> Option<String> {
     None
 }
 
+/// The `code` and `state` of an OAuth callback URL or path; an authorize error
+/// the browser was redirected with is an [`AuthorizeRefusal`].
 fn parse_callback_response(path: &str) -> anyhow::Result<(String, Option<String>)> {
     if let Some(error) = extract_query_param(path, "error") {
         let description = extract_query_param(path, "error_description").unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "authentication failed: {} {}",
-            error,
-            description
-        ));
+        return Err(AuthorizeRefusal { error, description }.into());
     }
     let code = extract_query_param(path, "code")
         .ok_or_else(|| anyhow::anyhow!("OAuth callback has no `code` parameter"))?;
     Ok((code, extract_query_param(path, "state")))
+}
+
+/// An RFC 6749 §4.1.2.1 authorize error: the issuer redirected the browser
+/// back with `error` (and maybe `error_description`) instead of a code.
+#[derive(Debug, thiserror::Error)]
+#[error("the issuer refused the authorization: {}", format!("{error} {description}").trim_end())]
+struct AuthorizeRefusal {
+    error: String,
+    description: String,
 }
 
 pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -2318,8 +2325,7 @@ async fn send_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| anyhow::anyhow!("failed to parse {what} response: {e}"))
 }
 
-/// Send `request`, requiring a 2xx answer; the error names `what` and carries
-/// the status and body of a refusal.
+/// Send `request`, requiring a 2xx answer; a refusal is an [`HttpRefusal`].
 async fn send_ok(
     request: reqwest::RequestBuilder,
     what: &str,
@@ -2331,9 +2337,37 @@ async fn send_ok(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("{what} failed (HTTP {status}): {body}"));
+        return Err(HttpRefusal {
+            what: what.to_owned(),
+            status,
+            body,
+        }
+        .into());
     }
     Ok(resp)
+}
+
+/// A non-2xx answer to the request named `what`, with the body the server
+/// sent, which is where an IdP explains a refusal.
+#[derive(Debug, thiserror::Error)]
+#[error("{what} failed (HTTP {status}): {body}")]
+struct HttpRefusal {
+    what: String,
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl HttpRefusal {
+    /// The OAuth error code of an RFC 6749 §5.2 error body, `{"error": "..."}`.
+    fn oauth_error(&self) -> Option<String> {
+        #[derive(Deserialize)]
+        struct Body {
+            error: String,
+        }
+        serde_json::from_str::<Body>(&self.body)
+            .ok()
+            .map(|b| b.error)
+    }
 }
 
 /// Exchange an authorization `code` for tokens at `token_url` (PKCE — sends
@@ -3362,9 +3396,7 @@ impl AuthSessionInner {
         require_state: bool,
     ) -> anyhow::Result<CredentialsEntry> {
         if !callback_state_matches(&self.expected_state, state.as_deref(), require_state) {
-            return Err(anyhow::anyhow!(
-                "authentication failed: callback state did not match"
-            ));
+            return Err(anyhow::anyhow!("callback state did not match"));
         }
         let endpoints = resolve_oidc_endpoints(&self.env.domain).await;
         let token_resp = exchange_code(
@@ -3409,6 +3441,13 @@ fn parse_pasted_callback(pasted: &str) -> anyhow::Result<(String, Option<String>
     }
 }
 
+/// Complete `session` from `pasted` callback input, or else from the callback
+/// its listener receives.
+///
+/// A login that fails at the issuer or the callback ends the task through
+/// [`login_failure`], without a traceback. A session that cannot be completed
+/// at all (already consumed, or pasted-less with no listener) is a bug in the
+/// caller and stays an ordinary error.
 fn finish_auth_session(
     session: &AuthSession,
     pasted: Option<&str>,
@@ -3421,9 +3460,10 @@ fn finish_auth_session(
         .take()
         .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))?;
     drop(guard);
+    let client_id = inner.env.client_id.clone();
     let entry = if let Some(pasted) = pasted {
-        let (code, state) = parse_pasted_callback(pasted)?;
-        block_on(inner.complete(code, state, false))?
+        parse_pasted_callback(pasted)
+            .and_then(|(code, state)| block_on(inner.complete(code, state, false)))
     } else {
         let listener = inner
             .listener
@@ -3432,9 +3472,45 @@ fn finish_auth_session(
         block_on(async move {
             let (code, state) = accept_callback(listener).await?;
             inner.complete(code, state, true).await
-        })?
-    };
+        })
+    }
+    .map_err(|err| login_failure(&err, &client_id))?;
     Ok(AuthCredentials::from_entry(&entry))
+}
+
+/// `err`, a failed browser login, as the [`TaskExit`] that reports it, with
+/// what to do about it when the issuer named an OAuth error
+/// ([`oauth_error_hint`]).
+fn login_failure(err: &anyhow::Error, client_id: &str) -> anyhow::Error {
+    let code = err
+        .downcast_ref::<HttpRefusal>()
+        .and_then(HttpRefusal::oauth_error)
+        .or_else(|| {
+            err.downcast_ref::<AuthorizeRefusal>()
+                .map(|r| r.error.clone())
+        });
+    let mut message = format!("login failed: {err:#}");
+    if let Some(hint) = code.and_then(|code| oauth_error_hint(&code, client_id)) {
+        message.push_str("\n\n");
+        message.push_str(&hint);
+    }
+    TaskExit::error(message).into()
+}
+
+/// What a user can do about the OAuth `code` an issuer refused a login with,
+/// for the codes that have a remedy on the CLI's side.
+fn oauth_error_hint(code: &str, client_id: &str) -> Option<String> {
+    Some(match code {
+        "invalid_client" => format!(
+            "The issuer does not accept client ID {client_id:?}. It must be registered as a \
+             public client that allows PKCE without a client secret."
+        ),
+        "invalid_grant" => {
+            "The authorization code expired or was already used. Run the login again.".to_owned()
+        }
+        "access_denied" => "The login was declined in the browser.".to_owned(),
+        _ => return None,
+    })
 }
 
 #[derive(Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -3479,6 +3555,9 @@ fn auth_session_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Complete from pasted input when supplied; otherwise wait on the listener.
+    ///
+    /// A login the issuer refuses, or whose callback is unusable, ends the task
+    /// with `login failed: …` and no traceback.
     fn finish<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] pasted: Option<&str>,
@@ -7726,19 +7805,19 @@ mod tests {
         assert!(!callback_state_matches("expected", Some("wrong"), false));
     }
 
-    #[test]
-    fn finish_auth_session_exchanges_a_pasted_code_once() {
+    /// Serve one PKCE token exchange on a local port, the way a self-hosted
+    /// issuer with no discovery document does: 404 the OIDC discovery request,
+    /// then answer the `POST /oauth/token` of `code=auth-code` with `status`
+    /// and the JSON `body`. Returns the issuer URL and the server's thread.
+    fn serve_token_exchange(
+        status: &'static str,
+        body: String,
+    ) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
 
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = server.local_addr().unwrap();
-        let token = jwt_with_exp(None);
-        let response_token = token.clone();
+        let issuer = format!("http://{}", server.local_addr().unwrap());
         let responder = std::thread::spawn(move || {
-            // Two requests: the token exchange resolves the endpoint through OIDC
-            // discovery first. 404 that, so the conventional `/oauth/token` this
-            // server answers is what gets posted to — the fallback a self-hosted
-            // issuer serving no discovery document takes.
             let (mut stream, _) = server.accept().unwrap();
             let mut discovery = [0; 1024];
             let read = stream.read(&mut discovery).unwrap();
@@ -7769,53 +7848,174 @@ mod tests {
             assert!(request.starts_with("POST /oauth/token HTTP/1.1"));
             assert!(request.contains("code=auth-code"));
             assert!(request.contains("redirect_uri=http%3A%2F%2Flocalhost%2Fcallback"));
-            let body =
-                format!(r#"{{"access_token":"{response_token}","refresh_token":"refresh"}}"#);
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
             .unwrap();
         });
-        let session = AuthSession {
+        (issuer, responder)
+    }
+
+    /// A session for `issuer` that is completed by pasting a code. A pasted
+    /// code carries no state, which `require_state = false` allows; the nonce
+    /// still has to be here for the flow to build.
+    fn pasted_code_session(issuer: String) -> AuthSession {
+        AuthSession {
             url: "https://auth.example/authorize".to_string(),
             inner: Mutex::new(Some(AuthSessionInner {
                 listener: None,
                 code_verifier: "verifier".to_string(),
                 redirect_uri: "http://localhost/callback".to_string(),
                 env: AuthEnv {
-                    domain: format!("http://{address}"),
+                    domain: issuer,
                     client_id: "client".to_string(),
                     scopes: Vec::new(),
                     authorize_params: BTreeMap::new(),
                 },
-                // A pasted code carries no state, which `require_state = false`
-                // allows; the nonce still has to be here for the flow to build.
                 expected_state: "nonce.54321".to_string(),
                 prefer_id_token: false,
                 issuer_kind: IssuerKind::Oidc,
             })),
-        };
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        }
+    }
+
+    fn tokio_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn finish_auth_session_exchanges_a_pasted_code_once() {
+        let token = jwt_with_exp(None);
+        let (issuer, responder) = serve_token_exchange(
+            "200 OK",
+            format!(r#"{{"access_token":"{token}","refresh_token":"refresh"}}"#),
+        );
+        let session = pasted_code_session(issuer);
+        let runtime = tokio_runtime();
         let _runtime = runtime.enter();
 
         let credentials = finish_auth_session(&session, Some("auth-code")).unwrap();
         assert_eq!(credentials.access_token, token);
         // The session was built when discovery had said nothing (plain OIDC); the
-        // 404 above still carried the tenant API's trace header, so the completed
-        // login records the tenant API rather than the earlier miss.
+        // 404 discovery answer still carried the tenant API's trace header, so the
+        // completed login records the tenant API rather than the earlier miss.
         assert_eq!(credentials.issuer_kind, IssuerKind::TenantApi);
         responder.join().unwrap();
+        let err = finish_auth_session(&session, Some("auth-code")).unwrap_err();
+        assert!(err.to_string().contains("already consumed"), "{err}");
         assert!(
-            finish_auth_session(&session, Some("auth-code"))
-                .unwrap_err()
-                .to_string()
-                .contains("already consumed")
+            err.downcast_ref::<TaskExit>().is_none(),
+            "a consumed session is a bug, reported with its traceback"
+        );
+    }
+
+    #[test]
+    fn finish_auth_session_ends_the_task_when_the_issuer_refuses_the_client() {
+        let (issuer, responder) = serve_token_exchange(
+            "401 Unauthorized",
+            r#"{"error":"invalid_client","error_description":"Client authentication failed"}"#
+                .to_string(),
+        );
+        let session = pasted_code_session(issuer);
+        let runtime = tokio_runtime();
+        let _runtime = runtime.enter();
+
+        let err = finish_auth_session(&session, Some("auth-code")).unwrap_err();
+        responder.join().unwrap();
+        let exit = err.downcast_ref::<TaskExit>().expect("a TaskExit");
+        assert_eq!(exit.code, 1);
+        let message = exit.message.as_deref().unwrap();
+        assert!(
+            message.starts_with(
+                "login failed: token exchange failed (HTTP 401 Unauthorized): {\"error\":\"invalid_client\""
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("\n\nThe issuer does not accept client ID \"client\". It must be registered as a public client that allows PKCE without a client secret."),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn finish_auth_session_ends_the_task_on_a_pasted_authorize_error() {
+        let session = pasted_code_session("http://unused.invalid".to_string());
+        let err = finish_auth_session(
+            &session,
+            Some("http://localhost/callback?error=access_denied&error_description=User%20declined"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<TaskExit>()
+                .and_then(|e| e.message.as_deref()),
+            Some(
+                "login failed: the issuer refused the authorization: access_denied User declined\n\nThe login was declined in the browser."
+            )
+        );
+    }
+
+    #[test]
+    fn login_failure_hints_only_for_oauth_errors_with_a_remedy() {
+        let message = |err: anyhow::Error| {
+            login_failure(&err, "client")
+                .downcast_ref::<TaskExit>()
+                .and_then(|e| e.message.clone())
+                .unwrap()
+        };
+        let refusal = |body: &str| HttpRefusal {
+            what: "token exchange".to_string(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: body.to_string(),
+        };
+
+        assert!(
+            message(refusal(r#"{"error":"invalid_grant"}"#).into()).ends_with(
+                "\n\nThe authorization code expired or was already used. Run the login again."
+            )
+        );
+        for unhinted in [
+            refusal(r#"{"error":"server_error"}"#).into(),
+            refusal("<html>Bad Gateway</html>").into(),
+            anyhow::anyhow!("callback state did not match"),
+        ] {
+            let message = message(unhinted);
+            assert!(message.starts_with("login failed: "), "{message}");
+            assert!(!message.contains("\n\n"), "{message}");
+        }
+        assert_eq!(
+            message(
+                AuthorizeRefusal {
+                    error: "temporarily_unavailable".to_string(),
+                    description: String::new(),
+                }
+                .into()
+            ),
+            "login failed: the issuer refused the authorization: temporarily_unavailable"
+        );
+    }
+
+    #[test]
+    fn http_refusal_reads_the_oauth_error_code_from_its_body() {
+        let refusal = |body: &str| HttpRefusal {
+            what: "token exchange".to_string(),
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: body.to_string(),
+        };
+        assert_eq!(
+            refusal(r#"{"error": "invalid_client", "error_description": "x"}"#).oauth_error(),
+            Some("invalid_client".to_string())
+        );
+        assert_eq!(refusal(r#"{"message":"nope"}"#).oauth_error(), None);
+        assert_eq!(refusal("not json").oauth_error(), None);
+        assert_eq!(
+            refusal("").to_string(),
+            "token exchange failed (HTTP 401 Unauthorized): "
         );
     }
 

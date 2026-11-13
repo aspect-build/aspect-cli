@@ -11,7 +11,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "aspect_cloud_heading", "browser_login_result", "default_marker_line", "identity", "login_command", "login_options", "login_target_label", "organization_label", "shadowed_warning", "status_line", "use_command")
+load("@aspect//auth.axl", "aspect_cloud_heading", "default_marker_line", "identity", "login_command", "login_options", "login_target_label", "organization_label", "shadowed_warning", "status_line", "use_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -54,26 +54,6 @@ def _test_identity(_):
 def _test_login_command(_):
     _eq("account → bare", login_command(_summary(builtin = True, name = "aspect")), "aspect auth login")
     _eq("deployment → --deployment", login_command(_summary(name = "gcp.acme")), "aspect auth login --deployment gcp.acme")
-
-def _test_browser_login_error(_):
-    def rejected():
-        fail('token exchange failed (HTTP 401 Unauthorized): {"error":"invalid_client"}')
-
-    rejected_result = browser_login_result(rejected)
-    _eq("rejected login has no credentials", rejected_result.credentials, None)
-    _eq(
-        "rejected login has a useful one-line error",
-        rejected_result.error,
-        'Authentication failed: token exchange failed (HTTP 401 Unauthorized): {"error":"invalid_client"} Check the client ID and whether it permits public PKCE login without a client secret.',
-    )
-
-    cancelled_result = browser_login_result(lambda: None)
-    _eq("cancelled login has no credentials", cancelled_result.credentials, None)
-    _eq("cancelled login is not an error", cancelled_result.error, "")
-
-    successful_result = browser_login_result(lambda: "credentials")
-    _eq("successful login preserves credentials", successful_result.credentials, "credentials")
-    _eq("successful login is not an error", successful_result.error, "")
 
 def _test_login_target_label(_):
     _eq("bare login → Aspect Cloud", login_target_label("", False), "Aspect Cloud")
@@ -228,7 +208,6 @@ _UNIT_TESTS = [
     _test_aspect_cloud_heading,
     _test_default_marker_line,
     _test_identity,
-    _test_browser_login_error,
     _test_login_command,
     _test_login_options,
     _test_login_target_label,
