@@ -487,7 +487,8 @@ def _github_lint_impl(ctx: FeatureContext):
     destination = lint_trait.findings_destination
 
     # A run outside a PR registers nothing: there is nowhere to post, and the
-    # reason `detect_pr` gives describes a PR it did not find.
+    # reason `detect_pr` gives describes a PR it did not find. Checked before
+    # the host gate, so a non-PR run logs no setup notice either.
     pr, _ = github.detect_pr(ctx.std)
     if not pr:
         return
