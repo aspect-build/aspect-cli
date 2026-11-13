@@ -4,6 +4,9 @@ load("./private/lib/environment.axl", "error", "info", "warn")
 load("./private/lib/prompt.axl", "prompt_choice")
 
 def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCredentials | None:
+    """Log in to `deployment` through the browser: its localhost callback, or a
+    callback URL or code pasted on stdin. `None` when nothing was pasted. A login
+    the issuer refuses ends the task in `session.finish`, without a traceback."""
     session = ctx.aspect.auth.login(deployment = deployment)
     opened = not ctx.args.no_browser and session.open_browser()
     if opened:
@@ -24,7 +27,14 @@ def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCre
     print("")
     ctx.std.io.stdout.write("Paste the callback URL (or just the code): ")
     ctx.std.io.stdout.flush()
-    pasted = str(ctx.std.io.stdin.read(8192)).strip()
+    raw = str(ctx.std.io.stdin.read(8192))
+    pasted = raw.strip()
+
+    # A terminal echoes the Enter that ends a paste, but not a Ctrl-D, and a
+    # pipe echoes nothing; end the prompt's line in the last two cases.
+    if not (ctx.std.io.stdin.is_tty and raw.endswith("\n")):
+        ctx.std.io.stdout.write("\n")
+        ctx.std.io.stdout.flush()
     if not pasted:
         return None
     return session.finish(pasted)
