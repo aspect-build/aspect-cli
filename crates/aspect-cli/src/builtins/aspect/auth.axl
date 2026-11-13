@@ -25,9 +25,21 @@ def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCre
     ctx.std.io.stdout.write("Paste the callback URL (or just the code): ")
     ctx.std.io.stdout.flush()
     pasted = str(ctx.std.io.stdin.read(8192)).strip()
+    ctx.std.io.stdout.write("\n")
+    ctx.std.io.stdout.flush()
     if not pasted:
         return None
     return session.finish(pasted)
+
+def browser_login_result(start_login):
+    """Turn IdP and callback failures into task errors rather than AXL tracebacks."""
+    err, creds = catch(start_login)
+    if err:
+        message = err.message
+        if '"invalid_client"' in message:
+            message += " Check the client ID and whether it permits public PKCE login without a client secret."
+        return struct(credentials = None, error = "Authentication failed: " + message)
+    return struct(credentials = creds, error = "")
 
 # Width of the label column in a deployment's detail block so values align. Must
 # be wider than the longest label ("Results", 7) to leave a gap; a label >= this
@@ -286,7 +298,11 @@ def _login_impl(ctx: TaskContext) -> int:
         # and a failed probe simply leaves the seeded values in place.
         if aspect_cloud_login:
             aspect_cloud_info = ctx.aspect.auth.configure_default()
-        creds = _run_browser_login(ctx, deployment)
+        result = browser_login_result(lambda: _run_browser_login(ctx, deployment))
+        if result.error:
+            error(ctx.std, result.error)
+            return 1
+        creds = result.credentials
         if creds == None:
             error(ctx.std, "No authorization code entered; not logged in.")
             return 1
