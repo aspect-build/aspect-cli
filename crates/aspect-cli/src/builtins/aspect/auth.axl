@@ -27,11 +27,12 @@ def _run_browser_login(ctx: TaskContext, deployment: str) -> aspect.auth.AuthCre
     print("")
     ctx.std.io.stdout.write("Paste the callback URL (or just the code): ")
     ctx.std.io.stdout.flush()
-    pasted = str(ctx.std.io.stdin.read(8192)).strip()
+    raw = str(ctx.std.io.stdin.read(8192))
+    pasted = raw.strip()
 
-    # A terminal echoes the Enter that ends the paste; piped input leaves the
-    # prompt's line open.
-    if not ctx.std.io.stdin.is_tty:
+    # A terminal echoes the Enter that ends a paste, but not a Ctrl-D, and a
+    # pipe echoes nothing; end the prompt's line in the last two cases.
+    if not (ctx.std.io.stdin.is_tty and raw.endswith("\n")):
         ctx.std.io.stdout.write("\n")
         ctx.std.io.stdout.flush()
     if not pasted:

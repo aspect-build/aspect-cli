@@ -2170,8 +2170,9 @@ async fn exchange_api_token(
 }
 
 /// Accept one OAuth callback request on `listener` and return its `code` and
-/// `state` query params (the caller validates `state` when it set one). Writes a
-/// success page to the browser.
+/// `state` query params (the caller validates `state` when it set one). Answers
+/// the browser with a page saying whether the login went through, so a refused
+/// login does not leave it on a dropped connection.
 async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Option<String>)> {
     let (mut stream, _addr) = listener
         .accept()
@@ -2183,24 +2184,69 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
         .await
         .map_err(|e| anyhow::anyhow!("failed to read OAuth callback: {}", e))?;
     let request = String::from_utf8_lossy(&buf[..n]);
-    let first_line = request
+    let callback = request
         .lines()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("empty HTTP request from browser callback"))?;
-    let path = first_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("malformed HTTP request line"))?;
-    let callback = parse_callback_response(path)?;
-    let html = r##"<!DOCTYPE html>
+        .ok_or_else(|| anyhow::anyhow!("empty HTTP request from browser callback"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .ok_or_else(|| anyhow::anyhow!("malformed HTTP request line"))
+        })
+        .and_then(parse_callback_response);
+    let (status, page) = match &callback {
+        Ok(_) => (
+            "200 OK",
+            callback_page(
+                "Authenticated",
+                "Login successful",
+                "You can close this tab and return to your terminal.",
+                true,
+            ),
+        ),
+        Err(_) => (
+            "400 Bad Request",
+            callback_page(
+                "Login failed",
+                "Login failed",
+                "Return to your terminal to see why.",
+                false,
+            ),
+        ),
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        page.len(),
+        page
+    );
+    let written = stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to write OAuth response: {}", e));
+    // The callback's own failure is the one worth reporting.
+    let callback = callback?;
+    written?;
+    Ok(callback)
+}
+
+/// The page the login callback answers the browser with. `auto_close` closes
+/// the tab after ten seconds, for a login that needs nothing more from it.
+fn callback_page(title: &str, heading: &str, message: &str, auto_close: bool) -> String {
+    let script = if auto_close {
+        "  <script>setTimeout(window.close, 10000)</script>\n"
+    } else {
+        ""
+    };
+    format!(
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Authenticated — Aspect Build</title>
+  <title>{title} — Aspect Build</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
       background: #f5f6f8;
       color: #1f2e35;
@@ -2208,8 +2254,8 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
       display: flex;
       align-items: center;
       justify-content: center;
-    }
-    .card {
+    }}
+    .card {{
       text-align: center;
       padding: 48px 56px;
       border: 1px solid #e2e6ea;
@@ -2217,18 +2263,18 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
       background: #fff;
       max-width: 340px;
       width: 100%;
-    }
-    .logo { margin-bottom: 28px; }
-    h2 {
+    }}
+    .logo {{ margin-bottom: 28px; }}
+    h2 {{
       font-size: 17px;
       font-weight: 600;
       color: #1f2e35;
       margin-bottom: 8px;
-    }
-    p {
+    }}
+    p {{
       font-size: 13px;
       color: #6b7e87;
-    }
+    }}
   </style>
 </head>
 <body>
@@ -2238,22 +2284,12 @@ async fn accept_callback(listener: TcpListener) -> anyhow::Result<(String, Optio
         <path fill-rule="evenodd" d="M37.854 39.784H24.115l6.825-11.923-6.825-11.923h13.739l6.874 11.923-6.874 11.923zm-30.978 0h13.719l6.825-11.932H13.77L6.896 15.919.07 27.852l6.806 11.932zm1.882-26.865l6.884 11.923 6.825-11.942h13.739L29.371.977H15.622L8.758 12.919z" fill="#176acc"/>
       </svg>
     </div>
-    <h2>Login successful</h2>
-    <p>You can close this tab and return to your terminal.</p>
+    <h2>{heading}</h2>
+    <p>{message}</p>
   </div>
-  <script>setTimeout(window.close, 10000)</script>
-</body>
-</html>"##;
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        html.len(),
-        html
-    );
-    stream
-        .write_all(response.as_bytes())
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to write OAuth response: {}", e))?;
-    Ok(callback)
+{script}</body>
+</html>"##
+    )
 }
 
 /// An OAuth token response. The bearer the CLI attaches to endpoints is the
@@ -2671,11 +2707,13 @@ fn callback_host(selected: &Deployment) -> Option<String> {
 ///
 /// `prefer_id_token` selects which of the grant's tokens becomes the bearer, which
 /// is a property of what the credential is sent to rather than of this flow — see
-/// [`AuthSessionInner::prefer_id_token`].
+/// [`AuthSessionInner::prefer_id_token`]. `aspect_cloud` says whose client the
+/// login uses, for what a refusal tells the user ([`LoginTarget`]).
 fn build_login_session(
     env: AuthEnv,
     redirect_uri: String,
     prefer_id_token: bool,
+    aspect_cloud: bool,
 ) -> anyhow::Result<AuthSession> {
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .map_err(|e| anyhow::anyhow!("failed to bind the login callback port: {}", e))?;
@@ -2706,6 +2744,7 @@ fn build_login_session(
             env,
             expected_state: state,
             prefer_id_token,
+            aspect_cloud,
             issuer_kind: endpoints.issuer_kind,
         })),
     })
@@ -3377,6 +3416,9 @@ struct AuthSessionInner {
     /// id_token, while Aspect Cloud addresses an API that validates the
     /// access_token — and both may reach the IdP through the same relay.
     prefer_id_token: bool,
+    /// Whether this is an Aspect Cloud login, whose OAuth client is Aspect's
+    /// rather than the deployment's.
+    aspect_cloud: bool,
     /// What the issuer offers beyond OAuth, as the discovery response identified
     /// it when the authorize URL was built; recorded on the credential.
     issuer_kind: IssuerKind,
@@ -3460,7 +3502,10 @@ fn finish_auth_session(
         .take()
         .ok_or_else(|| anyhow::anyhow!("auth session already consumed"))?;
     drop(guard);
-    let client_id = inner.env.client_id.clone();
+    let target = LoginTarget {
+        client_id: inner.env.client_id.clone(),
+        aspect_cloud: inner.aspect_cloud,
+    };
     let entry = if let Some(pasted) = pasted {
         parse_pasted_callback(pasted)
             .and_then(|(code, state)| block_on(inner.complete(code, state, false)))
@@ -3474,33 +3519,51 @@ fn finish_auth_session(
             inner.complete(code, state, true).await
         })
     }
-    .map_err(|err| login_failure(&err, &client_id))?;
+    .map_err(|err| {
+        let hint = oauth_error_code(&err).and_then(|code| oauth_error_hint(&code, &target));
+        login_failure(&err, hint)
+    })?;
     Ok(AuthCredentials::from_entry(&entry))
 }
 
-/// `err`, a failed browser login, as the [`TaskExit`] that reports it, with
-/// what to do about it when the issuer named an OAuth error
-/// ([`oauth_error_hint`]).
-fn login_failure(err: &anyhow::Error, client_id: &str) -> anyhow::Error {
-    let code = err
-        .downcast_ref::<HttpRefusal>()
-        .and_then(HttpRefusal::oauth_error)
-        .or_else(|| {
-            err.downcast_ref::<AuthorizeRefusal>()
-                .map(|r| r.error.clone())
-        });
+/// `err`, a failed login, as the [`TaskExit`] that reports it: one
+/// `login failed: …` line, then `hint` when there is something to do about it.
+fn login_failure(err: &anyhow::Error, hint: Option<String>) -> anyhow::Error {
     let mut message = format!("login failed: {err:#}");
-    if let Some(hint) = code.and_then(|code| oauth_error_hint(&code, client_id)) {
+    if let Some(hint) = hint {
         message.push_str("\n\n");
         message.push_str(&hint);
     }
     TaskExit::error(message).into()
 }
 
-/// What a user can do about the OAuth `code` an issuer refused a login with,
-/// for the codes that have a remedy on the CLI's side.
-fn oauth_error_hint(code: &str, client_id: &str) -> Option<String> {
+/// The OAuth error code an issuer refused a login with: from the token
+/// endpoint's error body, or the authorize redirect's `error` param.
+fn oauth_error_code(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<HttpRefusal>()
+        .and_then(HttpRefusal::oauth_error)
+        .or_else(|| {
+            err.downcast_ref::<AuthorizeRefusal>()
+                .map(|r| r.error.clone())
+        })
+}
+
+/// Whose OAuth client a browser login uses, which decides who can fix a
+/// refused client.
+struct LoginTarget {
+    client_id: String,
+    aspect_cloud: bool,
+}
+
+/// What a user can do about the OAuth `code` an issuer refused a browser
+/// login with, for the codes that have a remedy.
+fn oauth_error_hint(code: &str, target: &LoginTarget) -> Option<String> {
+    let client_id = &target.client_id;
     Some(match code {
+        "invalid_client" if target.aspect_cloud => format!(
+            "Aspect Cloud rejected the CLI's client ID {client_id:?}. This is a problem on \
+             Aspect's side; please report it to Aspect support."
+        ),
         "invalid_client" => format!(
             "The issuer does not accept client ID {client_id:?}. It must be registered as a \
              public client that allows PKCE without a client secret."
@@ -3510,6 +3573,16 @@ fn oauth_error_hint(code: &str, client_id: &str) -> Option<String> {
         }
         "access_denied" => "The login was declined in the browser.".to_owned(),
         _ => return None,
+    })
+}
+
+/// What a user can do about an API token the exchange refused.
+fn api_token_hint(err: &anyhow::Error) -> Option<String> {
+    let refusal = err.downcast_ref::<HttpRefusal>()?;
+    matches!(refusal.status.as_u16(), 401 | 403).then(|| {
+        "The API token was rejected. Check that it has not been revoked or expired, and that \
+         it was issued for this deployment."
+            .to_owned()
     })
 }
 
@@ -4113,6 +4186,12 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         resolve_deployment_api_url(deployment.into_option().as_deref())
     }
 
+    /// Start a login to `deployment` (or Aspect Cloud).
+    ///
+    /// With `token`, the credential for that token; with `api_token`, the one it
+    /// exchanges for; otherwise an `AuthSession` for the browser login. A token
+    /// that is malformed or refused, or a deployment that cannot be logged in
+    /// to, ends the task with its reason and no traceback.
     fn login<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named)] token: Option<&str>,
@@ -4122,10 +4201,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
         let selected = select_aspect_cloud_or_deployment(&deployments, deployment)?;
-        let env = auth_env_from(&selected)?;
+        let env = auth_env_from(&selected).map_err(|e| TaskExit::error(e.to_string()))?;
 
         if let Some(token) = token {
-            let claims = decode_jwt_claims(token)?;
+            let claims = decode_jwt_claims(token).map_err(|e| login_failure(&e, None))?;
             let entry = CredentialsEntry {
                 access_token: token.to_string(),
                 refresh_token: String::new(),
@@ -4141,8 +4220,11 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         }
 
         if let Some(api_token) = api_token {
-            let (client_id, secret, shape) = api_token_pair(api_token)?;
-            let entry = block_on(exchange_api_token(client_id, secret, shape, &env))?;
+            let entry = api_token_pair(api_token)
+                .and_then(|(client_id, secret, shape)| {
+                    block_on(exchange_api_token(client_id, secret, shape, &env))
+                })
+                .map_err(|e| login_failure(&e, api_token_hint(&e)))?;
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
@@ -4150,13 +4232,13 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // edges validate the id_token, while Aspect Cloud addresses an API that
         // validates the access_token and has the id_token filed alongside it.
         let redirect_uri = login_redirect_uri(&selected).ok_or_else(|| {
-            anyhow::anyhow!(
+            TaskExit::error(format!(
                 "deployment {:?} advertises no login redirect URI and serves no endpoint to \
                  derive one from — re-run `aspect auth configure <host>` to refresh it",
                 selected.name
-            )
+            ))
         })?;
-        let session = build_login_session(env, redirect_uri, !selected.builtin)?;
+        let session = build_login_session(env, redirect_uri, !selected.builtin, selected.builtin)?;
         Ok(heap.alloc(session))
     }
 
@@ -7877,6 +7959,7 @@ mod tests {
                 },
                 expected_state: "nonce.54321".to_string(),
                 prefer_id_token: false,
+                aspect_cloud: false,
                 issuer_kind: IssuerKind::Oidc,
             })),
         }
@@ -7961,42 +8044,157 @@ mod tests {
     }
 
     #[test]
-    fn login_failure_hints_only_for_oauth_errors_with_a_remedy() {
-        let message = |err: anyhow::Error| {
-            login_failure(&err, "client")
+    fn finish_auth_session_ends_the_task_on_a_refused_browser_callback() {
+        use std::io::{Read, Write};
+
+        let runtime = tokio_runtime();
+        let _runtime = runtime.enter();
+        let listener = block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        let session = pasted_code_session("http://unused.invalid".to_string());
+        session.inner.lock().unwrap().as_mut().unwrap().listener = Some(listener);
+        let browser = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            write!(
+                stream,
+                "GET /callback?error=access_denied HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            .unwrap();
+            let mut page = String::new();
+            stream.read_to_string(&mut page).unwrap();
+            page
+        });
+
+        let err = finish_auth_session(&session, None).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<TaskExit>()
+                .and_then(|e| e.message.as_deref()),
+            Some(
+                "login failed: the issuer refused the authorization: access_denied\n\nThe login was declined in the browser."
+            )
+        );
+        let page = browser.join().unwrap();
+        assert!(page.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{page}");
+        assert!(page.contains("<h2>Login failed</h2>"), "{page}");
+        assert!(!page.contains("window.close"), "{page}");
+    }
+
+    #[test]
+    fn callback_page_fills_in_its_text_and_closes_only_when_asked() {
+        let page = callback_page("Authenticated", "Login successful", "Close this tab.", true);
+        assert!(page.contains("<title>Authenticated — Aspect Build</title>"));
+        assert!(page.contains("<h2>Login successful</h2>"));
+        assert!(page.contains("<p>Close this tab.</p>"));
+        assert!(page.contains("setTimeout(window.close, 10000)"));
+        assert!(
+            page.contains("* { margin: 0;"),
+            "CSS braces survive formatting"
+        );
+        assert!(!callback_page("t", "h", "m", false).contains("window.close"));
+    }
+
+    #[test]
+    fn oauth_error_hint_covers_the_codes_with_a_remedy() {
+        let deployment = LoginTarget {
+            client_id: "client".to_string(),
+            aspect_cloud: false,
+        };
+        let aspect_cloud = LoginTarget {
+            client_id: "client".to_string(),
+            aspect_cloud: true,
+        };
+        assert!(
+            oauth_error_hint("invalid_client", &deployment)
+                .unwrap()
+                .contains("registered as a public client")
+        );
+        let cloud = oauth_error_hint("invalid_client", &aspect_cloud).unwrap();
+        assert!(cloud.contains("problem on Aspect's side"), "{cloud}");
+        assert!(!cloud.contains("PKCE"), "{cloud}");
+        assert_eq!(
+            oauth_error_hint("invalid_grant", &deployment).as_deref(),
+            Some("The authorization code expired or was already used. Run the login again.")
+        );
+        assert!(oauth_error_hint("access_denied", &aspect_cloud).is_some());
+        assert_eq!(oauth_error_hint("server_error", &deployment), None);
+    }
+
+    #[test]
+    fn login_failure_reports_one_line_then_any_hint() {
+        let message = |err: anyhow::Error, hint: Option<&str>| {
+            login_failure(&err, hint.map(str::to_owned))
                 .downcast_ref::<TaskExit>()
                 .and_then(|e| e.message.clone())
                 .unwrap()
         };
-        let refusal = |body: &str| HttpRefusal {
-            what: "token exchange".to_string(),
-            status: reqwest::StatusCode::BAD_REQUEST,
-            body: body.to_string(),
-        };
-
-        assert!(
-            message(refusal(r#"{"error":"invalid_grant"}"#).into()).ends_with(
-                "\n\nThe authorization code expired or was already used. Run the login again."
-            )
+        assert_eq!(
+            message(anyhow::anyhow!("callback state did not match"), None),
+            "login failed: callback state did not match"
         );
-        for unhinted in [
-            refusal(r#"{"error":"server_error"}"#).into(),
-            refusal("<html>Bad Gateway</html>").into(),
-            anyhow::anyhow!("callback state did not match"),
-        ] {
-            let message = message(unhinted);
-            assert!(message.starts_with("login failed: "), "{message}");
-            assert!(!message.contains("\n\n"), "{message}");
-        }
+        assert_eq!(
+            message(anyhow::anyhow!("nope"), Some("Try again.")),
+            "login failed: nope\n\nTry again."
+        );
         assert_eq!(
             message(
                 AuthorizeRefusal {
                     error: "temporarily_unavailable".to_string(),
                     description: String::new(),
                 }
-                .into()
+                .into(),
+                None
             ),
             "login failed: the issuer refused the authorization: temporarily_unavailable"
+        );
+    }
+
+    #[test]
+    fn oauth_error_code_reads_either_kind_of_refusal() {
+        let refusal = |body: &str| -> anyhow::Error {
+            HttpRefusal {
+                what: "token exchange".to_string(),
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: body.to_string(),
+            }
+            .into()
+        };
+        assert_eq!(
+            oauth_error_code(&refusal(r#"{"error":"invalid_grant"}"#)).as_deref(),
+            Some("invalid_grant")
+        );
+        assert_eq!(oauth_error_code(&refusal("<html>Bad Gateway</html>")), None);
+        let authorize: anyhow::Error = AuthorizeRefusal {
+            error: "access_denied".to_string(),
+            description: String::new(),
+        }
+        .into();
+        assert_eq!(
+            oauth_error_code(&authorize).as_deref(),
+            Some("access_denied")
+        );
+        assert_eq!(oauth_error_code(&anyhow::anyhow!("other")), None);
+    }
+
+    #[test]
+    fn api_token_hint_only_for_a_refused_token() {
+        let refusal = |status: u16| -> anyhow::Error {
+            HttpRefusal {
+                what: "API token exchange".to_string(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                body: String::new(),
+            }
+            .into()
+        };
+        assert!(
+            api_token_hint(&refusal(401))
+                .unwrap()
+                .starts_with("The API token was rejected.")
+        );
+        assert!(api_token_hint(&refusal(403)).is_some());
+        assert_eq!(api_token_hint(&refusal(500)), None);
+        assert_eq!(
+            api_token_hint(&anyhow::anyhow!("invalid API token format")),
+            None
         );
     }
 
