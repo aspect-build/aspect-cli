@@ -224,11 +224,12 @@ probe = task(kind = "probe", summary = "Check GitHub feature startup.", implemen
         output = probe.current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not output.status.success:
             fail(output.stdout + output.stderr)
-        logs = output.stdout + output.stderr
+        lines = (output.stdout + output.stderr).split("\n")
         for feature, skip_label in [("lint", "Skipping PR review comments."), ("status comment", "Skipping PR comment.")]:
-            _eq("Enterprise %s notice on a %s" % (feature, label), "not github.com" in logs and skip_label in logs, is_pr)
-        if is_pr:
-            _eq("PR notice names missing credentials", "missing ASPECT_GITHUB_TOKEN" in logs, True)
+            notices = [line for line in lines if skip_label in line and "not github.com" in line]
+            _eq("Enterprise %s notice on a %s" % (feature, label), len(notices) > 0, is_pr)
+            if is_pr:
+                _eq("%s notice names missing credentials" % feature, "missing ASPECT_GITHUB_TOKEN" in notices[0], True)
 
 _STATUS_COMMENT_PROBE = """
 load("@std//base64.axl", "base64")
