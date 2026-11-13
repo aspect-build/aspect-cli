@@ -183,6 +183,12 @@ def config(ctx):
     ctx.features[Deployment].enabled = False
     ctx.features[GithubStatusChecks].enabled = False
     ctx.features[GithubStatusComments].enabled = False
+    # The local case must not inherit PR context from its CI test runner.
+    for name in [
+        "CI", "ASPECT_GITHUB_PR_NUMBER", "GITHUB_ACTIONS", "BUILDKITE",
+        "CIRCLECI", "ASPECT_GITHUB_TOKEN", "ASPECT_GITHUB_API_URL", "GITHUB_API_URL",
+    ]:
+        ctx.std.env.remove_var(name)
     ctx.std.env.set_var("ASPECT_VCS_URL", "https://ghes.example.mil/fixture/repo")
     if ctx.std.env.var("PROBE_PR"):
         for name, value in {
@@ -204,11 +210,15 @@ def _impl(ctx):
 probe = task(kind = "probe", summary = "Check lint comment startup.", implementation = _impl, traits = [LintTrait])
 """)
     for is_pr in [False, True]:
-        output = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).env("PROBE_PR", "true" if is_pr else "").current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
+        probe = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).env("PROBE_PR", "true" if is_pr else "")
+        probe = probe.env("GITHUB_ACTIONS", "true").env("GITHUB_REF", "refs/pull/1/merge").env("GITHUB_REPOSITORY", "aspect-build/aspect-cli").env("GITHUB_SHA", "head")
+        output = probe.current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not output.status.success:
             fail(output.stdout + output.stderr)
         notice = "GitHub lint comments:" in output.stdout + output.stderr
         _eq("missing Enterprise credentials reported only for PR builds", notice, is_pr)
+        if is_pr:
+            _eq("PR notice names missing credentials", "missing ASPECT_GITHUB_TOKEN" in output.stdout + output.stderr, True)
 
 _STATUS_COMMENT_PROBE = """
 load("@std//base64.axl", "base64")
