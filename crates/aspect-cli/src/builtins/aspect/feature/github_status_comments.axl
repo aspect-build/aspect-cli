@@ -1581,11 +1581,13 @@ def _github_status_comments(ctx: FeatureContext):
     if identity == None:
         return
 
-    if github.bail_if_not_public_github(ctx.std, _LOG, "Skipping PR comment."):
-        return
-
+    # Before the host gate, so a branch build logs no setup notice for a PR
+    # comment it would never post.
     pr, _ = github.detect_pr(ctx.std)
     if pr == None:
+        return
+
+    if github.bail_if_not_public_github(ctx.std, _LOG, "Skipping PR comment."):
         return
 
     owner = pr["owner"]

@@ -486,17 +486,18 @@ def _github_lint_impl(ctx: FeatureContext):
     # Capture at config time so later LintTrait reassignment can't desync hooks.
     destination = lint_trait.findings_destination
 
+    # A run outside a PR registers nothing: there is nowhere to post, and the
+    # reason `detect_pr` gives describes a PR it did not find. Checked before
+    # the host gate, so a non-PR run logs no setup notice either.
+    pr, _ = github.detect_pr(ctx.std)
+    if not pr:
+        return
+
     if github.bail_if_not_public_github(ctx.std, _LOG, "Skipping PR review comments."):
         return
 
     # CI-run identity for cross-run cleanup (see `_ci_run_id`); "" off CI.
     run_id = _ci_run_id(ctx.std.env)
-
-    # A run outside a PR registers nothing: there is nowhere to post, and the
-    # reason `detect_pr` gives describes a PR it did not find.
-    pr, _ = github.detect_pr(ctx.std)
-    if not pr:
-        return
 
     gh = {
         # Filled by `_ensure_token` the first time something is posted.

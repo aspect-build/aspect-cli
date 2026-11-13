@@ -13,13 +13,14 @@ API, or the render pipeline.
     status-comment coordination helpers both comment surfaces share.
 
 Subprocess suites drive a feature end to end through a probe task with a
-stubbed `ctx.http()`: lint review comments, and the PR status comment on a
-GitHub Enterprise runner with `ASPECT_GITHUB_TOKEN`, with and without Aspect
-credentials and with coordination opted out, against a fake sibling job
-racing it through the comment (an overwrite, a duplicate comment), and
-against another push's comment (a newer push's is left alone, an older
-push's is reset); and a status check created with `ASPECT_GITHUB_TOKEN` and
-then canceled.
+stubbed `ctx.http()`: lint review comments, the Enterprise setup notice
+(logged on a PR build, not on a local or CI branch build), and the PR status
+comment on a GitHub Enterprise runner with `ASPECT_GITHUB_TOKEN`, with and
+without Aspect credentials and with coordination opted out, against a fake
+sibling job racing it through the comment (an overwrite, a duplicate
+comment), and against another push's comment (a newer push's is left alone,
+an older push's is reset); and a status check created with
+`ASPECT_GITHUB_TOKEN` and then canceled.
 
 Run with:
   aspect dev test-github-features
@@ -168,6 +169,67 @@ probe = task(kind = "probe", summary = "Capture native lint review comments.", i
         _eq("body matches its marker", rule + " finding" in comment["body"], True)
     _eq("multiline comment starts at finding", posted[2]["start_line"], 1)
     _eq("multiline comment ends at range end", posted[2]["line"], 3)
+
+def _test_enterprise_notice_only_on_pr(ctx):
+    """An Enterprise checkout without credentials logs the setup notice on a
+    PR build only: lint review comments and the PR status comment have
+    nowhere to post on a local or CI branch build, so those stay quiet."""
+    root = ctx.std.fs.mkdtemp(prefix = "github-enterprise-notice-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+    ctx.std.fs.write(root + "/MODULE.aspect", "")
+    ctx.std.fs.write(root + "/.aspect/config.axl", """
+load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+
+def config(ctx):
+    ctx.features[Deployment].enabled = False
+    ctx.features[GithubStatusChecks].enabled = False
+    # No case may inherit PR context from its CI test runner.
+    for name in [
+        "CI", "ASPECT_GITHUB_PR_NUMBER", "GITHUB_ACTIONS", "BUILDKITE",
+        "CIRCLECI", "CIRCLE_PULL_REQUEST", "ASPECT_GITHUB_TOKEN",
+        "ASPECT_GITHUB_API_URL", "GITHUB_API_URL",
+    ]:
+        ctx.std.env.remove_var(name)
+    ctx.std.env.set_var("ASPECT_VCS_URL", "https://ghes.example.mil/fixture/repo")
+    case = ctx.std.env.var("PROBE_CASE")
+    if case:
+        for name, value in {
+            "CI": "true",
+            "CIRCLECI": "true",
+            "CIRCLE_JOB": "build",
+            "CIRCLE_PROJECT_REPONAME": "repo",
+            "CIRCLE_SHA1": "head",
+            "CIRCLE_WORKFLOW_ID": "wf-1",
+            "GITHUB_REPOSITORY": "fixture/repo",
+            "GITHUB_SERVER_URL": "https://ghes.example.mil",
+        }.items():
+            ctx.std.env.set_var(name, value)
+    if case == "pr":
+        ctx.std.env.set_var("CIRCLE_PULL_REQUEST", "https://ghes.example.mil/fixture/repo/pull/1")
+""")
+    ctx.std.fs.write(root + "/.aspect/probe.axl", """
+load("@aspect//traits.axl", "LintTrait")
+
+def _impl(ctx):
+    return 0
+
+probe = task(kind = "probe", summary = "Check GitHub feature startup.", implementation = _impl, traits = [LintTrait])
+""")
+    for case, label in [("", "local build"), ("branch", "CI branch build"), ("pr", "CI PR build")]:
+        is_pr = case == "pr"
+        probe = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).env("PROBE_CASE", case)
+        probe = probe.env("GITHUB_ACTIONS", "true").env("GITHUB_REF", "refs/pull/1/merge").env("GITHUB_REPOSITORY", "aspect-build/aspect-cli").env("GITHUB_SHA", "head")
+        output = probe.current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if not output.status.success:
+            fail(output.stdout + output.stderr)
+        lines = (output.stdout + output.stderr).split("\n")
+        for feature, skip_label in [("lint", "Skipping PR review comments."), ("status comment", "Skipping PR comment.")]:
+            notices = [line for line in lines if skip_label in line and "not github.com" in line]
+            _eq("Enterprise %s notice on a %s" % (feature, label), len(notices) > 0, is_pr)
+            if is_pr:
+                _eq("%s notice names missing credentials" % feature, "missing ASPECT_GITHUB_TOKEN" in notices[0], True)
 
 _STATUS_COMMENT_PROBE = """
 load("@std//base64.axl", "base64")
@@ -644,6 +706,7 @@ def _test_impl(ctx):
     _test_registration_request()
     _test_coordination_helpers()
     _test_lint_comment_identity(ctx)
+    _test_enterprise_notice_only_on_pr(ctx)
     _test_status_comment_coordination(ctx)
     _test_status_comment_races(ctx)
     _test_status_comment_superseded(ctx)
