@@ -169,6 +169,47 @@ probe = task(kind = "probe", summary = "Capture native lint review comments.", i
     _eq("multiline comment starts at finding", posted[2]["start_line"], 1)
     _eq("multiline comment ends at range end", posted[2]["line"], 3)
 
+def _test_lint_comment_notice_only_on_pr(ctx):
+    root = ctx.std.fs.mkdtemp(prefix = "github-lint-notice-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(root))
+    ctx.std.fs.create_dir_all(root + "/.aspect")
+    ctx.std.fs.write(root + "/MODULE.aspect", "")
+    ctx.std.fs.write(root + "/.aspect/config.axl", """
+load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
+
+def config(ctx):
+    ctx.features[Deployment].enabled = False
+    ctx.features[GithubStatusChecks].enabled = False
+    ctx.features[GithubStatusComments].enabled = False
+    ctx.std.env.set_var("ASPECT_VCS_URL", "https://ghes.example.mil/fixture/repo")
+    if ctx.std.env.var("PROBE_PR"):
+        for name, value in {
+            "CI": "true",
+            "CIRCLECI": "true",
+            "CIRCLE_PULL_REQUEST": "https://ghes.example.mil/fixture/repo/pull/1",
+            "CIRCLE_SHA1": "head",
+            "GITHUB_REPOSITORY": "fixture/repo",
+            "GITHUB_SERVER_URL": "https://ghes.example.mil",
+        }.items():
+            ctx.std.env.set_var(name, value)
+""")
+    ctx.std.fs.write(root + "/.aspect/probe.axl", """
+load("@aspect//traits.axl", "LintTrait")
+
+def _impl(ctx):
+    return 0
+
+probe = task(kind = "probe", summary = "Check lint comment startup.", implementation = _impl, traits = [LintTrait])
+""")
+    for is_pr in [False, True]:
+        output = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).env("PROBE_PR", "true" if is_pr else "").current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if not output.status.success:
+            fail(output.stdout + output.stderr)
+        notice = "GitHub lint comments:" in output.stdout + output.stderr
+        _eq("missing Enterprise credentials reported only for PR builds", notice, is_pr)
+
 _STATUS_COMMENT_PROBE = """
 load("@std//base64.axl", "base64")
 load("@aspect//tips.axl", "tips")
@@ -644,6 +685,7 @@ def _test_impl(ctx):
     _test_registration_request()
     _test_coordination_helpers()
     _test_lint_comment_identity(ctx)
+    _test_lint_comment_notice_only_on_pr(ctx)
     _test_status_comment_coordination(ctx)
     _test_status_comment_races(ctx)
     _test_status_comment_superseded(ctx)
