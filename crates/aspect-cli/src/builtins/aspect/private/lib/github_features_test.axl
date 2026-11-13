@@ -185,10 +185,11 @@ load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 def config(ctx):
     ctx.features[Deployment].enabled = False
     ctx.features[GithubStatusChecks].enabled = False
-    # The local case must not inherit PR context from its CI test runner.
+    # No case may inherit PR context from its CI test runner.
     for name in [
         "CI", "ASPECT_GITHUB_PR_NUMBER", "GITHUB_ACTIONS", "BUILDKITE",
-        "CIRCLECI", "ASPECT_GITHUB_TOKEN", "ASPECT_GITHUB_API_URL", "GITHUB_API_URL",
+        "CIRCLECI", "CIRCLE_PULL_REQUEST", "ASPECT_GITHUB_TOKEN",
+        "ASPECT_GITHUB_API_URL", "GITHUB_API_URL",
     ]:
         ctx.std.env.remove_var(name)
     ctx.std.env.set_var("ASPECT_VCS_URL", "https://ghes.example.mil/fixture/repo")
@@ -223,10 +224,11 @@ probe = task(kind = "probe", summary = "Check GitHub feature startup.", implemen
         output = probe.current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not output.status.success:
             fail(output.stdout + output.stderr)
-        notice = "not github.com" in output.stdout + output.stderr
-        _eq("Enterprise setup notice on a " + label, notice, is_pr)
+        logs = output.stdout + output.stderr
+        for feature, skip_label in [("lint", "Skipping PR review comments."), ("status comment", "Skipping PR comment.")]:
+            _eq("Enterprise %s notice on a %s" % (feature, label), "not github.com" in logs and skip_label in logs, is_pr)
         if is_pr:
-            _eq("PR notice names missing credentials", "missing ASPECT_GITHUB_TOKEN" in output.stdout + output.stderr, True)
+            _eq("PR notice names missing credentials", "missing ASPECT_GITHUB_TOKEN" in logs, True)
 
 _STATUS_COMMENT_PROBE = """
 load("@std//base64.axl", "base64")
