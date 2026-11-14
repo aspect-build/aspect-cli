@@ -2014,6 +2014,16 @@ fn api_token_env_kind(deployment: &str, issuer: &str) -> String {
     }
 }
 
+/// A malformed or refused [`api_token_env_var`] token for `deployment`, exchanged
+/// with `issuer`: the variable, the cause, and [`api_token_env_kind`].
+fn api_token_env_error(deployment: &str, issuer: &str, err: &anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: {err:#}\n\n{}",
+        api_token_env_var(deployment),
+        api_token_env_kind(deployment, issuer)
+    )
+}
+
 /// The error for `deployment` holding no credential: the login that fixes it, and
 /// the variable that does on CI.
 pub fn not_logged_in_message(deployment: &str) -> String {
@@ -2095,19 +2105,11 @@ fn credentials_from_api_token_env(deployment: &str) -> anyhow::Result<Option<Cre
         }
     }
 
-    let (client_id, secret, shape) = api_token_pair(&token).map_err(|e| {
-        anyhow::anyhow!(
-            "{var}: {e}\n\n{}",
-            api_token_env_kind(deployment, &env.domain)
-        )
-    })?;
-    let entry = block_on(exchange_api_token(client_id, secret, shape, &env)).map_err(|e| {
-        anyhow::anyhow!(
-            "{var}: the API token exchange with {} failed: {e:#}\n\n{}",
-            env.domain,
-            api_token_env_kind(deployment, &env.domain)
-        )
-    })?;
+    let entry = api_token_pair(&token)
+        .and_then(|(client_id, secret, shape)| {
+            block_on(exchange_api_token(client_id, secret, shape, &env))
+        })
+        .map_err(|e| api_token_env_error(deployment, &env.domain, &e))?;
 
     // Store for subsequent calls. Clearing on lock-poison is fine — the
     // next caller will just miss and re-exchange.
@@ -8286,6 +8288,17 @@ mod tests {
             "ASPECT_API_TOKEN_GCP_ACME takes an API token for the Aspect Workflows deployment \
              'gcp.acme', issued by https://idp.acme.example. An Aspect account API token goes in \
              ASPECT_API_TOKEN."
+        );
+        assert_eq!(
+            api_token_env_error(
+                "acme",
+                "https://idp.acme.example",
+                &anyhow::anyhow!("invalid API token format")
+            )
+            .to_string(),
+            "ASPECT_API_TOKEN_ACME: invalid API token format\n\nASPECT_API_TOKEN_ACME takes an \
+             API token for the Aspect Workflows deployment 'acme', issued by \
+             https://idp.acme.example. An Aspect account API token goes in ASPECT_API_TOKEN."
         );
         assert_eq!(
             not_logged_in_message(ASPECT_CLOUD_DEPLOYMENT_NAME),
