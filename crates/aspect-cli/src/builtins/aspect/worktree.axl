@@ -790,100 +790,6 @@ def _score_slot(ctx: TaskContext, slot: dict, want: dict, problems: list, hooks:
         ) + "; every slot was scored by the built-in instead")
     return default_score(slot, want)
 
-def _slot_counts(registry: dict) -> dict:
-    """How many of a registry's slots are in each state, as a `prune_slot`
-    hook is shown them."""
-    states = [registry["slots"][sid]["state"] for sid in registry["slots"]]
-    return {
-        "total": len(states),
-        "free": len([s for s in states if s == FREE]),
-        "leased": len([s for s in states if s == LEASED]),
-        "reserved": len([s for s in states if s == RESERVED]),
-    }
-
-def _prune_pool_view(ctx: TaskContext, pool: dict, registry: dict, call: dict) -> dict:
-    """The pool as a `prune_slot` hook sees it: this pool's counts and every
-    other pool's on the machine, with `call` — the `event`, the
-    `max_idle_days` the built-in rule is applying, and `dry_run` — merged in.
-    Built once per command, and only when a hook is registered, since it reads
-    every pool's registry."""
-    others = []
-    for other in pools_on_disk(ctx.std):
-        if other["dir"] == pool["dir"]:
-            continue
-        others.append({"id": other["id"], "dir": other["dir"], "slots": _slot_counts(read_registry(ctx.std, other["dir"]))})
-    return {
-        "event": call["event"],
-        "max_idle_days": call.get("max_idle_days"),
-        "dry_run": call.get("dry_run", False),
-        "id": pool["id"],
-        "dir": pool["dir"],
-        "clone": pool["git_common_dir"].removesuffix("/.git"),
-        "max_slots": ctx.traits[Worktrees].max_slots,
-        "owned": len(owned_slots(pool, registry)),
-        "slots": _slot_counts(registry),
-        "other_pools": others,
-    }
-
-def _prune_slot_view(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str) -> dict:
-    """A free slot as a `prune_slot` hook sees it: a fresh dict of the
-    documented fields, so a hook can neither read other sessions' records nor
-    change the registry."""
-    slot = registry["slots"][slot_id]
-    path = slot_path(pool, slot_id)
-    warmth = warmth_of(ctx.std, path, root)
-    view = {key: slot.get(key) or ("" if key != "created_ms" else 0) for key in _HOOK_SLOT_FIELDS}
-    view.update({
-        "id": slot_id,
-        "path": path,
-        "output_base": output_base_of(ctx.std, path, root),
-        "base_present": warmth.base,
-        "server_pid": warmth.server,
-        "idle_ms": slot_idle_ms(ctx.std, pool, slot_id, slot, root),
-        "lease_count": slot.get("lease_count", 0),
-    })
-    return view
-
-def _prune_choices(ctx: TaskContext, pool: dict, registry: dict, slot_ids: list, root: str, call: dict, hooks: list | None = None) -> struct:
-    """What the `prune_slot` hook says of each of `slot_ids`: `chosen` maps a
-    slot to True (delete) or False (keep) where the hook gave an answer, and
-    leaves out those it left to the built-in rule (None); `warnings` are the
-    `prune_hook_failed` documents to report, already said on stderr. `call`
-    is what the hook is told about the command asking (`_prune_pool_view`).
-
-    Like `score_slot`, a hook that fails, answers with anything else, or runs
-    past `_HOOK_BUDGET_MS` across its calls has every answer discarded, so one
-    command never judges some slots by the hook and others by the built-in.
-    Only the first registered hook runs. `hooks` stands in for the registered
-    ones.
-    """
-    registered = ctx.traits[Worktrees].prune_slot if hooks == None else hooks
-    if not registered or not slot_ids:
-        return struct(chosen = {}, warnings = [])
-    seen = _prune_pool_view(ctx, pool, registry, call)
-    chosen = {}
-    problem = ""
-    started = time.now_ms()
-    for slot_id in slot_ids:
-        err, said = catch(registered[0], ctx, _prune_slot_view(ctx, pool, registry, slot_id, root), dict(seen))
-        spent = time.now_ms() - started
-        if err != None:
-            problem = "the prune_slot hook failed: " + printable(str(err))
-        elif said != None and type(said) != "bool":
-            problem = "the prune_slot hook returned " + ("an " if type(said)[0] in "aeiou" else "a ") + type(said) + " rather than True, False or None"
-        elif spent > _HOOK_BUDGET_MS:
-            problem = ("the prune_slot hook took %dms for %d of %d slots, past the %dms it is given while the " +
-                       "pool lock is held") % (spent, len(chosen) + 1, len(slot_ids), _HOOK_BUDGET_MS)
-        if problem:
-            break
-        if said != None:
-            chosen[slot_id] = said
-    if not problem:
-        return struct(chosen = chosen, warnings = [])
-    problem += "; every slot was judged by the built-in rule instead"
-    _warn(ctx.std, problem)
-    return struct(chosen = {}, warnings = [{"code": "prune_hook_failed", "message": problem}])
-
 def _worktree_holding_branch(ctx: TaskContext, pool: dict, name: str) -> str:
     """The path of any worktree of this clone that has `name` checked out, or "".
 
@@ -2054,18 +1960,139 @@ def _take_over(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name:
         "uncommitted": _porcelain_entries(work),
     }
 
-def _prune_reason(ctx: TaskContext, pool: dict, slot_id: str, slot: dict, root: str) -> str:
+def _prune_reason(ctx: TaskContext, pool: dict, slot_id: str, slot: dict, root: str, hooked: bool = False) -> str:
     """Why this slot is collectable, in the terms that actually apply to it.
 
     An entry with no recorded age is collectable because there is nothing behind
     it, not because of a threshold it cannot be measured against, and a
-    stranded one because its clone is gone, whatever its age.
+    stranded one because its clone is gone, whatever its age. `hooked` is a
+    slot the `prune_slot` hook chose, which is said first.
     """
+    if hooked:
+        return "the prune_slot hook chose it, " + _prune_reason(ctx, pool, slot_id, slot, root)
     if _stranded(ctx, pool, slot):
         return "stranded, clone gone"
     if slot.get("created_ms", 0):
         return "idle " + compact_ms(slot_idle_ms(ctx.std, pool, slot_id, slot, root))
     return "no recorded age, nothing on disk"
+
+# The commands that ask a `prune_slot` hook, as `pool["event"]` names them.
+_PRUNE_ON_ADD = "add"
+_PRUNE_ON_PRUNE = "prune"
+_PRUNE_ON_RELEASE = "release"
+
+def _prune_call(event: str, max_idle_days: int | None = None, dry_run: bool = False) -> dict:
+    """What a `prune_slot` hook is told about the command asking it: the
+    `event`, the `max_idle_days` the built-in rule is applying (None where it
+    applies none, as on `release`), and whether this is a `dry_run`."""
+    return {"event": event, "max_idle_days": max_idle_days, "dry_run": dry_run}
+
+def _slot_counts(registry: dict) -> dict:
+    """How many of a registry's slots are in each state, as a `prune_slot`
+    hook is shown them."""
+    states = [registry["slots"][sid]["state"] for sid in registry["slots"]]
+    return {
+        "total": len(states),
+        "free": len([s for s in states if s == FREE]),
+        "leased": len([s for s in states if s == LEASED]),
+        "reserved": len([s for s in states if s == RESERVED]),
+    }
+
+def _prune_pool_view(ctx: TaskContext, pool: dict, registry: dict, call: dict) -> dict:
+    """The pool as a `prune_slot` hook sees it: this pool's counts and every
+    other pool's on the machine, with `call` (`_prune_call`) merged in. Built
+    once per command, and only when a hook is registered, since it reads every
+    pool's registry."""
+    others = []
+    for other in pools_on_disk(ctx.std):
+        if other["dir"] == pool["dir"]:
+            continue
+        others.append({"id": other["id"], "dir": other["dir"], "slots": _slot_counts(read_registry(ctx.std, other["dir"]))})
+    return call | {
+        "id": pool["id"],
+        "dir": pool["dir"],
+        "clone": pool["git_common_dir"].removesuffix("/.git"),
+        "max_slots": ctx.traits[Worktrees].max_slots,
+        "owned": len(owned_slots(pool, registry)),
+        "slots": _slot_counts(registry),
+        "other_pools": others,
+    }
+
+def _prune_slot_view(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str) -> dict:
+    """A free slot as a `prune_slot` hook sees it: what `score_slot` is shown
+    (`_hook_view`), plus where the slot and its base are, the base's server,
+    and how long the slot has been idle."""
+    slot = registry["slots"][slot_id]
+    path = slot_path(pool, slot_id)
+    warmth = warmth_of(ctx.std, path, root)
+    return _hook_view(slot_id, slot, warmth.base) | {
+        "path": path,
+        "output_base": output_base_of(ctx.std, path, root),
+        "server_pid": warmth.server,
+        "idle_ms": slot_idle_ms(ctx.std, pool, slot_id, slot, root),
+        "lease_count": slot.get("lease_count", 0),
+    }
+
+def _prune_choices(ctx: TaskContext, pool: dict, registry: dict, slot_ids: list, root: str, call: dict, hooks: list | None = None) -> struct:
+    """What the `prune_slot` hook says of each of `slot_ids`: `chosen` maps a
+    slot to True (delete) or False (keep) where the hook gave an answer, and
+    leaves out those it left to the built-in rule (None); `warnings` are the
+    `prune_hook_failed` documents to report, already said on stderr. `call`
+    is what the hook is told about the command asking (`_prune_call`).
+
+    Like `score_slot`, a hook that fails, answers with anything else, or runs
+    past `_HOOK_BUDGET_MS` across its calls has every answer discarded, so one
+    command never judges some slots by the hook and others by the built-in.
+    Only the first registered hook runs. `hooks` stands in for the registered
+    ones.
+    """
+    registered = ctx.traits[Worktrees].prune_slot if hooks == None else hooks
+    if not registered or not slot_ids:
+        return struct(chosen = {}, warnings = [])
+    seen = _prune_pool_view(ctx, pool, registry, call)
+    chosen = {}
+    problem = ""
+    started = time.now_ms()
+    for i, slot_id in enumerate(slot_ids):
+        err, said = catch(registered[0], ctx, _prune_slot_view(ctx, pool, registry, slot_id, root), dict(seen))
+        spent = time.now_ms() - started
+        if err != None:
+            problem = "the prune_slot hook failed: " + printable(str(err))
+        elif said != None and type(said) != "bool":
+            problem = "the prune_slot hook returned a value of type " + type(said) + " rather than True, False or None"
+        elif spent > _HOOK_BUDGET_MS:
+            problem = "the prune_slot hook took %dms for %d of %d slots, past the %dms it is given" % (
+                spent,
+                i + 1,
+                len(slot_ids),
+                _HOOK_BUDGET_MS,
+            )
+        if problem:
+            break
+        if said != None:
+            chosen[slot_id] = said
+    if not problem:
+        return struct(chosen = chosen, warnings = [])
+    problem += "; every slot was judged by the built-in rule instead"
+    _warn(ctx.std, problem)
+    return struct(chosen = {}, warnings = [{"code": "prune_hook_failed", "message": problem}])
+
+_NOT_PRUNED = struct(dropped = False, kept = "", warnings = [])
+
+def _prune_released(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str, hooks: list | None = None) -> struct:
+    """Ask the `prune_slot` hook about the slot `release` has just freed, and
+    delete it with `drop_slot` when the hook says so. Mutates `registry`; the
+    caller writes it.
+
+    Returns `dropped`, whether the slot went; `kept`, why `drop_slot` refused
+    one the hook chose — usually a Bazel server still holding the base — or
+    ""; and the hook's `warnings`. `hooks` stands in for the registered ones.
+    """
+    answer = _prune_choices(ctx, pool, registry, [slot_id], root, _prune_call(_PRUNE_ON_RELEASE), hooks)
+    if not answer.chosen.get(slot_id, False):
+        return struct(dropped = False, kept = "", warnings = answer.warnings)
+    outcome = drop_slot(ctx.std, pool, registry, slot_id, root)
+    return struct(dropped = outcome.dropped, kept = outcome.reason, warnings = answer.warnings)
 
 def _hooked_prunable(
         ctx: TaskContext,
@@ -2105,10 +2132,10 @@ def _hooked_prunable(
     ]
     return struct(ids = ids, chosen = chosen, warnings = warnings)
 
-def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str, hooks: list | None = None) -> int:
+def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str, warnings: list | None = None, hooks: list | None = None) -> int:
     """Drop free slots nothing has touched in `PRUNE_IDLE_DAYS`, or that the
-    `prune_slot` hook chooses. Returns how many
-    went, so the caller can persist a registry that no longer matches the disk.
+    `prune_slot` hook chooses. Returns how many went, so the caller can persist
+    a registry that no longer matches the disk.
 
     This is what actually bounds the pool, and it runs inside `add` because
     nobody runs a cleanup command on a schedule. It never touches a leased slot
@@ -2117,20 +2144,18 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str, hooks: lis
 
     A `Worktrees.prune_slot` hook overrides the idle rule (`_hooked_prunable`).
     A slot the hook chose that a live server or work still holds is kept
-    without a word, and asked about again on the next `add` or `prune`. `hooks` stands in
-    for the registered ones.
+    without a word, and asked about again on the next `add` or `prune`. The
+    hook's `prune_hook_failed` warnings are appended to `warnings`. `hooks`
+    stands in for the registered ones.
     """
-    call = {"event": "add", "max_idle_days": PRUNE_IDLE_DAYS, "dry_run": False}
-    found = _hooked_prunable(ctx, pool, registry, root, call, stranded_at_once = False, hooks = hooks)
-    chosen = found.chosen
-    victims = found.ids
+    found = _hooked_prunable(ctx, pool, registry, root, _prune_call(_PRUNE_ON_ADD, PRUNE_IDLE_DAYS), stranded_at_once = False, hooks = hooks)
+    if warnings != None:
+        warnings.extend(found.warnings)
     dropped = 0
-    for slot_id in victims:
+    for slot_id in found.ids:
         slot = registry["slots"][slot_id]
         label = slot.get("last_branch", "") or slot_id
-        why = _prune_reason(ctx, pool, slot_id, slot, root)
-        if slot_id in chosen:
-            why = "the prune_slot hook chose it, " + why
+        why = _prune_reason(ctx, pool, slot_id, slot, root, hooked = slot_id in found.chosen)
         if drop_slot(ctx.std, pool, registry, slot_id, root).dropped:
             _info(ctx.std, "pruned slot (%s): %s" % (why, label))
             dropped += 1
@@ -3198,7 +3223,7 @@ def _adoption_preview(ctx: TaskContext, pool: dict, taken: list | None = None) -
             taken.extend(adopted)
     return reconcile(ctx.std, pool, registry)
 
-def _settle(ctx: TaskContext, pool: dict, root: str) -> dict:
+def _settle(ctx: TaskContext, pool: dict, root: str, notes: list | None = None) -> dict:
     """The registry, brought in line with git and tidied, for an `add` holding
     the pool lock: vanished checkouts unregistered, each slot's output base
     observed for `had_base`, stale slots aged out, and
@@ -3206,14 +3231,15 @@ def _settle(ctx: TaskContext, pool: dict, root: str) -> dict:
     unallocatable and still hold their branch in git. Steps that delete
     something write the registry at once; the rest is written with the lease
     that follows, or not at all — it is bookkeeping the next `add` observes
-    again."""
+    again. Warnings from the age-out are appended to `notes`, for the `add`'s
+    own report."""
     registry = _adopted(ctx, pool)
     if registry.get("read_only", False):
         return registry
     unregister_vanished(ctx.std, pool, registry)
     for slot_id in registry["slots"]:
         observe_base(registry, slot_id, warmth_of(ctx.std, slot_path(pool, slot_id), root).base)
-    if _age_out(ctx, pool, registry, root):
+    if _age_out(ctx, pool, registry, root, notes):
         write_registry(ctx.std, pool["dir"], registry)
     if _reclaim_reservations(ctx, pool, registry):
         write_registry(ctx.std, pool["dir"], registry)
@@ -3393,7 +3419,8 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     lock = _lock_pool(ctx, pool)
     if not lock:
         return _pool_busy(ctx)
-    registry = _settle(ctx, pool, root)
+    notes = []
+    registry = _settle(ctx, pool, root, notes)
     if registry.get("read_only", False):
         return _newer_registry(ctx, pool)
 
@@ -3414,7 +3441,6 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     # come into it — this caller asked for the branch it held.
     if held and _unlisted_lease(ctx, pool, registry, held):
         return _not_this_clones(ctx, pool, registry, held)
-    notes = []
     if held and abandoned_lease(ctx.std, pool, registry, held, root, _grace_ms(ctx)):
         previous = (registry["slots"][held].get("lease") or {}).get("agent") or {}
         said = ("taking back " + name + "'s slot from " + _holder(previous) +
@@ -3444,7 +3470,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         if is_directory(ctx.std, slot_path(pool, held)) and ctx.std.fs.exists(slot_path(pool, held) + "/.git"):
             took = _take_over(ctx, pool, registry, held, name, root)
             write_registry(ctx.std, pool["dir"], registry)
-            return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name, warnings = [took]))
+            return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name, warnings = notes + [took]))
         gone = _work(ctx, slot_path(pool, held), root)
         if gone:
             return _refuse(
@@ -3564,10 +3590,11 @@ def _add_detached(ctx: TaskContext, pool: dict, ref: str) -> int | TaskConclusio
     lock = _lock_pool(ctx, pool)
     if not lock:
         return _pool_busy(ctx)
-    registry = _settle(ctx, pool, root)
+    notes = []
+    registry = _settle(ctx, pool, root, notes)
     if registry.get("read_only", False):
         return _newer_registry(ctx, pool)
-    return _allocate(ctx, pool, lock, registry, want, root, commit, detached = ref)
+    return _allocate(ctx, pool, lock, registry, want, root, commit, detached = ref, notes = notes)
 
 def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     """End the lease on the slot named, or the one the caller stands in; with
@@ -3690,12 +3717,10 @@ def _release_slot(ctx: TaskContext, pool: dict, registry: dict, target: str, nam
     nothing refuses. Called holding the pool lock; the registry is written
     before returning when the slot is released.
 
-    Once released, the slot is offered to the `Worktrees.prune_slot` hook, and
-    deleted with `drop_slot` when it says so; `dropped` says whether it went,
-    and `drop_kept` why `drop_slot` refused, usually a Bazel server still
-    holding the base. `ask_hook` is False for a slot of another clone: the
-    hooks registered are this clone's config.axl's, not the owner's, so the
-    slot is left free for the owner's own hook to judge on its next `add`.
+    Once released, the slot is offered to the `Worktrees.prune_slot` hook
+    (`_prune_released`), whose outcome is `pruned`. `ask_hook` is False for a
+    slot of another clone: the hooks registered are this clone's config.axl's,
+    not the owner's, so the slot is left for the owner's hook to judge.
 
     Returns a struct whose `refusal` is the document `_refuse` would write when
     the slot is kept, with `reason` saying what was found in a phrase; or, with
@@ -3894,21 +3919,10 @@ def _release_slot(ctx: TaskContext, pool: dict, registry: dict, target: str, nam
     # can be looked at, and remembering that it existed is what lets a later
     # listing tell a reclaimed base from one that was never built.
     slot["had_base"] = slot.get("had_base", False) or warmth_of(ctx.std, path, root).base
-
-    # The one moment the caller knows the branch is done with: the hook may
-    # delete the slot rather than leave it warm for reuse.
-    pruned = _prune_choices(ctx, pool, registry, [target] if ask_hook else [], root, {"event": "release", "max_idle_days": None, "dry_run": False})
-    dropped = False
-    kept = ""
-    if pruned.chosen.get(target, False):
-        outcome = drop_slot(ctx.std, pool, registry, target, root)
-        dropped = outcome.dropped
-        kept = outcome.reason
+    pruned = _prune_released(ctx, pool, registry, target, root) if ask_hook else _NOT_PRUNED
     write_registry(ctx.std, pool["dir"], registry)
     return struct(
-        dropped = dropped,
-        drop_kept = kept,
-        prune_warnings = pruned.warnings,
+        pruned = pruned,
         refusal = None,
         reason = "",
         target = target,
@@ -3989,15 +4003,15 @@ def _release_report(ctx: TaskContext, pool: dict, done: struct, clone_there: str
             "message": "ended a lease held by " + _holder(holder),
             "previous_holder": holder,
         })
-    warnings.extend(done.prune_warnings)
-    if done.drop_kept:
+    warnings.extend(done.pruned.warnings)
+    if done.pruned.kept:
         warnings.append({
             "code": "prune_refused",
-            "message": ("the prune_slot hook chose to delete this slot, but " + done.drop_kept + ", so it stays " +
+            "message": ("the prune_slot hook chose to delete this slot, but " + done.pruned.kept + ", so it stays " +
                         "free in the pool; the next `aspect worktree add` or `prune` asks the hook about it again"),
-            "reason": done.drop_kept,
+            "reason": done.pruned.kept,
         })
-    elif done.server and not done.dropped:
+    elif done.server:
         warnings.append({
             "code": "bazel_server_running",
             "message": ("a Bazel server (pid %d) still holds this slot's output base, which keeps " +
@@ -4014,7 +4028,7 @@ def _release_report(ctx: TaskContext, pool: dict, done: struct, clone_there: str
         "released": done.released,
         "already_free": False,
         "slot": done.target,
-        "slot_deleted": done.dropped,
+        "slot_deleted": done.pruned.dropped,
         "path": path,
         "head": head,
         "head_on_remote": on_remote if head else None,
@@ -4712,7 +4726,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     eligible = []
     found = ""
     named = len(ctx.args.target) > 0
-    call = {"event": "prune", "max_idle_days": ctx.args.max_idle_days, "dry_run": ctx.args.dry_run}
+    call = _prune_call(_PRUNE_ON_PRUNE, ctx.args.max_idle_days, ctx.args.dry_run)
     policy = struct(ids = [], chosen = {}, warnings = [])
     if ctx.args.target:
         asked = ctx.args.target[0]
@@ -4812,9 +4826,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     for slot_id in victims:
         slot = registry["slots"][slot_id]
         aged = slot.get("created_ms", 0) != 0
-        why = "named" if named else _prune_reason(ctx, pool, slot_id, slot, root)
-        if not named and slot_id in policy.chosen:
-            why = "the prune_slot hook chose it, " + why
+        why = "named" if named else _prune_reason(ctx, pool, slot_id, slot, root, hooked = slot_id in policy.chosen)
         candidates.append({
             "slot": slot_id,
             "path": slot_path(pool, slot_id),
@@ -5685,6 +5697,9 @@ testonly_score_slot = _score_slot
 testonly_hook_view = _hook_view
 testonly_prune_choices = _prune_choices
 testonly_hooked_prunable = _hooked_prunable
+testonly_prune_released = _prune_released
+testonly_prune_call = _prune_call
+testonly_release_report = _release_report
 testonly_age_out = _age_out
 testonly_capped = _capped
 testonly_indented = _indented
