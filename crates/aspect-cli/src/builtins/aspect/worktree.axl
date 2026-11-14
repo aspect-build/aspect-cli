@@ -790,6 +790,100 @@ def _score_slot(ctx: TaskContext, slot: dict, want: dict, problems: list, hooks:
         ) + "; every slot was scored by the built-in instead")
     return default_score(slot, want)
 
+def _slot_counts(registry: dict) -> dict:
+    """How many of a registry's slots are in each state, as a `prune_slot`
+    hook is shown them."""
+    states = [registry["slots"][sid]["state"] for sid in registry["slots"]]
+    return {
+        "total": len(states),
+        "free": len([s for s in states if s == FREE]),
+        "leased": len([s for s in states if s == LEASED]),
+        "reserved": len([s for s in states if s == RESERVED]),
+    }
+
+def _prune_pool_view(ctx: TaskContext, pool: dict, registry: dict, call: dict) -> dict:
+    """The pool as a `prune_slot` hook sees it: this pool's counts and every
+    other pool's on the machine, with `call` — the `event`, the
+    `max_idle_days` the built-in rule is applying, and `dry_run` — merged in.
+    Built once per command, and only when a hook is registered, since it reads
+    every pool's registry."""
+    others = []
+    for other in pools_on_disk(ctx.std):
+        if other["dir"] == pool["dir"]:
+            continue
+        others.append({"id": other["id"], "dir": other["dir"], "slots": _slot_counts(read_registry(ctx.std, other["dir"]))})
+    return {
+        "event": call["event"],
+        "max_idle_days": call.get("max_idle_days"),
+        "dry_run": call.get("dry_run", False),
+        "id": pool["id"],
+        "dir": pool["dir"],
+        "clone": pool["git_common_dir"].removesuffix("/.git"),
+        "max_slots": ctx.traits[Worktrees].max_slots,
+        "owned": len(owned_slots(pool, registry)),
+        "slots": _slot_counts(registry),
+        "other_pools": others,
+    }
+
+def _prune_slot_view(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str) -> dict:
+    """A free slot as a `prune_slot` hook sees it: a fresh dict of the
+    documented fields, so a hook can neither read other sessions' records nor
+    change the registry."""
+    slot = registry["slots"][slot_id]
+    path = slot_path(pool, slot_id)
+    warmth = warmth_of(ctx.std, path, root)
+    view = {key: slot.get(key) or ("" if key != "created_ms" else 0) for key in _HOOK_SLOT_FIELDS}
+    view.update({
+        "id": slot_id,
+        "path": path,
+        "output_base": output_base_of(ctx.std, path, root),
+        "base_present": warmth.base,
+        "server_pid": warmth.server,
+        "idle_ms": slot_idle_ms(ctx.std, pool, slot_id, slot, root),
+        "lease_count": slot.get("lease_count", 0),
+    })
+    return view
+
+def _prune_choices(ctx: TaskContext, pool: dict, registry: dict, slot_ids: list, root: str, call: dict, hooks: list | None = None) -> struct:
+    """What the `prune_slot` hook says of each of `slot_ids`: `chosen` maps a
+    slot to True (delete) or False (keep) where the hook gave an answer, and
+    leaves out those it left to the built-in rule (None); `warnings` are the
+    `prune_hook_failed` documents to report, already said on stderr. `call`
+    is what the hook is told about the command asking (`_prune_pool_view`).
+
+    Like `score_slot`, a hook that fails, answers with anything else, or runs
+    past `_HOOK_BUDGET_MS` across its calls has every answer discarded, so one
+    command never judges some slots by the hook and others by the built-in.
+    Only the first registered hook runs. `hooks` stands in for the registered
+    ones.
+    """
+    registered = ctx.traits[Worktrees].prune_slot if hooks == None else hooks
+    if not registered or not slot_ids:
+        return struct(chosen = {}, warnings = [])
+    seen = _prune_pool_view(ctx, pool, registry, call)
+    chosen = {}
+    problem = ""
+    started = time.now_ms()
+    for slot_id in slot_ids:
+        err, said = catch(registered[0], ctx, _prune_slot_view(ctx, pool, registry, slot_id, root), dict(seen))
+        spent = time.now_ms() - started
+        if err != None:
+            problem = "the prune_slot hook failed: " + printable(str(err))
+        elif said != None and type(said) != "bool":
+            problem = "the prune_slot hook returned " + ("an " if type(said)[0] in "aeiou" else "a ") + type(said) + " rather than True, False or None"
+        elif spent > _HOOK_BUDGET_MS:
+            problem = ("the prune_slot hook took %dms for %d of %d slots, past the %dms it is given while the " +
+                       "pool lock is held") % (spent, len(chosen) + 1, len(slot_ids), _HOOK_BUDGET_MS)
+        if problem:
+            break
+        if said != None:
+            chosen[slot_id] = said
+    if not problem:
+        return struct(chosen = chosen, warnings = [])
+    problem += "; every slot was judged by the built-in rule instead"
+    _warn(ctx.std, problem)
+    return struct(chosen = {}, warnings = [{"code": "prune_hook_failed", "message": problem}])
+
 def _worktree_holding_branch(ctx: TaskContext, pool: dict, name: str) -> str:
     """The path of any worktree of this clone that has `name` checked out, or "".
 
@@ -1973,20 +2067,70 @@ def _prune_reason(ctx: TaskContext, pool: dict, slot_id: str, slot: dict, root: 
         return "idle " + compact_ms(slot_idle_ms(ctx.std, pool, slot_id, slot, root))
     return "no recorded age, nothing on disk"
 
-def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
-    """Drop free slots nothing has touched in `PRUNE_IDLE_DAYS`. Returns how many
+def _hooked_prunable(
+        ctx: TaskContext,
+        pool: dict,
+        registry: dict,
+        root: str,
+        call: dict,
+        stranded_at_once: bool,
+        chosen: dict | None = None,
+        hooks: list | None = None) -> struct:
+    """The free slots to delete by policy, in registry order: `prunable_slots`
+    at `call["max_idle_days"]`, overridden either way by the `prune_slot` hook
+    for this clone's own free slots. Another clone's slots, and entries with
+    nothing behind them, keep the built-in rule.
+
+    Returns `ids`, the hook's answers as `chosen` — passed back in to judge a
+    re-read registry by the same answers without asking again — and its
+    `warnings`. `hooks` stands in for the registered ones.
+    """
+    builtin = prunable_slots(ctx.std, pool, registry, call["max_idle_days"], root, stranded_at_once = stranded_at_once)
+    warnings = []
+    if chosen == None:
+        asked = [
+            sid
+            for sid in registry["slots"]
+            if registry["slots"][sid]["state"] == FREE and
+               registry["slots"][sid].get("owner_git_dir", "") == pool["git_common_dir"] and
+               registry["slots"][sid].get("created_ms", 0)
+        ]
+        answer = _prune_choices(ctx, pool, registry, asked, root, call, hooks)
+        chosen = answer.chosen
+        warnings = answer.warnings
+    ids = [
+        sid
+        for sid in registry["slots"]
+        if ((chosen[sid] and registry["slots"][sid]["state"] == FREE) if sid in chosen else sid in builtin)
+    ]
+    return struct(ids = ids, chosen = chosen, warnings = warnings)
+
+def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str, hooks: list | None = None) -> int:
+    """Drop free slots nothing has touched in `PRUNE_IDLE_DAYS`, or that the
+    `prune_slot` hook chooses. Returns how many
     went, so the caller can persist a registry that no longer matches the disk.
 
     This is what actually bounds the pool, and it runs inside `add` because
     nobody runs a cleanup command on a schedule. It never touches a leased slot
     or one a live server still holds, so the worst case is reclaiming cache that
     had already stopped paying for itself.
+
+    A `Worktrees.prune_slot` hook overrides the idle rule (`_hooked_prunable`).
+    A slot the hook chose that a live server or work still holds is kept
+    without a word, and asked about again on the next `add` or `prune`. `hooks` stands in
+    for the registered ones.
     """
+    call = {"event": "add", "max_idle_days": PRUNE_IDLE_DAYS, "dry_run": False}
+    found = _hooked_prunable(ctx, pool, registry, root, call, stranded_at_once = False, hooks = hooks)
+    chosen = found.chosen
+    victims = found.ids
     dropped = 0
-    for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_IDLE_DAYS, root, stranded_at_once = False):
+    for slot_id in victims:
         slot = registry["slots"][slot_id]
         label = slot.get("last_branch", "") or slot_id
         why = _prune_reason(ctx, pool, slot_id, slot, root)
+        if slot_id in chosen:
+            why = "the prune_slot hook chose it, " + why
         if drop_slot(ctx.std, pool, registry, slot_id, root).dropped:
             _info(ctx.std, "pruned slot (%s): %s" % (why, label))
             dropped += 1
@@ -3527,7 +3671,7 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
             write_registry(ctx.std, pool["dir"], registry)
         return _nothing_to_release(ctx, pool, registry, target)
 
-    done = _release_slot(ctx, pool, registry, target, name, root, in_clone)
+    done = _release_slot(ctx, pool, registry, target, name, root, in_clone, ask_hook = not there)
     if done.refusal:
         return _refused(ctx, done.refusal)
 
@@ -3541,10 +3685,17 @@ def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     _say_released(ctx, doc, root)
     return 0
 
-def _release_slot(ctx: TaskContext, pool: dict, registry: dict, target: str, name: str, root: str, in_clone: str) -> struct:
+def _release_slot(ctx: TaskContext, pool: dict, registry: dict, target: str, name: str, root: str, in_clone: str, ask_hook: bool = True) -> struct:
     """Judge leased slot `target` as `release <name>` does, and release it if
     nothing refuses. Called holding the pool lock; the registry is written
     before returning when the slot is released.
+
+    Once released, the slot is offered to the `Worktrees.prune_slot` hook, and
+    deleted with `drop_slot` when it says so; `dropped` says whether it went,
+    and `drop_kept` why `drop_slot` refused, usually a Bazel server still
+    holding the base. `ask_hook` is False for a slot of another clone: the
+    hooks registered are this clone's config.axl's, not the owner's, so the
+    slot is left free for the owner's own hook to judge on its next `add`.
 
     Returns a struct whose `refusal` is the document `_refuse` would write when
     the slot is kept, with `reason` saying what was found in a phrase; or, with
@@ -3743,8 +3894,21 @@ def _release_slot(ctx: TaskContext, pool: dict, registry: dict, target: str, nam
     # can be looked at, and remembering that it existed is what lets a later
     # listing tell a reclaimed base from one that was never built.
     slot["had_base"] = slot.get("had_base", False) or warmth_of(ctx.std, path, root).base
+
+    # The one moment the caller knows the branch is done with: the hook may
+    # delete the slot rather than leave it warm for reuse.
+    pruned = _prune_choices(ctx, pool, registry, [target] if ask_hook else [], root, {"event": "release", "max_idle_days": None, "dry_run": False})
+    dropped = False
+    kept = ""
+    if pruned.chosen.get(target, False):
+        outcome = drop_slot(ctx.std, pool, registry, target, root)
+        dropped = outcome.dropped
+        kept = outcome.reason
     write_registry(ctx.std, pool["dir"], registry)
     return struct(
+        dropped = dropped,
+        drop_kept = kept,
+        prune_warnings = pruned.warnings,
         refusal = None,
         reason = "",
         target = target,
@@ -3825,7 +3989,15 @@ def _release_report(ctx: TaskContext, pool: dict, done: struct, clone_there: str
             "message": "ended a lease held by " + _holder(holder),
             "previous_holder": holder,
         })
-    if done.server:
+    warnings.extend(done.prune_warnings)
+    if done.drop_kept:
+        warnings.append({
+            "code": "prune_refused",
+            "message": ("the prune_slot hook chose to delete this slot, but " + done.drop_kept + ", so it stays " +
+                        "free in the pool; the next `aspect worktree add` or `prune` asks the hook about it again"),
+            "reason": done.drop_kept,
+        })
+    elif done.server and not done.dropped:
         warnings.append({
             "code": "bazel_server_running",
             "message": ("a Bazel server (pid %d) still holds this slot's output base, which keeps " +
@@ -3842,6 +4014,7 @@ def _release_report(ctx: TaskContext, pool: dict, done: struct, clone_there: str
         "released": done.released,
         "already_free": False,
         "slot": done.target,
+        "slot_deleted": done.dropped,
         "path": path,
         "head": head,
         "head_on_remote": on_remote if head else None,
@@ -3853,8 +4026,11 @@ def _release_report(ctx: TaskContext, pool: dict, done: struct, clone_there: str
 
 def _say_released(ctx: TaskContext, doc: dict, root: str) -> None:
     """The text report of one `_release_report` document."""
-    _info(ctx.std, "released " + doc["released"] + "; the slot stays in the pool, " +
-                   _warmth_note(ctx.std, doc["path"], doc["released"], root).partition(":")[0])
+    if doc["slot_deleted"]:
+        _info(ctx.std, "released " + doc["released"] + " and deleted its slot and output base, as the prune_slot hook chose")
+    else:
+        _info(ctx.std, "released " + doc["released"] + "; the slot stays in the pool, " +
+                       _warmth_note(ctx.std, doc["path"], doc["released"], root).partition(":")[0])
     for w in doc["warnings"]:
         _warn(ctx.std, w["message"])
 
@@ -4329,7 +4505,7 @@ def _delete_slots(ctx: TaskContext, pool: dict, registry: dict, victims: list[st
         write_registry(ctx.std, pool["dir"], registry)
     return struct(pruned = pruned, kept = kept)
 
-def _nothing_to_prune_message(registry: dict, own_git_dir: str, max_idle_days: int) -> str:
+def _nothing_to_prune_message(registry: dict, own_git_dir: str, max_idle_days: int, hook_kept: int = 0) -> str:
     """Why nothing was collectable, in terms the reader can act on.
 
     Three different situations, and naming the wrong one sends somebody looking
@@ -4344,7 +4520,8 @@ def _nothing_to_prune_message(registry: dict, own_git_dir: str, max_idle_days: i
     free" or "none is old enough" is false either way.
 
     At a threshold of zero every free slot this clone owns is eligible, so with
-    nothing collected one of the earlier answers always applies.
+    nothing collected one of the earlier answers always applies — unless the
+    `prune_slot` hook kept them, which `hook_kept` counts and is then said.
     """
     free = [sid for sid in registry["slots"] if registry["slots"][sid]["state"] == FREE]
 
@@ -4365,6 +4542,11 @@ def _nothing_to_prune_message(registry: dict, own_git_dir: str, max_idle_days: i
     if not mine:
         return ("nothing to prune: the free slots here belong to another clone of this " +
                 "repository, and are that clone's to collect")
+    if hook_kept:
+        return "nothing to prune: the prune_slot hook kept %s, and no other free slot has been idle for %d days" % (
+            pluralize(hook_kept, "free slot"),
+            max_idle_days,
+        )
     return "nothing to prune: no free slot has been idle for %d days" % max_idle_days
 
 def _slot_on_disk(ctx: TaskContext, asked: str) -> list:
@@ -4530,6 +4712,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     eligible = []
     found = ""
     named = len(ctx.args.target) > 0
+    call = {"event": "prune", "max_idle_days": ctx.args.max_idle_days, "dry_run": ctx.args.dry_run}
+    policy = struct(ids = [], chosen = {}, warnings = [])
     if ctx.args.target:
         asked = ctx.args.target[0]
         if located:
@@ -4595,7 +4779,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             )
         eligible = [found]
     else:
-        eligible = prunable_slots(ctx.std, pool, registry, ctx.args.max_idle_days, root)
+        policy = _hooked_prunable(ctx, pool, registry, root, call, stranded_at_once = True)
+        eligible = policy.ids
 
     # A live Bazel server, or a checkout holding work, spares a slot. Applied
     # here rather than only at deletion, so `--dry-run` previews what a real run
@@ -4628,6 +4813,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         slot = registry["slots"][slot_id]
         aged = slot.get("created_ms", 0) != 0
         why = "named" if named else _prune_reason(ctx, pool, slot_id, slot, root)
+        if not named and slot_id in policy.chosen:
+            why = "the prune_slot hook chose it, " + why
         candidates.append({
             "slot": slot_id,
             "path": slot_path(pool, slot_id),
@@ -4672,7 +4859,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             if not _relock(ctx, pool, lock):
                 return _pool_busy(ctx)
             registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-            still = [found] if named else prunable_slots(ctx.std, pool, registry, ctx.args.max_idle_days, root)
+            still = [found] if named else _hooked_prunable(ctx, pool, registry, root, call, stranded_at_once = True, chosen = policy.chosen).ids
             victims = [
                 v
                 for v in victims
@@ -4723,6 +4910,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             # So a caller can tell "you said no" from "there was nothing to do",
             # which an empty `pruned` alone does not.
             "declined": declined,
+            "warnings": policy.warnings,
         }, indent = 2) + "\n")
         return 1 if kept_named else 0
 
@@ -4731,6 +4919,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             registry,
             pool["git_common_dir"],
             ctx.args.max_idle_days,
+            len([sid for sid in policy.chosen if not policy.chosen[sid]]),
         ))
     elif not victims:
         idle = (" that has been idle for %d days" % ctx.args.max_idle_days) if ctx.args.max_idle_days else ""
@@ -5371,7 +5560,7 @@ worktree_release = task(
     kind = "release",
     group = ["worktree"],
     summary = "End the lease on <branch>, the slot you are in, or with --all every slot: remove the worktree, keep the slot warm.",
-    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.\n\n`--all` ends every lease this clone holds in its pool, one slot at a time, each judged as naming it would judge it: the refusals above and the `--force` grades apply to each slot, a sibling subagent's lease is never released, and a slot still being set up, or whose checkout this clone's git does not list, is skipped. The pool's lock is taken for one slot at a time, so other `aspect worktree` calls go on meanwhile; a slot whose lease changed in between is skipped. One line per slot says what happened, then a count; it exits 1 when any slot was refused.",
+    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast. A `Worktrees.prune_slot` hook in config.axl can instead have the slot deleted, output base and all, once its lease ends — unless a Bazel server still holds that base, when the slot is kept free and the hook is asked again on the next `aspect worktree add` or `prune`. Another clone's slot released from here is never deleted this way: that clone's own hook judges it.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.\n\n`--all` ends every lease this clone holds in its pool, one slot at a time, each judged as naming it would judge it: the refusals above and the `--force` grades apply to each slot, a sibling subagent's lease is never released, and a slot still being set up, or whose checkout this clone's git does not list, is skipped. The pool's lock is taken for one slot at a time, so other `aspect worktree` calls go on meanwhile; a slot whose lease changed in between is skipped. One line per slot says what happened, then a count; it exits 1 when any slot was refused.",
     implementation = _release_impl,
     traits = [Worktrees],
     args = {
@@ -5420,7 +5609,7 @@ path = task(
 prune = task(
     group = ["worktree"],
     summary = "Delete free slots and their Bazel output bases: one named, or all that have gone stale.",
-    description = _EXPERIMENTAL + "\n\n" + "Reclaim the disk held by free slots. Name a branch, a slot id, a unique prefix of one or a slot's directory to delete that one however recently it was used; name nothing and every free slot nothing has used for a while goes. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots — and, by name, stranded ones — are considered: a slot someone is working in is never deleted, however long it has been idle. A free slot whose Bazel server is still running, or whose checkout holds work, is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nA clone that was moved or deleted leaves its slots for the next clone to take over: a free one by any clone, which then ages like its own, and a leased one by the clone whose git still lists its checkout. What no clone can take — a leased slot whose clone was deleted — is stranded, and goes only by being named, whatever its age, with `--force=all` where its checkout holds work; one whose lease's session is still running is refused, since its clone most likely moved.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
+    description = _EXPERIMENTAL + "\n\n" + "Reclaim the disk held by free slots. Name a branch, a slot id, a unique prefix of one or a slot's directory to delete that one however recently it was used; name nothing and every free slot nothing has used for a while goes — or, with a `Worktrees.prune_slot` hook in config.axl, every free slot the hook chooses, told the `--max-idle-days` and whether this is a `--dry-run`. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots — and, by name, stranded ones — are considered: a slot someone is working in is never deleted, however long it has been idle. A free slot whose Bazel server is still running, or whose checkout holds work, is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nA clone that was moved or deleted leaves its slots for the next clone to take over: a free one by any clone, which then ages like its own, and a leased one by the clone whose git still lists its checkout. What no clone can take — a leased slot whose clone was deleted — is stranded, and goes only by being named, whatever its age, with `--force=all` where its checkout holds work; one whose lease's session is still running is refused, since its clone most likely moved.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
     implementation = _prune_impl,
     traits = [Worktrees],
     args = {
@@ -5494,6 +5683,9 @@ testonly_push_command = _push_command
 testonly_reservation_may_clear = _reservation_may_clear
 testonly_score_slot = _score_slot
 testonly_hook_view = _hook_view
+testonly_prune_choices = _prune_choices
+testonly_hooked_prunable = _hooked_prunable
+testonly_age_out = _age_out
 testonly_capped = _capped
 testonly_indented = _indented
 testonly_release_grade = _release_grade

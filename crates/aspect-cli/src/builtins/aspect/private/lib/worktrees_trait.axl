@@ -18,10 +18,28 @@ docstring in `private/lib/worktree.axl` for how the pool is actually bounded.
 
 `abandoned_grace_hours` is how long a stopped session's slot is kept for it
 before another `add` may take it back.
+
+`prune_slot` decides when a free slot's disk is worth more than its warmth:
+asked about each of this clone's free slots during every `add` and every
+`prune` that names no slot, and about the slot just given back by `release`.
+`pool["event"]` says which, and `pool["max_idle_days"]` the threshold the
+built-in rule is applying. With `ctx` it can look at the machine
+itself, such as free space on the pool's volume:
+
+    def _prune_when_disk_is_short(ctx, slot, pool):
+        df = ctx.std.process.command("df").args(["-Pk", pool["dir"]]).stdout("piped").stderr("null").spawn().wait_with_output()
+        free_kb = int(df.stdout.strip().splitlines()[-1].split()[3])
+        if free_kb < 50 * 1024 * 1024:
+            return True    # under 50 GiB free: delete every free slot asked about
+        return None        # otherwise the built-in idle rule
+
+    ctx.traits[Worktrees].prune_slot.append(_prune_when_disk_is_short)
 """
 
-# The `score_slot` hook's limits: how long its calls for one `add` may take in
-# all, and the bound a score is clamped to.
+load("./worktree.axl", "PRUNE_IDLE_DAYS")
+
+# The hooks' limits: how long each hook's calls for one command may take in
+# all, and the bound a `score_slot` score is clamped to.
 HOOK_BUDGET_MS = 2000
 HOOK_SCORE_LIMIT = 1000000000
 
@@ -35,6 +53,11 @@ Worktrees = trait(
         int,
         default = 24,
         description = "How long a lease whose session has stopped is kept for that session to come back to — resumed, or restarted on its branch — counted from the slot's last activity: the lease being taken, Bazel using its output base, or a git operation in its checkout. Only after this, and only with nothing in the checkout to lose, is the slot taken back for another `add`. 0 takes such a slot back at once; a negative value is refused. `--take-over` and `release --force=all` are not bound by it.",
+    ),
+    prune_slot = attr(
+        list[typing.Callable[[TaskContext, dict, dict], typing.Any]],
+        default = [],
+        description = "Hooks deciding whether a free slot is deleted — its checkout directory, its Bazel output base and its pool entry: `fn(ctx, slot, pool) -> True | False | None`. True deletes it, False keeps it however long it has been idle, and None leaves it to the built-in rule, which deletes a free slot idle for `pool[\"max_idle_days\"]` days and never deletes one on `release`. `pool[\"event\"]` says which command is asking: `\"add\"`, once for each of this clone's free slots before a slot is picked, with `max_idle_days` " + str(PRUNE_IDLE_DAYS) + "; `\"prune\"`, the same for an `aspect worktree prune` that names no slot, with the `--max-idle-days` it was given and `dry_run` true for `--dry-run`, when the hook's answer only decides what is listed — so a hook must not act on its own, only answer; or `\"release\"`, once for the slot `release` has just freed, with `max_idle_days` None. A slot of another clone released from here is not asked about, since the hooks are this clone's config.axl's, not its owner's: it stays free for the owner's hook to judge. `slot` carries `id`, `path`, `output_base`, `base_present`, `server_pid` (0 when no Bazel server holds the base), `idle_ms`, `created_ms`, `lease_count`, `last_branch`, `last_commit` and `lock_digest`; `pool` carries `event`, `max_idle_days`, `dry_run`, `id`, `dir`, `clone`, `max_slots`, `owned` (how many slots this clone has, which `max_slots` counts), `slots` (this pool's `total`, `free`, `leased` and `reserved`) and `other_pools`, a list of every other pool on this machine with its `id`, `dir` and `slots`. Deleting is refused, whatever the hook says, while a Bazel server still holds the slot's output base — after a `release` it usually does, until Bazel's idle timeout — or while its checkout holds work; such a slot stays free and is asked about again on the next `add` or `prune`. The first registered hook decides. One that fails or returns something other than True, False or None is warned about (`prune_hook_failed`) and the built-in rule used for every slot; so does one whose calls take more than " + str(HOOK_BUDGET_MS // 1000) + " seconds in all, since the pool lock is held meanwhile — so read free space with `df`, not the size of a base with `du`. Slots of another clone, and pool entries with nothing behind them, are not asked about; nor is a slot named to `aspect worktree prune`, where naming it is the decision.",
     ),
     max_slots = attr(
         int,

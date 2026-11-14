@@ -11,6 +11,7 @@ two spellings but not the two hosts is the behaviour these pin down.
 
 load(
     "@aspect//worktree.axl",
+    "testonly_age_out",
     "testonly_base_note",
     "testonly_being_set_up",
     "testonly_capped",
@@ -23,6 +24,7 @@ load(
     "testonly_history_columns",
     "testonly_history_rows",
     "testonly_hook_view",
+    "testonly_hooked_prunable",
     "testonly_hosted_lease",
     "testonly_indented",
     "testonly_is_branch",
@@ -34,6 +36,7 @@ load(
     "testonly_own_subagent",
     "testonly_porcelain_entries",
     "testonly_protected_from",
+    "testonly_prune_choices",
     "testonly_push_command",
     "testonly_release_all_plan",
     "testonly_release_grade",
@@ -115,6 +118,7 @@ load(
     "work_in",
     "write_registry",
 )
+load("./worktrees_trait.axl", "Worktrees")
 
 def _eq(label, got, want):
     if got != want:
@@ -2736,6 +2740,190 @@ def _test_an_interrupted_add_takes_its_own_checkout_with_it(ctx):
     }}}
     _eq("nothing in it to keep", testonly_reservation_may_clear(ctx, clean.pool, registry, clean.slot_id), True)
 
+def _prune_pool(ctx):
+    """A pool under a throwaway home, with a second pool beside it, and a free
+    slot directory for each id asked for. Returns the pool, the output root, a
+    function restoring HOME, and the throwaway home."""
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-wt-prune")
+    root = home + "/.aspect/worktrees"
+    pool = {"id": "github.com/acme/web", "git_common_dir": home + "/clone/.git", "dir": root + "/github.com/acme/web"}
+    ctx.std.fs.create_dir_all(pool["dir"])
+    ctx.std.fs.create_dir_all(root + "/github.com/acme/api")
+    ctx.std.fs.write(root + "/github.com/acme/api/registry.json", json.encode({"version": 1, "slots": {
+        "eeeeeeeeeeee": _slot("/other/.git", state = LEASED),
+    }}))
+    saved = ctx.std.env.var("HOME")
+    ctx.std.env.set_var("HOME", home)
+
+    def restore():
+        if saved != None:
+            ctx.std.env.set_var("HOME", saved)
+
+    return struct(pool = pool, root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root"), restore = restore, home = home)
+
+def _test_the_prune_hook_overrides_the_idle_rule_both_ways(ctx):
+    """`prune_slot` decides for this clone's free slots in either direction: a
+    fresh slot it names goes, a stale one it keeps stays, and None leaves the
+    idle rule in charge. Leased slots and another clone's are never asked about,
+    and each call sees the slot and the pool as documented."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    mine = pool["git_common_dir"]
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(mine, age_days = 0),
+        "bbbbbbbbbbbb": _slot(mine, age_days = 31),
+        "cccccccccccc": _slot(mine, age_days = 0),
+        "dddddddddddd": _slot(mine, state = LEASED, age_days = 900),
+    }}
+    for sid in registry["slots"]:
+        ctx.std.fs.create_dir_all(slot_path(pool, sid))
+    seen = []
+
+    def hook(c, slot, p):
+        seen.append((slot, p))
+        return {"aaaaaaaaaaaa": True, "bbbbbbbbbbbb": False}.get(slot["id"])
+
+    dropped = testonly_age_out(ctx, pool, registry, env.root, [hook])
+    env.restore()
+    _eq("one went", dropped, 1)
+    _eq("what is left", sorted(registry["slots"].keys()), ["bbbbbbbbbbbb", "cccccccccccc", "dddddddddddd"])
+    _eq("its directory with it", ctx.std.fs.exists(slot_path(pool, "aaaaaaaaaaaa")), False)
+    _eq("only the free ones are asked", sorted([s["id"] for s, _ in seen]), ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"])
+
+    slot, p = seen[0]
+    _eq("the slot's fields", sorted(slot.keys()), sorted([
+        "base_present",
+        "created_ms",
+        "id",
+        "idle_ms",
+        "last_branch",
+        "last_commit",
+        "lease_count",
+        "lock_digest",
+        "output_base",
+        "path",
+        "server_pid",
+    ]))
+    _eq("its path", slot["path"], slot_path(pool, slot["id"]))
+    _eq("no server", slot["server_pid"], 0)
+    _eq("the event", p["event"], "add")
+    _eq("the threshold in effect", p["max_idle_days"], 30)
+    _eq("not a dry run", p["dry_run"], False)
+    _eq("this pool's counts", p["slots"], {"total": 4, "free": 3, "leased": 1, "reserved": 0})
+    _eq("what max_slots counts", p["owned"], 4)
+    _eq("the clone", p["clone"], env.home + "/clone")
+    _eq("the other pool, by id", [o["id"] for o in p["other_pools"]], ["github.com/acme/api"])
+    _eq("and its counts", p["other_pools"][0]["slots"], {"total": 1, "free": 0, "leased": 1, "reserved": 0})
+
+    # Left to the built-in, the stale slot goes and the fresh one stays.
+    env = _prune_pool(ctx)
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(env.pool["git_common_dir"], age_days = 0),
+        "bbbbbbbbbbbb": _slot(env.pool["git_common_dir"], age_days = 31),
+    }}
+    testonly_age_out(ctx, env.pool, registry, env.root, [lambda c, s, p: None])
+    env.restore()
+    _eq("None is the idle rule", sorted(registry["slots"].keys()), ["aaaaaaaaaaaa"])
+
+def _test_prune_tells_the_hook_its_threshold_and_asks_once(ctx):
+    """An `aspect worktree prune` that names no slot asks the hook with its own
+    `--max-idle-days` and `--dry-run`. Its answers are kept, so the re-check
+    after the confirmation judges a re-read registry by the same answers
+    without asking again, and a slot leased meanwhile drops out."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    mine = pool["git_common_dir"]
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(mine, age_days = 0),
+        "bbbbbbbbbbbb": _slot(mine, age_days = 10),
+        "cccccccccccc": _slot(mine, age_days = 10),
+    }}
+    calls = []
+
+    def hook(c, slot, p):
+        calls.append((slot["id"], p["event"], p["max_idle_days"], p["dry_run"]))
+        return {"aaaaaaaaaaaa": True, "bbbbbbbbbbbb": False}.get(slot["id"])
+
+    call = {"event": "prune", "max_idle_days": 7, "dry_run": True}
+    first = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, hooks = [hook])
+    _eq("chosen, built-in, and kept", first.ids, ["aaaaaaaaaaaa", "cccccccccccc"])
+    _eq("told the command's own settings", calls[0][1:], ("prune", 7, True))
+
+    registry["slots"]["aaaaaaaaaaaa"]["state"] = LEASED
+    again = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, chosen = first.chosen, hooks = [hook])
+    env.restore()
+    _eq("not asked again", len(calls), 3)
+    _eq("a slot leased meanwhile is out", again.ids, ["cccccccccccc"])
+
+def _test_the_prune_hook_cannot_delete_under_a_live_server(ctx):
+    """Whatever the hook says, `drop_slot` keeps a slot whose output base a
+    Bazel server still holds — the usual state just after a `release`."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    sid = "aaaaaaaaaaaa"
+    registry = {"slots": {sid: _slot(pool["git_common_dir"])}}
+    path = slot_path(pool, sid)
+    base = output_base_of(ctx.std, path, root = env.root)
+    ctx.std.fs.create_dir_all(path)
+    ctx.std.fs.create_dir_all(base + "/server")
+    server = ctx.std.process.command("sh").args(["-c", "sleep 30; true", "sh", "--output_base=" + base]).stdout("null").stderr("null").spawn()
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(server.id()) + "\n")
+    pids = []
+
+    def hook(c, slot, p):
+        pids.append(slot["server_pid"])
+        return True
+
+    dropped = testonly_age_out(ctx, pool, registry, env.root, [hook])
+    server.kill()
+    server.wait()
+    env.restore()
+    _eq("nothing went", dropped, 0)
+    _eq("the slot stays", sid in registry["slots"], True)
+    _eq("the hook was shown the server", pids, [server.id()])
+
+def _test_a_broken_prune_hook_falls_back_to_the_built_in(ctx):
+    """A hook that fails or answers with anything but True, False or None has
+    every answer discarded, said once, so no command judges some slots by the
+    hook and others by the built-in. A hook cannot change what the next call
+    is shown."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(pool["git_common_dir"]),
+        "bbbbbbbbbbbb": _slot(pool["git_common_dir"]),
+    }}
+    ids = sorted(registry["slots"].keys())
+    calls = []
+
+    def fails_second(c, s, p):
+        calls.append(s["id"])
+        if len(calls) > 1:
+            fail("hook exploded")
+        return True
+
+    out = testonly_prune_choices(ctx, pool, registry, ids, env.root, {"event": "add", "max_idle_days": 30}, [fails_second])
+    _eq("nothing chosen", out.chosen, {})
+    _eq("one warning", [w["code"] for w in out.warnings], ["prune_hook_failed"])
+    _eq("naming the error", "hook exploded" in out.warnings[0]["message"], True)
+
+    out = testonly_prune_choices(ctx, pool, registry, ids, env.root, {"event": "release"}, [lambda c, s, p: 1])
+    _eq("an int is not an answer", out.chosen, {})
+    _eq("said as a type", "returned an int" in out.warnings[0]["message"], True)
+
+    events = []
+
+    def meddles(c, s, p):
+        events.append(p["event"])
+        p["event"] = "evil"
+        return False
+
+    out = testonly_prune_choices(ctx, pool, registry, ids, env.root, {"event": "release"}, [meddles, lambda c, s, p: True])
+    env.restore()
+    _eq("only the first hook decides", out.chosen, {"aaaaaaaaaaaa": False, "bbbbbbbbbbbb": False})
+    _eq("each call sees the pool as it is", events, ["release", "release"])
+    _eq("nothing to say", out.warnings, [])
+
 def _broken_hook(ctx, slot, want):
     fail("hook exploded")
 
@@ -3843,6 +4031,10 @@ _UNIT_TESTS = [
     _test_a_lease_stands_while_the_checkout_is_there,
     _test_an_interrupted_add_takes_its_own_checkout_with_it,
     _test_a_broken_score_hook_falls_back_to_the_built_in,
+    _test_the_prune_hook_overrides_the_idle_rule_both_ways,
+    _test_the_prune_hook_cannot_delete_under_a_live_server,
+    _test_prune_tells_the_hook_its_threshold_and_asks_once,
+    _test_a_broken_prune_hook_falls_back_to_the_built_in,
     _test_another_clones_slot_is_found_by_its_branch,
     _test_a_stranded_slot_is_not_counted_as_another_clones,
     _test_push_advice_names_a_remote_the_clone_has,
@@ -3901,5 +4093,6 @@ worktree_tests = task(
     kind = "test-worktree",
     group = ["dev"],
     implementation = _test_impl,
+    traits = [Worktrees],
     args = {},
 )
