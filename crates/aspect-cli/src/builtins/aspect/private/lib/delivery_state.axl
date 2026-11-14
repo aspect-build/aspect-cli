@@ -5,9 +5,10 @@ backend. The task never talks to one directly: it builds a `Params` and calls
 whatever `DeliveryState.connect` is set to, getting back a `Backend` record
 whose verbs it drives. `connect = None` (the default) means the runner's
 deliveryd (`deliveryd.axl`) on an Aspect Workflows runner that exposes one,
-and Aspect's delivery API (`delivery_api.axl`), which stores each delivery's
-metadata and keeps attempt history, elsewhere. A config.axl picks one
-everywhere, or the direct-Redis `redis_state.axl`:
+and Aspect's delivery API (`delivery_api.axl`) elsewhere; both store each
+delivery's metadata and keep attempt history, deliveryd from its API v2. A
+config.axl picks one everywhere, or the deprecated direct-Redis
+`redis_state.axl`:
 
     load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api")
     if DeliveryState in ctx.traits:
@@ -95,7 +96,8 @@ PriorDeliveries = record(
 # latest delivery when it has that digest, so the next run delivers it again
 # under either skip policy. `read_only` is non-empty when the credential may
 # query but not record, and says why and how to fix it; such a backend serves
-# a `--dry-run` alone.
+# a `--dry-run` alone. `deprecation` is non-empty when the backend is
+# deprecated, and says what to move to; the task warns with it once per run.
 Backend = record(
     endpoint = field(str),
     describe = field(str),
@@ -109,6 +111,7 @@ Backend = record(
     stores_metadata = field(bool, default = False),
     tracks_latest = field(bool, default = False),
     read_only = field(str, default = ""),
+    deprecation = field(str, default = ""),
 )
 
 DeliveryState = trait(
@@ -122,8 +125,9 @@ DeliveryState = trait(
             "(ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT), and Aspect's delivery " +
             "API with the Aspect Cloud credential elsewhere. Set it to " +
             "`delivery_api.connect` or `deliveryd.connect` to pick one " +
-            "everywhere, to `redis_state.connect` to talk to Redis directly, " +
-            "or to any function returning a `delivery_state.Backend`."
+            "everywhere, to `redis_state.connect` (deprecated) to talk to " +
+            "Redis directly, or to any function returning a " +
+            "`delivery_state.Backend`."
         ),
     ),
 )

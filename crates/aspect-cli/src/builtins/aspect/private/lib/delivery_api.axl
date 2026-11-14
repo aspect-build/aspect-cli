@@ -9,7 +9,9 @@ included, in the target's history. Transient failures (`retryable_status`) are
 retried, a record with its original `event_id` so the server applies it once.
 A job that cannot use the API gets a startup error. A Workflows runner's
 deliveryd is the default where it exists; a runner uses the API with
-`DeliveryState.connect = delivery_api.connect`:
+`DeliveryState.connect = delivery_api.connect`. A deliveryd that serves API v2
+serves these same routes over its Unix socket without a credential;
+`deliveryd.axl` drives it through `open` with a `Server` and no `token`:
 
     dd = delivery_api.connect(ctx, delivery_state.Params(host = "gh", repo = "org/repo", prefix = "delivery", commit = sha, signature = build_url))
     prior = dd.query({label: digest})            # -> {label: PriorDeliveries}
@@ -31,8 +33,10 @@ _RECORD_ROUTE = _ROUTES + "/record"
 _QUERY_ROUTE = _ROUTES + "/query"
 
 _DESCRIBE = "Aspect delivery API"
+_NAME = "delivery API"
 
-# `Health.version` numbers deliveryd's protocol; the API has one.
+# `Health.version` is the server's own protocol version, comparable only
+# within one `describe`; output and branching use `describe`, not this.
 _VERSION = 1
 
 # A `retryable_status` is retried after the response's `Retry-After` (at most
@@ -41,11 +45,15 @@ _VERSION = 1
 _RETRY_PAUSES_MS = [1000, 2000, 4000]
 _MAX_RETRY_AFTER_MS = 30000
 
+# `token` is None for a server that takes no credential (deliveryd); `socket`
+# is the Unix socket to send through, or None for TCP.
 _Conn = record(
     http = field(typing.Any),
     base_url = field(str),
-    token = field(typing.Callable[[], str]),
+    token = field(typing.Callable[[], str] | None),
     pause = field(typing.Any),
+    socket = field(str | None, default = None),
+    name = field(str, default = _NAME),
 )
 
 # `status = 0` is a request that got no response; `failure` says why.
@@ -59,14 +67,16 @@ _Response = record(
 def _send_once(conn: _Conn, method: str, path: str, payload: dict | None) -> _Response:
     """One request, with a transport error, or a credential that fails to
     resolve, flattened into `status = 0`."""
-    err, token = catch(conn.token)
-    if err:
-        return _Response(status = 0, body = err.message, failure = "credential lookup failed")
-    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if conn.token:
+        err, token = catch(conn.token)
+        if err:
+            return _Response(status = 0, body = err.message, failure = "credential lookup failed")
+        headers["Authorization"] = "Bearer " + token
     if method == "GET":
-        fut = conn.http.get(url = conn.base_url + path, headers = headers)
+        fut = conn.http.get(url = conn.base_url + path, headers = headers, unix_socket = conn.socket)
     else:
-        fut = conn.http.post(url = conn.base_url + path, headers = headers, data = json.encode(payload))
+        fut = conn.http.post(url = conn.base_url + path, headers = headers, data = json.encode(payload), unix_socket = conn.socket)
     err, res = fut.catch().block()
     if err:
         return _Response(status = 0, body = err.message)
@@ -81,17 +91,18 @@ def _send(conn: _Conn, method: str, path: str, payload: dict | None) -> _Respons
         res = _send_once(conn, method, path, payload)
     return res
 
-def _check(op: str, res: _Response) -> dict:
-    """The decoded 2xx body, or `fail` with the server's own message."""
+def _check(conn: _Conn, op: str, res: _Response) -> dict:
+    """The decoded 2xx body, or `fail` with the server's own message (the
+    contract's `{"error": ...}`, which `aspect_cloud_error` reads)."""
     if res.status >= 200 and res.status < 300:
         body = json.try_decode(res.body, None)
         if type(body) != "dict":
-            fail("delivery API {} returned 2xx but body was not a JSON object: {}".format(op, res.body[:200].replace("\n", " ")))
+            fail("{} {} returned 2xx but body was not a JSON object: {}".format(conn.name, op, res.body[:200].replace("\n", " ")))
         return body
     if res.status == 0:
-        fail("delivery API {} failed ({}): {}".format(op, res.failure, res.body))
+        fail("{} {} failed ({}): {}".format(conn.name, op, res.failure, res.body))
     message = aspect_cloud_error(res) or res.body.strip()[:200]
-    fail("delivery API {} failed (HTTP {}): {}".format(op, res.status, message))
+    fail("{} {} failed (HTTP {}): {}".format(conn.name, op, res.status, message))
 
 def _scope(params: delivery_state.Params) -> dict:
     return {"ci_host": params.host, "repo": params.repo or None, "prefix": params.prefix}
@@ -120,7 +131,7 @@ def _query(conn: _Conn, params: delivery_state.Params, digests: dict) -> dict:
         if not pending:
             break
         labels = sorted(pending.keys())[:QUERY_BATCH_SIZE]
-        body = _check("query", _send(conn, "POST", _QUERY_ROUTE, dict(_scope(params), targets = {
+        body = _check(conn, "query", _send(conn, "POST", _QUERY_ROUTE, dict(_scope(params), targets = {
             label: pending[label]
             for label in labels
         })))
@@ -149,16 +160,31 @@ def _record(conn: _Conn, params: delivery_state.Params, new_id, outcome: str, la
         commit_sha = delivery_state.known_or_none(params.commit),
         metadata = metadata,
     )
-    _check(outcome, _send(conn, "POST", _RECORD_ROUTE, payload))
+    _check(conn, outcome, _send(conn, "POST", _RECORD_ROUTE, payload))
 
-def _unavailable(endpoint: str, message: str) -> delivery_state.Backend:
+# What a backend reports about the server it talks to, the Unix socket to
+# reach it through (None for TCP), and the `name` its errors give it.
+# `endpoint` "" means the `base_url`.
+Server = record(
+    endpoint = field(str, default = ""),
+    describe = field(str, default = _DESCRIBE),
+    version = field(int, default = _VERSION),
+    socket = field(str | None, default = None),
+    name = field(str, default = _NAME),
+)
+
+def _resolve(server: Server | None, base_url: str) -> Server:
+    server = server or Server()
+    return server if server.endpoint else Server(endpoint = base_url, describe = server.describe, version = server.version, socket = server.socket, name = server.name)
+
+def _unavailable(server: Server, message: str) -> delivery_state.Backend:
     def refuse(*args, **kwargs):
-        fail("delivery API is unavailable: " + message)
+        fail("{} is unavailable: {}".format(server.name, message))
 
-    status = delivery_state.Health(ok = False, version = _VERSION, error = message)
+    status = delivery_state.Health(ok = False, version = server.version, error = message)
     return delivery_state.Backend(
-        endpoint = endpoint,
-        describe = _DESCRIBE,
+        endpoint = server.endpoint,
+        describe = server.describe,
         status = status,
         health = lambda: status,
         record = refuse,
@@ -170,17 +196,19 @@ def _unavailable(endpoint: str, message: str) -> delivery_state.Backend:
         tracks_latest = True,
     )
 
-def _new(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep, read_only = "") -> delivery_state.Backend:
+def _new(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep, read_only = "", server: Server | None = None) -> delivery_state.Backend:
     """A backend over an already-resolved `base_url`, with no probe. `token()`
     returns the bearer token for each request, so a run outlasting one gets
-    the refreshed credential. `new_id()` mints an `event_id`; `pause(ms)`
-    sleeps between retries. All three are replaceable in tests. `read_only`
-    is the backend's `read_only`."""
-    conn = _Conn(http = http, base_url = base_url, token = token, pause = pause)
-    status = delivery_state.Health(ok = True, version = _VERSION, status = "ok")
+    the refreshed credential; None sends none. `new_id()` mints an
+    `event_id`; `pause(ms)` sleeps between retries. All three are replaceable
+    in tests. `read_only` is the backend's `read_only`; `server` (default:
+    Aspect's hosted API at `base_url`) what it reports and how it connects."""
+    server = _resolve(server, base_url)
+    conn = _Conn(http = http, base_url = base_url, token = token, pause = pause, socket = server.socket, name = server.name)
+    status = delivery_state.Health(ok = True, version = server.version, status = "ok")
     return delivery_state.Backend(
-        endpoint = base_url,
-        describe = _DESCRIBE,
+        endpoint = server.endpoint,
+        describe = server.describe,
         status = status,
         health = lambda: status,
         record = lambda label, digest: None,
@@ -193,27 +221,39 @@ def _new(http, base_url: str, token, params: delivery_state.Params, new_id, paus
         read_only = read_only,
     )
 
-def _open(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep) -> delivery_state.Backend:
+def _open(http, base_url: str, token, params: delivery_state.Params, new_id, pause = sleep, server: Server | None = None) -> delivery_state.Backend:
     """Probe the API with an empty query, which checks the credential without
     reading any state, and answers whether it may record (`writable`). A
     failed probe is reported through `.status`, as a startup error; a
-    credential that may only read, through `.read_only`."""
-    conn = _Conn(http = http, base_url = base_url, token = token, pause = pause)
+    credential that may only read, through `.read_only`. The arguments are
+    `_new`'s."""
+    server = _resolve(server, base_url)
+    conn = _Conn(http = http, base_url = base_url, token = token, pause = pause, socket = server.socket, name = server.name)
+
+    def backend(read_only = ""):
+        return _new(http, base_url, token, params, new_id, pause, read_only, server)
+
+    def unavailable(message):
+        return _unavailable(server, message)
+
     res = _send(conn, "POST", _QUERY_ROUTE, dict(_scope(params), targets = {}))
     if res.status >= 200 and res.status < 300:
         body = json.try_decode(res.body, None)
         if type(body) == "dict" and body.get("writable") == False:
-            read_only = "the Aspect Cloud credential can read delivery state but not record it. Grant the token's role `aspect.delivery.write`."
-            return _new(http, base_url, token, params, new_id, pause, read_only = read_only)
-        return _new(http, base_url, token, params, new_id, pause)
+            if token == None:
+                return backend("the server answers that it may not record (`writable: false`).")
+            return backend("the Aspect Cloud credential can read delivery state but not record it. Grant the token's role `aspect.delivery.write`.")
+        return backend()
     if res.status == 0:
-        return _unavailable(base_url, res.failure + ": " + res.body)
+        return unavailable(res.failure + ": " + res.body)
     message = "HTTP {}: {}".format(res.status, aspect_cloud_error(res) or res.body.strip()[:200])
+    if token == None:
+        return unavailable(message)
     if res.status == 401:
-        return _unavailable(base_url, "the delivery API rejected the Aspect Cloud credential ({}). Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.".format(message))
+        return unavailable("the delivery API rejected the Aspect Cloud credential ({}). Run `aspect auth login`, or check ASPECT_API_TOKEN in CI.".format(message))
     if res.status == 403:
-        return _unavailable(base_url, "the delivery API refused the Aspect Cloud credential ({}). Grant the token's role `aspect.delivery.write` (or `aspect.delivery.read`, for `--dry-run` alone).".format(message))
-    return _unavailable(base_url, message)
+        return unavailable("the delivery API refused the Aspect Cloud credential ({}). Grant the token's role `aspect.delivery.write` (or `aspect.delivery.read`, for `--dry-run` alone).".format(message))
+    return unavailable(message)
 
 def _event_ids(nonce: str):
     """A `new_id` minting `<nonce>-<n>`: unique across runs by the random
@@ -251,11 +291,13 @@ def _connect(ctx: TaskContext, params: delivery_state.Params) -> delivery_state.
     base_url = aspect_cloud_url(ctx, "")
     creds = aspect_cloud_credentials(ctx, required = False)
     if not creds:
-        return _unavailable(base_url, "no Aspect Cloud credential. Run `aspect auth login`, or set ASPECT_API_TOKEN in CI.")
+        return _unavailable(_resolve(None, base_url), "no Aspect Cloud credential. Run `aspect auth login`, or set ASPECT_API_TOKEN in CI.")
     token = lambda: _access_token(aspect_cloud_credentials(ctx, required = False))
     return _open(ctx.http(), base_url, token, params, _event_ids(random_hex(ctx)), _pause_with(params.heartbeat))
 
 delivery_api = namespace(
+    Server = Server,
+    unavailable = _unavailable,
     connect = _connect,
     new = _new,
     open = _open,

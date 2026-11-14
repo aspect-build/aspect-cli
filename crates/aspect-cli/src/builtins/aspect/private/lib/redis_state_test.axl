@@ -209,6 +209,7 @@ def _test_connect_probes_and_describes(ctx):
     deferred = []
     dd = _connect(fake, connects = connects, deferred = deferred)
     _eq("ok", dd.status.ok, True)
+    _eq("deprecated", dd.deprecation, redis_state.DEPRECATION)
     _eq("version is the key-scheme version", dd.status.version, 2)
     _eq("endpoint is the credential-free display", dd.endpoint, _ENDPOINT)
     _eq("describe names server version and transport", dd.describe, "redis 7.2.4 direct, plaintext")

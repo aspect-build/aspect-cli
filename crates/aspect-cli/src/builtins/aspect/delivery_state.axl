@@ -11,11 +11,15 @@ the implementations that ship with the CLI.
 Unset, the delivery task uses `deliveryd.connect` on an Aspect Workflows runner
 that exposes its deliveryd (`ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`), keeping
 state in the daemon over its Unix socket, and `delivery_api.connect` elsewhere:
-Aspect's delivery API with the Aspect Cloud credential, which stores delivery
-metadata and keeps every attempt in the target's history. Setting either
-picks it everywhere. `redis_state.connect` talks to Redis directly and reads
-`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`, `_REDIS_AUTH`,
-`_REDIS_LEGACY_TTL_SECONDS`).
+Aspect's delivery API with the Aspect Cloud credential. Both store delivery
+metadata and keep every attempt in the target's history, deliveryd once it
+serves API v2. Setting either picks it everywhere.
+
+Deprecated, and to be removed: deliveryd's API v1, which the CLI still speaks
+to a deliveryd that does not advertise v2, and `redis_state.connect`, which
+talks to Redis directly and reads `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT`
+(plus `_REDIS_CA_FILE`, `_REDIS_AUTH`, `_REDIS_LEGACY_TTL_SECONDS`). The task
+warns when it uses either.
 Any function returning a `delivery_state.Backend` works as well.
 Internal modules load from `private/lib/` directly.
 """

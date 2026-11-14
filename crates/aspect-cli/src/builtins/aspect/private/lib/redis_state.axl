@@ -1,10 +1,15 @@
 """Delivery state straight from Redis — a `DeliveryState.connect` that skips deliveryd.
 
-Speaks deliveryd's own key scheme, so the two backends interoperate against one
-database and a fleet can move between them without a migration:
+Deprecated, and to be removed from the CLI: use the runner's deliveryd (the
+default on an Aspect Workflows runner) or `delivery_api.connect`. The backend
+carries `DEPRECATION`, which the task warns with.
+
+Shares deliveryd API v1's signature keys, so this backend and a v1 deliveryd
+see each other's deliveries in one database; deliveryd's API v2 keeps separate
+state. Its keys:
 
     dd:sig:{host}:{prefix}:{digest}            HASH {sig, label, commit, at, meta?}, 365d TTL
-    delivery-signature:{host}:{digest}:{prefix} STRING, pre-v2 deliveryd; written alongside
+    delivery-signature:{host}:{digest}:{prefix} STRING, deliveryd API v1; written alongside
                                                 the hash so v1 readers still see deliveries,
                                                 read as a fallback and lazily copied into the hash
     {host}:{digest}:{prefix}                    artifact metadata written elsewhere; only
@@ -27,15 +32,20 @@ The connection is `redis.axl`'s client, configured from the runner's environment
     ASPECT_WORKFLOWS_DELIVERY_REDIS_AUTH       `password` or `user:password`; never in the URL
     ASPECT_WORKFLOWS_DELIVERY_REDIS_LEGACY_TTL_SECONDS
                                                lifetime of the legacy signature keys, set on
-                                               every write and on migration (default 7 days);
-                                               0 keeps them forever, for a fleet that still
-                                               has v1 deliveryd readers
+                                               every write and on migration (default 7 days;
+                                               0 sets no TTL)
 """
 
 load("@std//time.axl", "sleep", "time")
 load("./delivery_state.axl", "delivery_state")
 load("./redis.axl", "redis")
 load("./timestamp.axl", "rfc3339_utc")
+
+DEPRECATION = (
+    "`redis_state.connect` is deprecated and will be removed from the Aspect CLI. " +
+    "Remove it from `DeliveryState.connect` to use the runner's deliveryd, or set " +
+    "`DeliveryState.connect = delivery_api.connect`."
+)
 
 ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT"
 CA_FILE_ENV = "ASPECT_WORKFLOWS_DELIVERY_REDIS_CA_FILE"
@@ -312,10 +322,12 @@ def _connect(ctx, params: delivery_state.Params, connect = redis.connect, pause 
         deliver = lambda label, digest, meta = {}: _deliver(client, p, legacy_ttl_ms, label, digest, meta),
         delete = lambda digest: _delete(client, p, digest),
         stores_metadata = True,
+        deprecation = DEPRECATION,
     )
 
 redis_state = namespace(
     connect = _connect,
+    DEPRECATION = DEPRECATION,
     ENDPOINT_ENV = ENDPOINT_ENV,
     CA_FILE_ENV = CA_FILE_ENV,
     AUTH_ENV = AUTH_ENV,

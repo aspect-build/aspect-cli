@@ -17,8 +17,8 @@ Up to three Bazel build phases plus a dispatch loop:
   3. State record/query — record (label, digest) pairs, query per-prefix
      state through the `DeliveryState` backend (`lib/delivery_state.axl`).
      The default is the runner's deliveryd (`lib/deliveryd.axl`) on an Aspect
-     Workflows runner, which records first, else Aspect's delivery API
-     (`lib/delivery_api.axl`), which needs no record step.
+     Workflows runner, else Aspect's delivery API (`lib/delivery_api.axl`).
+     Only deliveryd's deprecated API v1 needs the record step.
   4. Phase 3 — download runfiles for targets that survived change detection,
      streaming BES into a run tracker to discover entrypoints. Skipped under
      `--dry-run` unless `--dry-run=build` asks for it.
@@ -72,8 +72,7 @@ The task gets its backend from `DeliveryState.connect` (`lib/delivery_state.axl`
 Unset, it is chosen by where the job runs (`_default_connect`):
 
   - On an Aspect Workflows runner, which exposes its deliveryd at
-    `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`, the runner's deliveryd, so an
-    upgrade keeps the state the runner already has.
+    `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`, the runner's deliveryd.
   - Elsewhere, Aspect's delivery API (`lib/delivery_api.axl`), authenticated
     with the Aspect Cloud credential. It keeps each target's latest delivery
     and each digest's, with their metadata, and records every attempt,
@@ -86,12 +85,15 @@ the other. A runner opts into the delivery API explicitly:
     if DeliveryState in ctx.traits:
         ctx.traits[DeliveryState].connect = delivery_api.connect
 
-deliveryd is the Unix-socket HTTP daemon Aspect Workflows runners start. It
-keeps the delivered-by URL alone, and the task warns once when `metadata` it
-could not store is lost. `redis_state.connect` reads `ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT`
-(plus `_REDIS_CA_FILE`, `_REDIS_AUTH`, `_REDIS_LEGACY_TTL_SECONDS`), shares
-deliveryd's key scheme and stores `metadata`. Neither tracks a target's
-latest delivery.
+deliveryd is the Unix-socket HTTP daemon Aspect Workflows runners start. One
+that advertises API v2 serves the delivery API's routes, so it behaves like
+the hosted API. One that does not speaks the deprecated v1: it keeps the
+delivered-by URL alone, and the task warns once when `metadata` it could not
+store is lost. The deprecated `redis_state.connect` reads
+`ASPECT_WORKFLOWS_DELIVERY_REDIS_ENDPOINT` (plus `_REDIS_CA_FILE`,
+`_REDIS_AUTH`, `_REDIS_LEGACY_TTL_SECONDS`) and stores `metadata`. Neither
+deliveryd v1 nor `redis_state` tracks a target's latest delivery, and the task
+warns when it uses either.
 
 
 Skip policy
@@ -108,8 +110,8 @@ Each target is skipped by one of two policies:
 A target opts into `once_per_digest` with the Bazel tag
 `delivery:once_per_digest`, read from the phase-1 build's `target_configured`
 events. `DeliveryTrait.skip_policy` has the final word. On a backend that does
-not track latest deliveries (deliveryd, `redis_state`), every target behaves
-as `once_per_digest`.
+not track latest deliveries (deliveryd v1, `redis_state`), every target
+behaves as `once_per_digest`.
 
 
 Metadata
@@ -223,8 +225,8 @@ Failure modes
   --track-state=true with --commit-sha unset and
     no CI env var exposing one (GITHUB_SHA,
     BUILDKITE_COMMIT, CIRCLE_SHA1, CI_COMMIT_SHA) hard fail() at startup
-    (deliveryd keys state by commit-sha, the other
-    backends record it; --track-state=false skips
+    (deliveryd v1 keys state by commit-sha, the
+    other backends record it; --track-state=false skips
     the check)
   --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
     contains a label not in the resolved
@@ -586,13 +588,12 @@ def _resolve_skip_policies(delivery_trait, targets: list, target_tags: dict) -> 
 def _default_connect(env) -> typing.Callable:
     """`DeliveryState.connect` when it is unset: the runner's deliveryd when
     the job runs on an Aspect Workflows runner that exposes one
-    (`deliveryd.ENDPOINT_ENV`), so upgrading the CLI keeps the state it already
-    has, else Aspect's delivery API."""
+    (`deliveryd.ENDPOINT_ENV`), else Aspect's delivery API."""
     return deliveryd.connect if env.var(deliveryd.ENDPOINT_ENV) else delivery_api.connect
 
 def _record_digests(dd, targets: list, output_shas: dict) -> None:
-    """`dd.record` each target's digest, which deliveryd needs before `query`
-    (it keys state by commit); the other backends record nothing."""
+    """`dd.record` each target's digest, which deliveryd v1 needs before
+    `query` (it keys state by commit); the other backends record nothing."""
     for label in targets:
         if label in output_shas:
             dd.record(label, output_shas[label])
@@ -1686,6 +1687,8 @@ def _delivery_impl(ctx):
         if dd.read_only and not dry_run:
             error(ctx.std, "Delivery state backend cannot record deliveries ({}): {} (A --dry-run can use it as is.)".format(dd.endpoint or dd.describe, dd.read_only))
             return _emit_final(ph, exit_code = 1)
+        if dd.deprecation:
+            warn(ctx.std, dd.deprecation)
 
     # iter handles are created per attempt inside the retry loop. The
     # CLI-streamed `--bes-backend` sinks stream phase-1 events and are waited
@@ -2473,7 +2476,7 @@ Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, 
         ),
         "commit_sha": args.string(
             default = "",
-            description = "Git commit SHA being delivered, recorded with each delivery (deliveryd also keys its state by it). Auto-detected from CI env vars (GITHUB_SHA / BUILDKITE_COMMIT / CIRCLE_SHA1 / CI_COMMIT_SHA, with PR-head resolution for GitHub Actions pull_request events) when unset or empty; pass a non-empty value to override.",
+            description = "Git commit SHA being delivered, recorded with each delivery (deliveryd v1 also keys its state by it). Auto-detected from CI env vars (GITHUB_SHA / BUILDKITE_COMMIT / CIRCLE_SHA1 / CI_COMMIT_SHA, with PR-head resolution for GitHub Actions pull_request events) when unset or empty; pass a non-empty value to override.",
         ),
         "build_url": args.string(
             default = "",

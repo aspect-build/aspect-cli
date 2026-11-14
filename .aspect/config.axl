@@ -4,7 +4,7 @@ load("@aspect//bazel/build_metadata_test.axl", "build_metadata_tests")
 load("@aspect//bazel/exec_log_test.axl", "exec_log_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//bazel_test.axl", "bazel_facade_tests")
-load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
+load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api", "deliveryd")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -820,9 +820,14 @@ def config(ctx: ConfigContext):
     ctx.traits[DeliveryTrait].delivery_manifest = _on_delivery_manifest
     ctx.traits[DeliveryTrait].upload_manifest = _on_upload_manifest
 
-    # Delivery state straight from Redis when a runner provides one.
-    if DeliveryState in ctx.traits and ctx.std.env.var(redis_state.ENDPOINT_ENV):
-        ctx.traits[DeliveryState].connect = redis_state.connect
+    # Delivery state in Aspect Cloud, except in a job that sets
+    # ASPECT_CLI_DELIVERY_BACKEND=deliveryd, which fails at startup on a runner
+    # without a deliveryd rather than falling back to Aspect Cloud.
+    if DeliveryState in ctx.traits:
+        if ctx.std.env.var("ASPECT_CLI_DELIVERY_BACKEND") == "deliveryd":
+            ctx.traits[DeliveryState].connect = deliveryd.connect
+        else:
+            ctx.traits[DeliveryState].connect = delivery_api.connect
 
     testing = ctx.std.env.var("ASPECT_CLI_TESTING")
 

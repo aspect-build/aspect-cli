@@ -111,14 +111,15 @@ jobs:
           ; do
             val=$(printenv "$var") && echo "  $var=$val" || true
           done
-  # Delivery with the runner's deliveryd, the default state backend on a
-  # Workflows runner (the GitHub-hosted delivery jobs in ci.yaml cover the
-  # delivery API).
+  # Delivery with the runner's deliveryd (the GitHub-hosted delivery jobs in
+  # ci.yaml cover the delivery API).
   delivery-deliveryd-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 10
     env:
       ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}
+      # .aspect/config.axl otherwise picks Aspect Cloud's delivery API.
+      ASPECT_CLI_DELIVERY_BACKEND: deliveryd
     steps:
       - uses: actions/checkout@v6
       # When dispatched by ci.yaml, reuse the CLI that run's pre-build already
