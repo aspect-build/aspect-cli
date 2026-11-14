@@ -141,9 +141,19 @@ impl Endpoints {
     /// network advertises only its web UI, which is still a deployment to
     /// configure and log in to; but recorded under Aspect Cloud's own name it
     /// would replace the endpoints that do serve builds, so
-    /// [`configure_deployment`] requires this of Aspect Cloud alone.
+    /// [`Self::configurable_as`] requires this of Aspect Cloud alone.
     fn serves_build_endpoints(&self) -> bool {
         !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
+    }
+
+    /// Whether `configure` may record these endpoints: any advertised endpoint for
+    /// a deployment, a build endpoint for Aspect Cloud (`aspect_cloud`).
+    fn configurable_as(&self, aspect_cloud: bool) -> bool {
+        if aspect_cloud {
+            self.serves_build_endpoints()
+        } else {
+            !self.is_empty()
+        }
     }
 }
 
@@ -1338,8 +1348,8 @@ fn configure_deployment(
     let host = endpoint_host_str(host);
     // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
     // Aspect Workflows deployment) so the task prints the right guidance rather than a
-    // Starlark traceback. An `aspect_endpoints` map is the definitive marker of
-    // a deployment — probe_protected_resource requires it.
+    // Starlark traceback. A non-empty `aspect_endpoints` map is the definitive
+    // marker of a deployment — probe_protected_resource requires it.
     let mk = |status: &str, reason: String| DeploymentInfo {
         status: status.to_string(),
         reason,
@@ -1355,7 +1365,7 @@ fn configure_deployment(
         Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
     };
     let (name, explicit_aspect_cloud) = resolve_deployment_name(name, &host, &info);
-    if explicit_aspect_cloud && !info.aspect_endpoints.serves_build_endpoints() {
+    if !info.aspect_endpoints.configurable_as(explicit_aspect_cloud) {
         return Ok(mk("not_a_deployment", String::new()));
     }
     // Endpoints recorded under Aspect Cloud's own name are folded into the seed and
@@ -6352,8 +6362,9 @@ mod tests {
             aspect_login_redirect_uri: String::new(),
             resource_name: String::new(),
         };
-        assert!(!viewer.aspect_endpoints.is_empty());
-        assert!(!viewer.aspect_endpoints.serves_build_endpoints());
+        assert!(viewer.aspect_endpoints.configurable_as(false));
+        assert!(!viewer.aspect_endpoints.configurable_as(true));
+        assert!(!Endpoints::default().configurable_as(false));
         // An issuer with no client is no login target.
         assert!(viewer.auth_servers().is_empty());
 
@@ -6363,7 +6374,14 @@ mod tests {
             ..viewer
         };
         assert_eq!(loggable.auth_servers().len(), 1);
-        assert!(!loggable.aspect_endpoints.serves_build_endpoints());
+
+        // A build endpoint is what lets a document be recorded as Aspect Cloud.
+        let edge = Endpoints {
+            cache: "cache.aspect.build".to_string(),
+            ..Endpoints::default()
+        };
+        assert!(edge.configurable_as(true));
+        assert!(edge.configurable_as(false));
     }
 
     /// The account's own name is writable when the caller asks for it by name —
