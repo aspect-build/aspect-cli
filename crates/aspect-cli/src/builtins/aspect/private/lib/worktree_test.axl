@@ -17,6 +17,7 @@ load(
     "testonly_capped",
     "testonly_closest",
     "testonly_collected_refusal",
+    "testonly_drop_deferred",
     "testonly_follow_caller",
     "testonly_free_columns",
     "testonly_held_by",
@@ -2858,6 +2859,48 @@ def _test_prune_tells_the_hook_its_threshold_and_asks_once(ctx):
     _eq("not asked again", len(calls), 3)
     _eq("a slot leased meanwhile is out", again.ids, ["cccccccccccc"])
 
+def _test_add_keeps_the_slot_it_reuses_whatever_the_hook_says(ctx):
+    """On `add`, the slots the hook chooses are deferred rather than deleted
+    in the sweep, and go only once `add` has picked its own: deleting the free
+    slot it would reuse would just make it build a new one cold. The idle
+    rule's own picks still go at once."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    mine = pool["git_common_dir"]
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(mine),
+        "bbbbbbbbbbbb": _slot(mine, age_days = 31),
+        "cccccccccccc": _slot(mine),
+    }}
+    for sid in registry["slots"]:
+        ctx.std.fs.create_dir_all(slot_path(pool, sid))
+    deferred = []
+    dropped = testonly_age_out(ctx, pool, registry, env.root, deferred = deferred, hooks = [
+        lambda c, s, p: True if s["id"] != "bbbbbbbbbbbb" else None,
+    ])
+    _eq("the idle rule's pick goes at once", (dropped, "bbbbbbbbbbbb" in registry["slots"]), (1, False))
+    _eq("the hook's wait", deferred, ["aaaaaaaaaaaa", "cccccccccccc"])
+    _eq("and are still there to pick from", sorted(registry["slots"].keys()), ["aaaaaaaaaaaa", "cccccccccccc"])
+
+    # `add` reserves the slot it picked, so that one is no longer free.
+    registry["slots"]["aaaaaaaaaaaa"]["state"] = RESERVED
+    testonly_drop_deferred(ctx, pool, registry, env.root, deferred)
+    env.restore()
+    _eq("the rest go after the pick", sorted(registry["slots"].keys()), ["aaaaaaaaaaaa"])
+    _eq("persisted", sorted(read_registry(ctx.std, pool["dir"])["slots"].keys()), ["aaaaaaaaaaaa"])
+
+def _test_a_slot_with_no_owner_recorded_is_asked_about(ctx):
+    """A free slot with no `owner_git_dir` ages out as this clone's own
+    (`prunable_slots`), so the hook is asked about it too."""
+    env = _prune_pool(ctx)
+    registry = {"slots": {"aaaaaaaaaaaa": _slot("")}}
+    seen = []
+    testonly_hooked_prunable(ctx, env.pool, registry, env.root, testonly_prune_call("add", 30), False, hooks = [
+        lambda c, s, p: seen.append(s["id"]),
+    ])
+    env.restore()
+    _eq("asked", seen, ["aaaaaaaaaaaa"])
+
 def _test_release_asks_the_hook_about_the_slot_it_freed(ctx):
     """On `release` the hook is asked once, with no idle threshold: True
     deletes the slot there and then, False and None keep it, and a slot whose
@@ -4153,6 +4196,8 @@ _UNIT_TESTS = [
     _test_the_prune_hook_cannot_delete_under_a_live_server,
     _test_prune_tells_the_hook_its_threshold_and_asks_once,
     _test_release_asks_the_hook_about_the_slot_it_freed,
+    _test_add_keeps_the_slot_it_reuses_whatever_the_hook_says,
+    _test_a_slot_with_no_owner_recorded_is_asked_about,
     _test_the_release_report_says_what_the_hook_did,
     _test_nothing_to_prune_names_the_hook_when_it_kept_slots,
     _test_a_broken_prune_hook_is_reported_by_add,

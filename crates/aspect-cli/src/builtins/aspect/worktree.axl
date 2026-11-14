@@ -2037,7 +2037,7 @@ def _prune_choices(ctx: TaskContext, pool: dict, registry: dict, slot_ids: list,
     """What the `prune_slot` hook says of each of `slot_ids`: `chosen` maps a
     slot to True (delete) or False (keep) where the hook gave an answer, and
     leaves out those it left to the built-in rule (None); `warnings` are the
-    `prune_hook_failed` documents to report, already said on stderr. `call`
+    `prune_hook_failed` documents for the caller to say. `call`
     is what the hook is told about the command asking (`_prune_call`).
 
     Like `score_slot`, a hook that fails, answers with anything else, or runs
@@ -2074,7 +2074,6 @@ def _prune_choices(ctx: TaskContext, pool: dict, registry: dict, slot_ids: list,
     if not problem:
         return struct(chosen = chosen, warnings = [])
     problem += "; every slot was judged by the built-in rule instead"
-    _warn(ctx.std, problem)
     return struct(chosen = {}, warnings = [{"code": "prune_hook_failed", "message": problem}])
 
 _NOT_PRUNED = struct(dropped = False, kept = "", warnings = [])
@@ -2119,7 +2118,7 @@ def _hooked_prunable(
             sid
             for sid in registry["slots"]
             if registry["slots"][sid]["state"] == FREE and
-               registry["slots"][sid].get("owner_git_dir", "") == pool["git_common_dir"] and
+               registry["slots"][sid].get("owner_git_dir", "") in ("", pool["git_common_dir"]) and
                registry["slots"][sid].get("created_ms", 0)
         ]
         answer = _prune_choices(ctx, pool, registry, asked, root, call, hooks)
@@ -2132,7 +2131,31 @@ def _hooked_prunable(
     ]
     return struct(ids = ids, chosen = chosen, warnings = warnings)
 
-def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str, warnings: list | None = None, hooks: list | None = None) -> int:
+def _drop_free(ctx: TaskContext, pool: dict, registry: dict, root: str, slot_ids: list, hooked: dict) -> int:
+    """Delete each of `slot_ids` that is still free, saying one line each with
+    `_prune_reason`; `hooked` holds the slots the `prune_slot` hook chose.
+    Returns how many went. A slot `drop_slot` refuses — a live server, work in
+    its checkout — is kept without a word."""
+    dropped = 0
+    for slot_id in slot_ids:
+        slot = registry["slots"].get(slot_id)
+        if not slot or slot["state"] != FREE:
+            continue
+        label = slot.get("last_branch", "") or slot_id
+        why = _prune_reason(ctx, pool, slot_id, slot, root, hooked = slot_id in hooked)
+        if drop_slot(ctx.std, pool, registry, slot_id, root).dropped:
+            _info(ctx.std, "pruned slot (%s): %s" % (why, label))
+            dropped += 1
+    return dropped
+
+def _age_out(
+        ctx: TaskContext,
+        pool: dict,
+        registry: dict,
+        root: str,
+        warnings: list | None = None,
+        deferred: list | None = None,
+        hooks: list | None = None) -> int:
     """Drop free slots nothing has touched in `PRUNE_IDLE_DAYS`, or that the
     `prune_slot` hook chooses. Returns how many went, so the caller can persist
     a registry that no longer matches the disk.
@@ -2143,23 +2166,29 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str, warnings: 
     had already stopped paying for itself.
 
     A `Worktrees.prune_slot` hook overrides the idle rule (`_hooked_prunable`).
-    A slot the hook chose that a live server or work still holds is kept
-    without a word, and asked about again on the next `add` or `prune`. The
-    hook's `prune_hook_failed` warnings are appended to `warnings`. `hooks`
-    stands in for the registered ones.
+    The slots it chose are appended to `deferred` rather than deleted, when
+    given: `add` deletes them once it has picked its slot (`_drop_deferred`),
+    since deleting the free slot it would have reused only makes it build a
+    new one cold. Its `prune_hook_failed` warnings are said and appended to
+    `warnings`. `hooks` stands in for the registered ones.
     """
     found = _hooked_prunable(ctx, pool, registry, root, _prune_call(_PRUNE_ON_ADD, PRUNE_IDLE_DAYS), stranded_at_once = False, hooks = hooks)
+    for w in found.warnings:
+        _warn(ctx.std, w["message"])
     if warnings != None:
         warnings.extend(found.warnings)
-    dropped = 0
-    for slot_id in found.ids:
-        slot = registry["slots"][slot_id]
-        label = slot.get("last_branch", "") or slot_id
-        why = _prune_reason(ctx, pool, slot_id, slot, root, hooked = slot_id in found.chosen)
-        if drop_slot(ctx.std, pool, registry, slot_id, root).dropped:
-            _info(ctx.std, "pruned slot (%s): %s" % (why, label))
-            dropped += 1
-    return dropped
+    now = found.ids
+    if deferred != None:
+        deferred.extend([sid for sid in found.ids if found.chosen.get(sid, False)])
+        now = [sid for sid in found.ids if not found.chosen.get(sid, False)]
+    return _drop_free(ctx, pool, registry, root, now, found.chosen)
+
+def _drop_deferred(ctx: TaskContext, pool: dict, registry: dict, root: str, deferred: list) -> None:
+    """Delete the free slots the `prune_slot` hook chose during `add`'s
+    sweep, once the slot `add` uses is no longer free; that one, reserved or
+    leased by now, is skipped. Writes the registry when any went."""
+    if deferred and _drop_free(ctx, pool, registry, root, deferred, {sid: True for sid in deferred}):
+        write_registry(ctx.std, pool["dir"], registry)
 
 def _reclaim_reservations(ctx: TaskContext, pool: dict, registry: dict) -> int:
     """Free slots an interrupted `add` was setting up. Returns how many went, so
@@ -3223,7 +3252,7 @@ def _adoption_preview(ctx: TaskContext, pool: dict, taken: list | None = None) -
             taken.extend(adopted)
     return reconcile(ctx.std, pool, registry)
 
-def _settle(ctx: TaskContext, pool: dict, root: str, notes: list | None = None) -> dict:
+def _settle(ctx: TaskContext, pool: dict, root: str, notes: list | None = None, deferred: list | None = None) -> dict:
     """The registry, brought in line with git and tidied, for an `add` holding
     the pool lock: vanished checkouts unregistered, each slot's output base
     observed for `had_base`, stale slots aged out, and
@@ -3232,14 +3261,15 @@ def _settle(ctx: TaskContext, pool: dict, root: str, notes: list | None = None) 
     something write the registry at once; the rest is written with the lease
     that follows, or not at all — it is bookkeeping the next `add` observes
     again. Warnings from the age-out are appended to `notes`, for the `add`'s
-    own report."""
+    own report, and the slots the `prune_slot` hook chose to `deferred`, for
+    `_drop_deferred` once a slot is picked."""
     registry = _adopted(ctx, pool)
     if registry.get("read_only", False):
         return registry
     unregister_vanished(ctx.std, pool, registry)
     for slot_id in registry["slots"]:
         observe_base(registry, slot_id, warmth_of(ctx.std, slot_path(pool, slot_id), root).base)
-    if _age_out(ctx, pool, registry, root, notes):
+    if _age_out(ctx, pool, registry, root, notes, deferred):
         write_registry(ctx.std, pool["dir"], registry)
     if _reclaim_reservations(ctx, pool, registry):
         write_registry(ctx.std, pool["dir"], registry)
@@ -3256,10 +3286,12 @@ def _allocate(
         created: bool = False,
         base_label: str = "",
         detached: str = "",
-        notes: list | None = None) -> int | TaskConclusion:
+        notes: list | None = None,
+        deferred: list | None = None) -> int | TaskConclusion:
     """Pick the slot that best fits `want`, reserve it under `want["name"]`,
     and check the worktree out into it — the end every `add` shares. `notes`
-    are warnings from before the pick, reported with its own."""
+    are warnings from before the pick, reported with its own; `deferred` are
+    the free slots the sweep left for after it (`_drop_deferred`)."""
     name = want["name"]
     agent = _me(ctx)
     chosen = _pick_slot(ctx, pool, registry, want, root)
@@ -3267,6 +3299,7 @@ def _allocate(
         chosen = struct(id = chosen.id, score = chosen.score, reused_from = chosen.reused_from, warnings = notes + chosen.warnings)
     token = reserve_slot(ctx.std, registry, chosen.id, name, agent)
     write_registry(ctx.std, pool["dir"], registry)
+    _drop_deferred(ctx, pool, registry, root, deferred or [])
     return _check_out_and_lease(ctx, pool, lock, registry, chosen, name, base_ref, token, agent, created, base_label, detached)
 
 _KIND_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
@@ -3420,7 +3453,8 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     if not lock:
         return _pool_busy(ctx)
     notes = []
-    registry = _settle(ctx, pool, root, notes)
+    deferred = []
+    registry = _settle(ctx, pool, root, notes, deferred)
     if registry.get("read_only", False):
         return _newer_registry(ctx, pool)
 
@@ -3470,6 +3504,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
         if is_directory(ctx.std, slot_path(pool, held)) and ctx.std.fs.exists(slot_path(pool, held) + "/.git"):
             took = _take_over(ctx, pool, registry, held, name, root)
             write_registry(ctx.std, pool["dir"], registry)
+            _drop_deferred(ctx, pool, registry, root, deferred)
             return _report_slot(ctx, pool, registry, held, name, struct(score = 0, reused_from = name, warnings = notes + [took]))
         gone = _work(ctx, slot_path(pool, held), root)
         if gone:
@@ -3553,7 +3588,7 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
             },
         )
 
-    return _allocate(ctx, pool, lock, registry, want, root, base_ref, not existing, base_label, notes = notes)
+    return _allocate(ctx, pool, lock, registry, want, root, base_ref, not existing, base_label, notes = notes, deferred = deferred)
 
 def _add_detached(ctx: TaskContext, pool: dict, ref: str) -> int | TaskConclusion:
     """`add <commit-ish> --detach`: a slot at that commit with no branch, as
@@ -3591,10 +3626,11 @@ def _add_detached(ctx: TaskContext, pool: dict, ref: str) -> int | TaskConclusio
     if not lock:
         return _pool_busy(ctx)
     notes = []
-    registry = _settle(ctx, pool, root, notes)
+    deferred = []
+    registry = _settle(ctx, pool, root, notes, deferred)
     if registry.get("read_only", False):
         return _newer_registry(ctx, pool)
-    return _allocate(ctx, pool, lock, registry, want, root, commit, detached = ref, notes = notes)
+    return _allocate(ctx, pool, lock, registry, want, root, commit, detached = ref, notes = notes, deferred = deferred)
 
 def _release_impl(ctx: TaskContext) -> int | TaskConclusion:
     """End the lease on the slot named, or the one the caller stands in; with
@@ -4794,6 +4830,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         eligible = [found]
     else:
         policy = _hooked_prunable(ctx, pool, registry, root, call, stranded_at_once = True)
+        for w in policy.warnings:
+            _warn(ctx.std, w["message"])
         eligible = policy.ids
 
     # A live Bazel server, or a checkout holding work, spares a slot. Applied
@@ -4934,8 +4972,10 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             len([sid for sid in policy.chosen if not policy.chosen[sid]]),
         ))
     elif not victims:
+        hooked = [sid for sid in policy.chosen if policy.chosen[sid]]
         idle = (" that has been idle for %d days" % ctx.args.max_idle_days) if ctx.args.max_idle_days else ""
-        _info(ctx.std, "nothing to prune: every free slot" + idle + " was kept, for the reasons above")
+        _info(ctx.std, "nothing to prune: every " + ("slot the prune_slot hook chose" if hooked else "free slot" + idle) +
+                       " was kept, for the reasons above")
     elif declined:
         _info(ctx.std, "left alone; nothing was deleted")
     elif verdict == confirm.SKIP:
@@ -5698,6 +5738,7 @@ testonly_hook_view = _hook_view
 testonly_prune_choices = _prune_choices
 testonly_hooked_prunable = _hooked_prunable
 testonly_prune_released = _prune_released
+testonly_drop_deferred = _drop_deferred
 testonly_prune_call = _prune_call
 testonly_release_report = _release_report
 testonly_age_out = _age_out
