@@ -30,7 +30,7 @@ itself, such as free space on the pool's volume:
         df = ctx.std.process.command("df").args(["-Pk", pool["dir"]]).stdout("piped").stderr("null").spawn().wait_with_output()
         free_kb = int(df.stdout.strip().splitlines()[-1].split()[3])
         if free_kb < 50 * 1024 * 1024:
-            return True    # under 50 GiB free: delete every free slot asked about
+            return True    # under 50 GiB free: delete the free slots asked about
         return None        # otherwise the built-in idle rule
 
     ctx.traits[Worktrees].prune_slot.append(_prune_when_disk_is_short)
