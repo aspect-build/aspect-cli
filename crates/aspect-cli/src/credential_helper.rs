@@ -18,7 +18,9 @@
 //! name; a user task cannot shadow it.
 
 use anyhow::Context;
-use axl_runtime::engine::{login_hint, profile_for_uri, resolve_access_token, resolve_profile};
+use axl_runtime::engine::{
+    not_logged_in_message, profile_for_uri, resolve_access_token, resolve_profile,
+};
 
 /// The credential-helper command, as the spec passes it (`argv[1]`). Also the
 /// reserved top-level command name the CLI guards in `cmd`.
@@ -81,19 +83,7 @@ pub fn run() -> anyhow::Result<()> {
         })
         .context("running the credential-helper token resolution")?
         .context("resolving the Aspect access token")?
-        .with_context(|| {
-            // Named the way the user knows it, and given the command that actually
-            // re-authenticates it.
-            let named = if resolved.builtin {
-                "Aspect Cloud".to_string()
-            } else {
-                format!("the Aspect Workflows deployment '{deployment}'")
-            };
-            format!(
-                "not logged in to {named}; run `{}`",
-                login_hint(&deployment)
-            )
-        })?;
+        .with_context(|| not_logged_in_message(&deployment))?;
 
     write_response(&bearer_response(&token))
 }
