@@ -1,8 +1,7 @@
 mod axl_context;
+mod bazel;
 
 fn main() -> anyhow::Result<()> {
-    println!("AXL LSP");
-
     let ctx = axl_context::AxlContext {};
     starlark_lsp::server::stdio_server(ctx)?;
     Ok(())
