@@ -463,7 +463,8 @@ def _configure_impl(ctx: TaskContext) -> int:
         print("")
         print("This deployment does not advertise its login config, so the CLI")
         print("cannot log in against it. Add the issuer, client_id, and hosts to")
-        print("~/.aspect/config.json by hand.")
+        print("~/.aspect/config.json by hand, or log in with a token it accepts:")
+        print("  aspect auth login --with-token --deployment " + info.name)
         return 1
     if not ctx.args.login:
         print("")

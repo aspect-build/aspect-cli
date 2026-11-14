@@ -3478,12 +3478,17 @@ impl AuthSessionInner {
     }
 }
 
-/// Check an `id_token`'s `iss` and `aud` against the issuer and client this login
-/// used (OIDC Core 3.1.3.7, steps 2 and 3): `iss` must equal `issuer`, ignoring a
-/// trailing `/`, and `aud` must be or contain `client_id`.
+/// Validate an `id_token`'s issuer and audience against the issuer and client this
+/// login used, per OIDC Core 3.1.3.7 steps 2 and 3: `iss` must equal `issuer`,
+/// ignoring a trailing `/`, and `aud` must be or contain `client_id`.
+///
+/// For a deployment, `issuer` and `client_id` are what it advertises, and its
+/// edges pin the same pair on the id_token they receive as the bearer. `azp` is not
+/// checked: steps 4 and 5 make that optional, and a multi-audience token that
+/// names this client in `aud` is accepted whatever its `azp`.
 ///
 /// The signature is not verified. The token came straight from the issuer's token
-/// endpoint over TLS, which OIDC Core 3.1.3.7 step 6 accepts in place of it.
+/// endpoint over TLS, which step 6 accepts in place of it.
 fn check_id_token_claims(id_token: &str, issuer: &str, client_id: &str) -> anyhow::Result<()> {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -4314,9 +4319,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     /// File `creds` for `deployment` under `profile`.
     ///
     /// `deployment` names what the credential talks to — omitted means Aspect
-    /// Cloud, not the default deployment — and is normalized, so the Aspect Cloud alias
-    /// files where Aspect Cloud's canonical name does. `profile` names who holds
-    /// it, defaulting to [`resolve_profile`]; every other deployment in that
+    /// Cloud, not the default deployment — and is normalized, so the Aspect Cloud
+    /// alias files where Aspect Cloud's canonical name does. `profile` names who
+    /// holds it, defaulting to [`resolve_profile`]; every other deployment in that
     /// profile, and every other profile, is left alone.
     fn persist<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -7971,7 +7976,7 @@ mod tests {
             .is_ok()
         );
         // A trailing slash on either side is the same issuer; an audience list
-        // need only contain the client.
+        // need only contain the client, whatever `azp` says.
         assert!(
             check_id_token_claims(
                 &token(r#"{"iss":"https://idp.example/","aud":["other","client"]}"#),
@@ -7980,6 +7985,25 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(
+            check_id_token_claims(
+                &token(r#"{"iss":"https://idp.example","aud":["client","api"],"azp":"api"}"#),
+                issuer,
+                "client"
+            )
+            .is_ok()
+        );
+        // Issuers with a path, as Entra v2 and Okta custom authorization servers
+        // have, compare whole.
+        for issuer in [
+            "https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0",
+            "https://acme.okta.com/oauth2/aus1a2b3c4d5e6f7g8h9",
+        ] {
+            let payload = format!(r#"{{"iss":"{issuer}","aud":"client"}}"#);
+            assert!(check_id_token_claims(&token(&payload), issuer, "client").is_ok());
+            let parent = issuer.rsplit_once('/').unwrap().0;
+            assert!(check_id_token_claims(&token(&payload), parent, "client").is_err());
+        }
 
         let err = check_id_token_claims(
             &token(r#"{"iss":"https://other.example","aud":"client"}"#),
