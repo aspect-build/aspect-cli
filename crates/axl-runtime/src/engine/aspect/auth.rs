@@ -763,7 +763,8 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
         }),
         _ => Err(anyhow::anyhow!(
             "deployment {:?} advertised no login config, so the CLI cannot log in \
-             against it; add its issuer and client_id to ~/.aspect/config.json",
+             against it; add its issuer and client_id to ~/.aspect/config.json, or \
+             log in with a token it accepts via `aspect auth login --with-token`",
             deployment.name
         )),
     }
@@ -1955,12 +1956,16 @@ fn api_token_cache() -> &'static Mutex<Option<ApiTokenCacheEntry>> {
 /// `ASPECT_API_TOKEN_<NAME>` for anything else, with the name uppercased and every
 /// character outside `[A-Z0-9]` replaced by `_`.
 ///
+/// The two hold different credentials. `ASPECT_API_TOKEN` is an Aspect account
+/// API token, minted by Aspect Cloud's issuer; `ASPECT_API_TOKEN_<NAME>` is minted
+/// by that deployment's own issuer. Neither is accepted in place of the other.
+///
 /// Aspect Cloud takes the unsuffixed name because a token for it is the one every
 /// installation needs — the GitHub and GitLab App features are served only there,
-/// so a self-hosted customer sets this one *and* the suffixed one for their own
-/// deployment. It is pinned to Aspect Cloud rather than tracking the default
-/// deployment so that `aspect auth use` cannot silently change which issuer a CI
-/// credential is minted by.
+/// so a customer with their own deployment sets this one for those features *and*
+/// the suffixed one for their builds. It is pinned to Aspect Cloud rather than
+/// tracking the default deployment so that `aspect auth use` cannot silently
+/// change which issuer a CI credential is exchanged against.
 ///
 /// The same name is used for the Buildkite secret store, so one scheme documents
 /// both.
@@ -3431,6 +3436,9 @@ impl AuthSessionInner {
     /// Returns the credential for this session's bearer — the `id_token` for a
     /// self-hosted deployment, the `access_token` for Aspect Cloud, per
     /// `prefer_id_token`. One grant, one credential.
+    ///
+    /// An `id_token` in the response must name this login's issuer and client
+    /// ([`check_id_token_claims`]), whichever token becomes the bearer.
     async fn complete(
         self,
         code: String,
@@ -3449,6 +3457,9 @@ impl AuthSessionInner {
             &self.code_verifier,
         )
         .await?;
+        if !token_resp.id_token.is_empty() {
+            check_id_token_claims(&token_resp.id_token, &self.env.domain, &self.env.client_id)?;
+        }
         let refresh_token = token_resp.refresh_token.clone();
         // Recorded so refresh keeps minting the same kind rather than downgrading
         // to whatever the grant happens to return.
@@ -3465,6 +3476,60 @@ impl AuthSessionInner {
             self.issuer_kind.or(endpoints.issuer_kind),
         )
     }
+}
+
+/// Check an `id_token`'s `iss` and `aud` against the issuer and client this login
+/// used (OIDC Core 3.1.3.7, steps 2 and 3): `iss` must equal `issuer`, ignoring a
+/// trailing `/`, and `aud` must be or contain `client_id`.
+///
+/// The signature is not verified. The token came straight from the issuer's token
+/// endpoint over TLS, which OIDC Core 3.1.3.7 step 6 accepts in place of it.
+fn check_id_token_claims(id_token: &str, issuer: &str, client_id: &str) -> anyhow::Result<()> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Audience {
+        One(String),
+        Many(Vec<String>),
+    }
+    #[derive(Deserialize)]
+    struct IdTokenClaims {
+        iss: Option<String>,
+        aud: Option<Audience>,
+    }
+
+    let payload = id_token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("the issuer returned an id_token that is not a JWT"))?;
+    let claims: IdTokenClaims = URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("the issuer returned an id_token that could not be decoded")
+        })?;
+
+    let want_iss = issuer.trim_end_matches('/');
+    let iss = claims.iss.unwrap_or_default();
+    if iss.trim_end_matches('/') != want_iss {
+        return Err(anyhow::anyhow!(
+            "the id_token was issued by {iss:?}, not by {want_iss:?}, the issuer this login used"
+        ));
+    }
+    let aud_ok = match &claims.aud {
+        Some(Audience::One(aud)) => aud == client_id,
+        Some(Audience::Many(auds)) => auds.iter().any(|a| a == client_id),
+        None => false,
+    };
+    if !aud_ok {
+        return Err(anyhow::anyhow!(
+            "the id_token is not for client {client_id:?}, the client this login used"
+        ));
+    }
+    Ok(())
 }
 
 fn callback_state_matches(expected: &str, actual: Option<&str>, require_state: bool) -> bool {
@@ -3899,12 +3964,6 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-/// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect Cloud entry
-/// (`builtin`) plus every configured deployment, each tagged with whether it is
-/// the default and whether a credential is stored under its profile. The account
-/// is always included (the `auth status` task renders it in its own section, logged
-/// in or not); when no configured deployment is the default, Aspect Cloud is the
-/// effective default (matching [`select_deployment`]).
 /// Everything [`summarize_deployment`] needs, read once: the configured
 /// deployments, the selected profile's credentials, and whether any configured
 /// deployment claims the default (which decides whether Aspect Cloud shows as it).
@@ -3919,6 +3978,12 @@ fn summary_inputs() -> anyhow::Result<(Vec<Deployment>, ProfileCredentials, bool
     Ok((deployments, creds, any_default))
 }
 
+/// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect Cloud entry
+/// (`builtin`) plus every configured deployment, each tagged with whether it is
+/// the default and whether a credential is stored under its profile. The account
+/// is always included (the `auth status` task renders it in its own section, logged
+/// in or not); when no configured deployment is the default, Aspect Cloud is the
+/// default (matching [`select_deployment`]).
 fn list_deployment_summaries() -> anyhow::Result<Vec<DeploymentSummary>> {
     let (deployments, creds, any_default) = summary_inputs()?;
     // Reported here rather than at load: `auth status` is where a user is looking
@@ -4188,10 +4253,13 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 
     /// Start a login to `deployment` (or Aspect Cloud).
     ///
-    /// With `token`, the credential for that token; with `api_token`, the one it
-    /// exchanges for; otherwise an `AuthSession` for the browser login. A token
-    /// that is malformed or refused, or a deployment that cannot be logged in
-    /// to, ends the task with its reason and no traceback.
+    /// With `token`, the credential for that token, stored as given: it is never
+    /// exchanged or refreshed, so the deployment needs no issuer or client id.
+    /// With `api_token`, the credential it exchanges for; otherwise an
+    /// `AuthSession` for the browser login. Both of those need the deployment's
+    /// issuer and client id. A token that is malformed or refused, or a deployment
+    /// that cannot be logged in to, ends the task with its reason and no
+    /// traceback.
     fn login<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named)] token: Option<&str>,
@@ -4201,7 +4269,6 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
         let selected = select_aspect_cloud_or_deployment(&deployments, deployment)?;
-        let env = auth_env_from(&selected).map_err(|e| TaskExit::error(e.to_string()))?;
 
         if let Some(token) = token {
             let claims = decode_jwt_claims(token).map_err(|e| login_failure(&e, None))?;
@@ -4218,6 +4285,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             };
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
+
+        let env = auth_env_from(&selected).map_err(|e| TaskExit::error(e.to_string()))?;
 
         if let Some(api_token) = api_token {
             let entry = api_token_pair(api_token)
@@ -4244,8 +4313,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 
     /// File `creds` for `deployment` under `profile`.
     ///
-    /// `deployment` names what the credential talks to — omitted means the
-    /// effective default deployment — and is normalized, so the Aspect Cloud alias
+    /// `deployment` names what the credential talks to — omitted means Aspect
+    /// Cloud, not the default deployment — and is normalized, so the Aspect Cloud alias
     /// files where Aspect Cloud's canonical name does. `profile` names who holds
     /// it, defaulting to [`resolve_profile`]; every other deployment in that
     /// profile, and every other profile, is left alone.
@@ -4268,8 +4337,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 
     /// Log out. `all` clears every credential of every profile. Otherwise it clears
     /// one deployment's credential in one profile: the deployment named
-    /// `deployment` — or, when none is given, the effective default deployment —
-    /// as `profile`, defaulting to [`resolve_profile`].
+    /// `deployment` — or, when none is given, Aspect Cloud (see
+    /// [`select_aspect_cloud_or_deployment`]) — as `profile`, defaulting to
+    /// [`resolve_profile`].
     ///
     /// Only that one credential: logging out of one deployment leaves the same
     /// profile's other logins alone, and logging out as one profile never touches
@@ -7887,6 +7957,55 @@ mod tests {
         assert!(!callback_state_matches("expected", Some("wrong"), false));
     }
 
+    #[test]
+    fn id_token_claims_must_name_the_issuer_and_client() {
+        let issuer = "https://idp.example";
+        let token = |payload: &str| jwt_with_payload(payload);
+
+        assert!(
+            check_id_token_claims(
+                &token(r#"{"iss":"https://idp.example","aud":"client"}"#),
+                issuer,
+                "client"
+            )
+            .is_ok()
+        );
+        // A trailing slash on either side is the same issuer; an audience list
+        // need only contain the client.
+        assert!(
+            check_id_token_claims(
+                &token(r#"{"iss":"https://idp.example/","aud":["other","client"]}"#),
+                "https://idp.example/",
+                "client"
+            )
+            .is_ok()
+        );
+
+        let err = check_id_token_claims(
+            &token(r#"{"iss":"https://other.example","aud":"client"}"#),
+            issuer,
+            "client",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("\"https://other.example\""),
+            "{err}"
+        );
+        for payload in [
+            r#"{"iss":"https://idp.example","aud":"other"}"#,
+            r#"{"iss":"https://idp.example","aud":["other"]}"#,
+            r#"{"iss":"https://idp.example"}"#,
+        ] {
+            let err = check_id_token_claims(&token(payload), issuer, "client").unwrap_err();
+            assert!(
+                err.to_string().contains("not for client"),
+                "{payload}: {err}"
+            );
+        }
+        assert!(check_id_token_claims(&token(r#"{"aud":"client"}"#), issuer, "client").is_err());
+        assert!(check_id_token_claims("not-a-jwt", issuer, "client").is_err());
+    }
+
     /// Serve one PKCE token exchange on a local port, the way a self-hosted
     /// issuer with no discovery document does: 404 the OIDC discovery request,
     /// then answer the `POST /oauth/token` of `code=auth-code` with `status`
@@ -7895,10 +8014,20 @@ mod tests {
         status: &'static str,
         body: String,
     ) -> (String, std::thread::JoinHandle<()>) {
+        serve_token_exchange_with(status, move |_| body)
+    }
+
+    /// [`serve_token_exchange`] with the body built from the issuer URL, which is
+    /// known only once the server is bound.
+    fn serve_token_exchange_with(
+        status: &'static str,
+        body: impl FnOnce(&str) -> String + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
 
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let issuer = format!("http://{}", server.local_addr().unwrap());
+        let body = body(&issuer);
         let responder = std::thread::spawn(move || {
             let (mut stream, _) = server.accept().unwrap();
             let mut discovery = [0; 1024];
@@ -7996,6 +8125,48 @@ mod tests {
             err.downcast_ref::<TaskExit>().is_none(),
             "a consumed session is a bug, reported with its traceback"
         );
+    }
+
+    #[test]
+    fn finish_auth_session_refuses_an_id_token_for_another_client() {
+        let (issuer, responder) = serve_token_exchange_with_id_token(r#""aud":"other""#);
+        let session = pasted_code_session(issuer);
+        let runtime = tokio_runtime();
+        let _runtime = runtime.enter();
+
+        let err = finish_auth_session(&session, Some("auth-code")).unwrap_err();
+        responder.join().unwrap();
+        let message = err
+            .downcast_ref::<TaskExit>()
+            .and_then(|e| e.message.as_deref())
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("login failed: the id_token is not for client \"client\""),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn finish_auth_session_accepts_an_id_token_for_this_login() {
+        let (issuer, responder) = serve_token_exchange_with_id_token(r#""aud":"client""#);
+        let session = pasted_code_session(issuer);
+        let runtime = tokio_runtime();
+        let _runtime = runtime.enter();
+
+        finish_auth_session(&session, Some("auth-code")).unwrap();
+        responder.join().unwrap();
+    }
+
+    /// [`serve_token_exchange`] answering with an access token and an id_token
+    /// whose `iss` is the mock issuer and whose other claims are `claims`.
+    fn serve_token_exchange_with_id_token(
+        claims: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        serve_token_exchange_with("200 OK", move |issuer| {
+            let access = jwt_with_exp(None);
+            let id = jwt_with_payload(&format!(r#"{{"iss":"{issuer}",{claims}}}"#));
+            format!(r#"{{"access_token":"{access}","id_token":"{id}"}}"#)
+        })
     }
 
     #[test]
