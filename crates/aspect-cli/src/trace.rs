@@ -30,6 +30,7 @@ use opentelemetry_sdk::{
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::{Mutex, OnceLock};
 use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 use tracing_core::Level;
@@ -381,7 +382,28 @@ fn base_resource() -> Resource {
     base_resource_builder().build()
 }
 
-fn merged_resource(extra: &std::collections::BTreeMap<String, String>) -> Resource {
+/// The `resource_attributes` of every metric exporter, merged for the one
+/// meter provider they share. Where two exporters set a key to different
+/// values, the first registered wins and the key is listed in the returned
+/// conflicts.
+fn metric_resource_attributes(specs: &[OtlpSpec]) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let mut merged = BTreeMap::new();
+    let mut conflicts = BTreeSet::new();
+    for (key, value) in specs.iter().flat_map(|spec| &spec.resource_attributes) {
+        match merged.entry(key.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(value.clone());
+            }
+            Entry::Occupied(first) if first.get() != value => {
+                conflicts.insert(key.clone());
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    (merged, conflicts)
+}
+
+fn merged_resource(extra: &BTreeMap<String, String>) -> Resource {
     if extra.is_empty() {
         return base_resource();
     }
@@ -571,9 +593,7 @@ fn http_config<B: WithExportConfig + WithHttpConfig>(
     })
 }
 
-fn metadata_from(
-    headers: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<MetadataMap> {
+fn metadata_from(headers: &BTreeMap<String, String>) -> anyhow::Result<MetadataMap> {
     let mut m = MetadataMap::new();
     for (k, v) in headers {
         let key: MetadataKey<_> = k
@@ -622,9 +642,10 @@ fn activate_file_spec(spec: &FileSpec) -> anyhow::Result<()> {
 /// Take the exporter specs collected during phase 1-3 evaluation and turn
 /// them into real exporters. OTLP specs become `opentelemetry_otlp` exporters
 /// that the span and log buffers replay into and then forward to. File specs
-/// add sinks to the file-sinks layer. Metric-enabled OTLP specs get a fresh
-/// metrics provider (no replay; phases 1-3 record no metrics), stored in a
-/// process-wide static so `OtelGuard` can flush it on drop.
+/// add sinks to the file-sinks layer. Metric-enabled OTLP specs share one
+/// fresh metrics provider (no replay; phases 1-3 record no metrics) whose
+/// resource merges their `resource_attributes`, stored in a process-wide
+/// static so `OtelGuard` can flush it on drop.
 ///
 /// Buffering always ends here, so a run without an OTLP exporter for a signal
 /// stops holding that signal's records.
@@ -706,9 +727,15 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
     log_buf.install_late(log_exporters).await;
 
     if !metric_exporters.is_empty() {
-        // Every metric exporter reads from this one provider, so metrics carry
-        // the base resource and not an exporter's own `resource_attributes`.
-        let mut builder = MeterProviderBuilder::default().with_resource(base_resource());
+        let (attributes, conflicts) = metric_resource_attributes(&metric_exporters);
+        for key in conflicts {
+            errln!(
+                "telemetry: metric exporters set resource attribute `{key}` to \
+                 different values; metrics carry the first registered exporter's"
+            );
+        }
+        let mut builder =
+            MeterProviderBuilder::default().with_resource(merged_resource(&attributes));
         for spec in metric_exporters {
             let exporter = build_otlp_metric_exporter(&spec)?;
             let mut reader = PeriodicReader::builder(exporter);
@@ -820,6 +847,62 @@ mod tests {
 
     fn env_with(var: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
         move |name| (name == var).then(|| value.to_owned())
+    }
+
+    fn otlp_spec(attributes: &[(&str, &str)]) -> OtlpSpec {
+        OtlpSpec {
+            url: "https://collector.example:4317".to_owned(),
+            protocol: OtlpProtocol::Grpc,
+            headers: Default::default(),
+            signals: Signals::all(),
+            resource_attributes: attributes
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn metrics_carry_a_metric_exporters_resource_attributes() {
+        let (attributes, conflicts) =
+            metric_resource_attributes(&[otlp_spec(&[("deployment.environment", "ci")])]);
+        assert!(conflicts.is_empty());
+        let resource = merged_resource(&attributes);
+        assert_eq!(
+            resource.get(&opentelemetry::Key::new("deployment.environment")),
+            Some(opentelemetry::Value::from("ci"))
+        );
+        assert_eq!(
+            resource.get(&opentelemetry::Key::new("service.name")),
+            Some(opentelemetry::Value::from("aspect-cli"))
+        );
+    }
+
+    #[test]
+    fn metric_resource_attributes_merge_across_exporters() {
+        let (attributes, conflicts) = metric_resource_attributes(&[
+            otlp_spec(&[("team", "build"), ("region", "us")]),
+            otlp_spec(&[("team", "build"), ("tenant", "acme")]),
+        ]);
+        assert!(conflicts.is_empty());
+        assert_eq!(
+            attributes.into_iter().collect::<Vec<_>>(),
+            [("region", "us"), ("team", "build"), ("tenant", "acme")]
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        );
+    }
+
+    #[test]
+    fn the_first_metric_exporter_wins_a_conflicting_attribute() {
+        let (attributes, conflicts) = metric_resource_attributes(&[
+            otlp_spec(&[("deployment.environment", "ci")]),
+            otlp_spec(&[("deployment.environment", "prod")]),
+        ]);
+        assert_eq!(attributes["deployment.environment"], "ci");
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            ["deployment.environment"]
+        );
     }
 
     #[test]

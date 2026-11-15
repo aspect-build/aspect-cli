@@ -477,11 +477,11 @@ fn exporters_methods(builder: &mut MethodsBuilder) {
     ///   signals: optional list, subset of ["traces", "logs", "metrics"];
     ///            default is all three
     ///   resource_attributes: optional dict[str,str] merged into the
-    ///                        Resource of the traces and logs an OTLP
-    ///                        exporter sends. Metrics carry only the base
-    ///                        Resource, since every metric exporter reads
-    ///                        from one meter provider; file exporters write
-    ///                        no Resource.
+    ///                        Resource an OTLP exporter sends. Metric
+    ///                        exporters share one Resource, merged from all
+    ///                        of theirs; where two set a key differently,
+    ///                        the first registered wins and the CLI warns.
+    ///                        File exporters write no Resource.
     fn add<'v>(
         this: ValueTyped<'v, Exporters>,
         #[starlark(require = named, default = NoneOr::None)] url: NoneOr<&'v str>,
