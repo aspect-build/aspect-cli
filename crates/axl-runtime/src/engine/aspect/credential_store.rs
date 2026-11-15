@@ -30,6 +30,10 @@
 //! stored value that *is* readable but unparseable (a legacy/corrupt layout) also
 //! reads as "no credentials" (see [`parse_stored_map`]), so it means "re-run
 //! login" rather than a hard error blocking every command.
+//!
+//! An empty keyring falls back to the default-path file, where releases before
+//! the keyring backend stored credentials in an older layout that only the
+//! caller can read; see [`migrate_legacy_file`].
 
 use std::collections::HashMap;
 use std::fs;
@@ -44,7 +48,8 @@ const KEYRING_SERVICE: &str = "Aspect";
 /// Environment variable forcing the file backend at a given path (headless CI).
 const CREDENTIALS_FILE_ENV: &str = "ASPECT_CREDENTIALS_FILE";
 
-/// The default file-backend path, also the historical credentials location.
+/// The default file-backend path, also where releases before the keyring backend
+/// stored credentials.
 fn default_file_path() -> anyhow::Result<PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to determine home directory"))?;
@@ -83,9 +88,30 @@ impl CredentialStore {
     /// read. A readable-but-unparseable stored value (a legacy/corrupt layout) is
     /// treated as empty on both backends — see [`parse_stored_map`] — so it means
     /// "re-run login", not a hard error on every command.
-    pub(crate) fn load_all<T: DeserializeOwned>(&self) -> anyhow::Result<HashMap<String, T>> {
+    ///
+    /// An empty keyring reads the default-path file through `parse_legacy`, moving
+    /// what it recognizes into the keyring; see [`migrate_legacy_file`].
+    pub(crate) fn load_all<T, P>(&self, parse_legacy: P) -> anyhow::Result<HashMap<String, T>>
+    where
+        T: DeserializeOwned + Serialize,
+        P: FnOnce(&str) -> Option<HashMap<String, T>>,
+    {
         match self {
-            Self::Keyring => keyring_load_all(),
+            Self::Keyring => {
+                let map = keyring_load_all()?;
+                if !map.is_empty() {
+                    return Ok(map);
+                }
+                match default_file_path() {
+                    Ok(path) => Ok(migrate_legacy_file(
+                        &path,
+                        parse_legacy,
+                        keyring_save_all,
+                        keyring_load_all,
+                    )),
+                    Err(_) => Ok(map),
+                }
+            }
             Self::File(path) => file_load_all(path),
         }
     }
@@ -138,6 +164,67 @@ fn keyring_load_all<T: DeserializeOwned>() -> anyhow::Result<HashMap<String, T>>
     }
 }
 
+/// The credentials in the legacy file at `path`, moved into the keyring through
+/// `save` so upgrading users stay logged in.
+///
+/// `parse` decides what is legacy: it returns `None` for anything it does not
+/// recognize as an older layout, the current layout included. A current-layout
+/// file at the default path is the file backend's own store, written on a run
+/// where the keyring was unreachable, and must stay put so such a run still finds
+/// it.
+///
+/// The credentials are returned only once `load` reads every profile back, and
+/// the file is deleted then too. A failed or partial write returns nothing and
+/// keeps the file for the next run: handing the credentials out anyway would let
+/// a later keyring write adopt them while the file survives, so a logout would
+/// bring them back. An unreadable file reads as nothing to migrate rather than
+/// failing every command.
+fn migrate_legacy_file<T, P, S, L>(path: &Path, parse: P, save: S, load: L) -> HashMap<String, T>
+where
+    P: FnOnce(&str) -> Option<HashMap<String, T>>,
+    S: FnOnce(&HashMap<String, T>) -> anyhow::Result<()>,
+    L: FnOnce() -> anyhow::Result<HashMap<String, T>>,
+{
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(e) => {
+            tracing::warn!(
+                "not migrating legacy credentials from {}: {e}",
+                path.display()
+            );
+            return HashMap::new();
+        }
+    };
+    let Some(legacy) = parse(&raw).filter(|m| !m.is_empty()) else {
+        return HashMap::new();
+    };
+    let complete = save(&legacy)
+        .and_then(|()| load())
+        .map(|stored| legacy.keys().all(|k| stored.contains_key(k)));
+    match complete {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("legacy credentials did not read back from the keyring");
+            return HashMap::new();
+        }
+        Err(e) => {
+            tracing::warn!("could not migrate legacy credentials into the keyring: {e}");
+            return HashMap::new();
+        }
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        // A concurrent invocation migrated the same file first.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            "migrated credentials but could not remove {}: {e}",
+            path.display()
+        ),
+    }
+    legacy
+}
+
 fn keyring_save_all<T: Serialize>(map: &HashMap<String, T>) -> anyhow::Result<()> {
     let entry = keyring_entry()?;
     if map.is_empty() {
@@ -187,6 +274,113 @@ fn file_save_all<T: Serialize>(path: &Path, map: &HashMap<String, T>) -> anyhow:
 mod tests {
     use super::*;
 
+    /// A legacy `credentials.json` in a fresh temp dir holding one profile, in
+    /// a layout [`legacy`] recognizes.
+    fn legacy_file() -> (tempfile::TempDir, PathBuf, HashMap<String, String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        fs::write(&path, r#"{"default": 7}"#).unwrap();
+        let migrated = HashMap::from([("default".to_string(), "7".to_string())]);
+        (dir, path, migrated)
+    }
+
+    /// A stand-in legacy parser: integer values are the older layout, string
+    /// values (what this store would write) are current and yield `None`.
+    fn legacy(raw: &str) -> Option<HashMap<String, String>> {
+        let old: HashMap<String, i64> = serde_json::from_str(raw).ok()?;
+        Some(old.into_iter().map(|(k, v)| (k, v.to_string())).collect())
+    }
+
+    #[test]
+    fn migration_moves_the_legacy_file_into_the_keyring() {
+        let (_dir, path, migrated) = legacy_file();
+        let written = std::cell::RefCell::new(HashMap::new());
+        let got = migrate_legacy_file(
+            &path,
+            legacy,
+            |m: &HashMap<String, String>| {
+                *written.borrow_mut() = m.clone();
+                Ok(())
+            },
+            || Ok(written.borrow().clone()),
+        );
+        assert_eq!(got, migrated);
+        assert_eq!(*written.borrow(), migrated);
+        assert!(
+            !path.exists(),
+            "a completed migration removes the legacy file"
+        );
+    }
+
+    #[test]
+    fn a_failed_keyring_write_keeps_the_file_and_returns_nothing() {
+        let (_dir, path, _) = legacy_file();
+        let got = migrate_legacy_file(
+            &path,
+            legacy,
+            |_: &HashMap<String, String>| Err(anyhow::anyhow!("keyring locked")),
+            || unreachable!("nothing to read back after a failed write"),
+        );
+        assert!(got.is_empty());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_partial_read_back_keeps_the_file_and_returns_nothing() {
+        let (_dir, path, _) = legacy_file();
+        let got = migrate_legacy_file(
+            &path,
+            legacy,
+            |_: &HashMap<String, String>| Ok(()),
+            || Ok(HashMap::new()),
+        );
+        assert!(got.is_empty());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_current_layout_file_is_left_for_the_file_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let current = HashMap::from([("default".to_string(), "tok".to_string())]);
+        file_save_all(&path, &current).unwrap();
+        let got = migrate_legacy_file(
+            &path,
+            legacy,
+            |_: &HashMap<String, String>| unreachable!("nothing to write"),
+            || unreachable!("nothing to read back"),
+        );
+        assert!(got.is_empty());
+        assert_eq!(file_load_all::<String>(&path).unwrap(), current);
+    }
+
+    #[test]
+    fn a_file_removed_by_a_concurrent_migration_still_migrates() {
+        let (_dir, path, migrated) = legacy_file();
+        let got = migrate_legacy_file(
+            &path,
+            legacy,
+            |_: &HashMap<String, String>| {
+                fs::remove_file(&path).unwrap();
+                Ok(())
+            },
+            || Ok(migrated.clone()),
+        );
+        assert_eq!(got, migrated);
+    }
+
+    #[test]
+    fn no_legacy_file_means_nothing_to_migrate() {
+        let dir = tempfile::tempdir().unwrap();
+        let got: HashMap<String, String> = migrate_legacy_file(
+            &dir.path().join("credentials.json"),
+            legacy,
+            |_| unreachable!("nothing to write"),
+            || unreachable!("nothing to read back"),
+        );
+        assert!(got.is_empty());
+    }
+
     #[test]
     fn file_backend_round_trips_and_is_empty_when_absent() {
         let dir = std::env::temp_dir().join(format!("aspect-cred-test-{}", std::process::id()));
@@ -194,7 +388,7 @@ mod tests {
         let store = CredentialStore::File(path.clone());
 
         // Absent file → empty, not an error.
-        let loaded: HashMap<String, String> = store.load_all().unwrap();
+        let loaded: HashMap<String, String> = store.load_all(legacy).unwrap();
         assert!(loaded.is_empty());
 
         let mut map = HashMap::new();
@@ -202,14 +396,14 @@ mod tests {
         map.insert("acme".to_string(), "tok-b".to_string());
         store.save_all(&map).unwrap();
 
-        let back: HashMap<String, String> = store.load_all().unwrap();
+        let back: HashMap<String, String> = store.load_all(legacy).unwrap();
         assert_eq!(back, map);
 
         // Saving a smaller set replaces the whole file (logout semantics).
         let mut one = HashMap::new();
         one.insert("acme".to_string(), "tok-b".to_string());
         store.save_all(&one).unwrap();
-        let back: HashMap<String, String> = store.load_all().unwrap();
+        let back: HashMap<String, String> = store.load_all(legacy).unwrap();
         assert_eq!(back, one);
 
         let _ = fs::remove_dir_all(&dir);
