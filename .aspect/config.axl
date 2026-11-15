@@ -251,8 +251,8 @@ def config(ctx: ConfigContext):
     _dogfood_task_hooks(ctx)
 
     # Dogfood telemetry.exporters: when DASH0_ENDPOINT/DASH0_TOKEN are injected
-    # (CI), ship aspect-cli's own traces/logs to Dash0 via OTLP + Bearer auth.
-    # No-op when either var is unset.
+    # (CI), ship aspect-cli's own traces, logs and metrics to Dash0 via OTLP +
+    # Bearer auth. No-op when either var is unset.
     dash0_endpoint = ctx.std.env.var("DASH0_ENDPOINT")
     dash0_token = ctx.std.env.var("DASH0_TOKEN")
     if dash0_endpoint and dash0_token:
