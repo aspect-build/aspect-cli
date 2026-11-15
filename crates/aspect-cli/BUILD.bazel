@@ -56,12 +56,12 @@ rust_binary(
     name = "aspect-cli",
     srcs = SRCS,
     compile_data = COMPILE_DATA,
+    proc_macro_deps = PROC_MACRO_DEPS,
     version_key = "STABLE_MONOREPO_VERSION",
     visibility = [
         "//:__pkg__",
         "//examples/deliverable:__pkg__",
     ],
-    proc_macro_deps = PROC_MACRO_DEPS,
     deps = DEPS,
 )
 
@@ -226,9 +226,9 @@ rust_binary(
     srcs = SRCS,
     compile_data = COMPILE_DATA,
     crate_root = "src/main.rs",
+    proc_macro_deps = PROC_MACRO_DEPS,
     release_rustc_flags = ["-Cstrip=none"],
     version_key = "STABLE_MONOREPO_VERSION",
-    proc_macro_deps = PROC_MACRO_DEPS,
     deps = DEPS,
 )
 
