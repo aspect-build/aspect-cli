@@ -18,7 +18,7 @@ pub fn set_warn(f: fn(&str)) {
     let _ = WARN.set(f);
 }
 
-fn warn(msg: &str) {
+pub(crate) fn warn(msg: &str) {
     match WARN.get() {
         Some(f) => f(msg),
         None => ::tracing::warn!("{msg}"),

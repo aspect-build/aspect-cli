@@ -298,7 +298,6 @@ impl BuildEventSink {
         outcome.error = None;
         outcome.times_bound += 1;
         drop(outcome);
-        bazel::bes::sink::set_warn(crate::diag::warn);
         let join = grpc::Grpc::spawn(
             rt.0.clone(),
             stream.subscribe(),
@@ -1064,6 +1063,9 @@ impl Build {
         };
         let build_event_stream = match bes_channel {
             Some(channel) => {
+                // BES sinks never fail the build; their warnings are how the
+                // user learns of a lost copy or upload.
+                bazel::bes::sink::set_warn(crate::diag::warn);
                 let gate = pids.gate(channel.path());
                 Some(BuildEventStream::spawn(channel, gate, file_sinks)?)
             }

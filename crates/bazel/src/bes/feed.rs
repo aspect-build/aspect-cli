@@ -53,9 +53,9 @@ impl FileSignal {
 
 /// The file sinks a stream mirrors its raw bytes to.
 ///
-/// A sink that fails to open, write or flush is dropped with the failure
-/// signalled to whoever waits on it, and the others go on: one bad path costs
-/// that copy, not the stream.
+/// A sink that fails to open, write or flush is dropped with a warning and the
+/// failure signalled to whoever waits on it, and the others go on: one bad path
+/// costs that copy, not the stream.
 struct Mirrors {
     sinks: Vec<Mirror>,
 }
@@ -63,18 +63,21 @@ struct Mirrors {
 struct Mirror {
     path: String,
     signal: Arc<FileSignal>,
-    /// `None` before the first open and once failed.
+    /// `None` before the first open, once failed, and once finished.
     out: Option<BufWriter<File>>,
 }
 
 impl Mirror {
+    /// Drop this sink: warn, and signal `why` to whoever waits on it.
     fn fail(&mut self, why: String) {
         self.out = None;
+        super::sink::warn(&format!("BES file sink {}: {why}", self.path));
         self.signal.complete(Err(why));
     }
 
+    /// Only [`fail`](Self::fail) completes the signal before the stream ends.
     fn failed(&self) -> bool {
-        self.out.is_none() && self.signal.is_complete()
+        self.signal.is_complete()
     }
 }
 
@@ -107,7 +110,7 @@ impl Mirrors {
             m.out = None;
             match File::create(&m.path) {
                 Ok(f) => m.out = Some(BufWriter::new(f)),
-                Err(e) => m.fail(format!("cannot open {}: {e}", m.path)),
+                Err(e) => m.fail(format!("cannot open: {e}")),
             }
         }
     }
@@ -219,8 +222,7 @@ impl BuildEventStream {
                     mirrors.write(&frame.raw);
                     payload
                 };
-                // The retried attempt's events start each sink over, as bazel
-                // truncates its own file.
+                // Bazel truncates its own file for the retried attempt.
                 if retry {
                     mirrors.restart();
                 }
@@ -1089,7 +1091,12 @@ mod tests {
         .concat()
     }
 
-    fn run_retry_sink_test(last_message_on_evicted: bool) -> Vec<u8> {
+    /// Run two attempts through a stream with one good file sink after
+    /// `other_sinks`, and return what the good sink holds.
+    fn run_retry_sink_test(
+        last_message_on_evicted: bool,
+        other_sinks: Vec<(String, Arc<FileSignal>)>,
+    ) -> Vec<u8> {
         let path = temp_fifo_path();
         let sink_path =
             std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
@@ -1100,10 +1107,13 @@ mod tests {
             path.clone(),
             pid,
             pid,
-            vec![(
-                sink_path.to_str().unwrap().to_string(),
-                Arc::new(FileSignal::new()),
-            )],
+            other_sinks
+                .into_iter()
+                .chain([(
+                    sink_path.to_str().unwrap().to_string(),
+                    Arc::new(FileSignal::new()),
+                )])
+                .collect(),
         )
         .unwrap();
         wait_for_fifo(&path);
@@ -1129,14 +1139,30 @@ mod tests {
     /// truncated so they contain only the retry stream's bytes.
     #[test]
     fn test_file_sinks_emptied_before_retry_stream() {
-        let written = run_retry_sink_test(false);
+        let written = run_retry_sink_test(false, vec![]);
         assert_eq!(written, attempt2_raw());
     }
 
     /// Same requirement when Bazel sets last_message=true on the evicted event.
     #[test]
     fn test_file_sinks_emptied_before_retry_stream_last_message() {
-        let written = run_retry_sink_test(true);
+        let written = run_retry_sink_test(true, vec![]);
         assert_eq!(written, attempt2_raw());
+    }
+
+    /// A sink that failed to open stays failed across a retry, and the good
+    /// sink beside it still starts over for the retried attempt.
+    #[test]
+    fn a_failed_sink_stays_failed_across_a_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_path = dir.path().join("missing-dir").join("bad.bin");
+        let bad = Arc::new(FileSignal::new());
+        let written = run_retry_sink_test(
+            false,
+            vec![(bad_path.to_str().unwrap().to_string(), bad.clone())],
+        );
+        assert_eq!(written, attempt2_raw());
+        assert!(bad.wait().unwrap_err().contains("cannot open"));
+        assert!(!bad_path.exists());
     }
 }
