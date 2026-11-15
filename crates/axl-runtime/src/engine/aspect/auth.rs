@@ -73,9 +73,10 @@ pub(crate) struct Deployment {
     /// The capability → host map the deployment advertised (`cache`, `bes`, and
     /// `exec` when it serves remote execution), so `aspect <build|test>
     /// --deployment <name>` wires each to the right Bazel flag. Absent for the
-    /// built-in Aspect seed (it advertises none yet), for a hand-edited
-    /// `config.json` entry that omits them, and for a deployment whose cache and
-    /// BES are private, which advertises only its web UI.
+    /// built-in Aspect seed (it advertises none yet) and for a hand-edited
+    /// `config.json` entry that omits them. A deployment whose cache and BES are
+    /// private records only its `results_url`, unless an earlier configure
+    /// recorded them ([`keep_build_endpoints`]).
     #[serde(default, skip_serializing_if = "Endpoints::is_empty")]
     pub(crate) endpoints: Endpoints,
     /// The `redirect_uri` this deployment's login sends the IdP to, exactly as it
@@ -103,8 +104,9 @@ const DEFAULT_LOGIN_SCOPES: &[&str] = &["openid", "profile", "email", "offline_a
 ///
 /// `results_url` is the odd one out: the build-result viewer
 /// (`--bes_results_url`), advertised as a top-level `aspect_bes_results_url`
-/// rather than an `aspect_endpoints` entry because it is a full URL, not a bare
-/// host. It is carried here so one struct describes everything BES-adjacent a
+/// because it is a full URL, not a bare host. An `aspect_endpoints` entry by
+/// that name is a web-UI-only deployment naming its origin; see
+/// [`deployment_from_discovery`]. It is carried here so one struct describes everything BES-adjacent a
 /// deployment offers, but it is never host-normalized and never joins the
 /// auth-gate `hosts` — it addresses a web UI, not a gRPC endpoint the login JWT
 /// is sent to. Empty when the deployment has no web UI.
@@ -137,23 +139,30 @@ impl Endpoints {
     /// Whether this advertises somewhere Bazel can actually talk to.
     ///
     /// Deliberately narrower than [`Self::is_empty`], which counts `results_url`
-    /// and `api` as well. A deployment whose cache and BES sit on a private
-    /// network advertises only its web UI, which is still a deployment to
-    /// configure and log in to; but recorded under Aspect Cloud's own name it
-    /// would replace the endpoints that do serve builds, so
-    /// [`Self::configurable_as`] requires this of Aspect Cloud alone.
+    /// and `api` as well. See [`configure_refusal`] for why only Aspect Cloud
+    /// requires it.
     fn serves_build_endpoints(&self) -> bool {
         !self.cache.is_empty() || !self.bes.is_empty() || !self.exec.is_empty()
     }
+}
 
-    /// Whether `configure` may record these endpoints: any advertised endpoint for
-    /// a deployment, a build endpoint for Aspect Cloud (`aspect_cloud`).
-    fn configurable_as(&self, aspect_cloud: bool) -> bool {
-        if aspect_cloud {
-            self.serves_build_endpoints()
-        } else {
-            !self.is_empty()
-        }
+/// The status `configure` refuses a discovered `aspect_endpoints` map with, or
+/// `None` when it may be recorded.
+///
+/// Any advertised endpoint makes a deployment: one whose cache and BES sit on a
+/// private network advertises only its web UI, and is still worth configuring
+/// and logging in to. An empty map is `"not_a_deployment"`.
+///
+/// Aspect Cloud (`aspect_cloud`) alone must serve a build endpoint, since its
+/// recorded endpoints replace the seed's and a viewer-only document would leave
+/// `--remote` with nothing to wire. That refusal is `"no_build_endpoints"`.
+fn configure_refusal(endpoints: &Endpoints, aspect_cloud: bool) -> Option<&'static str> {
+    if endpoints.is_empty() {
+        Some("not_a_deployment")
+    } else if aspect_cloud && !endpoints.serves_build_endpoints() {
+        Some("no_build_endpoints")
+    } else {
+        None
     }
 }
 
@@ -1009,12 +1018,12 @@ fn auth_server_info(server: AuthServer) -> AuthServerInfo {
 
 /// The result of probing a host for its protected-resource metadata, so
 /// `configure` can tell the two user-facing failure modes apart:
-///   - `Reachable` — a valid Aspect Workflows discovery doc (has a non-empty
-///     `aspect_endpoints`, which may name only the web UI's `results_url`).
+///   - `Reachable` — a parsed discovery doc; [`configure_refusal`] decides
+///     whether its endpoints make a deployment.
 ///   - `Unreachable` — a transport error (DNS/connect/TLS/timeout); the host may
 ///     well be a real deployment we just can't reach right now.
-///   - `NotADeployment` — reached the host, but it isn't an Aspect Workflows
-///     deployment endpoint (non-2xx, unparseable, or an empty `aspect_endpoints`).
+///   - `NotADeployment` — reached the host, but it answered non-2xx or with a
+///     document that does not parse.
 enum Discovery {
     Reachable(Box<ProtectedResource>),
     Unreachable(String),
@@ -1040,8 +1049,8 @@ async fn probe_protected_resource(host: &str) -> Discovery {
         return Discovery::NotADeployment;
     }
     match resp.json::<ProtectedResource>().await {
-        Ok(info) if !info.aspect_endpoints.is_empty() => Discovery::Reachable(Box::new(info)),
-        _ => Discovery::NotADeployment,
+        Ok(info) => Discovery::Reachable(Box::new(info)),
+        Err(_) => Discovery::NotADeployment,
     }
 }
 
@@ -1176,6 +1185,11 @@ fn is_advertisable_name(name: &str) -> bool {
 /// `endpoints` map is recorded (hosts normalized) so `--deployment` can wire each
 /// to its Bazel flag. `configured_host` is the host the user ran `configure`
 /// against (the `resource` may be a canonical alias).
+///
+/// `results_url` is the top-level `aspect_bes_results_url`. A web-UI-only
+/// document names its origin in `aspect_endpoints.results_url` instead, which is
+/// recorded in its place when there is no BES: that origin is not a viewer
+/// prefix, so it must never be paired with a BES as `--bes_results_url`.
 fn deployment_from_discovery(
     name: String,
     configured_host: &str,
@@ -1190,10 +1204,15 @@ fn deployment_from_discovery(
         bes: endpoint_host_str(&info.aspect_endpoints.bes),
         exec: endpoint_host_str(&info.aspect_endpoints.exec),
         api: endpoint_host_str(&info.aspect_endpoints.api),
-        // A viewer URL, kept verbatim: it is passed to --bes_results_url, not
-        // dialed as a gRPC endpoint, so it is neither host-normalized nor
-        // part of the auth gate.
-        results_url: info.aspect_bes_results_url.clone(),
+        // Kept verbatim: a URL, not a gRPC endpoint, so neither host-normalized
+        // nor part of the auth gate.
+        results_url: if info.aspect_bes_results_url.is_empty()
+            && info.aspect_endpoints.bes.is_empty()
+        {
+            info.aspect_endpoints.results_url.clone()
+        } else {
+            info.aspect_bes_results_url.clone()
+        },
     };
     for host in endpoint_hosts(&endpoints) {
         push_host(&mut hosts, &host);
@@ -1233,6 +1252,9 @@ fn deployment_from_discovery(
 /// Aspect Cloud is what `--remote` targets whenever no configured deployment
 /// claims it. `--default` on such an entry therefore takes the default by clearing
 /// whichever deployment holds it, rather than by setting a flag.
+///
+/// Replacing an entry keeps its build endpoints when the new record has none
+/// ([`keep_build_endpoints`]).
 ///
 /// Errors on a [`RESERVED_NAMES`] name. Every `configure` path funnels through
 /// here — derived names and an explicit `--deployment` alike — so this is the one
@@ -1287,11 +1309,31 @@ fn upsert_deployment(
     }
     let is_default = deployment.default;
     if let Some(slot) = existing.iter_mut().find(|d| d.name == deployment.name) {
+        keep_build_endpoints(&mut deployment, slot);
         *slot = deployment;
     } else {
         existing.push(deployment);
     }
     Ok(is_default)
+}
+
+/// Carry `recorded`'s cache, BES and executor onto `refreshed` when `refreshed`
+/// advertises none of them, along with the hosts their credential covers.
+///
+/// A web UI whose cache and BES are private advertises neither, so a re-configure
+/// through it says nothing about them. Dropping them would break
+/// `--remote --deployment` and the credential helper for a deployment
+/// configured earlier through its remote-cache host.
+fn keep_build_endpoints(refreshed: &mut Deployment, recorded: &Deployment) {
+    if refreshed.endpoints.serves_build_endpoints() {
+        return;
+    }
+    refreshed.endpoints.cache = recorded.endpoints.cache.clone();
+    refreshed.endpoints.bes = recorded.endpoints.bes.clone();
+    refreshed.endpoints.exec = recorded.endpoints.exec.clone();
+    for host in endpoint_hosts(&recorded.endpoints) {
+        push_host(&mut refreshed.hosts, &host);
+    }
 }
 
 /// Serialize `deployments` to the user's `~/.aspect/config.json` (creating the
@@ -1330,8 +1372,10 @@ fn save_user_deployment(
 ///
 /// The returned `status` distinguishes every outcome the caller reports:
 /// `"unreachable"` (transport failure, `reason` carries a terse cause),
-/// `"not_a_deployment"` (reached, but serves no `aspect_endpoints`, or claims
-/// Aspect Cloud without serving a cache, BES or executor),
+/// `"not_a_deployment"` (reached, but answered non-2xx, with no parseable
+/// document, or with an empty `aspect_endpoints`),
+/// `"no_build_endpoints"` (claims Aspect Cloud without a cache, BES or executor;
+/// see [`configure_refusal`]),
 /// `"needs_issuer"` / `"issuer_not_advertised"` (the advertised servers come back
 /// in `auth_servers` so the caller can prompt from — or list — them), or `"ok"`.
 /// Only `"ok"` writes anything.
@@ -1346,10 +1390,8 @@ fn configure_deployment(
     issuer: Option<String>,
 ) -> anyhow::Result<DeploymentInfo> {
     let host = endpoint_host_str(host);
-    // Distinguish the user-facing failure modes (unreachable vs. not an Aspect
-    // Aspect Workflows deployment) so the task prints the right guidance rather than a
-    // Starlark traceback. A non-empty `aspect_endpoints` map is the definitive
-    // marker of a deployment — probe_protected_resource requires it.
+    // Each failure mode is a status, so the task prints the right guidance
+    // rather than a Starlark traceback.
     let mk = |status: &str, reason: String| DeploymentInfo {
         status: status.to_string(),
         reason,
@@ -1365,8 +1407,8 @@ fn configure_deployment(
         Discovery::NotADeployment => return Ok(mk("not_a_deployment", String::new())),
     };
     let (name, explicit_aspect_cloud) = resolve_deployment_name(name, &host, &info);
-    if !info.aspect_endpoints.configurable_as(explicit_aspect_cloud) {
-        return Ok(mk("not_a_deployment", String::new()));
+    if let Some(status) = configure_refusal(&info.aspect_endpoints, explicit_aspect_cloud) {
+        return Ok(mk(status, String::new()));
     }
     // Endpoints recorded under Aspect Cloud's own name are folded into the seed and
     // reached with Aspect Cloud's own credential, so only a deployment on the
@@ -1402,9 +1444,8 @@ fn configure_deployment(
         AuthServerChoice::None => None,
     };
     let mut deployment = deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
-    // `--default` forces this deployment to take the default crown (upsert
-    // then clears it on every other entry); without it, upsert only sets the
-    // default when none exists yet, so a second configure doesn't hijack it.
+    // `--default` takes the default; without it, upsert keeps whichever
+    // deployment holds it.
     deployment.default = make_default;
     let can_login = deployment.issuer.is_some() && deployment.client_id.is_some();
     let hosts = deployment.hosts.clone();
@@ -3714,6 +3755,8 @@ fn auth_server_info_methods(registry: &mut MethodsBuilder) {
 ///     and the host may still be a real deployment.
 ///   - `"not_a_deployment"` — reached the host, but it isn't an Aspect Workflows
 ///     endpoint.
+///   - `"no_build_endpoints"` — the host would be recorded as Aspect Cloud but
+///     advertises no cache, BES or executor.
 ///   - `"needs_issuer"` — the deployment advertised more than one authorization
 ///     server and no `issuer` was given; `auth_servers` lists the choices to
 ///     prompt from.
@@ -4437,10 +4480,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     /// deployment). Returns a [`DeploymentInfo`] the caller uses to report the
     /// result and decide whether to run the interactive login.
     ///
-    /// `name` overrides the host-derived deployment name. `make_default` forces
-    /// this deployment to become the default (taking the crown from any other);
-    /// otherwise it becomes the default only when none is set yet — a second
-    /// configure never hijacks it. `issuer` selects among advertised authorization
+    /// `name` overrides the host-derived deployment name. `make_default` makes
+    /// this deployment the default (taking it from any other); otherwise the
+    /// default stays where it is ([`upsert_deployment`]). `issuer` selects among advertised authorization
     /// servers ([`resolve_auth_server`]): when set it must match an advertised one
     /// (else `"issuer_not_advertised"`, records nothing), and it is required only
     /// when the deployment advertises more than one — an unset `issuer` there
@@ -4506,10 +4548,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     /// deployment named `deployment` (or the default when omitted), plus its
     /// `results_url` viewer, so `aspect <build|test> --remote` can auto-wire
     /// --remote_cache, the BES backend, --remote_executor, and --bes_results_url.
-    /// Errors if the deployment names no configured deployment. A deployment that
-    /// advertised no endpoints (an older discovery, or the built-in Aspect seed)
-    /// returns empty strings — the task then injects nothing and relies on the
-    /// user's own flags.
+    /// Errors if the deployment names no configured deployment. A capability the
+    /// deployment does not advertise comes back as an empty string; one that
+    /// advertises none at all (only its web UI, or an older discovery) is refused
+    /// by `--remote` rather than wiring nothing.
     fn deployment_endpoints<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
@@ -6340,11 +6382,10 @@ mod tests {
     }
 
     /// A deployment whose cache and BES sit on a private network advertises only
-    /// its web UI. That is still a deployment — [`probe_protected_resource`] keys
-    /// on a non-empty `aspect_endpoints` — but it serves no build endpoint, which
-    /// is what keeps it from being recorded under Aspect Cloud's name.
+    /// its web UI. That is still a deployment, and one it can log in to when it
+    /// names a client, but it serves no build endpoint and so is not Aspect Cloud.
     #[test]
-    fn a_web_ui_only_deployment_is_a_deployment_without_build_endpoints() {
+    fn a_web_ui_only_deployment_is_a_deployment_but_not_aspect_cloud() {
         let viewer = ProtectedResource {
             resource: "https://app.acme.example.com/api/v1".to_string(),
             aspect_authorization_servers: Vec::new(),
@@ -6352,36 +6393,201 @@ mod tests {
             client_id: String::new(),
             scopes_supported: Vec::new(),
             aspect_endpoints: Endpoints {
-                cache: String::new(),
-                bes: String::new(),
-                exec: String::new(),
-                api: String::new(),
                 results_url: "https://app.acme.example.com".to_string(),
+                ..Endpoints::default()
             },
             aspect_bes_results_url: String::new(),
             aspect_login_redirect_uri: String::new(),
             resource_name: String::new(),
         };
-        assert!(viewer.aspect_endpoints.configurable_as(false));
-        assert!(!viewer.aspect_endpoints.configurable_as(true));
-        assert!(!Endpoints::default().configurable_as(false));
-        // An issuer with no client is no login target.
+        assert_eq!(configure_refusal(&viewer.aspect_endpoints, false), None);
+        assert_eq!(
+            configure_refusal(&viewer.aspect_endpoints, true),
+            Some("no_build_endpoints")
+        );
+        // An issuer with no client is no login target; with one, it is.
         assert!(viewer.auth_servers().is_empty());
-
-        // With a client it can be logged in to, still without a build endpoint.
         let loggable = ProtectedResource {
             client_id: "client".to_string(),
             ..viewer
         };
         assert_eq!(loggable.auth_servers().len(), 1);
 
-        // A build endpoint is what lets a document be recorded as Aspect Cloud.
-        let edge = Endpoints {
-            cache: "cache.aspect.build".to_string(),
+        // The web UI it advertises is what gets recorded, so `auth status` and
+        // `aspect mcp` can find it.
+        let deployment = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example.com",
+            &loggable,
+            loggable.auth_servers().first(),
+        );
+        assert_eq!(
+            deployment.endpoints.results_url,
+            "https://app.acme.example.com"
+        );
+        assert_eq!(deployment.hosts, vec!["app.acme.example.com"]);
+
+        // The top-level viewer URL wins when both are advertised.
+        let with_viewer = ProtectedResource {
+            aspect_bes_results_url: "https://app.acme.example.com/i/".to_string(),
+            ..loggable
+        };
+        let deployment = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example.com",
+            &with_viewer,
+            None,
+        );
+        assert_eq!(
+            deployment.endpoints.results_url,
+            "https://app.acme.example.com/i/"
+        );
+
+        // Beside a BES the origin is no stand-in, since it would be paired with
+        // that BES as `--bes_results_url`.
+        let with_bes = ProtectedResource {
+            aspect_bes_results_url: String::new(),
+            aspect_endpoints: Endpoints {
+                bes: "bes.acme.example.com".to_string(),
+                results_url: "https://app.acme.example.com".to_string(),
+                ..Endpoints::default()
+            },
+            ..with_viewer
+        };
+        let deployment =
+            deployment_from_discovery("acme".to_string(), "app.acme.example.com", &with_bes, None);
+        assert_eq!(deployment.endpoints.results_url, "");
+    }
+
+    /// Which `aspect_endpoints` maps `configure` records, as a deployment and as
+    /// Aspect Cloud.
+    #[test]
+    fn configure_refusal_by_endpoint_set() {
+        let only = |set: fn(&mut Endpoints)| {
+            let mut e = Endpoints::default();
+            set(&mut e);
+            e
+        };
+        let cases: [(&str, Endpoints, Option<&str>, Option<&str>); 6] = [
+            (
+                "empty",
+                Endpoints::default(),
+                Some("not_a_deployment"),
+                Some("not_a_deployment"),
+            ),
+            (
+                "results_url",
+                only(|e| e.results_url = "https://app.x".into()),
+                None,
+                Some("no_build_endpoints"),
+            ),
+            (
+                "api",
+                only(|e| e.api = "api.x".into()),
+                None,
+                Some("no_build_endpoints"),
+            ),
+            ("cache", only(|e| e.cache = "cache.x".into()), None, None),
+            ("bes", only(|e| e.bes = "bes.x".into()), None, None),
+            ("exec", only(|e| e.exec = "exec.x".into()), None, None),
+        ];
+        for (label, endpoints, as_deployment, as_aspect_cloud) in cases {
+            assert_eq!(
+                configure_refusal(&endpoints, false),
+                as_deployment,
+                "{label} as a deployment"
+            );
+            assert_eq!(
+                configure_refusal(&endpoints, true),
+                as_aspect_cloud,
+                "{label} as Aspect Cloud"
+            );
+        }
+    }
+
+    /// Aspect Cloud is resolved from the host as well as from `--name`, so a bare
+    /// `configure` of an Aspect Cloud host that serves only a viewer is refused,
+    /// and naming a customer's web UI as a deployment of its own is not.
+    #[test]
+    fn a_web_ui_only_host_is_refused_wherever_it_resolves_to_aspect_cloud() {
+        let viewer = ProtectedResource {
+            resource: String::new(),
+            aspect_authorization_servers: Vec::new(),
+            authorization_servers: Vec::new(),
+            client_id: String::new(),
+            scopes_supported: Vec::new(),
+            aspect_endpoints: Endpoints {
+                results_url: "https://app.example".to_string(),
+                ..Endpoints::default()
+            },
+            aspect_bes_results_url: String::new(),
+            aspect_login_redirect_uri: String::new(),
+            resource_name: String::new(),
+        };
+        let refusal = |name: Option<&str>, host: &str| {
+            let (_, aspect_cloud) =
+                resolve_deployment_name(name.map(str::to_string), host, &viewer);
+            configure_refusal(&viewer.aspect_endpoints, aspect_cloud)
+        };
+        assert_eq!(
+            refusal(None, "app.aspect.build"),
+            Some("no_build_endpoints")
+        );
+        assert_eq!(
+            refusal(Some(ASPECT_CLOUD_DEPLOYMENT_ALIAS), "app.acme.example.com"),
+            Some("no_build_endpoints")
+        );
+        assert_eq!(refusal(None, "app.acme.example.com"), None);
+        assert_eq!(refusal(Some("acme"), "app.aspect.build"), None);
+    }
+
+    /// Re-configuring through a web UI that advertises no build endpoint keeps the
+    /// cache and BES recorded through the remote-cache host, while one that does
+    /// advertise them replaces them.
+    #[test]
+    fn a_web_ui_refresh_keeps_the_recorded_build_endpoints() {
+        let mut through_cache = dep("acme", true);
+        through_cache.endpoints = Endpoints {
+            cache: "cache.acme.example.com".to_string(),
+            bes: "bes.acme.example.com".to_string(),
             ..Endpoints::default()
         };
-        assert!(edge.configurable_as(true));
-        assert!(edge.configurable_as(false));
+        through_cache.hosts = vec![
+            "remote.acme.example.com".to_string(),
+            "cache.acme.example.com".to_string(),
+            "bes.acme.example.com".to_string(),
+        ];
+        let mut existing = vec![through_cache];
+
+        let mut through_web_ui = dep("acme", false);
+        through_web_ui.endpoints = Endpoints {
+            results_url: "https://app.acme.example.com".to_string(),
+            ..Endpoints::default()
+        };
+        through_web_ui.hosts = vec!["app.acme.example.com".to_string()];
+        assert!(upsert_deployment(&mut existing, through_web_ui, false).unwrap());
+
+        let kept = &existing[0];
+        assert_eq!(kept.endpoints.cache, "cache.acme.example.com");
+        assert_eq!(kept.endpoints.bes, "bes.acme.example.com");
+        assert_eq!(kept.endpoints.results_url, "https://app.acme.example.com");
+        assert_eq!(
+            kept.hosts,
+            vec![
+                "app.acme.example.com",
+                "cache.acme.example.com",
+                "bes.acme.example.com"
+            ]
+        );
+
+        let mut moved = dep("acme", false);
+        moved.endpoints = Endpoints {
+            cache: "cache2.acme.example.com".to_string(),
+            ..Endpoints::default()
+        };
+        upsert_deployment(&mut existing, moved, false).unwrap();
+        assert_eq!(existing[0].endpoints.cache, "cache2.acme.example.com");
+        assert_eq!(existing[0].endpoints.bes, "");
     }
 
     /// The account's own name is writable when the caller asks for it by name —

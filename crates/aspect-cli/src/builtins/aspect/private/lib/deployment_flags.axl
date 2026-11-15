@@ -73,9 +73,9 @@ Failures:
     machine's deployment (a Workflows runner, or the endpoint variables set by
     hand): the Workflows feature wires that deployment, and a second one would
     route the build off it. `REMOTE_REFUSED_BY_ENV` is the message.
-  - `--remote` with no `--deployment` where the default advertises no Bazel
-    endpoint at all. Aspect Cloud always advertises, so this is a configured
-    deployment recorded before it served one.
+  - `--remote` against a deployment (the default, or the one `--deployment`
+    names) that advertises no Bazel endpoint at all: one advertising only its
+    web UI, or one recorded before it served any. Aspect Cloud always advertises.
   - A capability the user *named* that the deployment doesn't advertise (e.g.
     `--remote=exec` against a deployment with no remote execution). A defaulted
     capability is skipped silently instead: bare `--remote` means "use what this
@@ -265,16 +265,18 @@ def deployment_flag_args() -> dict:
         ),
     }
 
-def _advertises_nothing(endpoints) -> bool:
-    """Whether `endpoints` serves no Bazel endpoint at all — an error to name
-    `--remote` against, and nothing for `auto` to wire."""
-    return not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
+def serves_bazel_endpoint(endpoints) -> bool:
+    """Whether `endpoints` serves any endpoint Bazel dials (cache, BES or
+    executor). One that serves none, such as a deployment advertising only its
+    web UI, is an error to name `--remote` against and nothing for `auto` or a
+    machine rc to wire."""
+    return any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
 
 def _auto_wires(ctx, endpoints) -> bool:
     """Whether `auto` goes ahead with `endpoints`. Each of these is an error when
     a capability was named and silence when it was assumed, which is the whole
     difference between a default and a request."""
-    return not _advertises_nothing(endpoints) and can_authenticate(ctx, endpoints)
+    return serves_bazel_endpoint(endpoints) and can_authenticate(ctx, endpoints)
 
 def parse_remote(value: str) -> RemoteSpec:
     """Parse a `--remote` value into a [`RemoteSpec`].
@@ -371,16 +373,16 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     if auto and not _auto_wires(ctx, endpoints):
         return _NOTHING
 
-    # --remote needs a deployment to draw endpoints from. With no --deployment the
-    # target is the current default; if that advertises nothing at all, fail
-    # clearly rather than blaming a capability. Aspect Cloud always advertises —
-    # the built-in entry states its endpoints — so this is a configured
-    # deployment that serves no Bazel endpoint, recorded before it had any.
-    if _advertises_nothing(endpoints) and not ctx.args.deployment and not auto:
-        fail("--remote requires a deployment that serves a Bazel endpoint, but the default (%s) advertises none. " % endpoints.name +
-             "Run `aspect auth configure <host>` to refresh what it advertises. " +
-             "If you already have other deployments (see `aspect auth status`), choose one with " +
-             "`aspect auth use <name>` or pass an explicit --deployment <name>.")
+    # Fail clearly rather than wire nothing, or blame a capability. Aspect Cloud
+    # always advertises — the built-in entry states its endpoints — so this is a
+    # configured deployment with no public cache or BES, or one recorded before
+    # it had any.
+    if not serves_bazel_endpoint(endpoints) and not auto:
+        target = ("deployment '%s'" if ctx.args.deployment else "the default (%s)") % endpoints.name
+        fail("--remote requires a deployment that serves a Bazel endpoint, but %s advertises none. " % target +
+             "If it has gained one since it was configured, run `aspect auth configure <host>` to refresh it; " +
+             "otherwise choose another deployment (see `aspect auth status`) with " +
+             "`aspect auth use <name>` or --deployment <name>.")
 
     base_flags = []
     bes_backends = []

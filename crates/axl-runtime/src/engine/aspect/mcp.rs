@@ -795,7 +795,7 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
     if results_url.is_empty() {
         anyhow::bail!(
             "deployment '{}' does not advertise a build-results URL, so it has no web/API host to \
-             serve build results from. Re-run `aspect auth configure <remote-host>` against a \
+             serve build results from. Re-run `aspect auth configure <host>` against a \
              deployment with the Build & Test UI enabled.",
             deployment.name
         );
