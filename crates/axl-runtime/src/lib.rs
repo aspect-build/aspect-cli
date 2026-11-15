@@ -15,6 +15,7 @@ pub mod eval;
 pub mod module;
 pub mod out;
 pub mod project_root;
+pub mod startup;
 pub mod trace;
 
 pub use eval::TaskExit;

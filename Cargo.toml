@@ -24,3 +24,13 @@ rust-version = "1.88.0"
 # patches through MODULE.bazel. See "Patched crates" in CLAUDE.md.
 [workspace.metadata.patch]
 crates = ["starlark"]
+
+# The shipped release settings (`bazel/rust/defs.bzl` and `--config=release`
+# in .bazelrc: opt-level 3, one codegen unit, fat LTO, panic=abort) with
+# symbols kept, for profiling.
+[profile.profiling]
+inherits = "release"
+opt-level = 3
+panic = "abort"
+debug = "line-tables-only"
+strip = false
