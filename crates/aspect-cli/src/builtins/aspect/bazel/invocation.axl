@@ -61,6 +61,10 @@ _Invocation = record(
     announce_version = field(bool),
     announce_command = field(bool),
     max_attempts = field(int),
+    # Where Bazel's own stdout goes. Always a `Writable`, never None: the
+    # builtin reads None as "discard", and `_do_spawn` should not need a
+    # conditional. See `_build()`.
+    stdout = field(typing.Any),
 )
 
 def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: str, rc, command: str) -> list[str]:
@@ -94,16 +98,19 @@ def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: st
         return []
     return cli_targets
 
-def _resolve(ctx, command: str) -> _Invocation:
+def _resolve(ctx, command: str, stdout = None) -> _Invocation:
     """Shared constructor for `build` / `test`. Reads everything a feature injected
     on the trait (BES backends, the `rc_flags` hooks); the bazel core knows
     nothing about deployments or Aspect auth."""
     trait = ctx.traits[BazelTrait]
+    if stdout == None:
+        stdout = ctx.std.io.stdout
 
     # Base (default) flags, prepended so user --bazel-flag overrides win: the
-    # TTY signal. Feature-injected `trait.base_flags` (e.g. a deployment's
-    # --remote_cache) are prepended by `bazel_rc.setup` itself.
-    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    # TTY signal, read off the stream Bazel's stdout actually lands on.
+    # Feature-injected `trait.base_flags` (e.g. a deployment's --remote_cache)
+    # are prepended by `bazel_rc.setup` itself.
+    base_flags = ["--isatty=" + str(int(stdout.is_tty))]
 
     # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The rc set by
     # use_rc drives the health check (in results.setup) and every spawn below.
@@ -162,6 +169,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         announce_version = announce_version,
         announce_command = announce_command,
         max_attempts = max(1, requested),
+        stdout = stdout,
     )
 
 def _do_start(inv: _Invocation) -> None:
@@ -216,6 +224,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
+            stdout = inv.stdout,
             *inv.patterns
         )
     else:
@@ -226,6 +235,7 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
             aspects = aspects,
+            stdout = inv.stdout,
             *inv.patterns
         )
 
@@ -295,9 +305,9 @@ def _do_finish(inv: _Invocation, w) -> None:
     for handler in inv.trait.build_end:
         handler(inv.ctx, code)
 
-def _handle(ctx, command: str):
+def _handle(ctx, command: str, stdout = None):
     """Build the immutable config, then a handle of thin forwarders over it."""
-    inv = _resolve(ctx, command)
+    inv = _resolve(ctx, command, stdout = stdout)
     return struct(
         rc = inv.rc,
         targets = inv.patterns,
@@ -312,13 +322,20 @@ def _handle(ctx, command: str):
         finish = lambda w: _do_finish(inv, w),
     )
 
-def _build(ctx):
-    """High-level `bazel build` invocation handle. See module docstring."""
-    return _handle(ctx, "build")
+def _build(ctx, stdout = None):
+    """High-level `bazel build` invocation handle. See module docstring.
 
-def _test(ctx):
-    """High-level `bazel test` invocation handle. See module docstring."""
-    return _handle(ctx, "test")
+    `stdout` redirects Bazel's own stdout; the default inherits ours. Bazel
+    writes its result summary and test output there — only progress goes to
+    stderr — so a task whose stdout carries a machine payload must redirect it.
+    """
+    return _handle(ctx, "build", stdout = stdout)
+
+def _test(ctx, stdout = None):
+    """High-level `bazel test` invocation handle. See module docstring.
+
+    `stdout` redirects Bazel's own stdout; see `_build()`."""
+    return _handle(ctx, "test", stdout = stdout)
 
 def _args(phrase: str) -> dict:
     """The command-agnostic CLI args every Bazel-spawning task registers (splat
