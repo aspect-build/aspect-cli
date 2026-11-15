@@ -4,13 +4,15 @@
 //! registry with an `OpenTelemetryLayer` / `OpenTelemetryTracingBridge` whose
 //! exporters are `BufferingSpanExporter` / `BufferingLogExporter` (which
 //! accumulate everything in memory) plus a runtime-togglable `StderrLayer`
-//! that's wired but inactive by default.
+//! that's wired but inactive by default. The tracer provider is also installed
+//! as the global one, so spans built with `global::tracer` (those that carry
+//! times from Bazel's events) share the layer's pipeline and parentage.
 //!
-//! After phase 3 of the axl runtime, `install_late_exporters(specs)` is
-//! called with the set of `ExporterSpec`s collected from
+//! After phase 3 of the axl runtime, `install_late_exporters_blocking(specs)`
+//! is called with the set of `ExporterSpec`s collected from
 //! `ctx.telemetry.exporters.add(...)`. Each OTLP spec becomes a real OTLP
-//! exporter; the buffer is replayed. Each file/stderr spec activates the
-//! `StderrLayer` (or a future per-path file sink). Users who want
+//! exporter; the buffer is replayed. Each file spec adds a sink (stderr, stdout
+//! or a file path) to the file-sinks layer. Users who want
 //! `ASPECT_DEBUG=1`-style stderr output register a stderr exporter from
 //! .axl config — there's no env-var special-casing in this binary.
 
@@ -433,6 +435,9 @@ pub fn init() -> OtelGuard {
         .ok()
         .expect("trace::init called twice");
 
+    // Global too, for spans built with the tracer directly (the BES sink's
+    // `action`/`test`/`test_attempt`): they must land in this same pipeline.
+    global::set_tracer_provider(tracer_provider.clone());
     let tracer = tracer_provider.tracer("tracing-otel-subscriber");
 
     // The trace builtin (axl-runtime) emits via the tracing macros on two
@@ -614,6 +619,28 @@ fn activate_file_spec(spec: &FileSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs [`install_late_exporters`] to completion from synchronous code.
+///
+/// The buffer replay exports from the calling thread, and the HTTP exporter's
+/// blocking reqwest client must not run inside a tokio `block_on`: in debug
+/// builds reqwest asserts that and panics. So the replay runs on a scoped
+/// thread that only enters `handle`, which still gives the gRPC exporter the
+/// tokio reactor it needs.
+pub fn install_late_exporters_blocking(
+    handle: &tokio::runtime::Handle,
+    specs: Vec<ExporterSpec>,
+) -> anyhow::Result<()> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _runtime = handle.enter();
+                futures::executor::block_on(install_late_exporters(specs))
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 /// Take the exporter specs collected during phase 1-3 evaluation and turn
 /// them into real exporters. OTLP specs become `opentelemetry_otlp` exporters
 /// installed into the SDK pipeline (with the in-memory buffer replayed). File
@@ -624,7 +651,7 @@ fn activate_file_spec(spec: &FileSpec) -> anyhow::Result<()> {
 ///
 /// Stores the new `SdkMeterProvider` in a process-wide static so the
 /// existing `OtelGuard` can flush it on drop without taking `&mut`.
-pub async fn install_late_exporters(specs: Vec<ExporterSpec>) -> anyhow::Result<()> {
+async fn install_late_exporters(specs: Vec<ExporterSpec>) -> anyhow::Result<()> {
     if specs.is_empty() {
         // No exporter ever shows up. Mark OTel inactive so trace builtins
         // early-return for the rest of the run.

@@ -336,7 +336,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     }
                 }
             }
-            tokio::runtime::Handle::current().block_on(trace::install_late_exporters(exporters))?;
+            trace::install_late_exporters_blocking(&tokio::runtime::Handle::current(), exporters)?;
 
             // Phase 4: execute the selected task.
             let exit = mpe

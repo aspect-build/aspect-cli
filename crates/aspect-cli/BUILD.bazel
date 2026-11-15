@@ -13,6 +13,7 @@ DEPS = [
     "@crates//:chrono",
     "@crates//:clap",
     "@crates//:dirs",
+    "@crates//:futures",
     "@crates//:include_dir",
     "@crates//:libc",
     "@crates//:libmimalloc-sys",

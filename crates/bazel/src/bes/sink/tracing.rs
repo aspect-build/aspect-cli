@@ -1,15 +1,38 @@
+//! BES → OpenTelemetry trace sink.
+//!
+//! Consumes the build event stream on its own thread and turns it into spans
+//! and span events under the active `ctx.bazel.build` span:
+//!
+//! - `events` covers the stream, and `build_tool` the Bazel invocation
+//!   (`Started` → `BuildFinished`). Both are ordinary `tracing` spans, timed
+//!   by when the sink sees those events.
+//! - `action`, `test` and `test_attempt` describe work Bazel already finished
+//!   by the time its event arrives, so their times come from the event. They
+//!   are built with the OpenTelemetry tracer directly
+//!   ([`export_completed_span`]), because a `tracing` span can only be timed
+//!   by when it is entered and dropped. Each is parented to the current
+//!   `tracing` span through `OpenTelemetrySpanExt::context`, which needs the
+//!   global tracer provider and the `tracing-opentelemetry` layer to share
+//!   one `SdkTracerProvider` (`aspect-cli`'s `trace::init`).
+//! - Everything else becomes a span event, except progress and
+//!   `NamedSetOfFiles`, which are too frequent to be worth recording.
+
 use std::{
     sync::{Arc, mpsc::RecvError},
     thread::{self, JoinHandle},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use axl_proto::{
     Timestamp,
     build_event_stream::{TestStatus, build_event::Payload, build_event_id::Id},
 };
-
+use opentelemetry::{
+    Array, KeyValue, StringValue, Value, global,
+    trace::{Span as _, Status, Tracer as _},
+};
 use tracing::{Level, span::EnteredSpan};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::bes::BuildEventEnvelope;
 use crate::fanout::{SinkOutcome, Subscriber};
@@ -17,49 +40,72 @@ use crate::fanout::{SinkOutcome, Subscriber};
 #[derive(Debug)]
 pub struct Tracing {}
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+/// Instrumentation scope of the spans this sink builds with the tracer.
+const TRACER_NAME: &str = "aspect-cli.bes";
+
+fn system_time(ts: &Timestamp) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::new(ts.seconds.max(0) as u64, ts.nanos.max(0) as u32)
 }
 
-fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
-    timestamp.map_or_else(now_secs, |t| t.seconds)
-}
-
-/// Seconds since the Unix epoch, preferring the modern `Timestamp` field and
-/// falling back to the deprecated `*_millis` field before `now`. Older Bazel
-/// versions and cached test summaries populate only the millis field; using
-/// `now` there would export the span at consume time rather than the real test
-/// window.
-fn timestamp_secs_or_now(timestamp: Option<&Timestamp>, legacy_millis: i64) -> i64 {
+/// Prefers the `Timestamp` field, then the deprecated `*_millis` field, then
+/// `now`. Older Bazel versions and cached test summaries populate only the
+/// millis field.
+fn time_or_legacy(timestamp: Option<&Timestamp>, legacy_millis: i64) -> SystemTime {
     match timestamp {
-        Some(t) => t.seconds,
-        None if legacy_millis != 0 => legacy_millis / 1000,
-        None => now_secs(),
+        Some(t) => system_time(t),
+        None if legacy_millis > 0 => {
+            SystemTime::UNIX_EPOCH + Duration::from_millis(legacy_millis as u64)
+        }
+        None => SystemTime::now(),
     }
 }
 
-/// OTel span status code (`otel.status_code`) for a Bazel test outcome.
-///
-/// The tracing→OTel layer maps this field's value through `str_to_status`:
-/// `"ok"` → `Status::Ok`, `"error"` → `Status::Error`, anything else →
-/// `Status::Unset`. Failing outcomes (`FAILED`/`TIMEOUT`/`FAILED_TO_BUILD`/
-/// `REMOTE_FAILURE`/`TOOL_HALTED_BEFORE_TESTING`) become errors so failing tests
-/// surface as error spans; `PASSED`/`FLAKY` are `ok` (flaky ultimately passed);
-/// `NO_STATUS`/`INCOMPLETE` stay unset. Mirrors `bazel_results.axl`'s
-/// `_FAILED_STATUSES`.
-fn test_status_code(status: TestStatus) -> &'static str {
+fn duration_or_legacy(duration: Option<&prost_types::Duration>, legacy_millis: i64) -> Duration {
+    match duration {
+        Some(d) => Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32),
+        None => Duration::from_millis(legacy_millis.max(0) as u64),
+    }
+}
+
+/// Span status for a Bazel test outcome. Failing outcomes are errors; `PASSED`
+/// and `FLAKY` (which ultimately passed) are ok; `NO_STATUS`/`INCOMPLETE` stay
+/// unset. Mirrors `bazel_results.axl`'s `_FAILED_STATUSES`.
+fn test_status(status: TestStatus) -> Status {
     match status {
-        TestStatus::Passed | TestStatus::Flaky => "ok",
+        TestStatus::Passed | TestStatus::Flaky => Status::Ok,
         TestStatus::Failed
         | TestStatus::Timeout
         | TestStatus::FailedToBuild
         | TestStatus::RemoteFailure
-        | TestStatus::ToolHaltedBeforeTesting => "error",
-        _ => "unset",
+        | TestStatus::ToolHaltedBeforeTesting => Status::error(status.as_str_name()),
+        _ => Status::Unset,
     }
+}
+
+fn string_array(items: &[String]) -> Value {
+    Value::Array(Array::String(
+        items.iter().cloned().map(StringValue::from).collect(),
+    ))
+}
+
+/// Exports a span for work that already finished, with its real start and
+/// end, as a child of the current `tracing` span.
+fn export_completed_span(
+    name: &'static str,
+    start: SystemTime,
+    end: SystemTime,
+    status: Status,
+    attributes: Vec<KeyValue>,
+) {
+    let parent = tracing::Span::current().context();
+    let tracer = global::tracer(TRACER_NAME);
+    let mut span = tracer
+        .span_builder(name)
+        .with_start_time(start)
+        .with_attributes(attributes)
+        .start_with_context(&tracer, &parent);
+    span.set_status(status);
+    span.end_with_timestamp(end.max(start));
 }
 
 impl Tracing {
@@ -96,35 +142,58 @@ impl Tracing {
                         );
                     }
                     (Payload::Action(action), Id::ActionCompleted(id)) => {
-                        if action.start_time.is_some() && action.end_time.is_some() {
-                            let start_time = timestamp_or_now(action.start_time.as_ref());
-                            let end_time = timestamp_or_now(action.end_time.as_ref());
-
-                            // Span is entered+dropped on the same line; the OTel layer
-                            // honors otel.start_time/otel.end_time as timing overrides,
-                            // so the exported span carries the action's real wall-clock
-                            // window rather than this near-zero local duration.
-                            let _action = tracing::info_span!(
-                                "action",
-                                otel.start_time = start_time,
-                                otel.end_time = end_time,
-                                otel.status_code = if action.success { "unset" } else { "error" },
-                                label = ?id.label,
-                                success = action.success,
-                                mnemonic = action.r#type,
-                                exit_code = action.exit_code,
-                                command_line = ?action.command_line,
-                                stdout = ?action.stdout,
-                                stderr = ?action.stderr,
-                                primary_output = ?action.primary_output,
-                                action_metadata_logs = ?action.action_metadata_logs,
-                                failure_detail = ?action.failure_detail,
-                                strategy_details = ?action.strategy_details,
-                            )
-                            .entered();
+                        let (Some(start), Some(end)) =
+                            (action.start_time.as_ref(), action.end_time.as_ref())
+                        else {
+                            tracing::event!(name: "action_completed", Level::INFO, label = id.label);
+                            continue;
+                        };
+                        let mut attributes = vec![
+                            KeyValue::new("label", id.label.clone()),
+                            KeyValue::new("success", action.success),
+                            KeyValue::new("mnemonic", action.r#type.clone()),
+                            KeyValue::new("exit_code", i64::from(action.exit_code)),
+                            KeyValue::new("command_line", string_array(&action.command_line)),
+                        ];
+                        let debug_fields = [
+                            ("stdout", action.stdout.as_ref().map(|f| format!("{f:?}"))),
+                            ("stderr", action.stderr.as_ref().map(|f| format!("{f:?}"))),
+                            (
+                                "primary_output",
+                                action.primary_output.as_ref().map(|f| format!("{f:?}")),
+                            ),
+                            (
+                                "failure_detail",
+                                action.failure_detail.as_ref().map(|f| format!("{f:?}")),
+                            ),
+                            (
+                                "action_metadata_logs",
+                                (!action.action_metadata_logs.is_empty())
+                                    .then(|| format!("{:?}", action.action_metadata_logs)),
+                            ),
+                            (
+                                "strategy_details",
+                                (!action.strategy_details.is_empty())
+                                    .then(|| format!("{:?}", action.strategy_details)),
+                            ),
+                        ];
+                        attributes.extend(
+                            debug_fields
+                                .into_iter()
+                                .filter_map(|(k, v)| v.map(|v| KeyValue::new(k, v))),
+                        );
+                        let status = if action.success {
+                            Status::Unset
                         } else {
-                            tracing::event!(name: "action_completed", Level::INFO, label = ?id.label);
-                        }
+                            Status::error(format!("exit code {}", action.exit_code))
+                        };
+                        export_completed_span(
+                            "action",
+                            system_time(start),
+                            system_time(end),
+                            status,
+                            attributes,
+                        );
                     }
                     (Payload::Started(s), Id::Started(_)) => {
                         if build_span.is_some() {
@@ -160,77 +229,73 @@ impl Tracing {
                         );
                     }
                     (Payload::TestSummary(summary), Id::TestSummary(id)) => {
-                        // The authoritative per-target test outcome. Unlike the
-                        // TestRunner `action` span (which carries the spawn's
-                        // exit code — 0 for a spawn that merely executed), this
-                        // span carries the real BlazeTestStatus and sets the OTel
-                        // span status to error when the test failed.
+                        // The authoritative per-target outcome. The TestRunner
+                        // `action` span carries the spawn's exit code instead.
                         let status = TestStatus::try_from(summary.overall_status)
                             .unwrap_or(TestStatus::NoStatus);
                         #[allow(deprecated)]
-                        let start_time = timestamp_secs_or_now(
+                        let start = time_or_legacy(
                             summary.first_start_time.as_ref(),
                             summary.first_start_time_millis,
                         );
                         #[allow(deprecated)]
-                        let end_time = timestamp_secs_or_now(
+                        let end = time_or_legacy(
                             summary.last_stop_time.as_ref(),
                             summary.last_stop_time_millis,
                         );
-                        let _test = tracing::info_span!(
+                        export_completed_span(
                             "test",
-                            otel.start_time = start_time,
-                            otel.end_time = end_time,
-                            otel.status_code = test_status_code(status),
-                            label = id.label.as_str(),
-                            status = status.as_str_name(),
-                            success = matches!(status, TestStatus::Passed | TestStatus::Flaky),
-                            run_count = summary.run_count,
-                            shard_count = summary.shard_count,
-                            attempt_count = summary.attempt_count,
-                            total_run_count = summary.total_run_count,
-                            cached = summary.total_num_cached,
-                        )
-                        .entered();
+                            start,
+                            end,
+                            test_status(status),
+                            vec![
+                                KeyValue::new("label", id.label.clone()),
+                                KeyValue::new("status", status.as_str_name()),
+                                KeyValue::new(
+                                    "success",
+                                    matches!(status, TestStatus::Passed | TestStatus::Flaky),
+                                ),
+                                KeyValue::new("run_count", i64::from(summary.run_count)),
+                                KeyValue::new("shard_count", i64::from(summary.shard_count)),
+                                KeyValue::new("attempt_count", i64::from(summary.attempt_count)),
+                                KeyValue::new(
+                                    "total_run_count",
+                                    i64::from(summary.total_run_count),
+                                ),
+                                KeyValue::new("cached", i64::from(summary.total_num_cached)),
+                            ],
+                        );
                     }
                     (Payload::TestResult(result), Id::TestResult(id)) => {
-                        // Per shard/run/attempt outcome. TestSummary is the
-                        // final target verdict; these are the individual attempts
-                        // (a failing attempt that later passes is visible here as
-                        // an error span while the summary reports FLAKY).
+                        // One shard/run/attempt. A failing attempt that later
+                        // passes is an error span here while its `test` is ok.
                         let status =
                             TestStatus::try_from(result.status).unwrap_or(TestStatus::NoStatus);
                         #[allow(deprecated)]
-                        let start_time = timestamp_secs_or_now(
+                        let start = time_or_legacy(
                             result.test_attempt_start.as_ref(),
                             result.test_attempt_start_millis_epoch,
                         );
                         #[allow(deprecated)]
-                        let end_time = start_time
-                            + result.test_attempt_duration.as_ref().map_or_else(
-                                || result.test_attempt_duration_millis / 1000,
-                                |d| d.seconds,
-                            );
-                        let _test_attempt = tracing::info_span!(
+                        let duration = duration_or_legacy(
+                            result.test_attempt_duration.as_ref(),
+                            result.test_attempt_duration_millis,
+                        );
+                        export_completed_span(
                             "test_attempt",
-                            otel.start_time = start_time,
-                            otel.end_time = end_time,
-                            otel.status_code = test_status_code(status),
-                            label = id.label.as_str(),
-                            status = status.as_str_name(),
-                            cached = result.cached_locally,
-                            run = id.run,
-                            shard = id.shard,
-                            attempt = id.attempt,
-                        )
-                        .entered();
+                            start,
+                            start + duration,
+                            test_status(status),
+                            vec![
+                                KeyValue::new("label", id.label.clone()),
+                                KeyValue::new("status", status.as_str_name()),
+                                KeyValue::new("cached", result.cached_locally),
+                                KeyValue::new("run", i64::from(id.run)),
+                                KeyValue::new("shard", i64::from(id.shard)),
+                                KeyValue::new("attempt", i64::from(id.attempt)),
+                            ],
+                        );
                     }
-                    // High-volume streaming events (progress stdout/stderr chunks
-                    // and the NamedSetOfFiles fan-out) fire thousands of times per
-                    // build; representing each in the trace would flood the
-                    // exporter with no observability value. Everything else is
-                    // recorded as a lightweight span-event keyed by BES event kind
-                    // so no meaningful build event is silently dropped.
                     (Payload::Progress(_), _) | (Payload::NamedSetOfFiles(_), _) => {}
                     (_, id) => {
                         tracing::event!(name: "bes_event", Level::INFO, kind = id.as_str_name());
@@ -245,6 +310,9 @@ impl Tracing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::trace::{SpanKind, TracerProvider as _};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     #[test]
     fn failing_statuses_map_to_error() {
@@ -255,9 +323,8 @@ mod tests {
             TestStatus::RemoteFailure,
             TestStatus::ToolHaltedBeforeTesting,
         ] {
-            assert_eq!(
-                test_status_code(s),
-                "error",
+            assert!(
+                matches!(test_status(s), Status::Error { .. }),
                 "{s:?} should be an error span"
             );
         }
@@ -265,37 +332,92 @@ mod tests {
 
     #[test]
     fn passing_and_flaky_map_to_ok() {
-        assert_eq!(test_status_code(TestStatus::Passed), "ok");
-        assert_eq!(test_status_code(TestStatus::Flaky), "ok");
+        assert_eq!(test_status(TestStatus::Passed), Status::Ok);
+        assert_eq!(test_status(TestStatus::Flaky), Status::Ok);
     }
 
     #[test]
     fn indeterminate_statuses_stay_unset() {
-        assert_eq!(test_status_code(TestStatus::NoStatus), "unset");
-        assert_eq!(test_status_code(TestStatus::Incomplete), "unset");
+        assert_eq!(test_status(TestStatus::NoStatus), Status::Unset);
+        assert_eq!(test_status(TestStatus::Incomplete), Status::Unset);
     }
 
     #[test]
-    fn timestamp_prefers_modern_field() {
+    fn timestamp_keeps_nanos() {
         let ts = Timestamp {
             seconds: 42,
-            nanos: 0,
+            nanos: 123_456_789,
         };
-        assert_eq!(timestamp_secs_or_now(Some(&ts), 999_000), 42);
+        assert_eq!(
+            time_or_legacy(Some(&ts), 999_000),
+            SystemTime::UNIX_EPOCH + Duration::new(42, 123_456_789)
+        );
     }
 
     #[test]
     fn timestamp_falls_back_to_legacy_millis() {
         assert_eq!(
-            timestamp_secs_or_now(None, 1_723_000_000_000),
-            1_723_000_000
+            time_or_legacy(None, 1_723_000_000_250),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(1_723_000_000_250)
         );
     }
 
     #[test]
     fn timestamp_uses_now_when_nothing_populated() {
-        let before = now_secs();
-        let got = timestamp_secs_or_now(None, 0);
-        assert!(got >= before, "expected a current timestamp, got {got}");
+        let before = SystemTime::now();
+        assert!(time_or_legacy(None, 0) >= before);
+    }
+
+    #[test]
+    fn duration_falls_back_to_legacy_millis() {
+        assert_eq!(
+            duration_or_legacy(None, 1_500),
+            Duration::from_millis(1_500)
+        );
+        let d = prost_types::Duration {
+            seconds: 1,
+            nanos: 5,
+        };
+        assert_eq!(duration_or_legacy(Some(&d), 9_999), Duration::new(1, 5));
+    }
+
+    /// The span keeps the event's sub-second times and nests under the
+    /// `tracing` span that was current when it was exported.
+    #[test]
+    fn completed_span_keeps_times_and_parent() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        global::set_tracer_provider(provider.clone());
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+
+        let start = SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, 250_000_000);
+        let end = start + Duration::from_millis(1_234);
+        tracing::subscriber::with_default(subscriber, || {
+            let _parent = tracing::info_span!("build_tool").entered();
+            export_completed_span(
+                "test_attempt",
+                start,
+                end,
+                Status::Ok,
+                vec![KeyValue::new("label", "//:t")],
+            );
+        });
+        provider.force_flush().unwrap();
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let child = spans.iter().find(|s| s.name == "test_attempt").unwrap();
+        let parent = spans.iter().find(|s| s.name == "build_tool").unwrap();
+        assert_eq!(child.start_time, start);
+        assert_eq!(child.end_time, end);
+        assert_eq!(child.span_kind, SpanKind::Internal);
+        assert_eq!(child.status, Status::Ok);
+        assert_eq!(child.parent_span_id, parent.span_context.span_id());
+        assert_eq!(
+            child.span_context.trace_id(),
+            parent.span_context.trace_id()
+        );
     }
 }
