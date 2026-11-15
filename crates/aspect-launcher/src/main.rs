@@ -974,10 +974,10 @@ fn detach_stdio() {
     else {
         return;
     };
-    for fd in 0..=2 {
-        // SAFETY: duplicating a descriptor we own onto a standard one.
-        unsafe { libc::dup2(null.as_raw_fd(), fd) };
-    }
+    // A failure leaves that descriptor inherited, which is harmless.
+    let _ = rustix::stdio::dup2_stdin(&null);
+    let _ = rustix::stdio::dup2_stdout(&null);
+    let _ = rustix::stdio::dup2_stderr(&null);
     // With a standard descriptor closed at start, `open` returned it; closing
     // `null` would close it again.
     if null.as_raw_fd() <= 2 {
