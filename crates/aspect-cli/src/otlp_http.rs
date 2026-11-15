@@ -14,9 +14,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};
-
-/// Per-request timeout: the OTLP exporter default.
-const TIMEOUT: Duration = Duration::from_secs(10);
+use opentelemetry_otlp::{OTEL_EXPORTER_OTLP_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT};
 
 /// Largest response body read. OTLP responses are small status messages.
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
@@ -26,9 +24,10 @@ pub struct OtlpHttpClient(reqwest::blocking::Client);
 
 impl OtlpHttpClient {
     pub fn new() -> anyhow::Result<Self> {
+        let timeout = request_timeout(std::env::var(OTEL_EXPORTER_OTLP_TIMEOUT).ok().as_deref());
         Ok(Self(
             reqwest::blocking::Client::builder()
-                .timeout(TIMEOUT)
+                .timeout(timeout)
                 .build()?,
         ))
     }
@@ -43,6 +42,16 @@ impl OtlpHttpClient {
         let client = Arc::new(Self::new()?);
         Ok(SHARED.get_or_init(|| client).clone())
     }
+}
+
+/// Per-request timeout from `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds), else
+/// the exporter default. The exporter applies its own timeout only as a retry
+/// deadline, which cannot interrupt a blocking request, so the client must.
+fn request_timeout(env_millis: Option<&str>) -> Duration {
+    env_millis
+        .and_then(|v| v.trim().parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT)
 }
 
 #[async_trait::async_trait]
@@ -122,6 +131,16 @@ mod tests {
         );
         assert!(received.contains("x-honeycomb-team: key\r\n"), "{received}");
         assert!(received.ends_with("payload"), "{received}");
+    }
+
+    #[test]
+    fn request_timeout_reads_env_millis() {
+        assert_eq!(request_timeout(Some("30000")), Duration::from_secs(30));
+        assert_eq!(request_timeout(None), OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT);
+        assert_eq!(
+            request_timeout(Some("soon")),
+            OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT
+        );
     }
 
     #[test]
