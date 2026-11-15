@@ -97,6 +97,7 @@ aspect lint --strategy=hold-the-line     # only fail on errors in changed files 
 aspect lint --strategy=hard              # fail on any error
 aspect lint --strategy=soft              # surface diagnostics, never fail
 aspect lint --fix                        # apply rules_lint patches in-place
+aspect lint --target-pattern-file=targets.txt  # patterns from a file, as `aspect build`
 ```
 
 Required: at least one `--aspect=//path:linters.bzl%name`. Repeatable to run multiple linters in one invocation.

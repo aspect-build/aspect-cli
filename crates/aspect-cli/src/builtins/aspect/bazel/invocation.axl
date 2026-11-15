@@ -1,5 +1,8 @@
 """`bazel_invocation`: the high-level `build(ctx)` / `test(ctx)` invocation
-handles, and the `args` / `targets_arg` bundles a Bazel-spawning task declares.
+handles, and the `args` / `targets_arg` / `target_pattern_file_arg` bundles a
+Bazel-spawning task declares. `resolve_targets` turns the latter two into the
+patterns and flags for a spawn, for tasks such as `lint` that drive
+`ctx.bazel.build` without a handle.
 
 The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
 (`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
@@ -82,17 +85,55 @@ def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: st
         explicit:         whether the user actually passed target patterns
                           (`ctx.args.is_explicit("targets")`) rather than
                           inheriting the arg's default.
-        cli_targets:      `ctx.args.targets` — never empty (the arg declares
-                          `default = ["..."]`, `minimum = 1`).
+        cli_targets:      `ctx.args.targets`, which defaults to `["..."]`.
         own_pattern_file: value of aspect's `--target-pattern-file`, or `""`.
         rc:               the active `Bazelrc`; only `flag_value` is used.
+                          `None` before the rc is resolved, which ignores the
+                          forwarded spelling.
         command:          Bazel subcommand whose options `rc` resolves.
     """
     if explicit:
         return cli_targets
-    if own_pattern_file or rc.flag_value("--target_pattern_file", command = command):
+    if own_pattern_file:
+        return []
+    if rc != None and rc.flag_value("--target_pattern_file", command = command):
         return []
     return cli_targets
+
+def resolve_targets(ctx, rc, command: str) -> tuple:
+    """The `(patterns, flags)` a task places on its Bazel command line.
+
+    `patterns` is `target_patterns` over the task's `targets` arg. `flags`
+    carries aspect's own `--target-pattern-file` as Bazel's
+    `--target_pattern_file`, forwarded rather than expanded into argv since the
+    flag exists to bypass OS command-line length limits. It is per-invocation,
+    not rc material, which is what lets `target_patterns` ask `rc` about the
+    forwarded spelling alone.
+
+    Fails when the named file does not exist, so a typo surfaces as aspect's
+    own error rather than a Bazel loading failure. A task that does not declare
+    `target_pattern_file` gets no flags.
+
+    Args:
+        ctx:     the task context; reads `targets` and `target_pattern_file`.
+        rc:      the active `Bazelrc`, or `None` to resolve before it exists
+                 (e.g. a status subject), ignoring the forwarded spelling.
+        command: Bazel subcommand whose options `rc` resolves.
+    """
+    pattern_file = ctx.args.target_pattern_file if hasattr(ctx.args, "target_pattern_file") else ""
+    flags = []
+    if pattern_file:
+        if not ctx.std.fs.exists(pattern_file):
+            fail("--target-pattern-file: file not found: " + pattern_file)
+        flags.append("--target_pattern_file=" + pattern_file)
+    patterns = target_patterns(
+        ctx.args.is_explicit("targets"),
+        list(ctx.args.targets),
+        pattern_file,
+        rc,
+        command,
+    )
+    return patterns, flags
 
 def _resolve(ctx, command: str) -> _Invocation:
     """Shared constructor for `build` / `test`. Reads everything a feature injected
@@ -120,23 +161,8 @@ def _resolve(ctx, command: str) -> _Invocation:
     # from the resolved rc; appended to each spawn after rc expansion.
     rc_flags = bazel_rc.hook_flags(ctx, rc, command)
 
-    # aspect's own `--target-pattern-file` is a per-invocation flag, not rc
-    # material — keeping it out of the parsed rc is what lets `target_patterns`
-    # ask `rc` about the forwarded spelling. Forwarded rather than expanded into
-    # argv, since the flag exists to bypass OS command-line length limits.
-    own_pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
-    if own_pattern_file:
-        if not ctx.std.fs.exists(own_pattern_file):
-            fail("--target-pattern-file: file not found: " + own_pattern_file)
-        rc_flags.append("--target_pattern_file=" + own_pattern_file)
-
-    patterns = target_patterns(
-        ctx.args.is_explicit("targets"),
-        list(ctx.args.targets),
-        own_pattern_file,
-        rc,
-        command,
-    )
+    patterns, pattern_flags = resolve_targets(ctx, rc, command)
+    rc_flags.extend(pattern_flags)
 
     # The advertised build-result viewer; reaches the CI surfaces through the
     # results handle. Only Bazel's own BES module reads `--bes_results_url` (to
@@ -324,11 +350,7 @@ def _args(phrase: str) -> dict:
     """The command-agnostic CLI args every Bazel-spawning task registers (splat
     into `task(args)`): the flag/startup/announce args, the BES args, and the
     target-pattern-file / retry / cancel controls."""
-    return bazel_flags.args(phrase) | bazel_announce.args(phrase) | bes_args() | {
-        "target_pattern_file": args.string(
-            default = "",
-            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
-        ),
+    return bazel_flags.args(phrase) | bazel_announce.args(phrase) | bes_args() | _target_pattern_file_arg() | {
         "bazel_retry_attempts": args.int(
             default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
             description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
@@ -336,6 +358,17 @@ def _args(phrase: str) -> dict:
         "cancel": args.boolean(
             default = False,
             description = "Cancel any running Bazel invocation before starting.",
+        ),
+    }
+
+def _target_pattern_file_arg() -> dict:
+    """aspect's `--target-pattern-file` arg, read back by `resolve_targets`. Part
+    of `bazel_invocation.args`; splat it alone into a task that declares its
+    own Bazel args."""
+    return {
+        "target_pattern_file": args.string(
+            default = "",
+            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
         ),
     }
 
@@ -356,4 +389,5 @@ bazel_invocation = namespace(
     test = _test,
     args = _args,
     targets_arg = _targets_arg,
+    target_pattern_file_arg = _target_pattern_file_arg,
 )
