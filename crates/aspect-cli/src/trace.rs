@@ -26,7 +26,7 @@ use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::{
     Resource,
     logs::{LogExporter as _, SdkLoggerProvider},
-    metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider},
+    metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Temporality},
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
@@ -501,16 +501,43 @@ fn build_otlp_log_exporter(spec: &OtlpSpec) -> anyhow::Result<opentelemetry_otlp
 fn build_otlp_metric_exporter(
     spec: &OtlpSpec,
 ) -> anyhow::Result<opentelemetry_otlp::MetricExporter> {
-    let builder = opentelemetry_otlp::MetricExporter::builder();
-    let temporality = opentelemetry_sdk::metrics::Temporality::default();
+    let builder = match metric_temporality(env_var) {
+        Some(temporality) => {
+            opentelemetry_otlp::MetricExporter::builder().with_temporality(temporality)
+        }
+        None => opentelemetry_otlp::MetricExporter::builder(),
+    };
     Ok(match spec.protocol {
-        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?
-            .with_temporality(temporality)
-            .build()?,
-        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?
-            .with_temporality(temporality)
-            .build()?,
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?.build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?.build()?,
     })
+}
+
+/// Export interval used unless `OTEL_METRIC_EXPORT_INTERVAL` is set: half the
+/// SDK default, so a long build reports during the run.
+const METRIC_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Delta temporality unless `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`
+/// is set, in which case the exporter reads it. Every CLI run is a new
+/// process, so cumulative series would restart at zero each run instead of
+/// adding up across runs.
+fn metric_temporality(env: impl Fn(&str) -> Option<String>) -> Option<Temporality> {
+    env(opentelemetry_otlp::OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE)
+        .is_none()
+        .then_some(Temporality::Delta)
+}
+
+/// [`METRIC_EXPORT_INTERVAL`] unless `OTEL_METRIC_EXPORT_INTERVAL` is set, in
+/// which case the reader reads it.
+fn metric_export_interval(env: impl Fn(&str) -> Option<String>) -> Option<std::time::Duration> {
+    env(opentelemetry_sdk::metrics::OTEL_METRIC_EXPORT_INTERVAL)
+        .is_none()
+        .then_some(METRIC_EXPORT_INTERVAL)
+}
+
+/// A set, non-empty environment variable.
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 /// Endpoint, native-root TLS and headers (as gRPC metadata) for a gRPC
@@ -657,7 +684,7 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
                     log_exporters.push(ex);
                 }
                 if otlp.signals.metrics {
-                    metric_exporters.push((otlp.clone(), resource));
+                    metric_exporters.push(otlp.clone());
                 }
             }
             ExporterSpec::File(file) => {
@@ -679,18 +706,16 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
     log_buf.install_late(log_exporters).await;
 
     if !metric_exporters.is_empty() {
-        let mut builder = MeterProviderBuilder::default()
-            // Resource attribution at the metric provider level uses the
-            // base resource. Per-exporter resource_attributes are not
-            // separately surfaced in metrics in v1 (the OTLP metric
-            // exporter respects the provider's resource). Acceptable for
-            // an initial implementation; revisit if a use case appears.
-            .with_resource(base_resource());
-        for (spec, _resource) in metric_exporters {
+        // Every metric exporter reads from this one provider, so metrics carry
+        // the base resource and not an exporter's own `resource_attributes`.
+        let mut builder = MeterProviderBuilder::default().with_resource(base_resource());
+        for spec in metric_exporters {
             let exporter = build_otlp_metric_exporter(&spec)?;
-            let reader = PeriodicReader::builder(exporter)
-                .with_interval(std::time::Duration::from_secs(30))
-                .build();
+            let mut reader = PeriodicReader::builder(exporter);
+            if let Some(interval) = metric_export_interval(env_var) {
+                reader = reader.with_interval(interval);
+            }
+            let reader = reader.build();
             builder = builder.with_reader(reader);
         }
         let provider = builder.build();
@@ -791,6 +816,33 @@ mod tests {
 
     fn lock_test() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn env_with(var: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |name| (name == var).then(|| value.to_owned())
+    }
+
+    #[test]
+    fn metrics_default_to_delta_unless_preference_set() {
+        assert_eq!(metric_temporality(|_| None), Some(Temporality::Delta));
+        let env = env_with(
+            opentelemetry_otlp::OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE,
+            "cumulative",
+        );
+        assert_eq!(metric_temporality(env), None);
+    }
+
+    #[test]
+    fn metric_interval_defaults_unless_env_set() {
+        assert_eq!(
+            metric_export_interval(|_| None),
+            Some(METRIC_EXPORT_INTERVAL)
+        );
+        let env = env_with(
+            opentelemetry_sdk::metrics::OTEL_METRIC_EXPORT_INTERVAL,
+            "5000",
+        );
+        assert_eq!(metric_export_interval(env), None);
     }
 
     fn sample_event_fields() -> VisitedFields {

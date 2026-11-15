@@ -2,7 +2,9 @@
 
 use std::sync::OnceLock;
 
+mod events;
 pub mod grpc;
+mod metrics;
 pub mod retry;
 pub mod tracing;
 
