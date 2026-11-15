@@ -19,22 +19,22 @@
 //!   `aspect-cli`'s `trace::init` arranges by installing it globally.
 //! - Everything else becomes a span event, except progress and
 //!   `NamedSetOfFiles`, which are too frequent to be worth recording.
+//!
+//! The same loop records the [`BesMetrics`] from test and build-metrics
+//! events.
 
 use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{Arc, mpsc::RecvError},
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
-use axl_proto::{
-    Timestamp,
-    build_event_stream::{
-        ActionExecuted, TestResult, TestStatus, TestSummary,
-        build_event::Payload,
-        build_event_id::{ActionCompletedId, Id, TestResultId, TestSummaryId},
-    },
+use axl_proto::build_event_stream::{
+    ActionExecuted, TestResult, TestStatus, TestSummary,
+    build_event::Payload,
+    build_event_id::{ActionCompletedId, Id, TestResultId, TestSummaryId},
 };
 use opentelemetry::{
     Array, KeyValue, StringValue, Value, global,
@@ -43,29 +43,37 @@ use opentelemetry::{
 use tracing::{Level, span::EnteredSpan};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+use super::events::{attempt_cached, attempt_duration, system_time, time_or_legacy};
+use super::metrics::BesMetrics;
 use crate::bes::BuildEventEnvelope;
 use crate::fanout::{SinkOutcome, Subscriber};
 
 #[derive(Debug)]
 pub struct Tracing {}
 
-/// Instrumentation scope of the spans exported as [`CompletedSpan`]s.
-const TRACER_NAME: &str = "aspect-cli.bes";
+/// Instrumentation scope of the [`CompletedSpan`]s and of the [`BesMetrics`].
+const TELEMETRY_SCOPE: &str = "aspect-cli.bes";
 
 impl Tracing {
     pub fn spawn(recv: Subscriber<Arc<BuildEventEnvelope>>) -> JoinHandle<SinkOutcome> {
         let events_span = tracing::info_span!("events");
         thread::spawn(move || {
             let _events_guard = events_span.enter();
-            consume(&recv, &global::tracer(TRACER_NAME));
+            let metrics = BesMetrics::new(&global::meter(TELEMETRY_SCOPE));
+            consume(&recv, &global::tracer(TELEMETRY_SCOPE), &metrics);
             Ok(())
         })
     }
 }
 
 /// Reads events until the stream closes, recording each in the current
-/// `tracing` span and exporting [`CompletedSpan`]s through `tracer`.
-fn consume<T: Tracer>(recv: &Subscriber<Arc<BuildEventEnvelope>>, tracer: &T) {
+/// `tracing` span, exporting [`CompletedSpan`]s through `tracer` and
+/// recording `metrics`.
+fn consume<T: Tracer>(
+    recv: &Subscriber<Arc<BuildEventEnvelope>>,
+    tracer: &T,
+    metrics: &BesMetrics,
+) {
     let mut build_span: Option<EnteredSpan> = None;
     let mut test_windows = TestWindows::default();
     loop {
@@ -129,15 +137,21 @@ fn consume<T: Tracer>(recv: &Subscriber<Arc<BuildEventEnvelope>>, tracer: &T) {
                 );
             }
             (Payload::TestSummary(summary), Id::TestSummary(id)) => {
+                metrics.record_test_summary(summary);
                 let window = test_windows.take(&id.label);
                 test_span(summary, id, window, SystemTime::now()).export(tracer);
             }
             (Payload::TestResult(result), Id::TestResult(id)) => {
+                metrics.record_test_result(result);
                 let span = test_attempt_span(result, id, SystemTime::now());
                 if !attempt_cached(result) {
                     test_windows.record(&id.label, span.start, span.end);
                 }
                 span.export(tracer);
+            }
+            (Payload::BuildMetrics(build_metrics), _) => {
+                metrics.record_build_metrics(build_metrics);
+                tracing::event!(name: "bes_event", Level::INFO, kind = id.as_str_name());
             }
             (Payload::Progress(_), _) | (Payload::NamedSetOfFiles(_), _) => {}
             (_, id) => {
@@ -296,11 +310,7 @@ fn test_attempt_span(
             result.test_attempt_start.as_ref(),
             result.test_attempt_start_millis_epoch,
         );
-        let duration = duration_or_legacy(
-            result.test_attempt_duration.as_ref(),
-            result.test_attempt_duration_millis,
-        );
-        (start, start + duration)
+        (start, start + attempt_duration(result))
     };
     CompletedSpan {
         name: "test_attempt",
@@ -318,15 +328,6 @@ fn test_attempt_span(
     }
 }
 
-/// Whether the attempt came from a local or remote cache.
-fn attempt_cached(result: &TestResult) -> bool {
-    result.cached_locally
-        || result
-            .execution_info
-            .as_ref()
-            .is_some_and(|info| info.cached_remotely)
-}
-
 /// Span status for a Bazel test outcome. Failing outcomes are errors; `PASSED`
 /// and `FLAKY` (which ultimately passed) are ok; `NO_STATUS`/`INCOMPLETE` stay
 /// unset. Mirrors `bazel_results.axl`'s `_FAILED_STATUSES`.
@@ -339,31 +340,6 @@ fn test_status(status: TestStatus) -> Status {
         | TestStatus::RemoteFailure
         | TestStatus::ToolHaltedBeforeTesting => Status::error(status.as_str_name()),
         _ => Status::Unset,
-    }
-}
-
-fn system_time(ts: &Timestamp) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::new(ts.seconds.max(0) as u64, ts.nanos.max(0) as u32)
-}
-
-/// Prefers the `Timestamp` field, then the deprecated `*_millis` field, then
-/// `now`. Older Bazel versions and cached test summaries populate only the
-/// millis field.
-fn time_or_legacy(timestamp: Option<&Timestamp>, legacy_millis: i64) -> SystemTime {
-    match timestamp {
-        Some(t) => system_time(t),
-        None if legacy_millis > 0 => {
-            SystemTime::UNIX_EPOCH + Duration::from_millis(legacy_millis as u64)
-        }
-        None => SystemTime::now(),
-    }
-}
-
-/// Prefers the `Duration` field, then the deprecated `*_millis` field.
-fn duration_or_legacy(duration: Option<&axl_proto::Duration>, legacy_millis: i64) -> Duration {
-    match duration {
-        Some(d) => Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32),
-        None => Duration::from_millis(legacy_millis.max(0) as u64),
     }
 }
 
@@ -385,11 +361,17 @@ fn non_empty<T>(items: &[T]) -> Option<&[T]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use axl_proto::Timestamp;
     use axl_proto::build_event_stream::{
-        BuildEvent, BuildEventId, BuildFinished, BuildStarted, build_event_id::BuildFinishedId,
-        build_event_id::BuildStartedId, test_result,
+        BuildEvent, BuildEventId, BuildFinished, BuildMetrics, BuildStarted,
+        build_event_id::BuildFinishedId, build_event_id::BuildStartedId, build_metrics,
+        test_result,
     };
+    use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use prost::{Message as _, bytes::Bytes};
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -422,12 +404,16 @@ mod tests {
     }
 
     /// Runs `events` through [`consume`] under a `tracing` span named `parent`
-    /// and returns every exported span. Uses its own provider and subscriber,
-    /// so it never touches the global tracer.
-    fn export(events: Vec<Arc<BuildEventEnvelope>>) -> Vec<SpanData> {
-        let exporter = InMemorySpanExporter::default();
+    /// and returns every exported span and the names of the metrics recorded.
+    /// Uses its own providers and subscriber, so it never touches the globals.
+    fn run(events: Vec<Arc<BuildEventEnvelope>>) -> (Vec<SpanData>, Vec<String>) {
+        let span_exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
-            .with_simple_exporter(exporter.clone())
+            .with_simple_exporter(span_exporter.clone())
+            .build();
+        let metric_exporter = InMemoryMetricExporter::default();
+        let meter_provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(metric_exporter.clone()).build())
             .build();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("layer")));
@@ -439,13 +425,30 @@ mod tests {
         }
         broadcaster.close();
 
-        let tracer = provider.tracer(TRACER_NAME);
+        let tracer = provider.tracer(TELEMETRY_SCOPE);
+        let metrics = BesMetrics::new(&meter_provider.meter(TELEMETRY_SCOPE));
         tracing::subscriber::with_default(subscriber, || {
             let _parent = tracing::info_span!("parent").entered();
-            consume(&recv, &tracer);
+            consume(&recv, &tracer, &metrics);
         });
         provider.force_flush().unwrap();
-        exporter.get_finished_spans().unwrap()
+        meter_provider.force_flush().unwrap();
+
+        let mut metric_names: Vec<String> = metric_exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.scope_metrics())
+            .flat_map(|s| s.metrics())
+            .map(|m| m.name().to_owned())
+            .collect();
+        metric_names.sort();
+        metric_names.dedup();
+        (span_exporter.get_finished_spans().unwrap(), metric_names)
+    }
+
+    fn export(events: Vec<Arc<BuildEventEnvelope>>) -> Vec<SpanData> {
+        run(events).0
     }
 
     fn find<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
@@ -530,6 +533,41 @@ mod tests {
         assert_eq!(attempt.end_time, at(200, 59_000_001));
         assert_eq!(attempt.status, Status::error("FAILED"));
         assert_eq!(attribute(attempt, "attempt"), Some(&Value::I64(3)));
+    }
+
+    #[test]
+    fn stream_records_test_and_action_cache_metrics() {
+        let (_, metrics) = run(vec![
+            event(
+                Id::TestResult(TestResultId::default()),
+                Payload::TestResult(TestResult {
+                    status: TestStatus::Passed as i32,
+                    ..Default::default()
+                }),
+            ),
+            event(
+                Id::TestSummary(TestSummaryId::default()),
+                Payload::TestSummary(TestSummary::default()),
+            ),
+            event(
+                Id::BuildMetrics(Default::default()),
+                Payload::BuildMetrics(BuildMetrics {
+                    action_summary: Some(build_metrics::ActionSummary {
+                        action_cache_statistics: Some(Default::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            ),
+        ]);
+        assert_eq!(
+            metrics,
+            [
+                "bazel.action_cache.lookups",
+                "bazel.test.attempt.duration",
+                "bazel.test.results"
+            ]
+        );
     }
 
     #[test]
@@ -664,40 +702,5 @@ mod tests {
     fn indeterminate_statuses_stay_unset() {
         assert_eq!(test_status(TestStatus::NoStatus), Status::Unset);
         assert_eq!(test_status(TestStatus::Incomplete), Status::Unset);
-    }
-
-    #[test]
-    fn timestamp_keeps_nanos() {
-        assert_eq!(
-            time_or_legacy(Some(&ts(42, 123_456_789)), 999_000),
-            at(42, 123_456_789)
-        );
-    }
-
-    #[test]
-    fn timestamp_falls_back_to_legacy_millis() {
-        assert_eq!(
-            time_or_legacy(None, 1_723_000_000_250),
-            at(1_723_000_000, 250_000_000)
-        );
-    }
-
-    #[test]
-    fn timestamp_uses_now_when_nothing_populated() {
-        let before = SystemTime::now();
-        assert!(time_or_legacy(None, 0) >= before);
-    }
-
-    #[test]
-    fn duration_falls_back_to_legacy_millis() {
-        assert_eq!(
-            duration_or_legacy(None, 1_500),
-            Duration::from_millis(1_500)
-        );
-        let d = axl_proto::Duration {
-            seconds: 1,
-            nanos: 5,
-        };
-        assert_eq!(duration_or_legacy(Some(&d), 9_999), Duration::new(1, 5));
     }
 }

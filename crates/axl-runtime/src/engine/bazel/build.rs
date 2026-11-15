@@ -856,6 +856,10 @@ pub struct Build {
     #[allocative(skip)]
     signals: Arc<Signals>,
 
+    /// The BES trace sink, joined by `wait()` once the stream ends.
+    #[allocative(skip)]
+    trace_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
+
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
 }
@@ -1181,11 +1185,9 @@ impl Build {
         if named_consumers && let Some(stream) = execlog_stream.as_mut() {
             stream.take_initial_subscriber();
         }
-        // The tracing sink only emits via `tracing::event!` and never fails;
-        // detach its JoinHandle so `build.wait()` stays bazel-only.
-        if build_events {
-            let _ = tracing_sink::Tracing::spawn(build_event_stream.as_ref().unwrap().subscribe());
-        }
+        let trace_sink = build_events.then(|| {
+            tracing_sink::Tracing::spawn(build_event_stream.as_ref().unwrap().subscribe())
+        });
 
         drop(_enter);
         Ok(Self {
@@ -1199,6 +1201,7 @@ impl Build {
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
+            trace_sink: RefCell::new(trace_sink),
             span: RefCell::new(span),
         })
     }
@@ -1424,6 +1427,12 @@ impl Build {
                 }
                 Err(err) => anyhow::bail!("build event stream thread error: {}", err),
             }
+        }
+        // The sink may still hold the stream's last events, `BuildMetrics`
+        // among them; the task must not exit before they are recorded. It
+        // never fails, and it ends once it has drained the closed stream.
+        if let Some(trace_sink) = build.trace_sink.take() {
+            let _ = trace_sink.join();
         }
 
         // Wait for Workspace event stream to complete.
