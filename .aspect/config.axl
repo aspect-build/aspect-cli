@@ -77,6 +77,7 @@ load("@aspect//private/lib/redis_test.axl", "redis_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/resp_test.axl", "resp_tests")
+load("@aspect//private/lib/results_json_test.axl", "results_json_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
@@ -581,6 +582,9 @@ def config(ctx: ConfigContext):
     # ASPECT_DEBUG, and which signals the OTLP endpoint variables carry.
     # Run with: aspect dev test-telemetry
     ctx.tasks.add(telemetry_tests)
+    # `--output=json` document: redaction, bounded fields, truncation flags.
+    # Run with: aspect dev test-results-json
+    ctx.tasks.add(results_json_tests)
 
     # Adaptive rate-limit throttling: burn-rate, threshold ladder, two-bucket
     # independence, prefer_app_when_env_critical, watermark badge.
