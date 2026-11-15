@@ -124,8 +124,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 # matter which one the tool reads.
                 _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
 
-    # Last, so the document is the final thing on stdout no matter what the
-    # coverage block did.
     results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     return conclusion
 

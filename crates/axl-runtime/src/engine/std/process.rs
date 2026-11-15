@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::io;
 use std::process;
 use std::process::Stdio;
 use std::time::Duration;
@@ -224,9 +225,12 @@ impl<'v> values::StarlarkValue<'v> for Command {
 }
 
 /// Resolve a `stdout`/`stderr` argument to a [`Stdio`]. Accepts the mode
-/// strings `"null"`/`"piped"`/`"inherit"`, or a writable file stream from
+/// strings `"null"`/`"piped"`/`"inherit"`, a writable file stream from
 /// `fs.create(...)` — whose owned file is taken and handed to the child so its
-/// output lands directly on disk. `field` names the caller for error messages.
+/// output lands directly on disk — or a parent stdio handle (`ctx.std.io.stdout`
+/// / `ctx.std.io.stderr`), whose fd is duplicated so cross-wiring such as
+/// `stdout = ctx.std.io.stderr` works. `field` names the caller for error
+/// messages.
 pub(crate) fn stdio_from<'v>(
     io: Either<values::StringValue<'v>, stream::Writable>,
     field: &str,
@@ -246,10 +250,54 @@ pub(crate) fn stdio_from<'v>(
                 .ok_or_else(|| anyhow!("{field} file stream has already been consumed"))?;
             Ok(Stdio::from(file))
         }
-        Either::Right(_) => Err(anyhow!(
-            "{field} redirect requires a file stream from fs.create(...)"
-        )),
+        Either::Right(w) => writable_to_stdio(&w).map_err(|e| anyhow!("{field} redirect: {e}")),
     }
+}
+
+/// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
+/// as a child's stdio slot.
+///
+/// Parent stdio handles (`Writable::Stdout`/`Stderr`/`ChildStdin`) get their
+/// underlying fd duplicated so cross-wiring (e.g. `stdout = ctx.std.io.stderr`)
+/// works and the original handle stays usable from Starlark. `Writable::File`
+/// is `try_clone`d for the same reason.
+pub(crate) fn writable_to_stdio(w: &stream::Writable) -> io::Result<Stdio> {
+    let closed = || io::Error::other("writable stream is closed");
+    match w {
+        stream::Writable::Stdout(arc) => {
+            let guard = arc.lock().unwrap();
+            let borrowed = guard.borrow();
+            let s = borrowed.as_ref().ok_or_else(closed)?;
+            dup_fd(s)
+        }
+        stream::Writable::Stderr(arc) => {
+            let guard = arc.lock().unwrap();
+            let borrowed = guard.borrow();
+            let s = borrowed.as_ref().ok_or_else(closed)?;
+            dup_fd(s)
+        }
+        stream::Writable::ChildStdin(arc) => {
+            let guard = arc.lock().unwrap();
+            let borrowed = guard.borrow();
+            let s = borrowed.as_ref().ok_or_else(closed)?;
+            dup_fd(s)
+        }
+        stream::Writable::File(arc) => {
+            let guard = arc.lock().unwrap();
+            let file = guard.as_ref().ok_or_else(closed)?;
+            Ok(Stdio::from(file.try_clone()?))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn dup_fd<H: std::os::fd::AsFd>(h: &H) -> io::Result<Stdio> {
+    Ok(Stdio::from(h.as_fd().try_clone_to_owned()?))
+}
+
+#[cfg(windows)]
+fn dup_fd<H: std::os::windows::io::AsHandle>(h: &H) -> io::Result<Stdio> {
+    Ok(Stdio::from(h.as_handle().try_clone_to_owned()?))
 }
 
 #[starlark_module]
@@ -338,10 +386,12 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
     /// defaults to [`piped`] when used with [`output`].
     ///
-    /// Accepts the strings `"null"`, `"piped"`, `"inherit"`, or a writable file
+    /// Accepts the strings `"null"`, `"piped"`, `"inherit"`; a writable file
     /// stream from `fs.create(...)` to redirect output straight to that file —
     /// letting a caller poll the child's liveness with `try_wait` and read the
-    /// file afterwards instead of draining a pipe with `wait_with_output`.
+    /// file afterwards instead of draining a pipe with `wait_with_output`; or
+    /// `ctx.std.io.stdout` / `ctx.std.io.stderr` to send it to that stream
+    /// (e.g. `.stdout(ctx.std.io.stderr)` keeps our own stdout free).
     fn stdout<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
@@ -825,6 +875,25 @@ mod tests {
         assert!(err_msg.contains(program));
         assert!(!err_msg.contains("--user"));
         assert!(!err_msg.contains("fake-secret-key"));
+    }
+
+    #[test]
+    fn parent_stderr_can_take_a_childs_stdout() {
+        use std::sync::{Arc, Mutex};
+        let stderr =
+            stream::Writable::Stderr(Arc::new(Mutex::new(RefCell::new(Some(std::io::stderr())))));
+        let status = process::Command::new("true")
+            .stdout(writable_to_stdio(&stderr).unwrap())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn closed_parent_stream_is_an_error() {
+        use std::sync::{Arc, Mutex};
+        let closed = stream::Writable::Stdout(Arc::new(Mutex::new(RefCell::new(None))));
+        assert!(writable_to_stdio(&closed).is_err());
     }
 
     #[test]

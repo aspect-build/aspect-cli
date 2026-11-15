@@ -32,6 +32,7 @@ use starlark::{
 use crate::engine::cancellation;
 use crate::engine::children;
 use crate::engine::std::io::Stdio as StdStdio;
+use crate::engine::std::process::writable_to_stdio;
 use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
@@ -142,16 +143,13 @@ fn resolve_stdio(
         if stdout.is_some() || stderr.is_some() {
             anyhow::bail!("stdio cannot be combined with stdout/stderr — pass one or the other");
         }
-        return Ok((
-            build::writable_to_stdio(&s.stdout)?,
-            build::writable_to_stdio(&s.stderr)?,
-        ));
+        return Ok((writable_to_stdio(&s.stdout)?, writable_to_stdio(&s.stderr)?));
     }
     let to_stdio = |spec: Option<NoneOr<Writable>>| -> anyhow::Result<Stdio> {
         match spec {
             None => Ok(Stdio::inherit()),
             Some(NoneOr::None) => Ok(Stdio::null()),
-            Some(NoneOr::Other(w)) => Ok(build::writable_to_stdio(&w)?),
+            Some(NoneOr::Other(w)) => Ok(writable_to_stdio(&w)?),
         }
     };
     Ok((to_stdio(stdout)?, to_stdio(stderr)?))
