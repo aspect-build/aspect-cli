@@ -281,10 +281,20 @@ mod tests {
     }
 
     #[test]
-    fn spawn_spans_are_children_of_the_spawns_span() {
+    fn consume_exports_and_counts_spawn_entries_only() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+            data::{AggregatedMetrics, MetricData},
+        };
+
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
+            .build();
+        let metric_exporter = InMemoryMetricExporter::default();
+        let meter_provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(metric_exporter.clone()).build())
             .build();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("layer")));
@@ -293,29 +303,62 @@ mod tests {
         let (sender, recv) = bounded(8);
         tracing::subscriber::with_default(subscriber, || {
             let _spawns = tracing::info_span!("spawns").entered();
-            for entry in [
-                ExecLogEntry {
-                    id: 1,
-                    r#type: Some(Type::File(Default::default())),
-                },
-                ExecLogEntry {
-                    id: 0,
-                    r#type: Some(Type::Spawn(compiled())),
-                },
+            for r#type in [
+                Type::File(Default::default()),
+                Type::Spawn(compiled()),
+                Type::Spawn(Spawn {
+                    exit_code: 1,
+                    ..compiled()
+                }),
             ] {
-                sender.send(entry).unwrap();
+                sender
+                    .send(ExecLogEntry {
+                        id: 0,
+                        r#type: Some(r#type),
+                    })
+                    .unwrap();
             }
             drop(sender);
             consume(
                 &recv,
                 &tracer,
-                &SpawnInstruments::new(&opentelemetry::global::meter("test")),
+                &SpawnInstruments::new(&meter_provider.meter("test")),
             );
         });
 
         let spans: Vec<SpanData> = exporter.get_finished_spans().unwrap();
         let names: Vec<&str> = spans.iter().map(|s| s.name.as_ref()).collect();
-        assert_eq!(names, ["spawn", "spawns"], "one span per spawn entry only");
-        assert_eq!(spans[0].parent_span_id, spans[1].span_context.span_id());
+        assert_eq!(
+            names,
+            ["spawn", "spawn", "spawns"],
+            "a span per spawn entry only"
+        );
+        assert_eq!(spans[0].parent_span_id, spans[2].span_context.span_id());
+
+        meter_provider.force_flush().unwrap();
+        let mut counted = Vec::new();
+        for metric in metric_exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.scope_metrics())
+            .flat_map(|s| s.metrics())
+        {
+            if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
+                for p in sum.data_points() {
+                    let success = p
+                        .attributes()
+                        .find(|kv| kv.key.as_str() == "success")
+                        .map(|kv| kv.value.to_string());
+                    counted.push((success, p.value()));
+                }
+            }
+        }
+        counted.sort();
+        assert_eq!(
+            counted,
+            [(Some("false".into()), 1), (Some("true".into()), 1)],
+            "`success` follows the span's status"
+        );
     }
 }
