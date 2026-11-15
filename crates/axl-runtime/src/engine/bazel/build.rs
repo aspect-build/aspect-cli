@@ -1055,10 +1055,12 @@ impl Build {
         // reached by the other's variant.
         let mut compact_paths: Vec<String> = vec![];
         let mut decoded_paths: Vec<String> = vec![];
+        let mut execlog_telemetry = false;
         for sink in execlog_sinks {
             match sink {
                 ExecLogSink::CompactFile { path } => compact_paths.push(path),
                 ExecLogSink::File { path } => decoded_paths.push(path),
+                ExecLogSink::Telemetry => execlog_telemetry = true,
             }
         }
 
@@ -1200,14 +1202,21 @@ impl Build {
                 None
             };
 
-            // Decoded execlog file sinks belong to the execlog stream — joined
-            // (and write errors propagated) inside `execlog_stream.join()`.
+            // Decoded execlog sinks belong to the execlog stream — joined (and
+            // write errors propagated) inside `execlog_stream.join()`.
             if let Some(stream) = execlog_stream.as_mut() {
-                for path in decoded_paths {
-                    let recv = stream.receiver().ok_or_else(|| {
+                let subscriber = |stream: &ExecLogStream| {
+                    stream.receiver().ok_or_else(|| {
                         io::Error::other("execution log stream has no subscriber to clone")
-                    })?;
-                    stream.attach_file_sink(bazel::execlog::sink::spawn_file(recv, path));
+                    })
+                };
+                for path in decoded_paths {
+                    let recv = subscriber(stream)?;
+                    stream.attach_sink(bazel::execlog::sink::spawn_file(recv, path));
+                }
+                if execlog_telemetry {
+                    let recv = subscriber(stream)?;
+                    stream.attach_sink(bazel::execlog::telemetry::spawn(recv));
                 }
             }
 
@@ -1718,6 +1727,50 @@ Test = task(implementation = _impl)
              prefix a dropping producer leaves, and one short by a varying amount is \
              the race it leaves",
         );
+    }
+
+    /// A `telemetry()` sink is a subscriber the producer blocks for, so it has
+    /// to keep draining: one that stopped would park the reader at the ring and
+    /// stall the iterator beside it, which the timeout catches. The iterator
+    /// counting every entry is what shows the two shared the stream.
+    #[cfg(unix)]
+    #[test]
+    fn a_telemetry_sink_drains_the_log_beside_an_iterator() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.txt");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [bazel.execution_log.telemetry(), entries],
+        stderr = None,
+    )
+    seen = 0
+    for _ in entries:
+        seen += 1
+    status = build.wait()
+    if not status.success: return 1
+    ctx.std.fs.create({report:?}).write("%d\n" % seen)
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            report = report.to_str().unwrap(),
+        );
+
+        run_execlog_task(
+            Duration::from_secs(60),
+            script,
+            "the telemetry sink stopped draining and parked the reader",
+            "a build with a telemetry sink must still end cleanly",
+        );
+
+        let text = std::fs::read_to_string(&report).expect("the task should have reported");
+        assert_eq!(text.trim().parse::<u32>().unwrap(), SCENARIO_ENTRIES);
     }
 
     /// `execution_log = []`: the log is on with no consumer.

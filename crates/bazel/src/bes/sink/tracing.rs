@@ -11,12 +11,7 @@
 //!   A cached test attempt (local or remote) carries the times of the run that
 //!   produced it, so it is instead a zero-length span at the moment this build
 //!   reported it, and a `test` spans only this build's uncached attempts (see
-//!   [`TestWindows`]). A `tracing` span can only be timed by when it is entered and dropped, so
-//!   these are built as [`CompletedSpan`]s and exported with an OpenTelemetry
-//!   tracer, parented to the current `tracing` span through
-//!   `OpenTelemetrySpanExt::context`. That parent link needs the tracer and
-//!   the `tracing-opentelemetry` layer to share one provider, which
-//!   `aspect-cli`'s `trace::init` arranges by installing it globally.
+//!   [`TestWindows`]). They are [`CompletedSpan`]s.
 //! - Everything else becomes a span event, except progress and
 //!   `NamedSetOfFiles`, which are too frequent to be worth recording.
 //!
@@ -38,15 +33,15 @@ use axl_proto::build_event_stream::{
 };
 use opentelemetry::{
     Array, KeyValue, StringValue, Value, global,
-    trace::{Span as _, Status, Tracer},
+    trace::{Status, Tracer},
 };
 use tracing::{Level, span::EnteredSpan};
-use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-use super::events::{attempt_cached, attempt_duration, system_time, time_or_legacy};
+use super::events::{attempt_cached, attempt_duration, time_or_legacy};
 use super::metrics::BesMetrics;
 use crate::bes::BuildEventEnvelope;
 use crate::fanout::{SinkOutcome, Subscriber};
+use crate::otel::{CompletedSpan, system_time};
 
 #[derive(Debug)]
 pub struct Tracing {}
@@ -180,31 +175,6 @@ impl TestWindows {
 
     fn take(&mut self, label: &str) -> Option<(SystemTime, SystemTime)> {
         self.0.remove(label)
-    }
-}
-
-/// A span for work that already finished, timed from Bazel's events.
-#[derive(Debug)]
-struct CompletedSpan {
-    name: &'static str,
-    start: SystemTime,
-    end: SystemTime,
-    status: Status,
-    attributes: Vec<KeyValue>,
-}
-
-impl CompletedSpan {
-    /// Exports the span as a child of the current `tracing` span. An end
-    /// before the start is clamped to the start.
-    fn export<T: Tracer>(self, tracer: &T) {
-        let parent = tracing::Span::current().context();
-        let mut span = tracer
-            .span_builder(self.name)
-            .with_start_time(self.start)
-            .with_attributes(self.attributes)
-            .start_with_context(tracer, &parent);
-        span.set_status(self.status);
-        span.end_with_timestamp(self.end.max(self.start));
     }
 }
 

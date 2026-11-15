@@ -1362,6 +1362,16 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         Ok(ExecLogSink::CompactFile { path })
     }
 
+    /// Export a `spawn` span for every spawn in this build's execution log,
+    /// under a `spawns` span in the `ctx.bazel.build` trace, to the exporters
+    /// registered with `ctx.telemetry.exporters`. Writes no file.
+    ///
+    /// The `Telemetry` feature's `spawns` option adds this to every build. More
+    /// than one in a list exports each spawn once.
+    fn telemetry() -> anyhow::Result<ExecLogSink> {
+        Ok(ExecLogSink::Telemetry)
+    }
+
     /// Create a handle iterating this build's decoded execution log. Pass it in
     /// `execution_log=[...]` and then `for entry in handle:`.
     ///

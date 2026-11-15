@@ -27,11 +27,14 @@ use opentelemetry_sdk::{
     Resource,
     logs::{LogExporter as _, SdkLoggerProvider},
     metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Temporality},
-    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
+    trace::{
+        BatchConfigBuilder, BatchSpanProcessor, OTEL_BSP_MAX_QUEUE_SIZE, RandomIdGenerator,
+        Sampler, SdkTracerProvider,
+    },
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 use tracing_core::Level;
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -43,7 +46,9 @@ use tracing_subscriber::{
 };
 
 use crate::otlp_http::OtlpHttpClient;
-use crate::trace_buffer::{BufferingLogExporter, BufferingSpanExporter};
+use crate::trace_buffer::{
+    BufferingLogExporter, BufferingSpanExporter, CountingSpanProcessor, SpanLoss, SpanTally,
+};
 
 use axl_runtime::engine::telemetry::{FileFormat, Signals};
 
@@ -432,16 +437,24 @@ static ANY_LATE_EXPORTER: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 /// backed by the buffering exporters, and install the tracer provider
 /// globally. Returns the guard that flushes/shuts down providers on drop.
 pub fn init() -> OtelGuard {
-    let span_buffer = BufferingSpanExporter::new();
+    let span_buffer = BufferingSpanExporter::new(Arc::new(SpanTally::default()));
     let log_buffer = BufferingLogExporter::new();
 
+    let queue_size = span_queue_size(env_var);
+    let batch = BatchSpanProcessor::builder(span_buffer.clone())
+        .with_batch_config(
+            BatchConfigBuilder::default()
+                .with_max_queue_size(queue_size)
+                .build(),
+        )
+        .build();
     let tracer_provider = SdkTracerProvider::builder()
         .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
             1.0,
         ))))
         .with_id_generator(RandomIdGenerator::default())
         .with_resource(base_resource())
-        .with_batch_exporter(span_buffer.clone())
+        .with_span_processor(CountingSpanProcessor::new(batch, span_buffer.tally()))
         .build();
 
     let logger_provider = SdkLoggerProvider::builder()
@@ -450,7 +463,7 @@ pub fn init() -> OtelGuard {
         .build();
 
     SPAN_BUFFER
-        .set(span_buffer)
+        .set(span_buffer.clone())
         .ok()
         .expect("trace::init called twice");
     LOG_BUFFER
@@ -501,7 +514,48 @@ pub fn init() -> OtelGuard {
     OtelGuard {
         tracer_provider,
         logger_provider,
+        span_buffer,
+        queue_size,
     }
+}
+
+/// Spans the batch processor queues for export, unless
+/// `OTEL_BSP_MAX_QUEUE_SIZE` sets it. A span that ends while the queue is full
+/// is dropped, and the SDK's 2048 fills within seconds once a build exports a
+/// span per spawn.
+const SPAN_QUEUE_SIZE: usize = 65_536;
+
+fn span_queue_size(env: impl Fn(&str) -> Option<String>) -> usize {
+    env(OTEL_BSP_MAX_QUEUE_SIZE)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SPAN_QUEUE_SIZE)
+}
+
+/// One line per way spans were lost, saying which setting keeps them.
+fn span_loss_report(loss: SpanLoss, queue_size: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if loss.queued > 0 {
+        lines.push(format!(
+            "{} span(s) were dropped: the export queue of {queue_size} was full, or did not \
+             drain before shutdown. Raise OTEL_BSP_MAX_QUEUE_SIZE or \
+             ASPECT_TELEMETRY_SHUTDOWN_TIMEOUT_MS to keep them.",
+            loss.queued
+        ));
+    }
+    if loss.evicted > 0 {
+        lines.push(format!(
+            "{} span(s) recorded before the exporters were installed were dropped from the \
+             full start-up buffer.",
+            loss.evicted
+        ));
+    }
+    if loss.failed > 0 {
+        lines.push(format!(
+            "{} span(s) failed to export; check the collector's endpoint and credentials.",
+            loss.failed
+        ));
+    }
+    lines
 }
 
 fn build_otlp_span_exporter(spec: &OtlpSpec) -> anyhow::Result<opentelemetry_otlp::SpanExporter> {
@@ -772,6 +826,8 @@ fn shutdown_timeout() -> std::time::Duration {
 pub(crate) struct OtelGuard {
     tracer_provider: SdkTracerProvider,
     logger_provider: SdkLoggerProvider,
+    span_buffer: BufferingSpanExporter,
+    queue_size: usize,
 }
 
 impl Drop for OtelGuard {
@@ -795,6 +851,11 @@ impl Drop for OtelGuard {
         let mut errors: Vec<String> = Vec::new();
         if let Err(err) = self.tracer_provider.shutdown_with_timeout(timeout) {
             errors.push(format!("tracer: {err:?}"));
+        }
+        if let Some(loss) = self.span_buffer.loss() {
+            for line in span_loss_report(loss, self.queue_size) {
+                errln!("telemetry: {line}");
+            }
         }
         if let Ok(mut slot) = LATE_METER_PROVIDER.lock() {
             if let Some(mp) = slot.take() {
@@ -913,6 +974,35 @@ mod tests {
             "cumulative",
         );
         assert_eq!(metric_temporality(env), None);
+    }
+
+    #[test]
+    fn span_queue_size_defaults_unless_env_set() {
+        assert_eq!(span_queue_size(|_| None), SPAN_QUEUE_SIZE);
+        assert_eq!(
+            span_queue_size(env_with(OTEL_BSP_MAX_QUEUE_SIZE, "100")),
+            100
+        );
+        assert_eq!(
+            span_queue_size(env_with(OTEL_BSP_MAX_QUEUE_SIZE, "lots")),
+            SPAN_QUEUE_SIZE
+        );
+    }
+
+    #[test]
+    fn span_loss_report_names_the_setting_for_each_loss() {
+        assert!(span_loss_report(SpanLoss::default(), 10).is_empty());
+        let lines = span_loss_report(
+            SpanLoss {
+                queued: 3,
+                evicted: 0,
+                failed: 2,
+            },
+            10,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("3 span(s)") && lines[0].contains("OTEL_BSP_MAX_QUEUE_SIZE"));
+        assert!(lines[1].starts_with("2 span(s) failed"));
     }
 
     #[test]

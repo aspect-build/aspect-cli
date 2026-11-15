@@ -27,6 +27,7 @@ pub mod delimited;
 pub mod execlog;
 pub mod fanout;
 pub mod label;
+mod otel;
 pub mod process;
 pub mod rc;
 pub mod runfiles;

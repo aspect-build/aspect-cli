@@ -47,7 +47,13 @@ Registers exporters from four sources:
              if ctx.std.env.var("CI_HOST") == "buildkite":
                  ctx.telemetry.exporters.add(url = "https://otel.buildkite.example/v1")
 
-This feature itself is just a convenience layer over option 4 — it reads
+With `spawns = True` (`--telemetry:spawns`), every Bazel build also writes its
+execution log and exports a `spawn` span per spawn, through
+`bazel.execution_log.telemetry()` on `BazelTrait.execution_log_sinks`. Off by
+default: a large build runs tens of thousands of spawns, and writing the log
+costs Bazel I/O.
+
+Otherwise this feature is just a convenience layer over option 4 — it reads
 env vars / CLI flags and turns them into `add(...)` calls. Anything you
 can do here you can do directly via option 4.
 
@@ -69,6 +75,8 @@ catch-all is set, one endpoint is registered for all signals; if a per-signal
 endpoint is set, it is registered for just that signal (and the catch-all,
 where present, covers any remaining signals).
 """
+
+load("@aspect//bazel.axl", "BazelTrait")
 
 def _parse_headers(env):
     raw = env.var("OTEL_EXPORTER_OTLP_HEADERS") or ""
@@ -209,6 +217,8 @@ def _telemetry_impl(ctx: FeatureContext):
         _register_env_endpoints(ctx)
     if ctx.args.endpoint:
         _register_endpoint_args(ctx)
+    if ctx.args.spawns:
+        ctx.traits[BazelTrait].execution_log_sinks.append(bazel.execution_log.telemetry())
 
     trace.log("telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
     for spec in ctx.telemetry.exporters:
@@ -245,6 +255,12 @@ Telemetry = feature(
                           "all signals are enabled. For per-signal routing or " +
                           "resource_attributes, call ctx.telemetry.exporters.add() " +
                           "directly from config.axl.",
+        ),
+        "spawns": args.boolean(
+            default = False,
+            description = "Write each Bazel build's execution log and export a span " +
+                          "per spawn: its label, mnemonic, runner, cache hit and " +
+                          "time in each phase.",
         ),
     },
 )
