@@ -8,7 +8,10 @@
 //!   by when the sink sees those events.
 //! - `action`, `test` and `test_attempt` describe work Bazel already finished
 //!   by the time its event arrives, so they take their times from the event.
-//!   A `tracing` span can only be timed by when it is entered and dropped, so
+//!   A cached test attempt (local or remote) carries the times of the run that
+//!   produced it, so it is instead a zero-length span at the moment this build
+//!   reported it, and a `test` spans only this build's uncached attempts (see
+//!   [`TestWindows`]). A `tracing` span can only be timed by when it is entered and dropped, so
 //!   these are built as [`CompletedSpan`]s and exported with an OpenTelemetry
 //!   tracer, parented to the current `tracing` span through
 //!   `OpenTelemetrySpanExt::context`. That parent link needs the tracer and
@@ -18,6 +21,7 @@
 //!   `NamedSetOfFiles`, which are too frequent to be worth recording.
 
 use std::{
+    collections::HashMap,
     fmt::Debug,
     sync::{Arc, mpsc::RecvError},
     thread::{self, JoinHandle},
@@ -63,6 +67,7 @@ impl Tracing {
 /// `tracing` span and exporting [`CompletedSpan`]s through `tracer`.
 fn consume<T: Tracer>(recv: &Subscriber<Arc<BuildEventEnvelope>>, tracer: &T) {
     let mut build_span: Option<EnteredSpan> = None;
+    let mut test_windows = TestWindows::default();
     loop {
         let envelope = match recv.recv() {
             Ok(e) => e,
@@ -124,10 +129,15 @@ fn consume<T: Tracer>(recv: &Subscriber<Arc<BuildEventEnvelope>>, tracer: &T) {
                 );
             }
             (Payload::TestSummary(summary), Id::TestSummary(id)) => {
-                test_span(summary, id).export(tracer);
+                let window = test_windows.take(&id.label);
+                test_span(summary, id, window, SystemTime::now()).export(tracer);
             }
             (Payload::TestResult(result), Id::TestResult(id)) => {
-                test_attempt_span(result, id).export(tracer);
+                let span = test_attempt_span(result, id, SystemTime::now());
+                if !attempt_cached(result) {
+                    test_windows.record(&id.label, span.start, span.end);
+                }
+                span.export(tracer);
             }
             (Payload::Progress(_), _) | (Payload::NamedSetOfFiles(_), _) => {}
             (_, id) => {
@@ -137,7 +147,29 @@ fn consume<T: Tracer>(recv: &Subscriber<Arc<BuildEventEnvelope>>, tracer: &T) {
     }
 }
 
-/// A span for work that already finished, with the times Bazel reported.
+/// For each test label, the window its uncached attempts ran in during this
+/// build, from their `TestResult`s. A `TestSummary`'s own first-start and
+/// last-stop include cached attempts from earlier runs.
+#[derive(Debug, Default)]
+struct TestWindows(HashMap<String, (SystemTime, SystemTime)>);
+
+impl TestWindows {
+    fn record(&mut self, label: &str, start: SystemTime, end: SystemTime) {
+        self.0
+            .entry(label.to_owned())
+            .and_modify(|(s, e)| {
+                *s = (*s).min(start);
+                *e = (*e).max(end);
+            })
+            .or_insert((start, end));
+    }
+
+    fn take(&mut self, label: &str) -> Option<(SystemTime, SystemTime)> {
+        self.0.remove(label)
+    }
+}
+
+/// A span for work that already finished, timed from Bazel's events.
 #[derive(Debug)]
 struct CompletedSpan {
     name: &'static str,
@@ -201,20 +233,31 @@ fn action_span(action: &ActionExecuted, id: &ActionCompletedId) -> Option<Comple
 }
 
 /// The `test` span: a target's final outcome across every run, shard and
-/// attempt.
-fn test_span(summary: &TestSummary, id: &TestSummaryId) -> CompletedSpan {
+/// attempt. It covers `window`, this build's uncached attempts; with none, a
+/// fully cached test is a zero-length span at `reported`, and otherwise the
+/// summary's own times are used.
+fn test_span(
+    summary: &TestSummary,
+    id: &TestSummaryId,
+    window: Option<(SystemTime, SystemTime)>,
+    reported: SystemTime,
+) -> CompletedSpan {
     let status = TestStatus::try_from(summary.overall_status).unwrap_or(TestStatus::NoStatus);
     #[allow(deprecated)]
-    let (start, end) = (
-        time_or_legacy(
-            summary.first_start_time.as_ref(),
-            summary.first_start_time_millis,
+    let (start, end) = match window {
+        Some(window) => window,
+        None if summary.total_num_cached > 0 => (reported, reported),
+        None => (
+            time_or_legacy(
+                summary.first_start_time.as_ref(),
+                summary.first_start_time_millis,
+            ),
+            time_or_legacy(
+                summary.last_stop_time.as_ref(),
+                summary.last_stop_time_millis,
+            ),
         ),
-        time_or_legacy(
-            summary.last_stop_time.as_ref(),
-            summary.last_stop_time_millis,
-        ),
-    );
+    };
     CompletedSpan {
         name: "test",
         start,
@@ -237,34 +280,51 @@ fn test_span(summary: &TestSummary, id: &TestSummaryId) -> CompletedSpan {
 }
 
 /// The `test_attempt` span: one run of one shard. A flaky test has a failed
-/// attempt under a passing `test`.
-fn test_attempt_span(result: &TestResult, id: &TestResultId) -> CompletedSpan {
+/// attempt under a passing `test`. A cached attempt did no work in this build,
+/// so it is a zero-length span at `reported`.
+fn test_attempt_span(
+    result: &TestResult,
+    id: &TestResultId,
+    reported: SystemTime,
+) -> CompletedSpan {
     let status = TestStatus::try_from(result.status).unwrap_or(TestStatus::NoStatus);
     #[allow(deprecated)]
-    let (start, duration) = (
-        time_or_legacy(
+    let (start, end) = if attempt_cached(result) {
+        (reported, reported)
+    } else {
+        let start = time_or_legacy(
             result.test_attempt_start.as_ref(),
             result.test_attempt_start_millis_epoch,
-        ),
-        duration_or_legacy(
+        );
+        let duration = duration_or_legacy(
             result.test_attempt_duration.as_ref(),
             result.test_attempt_duration_millis,
-        ),
-    );
+        );
+        (start, start + duration)
+    };
     CompletedSpan {
         name: "test_attempt",
         start,
-        end: start + duration,
+        end,
         status: test_status(status),
         attributes: vec![
             KeyValue::new("label", id.label.clone()),
             KeyValue::new("status", status.as_str_name()),
-            KeyValue::new("cached", result.cached_locally),
+            KeyValue::new("cached", attempt_cached(result)),
             KeyValue::new("run", i64::from(id.run)),
             KeyValue::new("shard", i64::from(id.shard)),
             KeyValue::new("attempt", i64::from(id.attempt)),
         ],
     }
+}
+
+/// Whether the attempt came from a local or remote cache.
+fn attempt_cached(result: &TestResult) -> bool {
+    result.cached_locally
+        || result
+            .execution_info
+            .as_ref()
+            .is_some_and(|info| info.cached_remotely)
 }
 
 /// Span status for a Bazel test outcome. Failing outcomes are errors; `PASSED`
@@ -327,7 +387,7 @@ mod tests {
     use super::*;
     use axl_proto::build_event_stream::{
         BuildEvent, BuildEventId, BuildFinished, BuildStarted, build_event_id::BuildFinishedId,
-        build_event_id::BuildStartedId,
+        build_event_id::BuildStartedId, test_result,
     };
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
@@ -485,23 +545,82 @@ mod tests {
         assert_eq!(find(&spans, "parent").events.len(), 1);
     }
 
+    fn summary(total_num_cached: i32) -> TestSummary {
+        TestSummary {
+            overall_status: TestStatus::Flaky as i32,
+            attempt_count: 2,
+            total_num_cached,
+            first_start_time: Some(ts(10, 5)),
+            last_stop_time: Some(ts(12, 7)),
+            ..Default::default()
+        }
+    }
+
+    fn summary_id() -> TestSummaryId {
+        TestSummaryId {
+            label: "//:t".into(),
+            ..Default::default()
+        }
+    }
+
+    fn attempt(cached_locally: bool, cached_remotely: bool) -> TestResult {
+        TestResult {
+            status: TestStatus::Passed as i32,
+            cached_locally,
+            execution_info: Some(test_result::ExecutionInfo {
+                cached_remotely,
+                ..Default::default()
+            }),
+            test_attempt_start: Some(ts(10, 0)),
+            test_attempt_duration: Some(axl_proto::Duration {
+                seconds: 2,
+                nanos: 0,
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn test_span_takes_summary_window_and_status() {
-        let span = test_span(
-            &TestSummary {
-                overall_status: TestStatus::Flaky as i32,
-                attempt_count: 2,
-                first_start_time: Some(ts(10, 5)),
-                last_stop_time: Some(ts(12, 7)),
-                ..Default::default()
-            },
-            &TestSummaryId {
-                label: "//:t".into(),
-                ..Default::default()
-            },
-        );
+    fn uncached_test_span_takes_summary_times_and_status() {
+        let span = test_span(&summary(0), &summary_id(), None, at(99, 0));
         assert_eq!((span.start, span.end), (at(10, 5), at(12, 7)));
         assert_eq!(span.status, Status::Ok);
+    }
+
+    #[test]
+    fn test_span_covers_this_builds_uncached_attempts() {
+        let window = Some((at(20, 0), at(21, 0)));
+        let span = test_span(&summary(1), &summary_id(), window, at(99, 0));
+        assert_eq!((span.start, span.end), (at(20, 0), at(21, 0)));
+    }
+
+    #[test]
+    fn fully_cached_test_span_is_at_report_time() {
+        let span = test_span(&summary(2), &summary_id(), None, at(99, 0));
+        assert_eq!((span.start, span.end), (at(99, 0), at(99, 0)));
+    }
+
+    #[test]
+    fn cached_attempts_are_at_report_time() {
+        for (local, remote) in [(true, false), (false, true)] {
+            let span =
+                test_attempt_span(&attempt(local, remote), &TestResultId::default(), at(99, 0));
+            assert_eq!((span.start, span.end), (at(99, 0), at(99, 0)));
+            assert!(span.attributes.contains(&KeyValue::new("cached", true)));
+        }
+        let span = test_attempt_span(&attempt(false, false), &TestResultId::default(), at(99, 0));
+        assert_eq!((span.start, span.end), (at(10, 0), at(12, 0)));
+    }
+
+    #[test]
+    fn windows_merge_attempts_per_label() {
+        let mut windows = TestWindows::default();
+        windows.record("//:a", at(5, 0), at(6, 0));
+        windows.record("//:a", at(3, 0), at(4, 0));
+        windows.record("//:b", at(9, 0), at(10, 0));
+        assert_eq!(windows.take("//:a"), Some((at(3, 0), at(6, 0))));
+        assert_eq!(windows.take("//:a"), None);
+        assert_eq!(windows.take("//:b"), Some((at(9, 0), at(10, 0))));
     }
 
     #[test]
