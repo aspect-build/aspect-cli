@@ -18,6 +18,8 @@ use super::{AxlArchiveDep, AxlLocalDep, Dep};
 pub struct DiskStore {
     cache_root: PathBuf,
     root_sha: String,
+    /// Builds the HTTP client for fetching deps, on the first fetch.
+    new_client: fn() -> Client,
 }
 
 #[derive(Error, Debug)]
@@ -66,13 +68,11 @@ impl Processor {
 }
 
 impl DiskStore {
+    /// The store for `repo_root` under the CLI cache:
+    /// `${ASPECT_CLI_CACHE}/axl` when that is set and non-empty — CI runners
+    /// point it at a mount the warming archive includes, so the deps survive
+    /// runner reboots — else `${cache_dir()}/aspect/axl`.
     pub fn new(repo_root: PathBuf) -> Self {
-        // Cache root resolution:
-        //   1. ASPECT_CLI_CACHE env (non-empty) → ${ASPECT_CLI_CACHE}/axl
-        //   2. fallback             → ${cache_dir()}/aspect/axl
-        // CI runners point ASPECT_CLI_CACHE at an ephemeral mount that's
-        // included in the warming archive, so the AXL deps cache survives
-        // runner reboots.
         let cache_root = match std::env::var("ASPECT_CLI_CACHE") {
             Ok(val) if !val.is_empty() => PathBuf::from(val).join("axl"),
             _ => cache_dir()
@@ -80,9 +80,15 @@ impl DiskStore {
                 .join("aspect")
                 .join("axl"),
         };
+        Self::with_cache_root(repo_root, cache_root)
+    }
+
+    /// The store for `repo_root` under `cache_root`.
+    pub(crate) fn with_cache_root(repo_root: PathBuf, cache_root: PathBuf) -> Self {
         Self {
             root_sha: sha256::digest(repo_root.as_os_str().as_bytes()),
             cache_root,
+            new_client: Client::new,
         }
     }
 
@@ -284,7 +290,10 @@ impl DiskStore {
         fs::create_dir_all(&root.join("cas")).await?;
         fs::create_dir_all(&root.join("dl")).await?;
 
-        let client = reqwest::Client::new();
+        // Built on first fetch: it loads the platform's root certificates,
+        // which costs more than the rest of this function when every dep is
+        // already current.
+        let mut client: Option<Client> = None;
 
         let builtin_deps: Vec<Dep> = builtins
             .into_iter()
@@ -376,7 +385,10 @@ impl DiskStore {
                             let mut fetched = false;
 
                             for (i, url) in dep.urls.iter().enumerate() {
-                                match self.fetch_dep(&client, dep, url).await {
+                                match self
+                                    .fetch_dep(client.get_or_insert_with(self.new_client), dep, url)
+                                    .await
+                                {
                                     Ok(Some(computed)) => {
                                         return Err(StoreError::MissingIntegrity(
                                             dep.name.clone(),
@@ -436,5 +448,173 @@ impl DiskStore {
 
         module_roots.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(module_roots)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// A store under `dir` whose client ignores the developer's proxy
+    /// settings, so fetches reach the local test server.
+    fn store(dir: &tempfile::TempDir) -> DiskStore {
+        DiskStore {
+            new_client: || Client::builder().no_proxy().build().unwrap(),
+            ..DiskStore::with_cache_root(dir.path().join("repo"), dir.path().join("cache"))
+        }
+    }
+
+    fn root_mod(dir: &tempfile::TempDir) -> Mod {
+        let root = dir.path().join("repo");
+        Mod::new(root.clone(), "_root".to_string(), root)
+    }
+
+    /// `store` for a later start, which must not build a client: every dep
+    /// is current, so nothing is fetched.
+    fn offline(store: DiskStore) -> DiskStore {
+        DiskStore {
+            new_client: || panic!("a start with every dep current built an HTTP client"),
+            ..store
+        }
+    }
+
+    /// A gzipped tarball holding `files` under `prefix/`.
+    fn tarball(prefix: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (name, body) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{prefix}/{name}"), body.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Serve `body` to `requests` HTTP requests on a local port and return
+    /// the URL.
+    async fn serve(body: Vec<u8>, requests: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..requests {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                // Read the whole request: closing with unread input resets
+                // the connection, which can lose the response.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let mut response = Vec::new();
+                write!(
+                    response,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                response.extend_from_slice(&body);
+                socket.write_all(&response).await.unwrap();
+            }
+        });
+        format!("http://{addr}/dep.tar.gz")
+    }
+
+    /// A builtin is linked, not copied, and a second start finds it current
+    /// without building a client.
+    #[tokio::test]
+    async fn links_a_local_dep_and_keeps_it_on_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("builtin");
+        std::fs::create_dir_all(&source).unwrap();
+        let builtins = || vec![("aspect".to_string(), source.clone())];
+
+        for store in [store(&dir), offline(store(&dir))] {
+            let roots = store
+                .expand_store(&root_mod(&dir), builtins())
+                .await
+                .unwrap();
+            assert_eq!(
+                roots,
+                vec![("aspect".to_string(), store.dep_path("aspect"))]
+            );
+            assert_eq!(
+                std::fs::read_link(store.dep_path("aspect")).unwrap(),
+                source
+            );
+        }
+    }
+
+    /// A remote dep is downloaded, checked and unpacked once; the next start
+    /// uses it without building a client or making a request (the server
+    /// answers only one).
+    #[tokio::test]
+    async fn fetches_a_remote_dep_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = tarball(
+            "dep-1.0",
+            &[("MODULE.aspect", ""), ("tasks.axl", "x = 1\n")],
+        );
+        let integrity = IntegrityOpts::new()
+            .algorithm(Algorithm::Sha256)
+            .chain(&archive)
+            .result();
+        let url = serve(archive, 1).await;
+
+        let mut root = root_mod(&dir);
+        root.deps.insert(Dep::Remote(AxlArchiveDep {
+            urls: vec![url],
+            integrity: Some(integrity),
+            dev: false,
+            name: "dep".to_string(),
+            strip_prefix: "dep-1.0".to_string(),
+            auto_use_tasks: true,
+        }));
+        for store in [store(&dir), offline(store(&dir))] {
+            let roots = store.expand_store(&root, vec![]).await.unwrap();
+            assert_eq!(roots, vec![("dep".to_string(), store.dep_path("dep"))]);
+            let tasks = store.dep_path("dep").join("tasks.axl");
+            assert_eq!(std::fs::read_to_string(tasks).unwrap(), "x = 1\n");
+        }
+    }
+
+    /// A dep without `integrity` fails with the integrity to pin.
+    #[tokio::test]
+    async fn reports_the_integrity_of_an_unpinned_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = tarball("dep", &[("a.axl", "")]);
+        let expected = IntegrityOpts::new()
+            .algorithm(Algorithm::Sha512)
+            .chain(&archive)
+            .result();
+        let url = serve(archive, 1).await;
+
+        let mut root = root_mod(&dir);
+        root.deps.insert(Dep::Remote(AxlArchiveDep {
+            urls: vec![url],
+            integrity: None,
+            dev: false,
+            name: "dep".to_string(),
+            strip_prefix: String::new(),
+            auto_use_tasks: false,
+        }));
+        match store(&dir).expand_store(&root, vec![]).await {
+            Err(StoreError::MissingIntegrity(name, integrity)) => {
+                assert_eq!(name, "dep");
+                assert_eq!(integrity, expected);
+            }
+            other => panic!("expected MissingIntegrity, got {other:?}"),
+        }
     }
 }
