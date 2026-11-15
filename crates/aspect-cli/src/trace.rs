@@ -30,6 +30,7 @@ use opentelemetry_sdk::{
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::{Mutex, OnceLock};
 use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 use tracing_core::Level;
@@ -385,31 +386,24 @@ fn base_resource() -> Resource {
 /// meter provider they share. Where two exporters set a key to different
 /// values, the first registered wins and the key is listed in the returned
 /// conflicts.
-fn metric_resource_attributes(
-    specs: &[OtlpSpec],
-) -> (
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeSet<String>,
-) {
-    let mut merged = std::collections::BTreeMap::new();
-    let mut conflicts = std::collections::BTreeSet::new();
-    for spec in specs {
-        for (key, value) in &spec.resource_attributes {
-            match merged.get(key) {
-                None => {
-                    merged.insert(key.clone(), value.clone());
-                }
-                Some(first) if first != value => {
-                    conflicts.insert(key.clone());
-                }
-                Some(_) => {}
+fn metric_resource_attributes(specs: &[OtlpSpec]) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let mut merged = BTreeMap::new();
+    let mut conflicts = BTreeSet::new();
+    for (key, value) in specs.iter().flat_map(|spec| &spec.resource_attributes) {
+        match merged.entry(key.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(value.clone());
             }
+            Entry::Occupied(first) if first.get() != value => {
+                conflicts.insert(key.clone());
+            }
+            Entry::Occupied(_) => {}
         }
     }
     (merged, conflicts)
 }
 
-fn merged_resource(extra: &std::collections::BTreeMap<String, String>) -> Resource {
+fn merged_resource(extra: &BTreeMap<String, String>) -> Resource {
     if extra.is_empty() {
         return base_resource();
     }
@@ -599,9 +593,7 @@ fn http_config<B: WithExportConfig + WithHttpConfig>(
     })
 }
 
-fn metadata_from(
-    headers: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<MetadataMap> {
+fn metadata_from(headers: &BTreeMap<String, String>) -> anyhow::Result<MetadataMap> {
     let mut m = MetadataMap::new();
     for (k, v) in headers {
         let key: MetadataKey<_> = k
