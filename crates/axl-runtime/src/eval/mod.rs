@@ -6,6 +6,7 @@ mod load;
 mod load_path;
 mod multi_phase;
 mod outcome;
+mod prefetch;
 pub mod task;
 
 pub use api::get_globals;
