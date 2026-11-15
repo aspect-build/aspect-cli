@@ -356,11 +356,9 @@ mod tests {
     use super::*;
     use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
     use opentelemetry::trace::{Tracer as _, TracerProvider as _};
-    use opentelemetry_sdk::logs::SdkLoggerProvider;
-    use opentelemetry_sdk::trace::SdkTracerProvider;
-
     use opentelemetry_sdk::error::OTelSdkError;
-    use opentelemetry_sdk::trace::InMemorySpanExporter;
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
 
     type TestBuffer = BufferingSpanExporter<InMemorySpanExporter>;
 
@@ -373,7 +371,7 @@ mod tests {
     ) -> SdkTracerProvider {
         SdkTracerProvider::builder()
             .with_span_processor(CountingSpanProcessor::new(
-                opentelemetry_sdk::trace::SimpleSpanProcessor::new(buffer.clone()),
+                SimpleSpanProcessor::new(buffer.clone()),
                 buffer.tally(),
             ))
             .build()

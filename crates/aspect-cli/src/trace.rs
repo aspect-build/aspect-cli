@@ -15,6 +15,9 @@
 //! or a file path) to the file-sinks layer. Users who want
 //! `ASPECT_DEBUG=1`-style stderr output register a stderr exporter from
 //! .axl config — there's no env-var special-casing in this binary.
+//!
+//! At exit, `OtelGuard` reports any spans that never reached a collector (see
+//! `trace_buffer::SpanLoss`) and the setting that would have kept them.
 
 use axl_runtime::engine::telemetry::{
     ExporterSpec, FileDestination, FileSpec, OtlpProtocol, OtlpSpec,
@@ -28,8 +31,8 @@ use opentelemetry_sdk::{
     logs::{LogExporter as _, SdkLoggerProvider},
     metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Temporality},
     trace::{
-        BatchConfigBuilder, BatchSpanProcessor, OTEL_BSP_MAX_QUEUE_SIZE, RandomIdGenerator,
-        Sampler, SdkTracerProvider,
+        BatchConfigBuilder, BatchSpanProcessor, OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
+        OTEL_BSP_MAX_QUEUE_SIZE, RandomIdGenerator, Sampler, SdkTracerProvider,
     },
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
@@ -440,11 +443,16 @@ pub fn init() -> OtelGuard {
     let span_buffer = BufferingSpanExporter::new(Arc::new(SpanTally::default()));
     let log_buffer = BufferingLogExporter::new();
 
-    let queue_size = span_queue_size(env_var);
+    let queue_size = env_usize(env_var, OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_SIZE);
     let batch = BatchSpanProcessor::builder(span_buffer.clone())
         .with_batch_config(
             BatchConfigBuilder::default()
                 .with_max_queue_size(queue_size)
+                .with_max_export_batch_size(env_usize(
+                    env_var,
+                    OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
+                    SPAN_EXPORT_BATCH_SIZE,
+                ))
                 .build(),
         )
         .build();
@@ -520,15 +528,22 @@ pub fn init() -> OtelGuard {
 }
 
 /// Spans the batch processor queues for export, unless
-/// `OTEL_BSP_MAX_QUEUE_SIZE` sets it. A span that ends while the queue is full
-/// is dropped, and the SDK's 2048 fills within seconds once a build exports a
-/// span per spawn.
-const SPAN_QUEUE_SIZE: usize = 65_536;
+/// `OTEL_BSP_MAX_QUEUE_SIZE` sets it; a span that ends while the queue is full
+/// is dropped. The SDK's 2048 overflows in a burst of spawn spans. The queue
+/// is allocated in full at start-up, about 350 bytes a span, so it is not
+/// sized for the largest build: one that outruns it is reported at exit.
+const SPAN_QUEUE_SIZE: usize = 8_192;
 
-fn span_queue_size(env: impl Fn(&str) -> Option<String>) -> usize {
-    env(OTEL_BSP_MAX_QUEUE_SIZE)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(SPAN_QUEUE_SIZE)
+/// Spans sent per export, unless `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` sets it.
+/// Exports run one at a time, so the batch size is what bounds throughput to
+/// a distant collector; the SDK's 512 is a quarter of this.
+const SPAN_EXPORT_BATCH_SIZE: usize = 2_048;
+
+const _: () = assert!(SPAN_EXPORT_BATCH_SIZE <= SPAN_QUEUE_SIZE);
+
+/// `name` parsed as a count, or `default` when it is unset or not a number.
+fn env_usize(env: impl Fn(&str) -> Option<String>, name: &str, default: usize) -> usize {
+    env(name).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 /// One line per way spans were lost, saying which setting keeps them.
@@ -977,14 +992,12 @@ mod tests {
     }
 
     #[test]
-    fn span_queue_size_defaults_unless_env_set() {
-        assert_eq!(span_queue_size(|_| None), SPAN_QUEUE_SIZE);
+    fn span_batch_settings_default_unless_env_sets_a_number() {
+        let q = OTEL_BSP_MAX_QUEUE_SIZE;
+        assert_eq!(env_usize(|_| None, q, SPAN_QUEUE_SIZE), SPAN_QUEUE_SIZE);
+        assert_eq!(env_usize(env_with(q, "100"), q, SPAN_QUEUE_SIZE), 100);
         assert_eq!(
-            span_queue_size(env_with(OTEL_BSP_MAX_QUEUE_SIZE, "100")),
-            100
-        );
-        assert_eq!(
-            span_queue_size(env_with(OTEL_BSP_MAX_QUEUE_SIZE, "lots")),
+            env_usize(env_with(q, "lots"), q, SPAN_QUEUE_SIZE),
             SPAN_QUEUE_SIZE
         );
     }
