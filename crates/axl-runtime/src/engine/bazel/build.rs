@@ -298,7 +298,6 @@ impl BuildEventSink {
         outcome.error = None;
         outcome.times_bound += 1;
         drop(outcome);
-        bazel::bes::sink::set_warn(crate::diag::warn);
         let join = grpc::Grpc::spawn(
             rt.0.clone(),
             stream.subscribe(),
@@ -1064,6 +1063,9 @@ impl Build {
         };
         let build_event_stream = match bes_channel {
             Some(channel) => {
+                // BES sinks never fail the build; their warnings are how the
+                // user learns of a lost copy or upload.
+                bazel::bes::sink::set_warn(crate::diag::warn);
                 let gate = pids.gate(channel.path());
                 Some(BuildEventStream::spawn(channel, gate, file_sinks)?)
             }
@@ -3088,6 +3090,46 @@ Test = task(implementation = _impl)
         .expect("run_task");
 
         assert_eq!(exit, Some(0));
+    }
+
+    /// A file sink at a path that cannot be opened reports its own failure;
+    /// the build, its iterators and the other sinks finish as usual.
+    #[test]
+    fn a_file_sink_that_cannot_open_fails_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.bep");
+        let bad = dir.path().join("missing-dir").join("bad.bep");
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    good = bazel.build_events.file(path = {good:?})
+    bad = bazel.build_events.file(path = {bad:?})
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter, bad, good],
+        stderr = None,
+    )
+    seen = len([e for e in iter])
+    if not build.wait().success: return 1
+    if seen != 2: return 2
+    good.wait()
+    bad.wait()
+    if good.failed: return 3
+    if not bad.failed: return 4
+    if "cannot open" not in bad.error: return 5
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            good = good.to_str().unwrap(),
+            bad = bad.to_str().unwrap(),
+        ))
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+        assert!(std::fs::metadata(&good).unwrap().len() > 0);
     }
 
     /// `fully_async` lets the Bazel client exit while the server still writes

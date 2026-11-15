@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 use thiserror::Error;
 
 use super::BuildEventEnvelope;
-use super::binary_file::{End, Frame, Reader};
+use super::binary_file::{End, Reader};
 use super::redact::redact_event;
 use crate::fanout::{Broadcaster, Subscriber, SubscriberFilter};
 use crate::stream::Gate;
@@ -51,25 +51,86 @@ impl FileSignal {
     }
 }
 
-struct MultiWriter<R: Write> {
-    writers: Vec<R>,
+/// The file sinks a stream mirrors its raw bytes to.
+///
+/// A sink that fails to open, write or flush is dropped with a warning and the
+/// failure signalled to whoever waits on it, and the others go on: one bad path
+/// costs that copy, not the stream.
+struct Mirrors {
+    sinks: Vec<Mirror>,
 }
 
-impl<R> io::Write for MultiWriter<R>
-where
-    R: io::Write,
-{
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        for w in &mut self.writers {
-            w.write_all(buf)?;
-        }
-        Ok(buf.len())
+struct Mirror {
+    path: String,
+    signal: Arc<FileSignal>,
+    /// `None` before the first open, once failed, and once finished.
+    out: Option<BufWriter<File>>,
+}
+
+impl Mirror {
+    /// Drop this sink: warn, and signal `why` to whoever waits on it.
+    fn fail(&mut self, why: String) {
+        self.out = None;
+        super::sink::warn(&format!("BES file sink {}: {why}", self.path));
+        self.signal.complete(Err(why));
     }
-    fn flush(&mut self) -> io::Result<()> {
-        for w in &mut self.writers {
-            w.flush()?;
+
+    /// Only [`fail`](Self::fail) completes the signal before the stream ends.
+    fn failed(&self) -> bool {
+        self.signal.is_complete()
+    }
+}
+
+impl Mirrors {
+    fn open(sinks: Vec<(String, Arc<FileSignal>)>) -> Self {
+        let mut mirrors = Self {
+            sinks: sinks
+                .into_iter()
+                .map(|(path, signal)| Mirror {
+                    path,
+                    signal,
+                    out: None,
+                })
+                .collect(),
+        };
+        mirrors.restart();
+        mirrors
+    }
+
+    /// Start every sink over, empty: at the start, and at each attempt of a
+    /// build bazel retries.
+    fn restart(&mut self) {
+        for m in self.sinks.iter_mut().filter(|m| !m.failed()) {
+            // Flushed before the drop, so the drop writes nothing after
+            // `File::create` has truncated the file.
+            if let Some(Err(e)) = m.out.as_mut().map(|out| out.flush()) {
+                m.fail(format!("flush failed: {e}"));
+                continue;
+            }
+            m.out = None;
+            match File::create(&m.path) {
+                Ok(f) => m.out = Some(BufWriter::new(f)),
+                Err(e) => m.fail(format!("cannot open: {e}")),
+            }
         }
-        Ok(())
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for m in &mut self.sinks {
+            if let Some(Err(e)) = m.out.as_mut().map(|out| out.write_all(bytes)) {
+                m.fail(format!("write failed: {e}"));
+            }
+        }
+    }
+
+    /// Flush every sink and signal `result` to those still whole.
+    fn finish(&mut self, result: Result<(), String>) {
+        for m in &mut self.sinks {
+            match m.out.take().map(|mut out| out.flush()) {
+                Some(Err(e)) => m.fail(format!("flush failed: {e}")),
+                _ => m.signal.complete(result.clone()),
+            }
+        }
     }
 }
 
@@ -110,7 +171,8 @@ impl BuildEventStream {
     ///
     /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
     /// `signal.complete(result)` fires after flush, unblocking the file
-    /// sink handle's `wait()`.
+    /// sink handle's `wait()`. A sink that cannot be opened or written fails
+    /// its own signal and leaves the stream and the other sinks running.
     pub fn spawn(
         channel: Channel,
         gate: Gate,
@@ -125,132 +187,46 @@ impl BuildEventStream {
         let pipe = channel.follow(gate)?;
         let handle = thread::spawn(move || {
             let broadcaster = thread_broadcaster;
-            let raw_file_sink_paths: Vec<String> =
-                file_sinks.iter().map(|(p, _)| p.clone()).collect();
-            let file_signals: Vec<Arc<FileSignal>> =
-                file_sinks.into_iter().map(|(_, s)| s).collect();
-            let signal_all = |result: Result<(), String>| {
-                for s in &file_signals {
-                    s.complete(result.clone());
-                }
-            };
-
-            let open_file_sinks = |paths: &[String]| -> io::Result<MultiWriter<BufWriter<File>>> {
-                let writers = paths
-                    .iter()
-                    .map(|p| Ok(BufWriter::new(File::create(p)?)))
-                    .collect::<io::Result<Vec<_>>>()?;
-                Ok(MultiWriter { writers })
-            };
-
-            // End the stream: cut subscribers loose, flush and signal the
-            // file sinks. Says nothing about whether the build succeeded —
-            // that is the caller's to read off bazel's exit code.
-            let finish = |raw_out: &mut MultiWriter<BufWriter<File>>| {
-                broadcaster.close();
-                match raw_out.flush() {
-                    Ok(()) => {
-                        signal_all(Ok(()));
-                        Ok(())
-                    }
-                    Err(e) => {
-                        signal_all(Err(format!("flush failed: {e}")));
-                        Err(BuildEventStreamError::IO(e))
-                    }
-                }
-            };
-
-            let mut raw_out = match open_file_sinks(&raw_file_sink_paths) {
-                Ok(w) => w,
-                Err(e) => {
-                    signal_all(Err(format!("failed to open file sink(s): {e}")));
-                    return Err(BuildEventStreamError::IO(e));
-                }
-            };
-            // Scratch buffer for re-encoding redacted events. Reused across
-            // iterations to avoid per-event allocation. Only populated on the
-            // rare modified-event path (the common case writes the original
-            // bytes straight through).
+            let mut mirrors = Mirrors::open(file_sinks);
+            // Reused for the rare event redaction changes; the common case
+            // mirrors the original bytes.
             let mut reencode_buf: Vec<u8> = Vec::with_capacity(1024);
-
-            // One event, from the wire to what subscribers and file sinks get.
-            // Returns the envelope and whether this was the `BuildFinished`
-            // that ends an attempt bazel is about to retry.
-            let mut process =
-                |frame: Frame,
-                 raw_out: &mut MultiWriter<BufWriter<File>>|
-                 -> Result<(Arc<BuildEventEnvelope>, bool), BuildEventStreamError> {
-                    let retry = frame.is_retry_marker();
-                    let payload = frame.payload_bytes();
-                    let mut event = frame.event;
-                    // Redact secrets (headers, env passthrough, URL creds) BEFORE
-                    // anything downstream sees the event. Raw file sinks, gRPC
-                    // forwarders, and AXL iterators all read from the post-redact
-                    // stream — secrets never leave this process.
-                    //
-                    // `redact_event` only mutates a small set of payload kinds
-                    // (StructuredCommandLine, UnstructuredCommandLine, BuildMetadata,
-                    // etc.); for the common case it returns false and we write the
-                    // original bytes straight through with no re-encode cost.
-                    let modified = redact_event(&mut event);
-                    // These can be extremely slow and expensive calls depending
-                    // on the destination that we are writing to.
-                    // TODO: Ensure we have a dedicated thread where the writing
-                    // happens to avoid stalling.
-                    let encoded = if modified {
-                        reencode_buf.clear();
-                        event.encode_length_delimited(&mut reencode_buf)?;
-                        raw_out.write_all(reencode_buf.as_slice())?;
-                        Bytes::from(event.encode_to_vec())
-                    } else {
-                        raw_out.write_all(&frame.raw)?;
-                        payload
-                    };
-                    Ok((Arc::new(BuildEventEnvelope { event, encoded }), retry))
-                };
-
             let mut reader = Reader::new(pipe);
 
             for frame in &mut reader {
-                let processed = frame
-                    .map_err(BuildEventStreamError::IO)
-                    .and_then(|frame| process(frame, &mut raw_out));
-                let (envelope, retry) = match processed {
-                    Ok(processed) => processed,
+                let frame = match frame {
+                    Ok(frame) => frame,
                     Err(err) => {
-                        signal_all(Err(format!("BES read error: {err}")));
+                        mirrors.finish(Err(format!("BES read error: {err}")));
                         broadcaster.close();
-                        return Err(err);
+                        return Err(BuildEventStreamError::IO(err));
                     }
                 };
-
-                if retry {
-                    // Replace file sinks with fresh truncated files so
-                    // the retry stream starts clean.
-                    //
-                    // Order matters: flush first to empty the BufWriter's
-                    // internal buffer, then open new sinks (File::create
-                    // truncates the file).  The assignment drops the old
-                    // MultiWriter; since its BufWriters are now empty,
-                    // the drop-flush is a no-op and no stale bytes are
-                    // written after the truncation.
-                    let _ = raw_out.flush();
-                    match open_file_sinks(&raw_file_sink_paths) {
-                        Ok(new_raw_out) => {
-                            raw_out = new_raw_out;
-                        }
-                        Err(e) => {
-                            signal_all(Err(format!(
-                                "failed to reopen file sink(s) for retry: {e}"
-                            )));
-                            broadcaster.close();
-                            return Err(BuildEventStreamError::IO(e));
-                        }
+                let retry = frame.is_retry_marker();
+                let payload = frame.payload_bytes();
+                let mut event = frame.event;
+                // Secrets are redacted before anything downstream (file sinks,
+                // gRPC forwarders, AXL iterators) sees the event.
+                // TODO: write file sinks on a thread of their own, so a slow
+                // destination cannot stall the reader.
+                let encoded = if redact_event(&mut event) {
+                    reencode_buf.clear();
+                    if let Err(err) = event.encode_length_delimited(&mut reencode_buf) {
+                        mirrors.finish(Err(format!("BES encode error: {err}")));
+                        broadcaster.close();
+                        return Err(err.into());
                     }
+                    mirrors.write(&reencode_buf);
+                    Bytes::from(event.encode_to_vec())
+                } else {
+                    mirrors.write(&frame.raw);
+                    payload
+                };
+                // Bazel truncates its own file for the retried attempt.
+                if retry {
+                    mirrors.restart();
                 }
-
-                // Fan-out to all subscribers (non-blocking)
-                broadcaster.send(envelope);
+                broadcaster.send(Arc::new(BuildEventEnvelope { event, encoded }));
             }
 
             // The iterator stops only with an end; recorded before the close
@@ -259,7 +235,11 @@ impl BuildEventStream {
                 .into_end()
                 .unwrap_or_else(|| End::Corrupt("the stream stopped without a reason".into()));
             let _ = thread_end.set(end);
-            finish(&mut raw_out)
+            // Says nothing about whether the build succeeded: that is the
+            // caller's to read off bazel's exit code.
+            broadcaster.close();
+            mirrors.finish(Ok(()));
+            Ok(())
         });
 
         Ok(Self {
@@ -849,6 +829,54 @@ mod tests {
         let _ = std::fs::remove_file(&sink_path);
     }
 
+    /// A sink whose path cannot be opened fails alone: subscribers and the
+    /// other sinks still get the whole stream, and the writer is drained.
+    #[test]
+    fn a_sink_that_cannot_open_costs_only_its_own_copy() {
+        let path = temp_fifo_path();
+        let dir = tempfile::tempdir().unwrap();
+        let good_path = dir.path().join("good.bin");
+        let bad_path = dir.path().join("missing-dir").join("bad.bin");
+        let good = Arc::new(FileSignal::new());
+        let bad = Arc::new(FileSignal::new());
+        let mut holder = spawn_pid_holder();
+        let pid = holder.id();
+
+        let mut stream = spawn_at(
+            path.clone(),
+            pid,
+            pid,
+            vec![
+                (bad_path.to_str().unwrap().to_string(), bad.clone()),
+                (good_path.to_str().unwrap().to_string(), good.clone()),
+            ],
+        )
+        .unwrap();
+        let sub = stream.subscribe();
+        wait_for_fifo(&path);
+
+        let raw_bytes: Vec<u8> = [make_event(false), make_event(true)]
+            .iter()
+            .flat_map(encode_event)
+            .collect();
+        let path_w = path.clone();
+        let raw_clone = raw_bytes.clone();
+        let writer = std::thread::spawn(move || {
+            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+            f.write_all(&raw_clone).unwrap();
+        });
+
+        writer.join().unwrap();
+        stream.join().unwrap();
+        let _ = holder.kill();
+
+        assert_eq!(std::iter::from_fn(|| sub.recv().ok()).count(), 2);
+        assert_eq!(good.wait(), Ok(()));
+        assert_eq!(std::fs::read(&good_path).unwrap(), raw_bytes);
+        let err = bad.wait().unwrap_err();
+        assert!(err.contains("cannot open"), "{err}");
+    }
+
     // -------------------------------------------------------------------------
     // Transient error retry (documents current behavior)
     //
@@ -1063,7 +1091,12 @@ mod tests {
         .concat()
     }
 
-    fn run_retry_sink_test(last_message_on_evicted: bool) -> Vec<u8> {
+    /// Run two attempts through a stream with one good file sink after
+    /// `other_sinks`, and return what the good sink holds.
+    fn run_retry_sink_test(
+        last_message_on_evicted: bool,
+        other_sinks: Vec<(String, Arc<FileSignal>)>,
+    ) -> Vec<u8> {
         let path = temp_fifo_path();
         let sink_path =
             std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
@@ -1074,10 +1107,13 @@ mod tests {
             path.clone(),
             pid,
             pid,
-            vec![(
-                sink_path.to_str().unwrap().to_string(),
-                Arc::new(FileSignal::new()),
-            )],
+            other_sinks
+                .into_iter()
+                .chain([(
+                    sink_path.to_str().unwrap().to_string(),
+                    Arc::new(FileSignal::new()),
+                )])
+                .collect(),
         )
         .unwrap();
         wait_for_fifo(&path);
@@ -1103,14 +1139,30 @@ mod tests {
     /// truncated so they contain only the retry stream's bytes.
     #[test]
     fn test_file_sinks_emptied_before_retry_stream() {
-        let written = run_retry_sink_test(false);
+        let written = run_retry_sink_test(false, vec![]);
         assert_eq!(written, attempt2_raw());
     }
 
     /// Same requirement when Bazel sets last_message=true on the evicted event.
     #[test]
     fn test_file_sinks_emptied_before_retry_stream_last_message() {
-        let written = run_retry_sink_test(true);
+        let written = run_retry_sink_test(true, vec![]);
         assert_eq!(written, attempt2_raw());
+    }
+
+    /// A sink that failed to open stays failed across a retry, and the good
+    /// sink beside it still starts over for the retried attempt.
+    #[test]
+    fn a_failed_sink_stays_failed_across_a_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_path = dir.path().join("missing-dir").join("bad.bin");
+        let bad = Arc::new(FileSignal::new());
+        let written = run_retry_sink_test(
+            false,
+            vec![(bad_path.to_str().unwrap().to_string(), bad.clone())],
+        );
+        assert_eq!(written, attempt2_raw());
+        assert!(bad.wait().unwrap_err().contains("cannot open"));
+        assert!(!bad_path.exists());
     }
 }
