@@ -14,7 +14,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 # The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
-# call, which dogfoods the trace.event/trace.log pipeline against a real backend.
+# call, which dogfoods trace, log and metric export against a real backend.
 # Both are no-ops if a secret isn't configured (unset env var = empty string,
 # config.axl skips registration).
 #
