@@ -109,30 +109,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_value_clears_the_flag_and_is_not_a_request() {
-        let f = flags(&["--execution_log_compact_file="]);
-        assert_eq!(requested_path(&f, "build", None), None);
-    }
-
-    #[test]
-    fn a_relative_path_is_joined_to_the_spawn_directory() {
-        let f = flags(&["--execution_log_compact_file=out/log.zst"]);
-        assert_eq!(
-            requested_path(&f, "build", Some("/ws")),
-            Some(PathBuf::from("/ws/out/log.zst"))
-        );
-        assert_eq!(
-            requested_path(&f, "build", None),
-            Some(PathBuf::from("out/log.zst"))
-        );
-        let abs = flags(&["--execution_log_compact_file=/abs/log.zst"]);
-        assert_eq!(
-            requested_path(&abs, "build", Some("/ws")),
-            Some(PathBuf::from("/abs/log.zst"))
-        );
-    }
-
-    #[test]
     fn a_requested_path_leaves_the_flag_alone_and_tees_every_sink_but_its_own() {
         let p = plan(
             Some(PathBuf::from("/tmp/asked.zst")),

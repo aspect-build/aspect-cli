@@ -1538,6 +1538,44 @@ mod runcommand_tests {
         );
     }
 
+    /// An empty value clears an output flag rather than naming a file.
+    #[test]
+    fn requested_path_ignores_an_empty_value() {
+        let line = args(&["--some_output_file="]);
+        assert_eq!(
+            requested_path(&line, "--some_output_file", "build", None),
+            None
+        );
+        assert_eq!(
+            requested_path(&args(&[]), "--some_output_file", "build", None),
+            None
+        );
+    }
+
+    /// A relative path is joined to the spawn directory, where Bazel resolves it;
+    /// an absolute one, or one with no directory given, is kept as is.
+    #[test]
+    fn requested_path_joins_a_relative_path_to_the_spawn_directory() {
+        let relative = args(&["--some_output_file=out/f"]);
+        assert_eq!(
+            requested_path(&relative, "--some_output_file", "build", Some("/ws")),
+            Some(PathBuf::from("/ws/out/f")),
+        );
+        assert_eq!(
+            requested_path(&relative, "--some_output_file", "build", None),
+            Some(PathBuf::from("out/f")),
+        );
+        assert_eq!(
+            requested_path(
+                &args(&["--some_output_file=/abs/f"]),
+                "--some_output_file",
+                "build",
+                Some("/ws")
+            ),
+            Some(PathBuf::from("/abs/f")),
+        );
+    }
+
     /// An override is scoped to a section, so it answers only for the commands
     /// Bazel would apply it to — `options_for`'s inheritance, read back.
     #[test]

@@ -203,6 +203,37 @@ impl Iterator for Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The caller's BEP file is read from the command line and from a `common`
+    /// rc entry alike, since Bazel honours both.
+    #[test]
+    fn requested_path_reads_the_binary_file_flag() {
+        let line = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            requested_path(
+                &line(&["--build_event_binary_file=/tmp/ide.bep"]),
+                "build",
+                None
+            ),
+            Some(PathBuf::from("/tmp/ide.bep")),
+        );
+        assert_eq!(
+            requested_path(
+                &line(&["--default_override=0:common=--build_event_binary_file=/tmp/rc.bep"]),
+                "test",
+                None,
+            ),
+            Some(PathBuf::from("/tmp/rc.bep")),
+        );
+        assert_eq!(
+            requested_path(
+                &line(&["--build_event_json_file=/tmp/x.json"]),
+                "build",
+                None
+            ),
+            None
+        );
+    }
     use crate::stream::Gate;
     use crate::stream::pipe::Channel;
     use axl_proto::build_event_stream::build_event::Payload;

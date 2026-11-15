@@ -3142,18 +3142,15 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
-    /// A caller's `--build_event_binary_file` is written even though the CLI's
-    /// own FIFO flag, appended last, is the one Bazel writes to.
-    #[test]
-    fn a_requested_bep_file_is_written_while_the_cli_streams() {
-        let dir = tempfile::tempdir().unwrap();
-        let asked = dir.path().join("ide.bep");
+    /// Stream a build that asks for `--build_event_binary_file=<path>` to an
+    /// iterator, asserting the iterator sees every event.
+    fn stream_with_requested_bep_file(path: &std::path::Path) {
         run_bes_task(&format!(
             r#"
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=success", "--build_event_binary_file={asked}"],
+        flags = ["--scenario=success", "--build_event_binary_file={path}"],
         build_events = [iter],
         stderr = None,
     )
@@ -3164,8 +3161,17 @@ def _impl(ctx):
 
 Test = task(implementation = _impl)
 "#,
-            asked = asked.to_str().unwrap(),
+            path = path.to_str().unwrap(),
         ));
+    }
+
+    /// A caller's `--build_event_binary_file` is written even though the CLI's
+    /// own FIFO flag, appended last, is the one Bazel writes to.
+    #[test]
+    fn a_requested_bep_file_is_written_while_the_cli_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("ide.bep");
+        stream_with_requested_bep_file(&asked);
         assert_eq!(bep_file_kinds(&asked), ["started", "finished"]);
     }
 
@@ -3200,24 +3206,7 @@ Test = task(implementation = _impl)
     fn an_unwritable_bep_file_does_not_end_the_stream() {
         let dir = tempfile::tempdir().unwrap();
         let unwritable = dir.path().join("missing-dir").join("ide.bep");
-        run_bes_task(&format!(
-            r#"
-def _impl(ctx):
-    iter = bazel.build_events.iterator()
-    build = ctx.bazel.build(
-        flags = ["--scenario=success", "--build_event_binary_file={unwritable}"],
-        build_events = [iter],
-        stderr = None,
-    )
-    seen = len([e for e in iter])
-    if not build.wait().success: return 1
-    if seen != 2: return 2
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-            unwritable = unwritable.to_str().unwrap(),
-        ));
+        stream_with_requested_bep_file(&unwritable);
         assert!(!unwritable.exists());
     }
 
