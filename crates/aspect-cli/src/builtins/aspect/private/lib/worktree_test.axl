@@ -2854,10 +2854,18 @@ def _test_prune_tells_the_hook_its_threshold_and_asks_once(ctx):
     _eq("told the command's own settings", calls[0][1:], ("prune", 7, True))
 
     registry["slots"]["aaaaaaaaaaaa"]["state"] = LEASED
-    again = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, chosen = first.chosen, hooks = [hook])
-    env.restore()
+    again = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, previous = first, hooks = [hook])
     _eq("not asked again", len(calls), 3)
     _eq("a slot leased meanwhile is out", again.ids, ["cccccccccccc"])
+
+    # Leased and given back while the prompt sat there: no longer the slot the
+    # hook judged, so the built-in rule judges it, and it has just been used.
+    registry["slots"]["aaaaaaaaaaaa"] = _slot(mine, age_days = 0)
+    registry["slots"]["aaaaaaaaaaaa"]["lease_count"] = 1
+    again = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, previous = first, hooks = [hook])
+    env.restore()
+    _eq("a slot used since is judged afresh", again.ids, ["cccccccccccc"])
+    _eq("still not asked again", len(calls), 3)
 
 def _test_add_keeps_the_slot_it_reuses_whatever_the_hook_says(ctx):
     """On `add`, the slots the hook chooses are deferred rather than deleted
@@ -3080,10 +3088,21 @@ def _test_a_broken_prune_hook_falls_back_to_the_built_in(ctx):
         return False
 
     out = testonly_prune_choices(ctx, pool, registry, ids, env.root, testonly_prune_call("release"), [meddles, lambda c, s, p: True])
-    env.restore()
     _eq("only the first hook decides", out.chosen, {"aaaaaaaaaaaa": False, "bbbbbbbbbbbb": False})
     _eq("each call sees the pool as it is", events, ["release", "release"])
     _eq("nothing to say", out.warnings, [])
+
+    frees = []
+
+    def meddles_deep(c, s, p):
+        frees.append(p["slots"]["free"])
+        p["slots"]["free"] = 99
+        p["other_pools"].append({"id": "evil"})
+        return None
+
+    testonly_prune_choices(ctx, pool, registry, ids, env.root, testonly_prune_call("add", 30), [meddles_deep])
+    env.restore()
+    _eq("nor what is nested in it", frees, [2, 2])
 
 def _broken_hook(ctx, slot, want):
     fail("hook exploded")
