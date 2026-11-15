@@ -103,11 +103,14 @@ def _resolve(ctx, command: str, stdout = None) -> _Invocation:
     on the trait (BES backends, the `rc_flags` hooks); the bazel core knows
     nothing about deployments or Aspect auth."""
     trait = ctx.traits[BazelTrait]
+    if stdout == None:
+        stdout = ctx.std.io.stdout
 
     # Base (default) flags, prepended so user --bazel-flag overrides win: the
-    # TTY signal. Feature-injected `trait.base_flags` (e.g. a deployment's
-    # --remote_cache) are prepended by `bazel_rc.setup` itself.
-    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    # TTY signal, read off the stream Bazel's stdout actually lands on.
+    # Feature-injected `trait.base_flags` (e.g. a deployment's --remote_cache)
+    # are prepended by `bazel_rc.setup` itself.
+    base_flags = ["--isatty=" + str(int(stdout.is_tty))]
 
     # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The rc set by
     # use_rc drives the health check (in results.setup) and every spawn below.
@@ -166,7 +169,7 @@ def _resolve(ctx, command: str, stdout = None) -> _Invocation:
         announce_version = announce_version,
         announce_command = announce_command,
         max_attempts = max(1, requested),
-        stdout = stdout if stdout != None else ctx.std.io.stdout,
+        stdout = stdout,
     )
 
 def _do_start(inv: _Invocation) -> None:
