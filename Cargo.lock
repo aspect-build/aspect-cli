@@ -195,7 +195,6 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "serde_json",
- "sha256",
  "signal-hook-registry",
  "starlark",
  "tempfile",

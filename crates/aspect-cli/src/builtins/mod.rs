@@ -11,6 +11,9 @@
 //! (see `bazel/rust/defs.bzl`) and must embed regardless of assertion
 //! flags — the source-tree path only exists on the build machine.
 //!
+//! The extraction directory is named by [`content_hash`] of the embedded
+//! tree, which is taken on every start.
+//!
 //! Extraction is crash-safe: writes go to a temp directory and are
 //! published with an atomic `rename`, gated by a `.complete` marker
 //! written last. See [`extract_aspect_builtins`] for the full protocol.
@@ -42,18 +45,35 @@ pub fn expand_builtins(
     _root_dir: PathBuf,
     broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
-    let mut combined = String::new();
-    let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
-    for entry in ASPECT_DIR.find("**/*").unwrap() {
-        if let DirEntry::File(f) = entry {
-            combined.push_str(f.path().to_str().unwrap());
-            combined.push_str(f.contents_utf8().unwrap_or(""));
-            files.push((f.path().to_path_buf(), f.contents()));
-        }
-    }
-    let content_hash = sha256::digest(combined);
-    let aspect_dir = extract_aspect_builtins(&broot, &content_hash, &files)?;
+    let files: Vec<(PathBuf, &[u8])> = ASPECT_DIR
+        .find("**/*")
+        .unwrap()
+        .filter_map(|entry| match entry {
+            DirEntry::File(f) => Some((f.path().to_path_buf(), f.contents())),
+            DirEntry::Dir(_) => None,
+        })
+        .collect();
+    let aspect_dir = extract_aspect_builtins(&broot, &content_hash(&files), &files)?;
     Ok(vec![("aspect".to_string(), aspect_dir)])
+}
+
+/// A name for the tree `files` that changes whenever a path or its contents
+/// does.
+///
+/// std's SipHash rather than a cryptographic digest: this runs on every
+/// start over a ~5 MB tree, where SHA-256 cost ~10ms. Nothing adversarial
+/// picks the input, and a different rustc hashing the same tree differently
+/// costs one re-extraction. Each field is hashed with its length, so moving
+/// bytes between a path and the contents beside it changes the name.
+#[cfg(any(not(debug_assertions), feature = "bazel", test))]
+fn content_hash(files: &[(PathBuf, &[u8])]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    for (path, contents) in files {
+        path.as_os_str().as_encoded_bytes().hash(&mut hasher);
+        contents.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 /// Marker written into `{content_hash}/` after every file is flushed.
@@ -176,6 +196,28 @@ mod tests {
             ),
             (PathBuf::from("format.axl"), b"format = task()\n"),
         ]
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_follows_the_tree() {
+        let files = sample_files();
+        assert_eq!(content_hash(&files), content_hash(&sample_files()));
+        assert_eq!(content_hash(&files).len(), 16);
+
+        let mut edited = sample_files();
+        edited[2].1 = b"format = task(summary = \"x\")\n";
+        assert_ne!(content_hash(&files), content_hash(&edited));
+
+        let mut renamed = sample_files();
+        renamed[2].0 = PathBuf::from("fmt.axl");
+        assert_ne!(content_hash(&files), content_hash(&renamed));
+    }
+
+    #[test]
+    fn content_hash_separates_a_path_from_its_contents() {
+        let a = [(PathBuf::from("ab"), b"c" as &[u8])];
+        let b = [(PathBuf::from("a"), b"bc" as &[u8])];
+        assert_ne!(content_hash(&a), content_hash(&b));
     }
 
     fn assert_full_tree(aspect_dir: &Path) {

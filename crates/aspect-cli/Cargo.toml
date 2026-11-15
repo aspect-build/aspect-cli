@@ -33,7 +33,6 @@ opentelemetry-appender-tracing = "0.31.0"
 opentelemetry-semantic-conventions = "0.31.0"
 include_dir = { version = "0.7", features = ["glob"] }
 names = { version = "0.14", default-features = false }
-sha256 = "1.6.0"
 uuid = { version = "1", features = ["v4"] }
 starlark = "0.14.2"
 thiserror = "2.0.17"
