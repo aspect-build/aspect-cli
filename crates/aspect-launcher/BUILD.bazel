@@ -17,6 +17,7 @@ rust_binary(
         "@crates//:futures-util",
         "@crates//:miette",
         "@crates//:reqwest",
+        "@crates//:rustix",
         "@crates//:serde",
         "@crates//:sha2",
         "@crates//:starlark_syntax",

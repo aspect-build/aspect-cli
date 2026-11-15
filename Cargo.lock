@@ -223,6 +223,7 @@ dependencies = [
  "futures-util",
  "miette 7.6.0",
  "reqwest",
+ "rustix 1.0.8",
  "serde",
  "serde_json",
  "sha2",
