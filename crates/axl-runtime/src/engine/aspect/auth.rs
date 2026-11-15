@@ -1318,21 +1318,37 @@ fn upsert_deployment(
 }
 
 /// Carry `recorded`'s cache, BES and executor onto `refreshed` when `refreshed`
-/// advertises none of them, along with the hosts their credential covers.
+/// advertises none of them, with every host `recorded`'s credential covered.
 ///
 /// A web UI whose cache and BES are private advertises neither, so a re-configure
 /// through it says nothing about them. Dropping them would break
 /// `--remote --deployment` and the credential helper for a deployment
 /// configured earlier through its remote-cache host.
+///
+/// Only for the same deployment, which is the same login (issuer and
+/// `client_id`, both present): a name reused for another deployment must not
+/// inherit its endpoints, or the auth gate would hand the new login's token to
+/// the old one's cache.
+///
+/// A kept BES keeps the `results_url` recorded with it, since the refreshed one
+/// may be a bare web UI origin that is no viewer prefix for that BES.
 fn keep_build_endpoints(refreshed: &mut Deployment, recorded: &Deployment) {
-    if refreshed.endpoints.serves_build_endpoints() {
+    if refreshed.endpoints.serves_build_endpoints()
+        || !recorded.endpoints.serves_build_endpoints()
+        || refreshed.issuer.is_none()
+        || refreshed.client_id.is_none()
+        || (&refreshed.issuer, &refreshed.client_id) != (&recorded.issuer, &recorded.client_id)
+    {
         return;
     }
     refreshed.endpoints.cache = recorded.endpoints.cache.clone();
     refreshed.endpoints.bes = recorded.endpoints.bes.clone();
     refreshed.endpoints.exec = recorded.endpoints.exec.clone();
-    for host in endpoint_hosts(&recorded.endpoints) {
-        push_host(&mut refreshed.hosts, &host);
+    if !recorded.endpoints.bes.is_empty() {
+        refreshed.endpoints.results_url = recorded.endpoints.results_url.clone();
+    }
+    for host in &recorded.hosts {
+        push_host(&mut refreshed.hosts, host);
     }
 }
 
@@ -6542,39 +6558,26 @@ mod tests {
     }
 
     /// Re-configuring through a web UI that advertises no build endpoint keeps the
-    /// cache and BES recorded through the remote-cache host, while one that does
-    /// advertise them replaces them.
+    /// cache, BES, hosts and viewer URL recorded through the remote-cache host, while
+    /// a refresh that does advertise build endpoints replaces them.
     #[test]
     fn a_web_ui_refresh_keeps_the_recorded_build_endpoints() {
-        let mut through_cache = dep("acme", true);
-        through_cache.endpoints = Endpoints {
-            cache: "cache.acme.example.com".to_string(),
-            bes: "bes.acme.example.com".to_string(),
-            ..Endpoints::default()
-        };
-        through_cache.hosts = vec![
-            "remote.acme.example.com".to_string(),
-            "cache.acme.example.com".to_string(),
-            "bes.acme.example.com".to_string(),
-        ];
-        let mut existing = vec![through_cache];
-
-        let mut through_web_ui = dep("acme", false);
-        through_web_ui.endpoints = Endpoints {
-            results_url: "https://app.acme.example.com".to_string(),
-            ..Endpoints::default()
-        };
-        through_web_ui.hosts = vec!["app.acme.example.com".to_string()];
-        assert!(upsert_deployment(&mut existing, through_web_ui, false).unwrap());
+        let mut existing = vec![through_cache("acme")];
+        assert!(upsert_deployment(&mut existing, through_web_ui("acme"), false).unwrap());
 
         let kept = &existing[0];
         assert_eq!(kept.endpoints.cache, "cache.acme.example.com");
         assert_eq!(kept.endpoints.bes, "bes.acme.example.com");
-        assert_eq!(kept.endpoints.results_url, "https://app.acme.example.com");
+        // The bare origin is no viewer prefix for the kept BES.
+        assert_eq!(
+            kept.endpoints.results_url,
+            "https://app.acme.example.com/i/"
+        );
         assert_eq!(
             kept.hosts,
             vec![
                 "app.acme.example.com",
+                "remote.acme.example.com",
                 "cache.acme.example.com",
                 "bes.acme.example.com"
             ]
@@ -6588,6 +6591,68 @@ mod tests {
         upsert_deployment(&mut existing, moved, false).unwrap();
         assert_eq!(existing[0].endpoints.cache, "cache2.acme.example.com");
         assert_eq!(existing[0].endpoints.bes, "");
+    }
+
+    /// A name reused for another login inherits nothing, so its token is never
+    /// handed to the old deployment's cache. Neither does a refresh with no login
+    /// at all, since nothing then ties it to the recorded deployment.
+    #[test]
+    fn a_web_ui_refresh_on_another_login_keeps_nothing() {
+        let cases: [(&str, fn(&mut Deployment)); 3] = [
+            ("another issuer", |d| {
+                d.issuer = Some("https://other.example.com".to_string())
+            }),
+            ("another client", |d| {
+                d.client_id = Some("other-client".to_string())
+            }),
+            ("no login", |d| {
+                d.issuer = None;
+                d.client_id = None;
+            }),
+        ];
+        for (label, change) in cases {
+            let mut existing = vec![through_cache("acme")];
+            let mut elsewhere = through_web_ui("acme");
+            change(&mut elsewhere);
+            upsert_deployment(&mut existing, elsewhere, false).unwrap();
+
+            let replaced = &existing[0];
+            assert!(!replaced.endpoints.serves_build_endpoints(), "{label}");
+            assert_eq!(
+                replaced.endpoints.results_url, "https://app.acme.example.com",
+                "{label}"
+            );
+            assert_eq!(replaced.hosts, vec!["app.acme.example.com"], "{label}");
+        }
+    }
+
+    /// `name` as configured through its remote-cache host: cache and BES, and the
+    /// viewer URL paired with that BES.
+    fn through_cache(name: &str) -> Deployment {
+        let mut d = dep(name, true);
+        d.endpoints = Endpoints {
+            cache: "cache.acme.example.com".to_string(),
+            bes: "bes.acme.example.com".to_string(),
+            results_url: "https://app.acme.example.com/i/".to_string(),
+            ..Endpoints::default()
+        };
+        d.hosts = vec![
+            "remote.acme.example.com".to_string(),
+            "cache.acme.example.com".to_string(),
+            "bes.acme.example.com".to_string(),
+        ];
+        d
+    }
+
+    /// `name` as discovered through a web UI that advertises only its origin.
+    fn through_web_ui(name: &str) -> Deployment {
+        let mut d = dep(name, false);
+        d.endpoints = Endpoints {
+            results_url: "https://app.acme.example.com".to_string(),
+            ..Endpoints::default()
+        };
+        d.hosts = vec!["app.acme.example.com".to_string()];
+        d
     }
 
     /// The account's own name is writable when the caller asks for it by name —
