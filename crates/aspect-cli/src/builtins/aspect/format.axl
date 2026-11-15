@@ -528,7 +528,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         format_args,
         ctx.args.formatter_args_for_tree_walk,
     )
-    exit = ep.command(args = spawn_args, cwd = spawn_cwd).spawn().wait()
+    exit = ep.command(args = spawn_args, cwd = spawn_cwd) \
+        .stdout(results_json.child_stdout(ctx.std.io, ctx.args)).spawn().wait()
 
     if not exit.success:
         # Formatter itself errored — skip the formatting-required check;

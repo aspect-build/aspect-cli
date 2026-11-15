@@ -635,7 +635,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
             for hook in lint_trait.lint_report:
                 hook(ctx, filepath)
             return {"interesting": True, "linter_exit_code": 0, "failed_tool": ""}
-        ctx.std.io.stdout.write(report)
+        results_json.child_stdout(ctx.std.io, ctx.args).write(report)
         if github_output:
             ctx.std.fs.write(github_output, "lint-report=" + filepath)
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}

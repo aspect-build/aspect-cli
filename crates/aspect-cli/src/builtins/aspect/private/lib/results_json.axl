@@ -45,12 +45,12 @@ def output_arg() -> dict:
             default = _OUTPUT_TEXT,
             values = [_OUTPUT_TEXT, _OUTPUT_JSON],
             description = (
-                "stdout format. `text` (default): stdout stays empty and the " +
-                "human-readable result goes to stderr as usual. `json`: one " +
-                "result document on stdout when the task finishes, carrying the " +
-                "invocation ids, counts, every failure with its local log path, " +
-                "and the reproducer commands. Bazel's own output is unaffected — " +
-                "it stays on stderr either way."
+                "stdout format. `text` (default): human-readable output as " +
+                "usual. `json`: one result document on stdout when the task " +
+                "finishes, carrying the invocation ids, counts, every failure " +
+                "with its local log path, and the reproducer commands; Bazel's " +
+                "and every other child's stdout moves to stderr so stdout " +
+                "carries only the document."
             ),
         ),
     }
