@@ -287,8 +287,9 @@ _RESERVED_BRANCHES = [
     "AUTO_MERGE",
 ]
 
-# How long a `score_slot` hook may take across all the slots of one `add`, and
-# the bound its score is clamped to either way, so it stays a number every JSON
+# How long a hook's calls may take across one command — `score_slot`'s on
+# `add`, `prune_slot`'s on `add`, `prune` and `release` — and the bound a
+# `score_slot` score is clamped to either way, so it stays a number every JSON
 # reader can hold exactly. Defined beside the trait, whose description says them.
 _HOOK_BUDGET_MS = HOOK_BUDGET_MS
 _HOOK_SCORE_LIMIT = HOOK_SCORE_LIMIT
@@ -1273,6 +1274,7 @@ def _already_free_doc(pool: dict, slot_id: str) -> dict:
         "released": "",
         "already_free": True,
         "slot": slot_id,
+        "slot_deleted": False,
         "path": slot_path(pool, slot_id),
         "head": "",
         # Nothing was checked out, so there is no commit for a remote to have:
@@ -2108,7 +2110,7 @@ def _hooked_prunable(
     """The free slots to delete by policy, in registry order: `prunable_slots`
     at `call["max_idle_days"]`, overridden either way by the `prune_slot` hook
     for this clone's own free slots. Another clone's slots, and entries with
-    nothing behind them, keep the built-in rule.
+    no recorded age, keep the built-in rule.
 
     Returns `ids`, the hook's answers as `chosen`, each slot's `lease_count`
     when it was asked as `asked_at`, and the hook's `warnings`. That result,
@@ -2177,8 +2179,9 @@ def _age_out(
 
     This is what actually bounds the pool, and it runs inside `add` because
     nobody runs a cleanup command on a schedule. It never touches a leased slot
-    or one a live server still holds, so the worst case is reclaiming cache that
-    had already stopped paying for itself.
+    or one a live server still holds, so by the idle rule alone the worst case
+    is reclaiming cache that had already stopped paying for itself; a hook may
+    choose warmer slots than that.
 
     A `Worktrees.prune_slot` hook overrides the idle rule (`_hooked_prunable`).
     The slots it chose are appended to `deferred` rather than deleted, when
@@ -5022,7 +5025,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     elif not victims:
         hooked = [sid for sid in policy.chosen if policy.chosen[sid]]
         idle = (" that has been idle for %d days" % ctx.args.max_idle_days) if ctx.args.max_idle_days else ""
-        _info(ctx.std, "nothing to prune: every " + ("slot the prune_slot hook chose" if hooked else "free slot" + idle) +
+        _info(ctx.std, "nothing to prune: every " + ("candidate, the prune_slot hook's included," if hooked else "free slot" + idle) +
                        " was kept, for the reasons above")
     elif declined:
         _info(ctx.std, "left alone; nothing was deleted")
@@ -5716,11 +5719,11 @@ prune = task(
         "target": args.positional(
             minimum = 0,
             maximum = 1,
-            description = "A branch, a slot id or a unique prefix of one, or a slot's directory to delete, as `aspect worktree list` shows them. How long it has been idle is not consulted — naming it is the decision. Leave it out to work by idle time across every free slot. A slot id, prefix or directory names a slot of any clone of any repository, as `aspect worktree list --all` shows it, and the slot is pruned as its own clone would prune it; outside a clone, that is how a slot whose clone is gone is deleted.",
+            description = "A branch, a slot id or a unique prefix of one, or a slot's directory to delete, as `aspect worktree list` shows them. How long it has been idle is not consulted — naming it is the decision. Leave it out to work by idle time across every free slot, or by what a `Worktrees.prune_slot` hook chooses. A slot id, prefix or directory names a slot of any clone of any repository, as `aspect worktree list --all` shows it, and the slot is pruned as its own clone would prune it; outside a clone, that is how a slot whose clone is gone is deleted.",
         ),
         "max_idle_days": args.int(
             default = PRUNE_IDLE_DAYS,
-            description = "Delete free slots untouched for at least this many days, when no slot is named. `0` considers every free slot.",
+            description = "Delete free slots untouched for at least this many days, when no slot is named. `0` considers every free slot. A `Worktrees.prune_slot` hook is told this value, and its True or False overrides it for the slots it answers.",
         ),
         "dry_run": args.boolean(
             default = False,
