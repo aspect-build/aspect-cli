@@ -1,0 +1,11 @@
+"""Test helpers for the summary's Configuration row. Test-only."""
+
+def has_config_entry(text: str, key: str, value: str | None = None) -> bool:
+    """Whether `text` renders a `key` config entry, or exactly `key: value`.
+
+    Matches both the full layout (`**Key:** `v``) and the default preset
+    (`Key `v``).
+    """
+    if value == None:
+        return ("**%s:** `" % key) in text or (" %s `" % key) in text
+    return ("**%s:** `%s`" % (key, value)) in text or (" %s `%s`" % (key, value)) in text

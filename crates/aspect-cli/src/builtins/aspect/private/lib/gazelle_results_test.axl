@@ -35,6 +35,7 @@ Scope row (asserted after the loop): omitted for `DEFAULT_SCOPE`, shown for
 """
 
 load("./check_dispatch.axl", "resolve_templates")
+load("./config_row_testing.axl", "has_config_entry")
 load("./gazelle_results.axl", "DEFAULT_SCOPE", "init_data", "render_check_output")
 load("./template_presets.axl", "template_presets")
 
@@ -319,16 +320,6 @@ def _render_all(ctx, templates = None, progress_phrase = "Gazelle task in progre
     print("All " + str(len(scenarios)) + " gazelle scenarios rendered without error.")
     return 0
 
-def _scope_entry(value):
-    """The Scope config entry in the full layout and the default preset's."""
-    return ["**Scope:** `%s`" % value, "Scope `%s`" % value]
-
-def _has_scope(text, value = None):
-    """Whether `text` renders a Scope entry, or the one for `value` when given."""
-    if value == None:
-        return "**Scope:**" in text or "Scope `" in text
-    return any([e in text for e in _scope_entry(value)])
-
 def _check_scope_row(ctx, templates):
     t = resolve_templates(templates, "gazelle", renderer_kind = "gazelle_results") if templates else None
 
@@ -339,11 +330,11 @@ def _check_scope_row(ctx, templates):
     base = _make_base()
     if base["gazelle"]["scope"] != DEFAULT_SCOPE:
         fail("_make_base must use the default scope")
-    if _has_scope(_text(base)):
+    if has_config_entry(_text(base), "Scope"):
         fail("the default scope rendered a Scope row")
-    if not _has_scope(_text(_make_scope_changed()), "changed — 2 changed dirs"):
+    if not has_config_entry(_text(_make_scope_changed()), "Scope", "changed — 2 changed dirs"):
         fail("scope=changed with dirs did not render its count")
-    if not _has_scope(_text(_make_scope_changed_empty()), "changed"):
+    if not has_config_entry(_text(_make_scope_changed_empty()), "Scope", "changed"):
         fail("scope=changed with no dirs was not rendered")
 
 def _check_failed_actions_invoke_snippet_macro(ctx):
