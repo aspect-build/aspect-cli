@@ -10,15 +10,24 @@
 //! worker has started on it yet — lets the evaluating thread parse it itself
 //! rather than wait behind the queue.
 //!
+//! Every path moves through `pending` → `in_flight` → `ready` → taken, or
+//! straight from `pending` to taken when the evaluating thread parses it
+//! itself. Each move happens under the one lock, so exactly one thread wins a
+//! path: a worker only parses what it popped from `pending`, and `take` only
+//! parses what it removed from `pending`; a path is never queued twice. A
+//! file's loads are queued before its AST is handed out, so by the time
+//! evaluation reaches a load it is already `pending`, `in_flight` or `ready`.
+//! A second `take` of a path returns `Absent`, which only costs a re-parse.
+//!
 //! Evaluation order, scoping and diagnostics stay the loader's own. A file
 //! that fails to read, parse or resolve here is handed back as not
 //! prefetched, so the loader reads and parses it itself and reports the
 //! failure in the usual place. `@std` and `@bazel` files are embedded and
 //! tiny, and are not prefetched.
 //!
-//! Only phase 1 is prefetched. Its files run no side effects at module
-//! level, so a file cannot change between its parse and its evaluation; a
-//! config can write a file a later config loads.
+//! Only phase 1 is prefetched: module-level code has no `ctx`, so nothing in
+//! the phase writes the files it reads, whereas a config can write a file a
+//! later config loads.
 //!
 //! A panic on a worker is caught where panics unwind; an optimized Bazel
 //! build aborts on one, as it would for a panic anywhere else.
@@ -421,6 +430,99 @@ mod tests {
         let (dir, r#mod) = module(&[("a.axl", "a = 1\n")]);
         let roots = vec![(&r#mod, dir.path().join("a.axl"))];
         assert!(with_workers(&[], &api::dialect(), roots, 0, |p| p.is_none()));
+    }
+
+    /// Hammer the hand-off between workers and the evaluating thread: a
+    /// generated load graph with shared children and diamonds, evaluated
+    /// depth-first like the loader, with several worker counts. Every file
+    /// must come back parsed, as itself, exactly once, and every run must
+    /// finish.
+    #[test]
+    fn stress_every_file_is_handed_out_once() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const FILES: usize = 60;
+        // File i loads up to three later files, chosen by a fixed LCG so the
+        // graph is the same every run.
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 33) as usize
+        };
+        let loads: Vec<Vec<usize>> = (0..FILES)
+            .map(|i| {
+                let mut out: Vec<usize> = (0..next() % 4)
+                    .filter(|_| i + 1 < FILES)
+                    .map(|_| i + 1 + next() % (FILES - i - 1))
+                    .collect();
+                out.sort();
+                out.dedup();
+                out
+            })
+            .collect();
+        let sources: Vec<(String, String)> = loads
+            .iter()
+            .enumerate()
+            .map(|(i, deps)| {
+                let mut src: String = deps
+                    .iter()
+                    .map(|j| format!("load(\"./f{j}.axl\", \"v{j}\")\n"))
+                    .collect();
+                src.push_str(&format!("v{i} = {i}\n"));
+                (format!("f{i}.axl"), src)
+            })
+            .collect();
+        let files: Vec<(&str, &str)> = sources
+            .iter()
+            .map(|(n, s)| (n.as_str(), s.as_str()))
+            .collect();
+        let (dir, r#mod) = module(&files);
+        let path = |i: usize| dir.path().join(format!("f{i}.axl"));
+        let roots: Vec<usize> = (0..FILES).filter(|i| i % 7 == 0).collect();
+
+        for workers in [1, 2, 3, 8] {
+            for _ in 0..25 {
+                let (done, finished) = mpsc::channel();
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let roots_with_scope = roots.iter().map(|&i| (&r#mod, path(i))).collect();
+                        with_workers(&[], &api::dialect(), roots_with_scope, workers, |p| {
+                            let p = p.expect("prefetch runs");
+                            let mut taken = HashSet::new();
+                            let mut stack: Vec<usize> = roots.iter().rev().copied().collect();
+                            while let Some(i) = stack.pop() {
+                                if !taken.insert(i) {
+                                    continue;
+                                }
+                                let Taken::Parsed(ast) = p.take(&r#mod, &path(i)) else {
+                                    panic!("f{i}.axl was not handed out parsed");
+                                };
+                                let got: Vec<String> = ast
+                                    .loads()
+                                    .iter()
+                                    .map(|l| l.module_id.to_string())
+                                    .collect();
+                                let want: Vec<String> =
+                                    loads[i].iter().map(|j| format!("./f{j}.axl")).collect();
+                                assert_eq!(got, want, "f{i}.axl came back as another file");
+                                stack.extend(loads[i].iter().rev());
+                            }
+                            for &i in &taken {
+                                assert!(
+                                    matches!(p.take(&r#mod, &path(i)), Taken::Absent),
+                                    "f{i}.axl was handed out twice"
+                                );
+                            }
+                        });
+                        done.send(()).unwrap();
+                    });
+                    finished
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("a prefetch run hung");
+                });
+            }
+        }
     }
 
     /// A panic in the body propagates rather than hanging on the workers.
