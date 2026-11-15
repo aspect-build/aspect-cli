@@ -306,8 +306,12 @@ fn runnable_methods(registry: &mut MethodsBuilder) {
     /// from, even when the build ran elsewhere through `directory`; pass
     /// them in `env` to say otherwise. `cwd` defaults to `workspace_dir`,
     /// the directory `bazel run` uses, else the directory the task was
-    /// invoked from. The command spawns in its own process group, so
-    /// cancelling its token stops everything it started.
+    /// invoked from. The command leads its own process group, so cancelling
+    /// its token stops everything it started: in a session of its own with
+    /// no terminal or on CI, so a terminal it inherits stays usable. The
+    /// exception is a task that is the foreground job of a terminal off CI:
+    /// there the command shares the task's group so it can read the
+    /// terminal, and Ctrl+C reaches it directly.
     ///
     /// ```python
     /// child = r.command(args = ["--port", "8080"]).stdout("piped").spawn()
@@ -335,7 +339,7 @@ fn runnable_methods(registry: &mut MethodsBuilder) {
             &env,
             cwd.into_option().as_deref().map(Path::new),
         );
-        Ok(Command::from_std(cmd, true))
+        Ok(Command::runnable(cmd))
     }
 }
 
@@ -367,11 +371,15 @@ fn spawn_child(runnable: &bazel::command::run::Runnable, dirs: &Dirs, spec: Spaw
     } = spec;
     let mut cmd = runnable.command(dirs, &args, &env, cwd.as_deref());
     cmd.stdin(stdin).stdout(stdout).stderr(stderr);
-    let result = children::spawn(&mut cmd, &signals, &token, Some(0), children::Kind::Process)
-        .map(|(child, bound)| Child::from_parts(child, bound))
-        .map_err(|e| {
-            Failure::Internal(format!("failed to spawn {}: {e}", runnable.path.display()))
-        });
+    let result = children::spawn(
+        &mut cmd,
+        &signals,
+        &token,
+        children::runnable_group(),
+        children::Kind::Process,
+    )
+    .map(|(child, bound)| Child::from_parts(child, bound))
+    .map_err(|e| Failure::Internal(format!("failed to spawn {}: {e}", runnable.path.display())));
     let _ = tx.send(result);
 }
 
@@ -840,9 +848,9 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     /// `bazel run` uses. `directory` moves only the build:
     /// `BUILD_WORKING_DIRECTORY` and `ASPECT_WORKING_DIRECTORY` stay the
     /// directory the task was invoked from, so a tool built from the
-    /// workspace root still acts where the user ran it. The process is its own process group bound to
-    /// `cancellation`: cancelling the token stops it and everything it
-    /// started.
+    /// workspace root still acts where the user ran it. The process is bound
+    /// to `cancellation` and placed as `Runnable.command()` describes:
+    /// cancelling the token stops it and everything it started.
     ///
     /// Returns a `Run`. `run.wait()` blocks through the build and the
     /// process and returns the process's exit status; `run.child` is the

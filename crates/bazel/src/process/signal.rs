@@ -3,7 +3,8 @@
 //! stop sequences read. Unix sends signals; Windows sends a console break to
 //! the child's own console group (children are spawned with
 //! `CREATE_NEW_PROCESS_GROUP`, see [`creation_flags`]) and terminates
-//! processes through a handle.
+//! processes through a handle. Spawn-time helpers sit beside them: the
+//! creation flags every child gets, and whether we hold the terminal.
 
 use std::process::Command;
 
@@ -34,6 +35,36 @@ pub fn creation_flags(cmd: &mut Command) {
 
 #[cfg(not(windows))]
 pub fn creation_flags(_cmd: &mut Command) {}
+
+/// This process's place on its controlling terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terminal {
+    /// No controlling terminal (and always, on Windows).
+    None,
+    /// The foreground job: terminal reads and Ctrl+C go to our group.
+    Foreground,
+    /// A background job of the terminal.
+    Background,
+}
+
+#[cfg(unix)]
+pub fn terminal() -> Terminal {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+    let Ok(tty) = std::fs::File::open("/dev/tty") else {
+        return Terminal::None;
+    };
+    if unsafe { libc::tcgetpgrp(tty.as_raw_fd()) == libc::getpgrp() } {
+        Terminal::Foreground
+    } else {
+        Terminal::Background
+    }
+}
+
+#[cfg(not(unix))]
+pub fn terminal() -> Terminal {
+    Terminal::None
+}
 
 #[cfg(unix)]
 mod imp {

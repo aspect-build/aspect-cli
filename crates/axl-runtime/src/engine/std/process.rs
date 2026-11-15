@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::process;
 use std::process::Stdio;
 use std::time::Duration;
@@ -67,6 +67,7 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
         Ok(Command {
             inner: RefCell::new(process::Command::new(program.as_str())),
             process_group: Cell::new(None),
+            runnable: None,
         })
     }
 
@@ -140,18 +141,33 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
 pub struct Command {
     #[allocative(skip)]
     inner: RefCell<process::Command>,
+    /// The group AXL set with `process_group`, if any.
     #[allocative(skip)]
     process_group: Cell<Option<i32>>,
+    /// Set when the runtime assembled this command to run a target: with no
+    /// group set, it spawns into [`children::runnable_group`], decided once.
+    #[allocative(skip)]
+    runnable: Option<OnceCell<children::Group>>,
 }
 
 impl Command {
-    /// Wrap a command the runtime assembled. With `own_group` the child is
-    /// spawned as the leader of a new process group, so stopping it stops
-    /// everything it started.
-    pub(crate) fn from_std(inner: process::Command, own_group: bool) -> Self {
+    /// Wrap the command the runtime assembled to run a target.
+    pub(crate) fn runnable(inner: process::Command) -> Self {
         Self {
             inner: RefCell::new(inner),
-            process_group: Cell::new(own_group.then_some(0)),
+            process_group: Cell::new(None),
+            runnable: Some(OnceCell::new()),
+        }
+    }
+
+    /// Where to spawn. A runnable's place is decided at its first spawn, not
+    /// when it is built, and then kept: what a spawn sets on `inner` cannot
+    /// be unset, so a later spawn could not choose differently.
+    fn group(&self) -> children::Group {
+        match (self.process_group.get(), &self.runnable) {
+            (Some(group), _) => children::Group::Process(group),
+            (None, Some(decided)) => *decided.get_or_init(children::runnable_group),
+            (None, None) => children::Group::Ours,
         }
     }
 
@@ -176,13 +192,14 @@ impl Command {
             Some(token) => token.inner().clone(),
             None => signals.default_binding(),
         };
+        let group = self.group();
         // The spawn's borrow of `inner` ends with this statement, before
         // `describe` borrows it again for the error.
         let spawned = children::spawn(
             &mut self.inner.borrow_mut(),
             signals,
             &parent,
-            self.process_group.get(),
+            group,
             children::Kind::Process,
         );
         let (child, bound) =
@@ -296,8 +313,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// On Unix, `0` starts the command as the leader of a new process group.
     /// Cancelling a grouped child's token, or calling [`Child.kill`],
-    /// reaches every process in the group, not just the child. This setting
-    /// has no effect on Windows.
+    /// reaches every process in the group, not just the child. A child in a
+    /// group of its own is not the terminal's foreground job: reading or
+    /// configuring the terminal stops it. This setting has no effect on
+    /// Windows.
     fn process_group<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] group: i32,
@@ -783,6 +802,7 @@ mod tests {
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
+            runnable: None,
         };
         cmd.inner.borrow_mut().args([
             "--aws-sigv4",
@@ -809,6 +829,7 @@ mod tests {
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
+            runnable: None,
         };
         cmd.inner
             .borrow_mut()
@@ -822,50 +843,181 @@ mod tests {
         assert!(!err_msg.contains("fake-secret-key"));
     }
 
-    /// `Command::from_std(_, true)` is how `Runnable.command()` hands AXL a
-    /// command. Cancelling it must reach what the child started, not only
-    /// the child.
+    /// The session [`passes_in_session`] runs a test body in.
     #[cfg(unix)]
-    #[test]
-    fn a_runtime_assembled_command_is_stopped_with_its_descendants() {
-        use bazel::process::signal::{Target, is_running};
+    #[derive(Clone, Copy, PartialEq)]
+    enum Session {
+        /// No controlling terminal.
+        NoTerminal,
+        /// A fresh pty the body is the foreground job of, off CI.
+        Terminal,
+        /// The same pty, on a CI host.
+        CiTerminal,
+    }
+
+    #[cfg(unix)]
+    const IN_SESSION: &str = "AXL_PROCESS_TEST_IN_SESSION";
+
+    /// Runs the test `name` (in this module) again in a child of the test
+    /// binary, in `session`, and reports whether it passed. The CI markers
+    /// are the session's, not the caller's. The child sees [`IN_SESSION`] set
+    /// and runs the body instead of recursing.
+    #[cfg(unix)]
+    fn passes_in_session(name: &str, session: Session) -> bool {
+        use nix::libc;
+        use std::ffi::CStr;
+        use std::os::unix::process::CommandExt;
+
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut cmd = process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([&format!("{module}::{name}"), "--exact", "--test-threads=1"])
+            .env(IN_SESSION, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for marker in crate::ci::CI_MARKERS {
+            cmd.env_remove(marker);
+        }
+        if session == Session::CiTerminal {
+            cmd.env("BUILDKITE", "true");
+        }
+        // `ptsname` returns a static buffer, and these tests run in parallel.
+        static PTY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let master = (session != Session::NoTerminal).then(|| unsafe {
+            let _pty = PTY.lock().unwrap();
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0, "posix_openpt");
+            assert_eq!(libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+            assert_eq!(libc::grantpt(master), 0);
+            assert_eq!(libc::unlockpt(master), 0);
+            let slave = CStr::from_ptr(libc::ptsname(master)).to_owned();
+            (master, slave)
+        });
+        let slave = master.as_ref().map(|(_, slave)| slave.clone());
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(slave) = &slave {
+                    let fd = libc::open(slave.as_ptr(), libc::O_RDWR);
+                    if fd < 0 || libc::ioctl(fd, libc::TIOCSCTTY as _, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::dup2(fd, 0);
+                    if fd != 0 {
+                        libc::close(fd);
+                    }
+                }
+                Ok(())
+            });
+        }
+        // A session leader's exit waits for its terminal's output to drain,
+        // so something must read the pty.
+        if let Some((master, _)) = &master {
+            use std::io::Read;
+            use std::os::fd::FromRawFd;
+            let mut reader = unsafe {
+                std::fs::File::from_raw_fd(libc::fcntl(*master, libc::F_DUPFD_CLOEXEC, 0))
+            };
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = reader.read_to_end(&mut sink);
+            });
+        }
+        let output = cmd.output().unwrap();
+        if let Some((master, _)) = master {
+            unsafe { libc::close(master) };
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let ran = stdout.contains("1 passed");
+        if !output.status.success() || !ran {
+            eprintln!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        }
+        output.status.success() && ran
+    }
+
+    /// Spawns a runnable and returns whether it leads its own group, killing
+    /// it and its sleeper before returning.
+    #[cfg(unix)]
+    fn a_runnable_leads_its_own_group() -> bool {
         use nix::unistd::{Pid, getpgid};
-        use std::time::Instant;
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("descendant.pid");
+        let (child, descendant) = spawn_runnable_with_sleeper(dir.path());
+        let pid = child.inner.borrow().as_ref().unwrap().id() as i32;
+        let leads = getpgid(Some(Pid::from_raw(pid))).unwrap() == Pid::from_raw(pid);
+        nix::sys::signal::kill(Pid::from_raw(descendant), nix::sys::signal::SIGKILL).ok();
+        child.bound.token().cancel();
+        child
+            .wait_status(Some(Duration::from_secs(5)))
+            .unwrap()
+            .expect("the shell exits");
+        leads
+    }
+
+    /// Spawns `sh` through [`Command::runnable`], as `Runnable.command()`
+    /// does, with a backgrounded `sleep 30`; returns the child and the
+    /// sleeper's pid.
+    #[cfg(unix)]
+    fn spawn_runnable_with_sleeper(dir: &std::path::Path) -> (Child, i32) {
+        use std::time::Instant;
+
+        let pid_file = dir.join("descendant.pid");
         let mut inner = process::Command::new("sh");
         inner
             .arg("-c")
             .arg("sleep 30 & echo $! > \"$PID_FILE\"; wait")
             .env("PID_FILE", &pid_file)
-            .stdin(process::Stdio::null())
-            .stdout(process::Stdio::null())
-            .stderr(process::Stdio::null());
-        let child = Command::from_std(inner, true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = Command::runnable(inner)
             .try_spawn(&Signals::new(), NoneOr::None)
             .unwrap();
-        let pid = child.inner.borrow().as_ref().unwrap().id() as i32;
-        assert_eq!(
-            getpgid(Some(Pid::from_raw(pid))).unwrap(),
-            Pid::from_raw(pid)
-        );
-
         let deadline = Instant::now() + Duration::from_secs(5);
-        let descendant: i32 = loop {
+        loop {
             if let Ok(text) = std::fs::read_to_string(&pid_file)
                 && let Ok(pid) = text.trim().parse()
             {
-                break pid;
+                return (child, pid);
             }
             assert!(
                 Instant::now() < deadline,
                 "the shell never started its sleeper"
             );
             std::thread::sleep(Duration::from_millis(10));
-        };
+        }
+    }
+
+    /// With no terminal to share, a runnable leads its own group, so
+    /// cancelling it reaches what it started, not only the child.
+    #[cfg(unix)]
+    #[test]
+    fn a_runnable_outside_a_terminal_is_stopped_with_its_descendants() {
+        use bazel::process::signal::{Target, Terminal, is_running, terminal};
+        use nix::unistd::{Pid, getpgid};
+        use std::time::Instant;
+
+        if std::env::var_os(IN_SESSION).is_none() {
+            assert!(passes_in_session(
+                "a_runnable_outside_a_terminal_is_stopped_with_its_descendants",
+                Session::NoTerminal
+            ));
+            return;
+        }
+        assert_eq!(terminal(), Terminal::None);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (child, descendant) = spawn_runnable_with_sleeper(dir.path());
+        let pid = child.inner.borrow().as_ref().unwrap().id() as i32;
+        assert_eq!(
+            getpgid(Some(Pid::from_raw(pid))).unwrap(),
+            Pid::from_raw(pid)
+        );
 
         child.bound.token().cancel();
         child
@@ -882,11 +1034,150 @@ mod tests {
         );
     }
 
+    /// A runnable spawns again after its first spawn put it in a session.
+    #[cfg(unix)]
+    #[test]
+    fn a_runnable_spawns_more_than_once() {
+        if std::env::var_os(IN_SESSION).is_none() {
+            assert!(passes_in_session(
+                "a_runnable_spawns_more_than_once",
+                Session::NoTerminal
+            ));
+            return;
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut inner = process::Command::new("true");
+        inner.stdin(Stdio::null());
+        let cmd = Command::runnable(inner);
+        for _ in 0..2 {
+            let child = cmd.try_spawn(&Signals::new(), NoneOr::None).unwrap();
+            let status = child.wait_status(Some(Duration::from_secs(5))).unwrap();
+            assert!(status.expect("`true` exits").success());
+        }
+    }
+
+    /// As a background job of the terminal, a runnable leads a group in our
+    /// session, so the shell's job control applies to it as it does to us.
+    #[cfg(unix)]
+    #[test]
+    fn a_runnable_in_a_background_job_leads_a_group_in_our_session() {
+        use bazel::process::signal::{Terminal, terminal};
+        use nix::libc;
+        use nix::unistd::{Pid, getpgid, getsid};
+        use std::os::unix::process::CommandExt;
+
+        if std::env::var_os(IN_SESSION).is_none() {
+            assert!(passes_in_session(
+                "a_runnable_in_a_background_job_leads_a_group_in_our_session",
+                Session::Terminal
+            ));
+            return;
+        }
+        // Hand the terminal to another group, as a shell does on `bg`.
+        struct Holder(process::Child);
+        impl Drop for Holder {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let holder = Holder(
+            process::Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            assert_eq!(libc::tcsetpgrp(0, holder.0.id() as i32), 0);
+        }
+        assert_eq!(terminal(), Terminal::Background);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (child, descendant) = spawn_runnable_with_sleeper(dir.path());
+        let pid = Pid::from_raw(child.inner.borrow().as_ref().unwrap().id() as i32);
+        assert_eq!(getpgid(Some(pid)).unwrap(), pid);
+        assert_eq!(getsid(Some(pid)).unwrap(), getsid(None).unwrap());
+
+        nix::sys::signal::kill(Pid::from_raw(descendant), nix::sys::signal::SIGKILL).ok();
+        child.bound.token().cancel();
+        child
+            .wait_status(Some(Duration::from_secs(5)))
+            .unwrap()
+            .expect("the shell exits");
+    }
+
+    /// In the terminal's foreground, a runnable stays in our group: a
+    /// background group is stopped the moment it reads the terminal.
+    #[cfg(unix)]
+    #[test]
+    fn a_runnable_in_the_terminal_foreground_shares_it() {
+        if std::env::var_os(IN_SESSION).is_none() {
+            assert!(passes_in_session(
+                "a_runnable_in_the_terminal_foreground_shares_it",
+                Session::Terminal
+            ));
+            return;
+        }
+        assert_eq!(
+            bazel::process::signal::terminal(),
+            bazel::process::signal::Terminal::Foreground
+        );
+        assert!(!a_runnable_leads_its_own_group());
+    }
+
+    /// A CI job's pty has nobody at it, so the runnable leads its own group
+    /// and a stop reaches everything it started. It can still configure the
+    /// terminal it inherits, even through a shell that resets SIGTTOU.
+    #[cfg(unix)]
+    #[test]
+    fn a_runnable_in_a_ci_terminal_leads_its_own_group() {
+        if std::env::var_os(IN_SESSION).is_none() {
+            assert!(passes_in_session(
+                "a_runnable_in_a_ci_terminal_leads_its_own_group",
+                Session::CiTerminal
+            ));
+            return;
+        }
+        assert_eq!(
+            bazel::process::signal::terminal(),
+            bazel::process::signal::Terminal::Foreground
+        );
+        assert!(a_runnable_leads_its_own_group());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        // Inherits the session's pty, not `/dev/tty`: that one forwards to the
+        // caller's controlling terminal, and a new session has none.
+        let mut inner = process::Command::new("sh");
+        inner.arg("-c").arg("stty -echo && stty echo");
+        let child = Command::runnable(inner)
+            .try_spawn(&Signals::new(), NoneOr::None)
+            .unwrap();
+        let status = child.wait_status(Some(Duration::from_secs(5))).unwrap();
+        if status.is_none() {
+            child.bound.token().cancel();
+            let _ = child.wait_status(Some(Duration::from_secs(10)));
+        }
+        assert!(
+            status.expect("the terminal stopped the runnable").success(),
+            "stty failed on the inherited terminal"
+        );
+    }
+
     #[test]
     fn describe_excludes_args_and_env_vars() {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
             process_group: Cell::new(None),
+            runnable: None,
         };
         cmd.inner
             .borrow_mut()

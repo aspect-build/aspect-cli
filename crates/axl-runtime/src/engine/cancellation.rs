@@ -97,9 +97,9 @@ pub struct Signals {
     force: CancellationToken,
     kind: OnceLock<Kind>,
     count: AtomicU32,
-    /// A signal reached our whole process group (it came from the terminal),
-    /// so children in that group already have it.
-    group_signalled: AtomicBool,
+    /// How many signals reached our whole process group (they came from the
+    /// terminal), so that children in it at the time already had them.
+    terminal_signals: AtomicU32,
     /// Set once the task body has ended and the post-task hooks and defers
     /// are running: blocking builtins block normally again so cleanup can
     /// wait on things.
@@ -124,7 +124,7 @@ impl Signals {
             force: CancellationToken::new(),
             kind: OnceLock::new(),
             count: AtomicU32::new(0),
-            group_signalled: AtomicBool::new(false),
+            terminal_signals: AtomicU32::new(0),
             unwinding: AtomicBool::new(false),
             stops: Mutex::new(Vec::new()),
         })
@@ -159,7 +159,7 @@ impl Signals {
     pub fn record(&self, kind: Kind, origin: Origin) -> u32 {
         let _ = self.kind.set(kind);
         if origin == Origin::Terminal {
-            self.group_signalled.store(true, Ordering::SeqCst);
+            self.terminal_signals.fetch_add(1, Ordering::SeqCst);
         }
         let count = self.count.fetch_add(1, Ordering::SeqCst) + 1;
         self.root.cancel();
@@ -184,9 +184,10 @@ impl Signals {
         self.kind.get().copied()
     }
 
-    /// Whether a signal already reached every child in our process group.
-    pub fn group_signalled(&self) -> bool {
-        self.group_signalled.load(Ordering::SeqCst)
+    /// How many signals the terminal has delivered to our whole process
+    /// group, and so to every child in it at the time.
+    pub fn terminal_signals(&self) -> u32 {
+        self.terminal_signals.load(Ordering::SeqCst)
     }
 
     /// The task body has ended; blocking builtins block normally from here.
