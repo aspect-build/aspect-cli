@@ -566,7 +566,8 @@ fn span_loss_report(loss: SpanLoss, queue_size: usize) -> Vec<String> {
     }
     if loss.failed > 0 {
         lines.push(format!(
-            "{} span(s) failed to export; check the collector's endpoint and credentials.",
+            "{} span(s) failed to export, counted once per exporter that failed; check the \
+             collector's endpoint and credentials.",
             loss.failed
         ));
     }
