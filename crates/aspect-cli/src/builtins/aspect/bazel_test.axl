@@ -35,7 +35,7 @@ _MEMBERS = {
         "resolve",
         "resolve_startup",
     ]),
-    "bazel_invocation": (bazel_invocation, ["args", "build", "targets_arg", "test"]),
+    "bazel_invocation": (bazel_invocation, ["args", "build", "target_pattern_file_arg", "targets_arg", "test"]),
     "bazel_rc": (bazel_rc, ["hook_flags", "setup", "sibling", "with_flags"]),
 }
 
