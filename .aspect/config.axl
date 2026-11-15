@@ -46,6 +46,7 @@ load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_default_preset_snapshot_tests", "gazelle_template_snapshot_tests")
 load("@aspect//private/lib/git_checkout_test.axl", "git_checkout_tests")
 load("@aspect//private/lib/git_diff_test.axl", "git_diff_tests")
+load("@aspect//private/lib/git_files_test.axl", "git_files_tests")
 load("@aspect//private/lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//private/lib/github_features_test.axl", "github_features_tests")
 load("@aspect//private/lib/gitlab_detect_test.axl", "gitlab_detect_tests")
@@ -62,6 +63,7 @@ load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
+load("@aspect//private/lib/path_glob_test.axl", "path_glob_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
 load("@aspect//private/lib/random_test.axl", "random_tests")
@@ -112,7 +114,8 @@ buildifier = format.alias(
         # Caveat: `buildifier -r .` auto-discovers only BUILD(.bazel),
         # MODULE.bazel, WORKSPACE(.bazel), *.bzl, *.star — so --scope=all skips
         # *.axl, *.MODULE.bazel, Tiltfile, BUCK from include_patterns below;
-        # --scope=changed passes them positionally so they're covered.
+        # --scope=changed and --scope=git pass them positionally so they're
+        # covered.
         # https://aspect.build/docs/cli/tasks/buildifier#run-it-locally
         "formatter_args_for_tree_walk": ["-r", "."],
         # Symlink to the raw Go binary, doesn't cd to $BUILD_WORKING_DIRECTORY,
@@ -654,6 +657,15 @@ def config(ctx: ConfigContext):
     # git_diff_args under output-rewriting git config.
     # Run with: aspect dev test-git-diff
     ctx.tasks.add(git_diff_tests)
+
+    # `--scope=git` file listing: ls-files/check-attr parsing, argv batching,
+    # and a scratch-repository run.
+    # Run with: aspect dev test-git-files
+    ctx.tasks.add(git_files_tests)
+
+    # Path glob matcher and include/exclude filtering.
+    # Run with: aspect dev test-path-glob
+    ctx.tasks.add(path_glob_tests)
 
     # gazelle_results template snapshots.
     # Run with: aspect dev test-gazelle-template-snapshots

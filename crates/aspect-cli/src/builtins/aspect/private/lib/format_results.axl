@@ -54,7 +54,7 @@ def init_data():
     r["format"] = {
         "affected_files": [],  # file paths that need formatting
         "filtered_count": 0,  # files hidden by --include-pattern / --exclude-pattern
-        "scope": "",  # "changed" | "all"
+        "scope": "",  # "changed" | "git" | "all"
         "formatter_target": "",  # Bazel label of the formatter binary
         # Resolved `--severity` policy: "info" | "warn" | "fail".
         # Stamped by `_impl` after resolving `auto`.
@@ -62,7 +62,7 @@ def init_data():
         "formatter_error": False,  # formatter binary itself crashed
         "formatter_error_code": 0,  # exit code when formatter_error is True
         "no_git": False,  # no initial git commit / not in a git repo
-        "no_files_to_format": False,  # scope=changed but no changed files found
+        "no_files_to_format": False,  # the discovered file list was empty after filtering
         "patch_url": "",  # download URL for the format.patch artifact (optional)
     }
     return r
@@ -188,7 +188,7 @@ DETAILS_TEMPLATE = """{% if is_running %}
 > ⚠️ No initial git commit (or not in a git repository). The formatter ran but change detection was skipped.
 
 {% elif no_files_to_format %}
-> ℹ️ No changed files found for `--scope=changed`. Nothing to format.
+> ℹ️ No {% if scope == "changed" %}changed {% endif %}files found for `--scope={{ scope }}`. Nothing to format.
 
 {% elif is_clean %}
 ### ✅ All {% if checked_count %}{{ checked_count }} {% endif %}files {% if checked_count %}in scope {% endif %}are properly formatted.
@@ -248,20 +248,19 @@ def _config_items(data):
         "Strategy: hold-the-line — filtered to N changed files".
         ("changed files" is OK here because the "filtered to" prefix
         makes it clear these are files in the change set, not files
-        we modified.)
-      - Soft-fail: only shown when True. The default is False and
-        showing `Soft-fail: false` on every clean run would be noise;
-        the flag's whole purpose is to flag CI-bypass mode, so it
-        should stand out when set.
+        we modified.) `scope == "git"` appends " — N files" the same way.
+      - Severity: only shown when it resolved to `warn`, the one policy
+        that exits 0 on drift and so needs to stand out.
     """
     items = []
     scope = data["format"].get("scope", "") or ""
     if scope:
         value = scope
-        if scope == "changed":
-            count = data.get("changed_files_count", 0) or 0
-            if count > 0:
-                value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
+        count = data.get("changed_files_count", 0) or 0
+        if scope == "changed" and count > 0:
+            value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
+        elif scope == "git" and count > 0:
+            value = "%s — %s" % (scope, pluralize(count, "file"))
         items.append({"key": "Scope", "value": value})
     if data["format"].get("severity_resolved") == "warn":
         items.append({"key": "Severity", "value": "warn"})
@@ -314,6 +313,7 @@ def _build_details_data(data, status):
         "formatter_error_code": str(data["format"].get("formatter_error_code", 0) or 0),
         "no_git": bool(data["format"].get("no_git")),
         "no_files_to_format": bool(data["format"].get("no_files_to_format")),
+        "scope": data["format"].get("scope", "") or "changed",
         "patch_url": data["format"].get("patch_url", "") or "",
         "patch_download_cmd": patch_download_cmd(
             data["format"].get("patch_url", "") or "",

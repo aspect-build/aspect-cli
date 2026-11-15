@@ -8,16 +8,22 @@ rules_lint as well as any standalone runnable formatter binary targets such as
 Usage:
     # Format changed files (default)
     aspect format
-    # Format every file the formatter knows how to handle
+    # Format every file git knows about (tracked or untracked, not ignored)
+    aspect format --scope=git
+    # Let the formatter discover files itself
     aspect format --scope=all
     # Specify the formatter target
     aspect format --formatter-target=//path/to:formatter_bin
 
+A file list (positional files, `--scope=changed`, `--scope=git`) is passed to
+the formatter in batches that stay under the OS argument-length limit, one
+invocation per batch.
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@std//time.axl", "sleep_iter")
+load("./private/lib/argv.axl", "chunk_args")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -25,10 +31,11 @@ load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
 load("./private/lib/git_diff.axl", "git_diff_args")
+load("./private/lib/git_files.axl", "list_git_files")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
-load("./private/lib/path_glob.axl", "match_any")
+load("./private/lib/path_glob.axl", "filter_paths")
 load("./private/lib/path_utils.axl", "normalize_files_for_cwd")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in")
@@ -103,6 +110,40 @@ def _normalize_files_for_formatter(ctx, files):
 
 def _pick_status(data, had_failure, terminal):
     return pick_task_status(data, "format", had_failure, terminal)
+
+def _scope_qualifier(explicit_files, scope):
+    """The ` in scope` suffix for a file list the task discovered; empty for
+    positional files or a formatter that discovers its own."""
+    if explicit_files or scope not in ("changed", "git"):
+        return ""
+    return " in scope"
+
+def _filter_by_patterns(ctx, files, include_patterns, exclude_patterns):
+    """`filter_paths` over a discovered file list, saying what each pattern
+    list dropped."""
+    result = filter_paths(files, include_patterns, exclude_patterns)
+    if result.not_included > 0:
+        info(ctx.std, "Skipped %d file(s) not matching --include-pattern." % result.not_included)
+    if result.excluded > 0:
+        info(ctx.std, "Filtered %d file(s) via --exclude-pattern." % result.excluded)
+    return result.kept
+
+def _run_formatter(ctx, ep, format_args, spawn_cwd):
+    """Run the formatter over `format_args`, one invocation per
+    `chunk_args` batch, stopping at the first failure; with no files, one
+    invocation with the tree-walk args. Returns the last exit status."""
+    batches = chunk_args(format_args) or [[]]
+    exit = None
+    for batch in batches:
+        spawn_args = compute_spawn_args(
+            ctx.args.formatter_args,
+            batch,
+            ctx.args.formatter_args_for_tree_walk,
+        )
+        exit = ep.command(args = spawn_args, cwd = spawn_cwd).spawn().wait()
+        if not exit.success:
+            break
+    return exit
 
 def _compact_text(status, data):
     """Compact Result-cell text for the PR-comment surface."""
@@ -428,6 +469,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # these paths. Typical local repro: user pastes CI's fix command as-is.
     explicit_files = list(ctx.args.files)
 
+    # Files the task discovered (changed or listed by git), still to be
+    # pattern-filtered; None when nothing was discovered.
+    discovered = None
     format_args = []
     if explicit_files:
         print("Formatting %d file%s from positional arguments." % (
@@ -464,38 +508,43 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         if detect_result.get("unscoped"):
             # Degrade to --scope=all: no positionals, formatter walks the tree.
             warn(ctx.std, "Could not determine the changed-file set (%s). Formatting all files in scope (equivalent to --scope=all). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
-            format_args = []
         else:
-            changed_files = detect_result["files"]
-            if include_patterns:
-                kept = [f for f in changed_files if match_any(include_patterns, f)]
-                skipped_count = len(changed_files) - len(kept)
-                if skipped_count > 0:
-                    info(ctx.std, "Skipped %d file(s) not matching --include-pattern." % skipped_count)
-                changed_files = kept
-            if exclude_patterns:
-                kept = [f for f in changed_files if not match_any(exclude_patterns, f)]
-                n_excluded = len(changed_files) - len(kept)
-                if n_excluded > 0:
-                    info(ctx.std, "Filtered %d file(s) via --exclude-pattern." % n_excluded)
-                changed_files = kept
-            changed_files = _normalize_files_for_formatter(ctx, changed_files)
-            if not changed_files:
-                info(ctx.std, "No files to format")
-                data["format"]["no_files_to_format"] = True
-                return _emit_final(ph, 0)
+            discovered = detect_result["files"]
+    elif ctx.args.scope == "git":
+        status = _pick_status(data, had_failure = False, terminal = False)
+        ph.update(
+            status,
+            phases.ProgressStyles(
+                body = "Listing files known to git...",
+                stream = "Listing files known to git",
+            ),
+            kind = "format_results",
+            data = data,
+            phase = phases.Phase(name = "detect", description = "List files known to git", emoji = "🔍"),
+        )
+        discovered = list_git_files(ctx, ctx.std.env.git_root_dir(), ctx.std.env.current_dir())
+        if discovered == None:
+            warn(ctx.std, "Could not list files with `git ls-files` (not a git repository?). Letting the formatter discover files itself (equivalent to --scope=all).")
 
-            # Post-filter count for the Configuration row's `Scope: changed — N file(s)`.
-            data["changed_files_count"] = len(changed_files)
-            format_args = changed_files
+    if discovered != None:
+        discovered = _filter_by_patterns(ctx, discovered, include_patterns, exclude_patterns)
+        discovered = _normalize_files_for_formatter(ctx, discovered)
+        if not discovered:
+            info(ctx.std, "No files to format")
+            data["format"]["no_files_to_format"] = True
+            return _emit_final(ph, 0)
+
+        # Post-filter count for the Configuration row's file count.
+        data["changed_files_count"] = len(discovered)
+        format_args = discovered
 
     # Snapshot pre-format tracked state to detect formatter changes
     # independently of pre-existing dirty files. Non-destructive; "" = clean.
     pre_snap = _snapshot_tracked_state(ctx)
 
-    if explicit_files or ctx.args.scope == "changed":
+    if format_args:
         files_label = pluralize(len(format_args), "file")
-        scope_label = "" if explicit_files else " in scope"
+        scope_label = _scope_qualifier(explicit_files, ctx.args.scope)
         status = _pick_status(data, had_failure = False, terminal = False)
         ph.update(
             status,
@@ -520,12 +569,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = phases.Phase(name = "format", description = "Format files", emoji = "✨"),
         )
 
-    spawn_args = compute_spawn_args(
-        ctx.args.formatter_args,
-        format_args,
-        ctx.args.formatter_args_for_tree_walk,
-    )
-    exit = ep.command(args = spawn_args, cwd = spawn_cwd).spawn().wait()
+    exit = _run_formatter(ctx, ep, format_args, spawn_cwd)
 
     if not exit.success:
         # Formatter itself errored — skip the formatting-required check;
@@ -562,24 +606,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not formatter_diff:
         # CLI verdict is descriptive past-tense ("N files were modified"),
         # distinct from the prescriptive CI status pane phrasing.
-        if explicit_files:
-            scope_text = ""
-        elif ctx.args.scope == "changed":
-            scope_text = " in scope"
-        else:
-            scope_text = ""
-        print("No files%s were modified." % scope_text)
+        print("No files%s were modified." % _scope_qualifier(explicit_files, ctx.args.scope))
         return _emit_final(ph, 0)
 
     # Pattern filters hide files from the affected list + failure decision; they
     # don't undo changes (still in the tree), just stop unexpected files failing.
     name_out, _, _ = _git_diff_capture(ctx, "--name-only", pre_snap if pre_snap else "HEAD")
     affected_raw = [f for f in name_out.strip().split("\n") if f]
-    affected = affected_raw
-    if include_patterns and not explicit_files:
-        affected = [f for f in affected if match_any(include_patterns, f)]
-    if exclude_patterns:
-        affected = [f for f in affected if not match_any(exclude_patterns, f)]
+    affected = filter_paths(
+        affected_raw,
+        [] if explicit_files else include_patterns,
+        exclude_patterns,
+    ).kept
     filtered_count = len(affected_raw) - len(affected)
     affected = _normalize_files_for_formatter(ctx, affected)
 
@@ -589,12 +627,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return _emit_final(ph, 0)
 
     n = len(affected)
-    if explicit_files:
-        scope_qual = ""
-    elif ctx.args.scope == "changed":
-        scope_qual = " in scope"
-    else:
-        scope_qual = ""
+    scope_qual = _scope_qualifier(explicit_files, ctx.args.scope)
     if n == 1:
         print("1 file%s was modified:" % scope_qual)
     else:
@@ -608,8 +641,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["format"]["filtered_count"] = filtered_count
 
     # Optionally archive the diff as a CI artifact. Scope it to `affected` so it
-    # matches the failure-decision basis — in --scope=all the formatter rewrites
-    # filtered files too, which shouldn't appear in the uploaded patch.
+    # matches the failure-decision basis — in --scope=all the formatter may
+    # rewrite filtered files too, which shouldn't appear in the uploaded patch.
     if ctx.args.upload_format_diff:
         if filtered_count > 0:
             upload_diff, _, _ = _git_diff_capture(
@@ -643,12 +676,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 format = task(
     show_task_options = True,
-    summary = "Format source files with the configured formatter target. Formats changed files by default; `--scope=all` for the whole tree.",
+    summary = "Format source files with the configured formatter target. Formats changed files by default; `--scope=git` or `--scope=all` for the whole tree.",
     args = {
         "scope": args.string(
             default = "changed",
-            values = ["changed", "all"],
-            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). Useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
+            values = ["changed", "git", "all"],
+            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'git' formats every file under the current directory that git tracks or that is untracked but not ignored by `.gitignore`, skipping submodules and files marked generated in `.gitattributes` (`aspect-format-ignored`, `rules-lint-ignored`, `linguist-generated`, `gitlab-generated`); falls back to 'all' outside a git repository. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage, and it may visit ignored or generated files). 'git' and 'all' are useful as a nightly-job mode and when introducing a new formatter to a repo for the first time; pair 'git' with --include-pattern when the formatter is a raw binary that handles only some file types.",
         ),
         "severity": args.string(
             default = "auto",
@@ -657,11 +690,11 @@ format = task(
         ),
         "include_patterns": args.string_list(
             long = "include-pattern",
-            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Useful when the formatter_target is a raw binary that handles only a single file type. In `--scope=changed` (default), non-matching files are dropped from the file list before invoking the formatter. Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Useful when the formatter_target is a raw binary that handles only a single file type. In `--scope=changed` (default) and `--scope=git`, non-matching files are dropped from the file list before invoking the formatter. Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "exclude_patterns": args.string_list(
             long = "exclude-pattern",
-            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--exclude-pattern='vendor/**' --exclude-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` (default), filtered files are dropped from the file list passed to the formatter. In `--scope=all`, the formatter discovers files itself, so excluded files may still be rewritten on disk; in either scope, excluded files are omitted from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--exclude-pattern='vendor/**' --exclude-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` (default) and `--scope=git`, filtered files are dropped from the file list passed to the formatter. In `--scope=all`, the formatter discovers files itself, so excluded files may still be rewritten on disk; in every scope, excluded files are omitted from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "upload_format_diff": args.boolean(
             default = True,
@@ -697,7 +730,7 @@ format = task(
         ),
         "formatter_args_for_tree_walk": args.string_list(
             long = "formatter-arg-for-tree-walk",
-            description = "Extra positional arguments appended to the formatter binary's argv only when no positional files would otherwise reach it — i.e. when `aspect format` is invoked without explicit file args AND change-detection produced no file list (typically `--scope=all`, but also `--scope=changed` runs where the change-detection source returned no matches or degraded to scope-all). Appended after the (empty) file list and after `formatter_args`. Designed for bare formatter binaries that need an explicit tree-walk flag to do anything useful when the task delegates discovery to them. Example: `formatter_args_for_tree_walk = [\"-r\", \".\"]` for `@buildifier_prebuilt//buildifier`. Has no effect when the formatter receives at least one file (positionally or via `--scope=changed`), so it cannot accidentally turn a per-file invocation into a whole-tree rewrite. Wrapper targets like `format_multirun` from rules_lint walk on their own and don't need this.",
+            description = "Extra positional arguments appended to the formatter binary's argv only when no positional files would otherwise reach it — i.e. when `aspect format` is invoked without explicit file args AND the task discovered no file list (typically `--scope=all`, but also a `--scope=changed` run whose change detection degraded to scope-all, or `--scope=git` outside a git repository). Appended after the (empty) file list and after `formatter_args`. Designed for bare formatter binaries that need an explicit tree-walk flag to do anything useful when the task delegates discovery to them. Example: `formatter_args_for_tree_walk = [\"-r\", \".\"]` for `@buildifier_prebuilt//buildifier`. Has no effect when the formatter receives at least one file (positionally, or via `--scope=changed` or `--scope=git`), so it cannot accidentally turn a per-file invocation into a whole-tree rewrite. Wrapper targets like `format_multirun` from rules_lint walk on their own and don't need this.",
         ),
         # Positional file list: when non-empty the formatter gets these directly
         # (change-detection + --scope/--base-ref/--merge-base/--include-/

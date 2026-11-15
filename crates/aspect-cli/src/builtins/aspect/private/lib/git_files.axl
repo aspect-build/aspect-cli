@@ -1,0 +1,101 @@
+"""The files git knows about, minus the ones `.gitattributes` marks generated.
+
+`list_git_files(ctx, git_root, cwd)` returns, git-root-relative, every file
+under `cwd` that git tracks and that is still on disk, plus every untracked
+file `.gitignore` doesn't ignore. Submodules are skipped (a gitlink is a
+directory, not a file to hand a formatter), and so is any file with one of
+`GENERATED_ATTRIBUTES` set in `.gitattributes`.
+
+Every git call reads `-z` output: NUL-separated and never C-quoted, so paths
+with spaces, quotes, newlines or non-ASCII characters come back verbatim. The
+parsers are pure so `git_files_test.axl` covers them without a repository.
+"""
+
+load("./argv.axl", "chunk_args")
+
+# `.gitattributes` attributes that mark a file as generated. The last three
+# are the ones rules_lint's format.sh honors.
+GENERATED_ATTRIBUTES = [
+    "aspect-format-ignored",
+    "rules-lint-ignored",
+    "linguist-generated",
+    "gitlab-generated",
+]
+
+_GITLINK_MODE = "160000"
+
+def _fields(out):
+    return [f for f in (out or "").split("\x00") if f]
+
+def parse_ls_files_stage(out):
+    """Paths from `git ls-files -z --stage`, in order, without gitlinks and
+    with a conflicted path's several stages collapsed to one entry."""
+    seen = {}
+    paths = []
+    for record in _fields(out):
+        parts = record.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        meta, path = parts
+        if meta.split(" ")[0] == _GITLINK_MODE or path in seen:
+            continue
+        seen[path] = True
+        paths.append(path)
+    return paths
+
+def parse_ls_files(out):
+    """Paths from a plain `git ls-files -z` listing."""
+    return _fields(out)
+
+def parse_check_attr(out):
+    """Paths `git check-attr -z` reports with any attribute set, as a dict
+    used as a set. An attribute counts when it is `set` (bare `attr` in
+    `.gitattributes`) or has the value `true`; `unset`, `unspecified` and any
+    other value don't."""
+    fields = (out or "").split("\x00")
+    flagged = {}
+    for i in range(0, len(fields) - 2, 3):
+        if fields[i + 2] in ("set", "true"):
+            flagged[fields[i]] = True
+    return flagged
+
+def ls_files_pathspec(git_root, cwd):
+    """The pathspec that limits a listing run from `git_root` to `cwd`: the
+    literal subdirectory when `cwd` is below the root, else `.` (the whole
+    repository, for `cwd` at or above the root)."""
+    prefix = git_root + "/"
+    if cwd.startswith(prefix):
+        return ":(literal)" + cwd[len(prefix):]
+    return "."
+
+def present_files(staged, others, deleted):
+    """Tracked paths not in `deleted`, then the untracked `others`."""
+    gone = {p: True for p in deleted}
+    return [p for p in staged if p not in gone] + list(others)
+
+def _git_stdout(ctx, git_root, args):
+    out = ctx.std.process.command("git").args(args) \
+        .current_dir(git_root) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    return out.stdout if out.status.success else None
+
+def list_git_files(ctx, git_root, cwd):
+    """Git-root-relative files under `cwd` (see the module docstring), or
+    None when `git_root` is unset or a git command fails."""
+    if not git_root:
+        return None
+    spec = ls_files_pathspec(git_root, cwd)
+    staged = _git_stdout(ctx, git_root, ["ls-files", "-z", "--stage", "--", spec])
+    others = _git_stdout(ctx, git_root, ["ls-files", "-z", "--others", "--exclude-standard", "--", spec])
+    deleted = _git_stdout(ctx, git_root, ["ls-files", "-z", "--deleted", "--", spec])
+    if staged == None or others == None or deleted == None:
+        return None
+    files = present_files(parse_ls_files_stage(staged), parse_ls_files(others), parse_ls_files(deleted))
+
+    generated = {}
+    for batch in chunk_args(files):
+        out = _git_stdout(ctx, git_root, ["check-attr", "-z"] + GENERATED_ATTRIBUTES + ["--"] + batch)
+        if out == None:
+            return None
+        generated.update(parse_check_attr(out))
+    return [f for f in files if f not in generated]
