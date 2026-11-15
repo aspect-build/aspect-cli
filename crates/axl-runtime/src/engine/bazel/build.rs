@@ -2336,6 +2336,63 @@ Test = task(implementation = _impl)
         }
     }
 
+    /// A tee'd compact copy that cannot be opened fails alone: the decoded stream
+    /// and the other copies get the whole log, and `wait()` names the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_compact_copy_that_cannot_open_fails_alone() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lent = dir.path().join("lent.zstd");
+        let bad = dir.path().join("missing-dir").join("bad.zstd");
+        let teed = dir.path().join("teed.zstd");
+        let report = dir.path().join("report.txt");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [
+            bazel.execution_log.compact_file(path = {lent:?}),
+            bazel.execution_log.compact_file(path = {bad:?}),
+            bazel.execution_log.compact_file(path = {teed:?}),
+        ],
+        stderr = None,
+    )
+    seen = len([e for e in build.execution_logs()])
+    ctx.std.fs.create({report:?}).write("%d\n" % seen)
+    build.wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            lent = lent.to_str().unwrap(),
+            bad = bad.to_str().unwrap(),
+            teed = teed.to_str().unwrap(),
+            report = report.to_str().unwrap(),
+        );
+
+        let err = run_execlog_script(Duration::from_secs(60), script, "the reader parked")
+            .expect_err("a failed copy must fail `wait()`");
+        let seen = std::fs::read_to_string(&report).unwrap();
+        assert_eq!(seen.trim(), SCENARIO_ENTRIES.to_string(), "decoded entries");
+        for path in [&lent, &teed] {
+            assert_eq!(
+                compact_entry_count(path),
+                SCENARIO_ENTRIES,
+                "{}",
+                path.display()
+            );
+        }
+        assert!(!bad.exists());
+        let err = format!("{err:#}");
+        assert!(
+            err.contains(bad.to_str().unwrap()) && err.contains("cannot open"),
+            "the error should name the copy and why: {err}",
+        );
+    }
+
     /// A `compact_file` sink beside `build.execution_logs()` — the combination
     /// `ctx.bazel.build`'s own documentation advertises.
     ///

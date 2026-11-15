@@ -17,37 +17,75 @@ use crate::stream::pid_pair::PidPair;
 use thiserror::Error;
 use zstd::Decoder;
 
-/// Wraps a `Read` source and tees every byte read to one or more `BufWriter<File>` sinks.
-///
-/// Used to intercept raw bytes from a stream before any further processing,
-/// allowing file sinks to capture a copy without a second pass.
+/// One `CompactFile` copy the reader writes. A copy that cannot be opened,
+/// written or flushed stops being written and keeps why, so the other copies and
+/// the decoded stream go on and [`ExecLogStream::join`] reports it.
+struct Tee {
+    path: String,
+    /// `None` once failed or finished.
+    out: Option<BufWriter<File>>,
+    error: Option<String>,
+}
+
+impl Tee {
+    fn open(path: String) -> Self {
+        let (out, error) = match File::create(&path) {
+            Ok(f) => (Some(BufWriter::new(f)), None),
+            Err(e) => (None, Some(format!("cannot open: {e}"))),
+        };
+        Self { path, out, error }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if let Some(Err(e)) = self.out.as_mut().map(|out| out.write_all(bytes)) {
+            self.out = None;
+            self.error = Some(format!("write failed: {e}"));
+        }
+    }
+
+    /// Flush, and say why the copy is incomplete if it is.
+    fn finish(&mut self) -> io::Result<()> {
+        if let Some(Err(e)) = self.out.take().map(|mut out| out.flush()) {
+            self.error = Some(format!("flush failed: {e}"));
+        }
+        match &self.error {
+            Some(why) => Err(io::Error::other(format!(
+                "execution log copy {}: {why}",
+                self.path
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Wraps a `Read` source and tees every byte read to the [`Tee`]s, so they
+/// capture the raw bytes without a second pass.
 struct MultiTeeReader<R: Read> {
     inner: R,
-    writers: Vec<BufWriter<File>>,
+    tees: Vec<Tee>,
 }
 
 impl<R: Read> Read for MultiTeeReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
-        for w in &mut self.writers {
-            w.write_all(&buf[..n])?;
+        for tee in &mut self.tees {
+            tee.write(&buf[..n]);
         }
         Ok(n)
     }
 }
 
-impl<R: Read> Write for MultiTeeReader<R> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        for w in &mut self.writers {
-            w.write_all(buf)?;
+impl<R: Read> MultiTeeReader<R> {
+    /// Finish every copy, even after one fails, returning the first failure.
+    fn finish(&mut self) -> io::Result<()> {
+        let mut first = Ok(());
+        for tee in &mut self.tees {
+            let result = tee.finish();
+            if first.is_ok() {
+                first = result;
+            }
         }
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        for w in &mut self.writers {
-            w.flush()?;
-        }
-        Ok(())
+        first
     }
 }
 
@@ -196,7 +234,9 @@ impl ExecLogStream {
     /// https://github.com/bazelbuild/bazel/issues/28800.
     ///
     /// `CompactFile` sinks are unaffected — raw bytes are tee'd by
-    /// [`MultiTeeReader`] before decoding.
+    /// [`MultiTeeReader`] before decoding. A copy that fails stops being written
+    /// while everything else gets the whole log, and the failure is the thread's
+    /// result.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
@@ -227,13 +267,9 @@ impl ExecLogStream {
                 sender.close()?;
                 return Ok(ReaderOutcome::NeverAppeared);
             }
-            let writers = compact_sink_paths
-                .iter()
-                .map(|p| Ok(BufWriter::new(File::create(p)?)))
-                .collect::<io::Result<Vec<_>>>()?;
             let out_raw = MultiTeeReader {
                 inner: file,
-                writers,
+                tees: compact_sink_paths.into_iter().map(Tee::open).collect(),
             };
             let mut out_raw = Decoder::new(out_raw)?;
 
@@ -257,7 +293,7 @@ impl ExecLogStream {
                 }
             }
             sender.close()?;
-            out_raw.get_mut().get_mut().flush()?;
+            out_raw.get_mut().get_mut().finish()?;
             Ok(ReaderOutcome::Read)
         });
 
@@ -331,6 +367,46 @@ mod tests {
 
     fn entry(id: u32) -> ExecLogEntry {
         ExecLogEntry { id, r#type: None }
+    }
+
+    /// A copy that cannot open costs only itself: the reader still passes every
+    /// byte through, the good copy gets them all, and `finish` names the bad one.
+    #[test]
+    fn a_tee_that_cannot_open_fails_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.zstd");
+        let bad = dir.path().join("missing-dir").join("bad.zstd");
+        let bytes = b"compact log bytes".to_vec();
+        let mut tee = MultiTeeReader {
+            inner: bytes.as_slice(),
+            tees: [&bad, &good]
+                .map(|p| Tee::open(p.to_str().unwrap().to_string()))
+                .into(),
+        };
+
+        let mut read = vec![];
+        tee.read_to_end(&mut read).unwrap();
+        let err = tee.finish().unwrap_err().to_string();
+
+        assert_eq!(read, bytes);
+        assert_eq!(std::fs::read(&good).unwrap(), bytes);
+        assert!(
+            err.contains(bad.to_str().unwrap()) && err.contains("cannot open"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn tees_that_all_open_finish_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.zstd");
+        let mut tee = MultiTeeReader {
+            inner: &b"abc"[..],
+            tees: vec![Tee::open(path.to_str().unwrap().to_string())],
+        };
+        std::io::copy(&mut tee, &mut std::io::sink()).unwrap();
+        tee.finish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
     }
 
     /// Why the stream must not keep an unread subscriber once real ones exist.
