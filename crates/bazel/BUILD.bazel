@@ -36,6 +36,7 @@ rust_library(
         "@crates//:indexmap",
         "@crates//:libc",
         "@crates//:nix",
+        "@crates//:opentelemetry",
         "@crates//:prost",
         "@crates//:prost-types",
         "@crates//:rand",
@@ -49,6 +50,7 @@ rust_library(
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tracing",
+        "@crates//:tracing-opentelemetry",
         "@crates//:uuid",
         "@crates//:zstd",
     ] + select({
@@ -60,5 +62,9 @@ rust_library(
 rust_test(
     name = "bazel_test",
     crate = ":bazel",
-    deps = ["@crates//:tempfile"],
+    deps = [
+        "@crates//:opentelemetry_sdk",
+        "@crates//:tempfile",
+        "@crates//:tracing-subscriber",
+    ],
 )

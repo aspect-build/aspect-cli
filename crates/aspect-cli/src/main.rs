@@ -3,6 +3,7 @@ mod cmd;
 mod crash_handler;
 mod credential_helper;
 mod helpers;
+mod otlp_http;
 mod trace;
 mod trace_buffer;
 
@@ -339,7 +340,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     }
                 }
             }
-            tokio::runtime::Handle::current().block_on(trace::install_late_exporters(exporters))?;
+            trace::install_late_exporters(exporters)?;
 
             // Phase 4: execute the selected task.
             let exit = mpe

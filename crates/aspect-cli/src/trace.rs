@@ -3,14 +3,16 @@
 //! Initialization is deferred — at startup we install the tracing-subscriber
 //! registry with an `OpenTelemetryLayer` / `OpenTelemetryTracingBridge` whose
 //! exporters are `BufferingSpanExporter` / `BufferingLogExporter` (which
-//! accumulate everything in memory) plus a runtime-togglable `StderrLayer`
-//! that's wired but inactive by default.
+//! accumulate everything in memory) plus a `FileSinksLayer` that buffers
+//! until a file exporter is registered. The tracer provider is also installed
+//! as the global one, so spans built with `global::tracer` (those that carry
+//! times from Bazel's events) share the layer's pipeline and parentage.
 //!
 //! After phase 3 of the axl runtime, `install_late_exporters(specs)` is
 //! called with the set of `ExporterSpec`s collected from
 //! `ctx.telemetry.exporters.add(...)`. Each OTLP spec becomes a real OTLP
-//! exporter; the buffer is replayed. Each file/stderr spec activates the
-//! `StderrLayer` (or a future per-path file sink). Users who want
+//! exporter; the buffer is replayed. Each file spec adds a sink (stderr, stdout
+//! or a file path) to the file-sinks layer. Users who want
 //! `ASPECT_DEBUG=1`-style stderr output register a stderr exporter from
 //! .axl config — there's no env-var special-casing in this binary.
 
@@ -39,6 +41,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+use crate::otlp_http::OtlpHttpClient;
 use crate::trace_buffer::{BufferingLogExporter, BufferingSpanExporter};
 
 use axl_runtime::engine::telemetry::{FileFormat, Signals};
@@ -403,9 +406,9 @@ static LATE_METER_PROVIDER: Mutex<Option<SdkMeterProvider>> = Mutex::new(None);
 /// or any run with all exporters disabled), shutdown is silent.
 static ANY_LATE_EXPORTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Initialize the tracing subscriber with stderr (when `ASPECT_DEBUG` is set)
-/// and OTel layers backed by the buffering exporters. Returns the guard that
-/// flushes/shuts down providers on drop.
+/// Initialize the tracing subscriber with the file-sinks layer and OTel layers
+/// backed by the buffering exporters, and install the tracer provider
+/// globally. Returns the guard that flushes/shuts down providers on drop.
 pub fn init() -> OtelGuard {
     let span_buffer = BufferingSpanExporter::new();
     let log_buffer = BufferingLogExporter::new();
@@ -433,6 +436,8 @@ pub fn init() -> OtelGuard {
         .ok()
         .expect("trace::init called twice");
 
+    // Shared with spans built through `global::tracer` (see module docs).
+    global::set_tracer_provider(tracer_provider.clone());
     let tracer = tracer_provider.tracer("tracing-otel-subscriber");
 
     // The trace builtin (axl-runtime) emits via the tracing macros on two
@@ -477,93 +482,66 @@ pub fn init() -> OtelGuard {
     }
 }
 
-/// Build a real `opentelemetry_otlp::SpanExporter` for one OTLP spec.
 fn build_otlp_span_exporter(spec: &OtlpSpec) -> anyhow::Result<opentelemetry_otlp::SpanExporter> {
-    let exporter = match spec.protocol {
-        OtlpProtocol::Grpc => {
-            let mut b = opentelemetry_otlp::SpanExporter::builder()
-                .with_tonic()
-                .with_endpoint(&spec.url)
-                .with_tls_config(
-                    opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
-                        .with_native_roots(),
-                );
-            if !spec.headers.is_empty() {
-                b = b.with_metadata(metadata_from(&spec.headers)?);
-            }
-            b.build()?
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let mut b = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_endpoint(&spec.url);
-            if !spec.headers.is_empty() {
-                b = b.with_headers(spec.headers.clone().into_iter().collect());
-            }
-            b.build()?
-        }
-    };
-    Ok(exporter)
+    let builder = opentelemetry_otlp::SpanExporter::builder();
+    Ok(match spec.protocol {
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?.build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?.build()?,
+    })
 }
 
 fn build_otlp_log_exporter(spec: &OtlpSpec) -> anyhow::Result<opentelemetry_otlp::LogExporter> {
-    let exporter = match spec.protocol {
-        OtlpProtocol::Grpc => {
-            let mut b = opentelemetry_otlp::LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(&spec.url)
-                .with_tls_config(
-                    opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
-                        .with_native_roots(),
-                );
-            if !spec.headers.is_empty() {
-                b = b.with_metadata(metadata_from(&spec.headers)?);
-            }
-            b.build()?
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let mut b = opentelemetry_otlp::LogExporter::builder()
-                .with_http()
-                .with_endpoint(&spec.url);
-            if !spec.headers.is_empty() {
-                b = b.with_headers(spec.headers.clone().into_iter().collect());
-            }
-            b.build()?
-        }
-    };
-    Ok(exporter)
+    let builder = opentelemetry_otlp::LogExporter::builder();
+    Ok(match spec.protocol {
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?.build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?.build()?,
+    })
 }
 
 fn build_otlp_metric_exporter(
     spec: &OtlpSpec,
 ) -> anyhow::Result<opentelemetry_otlp::MetricExporter> {
-    let exporter = match spec.protocol {
-        OtlpProtocol::Grpc => {
-            let mut b = opentelemetry_otlp::MetricExporter::builder()
-                .with_tonic()
-                .with_endpoint(&spec.url)
-                .with_tls_config(
-                    opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
-                        .with_native_roots(),
-                );
-            if !spec.headers.is_empty() {
-                b = b.with_metadata(metadata_from(&spec.headers)?);
-            }
-            b.with_temporality(opentelemetry_sdk::metrics::Temporality::default())
-                .build()?
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let mut b = opentelemetry_otlp::MetricExporter::builder()
-                .with_http()
-                .with_endpoint(&spec.url);
-            if !spec.headers.is_empty() {
-                b = b.with_headers(spec.headers.clone().into_iter().collect());
-            }
-            b.with_temporality(opentelemetry_sdk::metrics::Temporality::default())
-                .build()?
-        }
-    };
-    Ok(exporter)
+    let builder = opentelemetry_otlp::MetricExporter::builder();
+    let temporality = opentelemetry_sdk::metrics::Temporality::default();
+    Ok(match spec.protocol {
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?
+            .with_temporality(temporality)
+            .build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?
+            .with_temporality(temporality)
+            .build()?,
+    })
+}
+
+/// Endpoint, native-root TLS and headers (as gRPC metadata) for a gRPC
+/// exporter of any signal.
+fn grpc_config<B: WithExportConfig + WithTonicConfig>(
+    builder: B,
+    spec: &OtlpSpec,
+) -> anyhow::Result<B> {
+    let builder = builder.with_endpoint(&spec.url).with_tls_config(
+        opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new().with_native_roots(),
+    );
+    Ok(if spec.headers.is_empty() {
+        builder
+    } else {
+        builder.with_metadata(metadata_from(&spec.headers)?)
+    })
+}
+
+/// Endpoint, client and headers for an `http/protobuf` exporter of any signal.
+fn http_config<B: WithExportConfig + WithHttpConfig>(
+    builder: B,
+    spec: &OtlpSpec,
+) -> anyhow::Result<B> {
+    let builder = builder
+        .with_endpoint(&spec.url)
+        .with_shared_http_client(OtlpHttpClient::shared()?);
+    Ok(if spec.headers.is_empty() {
+        builder
+    } else {
+        builder.with_headers(spec.headers.clone().into_iter().collect())
+    })
 }
 
 fn metadata_from(
@@ -616,28 +594,48 @@ fn activate_file_spec(spec: &FileSpec) -> anyhow::Result<()> {
 
 /// Take the exporter specs collected during phase 1-3 evaluation and turn
 /// them into real exporters. OTLP specs become `opentelemetry_otlp` exporters
-/// installed into the SDK pipeline (with the in-memory buffer replayed). File
-/// specs activate the runtime-togglable `StderrLayer` (or, eventually, file/
-/// stdout sinks). Sets up a fresh metrics provider that writes to all
-/// metric-enabled OTLP exporters (no pre-phase-3 metric replay; phases 1-3
-/// don't emit meaningful metric data).
+/// that the span and log buffers replay into and then forward to. File specs
+/// add sinks to the file-sinks layer. Metric-enabled OTLP specs get a fresh
+/// metrics provider (no replay; phases 1-3 record no metrics), stored in a
+/// process-wide static so `OtelGuard` can flush it on drop.
 ///
-/// Stores the new `SdkMeterProvider` in a process-wide static so the
-/// existing `OtelGuard` can flush it on drop without taking `&mut`.
-pub async fn install_late_exporters(specs: Vec<ExporterSpec>) -> anyhow::Result<()> {
-    if specs.is_empty() {
-        // No exporter ever shows up. Mark OTel inactive so trace builtins
-        // early-return for the rest of the run.
-        axl_runtime::trace::disable();
-        return Ok(());
-    }
+/// Buffering always ends here, so a run without an OTLP exporter for a signal
+/// stops holding that signal's records.
+///
+/// The replay exports from this thread, and the HTTP exporter's blocking
+/// reqwest client must not run inside a tokio `block_on` (reqwest asserts
+/// that in debug builds). So it runs on a scoped thread that only enters the
+/// caller's runtime, which still gives the gRPC exporter its reactor. Must be
+/// called from within a tokio runtime context.
+pub fn install_late_exporters(specs: Vec<ExporterSpec>) -> anyhow::Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _runtime = handle.enter();
+                futures::executor::block_on(install_late_exporters_async(specs))
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
 
+async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Result<()> {
     let span_buf = SPAN_BUFFER
         .get()
         .ok_or_else(|| anyhow::anyhow!("trace::init not called"))?;
     let log_buf = LOG_BUFFER
         .get()
         .ok_or_else(|| anyhow::anyhow!("trace::init not called"))?;
+
+    if specs.is_empty() {
+        // Trace builtins early-return for the rest of the run.
+        axl_runtime::trace::disable();
+        discard_buffer();
+        span_buf.install_late(Vec::new()).await;
+        log_buf.install_late(Vec::new()).await;
+        return Ok(());
+    }
 
     let mut span_exporters = Vec::new();
     let mut log_exporters = Vec::new();
@@ -669,30 +667,16 @@ pub async fn install_late_exporters(specs: Vec<ExporterSpec>) -> anyhow::Result<
         }
     }
 
-    // Replay buffered file-sink events into the freshly-installed sinks
-    // (mirrors the OTLP buffer-replay below). When no file sink shows
-    // up, drop the buffer so it stops accumulating for the rest of the
-    // run.
     if any_file {
         drain_buffer_to_sinks();
     } else {
         discard_buffer();
     }
 
-    // Note: we intentionally do *not* disable OTel here even when no
-    // OTLP spec was supplied. File-only configurations (e.g. the stock
-    // `ASPECT_DEBUG=1` translation registers a stderr file spec) still
-    // need trace macros to fire so `FileSinksLayer` can pick them up.
-    // `axl_runtime::trace::enable()` is called unconditionally from
-    // `Exporters::add`, so `axl_runtime::trace::enabled()` already
-    // reflects "any exporter is registered".
-
-    if !span_exporters.is_empty() {
-        span_buf.install_late(span_exporters).await;
-    }
-    if !log_exporters.is_empty() {
-        log_buf.install_late(log_exporters).await;
-    }
+    // OTel stays enabled even without an OTLP spec: file-only configurations
+    // (such as the `ASPECT_DEBUG=1` stderr spec) still need the trace macros.
+    span_buf.install_late(span_exporters).await;
+    log_buf.install_late(log_exporters).await;
 
     if !metric_exporters.is_empty() {
         let mut builder = MeterProviderBuilder::default()

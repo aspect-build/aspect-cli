@@ -57,9 +57,10 @@ impl BufferingSpanExporter {
     }
 
     /// Drain the buffer to the new exporters and switch to fan-out mode for
-    /// subsequent exports. Async — must run within a tokio runtime context
-    /// (the OTLP export futures are tokio-based). The caller is responsible
-    /// for setting each exporter's resource before passing it in.
+    /// subsequent exports; with no exporters, the buffer and every later
+    /// batch are dropped. Must run within a tokio runtime context (the gRPC
+    /// export futures need its reactor). The caller is responsible for
+    /// setting each exporter's resource before passing it in.
     pub async fn install_late(&self, exporters: Vec<opentelemetry_otlp::SpanExporter>) {
         let arc_exporters: Vec<Arc<opentelemetry_otlp::SpanExporter>> =
             exporters.into_iter().map(Arc::new).collect();
@@ -123,12 +124,10 @@ impl SpanExporter for BufferingSpanExporter {
         Ok(())
     }
 
-    fn shutdown_with_timeout(&mut self, timeout: Duration) -> OTelSdkResult {
-        let mut st = self.inner.lock().expect("span buffer mutex poisoned");
-        for ex in st.late.iter_mut() {
-            if let Some(ex) = Arc::get_mut(ex) {
-                let _ = ex.shutdown_with_timeout(timeout);
-            }
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        let st = self.inner.lock().expect("span buffer mutex poisoned");
+        for ex in st.late.iter() {
+            let _ = ex.shutdown_with_timeout(timeout);
         }
         Ok(())
     }
@@ -165,6 +164,7 @@ impl BufferingLogExporter {
         }
     }
 
+    /// Same contract as [`BufferingSpanExporter::install_late`].
     pub async fn install_late(&self, exporters: Vec<opentelemetry_otlp::LogExporter>) {
         let arc_exporters: Vec<Arc<opentelemetry_otlp::LogExporter>> =
             exporters.into_iter().map(Arc::new).collect();
@@ -229,4 +229,73 @@ impl LogExporter for BufferingLogExporter {
     }
 
     fn set_resource(&mut self, _resource: &Resource) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
+    use opentelemetry::trace::{Tracer as _, TracerProvider as _};
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+
+    fn span_provider(buffer: &BufferingSpanExporter) -> SdkTracerProvider {
+        SdkTracerProvider::builder()
+            .with_simple_exporter(buffer.clone())
+            .build()
+    }
+
+    fn emit_span(provider: &SdkTracerProvider) {
+        provider.tracer("t").in_span("s", |_| {});
+    }
+
+    fn span_state(buffer: &BufferingSpanExporter) -> (usize, bool) {
+        let st = buffer.inner.lock().unwrap();
+        (st.buffer.len(), st.replayed)
+    }
+
+    #[test]
+    fn spans_buffer_until_installed() {
+        let buffer = BufferingSpanExporter::new();
+        let provider = span_provider(&buffer);
+        emit_span(&provider);
+        emit_span(&provider);
+        assert_eq!(span_state(&buffer), (2, false));
+    }
+
+    #[test]
+    fn installing_no_span_exporters_ends_buffering() {
+        let buffer = BufferingSpanExporter::new();
+        let provider = span_provider(&buffer);
+        emit_span(&provider);
+        futures::executor::block_on(buffer.install_late(Vec::new()));
+        assert_eq!(span_state(&buffer), (0, true));
+        emit_span(&provider);
+        assert_eq!(span_state(&buffer), (0, true));
+    }
+
+    #[test]
+    fn installing_no_log_exporters_ends_buffering() {
+        let buffer = BufferingLogExporter::new();
+        let provider = SdkLoggerProvider::builder()
+            .with_simple_exporter(buffer.clone())
+            .build();
+        let logger = provider.logger("t");
+        let emit = || {
+            let mut record = logger.create_log_record();
+            record.set_body("hello".into());
+            logger.emit(record);
+        };
+        let state = || {
+            let st = buffer.inner.lock().unwrap();
+            (st.buffer.len(), st.replayed)
+        };
+
+        emit();
+        assert_eq!(state(), (1, false));
+        futures::executor::block_on(buffer.install_late(Vec::new()));
+        assert_eq!(state(), (0, true));
+        emit();
+        assert_eq!(state(), (0, true));
+    }
 }

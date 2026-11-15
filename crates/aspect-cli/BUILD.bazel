@@ -2,8 +2,8 @@ load("//bazel/release:release.bzl", "release")
 load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
 
-# Shared by the primary binary and the `-debug-` diagnostic variant so the two
-# cannot drift apart.
+# `DEPS` and `PROC_MACRO_DEPS` are shared by the primary binary and the
+# `-debug-` diagnostic variant so the two cannot drift apart.
 DEPS = [
     "//crates/aspect-telemetry",
     "//crates/axl-runtime",
@@ -13,6 +13,7 @@ DEPS = [
     "@crates//:chrono",
     "@crates//:clap",
     "@crates//:dirs",
+    "@crates//:futures",
     "@crates//:include_dir",
     "@crates//:libc",
     "@crates//:libmimalloc-sys",
@@ -20,6 +21,7 @@ DEPS = [
     "@crates//:names",
     "@crates//:opentelemetry",
     "@crates//:opentelemetry-appender-tracing",
+    "@crates//:opentelemetry-http",
     "@crates//:opentelemetry-otlp",
     "@crates//:opentelemetry-semantic-conventions",
     "@crates//:opentelemetry_sdk",
@@ -40,6 +42,8 @@ DEPS = [
     "@crates//:uuid",
 ]
 
+PROC_MACRO_DEPS = ["@crates//:async-trait"]
+
 SRCS = glob(["src/**/*.rs"])
 
 COMPILE_DATA = glob([
@@ -51,6 +55,7 @@ rust_binary(
     name = "aspect-cli",
     srcs = SRCS,
     compile_data = COMPILE_DATA,
+    proc_macro_deps = PROC_MACRO_DEPS,
     version_key = "STABLE_MONOREPO_VERSION",
     visibility = [
         "//:__pkg__",
@@ -220,6 +225,7 @@ rust_binary(
     srcs = SRCS,
     compile_data = COMPILE_DATA,
     crate_root = "src/main.rs",
+    proc_macro_deps = PROC_MACRO_DEPS,
     release_rustc_flags = ["-Cstrip=none"],
     version_key = "STABLE_MONOREPO_VERSION",
     deps = DEPS,
