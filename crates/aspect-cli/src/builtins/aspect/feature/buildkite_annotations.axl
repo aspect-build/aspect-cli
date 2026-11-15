@@ -423,6 +423,10 @@ def _buildkite_annotations(ctx: FeatureContext):
         if progress_text:
             _state["_progress"] = progress_text
 
+        # An empty kind is the "no template" contract, not a misrouting.
+        if not update.kind:
+            return
+
         context_id = _state.get("_context_id", "")
         if not context_id:
             _LOG.trace("task_update fired but no context_id; ignoring (kind=%s status=%s)" %

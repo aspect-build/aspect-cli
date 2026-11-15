@@ -119,6 +119,7 @@ def _spawn_target(ctx: TaskContext, ph, runnable, target: str, forward_args: lis
             body = body % target,
             stream = "Running %s" % target,
         ),
+        kind = "bazel_results",
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
     cmd = runnable.command(args = forward_args, env = extra_environment, cwd = spawn_cwd)
@@ -204,6 +205,7 @@ def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spaw
                 body = "%s exited with code %s — watching for changes..." % (target, child_status.code),
                 stream = "%s exited with code %s" % (target, child_status.code),
             ),
+            kind = "bazel_results",
         )
 
     # Boxed so on_batch can mutate it; each rebuild needs a distinct phase name.
@@ -286,7 +288,7 @@ def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spaw
         ws,
         on_batch,
         on_exit = on_exit,
-        on_stop = lambda: ph.update("running", phases.ProgressStyles(body = "Stopping %s..." % target)),
+        on_stop = lambda: ph.update("running", phases.ProgressStyles(body = "Stopping %s..." % target), kind = "bazel_results"),
         tick_ms = _WATCH_TICK_MS,
     )
 
@@ -414,6 +416,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
             body = "Running %s..." % target,
             stream = "Running %s" % target,
         ),
+        kind = "bazel_results",
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
