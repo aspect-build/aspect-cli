@@ -47,8 +47,7 @@
 
 mod common;
 
-use common::aspect_cli;
-use std::collections::HashMap;
+use common::{aspect_cli, base_env};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -234,28 +233,6 @@ fn basil_bin() -> &'static str {
         assert!(path.exists(), "basil not found at {}", path.display());
         path.to_string_lossy().into_owned()
     })
-}
-
-/// The environment a case runs under: the developer's own, minus everything
-/// that would make the result depend on where the test ran.
-///
-/// `ASPECT_*` would override the fixture's config, and the CI identity
-/// variables steer the built-in tasks into their CI code paths (status checks,
-/// runner detection) — the same filtering `tools/cache-diff-integration.py`
-/// does for the same reason. `HOME` and `PATH` stay: the CLI resolves its
-/// builtins cache under `HOME`.
-fn base_env() -> HashMap<String, String> {
-    const DROP_PREFIXES: &[&str] = &[
-        "ASPECT_",
-        "BASIL_",
-        "BUILDKITE_",
-        "CIRCLE",
-        "GITHUB_",
-        "GITLAB_",
-    ];
-    std::env::vars()
-        .filter(|(k, _)| k != "CI" && !DROP_PREFIXES.iter().any(|p| k.starts_with(p)))
-        .collect()
 }
 
 /// A scratch workspace plus the live process that stands in for the Bazel
