@@ -1,5 +1,6 @@
 //! Execution log → OpenTelemetry: a `spawn` span for every spawn the log
-//! records, under a `spawns` span beside the BES sink's `events`.
+//! records, under a `spawns` span beside the BES sink's `events`, and the
+//! [`SpawnInstruments`] metrics.
 //!
 //! A spawn's span starts at `SpawnMetrics.start_time` and lasts its
 //! `total_time`, both measured in this build, so a cache hit spans its lookup
@@ -30,10 +31,11 @@ use opentelemetry::{
     trace::{Status, Tracer},
 };
 
+use super::spawn_metrics::SpawnInstruments;
 use crate::fanout::SinkOutcome;
 use crate::otel::{CompletedSpan, duration, system_time};
 
-/// Instrumentation scope of the `spawn` spans.
+/// Instrumentation scope of the `spawn` spans and the spawn metrics.
 const TELEMETRY_SCOPE: &str = "aspect-cli.execlog";
 
 /// Reads one phase's duration from a spawn's metrics.
@@ -53,19 +55,22 @@ const PHASES: &[(&str, Phase)] = &[
 ];
 
 /// Reads `recv` to the end of the stream on its own thread, exporting a span
-/// per spawn under a `spawns` span opened in the caller's current span.
+/// per spawn under a `spawns` span opened in the caller's current span, and
+/// recording the spawn metrics.
 pub fn spawn(recv: Receiver<ExecLogEntry>) -> JoinHandle<SinkOutcome> {
     let spawns_span = tracing::info_span!("spawns");
     thread::spawn(move || {
         let _spawns = spawns_span.enter();
-        consume(&recv, &global::tracer(TELEMETRY_SCOPE));
+        let instruments = SpawnInstruments::new(&global::meter(TELEMETRY_SCOPE));
+        consume(&recv, &global::tracer(TELEMETRY_SCOPE), &instruments);
         Ok(())
     })
 }
 
-fn consume<T: Tracer>(recv: &Receiver<ExecLogEntry>, tracer: &T) {
+fn consume<T: Tracer>(recv: &Receiver<ExecLogEntry>, tracer: &T, instruments: &SpawnInstruments) {
     while let Ok(entry) = recv.recv() {
         if let Some(Type::Spawn(spawn)) = entry.r#type {
+            instruments.record(&spawn, failure(&spawn).is_none());
             spawn_span(&spawn, SystemTime::now()).export(tracer);
         }
     }
@@ -301,7 +306,11 @@ mod tests {
                 sender.send(entry).unwrap();
             }
             drop(sender);
-            consume(&recv, &tracer);
+            consume(
+                &recv,
+                &tracer,
+                &SpawnInstruments::new(&opentelemetry::global::meter("test")),
+            );
         });
 
         let spans: Vec<SpanData> = exporter.get_finished_spans().unwrap();

@@ -38,7 +38,7 @@ use opentelemetry::{
 use tracing::{Level, span::EnteredSpan};
 
 use super::events::{attempt_cached, attempt_duration, time_or_legacy};
-use super::metrics::BesMetrics;
+use super::metrics::{BesMetrics, Invocation};
 use crate::bes::BuildEventEnvelope;
 use crate::fanout::{SinkOutcome, Subscriber};
 use crate::otel::{CompletedSpan, system_time};
@@ -71,6 +71,7 @@ fn consume<T: Tracer>(
 ) {
     let mut build_span: Option<EnteredSpan> = None;
     let mut test_windows = TestWindows::default();
+    let mut invocation = Invocation::default();
     loop {
         let envelope = match recv.recv() {
             Ok(e) => e,
@@ -105,6 +106,7 @@ fn consume<T: Tracer>(
                     tracing::warn!("ignoring duplicate Started event");
                     continue;
                 }
+                invocation.command = Some(s.command.clone()).filter(|c| !c.is_empty());
                 build_span = Some(
                     tracing::info_span!(
                         "build_tool",
@@ -117,7 +119,13 @@ fn consume<T: Tracer>(
                     .entered(),
                 );
             }
-            (Payload::Finished(_), Id::BuildFinished(_)) => {
+            (Payload::Finished(finished), Id::BuildFinished(_)) => {
+                #[allow(deprecated)]
+                let success = finished
+                    .exit_code
+                    .as_ref()
+                    .map_or(finished.overall_success, |exit| exit.code == 0);
+                invocation.success = Some(success);
                 if build_span.take().is_none() {
                     tracing::warn!("BuildFinished without prior Started");
                 }
@@ -145,7 +153,7 @@ fn consume<T: Tracer>(
                 span.export(tracer);
             }
             (Payload::BuildMetrics(build_metrics), _) => {
-                metrics.record_build_metrics(build_metrics);
+                metrics.record_build_metrics(build_metrics, &invocation);
                 tracing::event!(name: "bes_event", Level::INFO, kind = id.as_str_name());
             }
             (Payload::Progress(_), _) | (Payload::NamedSetOfFiles(_), _) => {}
@@ -336,8 +344,8 @@ mod tests {
     use axl_proto::Timestamp;
     use axl_proto::build_event_stream::{
         BuildEvent, BuildEventId, BuildFinished, BuildMetrics, BuildStarted,
-        build_event_id::BuildFinishedId, build_event_id::BuildStartedId, build_metrics,
-        test_result,
+        build_event_id::BuildFinishedId, build_event_id::BuildStartedId, build_finished,
+        build_metrics, test_result,
     };
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry::trace::TracerProvider as _;
@@ -346,6 +354,7 @@ mod tests {
     use prost::{Message as _, bytes::Bytes};
     use tracing_subscriber::layer::SubscriberExt as _;
 
+    use super::super::metrics::tests::{Point, point, points};
     use crate::fanout::Broadcaster;
 
     fn ts(seconds: i64, nanos: i32) -> Timestamp {
@@ -374,9 +383,9 @@ mod tests {
     }
 
     /// Runs `events` through [`consume`] under a `tracing` span named `parent`
-    /// and returns every exported span and the names of the metrics recorded.
-    /// Uses its own providers and subscriber, so it never touches the globals.
-    fn run(events: Vec<Arc<BuildEventEnvelope>>) -> (Vec<SpanData>, Vec<String>) {
+    /// and returns every exported span and recorded metric point. Uses its own
+    /// providers and subscriber, so it never touches the globals.
+    fn run(events: Vec<Arc<BuildEventEnvelope>>) -> (Vec<SpanData>, Vec<Point>) {
         let span_exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(span_exporter.clone())
@@ -404,17 +413,10 @@ mod tests {
         provider.force_flush().unwrap();
         meter_provider.force_flush().unwrap();
 
-        let mut metric_names: Vec<String> = metric_exporter
-            .get_finished_metrics()
-            .unwrap()
-            .iter()
-            .flat_map(|r| r.scope_metrics())
-            .flat_map(|s| s.metrics())
-            .map(|m| m.name().to_owned())
-            .collect();
-        metric_names.sort();
-        metric_names.dedup();
-        (span_exporter.get_finished_spans().unwrap(), metric_names)
+        (
+            span_exporter.get_finished_spans().unwrap(),
+            points(&metric_exporter),
+        )
     }
 
     fn export(events: Vec<Arc<BuildEventEnvelope>>) -> Vec<SpanData> {
@@ -507,7 +509,7 @@ mod tests {
 
     #[test]
     fn stream_records_test_and_action_cache_metrics() {
-        let (_, metrics) = run(vec![
+        let (_, points) = run(vec![
             event(
                 Id::TestResult(TestResultId::default()),
                 Payload::TestResult(TestResult {
@@ -530,13 +532,56 @@ mod tests {
                 }),
             ),
         ]);
+        let mut names: Vec<&str> = points.iter().map(|(name, ..)| name.as_str()).collect();
+        names.dedup();
         assert_eq!(
-            metrics,
+            names,
             [
                 "bazel.action_cache.lookups",
                 "bazel.test.attempt.duration",
                 "bazel.test.results"
             ]
+        );
+    }
+
+    #[test]
+    fn build_duration_carries_the_command_and_outcome_from_the_stream() {
+        let (_, points) = run(vec![
+            event(
+                Id::Started(BuildStartedId::default()),
+                Payload::Started(BuildStarted {
+                    command: "test".into(),
+                    ..Default::default()
+                }),
+            ),
+            event(
+                Id::BuildFinished(BuildFinishedId::default()),
+                Payload::Finished(BuildFinished {
+                    exit_code: Some(build_finished::ExitCode {
+                        code: 3,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            ),
+            event(
+                Id::BuildMetrics(Default::default()),
+                Payload::BuildMetrics(BuildMetrics {
+                    timing_metrics: Some(build_metrics::TimingMetrics {
+                        wall_time_in_ms: 4_000,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            ),
+        ]);
+        assert_eq!(
+            points,
+            [point(
+                "bazel.build.duration",
+                &["command=test", "success=false"],
+                4.0
+            )]
         );
     }
 

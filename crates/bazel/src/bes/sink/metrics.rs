@@ -5,14 +5,20 @@
 //! | `bazel.test.results` | counter | `{test}` | `status`, `cached` |
 //! | `bazel.test.attempt.duration` | histogram | `s` | `status` |
 //! | `bazel.action_cache.lookups` | counter | `{lookup}` | `result`, `reason` |
+//! | `bazel.build.duration` | histogram | `s` | `command`, `success` |
+//! | `bazel.build.phase.duration` | histogram | `s` | `command`, `phase` |
 //!
 //! No attribute carries a target label, so the number of series stays bounded
 //! however large the build. `bazel.test.attempt.duration` records only
 //! attempts that ran in this build; a cached attempt took no time here.
+//! `bazel.build.phase.duration` has an `analysis` and an `execution` phase,
+//! which overlap when Bazel interleaves them.
 
 use axl_proto::{
     blaze::action_cache_statistics::MissReason,
-    build_event_stream::{BuildMetrics, TestResult, TestStatus, TestSummary},
+    build_event_stream::{
+        BuildMetrics, TestResult, TestStatus, TestSummary, build_metrics::TimingMetrics,
+    },
 };
 use opentelemetry::{
     KeyValue,
@@ -28,10 +34,27 @@ const TEST_DURATION_BOUNDARIES: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
 ];
 
+/// Bucket boundaries in seconds for the build durations, from a no-op build
+/// to a multi-hour one.
+const BUILD_DURATION_BOUNDARIES: &[f64] = &[
+    0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0, 7200.0,
+];
+
+/// What the stream said about the invocation before its `BuildMetrics`.
+#[derive(Debug, Default)]
+pub(super) struct Invocation {
+    /// The Bazel command, from `BuildStarted`.
+    pub command: Option<String>,
+    /// Whether it succeeded, from `BuildFinished`.
+    pub success: Option<bool>,
+}
+
 pub(super) struct BesMetrics {
     test_results: Counter<u64>,
     test_attempt_duration: Histogram<f64>,
     action_cache_lookups: Counter<u64>,
+    build_duration: Histogram<f64>,
+    build_phase_duration: Histogram<f64>,
 }
 
 impl BesMetrics {
@@ -52,6 +75,18 @@ impl BesMetrics {
                 .u64_counter("bazel.action_cache.lookups")
                 .with_unit("{lookup}")
                 .with_description("Local action cache lookups by result and miss reason")
+                .build(),
+            build_duration: meter
+                .f64_histogram("bazel.build.duration")
+                .with_unit("s")
+                .with_description("Wall time of a Bazel build, as Bazel measured it")
+                .with_boundaries(BUILD_DURATION_BOUNDARIES.to_vec())
+                .build(),
+            build_phase_duration: meter
+                .f64_histogram("bazel.build.phase.duration")
+                .with_unit("s")
+                .with_description("Wall time of a Bazel build's analysis and execution phases")
+                .with_boundaries(BUILD_DURATION_BOUNDARIES.to_vec())
                 .build(),
         }
     }
@@ -82,9 +117,41 @@ impl BesMetrics {
         );
     }
 
+    /// Action cache lookups, and the build's timing for `invocation`.
+    pub(super) fn record_build_metrics(&self, metrics: &BuildMetrics, invocation: &Invocation) {
+        if let Some(timing) = &metrics.timing_metrics {
+            self.record_timing(timing, invocation);
+        }
+        self.record_action_cache(metrics);
+    }
+
+    /// Phases Bazel did not time (`0`) are left out.
+    fn record_timing(&self, timing: &TimingMetrics, invocation: &Invocation) {
+        let command = invocation
+            .command
+            .as_ref()
+            .map(|c| KeyValue::new("command", c.clone()));
+        if timing.wall_time_in_ms > 0 {
+            let mut attributes: Vec<KeyValue> = command.iter().cloned().collect();
+            attributes.extend(invocation.success.map(|s| KeyValue::new("success", s)));
+            self.build_duration
+                .record(seconds(timing.wall_time_in_ms), &attributes);
+        }
+        for (phase, ms) in [
+            ("analysis", timing.analysis_phase_time_in_ms),
+            ("execution", timing.execution_phase_time_in_ms),
+        ] {
+            if ms > 0 {
+                let mut attributes: Vec<KeyValue> = command.iter().cloned().collect();
+                attributes.push(KeyValue::new("phase", phase));
+                self.build_phase_duration.record(seconds(ms), &attributes);
+            }
+        }
+    }
+
     /// Hits, and misses by reason. Misses Bazel reported without a reason are
     /// recorded with no `reason` attribute.
-    pub(super) fn record_build_metrics(&self, metrics: &BuildMetrics) {
+    fn record_action_cache(&self, metrics: &BuildMetrics) {
         let Some(stats) = metrics
             .action_summary
             .as_ref()
@@ -121,8 +188,12 @@ fn count(n: i32) -> u64 {
     u64::try_from(n).unwrap_or(0)
 }
 
+fn seconds(ms: i64) -> f64 {
+    ms as f64 / 1000.0
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use axl_proto::{
         blaze::{ActionCacheStatistics, action_cache_statistics::MissDetail},
@@ -134,16 +205,23 @@ mod tests {
         data::{AggregatedMetrics, MetricData},
     };
 
-    /// Records through `record` and returns every data point as
-    /// `(instrument, sorted attributes, value)`.
-    fn recorded(record: impl FnOnce(&BesMetrics)) -> Vec<(String, Vec<String>, f64)> {
+    /// Records through `record` and returns every data point, as [`points`].
+    fn recorded(record: impl FnOnce(&BesMetrics)) -> Vec<Point> {
         let exporter = InMemoryMetricExporter::default();
         let provider = SdkMeterProvider::builder()
             .with_reader(PeriodicReader::builder(exporter.clone()).build())
             .build();
         record(&BesMetrics::new(&provider.meter("test")));
         provider.force_flush().unwrap();
+        points(&exporter)
+    }
 
+    /// `(instrument, sorted attributes as "key=value", value)`; a histogram's
+    /// value is its sum.
+    pub(in crate::bes::sink) type Point = (String, Vec<String>, f64);
+
+    /// Every u64 sum and f64 histogram data point `exporter` holds, sorted.
+    pub(in crate::bes::sink) fn points(exporter: &InMemoryMetricExporter) -> Vec<Point> {
         let mut points = Vec::new();
         for resource in exporter.get_finished_metrics().unwrap() {
             for scope in resource.scope_metrics() {
@@ -179,7 +257,7 @@ mod tests {
         points
     }
 
-    fn point(name: &str, attrs: &[&str], value: f64) -> (String, Vec<String>, f64) {
+    pub(in crate::bes::sink) fn point(name: &str, attrs: &[&str], value: f64) -> Point {
         (
             name.to_owned(),
             attrs.iter().map(|s| (*s).to_owned()).collect(),
@@ -305,7 +383,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let points = recorded(|m| m.record_build_metrics(&metrics));
+        let points = recorded(|m| m.record_build_metrics(&metrics, &Invocation::default()));
         assert_eq!(
             points,
             vec![
@@ -343,7 +421,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            recorded(|m| m.record_build_metrics(&metrics)),
+            recorded(|m| m.record_build_metrics(&metrics, &Invocation::default())),
             vec![
                 point(
                     "bazel.action_cache.lookups",
@@ -356,7 +434,42 @@ mod tests {
     }
 
     #[test]
+    fn build_timing_is_recorded_by_command_and_outcome() {
+        let metrics = BuildMetrics {
+            timing_metrics: Some(TimingMetrics {
+                wall_time_in_ms: 12_500,
+                analysis_phase_time_in_ms: 2_000,
+                execution_phase_time_in_ms: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let invocation = Invocation {
+            command: Some("test".into()),
+            success: Some(false),
+        };
+        assert_eq!(
+            recorded(|m| m.record_build_metrics(&metrics, &invocation)),
+            vec![
+                point(
+                    "bazel.build.duration",
+                    &["command=test", "success=false"],
+                    12.5
+                ),
+                point(
+                    "bazel.build.phase.duration",
+                    &["command=test", "phase=analysis"],
+                    2.0
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn build_metrics_without_cache_statistics_record_nothing() {
-        assert!(recorded(|m| m.record_build_metrics(&BuildMetrics::default())).is_empty());
+        assert!(
+            recorded(|m| m.record_build_metrics(&BuildMetrics::default(), &Invocation::default()))
+                .is_empty()
+        );
     }
 }
