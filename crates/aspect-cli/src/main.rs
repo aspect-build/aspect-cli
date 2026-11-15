@@ -3,6 +3,7 @@ mod cmd;
 mod crash_handler;
 mod credential_helper;
 mod helpers;
+mod otlp_http;
 mod trace;
 mod trace_buffer;
 

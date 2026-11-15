@@ -179,6 +179,7 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "aspect-telemetry",
+ "async-trait",
  "axl-runtime",
  "backtrace",
  "chrono",
@@ -192,9 +193,11 @@ dependencies = [
  "names",
  "opentelemetry",
  "opentelemetry-appender-tracing",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "reqwest",
  "serde_json",
  "sha256",
  "signal-hook-registry",
@@ -220,7 +223,7 @@ dependencies = [
  "fork",
  "futures-util",
  "miette 7.6.0",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -234,7 +237,7 @@ name = "aspect-telemetry"
 version = "0.0.0-dev"
 dependencies = [
  "chrono",
- "reqwest 0.12.28",
+ "reqwest",
  "serde_json",
  "sha1",
  "tempfile",
@@ -381,7 +384,7 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "rcgen",
- "reqwest 0.12.28",
+ "reqwest",
  "rmcp",
  "rustls",
  "rustls-native-certs",
@@ -3119,7 +3122,6 @@ dependencies = [
  "bytes 1.10.1",
  "http",
  "opentelemetry",
- "reqwest 0.13.5",
 ]
 
 [[package]]
@@ -3135,7 +3137,6 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest 0.13.5",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -3912,6 +3913,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes 1.10.1",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -3946,37 +3948,6 @@ dependencies = [
  "wasm-streams",
  "web-sys",
  "webpki-roots",
-]
-
-[[package]]
-name = "reqwest"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
-dependencies = [
- "base64 0.23.1",
- "bytes 1.10.1",
- "futures-channel",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "sync_wrapper",
- "tokio",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

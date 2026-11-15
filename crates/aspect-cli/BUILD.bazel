@@ -2,8 +2,8 @@ load("//bazel/release:release.bzl", "release")
 load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
 
-# Shared by the primary binary and the `-debug-` diagnostic variant so the two
-# cannot drift apart.
+# `DEPS` and `PROC_MACRO_DEPS` are shared by the primary binary and the
+# `-debug-` diagnostic variant so the two cannot drift apart.
 DEPS = [
     "//crates/aspect-telemetry",
     "//crates/axl-runtime",
@@ -21,6 +21,7 @@ DEPS = [
     "@crates//:names",
     "@crates//:opentelemetry",
     "@crates//:opentelemetry-appender-tracing",
+    "@crates//:opentelemetry-http",
     "@crates//:opentelemetry-otlp",
     "@crates//:opentelemetry-semantic-conventions",
     "@crates//:opentelemetry_sdk",
@@ -42,6 +43,8 @@ DEPS = [
     "@crates//:uuid",
 ]
 
+PROC_MACRO_DEPS = ["@crates//:async-trait"]
+
 SRCS = glob(["src/**/*.rs"])
 
 COMPILE_DATA = glob([
@@ -58,6 +61,7 @@ rust_binary(
         "//:__pkg__",
         "//examples/deliverable:__pkg__",
     ],
+    proc_macro_deps = PROC_MACRO_DEPS,
     deps = DEPS,
 )
 
@@ -224,6 +228,7 @@ rust_binary(
     crate_root = "src/main.rs",
     release_rustc_flags = ["-Cstrip=none"],
     version_key = "STABLE_MONOREPO_VERSION",
+    proc_macro_deps = PROC_MACRO_DEPS,
     deps = DEPS,
 )
 

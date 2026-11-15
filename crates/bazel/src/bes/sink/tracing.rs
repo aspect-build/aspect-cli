@@ -389,10 +389,10 @@ mod tests {
     }
 
     fn find<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
-        spans
-            .iter()
-            .find(|s| s.name == name)
-            .unwrap_or_else(|| panic!("no {name} span in {:?}", spans.iter().map(|s| &s.name)))
+        spans.iter().find(|s| s.name == name).unwrap_or_else(|| {
+            let names: Vec<_> = spans.iter().map(|s| &s.name).collect();
+            panic!("no {name} span in {names:?}")
+        })
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! Initialization is deferred — at startup we install the tracing-subscriber
 //! registry with an `OpenTelemetryLayer` / `OpenTelemetryTracingBridge` whose
 //! exporters are `BufferingSpanExporter` / `BufferingLogExporter` (which
-//! accumulate everything in memory) plus a runtime-togglable `StderrLayer`
-//! that's wired but inactive by default. The tracer provider is also installed
+//! accumulate everything in memory) plus a `FileSinksLayer` that buffers
+//! until a file exporter is registered. The tracer provider is also installed
 //! as the global one, so spans built with `global::tracer` (those that carry
 //! times from Bazel's events) share the layer's pipeline and parentage.
 //!
@@ -41,6 +41,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+use crate::otlp_http::OtlpHttpClient;
 use crate::trace_buffer::{BufferingLogExporter, BufferingSpanExporter};
 
 use axl_runtime::engine::telemetry::{FileFormat, Signals};
@@ -481,93 +482,66 @@ pub fn init() -> OtelGuard {
     }
 }
 
-/// Build a real `opentelemetry_otlp::SpanExporter` for one OTLP spec.
 fn build_otlp_span_exporter(spec: &OtlpSpec) -> anyhow::Result<opentelemetry_otlp::SpanExporter> {
-    let exporter = match spec.protocol {
-        OtlpProtocol::Grpc => {
-            let mut b = opentelemetry_otlp::SpanExporter::builder()
-                .with_tonic()
-                .with_endpoint(&spec.url)
-                .with_tls_config(
-                    opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
-                        .with_native_roots(),
-                );
-            if !spec.headers.is_empty() {
-                b = b.with_metadata(metadata_from(&spec.headers)?);
-            }
-            b.build()?
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let mut b = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_endpoint(&spec.url);
-            if !spec.headers.is_empty() {
-                b = b.with_headers(spec.headers.clone().into_iter().collect());
-            }
-            b.build()?
-        }
-    };
-    Ok(exporter)
+    let builder = opentelemetry_otlp::SpanExporter::builder();
+    Ok(match spec.protocol {
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?.build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?.build()?,
+    })
 }
 
 fn build_otlp_log_exporter(spec: &OtlpSpec) -> anyhow::Result<opentelemetry_otlp::LogExporter> {
-    let exporter = match spec.protocol {
-        OtlpProtocol::Grpc => {
-            let mut b = opentelemetry_otlp::LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(&spec.url)
-                .with_tls_config(
-                    opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
-                        .with_native_roots(),
-                );
-            if !spec.headers.is_empty() {
-                b = b.with_metadata(metadata_from(&spec.headers)?);
-            }
-            b.build()?
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let mut b = opentelemetry_otlp::LogExporter::builder()
-                .with_http()
-                .with_endpoint(&spec.url);
-            if !spec.headers.is_empty() {
-                b = b.with_headers(spec.headers.clone().into_iter().collect());
-            }
-            b.build()?
-        }
-    };
-    Ok(exporter)
+    let builder = opentelemetry_otlp::LogExporter::builder();
+    Ok(match spec.protocol {
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?.build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?.build()?,
+    })
 }
 
 fn build_otlp_metric_exporter(
     spec: &OtlpSpec,
 ) -> anyhow::Result<opentelemetry_otlp::MetricExporter> {
-    let exporter = match spec.protocol {
-        OtlpProtocol::Grpc => {
-            let mut b = opentelemetry_otlp::MetricExporter::builder()
-                .with_tonic()
-                .with_endpoint(&spec.url)
-                .with_tls_config(
-                    opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
-                        .with_native_roots(),
-                );
-            if !spec.headers.is_empty() {
-                b = b.with_metadata(metadata_from(&spec.headers)?);
-            }
-            b.with_temporality(opentelemetry_sdk::metrics::Temporality::default())
-                .build()?
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let mut b = opentelemetry_otlp::MetricExporter::builder()
-                .with_http()
-                .with_endpoint(&spec.url);
-            if !spec.headers.is_empty() {
-                b = b.with_headers(spec.headers.clone().into_iter().collect());
-            }
-            b.with_temporality(opentelemetry_sdk::metrics::Temporality::default())
-                .build()?
-        }
-    };
-    Ok(exporter)
+    let builder = opentelemetry_otlp::MetricExporter::builder();
+    let temporality = opentelemetry_sdk::metrics::Temporality::default();
+    Ok(match spec.protocol {
+        OtlpProtocol::Grpc => grpc_config(builder.with_tonic(), spec)?
+            .with_temporality(temporality)
+            .build()?,
+        OtlpProtocol::HttpProtobuf => http_config(builder.with_http(), spec)?
+            .with_temporality(temporality)
+            .build()?,
+    })
+}
+
+/// Endpoint, native-root TLS and headers (as gRPC metadata) for a gRPC
+/// exporter of any signal.
+fn grpc_config<B: WithExportConfig + WithTonicConfig>(
+    builder: B,
+    spec: &OtlpSpec,
+) -> anyhow::Result<B> {
+    let builder = builder.with_endpoint(&spec.url).with_tls_config(
+        opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new().with_native_roots(),
+    );
+    Ok(if spec.headers.is_empty() {
+        builder
+    } else {
+        builder.with_metadata(metadata_from(&spec.headers)?)
+    })
+}
+
+/// Endpoint, client and headers for an `http/protobuf` exporter of any signal.
+fn http_config<B: WithExportConfig + WithHttpConfig>(
+    builder: B,
+    spec: &OtlpSpec,
+) -> anyhow::Result<B> {
+    let builder = builder
+        .with_endpoint(&spec.url)
+        .with_http_client(OtlpHttpClient::new()?);
+    Ok(if spec.headers.is_empty() {
+        builder
+    } else {
+        builder.with_headers(spec.headers.clone().into_iter().collect())
+    })
 }
 
 fn metadata_from(
@@ -657,6 +631,7 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
     if specs.is_empty() {
         // Trace builtins early-return for the rest of the run.
         axl_runtime::trace::disable();
+        discard_buffer();
         span_buf.install_late(Vec::new()).await;
         log_buf.install_late(Vec::new()).await;
         return Ok(());

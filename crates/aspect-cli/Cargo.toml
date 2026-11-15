@@ -26,10 +26,14 @@ aspect-telemetry = { path = "../aspect-telemetry" }
 axl-runtime = { path = "../axl-runtime" }
 clap = {version= "4.5.40", features = ["string"]}
 anyhow = "1"
+async-trait = "0.1.89"
 futures = "0.3.31"
+reqwest = { version = "0.12.22", default-features = false, features = ["blocking", "http2", "charset", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 opentelemetry = "0.33.0"
 opentelemetry_sdk = "0.33.0"
-opentelemetry-otlp = {version = "0.33.0", features = ["grpc-tonic", "tls-roots", "tls-ring", "logs"]}
+# No bundled HTTP client: `otlp_http::OtlpHttpClient` supplies the workspace reqwest.
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "tls-roots", "tls-ring", "http-proto", "trace", "logs", "metrics", "internal-logs"] }
+opentelemetry-http = { version = "0.33.0", default-features = false }
 opentelemetry-appender-tracing = "0.33.0"
 opentelemetry-semantic-conventions = "0.33.0"
 include_dir = { version = "0.7", features = ["glob"] }
