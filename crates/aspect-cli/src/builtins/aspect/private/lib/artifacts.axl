@@ -6,7 +6,8 @@ feature `ArtifactUpload` are co-located here. Consumers use `artifacts`.
 
 Without `ArtifactUpload` in the task graph, the trait callables are
 null-objects: `append` no-ops, `list/by_kind/by_label` read empty — so
-callers degrade gracefully without probing for the feature.
+callers degrade gracefully without probing for the feature. The same holds
+for a task that doesn't declare `artifacts.TRAITS`.
 
 CI platforms: GitHub Actions, Buildkite, CircleCI, GitLab.
 
@@ -73,6 +74,15 @@ _ArtifactsTrait = trait(
     list = attr(typing.Callable[[], list[_Artifact]], default = lambda: []),
 )
 
+def _list_all(ctx):
+    """Every registered artifact; [] when the task doesn't declare the trait."""
+    return ctx.traits[_ArtifactsTrait].list() if _ArtifactsTrait in ctx.traits else []
+
+def _register(ctx, a):
+    """Record `a`; a no-op when the task doesn't declare the trait."""
+    if _ArtifactsTrait in ctx.traits:
+        ctx.traits[_ArtifactsTrait].append(a)
+
 # Derived views — pure functions over list()
 
 def _by_kind(ctx):
@@ -80,7 +90,7 @@ def _by_kind(ctx):
     (those go through `by_label`). Later entries with the same kind
     overwrite earlier ones — rolling-replace semantics for batch uploads."""
     out = {}
-    for a in ctx.traits[_ArtifactsTrait].list():
+    for a in _list_all(ctx):
         if not a.label and a.url:
             out[a.kind] = a.url
     return out
@@ -94,7 +104,7 @@ def _list_kind(ctx, kind):
     URL-less ones.
     """
     out = []
-    for a in ctx.traits[_ArtifactsTrait].list():
+    for a in _list_all(ctx):
         if a.kind == kind and not a.label and a.url:
             out.append(a)
     return out
@@ -102,7 +112,7 @@ def _list_kind(ctx, kind):
 def _by_label(ctx):
     """Per-bazel-target file map: `{label: {filename: url}}`."""
     out = {}
-    for a in ctx.traits[_ArtifactsTrait].list():
+    for a in _list_all(ctx):
         if a.label:
             files = out.setdefault(a.label, {})
             files[a.name or a.kind] = a.url
@@ -143,7 +153,7 @@ def _upload_file(ctx, kind, name, path):
     url = result.get("download_url") or ""
     if not url.startswith("http"):
         url = ""
-    ctx.traits[_ArtifactsTrait].append(_Artifact(kind = kind, url = url, name = name))
+    _register(ctx, _Artifact(kind = kind, url = url, name = name))
     if url:
         info(ctx.std, "Uploaded %s — %s" % (name, url))
     else:
@@ -203,8 +213,8 @@ artifacts = struct(
 
     # Register a known URL without uploading — only when bypassing the
     # standard CI upload path (e.g. a custom uploader).
-    append = lambda ctx, a: ctx.traits[_ArtifactsTrait].append(a),
-    list = lambda ctx: ctx.traits[_ArtifactsTrait].list(),
+    append = _register,
+    list = _list_all,
     by_kind = _by_kind,
     list_kind = _list_kind,
     by_label = _by_label,
