@@ -165,7 +165,7 @@ load(
     "render_bazelrc",
     "startup_flags_for_rc",
 )
-load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "parse_remote")
+load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "parse_remote", "serves_bazel_endpoint")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
 load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups")
@@ -363,10 +363,12 @@ def _serves_remote_execution(endpoint_env, default) -> bool:
     return default != None and default.exec != ""
 
 def _default_deployment(deployments: list):
-    """The deployment a `bazel` call reaches without naming one, or `None`."""
+    """The deployment a `bazel` call reaches without naming one, or `None` —
+    also when the default serves no Bazel endpoint (one advertising only its web
+    UI), since a `bazel` call reaches nothing of it."""
     for d in deployments:
         if d.default:
-            return d
+            return d if serves_bazel_endpoint(d) else None
     return None
 
 def _groups(ctx: TaskContext, environment, on_runner: bool, machine_rc: bool, remote_on: dict, auth: dict, exec_log_path: str) -> (list, list):
