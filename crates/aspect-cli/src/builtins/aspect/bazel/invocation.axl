@@ -63,7 +63,7 @@ _Invocation = record(
     max_attempts = field(int),
     # Where Bazel's own stdout goes. Always a `Writable`, never None: the
     # builtin reads None as "discard", and `_do_spawn` should not need a
-    # conditional. See `build()`.
+    # conditional. See `_build()`.
     stdout = field(typing.Any),
 )
 

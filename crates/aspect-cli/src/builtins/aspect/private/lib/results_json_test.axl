@@ -119,6 +119,7 @@ def _test_truncation_is_reported(ctx):
     d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": ["CppCompile"], "stderr_path": "/tmp/a.err"})
     d["bazel"]["failed_actions"].append({"label": "//c:d", "mnemonics": ["Javac"], "stderr_path": ""})
     d["bazel"]["failed_actions_total"] = 400
+    d["bazel"]["failed_action_labels"] = ["//a:b", "//c:d"] + ["//x:t%d" % i for i in range(398)]
     d["bazel"]["failed_tests"].append({"label": "//e:f", "cached": False, "duration_ms": 0, "kind": "", "status": "FAILED"})
     d["bazel"]["failed_test_total"] = 150
 
@@ -133,6 +134,18 @@ def _test_untruncated_lists_are_not_flagged(ctx):
     d = init_data()
     d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stderr_path": ""})
     d["bazel"]["failed_actions_total"] = 1
+    d["bazel"]["failed_action_labels"] = ["//a:b"]
+
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("not flagged", doc["failures"]["truncated"]["actions"], False)
+
+def _test_one_target_failing_several_actions_is_not_truncation(ctx):
+    """`failed_actions` merges a label's actions into one entry, so a target
+    failing CppCompile and CppLink is two actions but one complete entry."""
+    d = init_data()
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": ["CppCompile", "CppLink"], "stderr_path": ""})
+    d["bazel"]["failed_actions_total"] = 2
+    d["bazel"]["failed_action_labels"] = ["//a:b"]
 
     doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
     _eq("not flagged", doc["failures"]["truncated"]["actions"], False)
@@ -206,6 +219,7 @@ def _test_child_stdout_keeps_the_document_alone_on_stdout(ctx):
     Bazel's result summary inside the document, which stops being JSON — and
     nothing downstream would catch that.
     """
+
     # Two `Writable`s for the same stream are distinct values, so these compare
     # the stream each handle names rather than the handle itself.
     io = ctx.std.io
@@ -241,6 +255,7 @@ _UNIT_TESTS = [
     _test_missing_test_details_leave_empty_paths,
     _test_truncation_is_reported,
     _test_untruncated_lists_are_not_flagged,
+    _test_one_target_failing_several_actions_is_not_truncation,
     _test_repro_commands_become_objects,
     _test_duration_needs_both_timestamps,
     _test_aborted_key_only_when_aborted,
