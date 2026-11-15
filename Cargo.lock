@@ -218,6 +218,7 @@ dependencies = [
  "dirs",
  "fork",
  "futures-util",
+ "libc",
  "miette 7.6.0",
  "reqwest",
  "serde",

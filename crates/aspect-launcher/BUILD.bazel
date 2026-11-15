@@ -15,6 +15,7 @@ rust_binary(
         "@crates//:dirs",
         "@crates//:fork",
         "@crates//:futures-util",
+        "@crates//:libc",
         "@crates//:miette",
         "@crates//:reqwest",
         "@crates//:serde",

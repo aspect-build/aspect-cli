@@ -960,6 +960,31 @@ async fn configure_tool_task(
     })(cache.clone(), root_dir.clone(), tool))
 }
 
+/// Point the telemetry child's stdin, stdout and stderr at `/dev/null`.
+///
+/// The child inherits the parent's descriptors, so a caller reading the
+/// command's output through a pipe — `$(aspect …)`, a CI log — would wait for
+/// EOF until the report was sent, up to its request timeout.
+fn detach_stdio() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let Ok(null) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+    else {
+        return;
+    };
+    for fd in 0..=2 {
+        // SAFETY: duplicating a descriptor we own onto a standard one.
+        unsafe { libc::dup2(null.as_raw_fd(), fd) };
+    }
+    // With a standard descriptor closed at start, `open` returned it; closing
+    // `null` would close it again.
+    if null.as_raw_fd() <= 2 {
+        let _ = null.into_raw_fd();
+    }
+}
+
 fn main() -> Result<ExitCode> {
     let cmd = Command::new("aspect")
         .disable_help_flag(true)
@@ -991,6 +1016,7 @@ fn main() -> Result<ExitCode> {
             if do_not_track() {
                 return Ok(ExitCode::SUCCESS);
             }
+            detach_stdio();
             // Report telemetry
             let threaded_rt = runtime::Runtime::new().into_diagnostic()?;
             threaded_rt.block_on(async {
