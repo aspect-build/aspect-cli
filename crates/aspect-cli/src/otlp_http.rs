@@ -10,6 +10,7 @@
 //! buffer from a thread that only enters the runtime for that reason.
 
 use std::io::Read as _;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};
@@ -30,6 +31,17 @@ impl OtlpHttpClient {
                 .timeout(TIMEOUT)
                 .build()?,
         ))
+    }
+
+    /// The process-wide client every HTTP exporter shares. Each blocking
+    /// client owns a runtime thread and loads the native root store.
+    pub fn shared() -> anyhow::Result<Arc<dyn HttpClient>> {
+        static SHARED: OnceLock<Arc<OtlpHttpClient>> = OnceLock::new();
+        if let Some(client) = SHARED.get() {
+            return Ok(client.clone());
+        }
+        let client = Arc::new(Self::new()?);
+        Ok(SHARED.get_or_init(|| client).clone())
     }
 }
 
@@ -110,6 +122,13 @@ mod tests {
         );
         assert!(received.contains("x-honeycomb-team: key\r\n"), "{received}");
         assert!(received.ends_with("payload"), "{received}");
+    }
+
+    #[test]
+    fn shared_client_is_reused() {
+        let a = OtlpHttpClient::shared().unwrap();
+        let b = OtlpHttpClient::shared().unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]

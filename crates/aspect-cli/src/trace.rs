@@ -536,7 +536,7 @@ fn http_config<B: WithExportConfig + WithHttpConfig>(
 ) -> anyhow::Result<B> {
     let builder = builder
         .with_endpoint(&spec.url)
-        .with_http_client(OtlpHttpClient::new()?);
+        .with_shared_http_client(OtlpHttpClient::shared()?);
     Ok(if spec.headers.is_empty() {
         builder
     } else {
