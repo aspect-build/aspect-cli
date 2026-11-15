@@ -69,7 +69,6 @@ use axl_runtime::eval::{AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPha
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use axl_runtime::{SignalKind, SignalOrigin, Signals};
-use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
@@ -104,7 +103,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     install_signal_watcher();
 
     if !do_not_track() {
-        let _ = task::spawn(send_telemetry());
+        spawn_telemetry();
     }
 
     let mut _tracing = trace::init();
@@ -372,6 +371,26 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     drop(_root);
     drop(_tracing);
     result
+}
+
+/// Send the usage report from a detached thread with its own runtime, so
+/// the process never waits for it.
+///
+/// Building the HTTP client loads the platform's root certificates, tens of
+/// milliseconds of synchronous work that would hold a worker of the main
+/// runtime, and that runtime's shutdown waits for its workers. A report
+/// still in flight when the command ends is abandoned.
+fn spawn_telemetry() {
+    let _ = std::thread::Builder::new()
+        .name("aspect-telemetry".into())
+        .spawn(|| {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                let _ = rt.block_on(send_telemetry());
+            }
+        });
 }
 
 /// For a task whose stdout is a machine-parsed protocol payload rather than
