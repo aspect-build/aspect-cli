@@ -7,10 +7,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::api;
 use super::error::EvalError;
 use super::load_path::{LoadPath, join_confined};
+use super::prefetch::{Prefetch, Taken};
 use crate::engine::store::Env;
 use crate::module::Mod;
 
@@ -50,6 +52,17 @@ pub struct AxlLoader<'m> {
     /// Module cache. Doubles as the cycle detector: an entry of `Loading` means
     /// the path is mid-evaluation on the current stack.
     loaded_modules: RefCell<HashMap<PathBuf, LoadState>>,
+
+    /// The parse-ahead running for the current phase, if any; see
+    /// [`Self::with_prefetch`].
+    prefetch: RefCell<Option<Arc<Prefetch<'m>>>>,
+}
+
+/// Where a `load()` resolves to: embedded `@std`/`@bazel` content, or a file
+/// evaluated under a `Mod` scope.
+pub(super) enum Target<'m> {
+    Std(&'static str),
+    Module(&'m Mod),
 }
 
 impl<'m> AxlLoader<'m> {
@@ -68,7 +81,23 @@ impl<'m> AxlLoader<'m> {
             load_stack: RefCell::new(vec![]),
             module_stack: RefCell::new(vec![]),
             loaded_modules: RefCell::new(HashMap::new()),
+            prefetch: RefCell::new(None),
         }
+    }
+
+    /// Run `body` while files reachable from `roots` are parsed ahead of
+    /// their evaluation on other threads; see [`super::prefetch`].
+    pub(crate) fn with_prefetch<T>(
+        &self,
+        roots: Vec<(&'m Mod, PathBuf)>,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        super::prefetch::with_prefetch(self.modules, &self.dialect, roots, |prefetch| {
+            let previous = self.prefetch.replace(prefetch);
+            let out = body();
+            *self.prefetch.borrow_mut() = previous;
+            out
+        })
     }
 
     /// Evaluate a `.axl` file in the given module's scope. Pushes `scope` onto
@@ -139,13 +168,23 @@ impl<'m> AxlLoader<'m> {
         content: Option<&'static str>,
         is_std: bool,
     ) -> Result<FrozenModule, EvalError> {
-        let raw = match content {
-            Some(s) => s.to_owned(),
-            None => fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?,
+        let prefetch = self.prefetch.borrow().clone();
+        let scope = self.module_stack.borrow().last().copied();
+        let prefetched = match (&prefetch, scope, content) {
+            (Some(prefetch), Some(scope), None) => prefetch.take(scope, path),
+            _ => Taken::Absent,
         };
-
-        let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
+        let ast = match prefetched {
+            Taken::Parsed(ast) => ast,
+            Taken::Absent => {
+                let raw = match content {
+                    Some(s) => s.to_owned(),
+                    None => fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?,
+                };
+                AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?
+            }
+        };
         Module::with_temp_heap(|module| {
             if is_std {
                 module.set("#_is_std#", Value::new_bool(true));
@@ -175,93 +214,16 @@ impl<'m> AxlLoader<'m> {
             target
         ))
     }
-
-    fn lookup_module(&self, name: &str) -> anyhow::Result<&'m Mod> {
-        self.modules
-            .iter()
-            .find(|m| m.name == name)
-            .ok_or_else(|| anyhow!("module '{}' is not declared.", name))
-    }
-}
-
-impl<'m> AxlLoader<'m> {
-    /// Top of the module stack — the scope of the file currently evaluating.
-    /// Errors if the stack is empty (callers reach this only via load arms
-    /// that genuinely need a parent module).
-    fn current_module(&self) -> anyhow::Result<&'m Mod> {
-        let stack = self.module_stack.borrow();
-        stack.last().copied().ok_or_else(|| {
-            anyhow!("no module on the stack — relative or subpath load with no caller scope")
-        })
-    }
-
-    /// Top of the load stack — the file currently evaluating. Used only for
-    /// resolving the directory of `RelativePath` loads.
-    fn current_script(&self) -> anyhow::Result<PathBuf> {
-        let stack = self.load_stack.borrow();
-        stack.last().cloned().ok_or_else(|| {
-            anyhow!("no script on the load stack — relative load with no caller context")
-        })
-    }
 }
 
 impl<'m> FileLoader for AxlLoader<'m> {
     fn load(&self, raw: &str) -> starlark::Result<FrozenModule> {
         let load_path: LoadPath = raw.try_into()?;
-
-        // Each arm yields the resolved path plus either embedded std content
-        // or a `Mod` scope to evaluate under. Std loads carry no scope (they're
-        // leaves); every other shape inherits or crosses into a `Mod`.
-        enum Target<'m> {
-            Std(&'static str),
-            Module(&'m Mod),
-        }
-
-        let (resolved_script_path, target): (PathBuf, Target<'m>) = match &load_path {
-            LoadPath::ModuleSpecifier { module, subpath }
-                if module == "std" || module == "bazel" =>
-            {
-                let filename = subpath
-                    .to_str()
-                    .ok_or_else(|| anyhow!("invalid @{} path: {:?}", module, subpath))?;
-                let content = crate::builtins::get(module, filename)
-                    .ok_or_else(|| anyhow!("'{}' does not exist in @{}", filename, module))?;
-                let path = PathBuf::from(format!("/@{}/{}", module, filename));
-                (path, Target::Std(content))
-            }
-            LoadPath::ModuleSpecifier { module, subpath } => {
-                let dep = self.lookup_module(module)?;
-                let path = join_confined(&dep.root, subpath)?;
-                if !path.is_file() {
-                    return Err(starlark::Error::new_other(anyhow!(
-                        "path {:?} does not exist in module `{}`.",
-                        subpath,
-                        module
-                    )));
-                }
-                (path, Target::Module(dep))
-            }
-            LoadPath::ModuleSubpath(subpath) => {
-                let scope = self.current_module()?;
-                (join_confined(&scope.root, subpath)?, Target::Module(scope))
-            }
-            LoadPath::RelativePath(relpath) => {
-                let scope = self.current_module()?;
-                let parent_script = self.current_script()?;
-                let parent_in_module = parent_script.strip_prefix(&scope.root).map_err(|_| {
-                    anyhow!(
-                        "parent script {} is not within current module {}",
-                        parent_script.display(),
-                        scope.root.display()
-                    )
-                })?;
-                let path = if let Some(parent_dir) = parent_in_module.parent() {
-                    join_confined(&scope.root, &parent_dir.join(relpath))?
-                } else {
-                    join_confined(&scope.root, relpath)?
-                };
-                (path, Target::Module(scope))
-            }
+        let scope = self.module_stack.borrow().last().copied();
+        let (resolved_script_path, target) = {
+            let load_stack = self.load_stack.borrow();
+            let parent = load_stack.last().map(PathBuf::as_path);
+            resolve(self.modules, &load_path, scope, parent)?
         };
 
         let frozen = match target {
@@ -271,4 +233,71 @@ impl<'m> FileLoader for AxlLoader<'m> {
 
         frozen.map_err(|e| Into::<starlark::Error>::into(e))
     }
+}
+
+/// Resolve `load_path`, loaded from `parent` under module `scope`, to the file
+/// it names and how to evaluate it. Shared by [`AxlLoader`]'s `load()` and
+/// [`super::prefetch`], so the two cannot disagree about which file a
+/// load means.
+pub(super) fn resolve<'m>(
+    modules: &'m [Mod],
+    load_path: &LoadPath,
+    scope: Option<&'m Mod>,
+    parent: Option<&Path>,
+) -> anyhow::Result<(PathBuf, Target<'m>)> {
+    // Only the relative arms need a caller.
+    let scope = || {
+        scope.ok_or_else(|| {
+            anyhow!("no module on the stack — relative or subpath load with no caller scope")
+        })
+    };
+    Ok(match load_path {
+        LoadPath::ModuleSpecifier { module, subpath } if module == "std" || module == "bazel" => {
+            let filename = subpath
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid @{} path: {:?}", module, subpath))?;
+            let content = crate::builtins::get(module, filename)
+                .ok_or_else(|| anyhow!("'{}' does not exist in @{}", filename, module))?;
+            let path = PathBuf::from(format!("/@{}/{}", module, filename));
+            (path, Target::Std(content))
+        }
+        LoadPath::ModuleSpecifier { module, subpath } => {
+            let dep = modules
+                .iter()
+                .find(|m| &m.name == module)
+                .ok_or_else(|| anyhow!("module '{}' is not declared.", module))?;
+            let path = join_confined(&dep.root, subpath)?;
+            if !path.is_file() {
+                return Err(anyhow!(
+                    "path {:?} does not exist in module `{}`.",
+                    subpath,
+                    module
+                ));
+            }
+            (path, Target::Module(dep))
+        }
+        LoadPath::ModuleSubpath(subpath) => {
+            let scope = scope()?;
+            (join_confined(&scope.root, subpath)?, Target::Module(scope))
+        }
+        LoadPath::RelativePath(relpath) => {
+            let scope = scope()?;
+            let parent_script = parent.ok_or_else(|| {
+                anyhow!("no script on the load stack — relative load with no caller context")
+            })?;
+            let parent_in_module = parent_script.strip_prefix(&scope.root).map_err(|_| {
+                anyhow!(
+                    "parent script {} is not within current module {}",
+                    parent_script.display(),
+                    scope.root.display()
+                )
+            })?;
+            let path = if let Some(parent_dir) = parent_in_module.parent() {
+                join_confined(&scope.root, &parent_dir.join(relpath))?
+            } else {
+                join_confined(&scope.root, relpath)?
+            };
+            (path, Target::Module(scope))
+        }
+    })
 }

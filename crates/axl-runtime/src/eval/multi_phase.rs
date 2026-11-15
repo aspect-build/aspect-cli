@@ -287,6 +287,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Each file is loaded into its own frozen module (via `AxlLoader::eval_module`).
     /// `FrozenTask` and `FrozenFeature` values discovered in those modules are
     /// inserted into `self.tasks` and `self.features` on the shared heap.
+    /// Files are read and parsed ahead of their evaluation on worker threads
+    /// (see `eval::prefetch`); evaluation itself stays on this thread.
+    /// Phase 2 does not do this: a config can write a file a later one
+    /// loads.
     ///
     /// A file that cannot be loaded does not stop the phase: it comes back as
     /// an [`AxlFileFailure`] and only the tasks and features *it* declares are
@@ -315,27 +319,42 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     ) -> PhaseFailures {
         let mut out = PhaseFailures::default();
 
-        // Evaluate auto-discovered AXL scripts (axl_sources in repo root)
-        for path in scripts {
-            if let Err(error) = self.eval_script_tasks(root_mod, path) {
-                self.record(&mut out, path, AxlFileRole::Tasks, error);
-            }
-        }
-
-        // Evaluate module specs (use_task and use_feature entries from MODULE.aspect)
-        for mode in modules.iter().chain(vec![root_mod]) {
-            for (abs_path, (label, symbols)) in mode.tasks.iter() {
-                if let Err(error) = self.eval_used_tasks(mode, abs_path, label, symbols) {
-                    self.record(&mut out, abs_path, AxlFileRole::Tasks, error);
+        let roots = scripts
+            .iter()
+            .map(|path| (root_mod, path.clone()))
+            .chain(modules.iter().chain([root_mod]).flat_map(|r#mod| {
+                let tasks = r#mod.tasks.keys().map(move |path| (r#mod, path.clone()));
+                let features = r#mod
+                    .features
+                    .iter()
+                    .map(move |(path, _)| (r#mod, path.clone()));
+                tasks.chain(features)
+            }))
+            .collect();
+        let loader = self.loader;
+        loader.with_prefetch(roots, || {
+            // Evaluate auto-discovered AXL scripts (axl_sources in repo root)
+            for path in scripts {
+                if let Err(error) = self.eval_script_tasks(root_mod, path) {
+                    self.record(&mut out, path, AxlFileRole::Tasks, error);
                 }
             }
 
-            for (abs_path, symbol) in mode.features.iter() {
-                if let Err(error) = self.eval_used_feature(mode, abs_path, symbol) {
-                    self.record(&mut out, abs_path, AxlFileRole::Feature, error);
+            // Evaluate module specs (use_task and use_feature entries from MODULE.aspect)
+            for mode in modules.iter().chain(vec![root_mod]) {
+                for (abs_path, (label, symbols)) in mode.tasks.iter() {
+                    if let Err(error) = self.eval_used_tasks(mode, abs_path, label, symbols) {
+                        self.record(&mut out, abs_path, AxlFileRole::Tasks, error);
+                    }
+                }
+
+                for (abs_path, symbol) in mode.features.iter() {
+                    if let Err(error) = self.eval_used_feature(mode, abs_path, symbol) {
+                        self.record(&mut out, abs_path, AxlFileRole::Feature, error);
+                    }
                 }
             }
-        }
+        });
 
         out
     }
