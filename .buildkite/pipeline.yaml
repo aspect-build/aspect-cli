@@ -320,10 +320,10 @@ steps:
       aspect test --task:name test-bk
   # Smoke-tests the new test-task flags. `--target-pattern-file` is forwarded
   # to Bazel verbatim, so the assertion is just that aspect resolves the file
-  # and the run completes. The IDE/BSP step re-runs the same pattern file in
-  # the shape the IntelliJ Bazel plugin produces through the tools/bazel
-  # wrapper — Bazel's own flag spellings behind `--bazel-flag` — asserting
-  # that the composed command line is one Bazel accepts.
+  # and the run completes. The IDE/BSP steps re-run builds in the shape the
+  # IntelliJ Bazel plugin produces through the tools/bazel wrapper, asserting
+  # that the composed command line is one Bazel accepts and that the caller's
+  # `--build_event_binary_file` is written.
   # `--coverage` is exercised against an sh_test rather
   # than a rust_test: `toolchains_llvm_bootstrapped` 0.5.2 (pinned in
   # MODULE.bazel) ships without `libclang_rt.profile.a`, so any rust_test under
@@ -357,6 +357,16 @@ steps:
         --target_pattern_file=$$PATTERNS \
         --tool_tag=bazelbsp:3.2.0
       rm -f $$PATTERNS
+
+      echo "--- :aspect: IDE/BSP shape — forwarded --build_event_binary_file"
+      BEP=$$(mktemp)
+      aspect build --task:name test-bk-ide-bep-file \
+        --build_event_binary_file=$$BEP \
+        --build_event_binary_file_upload_mode=wait_for_upload_complete \
+        --tool_tag=bazelbsp:3.2.0 \
+        //examples/test_states:always_pass
+      test -s $$BEP || { echo "the caller's --build_event_binary_file was not written"; exit 1; }
+      rm -f $$BEP
 
       echo "--- :aspect: aspect test --coverage (+ --coverage-report + --coverage-tool)"
       REPORT=$$(mktemp)

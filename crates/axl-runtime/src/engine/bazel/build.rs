@@ -3,6 +3,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
@@ -863,6 +864,22 @@ pub struct Build {
     span: RefCell<tracing::Span>,
 }
 
+/// Serve the caller's own `--build_event_binary_file` as a file sink.
+///
+/// The FIFO flag `Build::spawn` appends outranks it (the option is single-valued),
+/// so Bazel never writes the caller's file; the stream's raw bytes are mirrored
+/// there instead, complete once `wait()` has joined the stream. A file sink
+/// already naming the path is left as its only writer.
+fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path: PathBuf) {
+    if file_sinks.iter().any(|(p, _)| Path::new(p) == path) {
+        return;
+    }
+    file_sinks.push((
+        path.to_string_lossy().into_owned(),
+        Arc::new(FileSignal::new()),
+    ));
+}
+
 impl Build {
     /// Wait for the client to exit, a safe point: once the root is cancelled
     /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
@@ -932,6 +949,8 @@ impl Build {
         // must not repoint Bazel away from it.
         let injected_execlog_path =
             bazel::execlog::requested_path(&flags, verb, directory.as_deref());
+        let requested_bep_path =
+            bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
 
         let mut cmd = super::runner::SignalRunner(&signals).command();
         cmd.args(startup_flags);
@@ -942,9 +961,8 @@ impl Build {
             cmd.current_dir(directory);
         }
 
-        // File sinks share the BES reader's raw-bytes path (preserves
-        // bazel's byte-for-byte output); gRPC sinks run as broadcaster
-        // subscriber threads.
+        // File sinks share the BES reader's raw-bytes path (bazel's bytes, but
+        // with secrets redacted); gRPC sinks run as broadcaster subscriber threads.
         let mut file_sinks: Vec<(String, Arc<FileSignal>)> = vec![];
         let mut grpc_sinks: Vec<BuildEventSink> = vec![];
         for sink in sinks {
@@ -954,6 +972,9 @@ impl Build {
             } else {
                 grpc_sinks.push(sink);
             }
+        }
+        if build_events && let Some(path) = requested_bep_path {
+            tee_requested_bep_file(&mut file_sinks, path);
         }
 
         // Reserve the BES FIFO inode now (before `cmd.spawn()`) so bazel can
@@ -968,7 +989,7 @@ impl Build {
         let bes_channel = if build_events {
             let channel = BuildEventStream::reserve()?;
             cmd.arg("--build_event_binary_file_upload_mode=fully_async")
-                .arg("--build_event_binary_file")
+                .arg(bazel::bes::binary_file::FLAG)
                 .arg(channel.path());
             Some(channel)
         } else {
@@ -3092,6 +3113,114 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
+    /// The kinds of the events in the binary BEP file at `path`, in order.
+    fn bep_file_kinds(path: &std::path::Path) -> Vec<String> {
+        use axl_proto::build_event_stream::build_event::Payload;
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("the BEP file at {} should exist: {e}", path.display()));
+        let mut buf = bytes.as_slice();
+        let mut kinds = vec![];
+        while !buf.is_empty() {
+            let event =
+                axl_proto::build_event_stream::BuildEvent::decode_length_delimited(&mut buf)
+                    .expect("the BEP file should hold whole events");
+            kinds.push(match event.payload {
+                Some(Payload::Started(_)) => "started".to_string(),
+                Some(Payload::Finished(_)) => "finished".to_string(),
+                other => format!("{other:?}"),
+            });
+        }
+        kinds
+    }
+
+    /// Run `script` against basil and assert it exited 0.
+    fn run_bes_task(script: &str) {
+        let exit = crate::test::eval(script)
+            .with_fake_bazel()
+            .run_task(0)
+            .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// A caller's `--build_event_binary_file` is written even though the CLI's
+    /// own FIFO flag, appended last, is the one Bazel writes to.
+    #[test]
+    fn a_requested_bep_file_is_written_while_the_cli_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("ide.bep");
+        run_bes_task(&format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=success", "--build_event_binary_file={asked}"],
+        build_events = [iter],
+        stderr = None,
+    )
+    seen = len([e for e in iter])
+    if not build.wait().success: return 1
+    if seen != 2: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            asked = asked.to_str().unwrap(),
+        ));
+        assert_eq!(bep_file_kinds(&asked), ["started", "finished"]);
+    }
+
+    /// A relative path lands where Bazel would put it: under the spawn directory.
+    #[test]
+    fn a_relative_bep_file_resolves_against_the_spawn_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        run_bes_task(&format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        directory = {dir:?},
+        flags = ["--scenario=success", "--build_event_binary_file=relative.bep"],
+        build_events = True,
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+            dir = dir.path().to_str().unwrap(),
+        ));
+        assert_eq!(
+            bep_file_kinds(&dir.path().join("relative.bep")),
+            ["started", "finished"]
+        );
+    }
+
+    /// A path that cannot be created costs only the caller's copy: the CLI's
+    /// own consumers of the stream still see every event.
+    #[test]
+    fn an_unwritable_bep_file_does_not_end_the_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let unwritable = dir.path().join("missing-dir").join("ide.bep");
+        run_bes_task(&format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=success", "--build_event_binary_file={unwritable}"],
+        build_events = [iter],
+        stderr = None,
+    )
+    seen = len([e for e in iter])
+    if not build.wait().success: return 1
+    if seen != 2: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            unwritable = unwritable.to_str().unwrap(),
+        ));
+        assert!(!unwritable.exists());
+    }
+
     /// A file sink at a path that cannot be opened reports its own failure;
     /// the build, its iterators and the other sinks finish as usual.
     #[test]
@@ -3099,7 +3228,7 @@ Test = task(implementation = _impl)
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("good.bep");
         let bad = dir.path().join("missing-dir").join("bad.bep");
-        let exit = crate::test::eval(&format!(
+        run_bes_task(&format!(
             r#"
 def _impl(ctx):
     iter = bazel.build_events.iterator()
@@ -3124,11 +3253,7 @@ Test = task(implementation = _impl)
 "#,
             good = good.to_str().unwrap(),
             bad = bad.to_str().unwrap(),
-        ))
-        .with_fake_bazel()
-        .run_task(0)
-        .expect("run_task");
-        assert_eq!(exit, Some(0));
+        ));
         assert!(std::fs::metadata(&good).unwrap().len() > 0);
     }
 

@@ -1051,6 +1051,26 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
         .next_back()
 }
 
+/// The output file `name` asks Bazel to write for `command`, as [`last_flag_value`] reads
+/// it, or `None` when nothing asked.
+///
+/// An empty value clears the flag rather than naming a file, so it is not a request. A
+/// relative value is joined to `directory`, the spawn's working directory, because Bazel
+/// resolves it there while the CLI reads and writes from its own cwd.
+pub fn requested_path(
+    args: &[String],
+    name: &str,
+    command: &str,
+    directory: Option<&str>,
+) -> Option<PathBuf> {
+    last_flag_value(args, name, command)
+        .filter(|path| !path.is_empty())
+        .map(|path| match directory {
+            Some(dir) if Path::new(&path).is_relative() => Path::new(dir).join(path),
+            _ => PathBuf::from(path),
+        })
+}
+
 /// The [`DefaultOverride`] payloads among `tokens` that apply to `command`, in the order
 /// Bazel parses them: a section at a time in [`sections_for`] order, and within a section
 /// one [`override_chunks`] bucket at a time. Empty buckets are dropped.
