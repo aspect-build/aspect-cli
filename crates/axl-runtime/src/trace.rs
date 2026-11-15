@@ -353,7 +353,7 @@ mod tests {
 /// actually push into the tracing pipeline (target, level, fields). This
 /// exercises the same path the OTel logs bridge consumes downstream.
 #[cfg(test)]
-mod telemetry_tests {
+pub(crate) mod telemetry_tests {
     use std::collections::BTreeMap;
     use std::fmt;
     use std::sync::{Arc, Mutex};
@@ -365,11 +365,12 @@ mod telemetry_tests {
 
     use crate::axl_eval;
 
+    /// One `tracing` event as a recording subscriber saw it.
     #[derive(Debug, Clone)]
-    struct Recorded {
-        target: String,
-        level: String,
-        fields: BTreeMap<String, String>,
+    pub(crate) struct Recorded {
+        pub(crate) target: String,
+        pub(crate) level: String,
+        pub(crate) fields: BTreeMap<String, String>,
     }
 
     /// Captures every `Event` into a shared `Vec` so the test can assert
@@ -442,6 +443,14 @@ mod telemetry_tests {
     /// subscriber stays cached as `Interest::never()` for the rest of the
     /// process and our recorder never gets asked.
     fn capture(expr: &str) -> Vec<Recorded> {
+        capture_events(|| {
+            axl_eval!(expr).unwrap();
+        })
+    }
+
+    /// Run `f` with a recording subscriber installed, holding `TEST_LOCK`,
+    /// and return the events it fired. For tests anywhere in the crate.
+    pub(crate) fn capture_events(f: impl FnOnce()) -> Vec<Recorded> {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         tracing::callsite::rebuild_interest_cache();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -449,9 +458,7 @@ mod telemetry_tests {
             events: events.clone(),
         };
         let dispatch = Dispatch::new(recorder);
-        tracing::dispatcher::with_default(&dispatch, || {
-            axl_eval!(expr).unwrap();
-        });
+        tracing::dispatcher::with_default(&dispatch, f);
         let captured = events.lock().unwrap().clone();
         captured
     }

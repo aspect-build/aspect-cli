@@ -73,6 +73,8 @@ use axl_runtime::{SignalKind, SignalOrigin, Signals};
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
+use axl_runtime::startup::{StepTimer, step, step_async, time};
+
 use crate::cmd::Cmd;
 use crate::helpers::{find_user_config, get_default_axl_search_paths, search_sources};
 use axl_runtime::project_root::{find_aspect_root, find_bazel_root, find_git_root};
@@ -107,11 +109,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
         spawn_telemetry();
     }
 
-    let mut _tracing = trace::init();
+    let mut _tracing = time("tracing", trace::init);
     let _root = info_span!(
         "root",
         version = cargo_pkg_short_version(),
         pid = std::process::id(),
+        startup_ms = tracing::field::Empty,
     )
     .entered();
 
@@ -129,32 +132,42 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     })?;
     // `Env` requires both roots; cwd is the last-resort fallback when no
     // marker file exists anywhere up the tree.
-    let aspect_root =
-        find_aspect_root(&current_work_dir).unwrap_or_else(|| current_work_dir.clone());
-    let bazel_root = find_bazel_root(&current_work_dir).unwrap_or_else(|| current_work_dir.clone());
-    let git_root = find_git_root(&current_work_dir);
+    let (aspect_root, bazel_root, git_root) = step("roots", || {
+        (
+            find_aspect_root(&current_work_dir).unwrap_or_else(|| current_work_dir.clone()),
+            find_bazel_root(&current_work_dir).unwrap_or_else(|| current_work_dir.clone()),
+            find_git_root(&current_work_dir),
+        )
+    });
 
     let disk_store = DiskStore::new(aspect_root.clone());
     let mode = ModEvaluator::new(aspect_root.clone());
 
-    let root_mod = mode.evaluate(AXL_ROOT_MODULE_NAME.to_string(), aspect_root.clone())?;
-    let builtins = builtins::expand_builtins(aspect_root.clone(), disk_store.builtins_path())?;
-    let module_roots = disk_store.expand_store(&root_mod, builtins).await?;
+    let root_mod = step("root_module", || {
+        mode.evaluate(AXL_ROOT_MODULE_NAME.to_string(), aspect_root.clone())
+    })?;
+    let builtins = step("builtins", || {
+        builtins::expand_builtins(aspect_root.clone(), disk_store.builtins_path())
+    })?;
+    let module_roots = step_async("store", disk_store.expand_store(&root_mod, builtins)).await?;
 
-    let mut modules: Vec<Mod> = vec![];
-    for (name, root) in module_roots {
-        let r#mod = mode.evaluate(name, root)?;
-        axl_runtime::trace!("module @{} at {:?}", r#mod.name, r#mod.root);
-        modules.push(r#mod)
-    }
+    let modules = step("modules", || -> Result<Vec<Mod>, anyhow::Error> {
+        let mut modules: Vec<Mod> = vec![];
+        for (name, root) in module_roots {
+            let r#mod = mode.evaluate(name, root)?;
+            axl_runtime::trace!("module @{} at {:?}", r#mod.name, r#mod.root);
+            modules.push(r#mod)
+        }
+        Ok(modules)
+    })?;
 
     let search_paths = get_default_axl_search_paths(&current_work_dir, &aspect_root);
-    let (scripts, configs) = search_sources(&search_paths).await?;
+    let (scripts, configs) = step_async("sources", search_sources(&search_paths)).await?;
 
     // User-global overrides run last among configs, scoped to their own
     // module so loads resolve within ~/.aspect. Skipped when the aspect
     // root is the home dir itself — the file is already in `configs`.
-    let user_config = find_user_config(dirs::home_dir().as_deref())
+    let user_config = step_async("user_config", find_user_config(dirs::home_dir().as_deref()))
         .await
         .filter(|path| !configs.contains(path))
         .map(|path| {
@@ -171,6 +184,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     let parent_span = tracing::Span::current();
     let out = spawn_blocking(move || -> Result<ExitCode, anyhow::Error> {
         let _enter = parent_span.enter();
+        let root_span = &parent_span;
         let cli_version = cargo_pkg_short_version();
 
         ModuleEnv::with(|env| -> Result<ExitCode, anyhow::Error> {
@@ -194,7 +208,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut unloadable = Unloadable::default();
 
             // Phase 1: discover tasks and features.
-            let phase1 = mpe.eval(&scripts, &root_mod, &modules);
+            let phase1 = time("discover", || mpe.eval(&scripts, &root_mod, &modules));
             unloadable.scripts = phase1.files;
             if let Some(error) = phase1.ended {
                 return Err(unloadable.reporting(error.into()));
@@ -210,7 +224,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         .map(|(path, r#mod)| (path.as_path(), r#mod)),
                 )
                 .collect();
-            let phase2 = mpe.execute_configs(&config_entries);
+            let phase2 = time("configs", || mpe.execute_configs(&config_entries));
             unloadable.configs = phase2.files;
             if let Some(error) = phase2.ended {
                 return Err(unloadable
@@ -228,6 +242,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // A name conflict or a reserved name is judged here, on the
             // finished surface, so it is one of the raise paths that has to
             // report what did not load on its way out.
+            let cli_step = StepTimer::start("cli");
             let mut root_cmd = cmd
                 .build(&cli_version)
                 .map_err(|err| unloadable.reporting(err.into()))?;
@@ -240,7 +255,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut cmd_for_help = root_cmd.clone();
             let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
 
-            let matches = match root_cmd.try_get_matches_from_mut(argv) {
+            let parsed = root_cmd.try_get_matches_from_mut(argv);
+            cli_step.finish();
+            let matches = match parsed {
                 Ok(m) => m,
                 Err(err) => {
                     // `--help`, `--version` and a bare `aspect` all land here:
@@ -299,7 +316,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 _ => {}
             }
 
-            let dispatch = cmd.dispatch(matches)?;
+            let dispatch = step("dispatch", || cmd.dispatch(matches))?;
 
             // Print the "Running <task>" header before feature
             // implementations run so any diagnostic output from feature
@@ -313,8 +330,10 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             .map_err(anyhow::Error::from)?;
 
             // Phase 3: run enabled feature impls.
-            mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
-                .map_err(anyhow::Error::from)?;
+            time("features", || {
+                mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
+            })
+            .map_err(anyhow::Error::from)?;
 
             // Phase 3.5: install exporters from any registered via
             // `ctx.telemetry.exporters.add(...)`. Replays buffered spans
@@ -340,7 +359,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     }
                 }
             }
-            trace::install_late_exporters(exporters)?;
+            step("exporters", || trace::install_late_exporters(exporters))?;
+
+            report_startup(root_span, &dispatch.task_kind);
 
             // Phase 4: execute the selected task.
             let exit = mpe
@@ -396,6 +417,36 @@ fn spawn_telemetry() {
                 let _ = rt.block_on(send_telemetry());
             }
         });
+}
+
+/// OTel semantic-convention histogram boundaries for durations in seconds.
+const DURATION_BUCKETS_S: [f64; 14] = [
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
+/// Close the start-up measurement (see `axl_runtime::startup`) and attach
+/// its total to `root_span` as `startup_ms` and to the
+/// `aspect.cli.startup.duration` histogram, tagged with the task kind. The
+/// histogram is in seconds with the OTel semantic-convention boundaries for
+/// durations; the SDK's defaults are sized for milliseconds.
+fn report_startup(root_span: &tracing::Span, task_kind: &str) {
+    axl_runtime::startup::report(task_kind);
+    let Some(total) = axl_runtime::startup::total() else {
+        return;
+    };
+    root_span.record("startup_ms", total.as_secs_f64() * 1000.0);
+    opentelemetry::global::meter("aspect-cli")
+        .f64_histogram("aspect.cli.startup.duration")
+        .with_unit("s")
+        .with_boundaries(DURATION_BUCKETS_S.to_vec())
+        .with_description(
+            "Time from the start of aspect-cli's main until the selected task begins executing",
+        )
+        .build()
+        .record(
+            total.as_secs_f64(),
+            &[opentelemetry::KeyValue::new("task", task_kind.to_string())],
+        );
 }
 
 /// For a task whose stdout is a machine-parsed protocol payload rather than
@@ -636,8 +687,9 @@ fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
 }
 
 fn main() -> ExitCode {
-    // Install first, before any other machinery, so fatal-signal reporting
-    // covers everything after it (see the `crash_handler` module docs).
+    axl_runtime::startup::mark_process_start();
+    // Install before any other machinery, so fatal-signal reporting covers
+    // everything after it (see the `crash_handler` module docs).
     crash_handler::install();
     install_allocator_error_handler();
     crash_handler::trigger_test_crash();
