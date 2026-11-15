@@ -88,7 +88,8 @@ pub(crate) struct Deployment {
     /// Which token of a grant this deployment's endpoints validate, as its
     /// selected authorization server advertised it at `configure`. Absent when it
     /// advertised none. Login and refresh re-read the live document first and use
-    /// this only when it cannot be fetched — see [`current_bearer`].
+    /// this only when it cannot be fetched, or for a refresh not fetched in time —
+    /// see [`current_bearer`] and [`refresh_bearer`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bearer: Option<BearerKind>,
 }
@@ -1085,12 +1086,27 @@ async fn current_bearer(deployment: &Deployment) -> Option<BearerKind> {
     }
 }
 
-/// [`current_bearer`] for the deployment named `name`, `None` when no such
+/// How long a refresh waits for [`current_bearer`] before using the recorded
+/// value. A refresh runs inside the credential helper, which Bazel gives 10
+/// seconds by default (`--credential_helper_timeout`), and the token grant needs
+/// most of that.
+const REFRESH_BEARER_WAIT: Duration = Duration::from_secs(1);
+
+/// [`current_bearer`] for a refresh of the deployment named `name`: bounded by
+/// [`REFRESH_BEARER_WAIT`], after which the value recorded at `configure` stands
+/// in, as it does for a document that cannot be fetched. `None` when no such
 /// deployment is configured.
-async fn current_bearer_named(name: &str) -> Option<BearerKind> {
+async fn refresh_bearer(name: &str) -> Option<BearerKind> {
     let deployments = load_deployments().ok()?;
     let deployment = deployments.iter().find(|d| d.name == name)?;
-    current_bearer(deployment).await
+    bounded_bearer(deployment, REFRESH_BEARER_WAIT).await
+}
+
+/// [`current_bearer`], or `deployment`'s recorded `bearer` once `wait` passes.
+async fn bounded_bearer(deployment: &Deployment, wait: Duration) -> Option<BearerKind> {
+    tokio::time::timeout(wait, current_bearer(deployment))
+        .await
+        .unwrap_or(deployment.bearer)
 }
 
 /// The outcome of picking which advertised authorization server to configure,
@@ -2960,7 +2976,7 @@ impl RefreshFailure {
 /// tenant API is upgraded to it here and persisted that way by the caller.
 ///
 /// `advertised` is the `bearer` the credential's deployment advertises now
-/// ([`current_bearer`]), `None` for Aspect Cloud or a deployment that advertises
+/// ([`refresh_bearer`]), `None` for Aspect Cloud or a deployment that advertises
 /// none; it picks the bearer ([`BearerRule::for_refresh`]). A credential minted
 /// with the id_token switches to the access_token here when its deployment asks
 /// for one, and the refresh fails when the grant carries no access_token.
@@ -3319,7 +3335,7 @@ pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<O
         TokenAction::Use => Ok(Some(entry.access_token)),
         TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
         TokenAction::Refresh => {
-            let advertised = block_on(current_bearer_named(deployment));
+            let advertised = block_on(refresh_bearer(deployment));
             let refreshed = block_on(refresh_access_token(&entry, advertised))
                 .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
             store_credential(profile, deployment, refreshed.clone())?;
@@ -4610,7 +4626,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
             TokenAction::Refresh => match block_on(async {
-                refresh_access_token(&entry, current_bearer_named(&deployment).await).await
+                refresh_access_token(&entry, refresh_bearer(&deployment).await).await
             }) {
                 Ok(refreshed) => {
                     store_credential(&profile, &deployment, refreshed.clone())?;
@@ -8626,6 +8642,25 @@ mod tests {
         let mut other_issuer = recorded.clone();
         other_issuer.issuer = Some("https://auth.elsewhere.example".into());
         assert_eq!(doc.bearer_for(&other_issuer), None);
+    }
+
+    #[test]
+    fn a_refresh_does_not_wait_out_a_silent_discovery_host() {
+        // Accepts the connection and never answers the TLS handshake.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut deployment = dep("acme", false);
+        deployment.hosts = vec![silent.local_addr().unwrap().to_string()];
+        deployment.bearer = Some(BearerKind::AccessToken);
+
+        let started = Instant::now();
+        let bearer = current_thread_runtime()
+            .block_on(bounded_bearer(&deployment, Duration::from_millis(200)));
+        assert_eq!(bearer, Some(BearerKind::AccessToken));
+        assert!(
+            started.elapsed() < DISCOVERY_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
