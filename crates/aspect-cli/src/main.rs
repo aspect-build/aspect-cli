@@ -173,13 +173,17 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
         let cli_version = cargo_pkg_short_version();
 
         ModuleEnv::with(|env| -> Result<ExitCode, anyhow::Error> {
-            let loader = Loader::new(
+            // Never dropped: freeing every loaded file's frozen heap costs ~9ms
+            // per command. They hold only what module-level code built, which
+            // has no `ctx` and so owns no file or child; process exit releases
+            // them. The task heap, which can, is still dropped.
+            let loader = std::mem::ManuallyDrop::new(Loader::new(
                 cli_version.clone(),
                 aspect_root.clone(),
                 bazel_root.clone(),
                 git_root.clone(),
                 &modules,
-            );
+            ));
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
             // What the two phases could not load, and what that costs the
