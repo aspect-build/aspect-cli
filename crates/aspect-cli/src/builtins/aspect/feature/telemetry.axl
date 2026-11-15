@@ -1,6 +1,6 @@
 """Default telemetry feature.
 
-Registers exporters from three sources:
+Registers exporters from four sources:
 
   1. ASPECT_DEBUG=1 — always (regardless of `discover_endpoints`) wires up
      a compact stderr exporter for local debugging. Independent of the
@@ -9,8 +9,8 @@ Registers exporters from three sources:
   2. Environment variables — when `discover_endpoints = True` (default), reads the
      standard `OTEL_EXPORTER_OTLP_*` vars and registers matching endpoints.
      Preserves the familiar behavior where setting those vars in CI is
-     enough to ship traces, without baking the env-var sniff into the
-     runtime; the path is fully Starlark-driven.
+     enough to ship traces, logs and metrics, without baking the env-var
+     sniff into the runtime; the path is fully Starlark-driven.
 
   3. The `endpoint` arg — a CLI-friendly string list. Each entry encodes
      a URL with optional headers using a semicolon-separated form:
