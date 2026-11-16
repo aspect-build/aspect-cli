@@ -52,9 +52,15 @@ impl Tee {
     fn write(&mut self, bytes: &[u8]) {
         let Some(out) = self.out.as_mut() else { return };
         if let Err(e) = out.write_all(bytes) {
-            self.out = None;
-            self.error = Some(format!("ExecLog: write to '{}' failed: {e}", self.path));
+            let error = format!("ExecLog: write to '{}' failed: {e}", self.path);
+            self.fail(error);
         }
+    }
+
+    /// Stop writing the copy, keeping why.
+    fn fail(&mut self, error: String) {
+        self.out = None;
+        self.error.get_or_insert(error);
     }
 
     /// Start the copy over, empty, as bazel starts its own log over for a
@@ -99,6 +105,32 @@ impl<R: Read> MultiTeeReader<R> {
         self.tees.iter_mut().for_each(Tee::restart);
     }
 
+    /// Start every copy over from the file at `path` as it now stands, so the
+    /// copies end as Bazel's file does whatever order its bytes were read in.
+    fn recopy(&mut self, path: &Path) {
+        if self.tees.is_empty() {
+            return;
+        }
+        self.restart();
+        let fail_all = |tees: &mut Vec<Tee>, e: io::Error| {
+            let error = format!("ExecLog: copying '{}' failed: {e}", path.display());
+            tees.iter_mut().for_each(|t| t.fail(error.clone()));
+        };
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) => return fail_all(&mut self.tees, e),
+        };
+        let mut buf = vec![0; 64 * 1024];
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => self.tees.iter_mut().for_each(|t| t.write(&buf[..n])),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return fail_all(&mut self.tees, e),
+            }
+        }
+    }
+
     /// Finish every copy, failing with each failed copy's reason.
     fn finish(&mut self) -> io::Result<()> {
         let failures: Vec<String> = self.tees.iter_mut().filter_map(Tee::finish).collect();
@@ -129,16 +161,12 @@ fn broken_read(done: Option<&crate::stream::Done>, path: &std::path::Path) -> io
 /// The decoded stream over the followed file, as the reader thread holds it.
 type Decoding<'a> = Decoder<'a, io::BufReader<MultiTeeReader<followed::File>>>;
 
-/// Read the rest of the log without decoding it, so the raw copies still get
-/// every byte, starting them over with the file as decoding would.
+/// Read the rest of the log without decoding it, to the end of the stream.
+/// [`followed::File`] turns a read error into that end, so the only error it
+/// can return, [`followed::StartedOver`], just means reading on.
 fn pass_through(decoder: &mut Decoding<'_>) {
     let reader = decoder.get_mut();
-    while let Err(err) = io::copy(reader, &mut io::sink()) {
-        if !followed::StartedOver::is(&err) {
-            return;
-        }
-        reader.get_mut().restart();
-    }
+    while io::copy(reader, &mut io::sink()).is_err() {}
 }
 
 /// The file under `decoder` has said why it stopped, so a decode error is the
@@ -153,8 +181,6 @@ fn decoder_done(decoder: &Option<Decoding<'_>>) -> bool {
 pub enum ExecLogStreamError {
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),
-    #[error("prost decode error: {0}")]
-    ProstDecode(#[from] prost::DecodeError),
     #[error("send error: {0}")]
     Send(#[from] SendError),
     #[error("close error: {0}")]
@@ -191,9 +217,9 @@ pub enum ReaderOutcome {
     Read,
     /// The invocation ended before the log appeared.
     NeverAppeared,
-    /// The log stopped decoding partway, for the reason given. The decoded
-    /// stream ended there and the rest was read without decoding, so the
-    /// copies are whole; the build is not the reader's to fail over it.
+    /// The log stopped decoding partway, for the reason given, while
+    /// something was reading it. The decoded stream ended there; the build is
+    /// not the reader's to fail over it.
     Undecodable(String),
 }
 
@@ -286,9 +312,11 @@ impl ExecLogStream {
     /// A log that fails to decode, for that or any other reason, ends the
     /// decoded stream where it failed rather than failing `join()`: the build's
     /// outcome is Bazel's, and the consumers have every entry before the
-    /// failure. The rest is read without decoding, so the copies stay whole, and
+    /// failure. No later attempt in the file is decoded. The reader still waits
+    /// out the file, then writes every copy again from Bazel's finished log,
+    /// since a missed restart leaves what it read a mix of two attempts.
     /// `join()` reports [`ReaderOutcome::Undecodable`] for the caller to warn
-    /// about.
+    /// about when anything was reading the stream.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
@@ -365,16 +393,23 @@ impl ExecLogStream {
                         }
                     }
                 }
+                let closed = sender.close();
                 if undecodable.is_some() {
-                    pass_through(out_raw.as_mut().expect("put back after a restart"));
+                    let decoder = out_raw.as_mut().expect("put back after a restart");
+                    pass_through(decoder);
+                    let raw = decoder.get_mut().get_mut();
+                    let path = raw.inner.path().to_owned();
+                    raw.recopy(&path);
                 }
                 let decoder = out_raw.as_ref().expect("put back after a restart");
                 let file = &decoder.get_ref().get_ref().inner;
                 let broken = broken_read(file.done(), file.path());
-                let closed = sender.close();
                 broken?;
                 closed?;
-                Ok(undecodable.map_or(ReaderOutcome::Read, ReaderOutcome::Undecodable))
+                Ok(match undecodable {
+                    Some(reason) if has_readers => ReaderOutcome::Undecodable(reason),
+                    _ => ReaderOutcome::Read,
+                })
             })();
             // Every copy is finished however reading ended, so a failed one is
             // reported even beside a reader error.
@@ -596,21 +631,17 @@ mod tests {
         );
         let err = combine(Ok(ReaderOutcome::Read), vec!["sink".to_owned()]).unwrap_err();
         assert!(err.to_string().contains("sink"));
-        let decode = prost::DecodeError::new("bad entry");
-        let err = combine(Err(ExecLogStreamError::ProstDecode(decode)), vec![]).unwrap_err();
-        assert!(matches!(err, ExecLogStreamError::ProstDecode(_)));
         let io_err = ExecLogStreamError::IO(io::Error::other("reader"));
         let err = combine(Err(io_err), vec![]).unwrap_err();
         assert_eq!(err.to_string(), "io error: reader");
     }
 
-    /// A decode error and a failed copy are both reported, without a doubled
+    /// A reader error and a failed copy are both reported, without a doubled
     /// `io error:` prefix.
     #[test]
     fn a_reader_error_and_a_failed_copy_are_both_named() {
-        let decode = prost::DecodeError::new("bad entry");
         let err = combine(
-            Err(ExecLogStreamError::ProstDecode(decode)),
+            Err(ExecLogStreamError::IO(io::Error::other("bad entry"))),
             vec!["ExecLog: write to '/full/c.zstd' failed: disk full".to_owned()],
         )
         .unwrap_err()
@@ -815,6 +846,79 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(copy, log);
+    }
+
+    /// A restart the reader misses, because Bazel's new attempt grows past
+    /// where the reader had got to, reads as corruption: the stream ends there,
+    /// before Bazel does, and the copy is Bazel's final file rather than the
+    /// mix of attempts the reader saw.
+    #[test]
+    fn a_missed_restart_ends_the_stream_early_and_the_copy_matches_bazels_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("exec.log");
+        let copy = dir.path().join("copy.zstd");
+        let mut client = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let attempt1 = compact_log(1..=(CHANNEL_CAPACITY as u32 * 3));
+        let attempt2 = compact_log(100_000..=200_000);
+        assert!(attempt2.len() > attempt1.len(), "never reads as shorter");
+        std::fs::write(&log, &attempt1).unwrap();
+        let mut stream = ExecLogStream::spawn_with_file(
+            log.clone(),
+            client.id(),
+            client.id(),
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
+        let recv = stream.receiver().unwrap();
+        stream.seal();
+        // The reader has started, and parks once the ring fills.
+        assert_eq!(recv.recv().unwrap().id, 1);
+        std::fs::write(&log, &attempt2).unwrap();
+
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ids: Vec<u32> = std::iter::from_fn(|| recv.recv().ok().map(|e| e.id)).collect();
+            let _ = done.send(ids);
+        });
+        let ids = ended
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the stream ends at the failure, with Bazel still running");
+        assert!(ids.iter().all(|&id| id <= 3000), "{:?}", ids.last());
+
+        let _ = client.kill();
+        let _ = client.wait();
+        assert!(matches!(
+            stream.join().unwrap(),
+            ReaderOutcome::Undecodable(_)
+        ));
+        assert_eq!(std::fs::read(&copy).unwrap(), attempt2);
+    }
+
+    /// A log nobody reads is not reported for failing to decode, and its copy
+    /// is still whole.
+    #[test]
+    fn a_corrupt_log_nobody_reads_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.log");
+        let copy = dir.path().join("copy.zstd");
+        let mut log = compact_log(1..=5);
+        log.extend_from_slice(b"not a zstd frame at all");
+        std::fs::write(&path, &log).unwrap();
+        let mut client = std::process::Command::new("true").spawn().unwrap();
+        let _ = client.wait();
+        let mut stream = ExecLogStream::spawn_with_file(
+            path,
+            client.id(),
+            client.id(),
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
+        stream.seal();
+        assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
+        assert_eq!(std::fs::read(&copy).unwrap(), log);
     }
 
     /// A sealed stream with no consumer reads the whole log on its own, without
