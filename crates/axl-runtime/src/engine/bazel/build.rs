@@ -1191,7 +1191,12 @@ impl Build {
             .and_then(|dir| {
                 let path = dir.join(bazel::profile::file_name(requested_profile.as_deref()));
                 cmd.arg(format!("{}={}", bazel::profile::FLAG, path.display()));
-                requested_profile.map(|to| (path, to))
+                // An earlier run's profile at the caller's path is not left to
+                // be read as this build's, should this one never be reaped.
+                requested_profile.map(|to| {
+                    let _ = std::fs::remove_file(&to);
+                    (path, to)
+                })
             });
 
         // The workspace log stays in the history too; a path the caller asked

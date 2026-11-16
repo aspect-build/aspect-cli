@@ -1069,8 +1069,10 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 # Profile / BEP / exec-log — opt-in each. Files at paths this
                 # feature chose are removed on success AND failure (no retry,
                 # so a leftover file just leaks a potentially-sensitive
-                # artifact); a profile at a `--profile` set elsewhere is not
-                # ours to remove.
+                # artifact in a shared temp dir); a profile at a `--profile`
+                # set elsewhere is not ours to remove. The originals a build
+                # keeps in the task invocation's history are private to the
+                # user and pruned with it.
                 singletons = []
                 if upload_profile:
                     singletons.append(("profile", profile["path"], "profile.gz"))

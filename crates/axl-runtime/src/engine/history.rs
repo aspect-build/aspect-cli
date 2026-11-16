@@ -6,6 +6,9 @@
 //! [`History::earlier_run`]). An entry is made only once a Bazel invocation has
 //! a file to keep in it, so a run that kept nothing leaves no trace.
 //!
+//! The folders are readable by their user alone, since an execution log holds
+//! action command lines and environment variables unredacted.
+//!
 //! Bazel reads some of these files back after the build — it uploads the
 //! compact execution log as a build tool log, possibly after the client has
 //! exited — so nothing here is moved or deleted by the invocation that wrote
@@ -35,6 +38,17 @@ const BAZEL_DIR: &str = "bazel";
 /// `invocation`.
 pub fn bazel_dir(invocation: &Path, n: u32) -> PathBuf {
     invocation.join(BAZEL_DIR).join(n.to_string())
+}
+
+/// Create `dir` and its missing parents readable by this user alone: an
+/// execution log holds action command lines and environment variables, and
+/// nothing redacts it on disk.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 /// What the history keeps.
@@ -166,7 +180,7 @@ impl History {
         }
         invocation.bazel_invocations += 1;
         let dir = bazel_dir(&invocation.dir, invocation.bazel_invocations);
-        fs::create_dir_all(&dir)?;
+        create_private_dir(&dir)?;
         Ok(dir)
     }
 
@@ -455,6 +469,24 @@ mod tests {
         );
         assert!(!is_invocation_name("logs".as_ref()));
         assert!(!is_invocation_name("é".as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_history_is_readable_by_its_user_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let h = history(&root.path().join("history"), 1 << 30, 10);
+        h.begin(&id(1));
+        let mut dir = h.next_bazel_dir().unwrap();
+        loop {
+            let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", dir.display());
+            if dir == root.path().join("history") {
+                break;
+            }
+            dir.pop();
+        }
     }
 
     #[test]
