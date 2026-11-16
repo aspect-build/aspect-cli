@@ -34,7 +34,7 @@ const BUFFER_CAP: usize = 50_000;
 /// collector.
 #[derive(Debug, Default)]
 pub struct SpanTally {
-    /// Sampled spans that ended, counted before the batch processor's queue.
+    /// Spans that ended, counted before the batch processor's queue.
     ended: AtomicU64,
     /// Spans the batch processor handed to the exporter.
     received: AtomicU64,
