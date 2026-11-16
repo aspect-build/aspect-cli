@@ -97,14 +97,20 @@ fn partition_build_events(
 }
 
 /// Split the `execution_log=` argument into "is the stream enabled", the sinks
-/// and the iterator handles. Mirrors `partition_build_events`: `True` enables the
-/// stream naming no consumer up front — `build.execution_logs()` can still claim
-/// the stream's own subscriber later — and a list enables it and names consumers.
+/// and the iterator handles. `False` leaves the log off and a list turns it on.
+/// `True` is refused, because it names no consumer.
 fn partition_execution_log(
     arg: Either<bool, UnpackList<Either<ExecLogSink, iter::ExecLogIter>>>,
-) -> (bool, Vec<ExecLogSink>, Vec<iter::ExecLogIter>) {
-    match arg {
-        Either::Left(b) => (b, vec![], vec![]),
+) -> anyhow::Result<(bool, Vec<ExecLogSink>, Vec<iter::ExecLogIter>)> {
+    Ok(match arg {
+        Either::Left(false) => (false, vec![], vec![]),
+        Either::Left(true) => anyhow::bail!(
+            "`execution_log = True` names no consumer of the log. Pass \
+             `execution_log = [handle]` with `handle = bazel.execution_log.iterator()` \
+             and iterate the handle, pass sinks such as \
+             `bazel.execution_log.compact_file(path = ...)`, or pass `[]` to only \
+             write the log."
+        ),
         Either::Right(items) => {
             let mut sinks = vec![];
             let mut iters = vec![];
@@ -116,7 +122,7 @@ fn partition_execution_log(
             }
             (true, sinks, iters)
         }
-    }
+    })
 }
 
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
@@ -499,21 +505,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
     ///   exact bazel command line) before spawning. Resolved from the
     ///   `--announce-bazel-command` task flag.
-    /// * `execution_log` - Enable Bazel execution log collection. Pass `True` to
-    ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
-    ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
-    ///   to write the log to one or more files. A compact sink and the iterator can be
-    ///   combined: passing such a list still allows calling `build.execution_logs()` to
-    ///   iterate entries in-process. Either way that iteration is complete — the producer
-    ///   blocks for its consumer rather than dropping — so it has to run **before**
-    ///   `wait()`, which releases that consumer.
-    ///
-    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. A handle
-    ///   clones a subscriber of its own, so it combines with a decoded `file()` sink where
-    ///   `build.execution_logs()` does not, and `kinds=` filters by entry kind in Rust
-    ///   before anything is turned into a Starlark value — worth reaching for on a log of
-    ///   10k-50k entries. A handle must be drained before `wait()`, which releases any
-    ///   still-bound handle so an undrained one cannot hang the build.
+    /// * `execution_log` - Enable Bazel execution log collection by passing a list of
+    ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
+    ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
+    ///   handles to iterate entries in-process. Every consumer receives every entry —
+    ///   the producer blocks for each rather than dropping — so a handle must be
+    ///   drained **before** `wait()`, which releases any still-bound handle so an
+    ///   undrained one cannot hang the build. `[]` writes the log with no consumer.
     ///
     /// **Examples**
     ///
@@ -567,7 +565,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
-        let execution_log = partition_execution_log(execution_log);
+        let execution_log = partition_execution_log(execution_log)?;
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
@@ -634,21 +632,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
     ///   exact bazel command line) before spawning. Resolved from the
     ///   `--announce-bazel-command` task flag.
-    /// * `execution_log` - Enable Bazel execution log collection. Pass `True` to
-    ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
-    ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
-    ///   to write the log to one or more files. A compact sink and the iterator can be
-    ///   combined: passing such a list still allows calling `build.execution_logs()` to
-    ///   iterate entries in-process. Either way that iteration is complete — the producer
-    ///   blocks for its consumer rather than dropping — so it has to run **before**
-    ///   `wait()`, which releases that consumer.
-    ///
-    ///   The list also accepts `execution_log.iterator(kinds = [...])` handles. A handle
-    ///   clones a subscriber of its own, so it combines with a decoded `file()` sink where
-    ///   `build.execution_logs()` does not, and `kinds=` filters by entry kind in Rust
-    ///   before anything is turned into a Starlark value — worth reaching for on a log of
-    ///   10k-50k entries. A handle must be drained before `wait()`, which releases any
-    ///   still-bound handle so an undrained one cannot hang the build.
+    /// * `execution_log` - Enable Bazel execution log collection by passing a list of
+    ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
+    ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
+    ///   handles to iterate entries in-process. Every consumer receives every entry —
+    ///   the producer blocks for each rather than dropping — so a handle must be
+    ///   drained **before** `wait()`, which releases any still-bound handle so an
+    ///   undrained one cannot hang the build. `[]` writes the log with no consumer.
     ///
     /// **Examples**
     ///
@@ -700,7 +690,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<build::Build> {
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
-        let execution_log = partition_execution_log(execution_log);
+        let execution_log = partition_execution_log(execution_log)?;
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
@@ -1345,14 +1335,6 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// recorded them. Compare `compact_file`, which copies Bazel's own
     /// zstd-compressed bytes.
     ///
-    /// A decoded sink clones a subscriber of its own, which is why its presence
-    /// makes `build.execution_logs()` refuse: that call takes the stream's *own*
-    /// subscriber, and the stream's own is dropped once a clone exists, so there
-    /// is nothing left to hand out.
-    /// Pass an `execution_log.iterator()` handle instead when one build needs
-    /// both a decoded sink and in-process iteration — a handle clones too, so the
-    /// two combine.
-    ///
     /// The sink's writer is joined by `build.wait()`, so the file is complete and
     /// a write error fails the build rather than leaving a truncated artifact.
     ///
@@ -1383,11 +1365,8 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// Create a handle iterating this build's decoded execution log. Pass it in
     /// `execution_log=[...]` and then `for entry in handle:`.
     ///
-    /// Prefer this over `build.execution_logs()` for the cost, not for completeness:
-    /// both receive every entry, because the producer blocks for whatever subscribers
-    /// it has. What a handle adds is the `kinds=` filter below, and a subscriber of
-    /// its own — so it can sit alongside a decoded `file()` sink, where
-    /// `build.execution_logs()` takes the stream's one and only and is refused.
+    /// The handle receives every entry it accepts, because the producer blocks for
+    /// each subscriber, and combines with sinks and other handles.
     ///
     /// Optional `kinds=` filters by `ExecLogEntry.type` variant — the same names
     /// `type(entry.type)` returns — before the entry becomes a Starlark value. This
@@ -1449,8 +1428,6 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
     const BuildEventSink: StarlarkValueAsType<build::BuildEventSink> = StarlarkValueAsType::new();
     const BuildStatus: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
     const Cancellation: StarlarkValueAsType<cancel::Cancellation> = StarlarkValueAsType::new();
-    const ExecutionLogIterator: StarlarkValueAsType<iter::ExecutionLogIterator> =
-        StarlarkValueAsType::new();
     const WorkspaceEventIterator: StarlarkValueAsType<iter::WorkspaceEventIterator> =
         StarlarkValueAsType::new();
 }
@@ -1504,4 +1481,26 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         run::register_run_types(globals);
         run::register_run_errors(globals);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_log_true_is_refused_and_names_the_iterator() {
+        let err = partition_execution_log(Either::Left(true))
+            .expect_err("`execution_log = True` must be refused")
+            .to_string();
+        assert!(
+            err.contains("bazel.execution_log.iterator()"),
+            "the refusal should name the replacement: {err}",
+        );
+    }
+
+    #[test]
+    fn execution_log_false_leaves_the_log_off() {
+        let (enabled, sinks, iters) = partition_execution_log(Either::Left(false)).unwrap();
+        assert!(!enabled && sinks.is_empty() && iters.is_empty());
+    }
 }

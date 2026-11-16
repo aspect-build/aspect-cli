@@ -1,23 +1,12 @@
-//! The two AXL-facing views of a build's decoded execution log.
-//!
-//! [`ExecutionLogIterator`] backs `build.execution_logs()`: unfiltered, and handed
-//! out after the spawn. It takes the stream's *own* subscriber, which is in the
-//! ring from the moment the stream spawns, so the reader blocks for it like any
-//! other consumer and the iteration is complete.
-//!
 //! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
-//! before the spawn and passed in `execution_log = [...]`. Both forms are
-//! complete; what the handle adds is its `kinds=` filter, applied here in Rust so
-//! a consumer that only wants spawns does not pay a Starlark allocation per file
-//! in the build, and a subscriber of its own, so it can sit beside a decoded
-//! `file()` sink where `build.execution_logs()` cannot.
+//! before the spawn and passed in `execution_log = [...]`. Its `kinds=` filter
+//! runs here in Rust, so a consumer that only wants spawns does not pay a
+//! Starlark allocation per file in the build.
 //!
-//! Both hold a subscriber the producer blocks for, so both have to be releasable
-//! from outside: `build.wait()` releases every one still held before joining the
-//! reader, which is what bounds a consumer that stopped reading. That lifecycle,
-//! and the cancellation-aware blocking read it wraps, live once in
-//! [`Subscription`] — what remains here is what the two views do *not* share:
-//! `kinds=` filtering and a deferred bind for the handle, nothing for the other.
+//! A bound handle is a subscriber the producer blocks for, so `build.wait()`
+//! releases every one still held before joining the reader, which is what
+//! bounds a consumer that stopped reading. That lifecycle, and the
+//! cancellation-aware blocking read it wraps, live in [`Subscription`].
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,124 +37,6 @@ use fibre::spmc::Receiver;
 
 use crate::engine::cancellation::Signals;
 use bazel::execlog::subscription::Subscription;
-
-/// The `build.execution_logs()` iterator: the stream's own subscriber, handed to
-/// AXL as an iterable.
-///
-/// Nothing but a [`Subscription`] and the signals a blocking read needs — this
-/// view adds no filter and no deferred bind, so the shared lifecycle is the whole
-/// of it.
-#[derive(Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
-#[display("<execlog_iterator>")]
-pub struct ExecutionLogIterator {
-    #[allocative(skip)]
-    #[trace(unsafe_ignore)]
-    sub: Subscription,
-    /// The run's cancellation state, so blocking iteration stays a safe point —
-    /// as for [`ExecLogIter::signals`]. See `iter_next`.
-    #[allocative(skip)]
-    signals: Arc<Signals>,
-}
-
-impl ExecutionLogIterator {
-    pub fn new(signals: Arc<Signals>, recv: Receiver<ExecLogEntry>) -> Self {
-        Self {
-            sub: Subscription::live(recv),
-            signals,
-        }
-    }
-
-    /// Unsubscribe, dropping any entries still buffered. Idempotent.
-    ///
-    /// `build.wait()` calls this before joining the stream, for the same reason
-    /// it releases every [`ExecLogIter`]: the subscriber this holds is one the
-    /// producer blocks for, so an iteration that stopped early — or never
-    /// started — would otherwise park the reader on a consumer that is not
-    /// coming. The stream cannot do it itself; `execution_logs()` took the
-    /// receiver out of it.
-    pub fn release(&self) {
-        self.sub.release();
-    }
-}
-
-impl<'v> AllocValue<'v> for ExecutionLogIterator {
-    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
-        heap.alloc_complex_no_freeze(self)
-    }
-}
-
-#[starlark_module]
-pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
-    /// Non-blocking pop of the next entry, or `None` when nothing is buffered
-    /// yet. The producer runs up to the channel capacity ahead and then waits
-    /// for this subscriber, so polling slowly costs time rather than entries.
-    fn try_pop<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<ExecLogEntry>> {
-        let this = this
-            .downcast_ref_err::<ExecutionLogIterator>()
-            .into_anyhow_result()?;
-        Ok(NoneOr::from_option(this.sub.try_pop(|_| true)))
-    }
-
-    /// Returns `True` once the stream has ended and every entry has been
-    /// received via `for` or repeated `try_pop`, or the subscriber has been
-    /// released (`build.wait()`).
-    fn done<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        let this = this
-            .downcast_ref_err::<ExecutionLogIterator>()
-            .into_anyhow_result()?;
-        Ok(this.sub.is_drained())
-    }
-
-    /// Stop consuming: unsubscribe and drop whatever is buffered. Idempotent.
-    /// As on an [`ExecLogIter`] handle — a task that decides mid-build it no
-    /// longer wants entries releases the producer's blocking-send path rather
-    /// than holding the end-of-build join open until `wait()` does it.
-    fn drain<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
-        let this = this
-            .downcast_ref_err::<ExecutionLogIterator>()
-            .into_anyhow_result()?;
-        this.release();
-        Ok(NoneType)
-    }
-}
-
-#[starlark_value(type = "ExecutionLogIterator")]
-impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
-    fn eval_type(&self) -> Option<Ty> {
-        Some(Ty::iter(ExecLogEntry::get_type_starlark_repr()))
-    }
-
-    fn get_type_starlark_repr() -> Ty {
-        Ty::iter(ExecLogEntry::get_type_starlark_repr())
-    }
-
-    fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new("execlog_methods", execlog_methods);
-        Some(RES.methods())
-    }
-
-    unsafe fn iterate(
-        &self,
-        me: values::Value<'v>,
-        _heap: Heap<'v>,
-    ) -> starlark::Result<values::Value<'v>> {
-        Ok(me)
-    }
-    /// Blocks until the next entry or the end of the stream. Unfiltered: every
-    /// entry yields. See [`Subscription::recv_blocking`] for why it is
-    /// cancellation-aware.
-    unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
-        self.sub
-            .recv_blocking(|| self.signals.should_unwind(), |_| true)
-            .map(|entry| entry.alloc_value(heap))
-    }
-
-    /// Leaving a `for` loop is not unsubscribing: the subscriber stays live, so
-    /// `try_pop` and a second loop resume where the first stopped rather than
-    /// starting over. Only `build.wait()` releases it. See
-    /// [`ExecutionLogIterator::release`].
-    unsafe fn iter_stop(&self) {}
-}
 
 /// Proto field number of each `ExecLogEntry.type` variant — the tag a `kinds=`
 /// filter matches on. Mirrors `payload_discriminant` for build events: an
@@ -231,13 +102,11 @@ pub fn parse_entry_kind(value: values::Value) -> anyhow::Result<i32> {
 /// one build's decoded execution log, created before the spawn and passed in
 /// `execution_log = [...]`.
 ///
-/// Why a handle rather than `build.execution_logs()`: cost and composition, not
-/// completeness. Both forms receive every entry — the producer blocks for
-/// whatever subscribers it has, see
-/// [`ExecLogStream::spawn_with_file`](bazel::execlog::feed::ExecLogStream::spawn_with_file).
-/// A handle clones a subscriber of its own, so it combines with sinks where
-/// `execution_logs()` takes the stream's one and only, and it filters in Rust,
-/// below.
+/// A handle receives every entry it accepts — the producer blocks for each
+/// subscriber, see
+/// [`ExecLogStream::spawn_with_file`](bazel::execlog::feed::ExecLogStream::spawn_with_file)
+/// — and clones a subscriber of its own, so it combines with sinks and other
+/// handles.
 ///
 /// `kinds` filters by payload tag in Rust, before the entry is turned into a
 /// Starlark value. That matters more here than it does for build events: a log
@@ -342,10 +211,9 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
         Some(RES.methods())
     }
 
-    /// `done` here means "this handle no longer holds a subscriber" — released by
-    /// `drain()`, a cancel, or `build.wait()`. Narrower than
-    /// `ExecutionLogIterator.done()`, which answers "nothing more can arrive" and
-    /// is also true of a still-subscribed handle whose stream has closed.
+    /// `done` means "this handle no longer holds a subscriber": a read or
+    /// `try_pop` found the stream closed, or `drain()`, a cancel or
+    /// `build.wait()` released it.
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<values::Value<'v>> {
         match attribute {
             "done" => Some(heap.alloc(self.sub.is_done())),

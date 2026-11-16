@@ -908,6 +908,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Run> {
+        let execution_log = super::partition_execution_log(execution_log)?;
         let env_: &Env = Env::from_eval(eval)?;
         let token = super::cancellation_token(&env_.signals, cancellation);
         let (child_tx, child_rx) = oneshot::channel();
@@ -932,7 +933,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             env_,
             std::slice::from_ref(&label),
             super::partition_build_events(build_events),
-            super::partition_execution_log(execution_log),
+            execution_log,
             rc.into_option().cloned(),
             directory.into_option(),
             (Stdio::inherit(), Stdio::inherit()),
@@ -1020,6 +1021,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Runs> {
+        let execution_log = super::partition_execution_log(execution_log)?;
         let env: &Env = Env::from_eval(eval)?;
         let token = super::cancellation_token(&env.signals, cancellation);
         let started = start(
@@ -1027,7 +1029,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             env,
             &targets.items,
             super::partition_build_events(build_events),
-            super::partition_execution_log(execution_log),
+            execution_log,
             rc.into_option().cloned(),
             directory.into_option(),
             super::resolve_stdio(stdio, stdout, stderr)?,
