@@ -1534,8 +1534,9 @@ impl Build {
                 Ok(ReaderOutcome::Undecodable(reason)) => {
                     errln!(
                         "WARNING: the execution log '{path}' stopped decoding \
-                         ({reason}), so its hooks, spawn telemetry and decoded copies \
-                         hold only the entries before that point."
+                         ({reason}), so its hooks, spawn telemetry and decoded sinks \
+                         hold only the entries before that point. The build's result \
+                         and copies of the compact log are unaffected."
                     );
                 }
                 Ok(_) => {}

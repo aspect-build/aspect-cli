@@ -233,14 +233,16 @@ impl File {
 
     /// The file last read, from its start, for going over it once more after
     /// the stream is over: the writer's file, even if its path has since been
-    /// reused. It shares the stream's offset, so the stream is not read after.
-    /// `None` if no file was ever opened.
-    pub fn rewound(&self) -> Option<io::Result<fs::File>> {
-        let current = self.current.as_ref()?;
-        Some(current.file.try_clone().and_then(|mut file| {
-            file.seek(SeekFrom::Start(0))?;
-            Ok(file)
-        }))
+    /// reused. Reading it moves the stream's offset too, so the stream must not
+    /// be read once it is used. Fails if no file was ever opened.
+    pub fn rewound(&self) -> io::Result<fs::File> {
+        let current = self
+            .current
+            .as_ref()
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "the file never appeared"))?;
+        let mut file = current.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
     }
 
     /// Whether the file has been seen to exist.

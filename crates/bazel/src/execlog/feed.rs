@@ -20,9 +20,9 @@ use zstd::Decoder;
 
 /// One `CompactFile` copy the reader writes. A copy that cannot be created,
 /// written, flushed or copied again ([`MultiTeeReader::recopy`]) stops being
-/// written (whatever reached the file stays) and
-/// keeps why, so the other copies and the decoded stream are unaffected and
-/// [`ExecLogStream::join`] reports it.
+/// written (whatever reached the file stays) and keeps why, so the other
+/// copies and the decoded stream are unaffected and [`ExecLogStream::join`]
+/// reports it.
 struct Tee {
     path: String,
     /// `None` once failed or finished.
@@ -406,10 +406,7 @@ impl ExecLogStream {
                         "copying '{}' again after it stopped decoding ({reason})",
                         raw.inner.path().display()
                     );
-                    let source = raw
-                        .inner
-                        .rewound()
-                        .unwrap_or_else(|| Err(io::Error::other("the log was never opened")));
+                    let source = raw.inner.rewound();
                     raw.recopy(source, &what);
                 }
                 let decoder = out_raw.as_ref().expect("put back after a restart");
@@ -897,7 +894,8 @@ mod tests {
         let ids = ended
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("the stream ends at the failure, with Bazel still running");
-        assert!(ids.iter().all(|&id| id <= 3000), "{:?}", ids.last());
+        let last = CHANNEL_CAPACITY as u32 * 3;
+        assert!(ids.iter().all(|&id| id <= last), "{:?}", ids.last());
 
         let _ = client.kill();
         let _ = client.wait();
@@ -952,17 +950,23 @@ mod tests {
         let copy = dir.path().join("copy.zstd");
         let mut log = compact_log(1..=5);
         log.extend_from_slice(b"not a zstd frame at all");
-        std::fs::write(&path, &log).unwrap();
-        let mut client = std::process::Command::new("true").spawn().unwrap();
-        let _ = client.wait();
+        let mut client = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
         let mut stream = ExecLogStream::spawn_with_file(
-            path,
+            path.clone(),
             client.id(),
             client.id(),
             vec![copy.to_str().unwrap().to_owned()],
         )
         .unwrap();
+        // Sealed before the log exists, so no entry can reach the stream's own
+        // subscriber.
         stream.seal();
+        std::fs::write(&path, &log).unwrap();
+        let _ = client.kill();
+        let _ = client.wait();
         assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
         assert_eq!(std::fs::read(&copy).unwrap(), log);
     }
