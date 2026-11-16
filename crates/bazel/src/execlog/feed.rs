@@ -129,6 +129,18 @@ fn broken_read(done: Option<&crate::stream::Done>, path: &std::path::Path) -> io
 /// The decoded stream over the followed file, as the reader thread holds it.
 type Decoding<'a> = Decoder<'a, io::BufReader<MultiTeeReader<followed::File>>>;
 
+/// Read the rest of the log without decoding it, so the raw copies still get
+/// every byte, starting them over with the file as decoding would.
+fn pass_through(decoder: &mut Decoding<'_>) {
+    let reader = decoder.get_mut();
+    while let Err(err) = io::copy(reader, &mut io::sink()) {
+        if !followed::StartedOver::is(&err) {
+            return;
+        }
+        reader.get_mut().restart();
+    }
+}
+
 /// The file under `decoder` has said why it stopped, so a decode error is the
 /// stream cut short, not corrupt.
 fn decoder_done(decoder: &Option<Decoding<'_>>) -> bool {
@@ -172,13 +184,17 @@ pub enum ExecLogStreamError {
 /// not join — so a task that never calls `wait()` never learns it, and no warning
 /// is printed. Every wired site calls `wait()`, so this is a note about where the
 /// verdict lives rather than a gap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReaderOutcome {
     /// The log appeared and was read to the end of the stream. A read error
     /// fails the stream instead.
     Read,
     /// The invocation ended before the log appeared.
     NeverAppeared,
+    /// The log stopped decoding partway, for the reason given. The decoded
+    /// stream ended there and the rest was read without decoding, so the
+    /// copies are whole; the build is not the reader's to fail over it.
+    Undecodable(String),
 }
 
 #[derive(Debug)]
@@ -266,6 +282,13 @@ impl ExecLogStream {
     /// restart is noticed only if the reader reaches the old end before the new
     /// log grows past it: a reader parked by a slow consumer meanwhile reads on
     /// into the middle of the new log, which fails to decode.
+    ///
+    /// A log that fails to decode, for that or any other reason, ends the
+    /// decoded stream where it failed rather than failing `join()`: the build's
+    /// outcome is Bazel's, and the consumers have every entry before the
+    /// failure. The rest is read without decoding, so the copies stay whole, and
+    /// `join()` reports [`ReaderOutcome::Undecodable`] for the caller to warn
+    /// about.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
@@ -305,13 +328,19 @@ impl ExecLogStream {
 
             let read = (|| -> Result<ReaderOutcome, ExecLogStreamError> {
                 let mut has_readers = true;
+                let mut undecodable = None;
                 loop {
                     let decoder = out_raw.as_mut().expect("put back after a restart");
                     match delimited::next_frame(decoder, &mut buf) {
                         Ok(Some(header)) => {
                             if has_readers {
-                                let entry = ExecLogEntry::decode(&buf[..header.len])?;
-                                has_readers = sender.send(entry).is_ok();
+                                match ExecLogEntry::decode(&buf[..header.len]) {
+                                    Ok(entry) => has_readers = sender.send(entry).is_ok(),
+                                    Err(err) => {
+                                        undecodable = Some(err.to_string());
+                                        break;
+                                    }
+                                }
                             }
                         }
                         // The end: between two entries, or the stream stopped
@@ -330,8 +359,14 @@ impl ExecLogStream {
                             out_raw = Some(Decoder::new(inner)?);
                         }
                         Err(_) if decoder_done(&out_raw) => break,
-                        Err(err) => return Err(err.into()),
+                        Err(err) => {
+                            undecodable = Some(err.to_string());
+                            break;
+                        }
                     }
+                }
+                if undecodable.is_some() {
+                    pass_through(out_raw.as_mut().expect("put back after a restart"));
                 }
                 let decoder = out_raw.as_ref().expect("put back after a restart");
                 let file = &decoder.get_ref().get_ref().inner;
@@ -339,7 +374,7 @@ impl ExecLogStream {
                 let closed = sender.close();
                 broken?;
                 closed?;
-                Ok(ReaderOutcome::Read)
+                Ok(undecodable.map_or(ReaderOutcome::Read, ReaderOutcome::Undecodable))
             })();
             // Every copy is finished however reading ended, so a failed one is
             // reported even beside a reader error.
@@ -727,6 +762,59 @@ mod tests {
         assert!(recv.recv().is_err(), "the stream ends with the client");
         assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
         assert_eq!(std::fs::read(&copy).unwrap(), attempt2);
+    }
+
+    /// Reads `log` to the end with one consumer and a copy, after the client
+    /// has exited: the ids the consumer got, the outcome, and the copy's bytes.
+    fn read_whole(log: &[u8]) -> (Vec<u32>, ReaderOutcome, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.log");
+        let copy = dir.path().join("copy.zstd");
+        std::fs::write(&path, log).unwrap();
+        let mut client = std::process::Command::new("true").spawn().unwrap();
+        let _ = client.wait();
+        let mut stream = ExecLogStream::spawn_with_file(
+            path,
+            client.id(),
+            client.id(),
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
+        let recv = stream.receiver().unwrap();
+        stream.seal();
+        let ids = std::iter::from_fn(|| recv.recv().ok().map(|e| e.id)).collect();
+        (ids, stream.join().unwrap(), std::fs::read(&copy).unwrap())
+    }
+
+    /// A log that stops being zstd partway ends the decoded stream there
+    /// without failing it, and the copy still gets every byte.
+    #[test]
+    fn a_corrupt_log_ends_the_stream_and_is_not_an_error() {
+        let mut log = compact_log(1..=5);
+        log.extend_from_slice(b"not a zstd frame at all");
+        let (ids, outcome, copy) = read_whole(&log);
+        assert_eq!(ids, [1, 2, 3, 4, 5]);
+        assert!(
+            matches!(outcome, ReaderOutcome::Undecodable(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(copy, log);
+    }
+
+    /// So does an entry that is not an `ExecLogEntry`.
+    #[test]
+    fn an_undecodable_entry_ends_the_stream_and_is_not_an_error() {
+        let mut raw: Vec<u8> = entry(1).encode_length_delimited_to_vec();
+        raw.extend_from_slice(&[2, 0xff, 0xff]);
+        raw.extend(entry(3).encode_length_delimited_to_vec());
+        let log = zstd::encode_all(raw.as_slice(), 0).unwrap();
+        let (ids, outcome, copy) = read_whole(&log);
+        assert_eq!(ids, [1]);
+        assert!(
+            matches!(outcome, ReaderOutcome::Undecodable(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(copy, log);
     }
 
     /// A sealed stream with no consumer reads the whole log on its own, without

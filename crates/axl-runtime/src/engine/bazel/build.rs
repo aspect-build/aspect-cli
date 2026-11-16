@@ -1529,6 +1529,12 @@ impl Build {
                          log, so nothing that reads it saw this invocation."
                     );
                 }
+                Ok(ReaderOutcome::Undecodable(reason)) => {
+                    errln!(
+                        "WARNING: the execution log stopped decoding ({reason}), so \
+                         whatever reads it saw only the entries before that point."
+                    );
+                }
                 Ok(_) => {}
                 Err(err) => {
                     stream_errors.push(format!("reading the execution log '{path}' failed: {err}"))
