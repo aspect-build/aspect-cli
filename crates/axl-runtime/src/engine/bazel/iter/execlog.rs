@@ -211,9 +211,9 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
         Some(RES.methods())
     }
 
-    /// `done` means "this handle no longer holds a subscriber": released by
-    /// `drain()`, a cancel, or `build.wait()`. A subscribed handle whose stream
-    /// has closed is not done.
+    /// `done` means "this handle no longer holds a subscriber": a read or
+    /// `try_pop` found the stream closed, or `drain()`, a cancel or
+    /// `build.wait()` released it.
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<values::Value<'v>> {
         match attribute {
             "done" => Some(heap.alloc(self.sub.is_done())),
