@@ -107,8 +107,9 @@ fn partition_execution_log(
         Either::Left(true) => anyhow::bail!(
             "`execution_log = True` names no consumer of the log. Pass \
              `execution_log = [handle]` with `handle = bazel.execution_log.iterator()` \
-             and iterate the handle, or pass sinks such as \
-             `bazel.execution_log.compact_file(path = ...)`."
+             and iterate the handle, pass sinks such as \
+             `bazel.execution_log.compact_file(path = ...)`, or pass `[]` to only \
+             write the log."
         ),
         Either::Right(items) => {
             let mut sinks = vec![];
@@ -1480,4 +1481,26 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         run::register_run_types(globals);
         run::register_run_errors(globals);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_log_true_is_refused_and_names_the_iterator() {
+        let err = partition_execution_log(Either::Left(true))
+            .expect_err("`execution_log = True` must be refused")
+            .to_string();
+        assert!(
+            err.contains("bazel.execution_log.iterator()"),
+            "the refusal should name the replacement: {err}",
+        );
+    }
+
+    #[test]
+    fn execution_log_false_leaves_the_log_off() {
+        let (enabled, sinks, iters) = partition_execution_log(Either::Left(false)).unwrap();
+        assert!(!enabled && sinks.is_empty() && iters.is_empty());
+    }
 }

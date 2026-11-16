@@ -202,12 +202,12 @@ pub struct ExecLogStream {
     /// subscriber can be cloned from — so once it is gone, nothing can join.
     ///
     /// It is an `Option` because it has to be dropped ([`seal`](Self::seal)) as
-    /// soon as the other consumers are wired: in fibre's broadcast ring the producer may not
-    /// lap its slowest subscriber, and one nobody reads is a tail stuck at entry
-    /// zero. Left in place beside others it caps them all at
+    /// soon as the other consumers are wired: in fibre's broadcast ring the
+    /// producer may not lap its slowest subscriber, and one nobody reads is a
+    /// tail stuck at entry zero. Left in place beside others it caps them all at
     /// [`CHANNEL_CAPACITY`], blocking the producer there. Gone with no consumer
-    /// in its place, the first send reports `Closed` and the reader skips decoding
-    /// entirely, which is what `join()` relies on.
+    /// in its place, the first send reports `Closed` and the reader skips
+    /// decoding entirely.
     recv: Option<Receiver<ExecLogEntry>>,
     /// Decoded-file sink writer threads owned by this stream — joined in `join()`.
     file_sink_handles: Vec<JoinHandle<SinkOutcome>>,
@@ -258,9 +258,9 @@ impl ExecLogStream {
     /// write an incomplete file; an
     /// `ExecLogIter` handle backing `BazelTrait.exec_log_event` hooks — each of
     /// which would otherwise miss entries with nothing to say so. The reader waits
-    /// for the slowest subscriber; `build.wait()` releases the AXL-side consumers
-    /// and then joins, and `join()`'s first act is to release the stream's own —
-    /// so one that stops reading cannot hold the reader forever.
+    /// for the slowest subscriber. The stream's own is dropped once consumers are
+    /// bound ([`seal`](Self::seal)) and `build.wait()` releases the AXL-side ones
+    /// before joining, so one that stops reading cannot hold the reader forever.
     ///
     /// A send that fails means every subscriber is gone, which is not an error:
     /// there is nobody left to miss the remaining entries, and failing here would
@@ -745,6 +745,34 @@ mod tests {
         assert!(recv.recv().is_err(), "the stream ends with the client");
         assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
         assert_eq!(std::fs::read(&copy).unwrap(), attempt2);
+    }
+
+    /// A sealed stream with no consumer reads the whole log on its own, without
+    /// a `join()` to release anything, and hands out no further subscriber.
+    #[test]
+    fn a_sealed_stream_with_no_consumer_reads_to_the_end_unaided() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("exec.log");
+        std::fs::write(&log, compact_log(1..=(CHANNEL_CAPACITY as u32 + 10))).unwrap();
+        let mut client = std::process::Command::new("true").spawn().unwrap();
+        let _ = client.wait();
+        let mut stream =
+            ExecLogStream::spawn_with_file(log, client.id(), client.id(), vec![]).unwrap();
+        stream.seal();
+        assert!(
+            stream.receiver().is_none(),
+            "nothing can subscribe once sealed"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !stream.handle.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a sealed stream with no consumer parked its reader",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
     }
 
     /// Why the stream must not keep an unread subscriber once real ones exist.

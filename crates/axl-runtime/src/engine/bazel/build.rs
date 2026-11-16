@@ -1724,9 +1724,8 @@ Test = task(implementation = _impl)
     ///
     /// The stream drops its own subscriber once consumers are bound, so with none
     /// the first `send` fails and the reader drains the remaining bytes without
-    /// decoding them. A stream that kept that subscriber would park at
-    /// `CHANNEL_CAPACITY` until `join()` released it. The tests below cover the
-    /// subscribers handles hold, which `wait()` releases itself.
+    /// decoding them. The tests below cover the subscribers handles hold, which
+    /// `wait()` releases itself.
     ///
     /// The timeout is the whole assertion; a regression here is a hang.
     #[cfg(unix)]
@@ -2300,29 +2299,6 @@ Test = task(implementation = _impl)
             compact_entry_count(&sink_path),
             SCENARIO_ENTRIES,
             "the compact log on disk should be complete too",
-        );
-    }
-
-    /// `execution_log = True` names no consumer, so it is refused before Bazel
-    /// spawns, with a message naming the handle that replaces it.
-    #[test]
-    fn execution_log_true_is_refused_and_names_the_iterator() {
-        let err = crate::test::eval(
-            r#"
-def _impl(ctx):
-    ctx.bazel.build(execution_log = True)
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-        )
-        .with_fake_bazel()
-        .run_task(0)
-        .expect_err("`execution_log = True` must be refused")
-        .to_string();
-        assert!(
-            err.contains("bazel.execution_log.iterator()"),
-            "the refusal should name the replacement: {err}",
         );
     }
 
