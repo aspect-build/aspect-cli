@@ -22,6 +22,11 @@
 //!     decoded channel's 1000-entry capacity are the point — truncation past the
 //!     capacity is invisible without a log longer than it.
 //!
+//!     When `--experimental_workspace_rules_log_file <path>` is present, a
+//!     scenario with `workspace_events` writes that many length-delimited
+//!     `WorkspaceEvent` protobufs there, `location` numbering them from 1; one
+//!     with `workspace_corrupt` writes a single event that does not decode.
+//!
 //!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
 //!     [`await_pump_handshake`].
 //!
@@ -58,6 +63,7 @@ use axl_proto::build_event_stream::{
     build_finished::ExitCode,
 };
 use axl_proto::tools::protos::{ExecLogEntry, exec_log_entry};
+use axl_proto::workspace_log::WorkspaceEvent;
 use prost::Message;
 
 fn main() {
@@ -167,6 +173,15 @@ fn run_build(args: &[String], verb: &str) {
     }
 
     let s = scenario(&scenario_name);
+
+    if let Some(path) = flag("--experimental_workspace_rules_log_file") {
+        if s.workspace_corrupt {
+            fs::write(&path, [4, 0xff, 0xff, 0xff, 0xff])
+                .unwrap_or_else(|e| panic!("basil: writing workspace log {path:?}: {e}"));
+        } else if s.workspace_events > 0 {
+            write_workspace_log(&path, s.workspace_events);
+        }
+    }
 
     let log = || match &execlog_path {
         Some(path) if s.execlog_entries > 0 => write_execlog(path, s.execlog_entries),
@@ -336,6 +351,11 @@ struct Scenario {
     /// binary stream — so a scenario that has to get past that selection names
     /// the labels it comes back with. See [`write_json_bep`].
     json_bep_tests: &'static [&'static str],
+    /// How many `WorkspaceEvent` messages to write to
+    /// `--experimental_workspace_rules_log_file`, when the runtime asked for one.
+    workspace_events: u32,
+    /// Write one event there that does not decode, instead.
+    workspace_corrupt: bool,
 }
 
 /// A clean single-attempt run with no pauses and no execution log — so each
@@ -348,6 +368,8 @@ impl Default for Scenario {
             execlog_entries: 0,
             execlog_delay: Duration::ZERO,
             json_bep_tests: &[],
+            workspace_events: 0,
+            workspace_corrupt: false,
         }
     }
 }
@@ -422,6 +444,12 @@ fn await_moved(path: &str) {
     }
 }
 
+/// Entries or events in each log scenario: past the decoded channel's
+/// 1000-entry capacity, which is the only length that can tell a stream that
+/// delivers everything apart from one that stops at the ring, and still a
+/// fraction of a second to write.
+const BEYOND_CAPACITY: u32 = 3000;
+
 /// See [`await_moved`]: long enough for a loaded machine, short enough that a
 /// reader that never comes does not hang the test.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -492,6 +520,25 @@ fn write_execlog(path: &str, count: u32) {
         .unwrap_or_else(|e| panic!("basil: publishing execlog to {path:?}: {e}"));
 }
 
+/// Write `count` workspace events to `path`, built under a sibling `.partial`
+/// name and renamed into place as [`write_execlog`] does.
+fn write_workspace_log(path: &str, count: u32) {
+    let partial = format!("{path}.partial");
+    let bytes: Vec<u8> = (1..=count)
+        .flat_map(|n| {
+            WorkspaceEvent {
+                location: n.to_string(),
+                ..Default::default()
+            }
+            .encode_length_delimited_to_vec()
+        })
+        .collect();
+    fs::write(&partial, bytes)
+        .unwrap_or_else(|e| panic!("basil: writing workspace log {partial:?}: {e}"));
+    fs::rename(&partial, path)
+        .unwrap_or_else(|e| panic!("basil: publishing workspace log to {path:?}: {e}"));
+}
+
 /// Resolve a scenario by name. Each scenario documents the behavior or bug
 /// it targets. Add new ones here.
 fn scenario(name: &str) -> Scenario {
@@ -553,9 +600,25 @@ fn scenario(name: &str) -> Scenario {
         // A clean run that also writes a compact execution log longer than the
         // decoded channel's capacity. A shorter log cannot tell a stream that
         // delivers everything apart from one that silently stops at the capacity;
-        // 3000 is comfortably past it and still a fraction of a second to write.
+        // `BEYOND_CAPACITY` is comfortably past it.
         "execlog_beyond_capacity" => Scenario {
-            execlog_entries: 3000,
+            execlog_entries: BEYOND_CAPACITY,
+            ..Default::default()
+        },
+
+        // A workspace event log longer than the decoded channel's capacity, for
+        // the same reason.
+        "workspace_events_beyond_capacity" => Scenario {
+            workspace_events: BEYOND_CAPACITY,
+            ..Default::default()
+        },
+
+        // A workspace log that fails to decode, beside an execution log longer
+        // than the channel's capacity: the failed workspace log must not keep
+        // `wait()` from releasing the execution log's handles.
+        "corrupt_workspace_log_beside_execlog" => Scenario {
+            workspace_corrupt: true,
+            execlog_entries: BEYOND_CAPACITY,
             ..Default::default()
         },
 
@@ -570,7 +633,7 @@ fn scenario(name: &str) -> Scenario {
         // scheduling. Bazel is slower than this to finish a build after its last
         // build event in practice.
         "execlog_after_bes" => Scenario {
-            execlog_entries: 3000,
+            execlog_entries: BEYOND_CAPACITY,
             execlog_delay: Duration::from_secs(2),
             ..Default::default()
         },
@@ -579,12 +642,12 @@ fn scenario(name: &str) -> Scenario {
         // BLAZE_INTERNAL_ERROR (37) — which `BazelTrait.build_retry` retries by
         // default, so a task driving this runs its whole spawn → drain → wait
         // cycle once per attempt. Each attempt writes its own log, numbered from
-        // 1 again, so a consumer that receives `1..=3000` twice has proved that
+        // 1 again, so a consumer that receives the whole log twice has proved that
         // every attempt got a live handle of its own.
         "execlog_retryable_failure" => Scenario {
             attempts: vec![vec![build_started(), build_finished(37, true)]],
             exit: ExitBehavior::Code(37),
-            execlog_entries: 3000,
+            execlog_entries: BEYOND_CAPACITY,
             ..Default::default()
         },
 
@@ -596,7 +659,7 @@ fn scenario(name: &str) -> Scenario {
         // `--remote_grpc_log` no fake Bazel produces, so the task fails after
         // the part under test, as it does for `delivery`.
         "cache_diff_precise" => Scenario {
-            execlog_entries: 3000,
+            execlog_entries: BEYOND_CAPACITY,
             json_bep_tests: &["//fixture:runs"],
             ..Default::default()
         },

@@ -35,8 +35,9 @@ use axl_proto::tools::protos::exec_log_entry;
 use derive_more::Display;
 use fibre::spmc::Receiver;
 
+use super::Handle;
 use crate::engine::cancellation::Signals;
-use bazel::execlog::subscription::Subscription;
+use bazel::subscription::Subscription;
 
 /// Proto field number of each `ExecLogEntry.type` variant — the tag a `kinds=`
 /// filter matches on. Mirrors `payload_discriminant` for build events: an
@@ -123,7 +124,7 @@ pub struct ExecLogIter {
     /// will be bound to.
     #[allocative(skip)]
     #[trace(unsafe_ignore)]
-    sub: Subscription,
+    sub: Subscription<ExecLogEntry>,
     /// The run's cancellation state, carried from construction so blocking
     /// iteration stays a safe point. Without it a drain would park in a bare
     /// `recv()` and the AXL body would stop answering signals — see `iter_next`.
@@ -140,34 +141,9 @@ impl ExecLogIter {
         }
     }
 
-    /// Subscribe this handle to a build's decoded execution log. Called by
-    /// `Build::spawn` with a clone of the stream's receiver; one handle binds
-    /// once, so a handle reused across two builds is an error rather than a
-    /// stream silently attached to the wrong one.
-    pub fn bind(&self, recv: Receiver<ExecLogEntry>) -> anyhow::Result<()> {
-        if self.sub.bind(recv) {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "this `bazel.execution_log.iterator()` handle was already bound to a build; \
-             create a fresh one per build",
-        )
-    }
-
-    /// Unsubscribe, dropping any entries still buffered.
-    ///
-    /// `build.wait()` calls this before joining the stream, which is what bounds
-    /// a task that never drained its handle: the producer blocks for every
-    /// subscriber, so the reader would otherwise wait on a consumer that is not
-    /// coming. The AXL side drains first (`bazel/exec_log.axl`) and so loses
-    /// nothing to it.
-    pub fn release(&self) {
-        self.sub.release();
-    }
-
     /// Whether this handle still holds a subscriber.
     ///
-    /// For the all-or-nothing bind in `build::bind_execlog_iters`, whose
+    /// For the all-or-nothing bind in `build::bind_handles`, whose
     /// rollback nothing else can observe: `release` and a drained handle both
     /// end in `Done`, so a later `bind` fails whether or not the rollback ran.
     #[cfg(test)]
@@ -180,6 +156,33 @@ impl ExecLogIter {
             Some(kinds) => entry_kind_in(entry, kinds),
             None => true,
         }
+    }
+}
+
+impl Handle<ExecLogEntry> for ExecLogIter {
+    /// Subscribe this handle to a build's decoded execution log. Called by
+    /// `Build::spawn` with a clone of the stream's receiver; one handle binds
+    /// once, so a handle reused across two builds is an error rather than a
+    /// stream silently attached to the wrong one.
+    fn bind(&self, recv: Receiver<ExecLogEntry>) -> anyhow::Result<()> {
+        if self.sub.bind(recv) {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "this `bazel.execution_log.iterator()` handle was already bound or has finished; \
+             create a fresh one per build",
+        )
+    }
+
+    /// Unsubscribe, dropping any entries still buffered.
+    ///
+    /// `build.wait()` calls this before joining the stream, which is what bounds
+    /// a task that never drained its handle: the producer blocks for every
+    /// subscriber, so the reader would otherwise wait on a consumer that is not
+    /// coming. The AXL side drains first (`bazel/exec_log.axl`) and so loses
+    /// nothing to it.
+    fn release(&self) {
+        self.sub.release();
     }
 }
 
@@ -236,7 +239,7 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
     /// Blocks until the next entry this handle's `kinds=` filter wants, or the end
     /// of the stream. Entries of other kinds are discarded rather than yielded as
     /// `None`, unlike the BES iterator's quiet tick. See
-    /// [`Subscription::recv_blocking`] for why it is cancellation-aware.
+    /// the [`iter`](super) module docs for why it is cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         self.sub
             .recv_blocking(|| self.signals.should_unwind(), |entry| self.wants(entry))
@@ -511,7 +514,7 @@ mod tests {
     /// The AXL-visible half of [`Subscription`]'s on-loan guarantee: a handle
     /// mid-read is still a bound handle, so `bind` refuses it. See
     /// `subscription::State::Reading` for what conflating the two would cost,
-    /// and why this is asserted though AXL cannot reach it.
+    /// and the [`iter`](super) module docs for why AXL cannot reach it.
     #[test]
     fn a_handle_mid_read_cannot_be_rebound() {
         let (_s1, r1) = bounded::<ExecLogEntry>(4);

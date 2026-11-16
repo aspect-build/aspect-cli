@@ -469,7 +469,7 @@ fn start<'v>(
         targets.iter().cloned(),
         (true, sinks, iters),
         execution_log,
-        false,
+        (false, vec![]),
         flags,
         startup_flags,
         build_stdout,

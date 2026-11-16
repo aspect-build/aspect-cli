@@ -1,12 +1,12 @@
 use axl_proto::tools::protos::ExecLogEntry;
-use fibre::spmc::{Receiver, bounded};
+use fibre::spmc::Receiver;
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::{BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::{env, thread};
 
@@ -14,6 +14,7 @@ use crate::delimited;
 use crate::fanout::SinkOutcome;
 use crate::stream::file as followed;
 use crate::stream::pid_pair::PidPair;
+use crate::subscription::{Origin, ring};
 use thiserror::Error;
 use zstd::Decoder;
 
@@ -180,35 +181,13 @@ pub enum ReaderOutcome {
     NeverAppeared,
 }
 
-/// Decoded entries buffered between the reader thread and its subscribers.
-///
-/// A broadcast ring: the producer may not lap its slowest subscriber, so this is
-/// how far ahead of the slowest consumer the reader may get before it blocks. It
-/// is the whole of the back-pressure budget — nothing is dropped past it — so it
-/// trades memory for how long a slow consumer can be slow without costing the
-/// reader a context switch per entry.
-const CHANNEL_CAPACITY: usize = 1000;
-
-/// [`CHANNEL_CAPACITY`], for tests that assert on behaviour at the boundary
-/// rather than restating the number.
-pub fn channel_capacity() -> usize {
-    CHANNEL_CAPACITY
-}
-
 #[derive(Debug)]
 pub struct ExecLogStream {
     handle: JoinHandle<Result<ReaderOutcome, ExecLogStreamError>>,
-    /// The one subscriber the stream starts with, and the only thing a further
-    /// subscriber can be cloned from — so once it is gone, nothing can join.
-    ///
-    /// It is an `Option` because it has to be dropped ([`seal`](Self::seal)) as
-    /// soon as the other consumers are wired: in fibre's broadcast ring the
-    /// producer may not lap its slowest subscriber, and one nobody reads is a
-    /// tail stuck at entry zero. Left in place beside others it caps them all at
-    /// [`CHANNEL_CAPACITY`], blocking the producer there. Gone with no consumer
-    /// in its place, the first send reports `Closed` and the reader skips
-    /// decoding entirely.
-    recv: Option<Receiver<ExecLogEntry>>,
+    /// Where the log is read from, for naming it in errors.
+    path: PathBuf,
+    /// The ring's origin, sealed once the consumers are wired.
+    origin: Origin<ExecLogEntry>,
     /// Decoded-entry sink threads owned by this stream — joined in `join()`.
     sink_handles: Vec<JoinHandle<SinkOutcome>>,
 }
@@ -293,13 +272,13 @@ impl ExecLogStream {
         client_pid: u32,
         compact_sink_paths: Vec<String>,
     ) -> io::Result<Self> {
-        let (mut sender, recv) = bounded::<ExecLogEntry>(CHANNEL_CAPACITY);
+        let (mut sender, origin) = ring::<ExecLogEntry>();
         let gate = PidPair {
             client: client_pid,
             server: Some(server_pid),
         }
         .gate();
-        let mut file = followed::File::follow(path, gate);
+        let mut file = followed::File::follow(path.clone(), gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
 
@@ -376,24 +355,27 @@ impl ExecLogStream {
 
         Ok(Self {
             handle,
-            recv: Some(recv),
+            path,
+            origin,
             sink_handles: vec![],
         })
     }
 
-    /// A further subscriber to the decoded stream, cloned from the stream's own.
-    /// `None` once that one has been dropped ([`seal`](Self::seal), `join()`).
-    ///
-    /// Only for a consumer that will actually drain it — see the `recv` field.
-    pub fn receiver(&self) -> Option<Receiver<ExecLogEntry>> {
-        self.recv.as_ref().cloned()
+    /// The log's path.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    /// Drop the stream's own subscriber once every consumer has cloned one from
-    /// [`receiver`](Self::receiver), so it cannot hold the ring full (see the
-    /// `recv` field). No consumer can be added afterwards.
+    /// A further subscriber to the decoded stream, for a consumer that will
+    /// drain it. See [`Origin::receiver`].
+    pub fn receiver(&self) -> Option<Receiver<ExecLogEntry>> {
+        self.origin.receiver()
+    }
+
+    /// Stop handing out subscribers once every consumer has one. See
+    /// [`Origin`] for why.
     pub fn seal(&mut self) {
-        self.recv.take();
+        self.origin.seal();
     }
 
     /// Take ownership of a decoded-entry sink thread. Its lifecycle is tied to
@@ -411,7 +393,7 @@ impl ExecLogStream {
     /// reader thread and every attached sink, failing with every
     /// error among them (see [`combine`]).
     pub fn join(mut self) -> Result<ReaderOutcome, ExecLogStreamError> {
-        self.recv.take();
+        self.origin.seal();
         let reader_result = self.handle.join().expect("join error");
         let sink_errors = self
             .sink_handles
@@ -450,7 +432,7 @@ fn combine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fibre::TrySendError;
+    use crate::subscription::CHANNEL_CAPACITY;
 
     fn entry(id: u32) -> ExecLogEntry {
         ExecLogEntry { id, r#type: None }
@@ -773,41 +755,5 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
-    }
-
-    /// Why the stream must not keep an unread subscriber once real ones exist.
-    ///
-    /// In fibre's broadcast ring each subscriber has its own tail and the producer
-    /// may not lap the slowest. One that nobody reads sits at entry zero forever,
-    /// so the ring reads as full from the producer's side however diligently every
-    /// other subscriber drains — capping them all at the capacity. Blocking sends
-    /// then park, which the consumer cannot see.
-    #[test]
-    fn an_unread_subscriber_clone_stops_the_producer_once_the_ring_fills() {
-        // A small ring: the behaviour is in the tails, not the size.
-        const CAPACITY: u32 = 4;
-        let (sender, kept) = bounded::<ExecLogEntry>(CAPACITY as usize);
-        let drained = kept.clone();
-
-        for i in 0..CAPACITY {
-            sender.try_send(entry(i)).expect("the ring has room");
-        }
-        for i in 0..CAPACITY {
-            assert_eq!(drained.recv().expect("an entry").id, i);
-        }
-
-        // `drained` is caught up, but `kept` never read anything, so from the
-        // producer's side the ring is still full.
-        assert!(
-            matches!(sender.try_send(entry(99)), Err(TrySendError::Full(_))),
-            "an unread clone should hold the ring full even though every other \
-             subscriber is caught up",
-        );
-
-        drop(kept);
-        sender
-            .try_send(entry(99))
-            .expect("dropping the unread clone must free the ring");
-        assert_eq!(drained.recv().expect("an entry").id, 99);
     }
 }

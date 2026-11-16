@@ -20,12 +20,9 @@ pub struct PidPair {
     /// be stale if the server restarts for the command. Read it with the
     /// build's startup flags, so it is the server this command will use.
     ///
-    /// What a wrong answer costs depends on the stream. For a pipe it costs
-    /// speed: an empty read already means "no writer attached", and the
-    /// client's exit is what ends the stream. For a regular file it can cost
-    /// events: nothing but the server's open files says the writer is still
-    /// writing, so once the client has exited a stale pid makes the file look
-    /// finished at the server's next pause.
+    /// A wrong answer can cost events: nothing but the server's open files
+    /// says the writer is still writing, so once the client has exited a
+    /// stale pid makes the file look finished at the server's next pause.
     pub server: Option<u32>,
 }
 
@@ -66,9 +63,6 @@ fn resolve(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::pipe::Channel;
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
     use std::process::{Child, Command, Stdio};
     use std::time::Duration;
 
@@ -139,13 +133,8 @@ mod tests {
 
     #[test]
     fn held_follows_whether_the_server_has_the_path_open() {
-        let channel = Channel::at(std::env::temp_dir().join(format!(
-            "bazel-invocation-test-{}-{}.fifo",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        )))
-        .unwrap();
-        let path = channel.path().to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stream.bin");
 
         // This process plays the server.
         let mut gate = PidPair {
@@ -154,34 +143,22 @@ mod tests {
         }
         .gate();
         let held = gate.held.as_mut().expect("a server pid gives a hint");
-        assert!(!held(&path), "nothing has the FIFO open yet");
+        assert!(!held(&path), "nothing has the file open yet");
 
-        let reader = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)
-            .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
         assert!(held(&path), "the server holds it now");
 
-        drop(reader);
+        drop(file);
         assert!(!held(&path), "and no longer");
     }
 
     #[test]
     fn held_is_asked_about_the_resolved_path() {
-        let dir =
-            std::env::temp_dir().join(format!("bazel-invocation-dir-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let link =
-            std::env::temp_dir().join(format!("bazel-invocation-link-{}", uuid::Uuid::new_v4()));
-        std::os::unix::fs::symlink(&dir, &link).unwrap();
-
-        let channel = Channel::at(dir.join("pipe.fifo")).unwrap();
-        let reader = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(channel.path())
-            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        let file = std::fs::File::create(dir.path().join("stream.bin")).unwrap();
 
         // Ask through the symlinked spelling of the same path.
         let mut gate = PidPair {
@@ -189,12 +166,8 @@ mod tests {
             server: Some(std::process::id()),
         }
         .gate();
-        assert!((gate.held.as_mut().unwrap())(&link.join("pipe.fifo")));
-
-        drop(reader);
-        drop(channel);
-        let _ = std::fs::remove_file(&link);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!((gate.held.as_mut().unwrap())(&link.join("stream.bin")));
+        drop(file);
     }
 
     #[test]
@@ -251,17 +224,15 @@ mod tests {
 
     #[test]
     fn a_dead_server_holds_nothing() {
-        let channel = Channel::at(std::env::temp_dir().join(format!(
-            "bazel-invocation-dead-{}.fifo",
-            uuid::Uuid::new_v4()
-        )))
-        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stream.bin");
+        let _file = std::fs::File::create(&path).unwrap();
         let mut gate = PidPair {
             client: std::process::id(),
             server: Some(reaped_pid()),
         }
         .gate();
-        assert!(!(gate.held.as_mut().unwrap())(channel.path()));
+        assert!(!(gate.held.as_mut().unwrap())(&path));
     }
 
     #[test]
