@@ -1,7 +1,11 @@
+//! The build event stream of one bazel command: a reader thread follows
+//! `--build_event_binary_file` ([`super::binary_file`]), redacts each event,
+//! mirrors the raw bytes to file sinks and fans the events out to subscribers,
+//! which bind between [`BuildEventStream::new`] and [`BuildEventStream::start`].
+
 use prost::Message;
 use prost::bytes::Bytes;
 use std::fs::File;
-use std::io;
 use std::io::BufWriter;
 use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -13,7 +17,7 @@ use super::binary_file::{End, Reader};
 use super::redact::redact_event;
 use crate::fanout::{Broadcaster, Subscriber, SubscriberFilter};
 use crate::stream::Gate;
-use crate::stream::pipe::Channel;
+use crate::stream::file::Reservation;
 
 /// Set once, when the feed has flushed the raw file a file sink mirrors the
 /// stream to, so whoever waits on that sink learns whether the copy is whole.
@@ -56,6 +60,9 @@ impl FileSignal {
 /// A sink that fails to open, write or flush is dropped with a warning and the
 /// failure signalled to whoever waits on it, and the others go on: one bad path
 /// costs that copy, not the stream.
+///
+/// TODO: write the sinks on a thread of their own, so a slow destination
+/// cannot stall the reader.
 struct Mirrors {
     sinks: Vec<Mirror>,
 }
@@ -146,52 +153,76 @@ pub enum BuildEventStreamError {
 
 #[derive(Debug)]
 pub struct BuildEventStream {
-    /// Thread handle, stored in Option so we can take() it to join without consuming self.
+    /// The reader thread: `None` until [`start`](Self::start), and again once
+    /// joined.
     handle: Option<JoinHandle<Result<(), BuildEventStreamError>>>,
+    /// `None` once joined; subscribing then yields a disconnected subscriber.
     broadcaster: Option<Broadcaster<Arc<BuildEventEnvelope>>>,
-    /// How the stream ended, set by the reader thread before it closes the
-    /// broadcaster, so anything woken by the close can read it.
+    /// How the stream ended, set by the reader thread on a clean finish before
+    /// it closes the broadcaster, so anything woken by the close can read it.
+    /// `None` when the thread returned an error instead.
     end: Arc<OnceLock<End>>,
 }
 
 impl BuildEventStream {
-    /// Reserve the FIFO the BEP is written to, so its path can go on the
-    /// command line as `--build_event_binary_file` before bazel is spawned.
-    /// Pair with [`spawn`](Self::spawn) once the bazel client exists.
-    pub fn reserve() -> io::Result<Channel> {
-        Channel::fifo("build-event-out")
+    /// Reserve the path the BEP is written to, so it can go on the command
+    /// line as `--build_event_binary_file` before bazel is spawned. Bazel
+    /// creates the file; the reader removes it once the stream is over.
+    pub fn reserve() -> Reservation {
+        Reservation::temp("build-event-out")
     }
 
-    /// Spawn the BES reader thread on `channel`.
+    /// A stream nothing reads yet. Subscribe, then [`start`](Self::start):
+    /// the broadcaster does not replay, and the file keeps whatever bazel
+    /// writes in the meantime, so subscribing first is what makes every
+    /// subscriber see the whole stream.
+    pub fn new() -> Self {
+        Self {
+            handle: None,
+            broadcaster: Some(Broadcaster::new()),
+            end: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Start the reader thread on `file`.
     ///
     /// `gate` answers the two questions that decide when the stream is over
     /// (see [`crate::stream`]); for a real bazel it comes from
     /// `PidPair::gate`, which keys "ended" on the client and "held" on the
     /// server.
     ///
-    /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
+    /// Each `(path, signal)` pair gets the raw event bytes mirrored to `path`;
     /// `signal.complete(result)` fires after flush, unblocking the file
-    /// sink handle's `wait()`. A sink that cannot be opened or written fails
-    /// its own signal and leaves the stream and the other sinks running.
-    pub fn spawn(
-        channel: Channel,
+    /// sink handle's `wait()`. A sink starts over with each attempt of a build
+    /// bazel retries, so it holds only the last attempt.
+    ///
+    /// Every event is redacted (see [`super::redact`]) before anything sees
+    /// it: subscribers and file sinks read the same post-redact stream, so
+    /// secrets never leave this process. An event redaction leaves alone, the
+    /// common case, is mirrored as its original bytes without a re-encode.
+    ///
+    /// File sinks are written on the reader thread, so a slow sink slows the
+    /// reader, though never bazel.
+    pub fn start(
+        mut self,
+        file: Reservation,
         gate: Gate,
         file_sinks: Vec<(String, Arc<FileSignal>)>,
-    ) -> io::Result<Self> {
-        let main_broadcaster = Broadcaster::new();
-        let thread_broadcaster = main_broadcaster.clone();
-        let end_cell = Arc::new(OnceLock::new());
-        let thread_end = end_cell.clone();
-        // Opened here, not on the thread: it never blocks, and a failure
-        // belongs to the caller.
-        let pipe = channel.follow(gate)?;
-        let handle = thread::spawn(move || {
+    ) -> Self {
+        assert!(self.handle.is_none(), "a stream is started once");
+        let thread_broadcaster = self
+            .broadcaster
+            .clone()
+            .expect("a stream is started before it is joined");
+        let thread_end = self.end.clone();
+        let file = file.follow(gate);
+        self.handle = Some(thread::spawn(move || {
             let broadcaster = thread_broadcaster;
             let mut mirrors = Mirrors::open(file_sinks);
             // Reused for the rare event redaction changes; the common case
             // mirrors the original bytes.
             let mut reencode_buf: Vec<u8> = Vec::with_capacity(1024);
-            let mut reader = Reader::new(pipe);
+            let mut reader = Reader::new(file);
 
             for frame in &mut reader {
                 let frame = match frame {
@@ -202,13 +233,12 @@ impl BuildEventStream {
                         return Err(BuildEventStreamError::IO(err));
                     }
                 };
-                let retry = frame.is_retry_marker();
+                if frame.starts_retried_attempt() {
+                    mirrors.restart();
+                }
+
                 let payload = frame.payload_bytes();
                 let mut event = frame.event;
-                // Secrets are redacted before anything downstream (file sinks,
-                // gRPC forwarders, AXL iterators) sees the event.
-                // TODO: write file sinks on a thread of their own, so a slow
-                // destination cannot stall the reader.
                 let encoded = if redact_event(&mut event) {
                     reencode_buf.clear();
                     if let Err(err) = event.encode_length_delimited(&mut reencode_buf) {
@@ -222,10 +252,6 @@ impl BuildEventStream {
                     mirrors.write(&frame.raw);
                     payload
                 };
-                // Bazel truncates its own file for the retried attempt.
-                if retry {
-                    mirrors.restart();
-                }
                 broadcaster.send(Arc::new(BuildEventEnvelope { event, encoded }));
             }
 
@@ -240,13 +266,8 @@ impl BuildEventStream {
             broadcaster.close();
             mirrors.finish(Ok(()));
             Ok(())
-        });
-
-        Ok(Self {
-            handle: Some(handle),
-            broadcaster: Some(main_broadcaster),
-            end: end_cell,
-        })
+        }));
+        self
     }
 
     /// How the stream ended, once the reader thread has finished.
@@ -254,11 +275,9 @@ impl BuildEventStream {
         self.end.get()
     }
 
-    /// Subscribe to the build event stream without history replay.
-    ///
-    /// This is for internal use by sinks that subscribe at stream creation time
-    /// and don't need history replay. Use `subscribe()` for user-facing APIs
-    /// where late subscription support is needed.
+    /// A subscriber that sees every event sent from now on. Subscribe before
+    /// [`start`](Self::start) to see the whole stream; the broadcaster does
+    /// not replay.
     pub fn subscribe(&self) -> Subscriber<Arc<BuildEventEnvelope>> {
         self.subscribe_filtered(None)
     }
@@ -279,7 +298,8 @@ impl BuildEventStream {
         }
     }
 
-    /// Wait for the BES thread to complete.
+    /// Disconnect every subscriber and wait for the reader thread, if it was
+    /// started.
     pub fn join(&mut self) -> Result<(), BuildEventStreamError> {
         let _ = self.broadcaster.take();
         if let Some(handle) = self.handle.take() {
@@ -289,36 +309,26 @@ impl BuildEventStream {
     }
 }
 
+impl Default for BuildEventStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bes::testing::{build_finished, encoded, encoded_all, plain, retry_marker, started};
+    use crate::fanout::Subscriber;
+    use crate::stream::file::moved_name;
     use crate::stream::pid_pair::PidPair;
+    use crate::stream::testing::test_windows;
     use axl_proto::build_event_stream::BuildEvent;
+    use axl_proto::build_event_stream::build_event::Payload;
     use std::fs::OpenOptions;
-    use std::path::PathBuf;
-
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
     use std::time::Duration;
-
-    /// Encode a `BuildEvent` as a length-delimited protobuf record (LEB128 varint + body),
-    /// matching the framing the reader expects.
-    fn encode_event(event: &BuildEvent) -> Vec<u8> {
-        let body = event.encode_to_vec();
-        let mut out = Vec::new();
-        let mut remaining = body.len();
-        loop {
-            let mut byte = (remaining & 0x7F) as u8;
-            remaining >>= 7;
-            if remaining > 0 {
-                byte |= 0x80;
-            }
-            out.push(byte);
-            if remaining == 0 {
-                break;
-            }
-        }
-        out.extend_from_slice(&body);
-        out
-    }
 
     /// Replay a recorded BEP file through the stream with the production
     /// subscriber shape (gRPC sink + AXL iterator + tracing sink) and report
@@ -330,7 +340,7 @@ mod tests {
     ///
     /// ```text
     /// ASPECT_BES_BENCH_FILE=/path/to/bep.binpb \
-    ///   /usr/bin/time -l cargo test -p axl-runtime --release \
+    ///   /usr/bin/time -l cargo test -p bazel --release \
     ///   bench_stream_fanout -- --ignored --nocapture
     /// ```
     ///
@@ -351,13 +361,15 @@ mod tests {
         // promptly.
         let lag = std::env::var("ASPECT_BES_BENCH_LAG").unwrap_or_default();
 
-        let path = temp_fifo_path();
-        let pid = std::process::id();
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
+        let mut client = sleeper();
+        let file = BuildEventStream::reserve();
+        let path = file.path().to_path_buf();
+        let stream = BuildEventStream::new();
         let grpc_sub = stream.subscribe();
         let axl_sub = stream.subscribe();
         let tracing_sub = stream.subscribe();
-        wait_for_fifo(&path);
+        let gate = gate(client.id(), client.id());
+        let mut stream = stream.start(file, gate, vec![]);
 
         // Mirrors the gRPC sink: every event is re-encoded into a publish
         // request, and every request is retained until the server acks it.
@@ -388,29 +400,22 @@ mod tests {
                 held_requests.len() + held_events.len() + held_bytes.len(),
             )
         });
-        let axl = std::thread::spawn(move || {
-            let mut n = 0u64;
-            while axl_sub.recv().is_ok() {
-                n += 1;
-            }
-            n
-        });
-        let tracing = std::thread::spawn(move || {
-            let mut n = 0u64;
-            while tracing_sub.recv().is_ok() {
-                n += 1;
-            }
-            n
-        });
+        let count = |sub: Subscriber<Arc<BuildEventEnvelope>>| {
+            std::thread::spawn(move || {
+                let mut n = 0u64;
+                while sub.recv().is_ok() {
+                    n += 1;
+                }
+                n
+            })
+        };
+        let axl = count(axl_sub);
+        let tracing = count(tracing_sub);
 
         let start = std::time::Instant::now();
-        let writer = std::thread::spawn(move || {
-            let mut src = std::io::BufReader::new(std::fs::File::open(&input).unwrap());
-            let mut fifo = OpenOptions::new().write(true).open(&path).unwrap();
-            std::io::copy(&mut src, &mut fifo).unwrap()
-        });
-
-        let bytes = writer.join().unwrap();
+        let bytes = std::fs::copy(&input, &path).unwrap();
+        let _ = client.kill();
+        let _ = client.wait();
         stream.join().unwrap();
         let (grpc_n, held) = grpc.join().unwrap();
         let axl_n = axl.join().unwrap();
@@ -427,727 +432,539 @@ mod tests {
         );
     }
 
-    fn make_event(last_message: bool) -> BuildEvent {
-        BuildEvent {
-            last_message,
-            ..Default::default()
-        }
+    /// A long-lived process that holds no file open: the client, or a server
+    /// whose pid is stale.
+    fn sleeper() -> Child {
+        Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
     }
 
-    fn temp_fifo_path() -> PathBuf {
-        std::env::temp_dir().join(format!("test-bes-{}.fifo", uuid::Uuid::new_v4()))
-    }
-
-    /// Poll until the FIFO inode appears at `path`. The BES thread mkfifos the
-    /// path lazily inside `BuildEventStream::spawn`, so test threads that open
-    /// the writer side have to wait for the inode before `OpenOptions::open`.
-    fn wait_for_fifo(path: &PathBuf) {
+    /// A server that holds `path` open for writing, as bazel's does while it
+    /// writes the stream.
+    fn holder_of(path: &Path) -> Child {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(r#"exec 3>>"$0"; sleep 60"#)
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn holder");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !path.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "FIFO was not created within 5s: {}",
-                path.display()
-            );
+            assert!(std::time::Instant::now() < deadline, "holder never opened");
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    /// A stream on `channel` whose quiet windows are short enough for a test.
-    /// `server_pid` is the process whose open files decide `held`: this
-    /// process owns the FIFO's read end, so passing its own pid reads as "held"
-    /// for as long as the stream is open.
-    fn spawn_on(
-        channel: Channel,
-        server_pid: u32,
-        client_pid: u32,
-        file_sinks: Vec<(String, Arc<FileSignal>)>,
-    ) -> BuildEventStream {
-        let mut gate = PidPair {
-            client: client_pid,
-            server: Some(server_pid),
-        }
-        .gate(channel.path());
-        gate.quiet = Duration::from_millis(300);
-        gate.quiet_empty = Duration::from_millis(100);
-        BuildEventStream::spawn(channel, gate, file_sinks).unwrap()
-    }
-
-    /// [`spawn_on`] a FIFO created at `path`.
-    fn spawn_at(
-        path: PathBuf,
-        server_pid: u32,
-        client_pid: u32,
-        file_sinks: Vec<(String, Arc<FileSignal>)>,
-    ) -> io::Result<BuildEventStream> {
-        let channel = Channel::at(path)?;
-        Ok(spawn_on(channel, server_pid, client_pid, file_sinks))
-    }
-
-    /// Spawn a long-lived `sleep` subprocess and return its pid.
-    ///
-    /// We need a live, external pid for the server that does NOT hold the FIFO
-    /// open: using our own pid would read as "held" (we own the read end), which
-    /// keeps the stream from ending on EOF.
-    fn spawn_pid_holder() -> std::process::Child {
-        std::process::Command::new("sleep")
-            .arg("60")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("failed to spawn sleep")
+        child
     }
 
     /// A pid that is certainly gone: spawn the shortest-lived process there is
     /// and reap it, so `is_pid_alive` sees a free pid rather than a zombie.
     fn dead_pid() -> u32 {
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("failed to spawn true");
+        let mut child = Command::new("true").spawn().expect("spawn true");
         let pid = child.id();
-        child.wait().expect("failed to reap true");
+        child.wait().expect("reap true");
         pid
     }
 
-    // -------------------------------------------------------------------------
-    // No writer ever arrives: Bazel exited before opening the BEP file
-    // -------------------------------------------------------------------------
-
-    /// Bazel can exit before it ever opens the BEP file — an unrecognized flag,
-    /// a bad startup option — leaving a live daemon that still looks like a
-    /// writer on its way. The stream has to end, empty, rather than wait on a
-    /// writer that cannot arrive; the caller reports bazel's exit code.
-    #[test]
-    fn a_writer_that_never_opens_ends_the_stream() {
-        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
-            // Server alive (daemons outlive the invocation), invocation gone.
-            let mut holder = spawn_pid_holder();
-            let mut stream = spawn_at(path, holder.id(), dead_pid(), vec![]).unwrap();
-            let sub = stream.subscribe();
-            let joined = stream.join().is_ok();
-            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-            let _ = holder.kill();
-            (joined, events.len())
-        });
-        assert_eq!(
-            outcome,
-            Some((true, 0)),
-            "the stream must end promptly and empty, not wait for a writer that cannot come"
-        );
+    /// Write to the file at `path` before the stream starts: once it has,
+    /// the reader has moved the file away from the path.
+    fn append(path: &Path, bytes: &[u8]) {
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
     }
 
-    /// The invocation that never opens the file is also never reaped while the
-    /// task is still iterating the stream: it is a zombie, not a free pid.
-    #[test]
-    fn a_zombie_writer_that_never_opens_ends_the_stream() {
-        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
-            let mut holder = spawn_pid_holder();
-            let zombie = std::process::Command::new("true")
-                .spawn()
-                .expect("spawn true");
-            std::thread::sleep(Duration::from_millis(200));
-            let mut stream = spawn_at(path, holder.id(), zombie.id(), vec![]).unwrap();
-            let sub = stream.subscribe();
-            let joined = stream.join().is_ok();
-            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-            let _ = holder.kill();
-            drop(zombie);
-            (joined, events.len())
-        });
-        assert_eq!(outcome, Some((true, 0)));
+    fn stop(mut child: Child) {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
-    /// The server can keep the write end open after the client is gone (a BEP
-    /// transport stuck closing). No end-of-file ever arrives, so the stream
-    /// has to end on the client's death alone.
-    #[test]
-    fn a_dead_client_ends_the_stream_while_the_server_holds_the_pipe() {
-        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
-            let channel = Channel::at(path.clone()).expect("mkfifo");
-            let mut server_pid = spawn_pid_holder();
-            let mut client = spawn_pid_holder();
-            let (release, held) = std::sync::mpsc::channel::<()>();
-            let path_w = path.clone();
-            let server = std::thread::spawn(move || {
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-                f.write_all(&encode_event(&make_event(false))).unwrap();
-                let _ = held.recv();
-            });
-            let mut stream = spawn_on(channel, server_pid.id(), client.id(), vec![]);
-            let sub = stream.subscribe();
-            let first = sub.recv().is_ok();
-            // The client exits; the server still holds the write end.
-            let _ = client.kill();
-            let _ = client.wait();
-            let joined = stream.join().is_ok();
-            let _ = release.send(());
-            let _ = server.join();
-            let _ = server_pid.kill();
-            (first, joined)
-        });
-        assert_eq!(
-            outcome,
-            Some((true, true)),
-            "the stream must end on the client's death while the server holds the pipe"
-        );
+    fn gate(server: u32, client: u32) -> Gate {
+        let mut gate = PidPair {
+            client,
+            server: Some(server),
+        }
+        .gate();
+        test_windows(&mut gate);
+        gate
     }
 
-    /// The other edge: the reader starts the moment bazel is spawned, but bazel
-    /// does not open the BEP file until its JVM is up seconds later. That gap
-    /// must not be taken for an invocation that will never write, or every
-    /// event of a real build is lost.
-    #[test]
-    fn a_writer_that_opens_late_still_delivers_its_events() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        let path_w = path.clone();
-        let writer = std::thread::spawn(move || {
-            // Many poll intervals' worth of "no writer", so the reader cannot
-            // pass this test by racing to its first read.
-            std::thread::sleep(Duration::from_millis(300));
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-            f.write_all(&encode_event(&make_event(true))).unwrap();
-        });
-
-        writer.join().unwrap();
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        assert_eq!(
-            events.len(),
-            1,
-            "a late writer's events must not be dropped"
-        );
-        assert!(events[0].event.last_message);
+    /// A stream under test, with one subscriber bound before it starts.
+    struct Rig {
+        stream: BuildEventStream,
+        sub: Subscriber<Arc<BuildEventEnvelope>>,
+        path: PathBuf,
+        /// The current attempt's file, as bazel holds it.
+        writer: std::cell::RefCell<Option<File>>,
     }
 
-    // -------------------------------------------------------------------------
-    // Happy path: Bazel sends a complete stream ending with last_message = true
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_complete_stream_delivers_all_events() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        let path_w = path.clone();
-        let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            f.write_all(&encode_event(&make_event(true))).unwrap();
-        });
-
-        writer.join().unwrap();
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        assert_eq!(events.len(), 3);
-        assert!(!events[0].event.last_message);
-        assert!(!events[1].event.last_message);
-        assert!(events[2].event.last_message);
-    }
-
-    // -------------------------------------------------------------------------
-    // BrokenPipe: Bazel closes the FIFO before sending last_message
-    // (e.g. Bazel process killed, SIGTERM, or a transient-error attempt ending)
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_broken_pipe_ends_stream_gracefully() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        let path_w = path.clone();
-        let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            // Closing `f` here without last_message triggers BrokenPipe on the read side.
-        });
-
-        writer.join().unwrap();
-        // join() must return Ok — BrokenPipe is a graceful termination.
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        assert_eq!(events.len(), 1);
-        assert!(!events[0].event.last_message);
-    }
-
-    // -------------------------------------------------------------------------
-    // Writer reconnect
-    //
-    // Force reconnect gaps to surface as `Ok(0)`: this process owns the FIFO's
-    // read end, while a separate live PID represents the Bazel invocation.
-    // -------------------------------------------------------------------------
-
-    /// Keeps the stream open when a writer reconnects between records.
-    #[test]
-    fn a_writer_reconnecting_between_records_keeps_the_stream_open() {
-        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
-            let mut holder = spawn_pid_holder();
-
-            let mut stream =
-                spawn_at(path.clone(), std::process::id(), holder.id(), vec![]).unwrap();
-            let sub = stream.subscribe();
-            wait_for_fifo(&path);
-
-            let path_w = path.clone();
-            let _writer = std::thread::spawn(move || {
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-                f.write_all(&encode_event(&make_event(false))).unwrap();
-                drop(f);
-                // Keep the writer disconnected for several polling intervals.
-                std::thread::sleep(Duration::from_millis(200));
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-                f.write_all(&encode_event(&make_event(true))).unwrap();
-            });
-
-            // Do not join: if the reader exits, the reconnect blocks in `open`,
-            // and the outer timeout must report the failure.
-            let joined = stream.join().map_err(|e| e.to_string());
-            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-            let _ = holder.kill();
-            (joined, events.len())
-        });
-        assert_eq!(
-            outcome,
-            Some((Ok(()), 2)),
-            "the gap between attempts must not end the stream"
-        );
-    }
-
-    /// Preserves framing when a writer reconnects part-way through a record.
-    #[test]
-    fn a_record_split_across_a_writer_reconnect_is_not_desynced() {
-        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
-            let path = temp_fifo_path();
-            let mut holder = spawn_pid_holder();
-
-            let mut stream =
-                spawn_at(path.clone(), std::process::id(), holder.id(), vec![]).unwrap();
-            let sub = stream.subscribe();
-            wait_for_fifo(&path);
-
-            let path_w = path.clone();
-            let _writer = std::thread::spawn(move || {
-                let record = encode_event(&make_event(true));
-                // Reconnect before the final byte so the gap occurs inside the record.
-                let split = record.len() - 1;
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-                f.write_all(&record[..split]).unwrap();
-                drop(f);
-                std::thread::sleep(Duration::from_millis(200));
-                let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-                f.write_all(&record[split..]).unwrap();
-            });
-
-            // Do not join: if the reader exits, the reconnect blocks in `open`,
-            // and the outer timeout must report the failure.
-            let joined = stream.join().map_err(|e| e.to_string());
-            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-            let _ = holder.kill();
-            (
-                joined,
-                events.len(),
-                events.first().map(|e| e.event.last_message),
-            )
-        });
-        assert_eq!(
-            outcome,
-            Some((Ok(()), 1, Some(true))),
-            "a record spanning a reconnect must be delivered whole"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // File sink: raw bytes are written to a file sink path alongside events
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_file_sink_captures_raw_bytes() {
-        let path = temp_fifo_path();
-        let sink_path =
-            std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(
-            path.clone(),
-            pid,
-            pid,
-            vec![(
-                sink_path.to_str().unwrap().to_string(),
-                Arc::new(FileSignal::new()),
-            )],
-        )
-        .unwrap();
-        wait_for_fifo(&path);
-
-        let events_to_send = vec![make_event(false), make_event(true)];
-        let raw_bytes: Vec<u8> = events_to_send.iter().flat_map(encode_event).collect();
-
-        let path_w = path.clone();
-        let raw_clone = raw_bytes.clone();
-        let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-            f.write_all(&raw_clone).unwrap();
-        });
-
-        writer.join().unwrap();
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let written = std::fs::read(&sink_path).unwrap();
-        assert_eq!(
-            written, raw_bytes,
-            "sink file must contain the exact raw bytes"
-        );
-        let _ = std::fs::remove_file(&sink_path);
-    }
-
-    /// A sink whose path cannot be opened fails alone: subscribers and the
-    /// other sinks still get the whole stream, and the writer is drained.
-    #[test]
-    fn a_sink_that_cannot_open_costs_only_its_own_copy() {
-        let path = temp_fifo_path();
-        let dir = tempfile::tempdir().unwrap();
-        let good_path = dir.path().join("good.bin");
-        let bad_path = dir.path().join("missing-dir").join("bad.bin");
-        let good = Arc::new(FileSignal::new());
-        let bad = Arc::new(FileSignal::new());
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(
-            path.clone(),
-            pid,
-            pid,
-            vec![
-                (bad_path.to_str().unwrap().to_string(), bad.clone()),
-                (good_path.to_str().unwrap().to_string(), good.clone()),
-            ],
-        )
-        .unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        let raw_bytes: Vec<u8> = [make_event(false), make_event(true)]
-            .iter()
-            .flat_map(encode_event)
-            .collect();
-        let path_w = path.clone();
-        let raw_clone = raw_bytes.clone();
-        let writer = std::thread::spawn(move || {
-            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
-            f.write_all(&raw_clone).unwrap();
-        });
-
-        writer.join().unwrap();
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        assert_eq!(std::iter::from_fn(|| sub.recv().ok()).count(), 2);
-        assert_eq!(good.wait(), Ok(()));
-        assert_eq!(std::fs::read(&good_path).unwrap(), raw_bytes);
-        let err = bad.wait().unwrap_err();
-        assert!(err.contains("cannot open"), "{err}");
-    }
-
-    // -------------------------------------------------------------------------
-    // Transient error retry (documents current behavior)
-    //
-    // When Bazel retries after REMOTE_CACHE_EVICTED it reopens the same BEP
-    // path.  With our FIFO-based design the sequence is:
-    //
-    //   Attempt 1: Bazel opens FIFO → writes → closes
-    //              → our thread sees BrokenPipe → closes broadcaster → exits
-    //   Attempt 2: Bazel tries to open FIFO again for writing
-    //              → BLOCKS: the read end was closed when our thread exited,
-    //                so there is no reader; the open(O_WRONLY) never returns.
-    //
-    // Net effect: only attempt 1's events are visible to subscribers.
-    // Attempt 2 cannot deliver any events through the closed stream.
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_transient_retry_cannot_reconnect_after_stream_closed() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        // Attempt 1 — writer closes without last_message (transient error).
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_event(false))).unwrap();
-            // `f` drops here → all writers gone → BrokenPipe in stream thread.
+    impl Rig {
+        fn new(server: u32, client: u32) -> Self {
+            Self::with_sinks(server, client, vec![])
         }
 
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        // Only attempt 1's single event was received.
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        assert_eq!(events.len(), 1, "only attempt 1 events should be visible");
-
-        // Attempt 2 — try to open the write end with O_NONBLOCK. The stream
-        // thread exited, closing the read end and removing the FIFO, so there
-        // is nothing to connect to (a FIFO that was still there with no reader
-        // would be ENXIO). Either way the open fails at once, without leaving a
-        // dangling blocked thread.
-        use nix::libc;
-        use std::os::unix::fs::OpenOptionsExt;
-        let result = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path);
-        assert!(result.is_err(), "attempt 2 open should fail (no reader)");
-        assert_eq!(
-            result.unwrap_err().raw_os_error(),
-            Some(libc::ENOENT),
-            "expected ENOENT (the ended stream removed its FIFO)"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // Desired behavior: transient error retry delivers events from both attempts
-    //
-    // Bazel REMOTE_CACHE_EVICTED retry sequence (from transient_error.md):
-    //   Attempt 1: open FIFO → write BuildStarted + BuildFinished(FAILED) → close
-    //   Attempt 2: open FIFO → write BuildStarted + BuildFinished(SUCCESS) → close
-    //
-    // The subscriber should see all 4 events in order across both attempts.
-    //
-    // NOT YET IMPLEMENTED: the stream thread currently exits on the first
-    // BrokenPipe (attempt 1 close), closing the read end.  Attempt 2's
-    // open(O_WRONLY) then blocks indefinitely waiting for a reader.
-    //
-    // To make this pass the stream would need to keep the FIFO read end open
-    // (or reopen it) after BrokenPipe so that the retry writer can connect.
-    // -------------------------------------------------------------------------
-
-    fn make_build_started() -> BuildEvent {
-        use axl_proto::build_event_stream::BuildStarted;
-        use axl_proto::build_event_stream::build_event::Payload;
-        BuildEvent {
-            last_message: false,
-            payload: Some(Payload::Started(BuildStarted::default())),
-            ..Default::default()
+        fn with_sinks(server: u32, client: u32, sinks: Vec<(String, Arc<FileSignal>)>) -> Self {
+            let file = BuildEventStream::reserve();
+            let path = file.path().to_path_buf();
+            let stream = BuildEventStream::new();
+            let sub = stream.subscribe();
+            let stream = stream.start(file, gate(server, client), sinks);
+            Self {
+                stream,
+                sub,
+                path,
+                writer: Default::default(),
+            }
         }
-    }
 
-    fn make_build_finished(exit_code: i32, last_message: bool) -> BuildEvent {
-        use axl_proto::build_event_stream::BuildFinished;
-        use axl_proto::build_event_stream::build_event::Payload;
-        use axl_proto::build_event_stream::build_finished::ExitCode;
-        BuildEvent {
-            last_message,
-            payload: Some(Payload::Finished(BuildFinished {
-                exit_code: Some(ExitCode {
-                    code: exit_code,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            })),
-            ..Default::default()
+        /// A new attempt, as bazel opens one: the file created or truncated.
+        fn attempt(&self, events: &[BuildEvent]) {
+            let mut f = File::create(&self.path).unwrap();
+            for e in events {
+                f.write_all(&encoded(e)).unwrap();
+            }
+            *self.writer.borrow_mut() = Some(f);
         }
-    }
 
-    #[test]
-    fn test_transient_retry_delivers_events_from_both_attempts() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        // Attempt 1: BuildStarted + BuildFinished(REMOTE_CACHE_EVICTED=39), then
-        // the writer closes.  The stream should swallow the BrokenPipe and wait.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(39, false)))
+        /// More of the current attempt.
+        fn append(&self, bytes: &[u8]) {
+            let mut writer = self.writer.borrow_mut();
+            writer
+                .as_mut()
+                .expect("an attempt to append to")
+                .write_all(bytes)
                 .unwrap();
         }
 
-        // Attempt 2: Bazel retries.  Because the stream kept the FIFO read end
-        // open, this open(O_WRONLY) pairs with it immediately.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(0, true)))
-                .unwrap();
+        fn recv(&self, n: usize) -> Vec<BuildEvent> {
+            (0..n)
+                .map(|_| self.sub.recv().expect("an event").event.clone())
+                .collect()
         }
 
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-
-        assert_eq!(events.len(), 4);
-        // attempt 1
-        assert!(matches!(
-            events[0].event.payload,
-            Some(axl_proto::build_event_stream::build_event::Payload::Started(_))
-        ));
-        assert!(matches!(
-            events[1].event.payload,
-            Some(axl_proto::build_event_stream::build_event::Payload::Finished(_))
-        ));
-        // attempt 2
-        assert!(matches!(
-            events[2].event.payload,
-            Some(axl_proto::build_event_stream::build_event::Payload::Started(_))
-        ));
-        assert!(events[3].event.last_message);
+        /// Join, then everything the subscriber has not taken yet.
+        fn finish(mut self) -> (Result<(), String>, Vec<BuildEvent>, PathBuf) {
+            let joined = self.stream.join().map_err(|e| e.to_string());
+            let rest = std::iter::from_fn(|| self.sub.recv().ok())
+                .map(|e| e.event.clone())
+                .collect();
+            (joined, rest, self.path)
+        }
     }
 
-    /// Bazel may set last_message=true on the BuildFinished(REMOTE_CACHE_EVICTED)
-    /// event.  The stream must not close on that last_message because a retry is
-    /// expected; it should stay open and deliver attempt 2's events normally.
-    #[test]
-    fn test_transient_retry_with_last_message_on_evicted_event() {
-        let path = temp_fifo_path();
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(path.clone(), pid, pid, vec![]).unwrap();
-        let sub = stream.subscribe();
-        wait_for_fifo(&path);
-
-        // Attempt 1: BuildFinished carries both REMOTE_CACHE_EVICTED and last_message=true.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(39, true)))
-                .unwrap();
-        }
-
-        // Attempt 2: normal successful stream.
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&encode_event(&make_build_started())).unwrap();
-            f.write_all(&encode_event(&make_build_finished(0, true)))
-                .unwrap();
-        }
-
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        // Receiving all 4 events proves the stream did not terminate when it saw
-        // last_message=true on attempt 1's REMOTE_CACHE_EVICTED BuildFinished.
-        assert_eq!(events.len(), 4);
-        assert!(events[1].event.last_message); // attempt 1's BuildFinished had last_message=true ...
-        assert!(events[3].event.last_message); // ... but only attempt 2's actually closed the stream
-    }
-
-    // -------------------------------------------------------------------------
-    // File sink truncation on retry
-    // -------------------------------------------------------------------------
-
-    fn attempt1_raw(last_message: bool) -> Vec<u8> {
-        [
-            encode_event(&make_build_started()),
-            encode_event(&make_build_finished(39, last_message)),
-        ]
-        .concat()
-    }
-
-    fn attempt2_raw() -> Vec<u8> {
-        [
-            encode_event(&make_build_started()),
-            encode_event(&make_build_finished(0, true)),
-        ]
-        .concat()
-    }
-
-    /// Run two attempts through a stream with one good file sink after
-    /// `other_sinks`, and return what the good sink holds.
-    fn run_retry_sink_test(
-        last_message_on_evicted: bool,
-        other_sinks: Vec<(String, Arc<FileSignal>)>,
-    ) -> Vec<u8> {
-        let path = temp_fifo_path();
-        let sink_path =
-            std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
-        let mut holder = spawn_pid_holder();
-        let pid = holder.id();
-
-        let mut stream = spawn_at(
-            path.clone(),
-            pid,
-            pid,
-            other_sinks
-                .into_iter()
-                .chain([(
-                    sink_path.to_str().unwrap().to_string(),
-                    Arc::new(FileSignal::new()),
-                )])
-                .collect(),
-        )
-        .unwrap();
-        wait_for_fifo(&path);
-
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&attempt1_raw(last_message_on_evicted)).unwrap();
-        }
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            f.write_all(&attempt2_raw()).unwrap();
-        }
-
-        stream.join().unwrap();
-        let _ = holder.kill();
-
-        let written = std::fs::read(&sink_path).unwrap();
-        let _ = std::fs::remove_file(&sink_path);
+    /// What a file sink wrote, removing it.
+    fn take_sink(path: &Path) -> Vec<u8> {
+        let written = std::fs::read(path).unwrap();
+        let _ = std::fs::remove_file(path);
         written
     }
 
-    /// After REMOTE_CACHE_EVICTED (last_message=false), the file sinks must be
-    /// truncated so they contain only the retry stream's bytes.
-    #[test]
-    fn test_file_sinks_emptied_before_retry_stream() {
-        let written = run_retry_sink_test(false, vec![]);
-        assert_eq!(written, attempt2_raw());
+    /// The event file and the `attempts` names the reader moved it to are
+    /// all gone.
+    fn nothing_left_of(path: &Path, attempts: u32) {
+        assert!(!path.exists());
+        for n in 1..=attempts {
+            let moved = moved_name(path, n);
+            assert!(!moved.exists(), "{} is left behind", moved.display());
+        }
     }
 
-    /// Same requirement when Bazel sets last_message=true on the evicted event.
+    /// A file sink's path, and the spec `start` takes for it.
+    fn file_sink() -> (PathBuf, (String, Arc<FileSignal>)) {
+        let path = std::env::temp_dir().join(format!("test-bes-sink-{}.bin", uuid::Uuid::new_v4()));
+        let spec = (
+            path.to_str().unwrap().to_string(),
+            Arc::new(FileSignal::new()),
+        );
+        (path, spec)
+    }
+
+    // -------------------------------------------------------------------------
+    // Bazel exited before it created the event file
+    // -------------------------------------------------------------------------
+
+    /// Bazel can exit before it ever creates the event file (an unrecognized
+    /// flag, a bad startup option), leaving a live daemon behind. The stream
+    /// has to end, empty, rather than wait for a file that cannot come.
     #[test]
-    fn test_file_sinks_emptied_before_retry_stream_last_message() {
-        let written = run_retry_sink_test(true, vec![]);
-        assert_eq!(written, attempt2_raw());
+    fn a_file_that_never_appears_ends_the_stream_once_the_client_is_gone() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let server = sleeper();
+            let rig = Rig::new(server.id(), dead_pid());
+            let (joined, events, _) = rig.finish();
+            stop(server);
+            (joined, events.len())
+        });
+        assert_eq!(outcome, Some((Ok(()), 0)));
+    }
+
+    /// The client that never creates the file is also not reaped while the
+    /// task is still iterating the stream: it is a zombie, not a free pid.
+    #[test]
+    fn a_zombie_client_ends_the_stream_too() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let server = sleeper();
+            let zombie = Command::new("true").spawn().expect("spawn true");
+            std::thread::sleep(Duration::from_millis(200));
+            let rig = Rig::new(server.id(), zombie.id());
+            let (joined, events, _) = rig.finish();
+            stop(server);
+            drop(zombie);
+            (joined, events.len())
+        });
+        assert_eq!(outcome, Some((Ok(()), 0)));
+    }
+
+    /// The other edge: bazel creates the file only once its JVM is up, seconds
+    /// after the reader starts. That gap is not a build that will never write.
+    #[test]
+    fn a_file_created_late_still_delivers_its_events() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let client = sleeper();
+            let rig = Rig::new(client.id(), client.id());
+            std::thread::sleep(Duration::from_millis(300));
+            rig.attempt(&[plain(true)]);
+            let (joined, events, _) = rig.finish();
+            stop(client);
+            (joined, events)
+        });
+        assert_eq!(outcome, Some((Ok(()), vec![plain(true)])));
+    }
+
+    // -------------------------------------------------------------------------
+    // How a stream ends
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn a_complete_stream_delivers_every_event() {
+        let client = sleeper();
+        let rig = Rig::new(client.id(), client.id());
+        rig.attempt(&[plain(false), plain(false), plain(true)]);
+        let (joined, events, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(events, vec![plain(false), plain(false), plain(true)]);
+    }
+
+    /// Bazel killed mid-build: no `last_message`, and the stream ends with the
+    /// client.
+    #[test]
+    fn a_stream_without_its_final_event_ends_with_the_client() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let client = sleeper();
+            let server = sleeper();
+            let rig = Rig::new(server.id(), client.id());
+            rig.attempt(&[plain(false)]);
+            let first = rig.recv(1);
+            stop(client);
+            let (joined, rest, _) = rig.finish();
+            stop(server);
+            (joined, first.len() + rest.len())
+        });
+        assert_eq!(outcome, Some((Ok(()), 1)));
+    }
+
+    /// The server can keep the file open after the client is gone (a BEP
+    /// transport stuck closing). The stream ends on the quiet window.
+    #[test]
+    fn a_dead_client_ends_the_stream_while_the_server_holds_the_file() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let client = sleeper();
+            let file = BuildEventStream::reserve();
+            let path = file.path().to_path_buf();
+            let server = holder_of(&path);
+            append(&path, &encoded(&plain(false)));
+            let stream = BuildEventStream::new();
+            let sub = stream.subscribe();
+            let mut stream = stream.start(file, gate(server.id(), client.id()), vec![]);
+            let first = sub.recv().is_ok();
+            stop(client);
+            let joined = stream.join().is_ok();
+            stop(server);
+            (first, joined)
+        });
+        assert_eq!(outcome, Some((true, true)));
+    }
+
+    /// A server pid gone stale holds nothing, so every pause between events
+    /// looks like nobody is writing. That must not end the stream while the
+    /// client runs.
+    #[test]
+    fn a_pause_between_events_does_not_end_the_stream() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let client = sleeper();
+            let stale_server = sleeper();
+            let rig = Rig::new(stale_server.id(), client.id());
+            rig.attempt(&[plain(false)]);
+            let first = rig.recv(1);
+            std::thread::sleep(Duration::from_millis(400));
+            rig.append(&encoded(&plain(true)));
+            let (joined, rest, _) = rig.finish();
+            stop(client);
+            stop(stale_server);
+            (joined, first.len() + rest.len())
+        });
+        assert_eq!(outcome, Some((Ok(()), 2)));
+    }
+
+    /// Bazel flushing part of a record is a short read, not a framing error.
+    #[test]
+    fn a_record_written_in_two_parts_is_delivered_whole() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let client = sleeper();
+            let rig = Rig::new(client.id(), client.id());
+            let record = encoded(&plain(true));
+            let split = record.len() - 1;
+            rig.attempt(&[]);
+            rig.append(&record[..split]);
+            std::thread::sleep(Duration::from_millis(200));
+            rig.append(&record[split..]);
+            let (joined, events, _) = rig.finish();
+            stop(client);
+            (joined, events)
+        });
+        assert_eq!(outcome, Some((Ok(()), vec![plain(true)])));
+    }
+
+    #[test]
+    fn events_written_before_the_stream_starts_reach_every_subscriber() {
+        let client = sleeper();
+        let file = BuildEventStream::reserve();
+        let path = file.path().to_path_buf();
+        let mut bazel = File::create(&path).unwrap();
+        bazel.write_all(&encoded(&started())).unwrap();
+        let stream = BuildEventStream::new();
+        let first = stream.subscribe();
+        let second = stream.subscribe();
+        let mut stream = stream.start(file, gate(client.id(), client.id()), vec![]);
+        bazel.write_all(&encoded(&plain(true))).unwrap();
+        drop(bazel);
+        stream.join().unwrap();
+        stop(client);
+        for sub in [first, second] {
+            let got: Vec<_> = std::iter::from_fn(|| sub.recv().ok())
+                .map(|e| e.event.clone())
+                .collect();
+            assert_eq!(got, vec![started(), plain(true)]);
+        }
+    }
+
+    #[test]
+    fn the_event_file_is_removed_once_the_stream_is_over() {
+        let client = sleeper();
+        let rig = Rig::new(client.id(), client.id());
+        rig.attempt(&[plain(true)]);
+        let (joined, _, path) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        nothing_left_of(&path, 1);
+    }
+
+    #[test]
+    fn joining_an_unstarted_stream_disconnects_its_subscribers() {
+        let mut stream = BuildEventStream::new();
+        let sub = stream.subscribe();
+        stream.join().unwrap();
+        assert!(sub.recv().is_err());
+        assert!(stream.subscribe().recv().is_err(), "and later ones too");
+    }
+
+    #[test]
+    #[should_panic(expected = "started once")]
+    fn a_stream_is_started_once() {
+        let client = sleeper();
+        let (a, b) = (BuildEventStream::reserve(), BuildEventStream::reserve());
+        let (ga, gb) = (
+            gate(client.id(), client.id()),
+            gate(client.id(), client.id()),
+        );
+        let _ = BuildEventStream::new()
+            .start(a, ga, vec![])
+            .start(b, gb, vec![]);
+    }
+
+    // -------------------------------------------------------------------------
+    // File sinks
+    // -------------------------------------------------------------------------
+
+    /// A sink at a path that cannot be opened fails alone: the stream and the
+    /// other sinks go on.
+    #[test]
+    fn a_file_sink_that_cannot_open_costs_only_its_copy() {
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), || {
+            let client = sleeper();
+            let (good, good_spec) = file_sink();
+            let bad_signal = Arc::new(FileSignal::new());
+            let bad = (
+                "/nonexistent-dir/for/a/sink.bin".to_string(),
+                bad_signal.clone(),
+            );
+            let rig = Rig::with_sinks(client.id(), client.id(), vec![bad, good_spec]);
+            let events = [started(), plain(true)];
+            rig.attempt(&events);
+            let (joined, got, _) = rig.finish();
+            stop(client);
+            let written = take_sink(&good);
+            (
+                joined,
+                got == events,
+                written == encoded_all(&events),
+                bad_signal.wait(),
+            )
+        });
+        let (joined, got, written, bad) = outcome.expect("the stream hung");
+        assert_eq!(joined, Ok(()));
+        assert!(got, "the subscriber saw every event");
+        assert!(written, "the good sink holds every event");
+        let err = bad.unwrap_err();
+        assert!(err.contains("cannot open"), "{err}");
+    }
+
+    /// A sink that cannot be opened again for a retried attempt fails alone.
+    #[test]
+    fn a_file_sink_that_cannot_restart_costs_only_its_copy() {
+        let client = sleeper();
+        let dir = std::env::temp_dir().join(format!("test-bes-sinkdir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let doomed_signal = Arc::new(FileSignal::new());
+        let doomed = (
+            dir.join("sink.bin").to_str().unwrap().to_string(),
+            doomed_signal.clone(),
+        );
+        let (good, good_spec) = file_sink();
+        let rig = Rig::with_sinks(client.id(), client.id(), vec![doomed, good_spec]);
+        rig.attempt(&attempt1(false));
+        rig.recv(2);
+        std::fs::remove_dir_all(&dir).unwrap();
+        rig.attempt(&attempt2());
+        let (joined, rest, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(rest, attempt2());
+        assert!(doomed_signal.wait().is_err());
+        let written = take_sink(&good);
+        assert_eq!(written, encoded_all(&attempt2()));
+    }
+
+    /// Retries exhausted: the last attempt ends on a retry marker and none
+    /// follows. The sink keeps that attempt, since nothing replaced it, and
+    /// the stream is complete.
+    #[test]
+    fn a_file_sink_keeps_a_last_attempt_that_ended_on_a_retry_marker() {
+        let client = sleeper();
+        let (sink, spec) = file_sink();
+        let mut rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
+        rig.attempt(&attempt1(true));
+        rig.recv(2);
+        stop(client);
+        assert_eq!(rig.stream.join().map_err(|e| e.to_string()), Ok(()));
+        assert!(
+            matches!(rig.stream.end(), Some(End::Complete)),
+            "{:?}",
+            rig.stream.end()
+        );
+        let (joined, _, _) = rig.finish();
+        assert_eq!(joined, Ok(()));
+        let written = take_sink(&sink);
+        assert_eq!(written, encoded_all(&attempt1(true)));
+    }
+
+    #[test]
+    fn a_file_sink_is_whole_and_empty_when_bazel_never_wrote() {
+        let server = sleeper();
+        let (sink, (path, signal)) = file_sink();
+        let rig = Rig::with_sinks(server.id(), dead_pid(), vec![(path, signal.clone())]);
+        let (joined, events, _) = rig.finish();
+        stop(server);
+        assert_eq!(joined, Ok(()));
+        assert!(events.is_empty());
+        assert_eq!(signal.wait(), Ok(()));
+        assert_eq!(take_sink(&sink), b"");
+    }
+
+    #[test]
+    fn a_file_sink_captures_the_raw_bytes() {
+        let client = sleeper();
+        let (sink, spec) = file_sink();
+        let rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
+        let events = [plain(false), plain(true)];
+        rig.attempt(&events);
+        let (joined, _, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        let written = take_sink(&sink);
+        assert_eq!(written, encoded_all(&events));
+    }
+
+    // -------------------------------------------------------------------------
+    // A build bazel retries after REMOTE_CACHE_EVICTED
+    //
+    // Each attempt creates the file over with O_TRUNC. Bazel's gap between
+    // attempts is a whole loading and analysis phase, which these tests stand
+    // in for by letting the reader reach the retry marker before the next
+    // attempt starts.
+    // -------------------------------------------------------------------------
+
+    fn attempt1(last_message: bool) -> [BuildEvent; 2] {
+        [started(), retry_marker(last_message)]
+    }
+
+    fn attempt2() -> [BuildEvent; 2] {
+        [started(), build_finished(0, true)]
+    }
+
+    fn run_retry(
+        last_message_on_evicted: bool,
+        sinks: Vec<(String, Arc<FileSignal>)>,
+    ) -> Vec<BuildEvent> {
+        let client = sleeper();
+        let rig = Rig::with_sinks(client.id(), client.id(), sinks);
+        rig.attempt(&attempt1(last_message_on_evicted));
+        let mut events = rig.recv(2);
+        rig.attempt(&attempt2());
+        let (joined, rest, path) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        nothing_left_of(&path, 2);
+        events.extend(rest);
+        events
+    }
+
+    #[test]
+    fn a_retry_delivers_both_attempts_in_order() {
+        let events = run_retry(false, vec![]);
+        assert_eq!(events, [attempt1(false), attempt2()].concat());
+    }
+
+    /// Bazel may set `last_message` on the retried attempt's `BuildFinished`.
+    /// Only the last attempt's final event ends the stream.
+    #[test]
+    fn a_retry_with_last_message_on_the_evicted_attempt_delivers_both() {
+        let events = run_retry(true, vec![]);
+        assert_eq!(events, [attempt1(true), attempt2()].concat());
+    }
+
+    fn retry_sink(last_message_on_evicted: bool) -> Vec<u8> {
+        let (sink, spec) = file_sink();
+        run_retry(last_message_on_evicted, vec![spec]);
+        let written = take_sink(&sink);
+        written
+    }
+
+    /// The file sinks start over with the retry, holding only its bytes.
+    #[test]
+    fn file_sinks_hold_only_the_retried_stream() {
+        let want = encoded_all(&attempt2());
+        assert_eq!(retry_sink(false), want);
+        assert_eq!(retry_sink(true), want);
     }
 
     /// A sink that failed to open stays failed across a retry, and the good
@@ -1157,12 +974,71 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad_path = dir.path().join("missing-dir").join("bad.bin");
         let bad = Arc::new(FileSignal::new());
-        let written = run_retry_sink_test(
+        let (good, good_spec) = file_sink();
+        run_retry(
             false,
-            vec![(bad_path.to_str().unwrap().to_string(), bad.clone())],
+            vec![
+                (bad_path.to_str().unwrap().to_string(), bad.clone()),
+                good_spec,
+            ],
         );
-        assert_eq!(written, attempt2_raw());
-        assert!(bad.wait().unwrap_err().contains("cannot open"));
+        let written = take_sink(&good);
+        let err = bad.wait().unwrap_err();
+        assert!(err.contains("cannot open"), "{err}");
         assert!(!bad_path.exists());
+        assert_eq!(written, encoded_all(&attempt2()));
+    }
+
+    /// An event redaction changes reaches the sink re-encoded, and after a
+    /// retry only the retried attempt's copy of it is there.
+    #[test]
+    fn a_redacted_event_after_a_retry_reaches_the_sink_re_encoded() {
+        let with_options = || {
+            let mut e = started();
+            if let Some(Payload::Started(s)) = e.payload.as_mut() {
+                s.options_description = "--repo_env=SECRET=hunter2".into();
+            }
+            e
+        };
+        let client = sleeper();
+        let (sink, spec) = file_sink();
+        let rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
+        rig.attempt(&[with_options(), retry_marker(false)]);
+        rig.recv(2);
+        rig.attempt(&[with_options(), build_finished(0, true)]);
+        let (joined, rest, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(rest, vec![started(), build_finished(0, true)], "redacted");
+        assert_eq!(
+            take_sink(&sink),
+            encoded_all(&[started(), build_finished(0, true)])
+        );
+    }
+
+    /// The retried attempt goes on writing after its retry marker. That tail
+    /// belongs to the attempt bazel abandoned, not to the sink's last attempt.
+    #[test]
+    fn file_sinks_drop_the_tail_of_the_retried_attempt() {
+        let client = sleeper();
+        let (sink, spec) = file_sink();
+        let rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
+        // Attempt 1's writer stays open: the reader has moved the file off the
+        // path, and the tail is written through the fd bazel already has.
+        let mut first = File::create(&rig.path).unwrap();
+        for e in attempt1(false) {
+            first.write_all(&encoded(&e)).unwrap();
+        }
+        rig.recv(2);
+        first.write_all(&encoded(&plain(true))).unwrap();
+        drop(first);
+        rig.recv(1);
+        rig.attempt(&attempt2());
+        let (joined, _, path) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        nothing_left_of(&path, 2);
+        let written = take_sink(&sink);
+        assert_eq!(written, encoded_all(&attempt2()));
     }
 }

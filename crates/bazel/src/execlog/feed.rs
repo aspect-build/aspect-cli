@@ -214,7 +214,8 @@ impl ExecLogStream {
     /// [`reserve_path`](Self::reserve_path).
     ///
     /// `server_pid` is the Bazel daemon: the process that holds the file open while
-    /// it writes, so it answers "are more bytes coming?".
+    /// it writes, so once the client has exited it answers "are more bytes
+    /// coming?".
     ///
     /// `client_pid` is the spawned bazel client — the per-invocation pid whose death
     /// means no execution log is coming at all. It has to be asked separately,
@@ -224,11 +225,13 @@ impl ExecLogStream {
     ///
     /// The thread streams the file as Bazel writes it using
     /// [`crate::stream::file::File`], which waits for the file to exist and for
-    /// more bytes while Bazel holds it open, and says when the stream is over. It
-    /// self-terminates when Bazel closes the file; a read error fails `join()`.
+    /// more bytes while Bazel holds it open, and says when the stream is over:
+    /// once Bazel has closed the file and the client has exited, or once the
+    /// quiet window after the client's exit has passed (see [`crate::stream`]).
+    /// A read error fails `join()`.
     ///
-    /// Unlike the BES FIFO, a regular file loses nothing by starting late: bytes
-    /// written before the reader opens are still there to be read.
+    /// A regular file loses nothing by starting late: bytes written before the
+    /// reader opens are still there to be read.
     ///
     /// ## Send strategy
     ///
@@ -254,7 +257,7 @@ impl ExecLogStream {
     /// Bazel. Back-pressure shows up as a longer `join()` at the end of the build,
     /// not as a slower build. A regular file rather than a FIFO, deliberately:
     /// Bazel checksums the compact log after writing it and cannot seek back on a
-    /// pipe, which stalls it mid-build and deadlocks against a BEP FIFO —
+    /// pipe, which stalls it mid-build —
     /// https://github.com/bazelbuild/bazel/issues/28800.
     ///
     /// `CompactFile` sinks are unaffected — raw bytes are tee'd by
@@ -272,7 +275,7 @@ impl ExecLogStream {
             client: client_pid,
             server: Some(server_pid),
         }
-        .gate(&path);
+        .gate();
         let mut file = followed::File::follow(path, gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);

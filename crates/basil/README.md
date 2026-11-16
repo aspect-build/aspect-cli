@@ -23,6 +23,6 @@ Scenarios live in `src/main.rs`. Add new ones there and document what they repro
 
 ## When to use it
 
-Use basil any time a test wants to exercise the `ctx.bazel.build` path without spawning real Bazel. It's deterministic, fast, and lets you reproduce edge cases (cache eviction, broken pipes, retry storms) that are hard to trigger against a live Bazel server.
+Use basil any time a test wants to exercise the `ctx.bazel.build` path without spawning real Bazel. It's deterministic, fast, and lets you reproduce edge cases (cache eviction, a retry that never comes, retry storms) that are hard to trigger against a live Bazel server.
 
 It is not a replacement for end-to-end testing against real Bazel — only for unit-level coverage of axl-runtime's BES handling.

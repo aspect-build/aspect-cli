@@ -6,9 +6,11 @@
 //! * [`pid_pair::PidPair`]: one bazel command's client and server, and the
 //!   two answers a [`Gate`] needs from them.
 //!
-//! Both are plain [`std::io::Read`]s: bytes, or `Ok(0)` once the stream is
-//! over, with the reason in `done()`. They differ in how a read behaves and
-//! share the decision of when to stop, which is [`Rules`].
+//! [`pipe::Pipe`] and [`file::File`] are plain [`std::io::Read`]s: bytes, or
+//! `Ok(0)` once the stream is over, with the reason in `done()`. A
+//! [`file::File`] also fails once with [`file::StartedOver`] each time its
+//! reading starts over. They differ in how a read behaves and share the
+//! decision of when to stop, which is [`Rules`].
 //!
 //! # When a stream is over
 //!
@@ -21,7 +23,8 @@
 //! | rule | condition | result |
 //! |---|---|---|
 //! | R1 | read error, or (pipe) the path no longer names this FIFO | [`Done::Broken`] |
-//! | R2 | EOF, bytes seen, not `expect_more`, `held` says nobody holds it | [`Done::Drained`] |
+//! | R2 | EOF, bytes seen, [`Expect::Unknown`], `held` says nobody holds it, and (file) `ended` | [`Done::Drained`] |
+//! | R2′ | EOF, bytes seen, [`Expect::NothingOnceEnded`], and `ended` | [`Done::Drained`] |
 //! | R3 | `ended`, no bytes ever, `held` says nobody holds it | [`Done::Ended`] now |
 //! | R4 | `ended`, and quiet for [`Gate::quiet_empty`] (no bytes ever) or [`Gate::quiet`] | [`Done::Ended`] |
 //! | R5 | anything else | wait |
@@ -29,13 +32,29 @@
 //! R1 belongs to the medium; [`Rules`] decides R2 to R4. Any bytes reset the
 //! quiet timer, so a writer still flushing after its owner has ended is never
 //! cut off.
+//!
+//! R2 asks more of a file than of a pipe. A pipe's EOF already says no writer
+//! is attached, and `held` only confirms it. A file's EOF says nothing about
+//! writers, so `held` would be the whole answer, and it comes from a server pid
+//! read before the build that a restarted server makes stale. A stale pid holds
+//! nothing, so trusted alone it would end a file at the first pause between
+//! writes. Requiring `ended` too means a wrong `held` can only end the stream
+//! early once the client is gone.
+//!
+//! R2′ is for when the protocol on top says what is written is whole, and
+//! only a successor the owner starts could add to it. The owner having ended
+//! settles that, and `held` is not asked: a server that still holds the file
+//! open has nothing more to write to it.
 
 use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub mod file;
 pub mod pid_pair;
 pub mod pipe;
+#[cfg(test)]
+pub(crate) mod testing;
 
 /// How long one wait for bytes lasts before the rules are evaluated again.
 pub(crate) const TICK: Duration = Duration::from_millis(10);
@@ -55,15 +74,16 @@ pub const QUIET_EMPTY: Duration = Duration::from_millis(250);
 /// What a stream asks of whoever started the writers.
 ///
 /// Both are called from the reading thread and only when a rule needs the
-/// answer, so a costly `held` is not paid per byte.
+/// answer, or (`held`) while a [`file::File`] waits to move on to the next
+/// file, so a costly `held` is not paid per byte.
 pub struct Gate {
     /// The thing that owns this stream is over, so only what is already
     /// written, or being flushed, remains.
     pub ended: Box<dyn FnMut() -> bool + Send>,
-    /// Whether any writer still holds the path open. `None` when there is no
-    /// way to know, which only removes the fast paths (R2, R3), never makes the
-    /// stream wrong.
-    pub held: Option<Box<dyn FnMut() -> bool + Send>>,
+    /// Whether any writer still holds open the path it is given: the one the
+    /// stream reads from now. `None` when there is no way to know, which only
+    /// removes the fast paths (R2, R3), never makes the stream wrong.
+    pub held: Option<Box<dyn FnMut(&Path) -> bool + Send>>,
     /// See [`QUIET`].
     pub quiet: Duration,
     /// See [`QUIET_EMPTY`].
@@ -80,7 +100,7 @@ impl Gate {
         }
     }
 
-    pub fn with_held(mut self, held: impl FnMut() -> bool + Send + 'static) -> Self {
+    pub fn with_held(mut self, held: impl FnMut(&Path) -> bool + Send + 'static) -> Self {
         self.held = Some(Box::new(held));
         self
     }
@@ -89,7 +109,8 @@ impl Gate {
 /// Why a followed stream stopped producing bytes.
 #[derive(Debug)]
 pub enum Done {
-    /// No writer remains and none is coming back.
+    /// Nothing more is coming: the writers closed (R2), or the stream was
+    /// whole once the owner ended (R2′).
     Drained { bytes: u64 },
     /// The owner ended and the stream then stayed quiet for `quiet`.
     Ended { bytes: u64, quiet: Duration },
@@ -111,7 +132,7 @@ impl Done {
 impl std::fmt::Display for Done {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Done::Drained { bytes } => write!(f, "every writer closed after {bytes} bytes"),
+            Done::Drained { bytes } => write!(f, "the stream ended after {bytes} bytes"),
             Done::Ended { bytes: 0, .. } => write!(f, "the writer ended without writing anything"),
             Done::Ended { bytes, quiet } => write!(
                 f,
@@ -125,6 +146,21 @@ impl std::fmt::Display for Done {
     }
 }
 
+/// What the protocol on top of a stream says about its writer, which neither
+/// the medium nor the [`Gate`] can. See R2 and R2′ in the [module docs](self).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Expect {
+    /// Nothing: the rules decide alone.
+    #[default]
+    Unknown,
+    /// The writer is not done: R2 is off, and the owner ending is what ends
+    /// the stream (R4).
+    More,
+    /// What is written is whole. More can follow only while the owner runs,
+    /// so once it has ended the current end is the end (R2′).
+    NothingOnceEnded,
+}
+
 /// The decision of when a stream is over (R2 to R4), and the bookkeeping it
 /// needs: bytes seen, the quiet timer, whether more is expected. Shared by
 /// [`pipe::Pipe`] and [`file::File`].
@@ -133,16 +169,29 @@ pub(crate) struct Rules {
     bytes: u64,
     /// When the stream first went quiet with the owner already ended.
     quiet_since: Option<Instant>,
-    expect_more: bool,
+    expect: Expect,
+    /// R2 also needs `ended`: the medium's EOF does not say the writers are
+    /// gone. See the [module docs](self).
+    drain_needs_end: bool,
 }
 
 impl Rules {
+    /// The rules for a medium whose EOF means no writer is attached: a pipe.
     pub(crate) fn new(gate: Gate) -> Self {
         Self {
             gate,
             bytes: 0,
             quiet_since: None,
-            expect_more: false,
+            expect: Expect::Unknown,
+            drain_needs_end: false,
+        }
+    }
+
+    /// The rules for a medium whose EOF is only its current end: a file.
+    pub(crate) fn for_file(gate: Gate) -> Self {
+        Self {
+            drain_needs_end: true,
+            ..Self::new(gate)
         }
     }
 
@@ -156,8 +205,17 @@ impl Rules {
         self.quiet_since = None;
     }
 
-    pub(crate) fn expect_more(&mut self, yes: bool) {
-        self.expect_more = yes;
+    pub(crate) fn expect(&mut self, what: Expect) {
+        self.expect = what;
+    }
+
+    /// `held`, asked about `path` outside the rules.
+    pub(crate) fn held(&mut self, path: &Path) -> Option<bool> {
+        self.gate.held.as_mut().map(|f| f(path))
+    }
+
+    pub(crate) fn quiet(&self) -> Duration {
+        self.gate.quiet
     }
 
     /// R1: the medium failed.
@@ -169,20 +227,34 @@ impl Rules {
     }
 
     /// Apply R2 to R4 to a read that returned nothing. `eof` is whether the
-    /// read saw zero bytes, as opposed to a writer attached but quiet.
-    pub(crate) fn judge(&mut self, eof: bool) -> Option<Done> {
+    /// read saw zero bytes, as opposed to a writer attached but quiet, and
+    /// `reading` is the path `held` is asked about.
+    pub(crate) fn judge(&mut self, eof: bool, reading: &Path) -> Option<Done> {
         let bytes = self.bytes;
 
         let mut held: Option<Option<bool>> = None;
         let mut held = |gate: &mut Gate| -> Option<bool> {
-            *held.get_or_insert_with(|| gate.held.as_mut().map(|f| f()))
+            *held.get_or_insert_with(|| gate.held.as_mut().map(|f| f(reading)))
         };
 
-        if eof && bytes > 0 && !self.expect_more && held(&mut self.gate) == Some(false) {
+        let mut ended: Option<bool> = None;
+        let mut ended = |gate: &mut Gate| -> bool { *ended.get_or_insert_with(|| (gate.ended)()) };
+
+        let drained = eof
+            && bytes > 0
+            && match self.expect {
+                Expect::Unknown => {
+                    (!self.drain_needs_end || ended(&mut self.gate))
+                        && held(&mut self.gate) == Some(false)
+                }
+                Expect::More => false,
+                Expect::NothingOnceEnded => ended(&mut self.gate),
+            };
+        if drained {
             return Some(Done::Drained { bytes });
         }
 
-        if !(self.gate.ended)() {
+        if !ended(&mut self.gate) {
             self.quiet_since = None;
             return None;
         }
@@ -207,57 +279,34 @@ impl Rules {
 
 #[cfg(test)]
 mod tests {
+    use super::testing::Flags;
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
-    struct Flags {
-        ended: Arc<AtomicBool>,
-        held: Arc<AtomicBool>,
-        held_calls: Arc<AtomicUsize>,
-    }
+    /// The path `held` is asked about: these rules never look at it.
+    const STREAM: &str = "/stream";
 
+    /// Rules on [`Flags`], with windows the sleeps below are sized to.
     fn rules(with_held: bool) -> (Rules, Flags) {
-        let ended = Arc::new(AtomicBool::new(false));
-        let held = Arc::new(AtomicBool::new(true));
-        let held_calls = Arc::new(AtomicUsize::new(0));
-        let e = ended.clone();
-        let mut gate = Gate::new(move || e.load(Ordering::SeqCst));
-        if with_held {
-            let (h, c) = (held.clone(), held_calls.clone());
-            gate = gate.with_held(move || {
-                c.fetch_add(1, Ordering::SeqCst);
-                h.load(Ordering::SeqCst)
-            });
-        }
+        let flags = Flags::new();
+        let mut gate = flags.gate(with_held);
         gate.quiet = Duration::from_millis(100);
         gate.quiet_empty = Duration::from_millis(40);
-        (
-            Rules::new(gate),
-            Flags {
-                ended,
-                held,
-                held_calls,
-            },
-        )
+        (Rules::new(gate), flags)
     }
 
-    impl Flags {
-        fn end(&self) {
-            self.ended.store(true, Ordering::SeqCst);
-        }
-        fn release(&self) {
-            self.held.store(false, Ordering::SeqCst);
-        }
+    fn rules_for_file() -> (Rules, Flags) {
+        let (r, f) = rules(true);
+        (Rules::for_file(r.gate), f)
     }
 
     #[test]
     fn nothing_is_decided_while_the_owner_lives_and_the_file_is_held() {
         let (mut r, _f) = rules(true);
-        assert!(r.judge(true).is_none());
+        assert!(r.judge(true, Path::new(STREAM)).is_none());
         r.arrived(5);
-        assert!(r.judge(true).is_none());
-        assert!(r.judge(false).is_none());
+        assert!(r.judge(true, Path::new(STREAM)).is_none());
+        assert!(r.judge(false, Path::new(STREAM)).is_none());
     }
 
     #[test]
@@ -265,22 +314,65 @@ mod tests {
         let (mut r, f) = rules(true);
         f.release();
         // No bytes yet.
-        assert!(r.judge(true).is_none());
+        assert!(r.judge(true, Path::new(STREAM)).is_none());
         r.arrived(3);
         // Writer attached but quiet is not EOF.
-        assert!(r.judge(false).is_none());
+        assert!(r.judge(false, Path::new(STREAM)).is_none());
         // Expecting more switches it off.
-        r.expect_more(true);
-        assert!(r.judge(true).is_none());
-        r.expect_more(false);
-        assert!(matches!(r.judge(true), Some(Done::Drained { bytes: 3 })));
+        r.expect(Expect::More);
+        assert!(r.judge(true, Path::new(STREAM)).is_none());
+        r.expect(Expect::Unknown);
+        assert!(matches!(
+            r.judge(true, Path::new(STREAM)),
+            Some(Done::Drained { bytes: 3 })
+        ));
+    }
+
+    #[test]
+    fn r2_on_a_file_also_needs_the_owner_ended() {
+        // A stale server pid holds nothing: while the client lives, "nobody
+        // holds the file" must not end a file at a pause between writes.
+        let (mut r, f) = rules_for_file();
+        f.release();
+        r.arrived(3);
+        assert!(
+            r.judge(true, Path::new(STREAM)).is_none(),
+            "the client is still running"
+        );
+        f.end();
+        assert!(matches!(
+            r.judge(true, Path::new(STREAM)),
+            Some(Done::Drained { bytes: 3 })
+        ));
+    }
+
+    #[test]
+    fn r2_prime_needs_only_eof_bytes_and_the_owner_ended() {
+        // `held` says the file is held, and is not asked.
+        let (mut r, f) = rules_for_file();
+        r.expect(Expect::NothingOnceEnded);
+        assert!(r.judge(true, Path::new(STREAM)).is_none(), "no bytes yet");
+        r.arrived(3);
+        assert!(
+            r.judge(true, Path::new(STREAM)).is_none(),
+            "the owner can still add to it"
+        );
+        f.end();
+        assert!(
+            r.judge(false, Path::new(STREAM)).is_none(),
+            "a writer attached is not EOF"
+        );
+        assert!(matches!(
+            r.judge(true, Path::new(STREAM)),
+            Some(Done::Drained { bytes: 3 })
+        ));
     }
 
     #[test]
     fn r2_without_a_held_hint_never_applies() {
         let (mut r, _f) = rules(false);
         r.arrived(3);
-        assert!(r.judge(true).is_none());
+        assert!(r.judge(true, Path::new(STREAM)).is_none());
     }
 
     #[test]
@@ -288,7 +380,7 @@ mod tests {
         let (mut r, f) = rules(true);
         f.end();
         f.release();
-        match r.judge(true) {
+        match r.judge(true, Path::new(STREAM)) {
             Some(Done::Ended { bytes: 0, quiet }) => assert_eq!(quiet, Duration::ZERO),
             other => panic!("expected an immediate Ended, got {other:?}"),
         }
@@ -298,7 +390,7 @@ mod tests {
         f.release();
         r.arrived(1);
         assert!(
-            r.judge(false).is_none(),
+            r.judge(false, Path::new(STREAM)).is_none(),
             "R2 needs eof; the window has not passed"
         );
     }
@@ -307,21 +399,30 @@ mod tests {
     fn r4_waits_the_window_that_matches_whether_bytes_were_seen() {
         let (mut r, f) = rules(true);
         f.end();
-        assert!(r.judge(false).is_none(), "the window just started");
+        assert!(
+            r.judge(false, Path::new(STREAM)).is_none(),
+            "the window just started"
+        );
         std::thread::sleep(Duration::from_millis(60));
         assert!(
-            matches!(r.judge(false), Some(Done::Ended { bytes: 0, .. })),
+            matches!(
+                r.judge(false, Path::new(STREAM)),
+                Some(Done::Ended { bytes: 0, .. })
+            ),
             "the empty window is 40ms"
         );
 
         let (mut r, f) = rules(true);
         f.end();
         r.arrived(9);
-        assert!(r.judge(false).is_none());
+        assert!(r.judge(false, Path::new(STREAM)).is_none());
         std::thread::sleep(Duration::from_millis(60));
-        assert!(r.judge(false).is_none(), "the non-empty window is 100ms");
+        assert!(
+            r.judge(false, Path::new(STREAM)).is_none(),
+            "the non-empty window is 100ms"
+        );
         std::thread::sleep(Duration::from_millis(60));
-        match r.judge(false) {
+        match r.judge(false, Path::new(STREAM)) {
             Some(Done::Ended { bytes: 9, quiet }) => assert!(quiet >= Duration::from_millis(100)),
             other => panic!("expected Ended, got {other:?}"),
         }
@@ -332,14 +433,14 @@ mod tests {
         let (mut r, f) = rules(true);
         f.end();
         r.arrived(1);
-        r.judge(false);
+        r.judge(false, Path::new(STREAM));
         assert!(r.quiet_since.is_some());
         r.arrived(1);
         assert!(r.quiet_since.is_none(), "bytes restart the window");
-        r.judge(false);
+        r.judge(false, Path::new(STREAM));
         assert!(r.quiet_since.is_some());
         f.ended.store(false, Ordering::SeqCst);
-        r.judge(false);
+        r.judge(false, Path::new(STREAM));
         assert!(
             r.quiet_since.is_none(),
             "an owner that is not ended clears it"
@@ -350,18 +451,18 @@ mod tests {
     fn held_is_asked_lazily_and_at_most_once_per_judgement() {
         let (mut r, f) = rules(true);
         // Owner alive, no EOF: nothing needs it.
-        r.judge(false);
+        r.judge(false, Path::new(STREAM));
         assert_eq!(f.held_calls.load(Ordering::SeqCst), 0);
         // EOF with no bytes and an ended owner: R3 asks once.
         f.end();
         f.release();
-        r.judge(true);
+        r.judge(true, Path::new(STREAM));
         assert_eq!(f.held_calls.load(Ordering::SeqCst), 1);
         // EOF with bytes, owner ended: R2 asks, R3 does not ask again.
         let (mut r, f) = rules(true);
         f.end();
         r.arrived(1);
-        r.judge(true);
+        r.judge(true, Path::new(STREAM));
         assert_eq!(f.held_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -383,8 +484,8 @@ mod tests {
         assert_eq!(gate.quiet, QUIET);
         assert_eq!(gate.quiet_empty, QUIET_EMPTY);
         assert!(gate.held.is_none());
-        let mut gate = gate.with_held(|| true);
-        assert!((gate.held.as_mut().unwrap())());
+        let mut gate = gate.with_held(|_| true);
+        assert!((gate.held.as_mut().unwrap())(Path::new(STREAM)));
     }
 
     #[test]
@@ -411,7 +512,7 @@ mod tests {
             ],
             [10, 20, 0, 30]
         );
-        assert_eq!(drained.to_string(), "every writer closed after 10 bytes");
+        assert_eq!(drained.to_string(), "the stream ended after 10 bytes");
         assert_eq!(
             ended.to_string(),
             "the writer ended and nothing more arrived for 5000ms after 20 bytes"

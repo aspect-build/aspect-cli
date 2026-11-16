@@ -74,7 +74,8 @@ pub fn is_path_open_for_pid(path: &Path, pid: u32) -> io::Result<bool> {
         Err(_) => return Ok(false),
     };
     for fd in proc.fd().map_err(|err| io::Error::other(err))? {
-        let fd = fd.map_err(|err| io::Error::other(err))?;
+        // An fd closed since the listing says nothing about the others.
+        let Ok(fd) = fd else { continue };
         if let FDTarget::Path(fd_path) = &fd.target {
             if fd_path == path {
                 return Ok(true);
@@ -95,7 +96,11 @@ pub fn is_path_open_for_pid(path: &Path, pid: u32) -> io::Result<bool> {
     }
     let pid_val = Pid(pid);
     for fd in proc_pidinfo_list::<ProcFDInfo>(pid_val)? {
-        match proc_pidfdinfo::<VnodeFdInfoWithPath>(pid_val, fd.proc_fd)? {
+        // An fd closed since the listing says nothing about the others.
+        let Ok(info) = proc_pidfdinfo::<VnodeFdInfoWithPath>(pid_val, fd.proc_fd) else {
+            continue;
+        };
+        match info {
             Some(vnode) => match vnode.path() {
                 Ok(p) => {
                     if path == p {

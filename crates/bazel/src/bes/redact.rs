@@ -6,7 +6,7 @@
 //! `--bes_backend=grpcs://user:password@host:port`,
 //! `--action_env=DEPLOY_TOKEN=<secret>`, etc. Without redaction, those secrets
 //! flow downstream to every BES sink — the gRPC forwarder, file dumps uploaded
-//! as artifacts, the AXL `build_events()` iterator. We don't want that.
+//! as artifacts, `bazel.build_events.iterator()` handles. We don't want that.
 //!
 //! This module rewrites events in place before fan-out, so every downstream
 //! consumer sees a scrubbed stream. Secrets never leave the process.

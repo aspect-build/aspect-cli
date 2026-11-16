@@ -108,14 +108,6 @@ impl Pipe {
         &self.path
     }
 
-    /// The protocol says a writer will reconnect, such as a build retrying
-    /// after the previous attempt closed the file. While set, a gap with no
-    /// writer is a pause and not the end (R2 is off); the owner ending still
-    /// ends the stream (R4).
-    pub fn expect_more(&mut self, yes: bool) {
-        self.rules.expect_more(yes);
-    }
-
     fn still_names_this_fifo(&self) -> bool {
         std::fs::metadata(&self.path)
             .map(|m| (m.dev(), m.ino()) == self.ident)
@@ -132,7 +124,7 @@ impl Pipe {
                 "the channel path no longer names the FIFO being read",
             )));
         }
-        self.rules.judge(eof)
+        self.rules.judge(eof, &self.path)
     }
 
     /// Wait one tick for bytes. On EOF a poll would return at once (a hung-up
@@ -200,21 +192,17 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::FileTypeExt;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, mpsc};
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    const QUIET_TEST: Duration = Duration::from_millis(200);
-    const QUIET_EMPTY_TEST: Duration = Duration::from_millis(100);
+    use crate::stream::testing::{Flags, QUIET_EMPTY_TEST, QUIET_TEST, finished, still_waiting};
 
     /// A follower whose owner and writers are flags the test flips.
     struct Rig {
         follower: Pipe,
         path: PathBuf,
-        ended: Arc<AtomicBool>,
-        held: Arc<AtomicBool>,
-        ended_calls: Arc<AtomicUsize>,
-        held_calls: Arc<AtomicUsize>,
+        flags: Flags,
     }
 
     impl Rig {
@@ -226,31 +214,11 @@ mod tests {
         fn with(with_held: bool) -> Self {
             let channel = Channel::fifo("bazel-pipe-test").unwrap();
             let path = channel.path().to_path_buf();
-            let ended = Arc::new(AtomicBool::new(false));
-            let held = Arc::new(AtomicBool::new(true));
-            let ended_calls = Arc::new(AtomicUsize::new(0));
-            let held_calls = Arc::new(AtomicUsize::new(0));
-            let (e, ec) = (ended.clone(), ended_calls.clone());
-            let mut gate = Gate::new(move || {
-                ec.fetch_add(1, Ordering::SeqCst);
-                e.load(Ordering::SeqCst)
-            });
-            if with_held {
-                let (h, hc) = (held.clone(), held_calls.clone());
-                gate = gate.with_held(move || {
-                    hc.fetch_add(1, Ordering::SeqCst);
-                    h.load(Ordering::SeqCst)
-                });
-            }
-            gate.quiet = QUIET_TEST;
-            gate.quiet_empty = QUIET_EMPTY_TEST;
+            let flags = Flags::new();
             Self {
-                follower: channel.follow(gate).unwrap(),
+                follower: channel.follow(flags.gate(with_held)).unwrap(),
                 path,
-                ended,
-                held,
-                ended_calls,
-                held_calls,
+                flags,
             }
         }
 
@@ -262,11 +230,11 @@ mod tests {
         }
 
         fn end_owner(&self) {
-            self.ended.store(true, Ordering::SeqCst);
+            self.flags.end();
         }
 
         fn release(&self) {
-            self.held.store(false, Ordering::SeqCst);
+            self.flags.release();
         }
     }
 
@@ -280,18 +248,6 @@ mod tests {
             let _ = tx.send((out, f));
         });
         rx
-    }
-
-    fn still_waiting(rx: &mpsc::Receiver<(Vec<u8>, Pipe)>) -> bool {
-        matches!(
-            rx.recv_timeout(Duration::from_millis(400)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        )
-    }
-
-    fn finished(rx: mpsc::Receiver<(Vec<u8>, Pipe)>) -> (Vec<u8>, Pipe) {
-        rx.recv_timeout(Duration::from_secs(10))
-            .expect("the read should have ended")
     }
 
     // R5 and the byte path
@@ -333,7 +289,7 @@ mod tests {
     #[test]
     fn before_any_writer_with_the_owner_alive_the_read_waits() {
         let rig = Rig::new();
-        let ended = rig.ended.clone();
+        let ended = rig.flags.ended.clone();
         let rx = read_in_background(rig.follower);
         assert!(still_waiting(&rx), "no writer yet is not an end");
         ended.store(true, Ordering::SeqCst);
@@ -346,7 +302,7 @@ mod tests {
     fn a_writer_arriving_late_is_read() {
         let rig = Rig::new();
         let mut w = rig.writer();
-        let held = rig.held.clone();
+        let held = rig.flags.held.clone();
         let rx = read_in_background(rig.follower);
         assert!(still_waiting(&rx));
         w.write_all(b"late").unwrap();
@@ -366,7 +322,7 @@ mod tests {
         }
         let mut one = [0u8; 1];
         rig.follower.read_exact(&mut one).unwrap();
-        let ended = rig.ended.clone();
+        let ended = rig.flags.ended.clone();
         let rx = read_in_background(rig.follower);
         assert!(
             still_waiting(&rx),
@@ -399,7 +355,7 @@ mod tests {
             let mut w = rig.writer();
             w.write_all(b"payload").unwrap();
         }
-        let ended = rig.ended.clone();
+        let ended = rig.flags.ended.clone();
         let rx = read_in_background(rig.follower);
         assert!(still_waiting(&rx), "the server may come back to the file");
         ended.store(true, Ordering::SeqCst);
@@ -412,7 +368,7 @@ mod tests {
         let rig = Rig::new();
         rig.release();
         drop(rig.writer()); // attached and gone, nothing written
-        let ended = rig.ended.clone();
+        let ended = rig.flags.ended.clone();
         let rx = read_in_background(rig.follower);
         assert!(
             still_waiting(&rx),
@@ -421,60 +377,6 @@ mod tests {
         ended.store(true, Ordering::SeqCst);
         let (_, f) = finished(rx);
         assert!(matches!(f.done(), Some(Done::Ended { bytes: 0, .. })));
-    }
-
-    #[test]
-    fn r2_is_off_while_more_is_expected() {
-        let mut rig = Rig::new();
-        rig.release();
-        {
-            let mut w = rig.writer();
-            w.write_all(b"one").unwrap();
-        }
-        let mut buf = [0u8; 3];
-        rig.follower.read_exact(&mut buf).unwrap();
-        rig.follower.expect_more(true);
-
-        let path = rig.path.clone();
-        let second = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            let mut w = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-            w.write_all(b"two").unwrap();
-        });
-        let mut next = [0u8; 3];
-        rig.follower.read_exact(&mut next).unwrap();
-        second.join().unwrap();
-        assert_eq!(&next, b"two", "the reader waited out the gap");
-
-        rig.follower.expect_more(false);
-        let mut rest = Vec::new();
-        rig.follower.read_to_end(&mut rest).unwrap();
-        assert!(rest.is_empty());
-        assert!(matches!(
-            rig.follower.done(),
-            Some(Done::Drained { bytes: 6 })
-        ));
-    }
-
-    #[test]
-    fn expecting_more_does_not_outlast_the_owner() {
-        let mut rig = Rig::new();
-        rig.release();
-        {
-            let mut w = rig.writer();
-            w.write_all(b"one").unwrap();
-        }
-        rig.follower.expect_more(true);
-        rig.end_owner();
-        let mut out = Vec::new();
-        let t = Instant::now();
-        rig.follower.read_to_end(&mut out).unwrap();
-        assert_eq!(out, b"one");
-        assert!(t.elapsed() >= QUIET_TEST, "R4's window applied");
-        assert!(matches!(
-            rig.follower.done(),
-            Some(Done::Ended { bytes: 3, .. })
-        ));
     }
 
     #[test]
@@ -703,8 +605,8 @@ mod tests {
         w.write_all(b"abcdef").unwrap();
         let mut buf = [0u8; 6];
         rig.follower.read_exact(&mut buf).unwrap();
-        assert_eq!(rig.ended_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(rig.held_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rig.flags.ended_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rig.flags.held_calls.load(Ordering::SeqCst), 0);
         drop(w);
     }
 
@@ -712,8 +614,9 @@ mod tests {
     fn a_costly_held_is_not_asked_while_a_writer_is_attached_and_quiet() {
         let rig = Rig::new();
         let w = rig.writer();
-        let (ended_calls, held_calls) = (rig.ended_calls.clone(), rig.held_calls.clone());
-        let ended = rig.ended.clone();
+        let (ended_calls, held_calls) =
+            (rig.flags.ended_calls.clone(), rig.flags.held_calls.clone());
+        let ended = rig.flags.ended.clone();
         let rx = read_in_background(rig.follower);
         assert!(still_waiting(&rx));
         assert!(
@@ -730,7 +633,7 @@ mod tests {
 
     #[test]
     fn a_channel_is_a_fifo_named_for_its_caller() {
-        let channel = Channel::fifo("build-event-out").unwrap();
+        let channel = Channel::fifo("workspace-event-out").unwrap();
         let name = channel
             .path()
             .file_name()
@@ -738,7 +641,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(
-            name.starts_with("build-event-out-") && name.ends_with(".bin"),
+            name.starts_with("workspace-event-out-") && name.ends_with(".bin"),
             "{name}"
         );
         assert_eq!(channel.path().parent().unwrap(), std::env::temp_dir());

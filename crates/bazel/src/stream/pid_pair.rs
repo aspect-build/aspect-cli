@@ -24,25 +24,25 @@ pub struct PidPair {
     /// speed: an empty read already means "no writer attached", and the
     /// client's exit is what ends the stream. For a regular file it can cost
     /// events: nothing but the server's open files says the writer is still
-    /// writing, so a stale pid makes the file look finished early.
+    /// writing, so once the client has exited a stale pid makes the file look
+    /// finished at the server's next pause.
     pub server: Option<u32>,
 }
 
 impl PidPair {
-    /// The two answers a stream on `path` needs (see [`Gate`]):
+    /// The two answers a stream needs (see [`Gate`]):
     ///
     /// * `ended`: the client is gone (a zombie counts as gone).
-    /// * `held`: the server has `path` open. Absent without a server pid. If
-    ///   the server's fds cannot be read the answer is "held", the cautious
-    ///   one, since "not held" ends streams early.
-    pub fn gate(&self, path: &Path) -> Gate {
+    /// * `held`: the server has the path the stream reads open. Absent
+    ///   without a server pid. If the server's fds cannot be read the answer
+    ///   is "held", the cautious one, since "not held" ends streams early.
+    pub fn gate(&self) -> Gate {
         let client = self.client;
         let gate = Gate::new(move || !is_pid_alive(client));
         match self.server {
-            Some(server) => {
-                let path = resolve(path);
-                gate.with_held(move || is_path_open_for_pid(&path, server).unwrap_or(true))
-            }
+            Some(server) => gate.with_held(move |path| {
+                is_path_open_for_pid(&resolve(path), server).unwrap_or(true)
+            }),
             None => gate,
         }
     }
@@ -95,7 +95,7 @@ mod tests {
             client: client.id(),
             server: None,
         }
-        .gate(Path::new("/nonexistent"));
+        .gate();
         assert!(!(gate.ended)());
         let _ = client.kill();
         let _ = client.wait();
@@ -107,7 +107,7 @@ mod tests {
             client: reaped_pid(),
             server: None,
         }
-        .gate(Path::new("/nonexistent"));
+        .gate();
         assert!((gate.ended)());
     }
 
@@ -120,7 +120,7 @@ mod tests {
             client: client.id(),
             server: None,
         }
-        .gate(Path::new("/nonexistent"));
+        .gate();
         unsafe { libc::kill(client.id() as libc::pid_t, libc::SIGKILL) };
         std::thread::sleep(Duration::from_millis(300));
         assert!((gate.ended)(), "a zombie must read as ended");
@@ -133,7 +133,7 @@ mod tests {
             client: std::process::id(),
             server: None,
         }
-        .gate(Path::new("/nonexistent"));
+        .gate();
         assert!(gate.held.is_none());
     }
 
@@ -152,19 +152,19 @@ mod tests {
             client: std::process::id(),
             server: Some(std::process::id()),
         }
-        .gate(&path);
+        .gate();
         let held = gate.held.as_mut().expect("a server pid gives a hint");
-        assert!(!held(), "nothing has the FIFO open yet");
+        assert!(!held(&path), "nothing has the FIFO open yet");
 
         let reader = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(&path)
             .unwrap();
-        assert!(held(), "the server holds it now");
+        assert!(held(&path), "the server holds it now");
 
         drop(reader);
-        assert!(!held(), "and no longer");
+        assert!(!held(&path), "and no longer");
     }
 
     #[test]
@@ -188,8 +188,8 @@ mod tests {
             client: std::process::id(),
             server: Some(std::process::id()),
         }
-        .gate(&link.join("pipe.fifo"));
-        assert!((gate.held.as_mut().unwrap())());
+        .gate();
+        assert!((gate.held.as_mut().unwrap())(&link.join("pipe.fifo")));
 
         drop(reader);
         drop(channel);
@@ -210,19 +210,34 @@ mod tests {
             client: std::process::id(),
             server: Some(std::process::id()),
         }
-        .gate(&link.join("exec.log"));
+        .gate();
+        let asked = link.join("exec.log");
         let held = gate.held.as_mut().unwrap();
-        assert!(!held());
+        assert!(!held(&asked));
 
         let file = std::fs::File::create(dir.join("exec.log")).unwrap();
         assert!(
-            held(),
+            held(&asked),
             "the server has it open now, whichever way it was spelled"
         );
         drop(file);
-        assert!(!held());
+        assert!(!held(&asked));
 
         let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn held_follows_a_file_renamed_while_it_is_open() {
+        let dir = std::env::temp_dir().join(format!("bazel-pid-pair-mv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (before, after) = (dir.join("a.bin"), dir.join("b.bin"));
+        let file = std::fs::File::create(&before).unwrap();
+        std::fs::rename(&before, &after).unwrap();
+        let me = std::process::id();
+        assert!(is_path_open_for_pid(&resolve(&after), me).unwrap());
+        assert!(!is_path_open_for_pid(&resolve(&before), me).unwrap());
+        drop(file);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -245,8 +260,8 @@ mod tests {
             client: std::process::id(),
             server: Some(reaped_pid()),
         }
-        .gate(channel.path());
-        assert!(!(gate.held.as_mut().unwrap())());
+        .gate();
+        assert!(!(gate.held.as_mut().unwrap())(channel.path()));
     }
 
     #[test]
@@ -255,7 +270,7 @@ mod tests {
             client: 1,
             server: None,
         }
-        .gate(Path::new("/nonexistent"));
+        .gate();
         assert_eq!(gate.quiet, crate::stream::QUIET);
         assert_eq!(gate.quiet_empty, crate::stream::QUIET_EMPTY);
     }
