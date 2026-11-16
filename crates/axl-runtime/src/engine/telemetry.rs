@@ -797,9 +797,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_policy_decides_the_stream_and_its_spans() {
+    fn each_policy_decides_the_stream_and_its_telemetry() {
         use SourcePolicy::*;
-        // (policy, requested, exporting) -> (stream on, spans)
+        // (policy, requested, exporting) -> (stream on, telemetry)
         let table = [
             (Auto, false, false, (false, false)),
             (Auto, false, true, (false, false)),
@@ -847,9 +847,15 @@ mod tests {
             sources.set_exported(specs);
             (sources.traces(), sources.metrics())
         };
-        let metrics_only = TelemetrySources::default();
-        metrics_only.set_exported(&[otlp(false, true)]);
-        assert!(metrics_only.exporting(), "metrics alone feed the streams");
+        let exporting = |specs: &[ExporterSpec]| {
+            let sources = TelemetrySources::default();
+            sources.set_exported(specs);
+            sources.exporting()
+        };
+        assert!(!exporting(&[]));
+        assert!(!exporting(std::slice::from_ref(&file)), "file only");
+        assert!(exporting(&[otlp(true, false)]), "traces only");
+        assert!(exporting(&[otlp(false, true)]), "metrics only");
         assert_eq!(exported(&[]), (false, false));
         assert_eq!(
             exported(std::slice::from_ref(&file)),

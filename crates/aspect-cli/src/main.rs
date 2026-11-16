@@ -375,9 +375,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 dispatch.timing,
                 |t, h| dispatch.task_args(t, h),
             );
-            // A hard error ends the process with `ExitCode::FAILURE`, 1.
-            let exit_code = exit.as_ref().map_or(1, |code| code.unwrap_or(0));
-            cli_metrics::record_task(&dispatch.task_kind, exit_code, task_start.elapsed());
+            cli_metrics::record_task(
+                &dispatch.task_kind,
+                cli_metrics::task_exit_code(&exit),
+                task_start.elapsed(),
+            );
             let exit = exit.map_err(anyhow::Error::from)?;
 
             mpe.finish();

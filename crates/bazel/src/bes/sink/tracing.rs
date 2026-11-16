@@ -586,6 +586,44 @@ mod tests {
         );
     }
 
+    fn wall_time(ms: i64) -> Arc<BuildEventEnvelope> {
+        event(
+            Id::BuildMetrics(Default::default()),
+            Payload::BuildMetrics(BuildMetrics {
+                timing_metrics: Some(build_metrics::TimingMetrics {
+                    wall_time_in_ms: ms,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn build_duration_without_started_or_finished_has_no_attributes() {
+        let (_, points) = run(vec![wall_time(2_000)]);
+        assert_eq!(points, [point("bazel.build.duration", &[], 2.0)]);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn build_success_falls_back_to_overall_success_without_an_exit_code() {
+        let (_, points) = run(vec![
+            event(
+                Id::BuildFinished(BuildFinishedId::default()),
+                Payload::Finished(BuildFinished {
+                    overall_success: true,
+                    ..Default::default()
+                }),
+            ),
+            wall_time(1_000),
+        ]);
+        assert_eq!(
+            points,
+            [point("bazel.build.duration", &["success=true"], 1.0)]
+        );
+    }
+
     #[test]
     fn action_without_times_is_not_a_span() {
         let spans = export(vec![event(

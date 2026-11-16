@@ -70,7 +70,7 @@ pub fn spawn(recv: Receiver<ExecLogEntry>) -> JoinHandle<SinkOutcome> {
 fn consume<T: Tracer>(recv: &Receiver<ExecLogEntry>, tracer: &T, instruments: &SpawnInstruments) {
     while let Ok(entry) = recv.recv() {
         if let Some(Type::Spawn(spawn)) = entry.r#type {
-            instruments.record(&spawn, !failed(&spawn));
+            instruments.record(&spawn, failure(&spawn).is_none());
             spawn_span(&spawn, SystemTime::now()).export(tracer);
         }
     }
@@ -137,11 +137,6 @@ fn failure(spawn: &Spawn) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Whether [`failure`] has a reason, without building it.
-fn failed(spawn: &Spawn) -> bool {
-    !succeeded(&spawn.status) || spawn.exit_code != 0
 }
 
 /// Bazel leaves `status` empty, or `SUCCESS`, for a spawn that succeeded.

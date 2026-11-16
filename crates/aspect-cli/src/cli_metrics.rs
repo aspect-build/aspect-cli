@@ -21,7 +21,7 @@ const STARTUP_BOUNDARIES: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
-/// From a quick `aspect version`-sized task to a multi-hour CI build.
+/// From a near-instant task to a multi-hour CI build.
 const TASK_BOUNDARIES: &[f64] = &[
     0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0, 7200.0,
 ];
@@ -56,6 +56,12 @@ pub fn record_task(task: &str, exit_code: u8, elapsed: Duration) {
     );
 }
 
+/// The code a task's result ends the process with: a hard error is
+/// `ExitCode::FAILURE`, 1, and a task that set none exits 0.
+pub fn task_exit_code<E>(exit: &Result<Option<u8>, E>) -> u8 {
+    exit.as_ref().map_or(1, |code| code.unwrap_or(0))
+}
+
 fn histogram(
     name: &'static str,
     description: &'static str,
@@ -67,4 +73,16 @@ fn histogram(
         .with_description(description)
         .with_boundaries(boundaries.to_vec())
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_exits_with_its_code_zero_or_one_on_error() {
+        assert_eq!(task_exit_code::<()>(&Ok(Some(3))), 3);
+        assert_eq!(task_exit_code::<()>(&Ok(None)), 0);
+        assert_eq!(task_exit_code(&Err(())), 1);
+    }
 }
