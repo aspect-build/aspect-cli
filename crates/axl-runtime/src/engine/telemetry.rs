@@ -13,11 +13,17 @@
 //! - **File**: `add(file=..., format=..., signals=..., resource_attributes=...)`
 //!   writes locally to stderr, stdout, or a file path. Used (among other things)
 //!   to express `ASPECT_DEBUG=1` as ordinary user-space configuration.
+//!
+//! `ctx.telemetry.build_events` and `ctx.telemetry.execution_log` set when a
+//! Bazel build's stream becomes spans: a [`SourcePolicy`] each, held in
+//! [`TelemetrySources`] on the run's `Env` so every `ctx.bazel.build` reads it.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -217,20 +223,135 @@ impl Signals {
     }
 }
 
+/// When a Bazel build's stream becomes spans. Metrics from the stream are
+/// recorded whatever the policy, because they cost a data point per series
+/// rather than one per event.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SourcePolicy {
+    /// Spans when the build already has the stream.
+    #[default]
+    Auto,
+    /// Turn the stream on for every build, and export its spans.
+    Always,
+    /// No spans.
+    Off,
+}
+
+impl SourcePolicy {
+    const NAMES: [(&'static str, SourcePolicy); 3] = [
+        ("auto", SourcePolicy::Auto),
+        ("always", SourcePolicy::Always),
+        ("off", SourcePolicy::Off),
+    ];
+
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        Self::NAMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, p)| *p)
+            .ok_or_else(|| anyhow::anyhow!("expected one of auto, always, off; got {name:?}"))
+    }
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES.iter().find(|(_, p)| *p == self).unwrap().0
+    }
+
+    /// `(stream on, export spans)` for a build that asked for the stream as
+    /// `requested`, while an exporter is installed as `exporting`. `Always`
+    /// turns the stream on only when there is somewhere to send its spans.
+    pub fn resolve(self, requested: bool, exporting: bool) -> (bool, bool) {
+        match self {
+            SourcePolicy::Auto => (requested, requested && exporting),
+            SourcePolicy::Always => (requested || exporting, exporting),
+            SourcePolicy::Off => (requested, false),
+        }
+    }
+}
+
+/// The run's [`SourcePolicy`] per Bazel stream, shared by `ctx.telemetry`
+/// (which sets it) and every build spawned in the run (which reads it).
+#[derive(Debug, Default)]
+pub struct TelemetrySources {
+    build_events: AtomicU8,
+    execution_log: AtomicU8,
+}
+
+impl TelemetrySources {
+    pub fn build_events(&self) -> SourcePolicy {
+        Self::load(&self.build_events)
+    }
+
+    pub fn execution_log(&self) -> SourcePolicy {
+        Self::load(&self.execution_log)
+    }
+
+    fn slot(&self, attribute: &str) -> Option<&AtomicU8> {
+        match attribute {
+            "build_events" => Some(&self.build_events),
+            "execution_log" => Some(&self.execution_log),
+            _ => None,
+        }
+    }
+
+    fn load(slot: &AtomicU8) -> SourcePolicy {
+        SourcePolicy::NAMES[slot.load(Ordering::Relaxed) as usize].1
+    }
+
+    fn store(slot: &AtomicU8, policy: SourcePolicy) {
+        let index = SourcePolicy::NAMES.iter().position(|(_, p)| *p == policy);
+        slot.store(index.unwrap() as u8, Ordering::Relaxed);
+    }
+}
+
+fn sources_get_attr<'v>(
+    sources: &TelemetrySources,
+    attribute: &str,
+    heap: Heap<'v>,
+) -> Option<Value<'v>> {
+    sources
+        .slot(attribute)
+        .map(|slot| heap.alloc(TelemetrySources::load(slot).name()))
+}
+
+fn sources_set_attr(
+    sources: &TelemetrySources,
+    attribute: &str,
+    value: Value,
+) -> starlark::Result<()> {
+    let slot = sources.slot(attribute).ok_or_else(|| {
+        starlark::Error::new_other(anyhow::anyhow!(
+            "telemetry attribute `{attribute}` is read-only"
+        ))
+    })?;
+    let name = value.unpack_str().ok_or_else(|| {
+        starlark::Error::new_other(anyhow::anyhow!(
+            "`ctx.telemetry.{attribute}` must be a string, got `{}`",
+            value.get_type()
+        ))
+    })?;
+    let policy = SourcePolicy::parse(name).map_err(|e| {
+        starlark::Error::new_other(anyhow::anyhow!("`ctx.telemetry.{attribute}`: {e}"))
+    })?;
+    TelemetrySources::store(slot, policy);
+    Ok(())
+}
+
 /// `ctx.telemetry` value. Holds a `Value` pointing at its `Exporters`
 /// instance so both ConfigContext and FeatureContext views share a single
-/// list across phases.
+/// list across phases, and the run's [`TelemetrySources`].
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<Telemetry>")]
 pub struct Telemetry<'v> {
     exporters: Value<'v>,
+    #[allocative(skip)]
+    sources: Arc<TelemetrySources>,
 }
 
 impl<'v> Telemetry<'v> {
     /// Allocate a fresh Telemetry (with an empty Exporters list) on the heap.
-    pub fn alloc(heap: Heap<'v>) -> Value<'v> {
+    pub fn alloc(heap: Heap<'v>, sources: Arc<TelemetrySources>) -> Value<'v> {
         let exporters = heap.alloc(Exporters::new());
-        heap.alloc(Telemetry { exporters })
+        heap.alloc(Telemetry { exporters, sources })
     }
 
     pub fn exporters(&self) -> Value<'v> {
@@ -255,6 +376,7 @@ impl<'v> Freeze for Telemetry<'v> {
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         Ok(FrozenTelemetry {
             exporters: self.exporters.freeze(freezer)?,
+            sources: self.sources,
         })
     }
 }
@@ -265,6 +387,14 @@ impl<'v> StarlarkValue<'v> for Telemetry<'v> {
         static RES: MethodsStatic = MethodsStatic::new("telemetry_methods", telemetry_methods);
         Some(RES.methods())
     }
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        sources_get_attr(&self.sources, attribute, heap)
+    }
+
+    fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
+        sources_set_attr(&self.sources, attribute, value)
+    }
 }
 
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
@@ -272,6 +402,8 @@ impl<'v> StarlarkValue<'v> for Telemetry<'v> {
 pub struct FrozenTelemetry {
     #[allocative(skip)]
     exporters: FrozenValue,
+    #[allocative(skip)]
+    sources: Arc<TelemetrySources>,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenTelemetry {
@@ -287,6 +419,14 @@ impl<'v> StarlarkValue<'v> for FrozenTelemetry {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new("telemetry_methods", telemetry_methods);
         Some(RES.methods())
+    }
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        sources_get_attr(&self.sources, attribute, heap)
+    }
+
+    fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
+        sources_set_attr(&self.sources, attribute, value)
     }
 }
 
@@ -591,5 +731,105 @@ impl Display for ExporterSpec {
                 FileDestination::Path(p) => write!(f, "file:{}@{:?}", p.display(), s.format),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_policy_decides_the_stream_and_its_spans() {
+        use SourcePolicy::*;
+        // (policy, requested, exporting) -> (stream on, spans)
+        let table = [
+            (Auto, false, false, (false, false)),
+            (Auto, false, true, (false, false)),
+            (Auto, true, false, (true, false)),
+            (Auto, true, true, (true, true)),
+            (Always, false, false, (false, false)),
+            (Always, false, true, (true, true)),
+            (Always, true, false, (true, false)),
+            (Always, true, true, (true, true)),
+            (Off, false, true, (false, false)),
+            (Off, true, true, (true, false)),
+        ];
+        for (policy, requested, exporting, want) in table {
+            assert_eq!(
+                policy.resolve(requested, exporting),
+                want,
+                "{policy:?} requested={requested} exporting={exporting}"
+            );
+        }
+    }
+
+    #[test]
+    fn policies_round_trip_by_name() {
+        for (name, policy) in SourcePolicy::NAMES {
+            assert_eq!(SourcePolicy::parse(name).unwrap(), policy);
+            assert_eq!(policy.name(), name);
+        }
+        assert!(SourcePolicy::parse("on").is_err());
+        let sources = TelemetrySources::default();
+        assert_eq!(sources.build_events(), SourcePolicy::Auto);
+        assert_eq!(sources.execution_log(), SourcePolicy::Auto);
+    }
+
+    /// Config sets a policy and a feature in the next phase reads it back:
+    /// both see the run's one `TelemetrySources`, which builds read too.
+    #[test]
+    fn config_sets_a_policy_that_features_see() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _feature(ctx):
+    ctx.std.fs.write({path:?}, ctx.telemetry.execution_log + " " + ctx.telemetry.build_events)
+
+Probe = feature(implementation = _feature)
+
+def _impl(ctx):
+    return 0
+
+t = task(implementation = _impl)
+"#,
+            path = marker.path().to_str().unwrap(),
+        ))
+        .with_config(
+            r#"
+def config(ctx):
+    ctx.telemetry.execution_log = "always"
+    ctx.telemetry.build_events = "off"
+"#,
+        )
+        .with_features(&["Probe"])
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+        assert_eq!(
+            std::fs::read_to_string(marker.path()).unwrap(),
+            "always off"
+        );
+    }
+
+    #[test]
+    fn an_unknown_policy_is_refused_with_the_choices() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    return 0
+
+t = task(implementation = _impl)
+"#,
+        )
+        .with_config(
+            r#"
+def config(ctx):
+    ctx.telemetry.execution_log = "on"
+"#,
+        )
+        .run_task(0)
+        .expect_err("an unknown policy must be refused");
+        let err = format!("{err:#}");
+        assert!(err.contains("auto, always, off"), "{err}");
     }
 }

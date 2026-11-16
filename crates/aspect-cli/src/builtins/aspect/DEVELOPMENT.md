@@ -784,7 +784,7 @@ Two invocations under one *single* phase would not be distinguishable, and `sink
 
 **The stream is lossless.** The reader sends blocking, so every subscriber receives every entry — a hook and a decoded `file()` sink alike. That blocking earns its keep: the reader decodes a file already complete on disk and outruns any AXL loop by a wide margin, so a consumer falls more than a buffer behind within the first few hundred entries, and a producer that dropped instead would drop by a different amount every run. A handle's `kinds=` filter runs in Rust before an entry becomes a Starlark value, which on a 10k-50k-entry log is most of the work.
 
-Decoded sinks (`file`, `telemetry`) and handles can be combined — `execution_log = [bazel.execution_log.iterator(), bazel.execution_log.file(path = ...)]` — and both see every entry, because the decoded channel is a broadcast. A `compact_file` sink is tee'd from the raw bytes before decoding, so it costs the decoded channel nothing.
+A sink and a handle can be combined — `execution_log = [bazel.execution_log.iterator(), bazel.execution_log.file(path = ...)]` — and both see every entry, because the decoded channel is a broadcast; so does the CLI's own spawn span reader, which `ctx.telemetry.execution_log` (`--telemetry:execution-log`) attaches. A `compact_file` sink is tee'd from the raw bytes before decoding, so it costs the decoded channel nothing.
 
 Every decoded consumer belongs before `build.wait()`, which releases each one and then joins the reader. That is what bounds a build whose log nobody drained: the producer blocks for its subscribers, so one left undrained would park the reader forever.
 

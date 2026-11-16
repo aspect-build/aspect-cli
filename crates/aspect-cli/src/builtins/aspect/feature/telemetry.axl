@@ -47,11 +47,20 @@ Registers exporters from four sources:
              if ctx.std.env.var("CI_HOST") == "buildkite":
                  ctx.telemetry.exporters.add(url = "https://otel.buildkite.example/v1")
 
-With `spawns = True` (`--telemetry:spawns`), every Bazel build also writes its
-execution log and exports a `spawn` span per spawn, through
-`bazel.execution_log.telemetry()` on `BazelTrait.execution_log_sinks`. Off by
-default: a large build runs tens of thousands of spawns, and writing the log
-costs Bazel I/O.
+`build_events` and `execution_log` (`--telemetry:build-events`,
+`--telemetry:execution-log`) set when a Bazel build's stream becomes spans,
+through `ctx.telemetry.build_events` and `ctx.telemetry.execution_log`:
+
+  auto    (default) spans when the build already has the stream
+  always  turn the stream on for every build, and export its spans; bare
+          `--telemetry:execution-log` means this
+  off     no spans
+
+The build event stream gives a span per build, failed action and test; the
+execution log a `spawn` span per spawn, which on a large build is tens of
+thousands, and `always` costs Bazel the I/O of writing the log. Metrics from
+either stream are recorded whatever the setting. Nothing is exported, and
+`always` turns on nothing, unless an exporter is registered.
 
 Otherwise this feature is just a convenience layer over option 4 — it reads
 env vars / CLI flags and turns them into `add(...)` calls. Anything you
@@ -76,7 +85,9 @@ endpoint is set, it is registered for just that signal (and the catch-all,
 where present, covers any remaining signals).
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+_AUTO = "auto"
+_ALWAYS = "always"
+_SOURCE_POLICIES = [_AUTO, _ALWAYS, "off"]
 
 def _parse_headers(env):
     raw = env.var("OTEL_EXPORTER_OTLP_HEADERS") or ""
@@ -217,8 +228,8 @@ def _telemetry_impl(ctx: FeatureContext):
         _register_env_endpoints(ctx)
     if ctx.args.endpoint:
         _register_endpoint_args(ctx)
-    if ctx.args.spawns:
-        ctx.traits[BazelTrait].execution_log_sinks.append(bazel.execution_log.telemetry())
+    ctx.telemetry.build_events = ctx.args.build_events
+    ctx.telemetry.execution_log = ctx.args.execution_log
 
     trace.log("telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
     for spec in ctx.telemetry.exporters:
@@ -256,11 +267,22 @@ Telemetry = feature(
                           "resource_attributes, call ctx.telemetry.exporters.add() " +
                           "directly from config.axl.",
         ),
-        "spawns": args.boolean(
-            default = False,
-            description = "Write each Bazel build's execution log and export a span " +
-                          "per spawn: its label, mnemonic, runner, cache hit and " +
-                          "time in each phase.",
+        "build_events": args.string(
+            default = _AUTO,
+            values = _SOURCE_POLICIES,
+            bare = _ALWAYS,
+            description = "When a Bazel build's event stream becomes spans: auto " +
+                          "(default) when the build already streams build events, " +
+                          "always to turn the stream on for every build, off for none.",
+        ),
+        "execution_log": args.string(
+            default = _AUTO,
+            values = _SOURCE_POLICIES,
+            bare = _ALWAYS,
+            description = "When a Bazel build's execution log becomes a span per spawn " +
+                          "(label, mnemonic, runner, cache hit, time in each phase): " +
+                          "auto (default) when the build already writes the log, " +
+                          "always to write it for every build, off for none.",
         ),
     },
 )

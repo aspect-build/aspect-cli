@@ -259,7 +259,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             tasks: heap.alloc(TaskMap::new()),
             features: heap.alloc(FeatureMap::new()),
             trait_map_value: None,
-            telemetry_value: Telemetry::alloc(heap),
+            telemetry_value: Telemetry::alloc(heap, loader.env.telemetry.clone()),
             hooks_value: TaskHooks::alloc(heap),
         }
     }

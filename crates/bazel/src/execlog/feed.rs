@@ -255,7 +255,7 @@ impl ExecLogStream {
     ///
     /// Entries are sent with the blocking [`fibre::spmc::Sender::send`], so every
     /// subscriber sees every entry: a decoded `File` sink, which would otherwise
-    /// write an incomplete file; the telemetry sink's spans; an `ExecLogIter`
+    /// write an incomplete file; the spawn span sink; an `ExecLogIter`
     /// handle backing `BazelTrait.exec_log_event` hooks — each of which would
     /// otherwise miss entries with nothing to say so. The reader waits for the
     /// slowest subscriber. The stream's own is dropped once consumers are bound

@@ -41,6 +41,7 @@ use bazel::stream::pid_pair::PidPair;
 use crate::engine::r#async::rt::AsyncRuntime;
 use crate::engine::cancellation::Signals;
 use crate::engine::children::{self, Bound, Recv, recv_cancellable};
+use crate::engine::telemetry::TelemetrySources;
 use tokio_util::sync::CancellationToken;
 
 use super::iter::ExecLogIter;
@@ -957,9 +958,13 @@ impl Build {
         directory: Option<String>,
         announce: AnnounceSpawn,
         signals: Arc<Signals>,
+        telemetry: &TelemetrySources,
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
+        let exporting = crate::trace::enabled();
+        let (build_events, bes_spans) = telemetry.build_events().resolve(build_events, exporting);
+
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
         // server whose startup options differ from the ones it is handed, so a
@@ -993,6 +998,14 @@ impl Build {
         // the CLI streams.
         let injected_execlog_path =
             bazel::execlog::requested_path(&flags, verb, directory.as_deref());
+        // A log the user's own flags ask Bazel for is one the build already
+        // has, so `auto` reads it for spans as well; the stream is on for the
+        // task's consumers or for those spans.
+        let (log_on, execlog_spans) = telemetry.execution_log().resolve(
+            execlog_enabled || injected_execlog_path.is_some(),
+            exporting,
+        );
+        let execlog_enabled = execlog_enabled || (log_on && execlog_spans);
         let requested_bep_path =
             bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
 
@@ -1049,16 +1062,14 @@ impl Build {
         };
 
         // Compact paths go to the tee reader inside the stream thread; decoded
-        // paths get a writer thread each and `telemetry()` one span exporter,
-        // each cloning a subscriber of the decoded stream.
+        // paths get a writer thread each, cloning a subscriber of the decoded
+        // stream, as the spawn spans do.
         let mut compact_paths: Vec<String> = vec![];
         let mut decoded_paths: Vec<String> = vec![];
-        let mut execlog_telemetry = false;
         for sink in execlog_sinks {
             match sink {
                 ExecLogSink::CompactFile { path } => compact_paths.push(path),
                 ExecLogSink::File { path } => decoded_paths.push(path),
-                ExecLogSink::Telemetry => execlog_telemetry = true,
             }
         }
 
@@ -1212,7 +1223,7 @@ impl Build {
                     let recv = subscriber(stream)?;
                     stream.attach_sink(bazel::execlog::sink::spawn_file(recv, path));
                 }
-                if execlog_telemetry {
+                if execlog_spans {
                     let recv = subscriber(stream)?;
                     stream.attach_sink(bazel::execlog::telemetry::spawn(recv));
                 }
@@ -1237,8 +1248,11 @@ impl Build {
             if let Some(stream) = execlog_stream.as_mut() {
                 stream.seal();
             }
-            let trace_sink = build_events.then(|| {
-                tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
+            let trace_sink = (build_events && exporting).then(|| {
+                tracing_sink::Tracing::spawn(
+                    build_event_stream.stream().unwrap().subscribe(),
+                    bes_spans,
+                )
             });
             Ok((
                 workspace_event_stream,
@@ -1727,13 +1741,14 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// A `telemetry()` sink is a subscriber the producer blocks for, so it has
-    /// to keep draining: one that stopped would park the reader at the ring and
-    /// stall the iterator beside it, which the timeout catches. The iterator
-    /// counting every entry is what shows the two shared the stream.
+    /// Under the default `auto` policy a build that writes the log gets the
+    /// spawn span sink, a subscriber the producer blocks for, so it has to keep
+    /// draining: one that stopped would park the reader at the ring and stall
+    /// the iterator beside it, which the timeout catches. The iterator counting
+    /// every entry is what shows the two shared the stream.
     #[cfg(unix)]
     #[test]
-    fn a_telemetry_sink_drains_the_log_beside_an_iterator() {
+    fn the_spawn_span_sink_drains_the_log_beside_an_iterator() {
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1744,7 +1759,7 @@ def _impl(ctx):
     entries = bazel.execution_log.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = [bazel.execution_log.telemetry(), entries],
+        execution_log = [entries],
         stderr = None,
     )
     seen = 0
@@ -1763,8 +1778,8 @@ Test = task(implementation = _impl)
         run_execlog_task(
             Duration::from_secs(60),
             script,
-            "the telemetry sink stopped draining and parked the reader",
-            "a build with a telemetry sink must still end cleanly",
+            "the spawn span sink stopped draining and parked the reader",
+            "a build with spawn spans must still end cleanly",
         );
 
         let text = std::fs::read_to_string(&report).expect("the task should have reported");

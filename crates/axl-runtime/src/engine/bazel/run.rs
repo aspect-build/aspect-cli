@@ -477,6 +477,7 @@ fn start<'v>(
         directory,
         announce,
         env.signals.clone(),
+        &env.telemetry,
         cancellation,
         env.rt.clone(),
     )?;

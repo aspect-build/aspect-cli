@@ -591,6 +591,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 command: announce_command,
             },
             env.signals.clone(),
+            &env.telemetry,
             &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
         )?;
@@ -717,6 +718,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 command: announce_command,
             },
             env.signals.clone(),
+            &env.telemetry,
             &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
         )?;
@@ -1360,16 +1362,6 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// the build's other execution-log consumers still get the whole log.
     fn compact_file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
         Ok(ExecLogSink::CompactFile { path })
-    }
-
-    /// Export a `spawn` span for every spawn in this build's execution log,
-    /// under a `spawns` span in the `ctx.bazel.build` trace, to the exporters
-    /// registered with `ctx.telemetry.exporters`. Writes no file.
-    ///
-    /// The `Telemetry` feature's `spawns` option adds this to every build. More
-    /// than one in a list exports each spawn once.
-    fn telemetry() -> anyhow::Result<ExecLogSink> {
-        Ok(ExecLogSink::Telemetry)
     }
 
     /// Create a handle iterating this build's decoded execution log. Pass it in

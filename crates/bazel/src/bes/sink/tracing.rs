@@ -33,7 +33,7 @@ use axl_proto::build_event_stream::{
 };
 use opentelemetry::{
     Array, KeyValue, StringValue, Value, global,
-    trace::{Status, Tracer},
+    trace::{Status, Tracer, noop::NoopTracer},
 };
 use tracing::{Level, span::EnteredSpan};
 
@@ -50,14 +50,38 @@ pub struct Tracing {}
 const TELEMETRY_SCOPE: &str = "aspect-cli.bes";
 
 impl Tracing {
-    pub fn spawn(recv: Subscriber<Arc<BuildEventEnvelope>>) -> JoinHandle<SinkOutcome> {
-        let events_span = tracing::info_span!("events");
+    /// Reads `recv` to the end of the stream on its own thread, recording the
+    /// [`BesMetrics`], and with `spans` the spans under an `events` span
+    /// opened in the caller's current span. Without `spans` the loop runs with
+    /// no `tracing` subscriber and a no-op tracer, so it exports none.
+    pub fn spawn(
+        recv: Subscriber<Arc<BuildEventEnvelope>>,
+        spans: bool,
+    ) -> JoinHandle<SinkOutcome> {
+        let events_span = spans.then(|| tracing::info_span!("events"));
         thread::spawn(move || {
-            let _events_guard = events_span.enter();
+            let _events = events_span.as_ref().map(|span| span.enter());
             let metrics = BesMetrics::new(&global::meter(TELEMETRY_SCOPE));
-            consume(&recv, &global::tracer(TELEMETRY_SCOPE), &metrics);
+            read(&recv, spans, &global::tracer(TELEMETRY_SCOPE), &metrics);
             Ok(())
         })
+    }
+}
+
+/// [`consume`], or without `spans` the same loop under no `tracing`
+/// subscriber and a no-op tracer, so only `metrics` are recorded.
+fn read<T: Tracer>(
+    recv: &Subscriber<Arc<BuildEventEnvelope>>,
+    spans: bool,
+    tracer: &T,
+    metrics: &BesMetrics,
+) {
+    if spans {
+        consume(recv, tracer, metrics);
+    } else {
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            consume(recv, &NoopTracer::new(), metrics)
+        });
     }
 }
 
@@ -373,10 +397,14 @@ mod tests {
         Arc::new(BuildEventEnvelope { event, encoded })
     }
 
-    /// Runs `events` through [`consume`] under a `tracing` span named `parent`
+    fn run(events: Vec<Arc<BuildEventEnvelope>>) -> (Vec<SpanData>, Vec<String>) {
+        run_with(events, true)
+    }
+
+    /// Runs `events` through [`read`] under a `tracing` span named `parent`
     /// and returns every exported span and the names of the metrics recorded.
     /// Uses its own providers and subscriber, so it never touches the globals.
-    fn run(events: Vec<Arc<BuildEventEnvelope>>) -> (Vec<SpanData>, Vec<String>) {
+    fn run_with(events: Vec<Arc<BuildEventEnvelope>>, spans: bool) -> (Vec<SpanData>, Vec<String>) {
         let span_exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(span_exporter.clone())
@@ -399,7 +427,7 @@ mod tests {
         let metrics = BesMetrics::new(&meter_provider.meter(TELEMETRY_SCOPE));
         tracing::subscriber::with_default(subscriber, || {
             let _parent = tracing::info_span!("parent").entered();
-            consume(&recv, &tracer, &metrics);
+            read(&recv, spans, &tracer, &metrics);
         });
         provider.force_flush().unwrap();
         meter_provider.force_flush().unwrap();
@@ -538,6 +566,31 @@ mod tests {
                 "bazel.test.results"
             ]
         );
+    }
+
+    /// With spans off the loop still records metrics; the only span is the
+    /// test's own `parent`.
+    #[test]
+    fn without_spans_the_stream_records_metrics_only() {
+        let (spans, metrics) = run_with(
+            vec![
+                event(
+                    Id::Started(Default::default()),
+                    Payload::Started(Default::default()),
+                ),
+                event(
+                    Id::TestResult(TestResultId::default()),
+                    Payload::TestResult(TestResult {
+                        status: TestStatus::Passed as i32,
+                        ..Default::default()
+                    }),
+                ),
+            ],
+            false,
+        );
+        let names: Vec<&str> = spans.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, ["parent"]);
+        assert_eq!(metrics, ["bazel.test.attempt.duration"]);
     }
 
     #[test]

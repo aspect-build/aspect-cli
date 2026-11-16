@@ -244,13 +244,11 @@ pub(crate) fn materialize_aspects(
 /// |---|---|
 /// | `File` | Varint-length-prefixed binary proto, no zstd (decoded entries re-encoded) |
 /// | `CompactFile` | Raw zstd-compressed bytes (identical to `--execution_log_compact_file`) |
-/// | `Telemetry` | No file: a span per spawn, sent to the configured exporters |
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<bazel.execlog.ExecLogSink>")]
 pub enum ExecLogSink {
     File { path: String },
     CompactFile { path: String },
-    Telemetry,
 }
 
 starlark_simple_value!(ExecLogSink);
