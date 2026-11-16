@@ -62,6 +62,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         config: None,
         string_list_args: vec![],
         signals: None,
+        exporting: false,
     }
 }
 
@@ -73,6 +74,7 @@ pub struct EvalBuilder {
     config: Option<String>,
     string_list_args: Vec<(String, Vec<String>)>,
     signals: Option<Arc<Signals>>,
+    exporting: bool,
 }
 
 impl EvalBuilder {
@@ -106,6 +108,13 @@ impl EvalBuilder {
     /// Idempotent across tests; see `install_basil` for details.
     pub fn with_fake_bazel(mut self) -> Self {
         self.with_fake_bazel = true;
+        self
+    }
+
+    /// Run as if OTLP exporters took every signal, so builds attach their
+    /// telemetry sinks.
+    pub fn with_exporting(mut self) -> Self {
+        self.exporting = true;
         self
     }
 
@@ -249,6 +258,9 @@ impl EvalBuilder {
                 &modules,
             );
             loader.env.signals = signals.clone();
+            if self.exporting {
+                loader.env.telemetry.export_everything();
+            }
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
             raise_first(mpe.eval(&scripts, &root_mod, &modules))?;

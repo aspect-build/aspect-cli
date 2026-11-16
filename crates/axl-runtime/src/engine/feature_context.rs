@@ -187,6 +187,9 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
     /// Telemetry handle. Use `ctx.telemetry.exporters.add(url=..., ...)` to
     /// register OTLP exporters that the runtime installs after phase 3.
     /// Buffered spans/logs from earlier phases are replayed to them.
+    /// `ctx.telemetry.build_events` and `ctx.telemetry.execution_log` set when
+    /// a Bazel build's stream becomes telemetry: `"auto"` (default), `"always"`
+    /// or `"off"`.
     #[starlark(attribute)]
     fn telemetry<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
         if let Some(c) = this.downcast_ref::<FeatureContext>() {

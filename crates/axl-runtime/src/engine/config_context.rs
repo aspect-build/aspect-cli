@@ -238,6 +238,9 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
 
     /// Telemetry handle. Use `ctx.telemetry.exporters.add(url=..., ...)` to
     /// register OTLP exporters before any task runs.
+    /// `ctx.telemetry.build_events` and `ctx.telemetry.execution_log` set when
+    /// a Bazel build's stream becomes telemetry: `"auto"` (default), `"always"`
+    /// or `"off"`.
     #[starlark(attribute)]
     fn telemetry<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
         if let Some(c) = this.downcast_ref::<ConfigContext>() {

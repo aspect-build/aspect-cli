@@ -6,9 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use axl_proto::{Timestamp, build_event_stream::TestResult};
 
-pub(super) fn system_time(ts: &Timestamp) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::new(ts.seconds.max(0) as u64, ts.nanos.max(0) as u32)
-}
+use crate::otel::{self, system_time};
 
 /// Prefers the `Timestamp` field, then the deprecated `*_millis` field, then
 /// `now`. Older Bazel versions and cached test summaries populate only the
@@ -26,7 +24,7 @@ pub(super) fn time_or_legacy(timestamp: Option<&Timestamp>, legacy_millis: i64) 
 /// Prefers the `Duration` field, then the deprecated `*_millis` field.
 fn duration_or_legacy(duration: Option<&axl_proto::Duration>, legacy_millis: i64) -> Duration {
     match duration {
-        Some(d) => Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32),
+        Some(d) => otel::duration(d),
         None => Duration::from_millis(legacy_millis.max(0) as u64),
     }
 }

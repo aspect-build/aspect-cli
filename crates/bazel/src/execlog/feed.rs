@@ -209,8 +209,8 @@ pub struct ExecLogStream {
     /// in its place, the first send reports `Closed` and the reader skips
     /// decoding entirely.
     recv: Option<Receiver<ExecLogEntry>>,
-    /// Decoded-file sink writer threads owned by this stream — joined in `join()`.
-    file_sink_handles: Vec<JoinHandle<SinkOutcome>>,
+    /// Decoded-entry sink threads owned by this stream — joined in `join()`.
+    sink_handles: Vec<JoinHandle<SinkOutcome>>,
 }
 
 impl ExecLogStream {
@@ -255,11 +255,11 @@ impl ExecLogStream {
     ///
     /// Entries are sent with the blocking [`fibre::spmc::Sender::send`], so every
     /// subscriber sees every entry: a decoded `File` sink, which would otherwise
-    /// write an incomplete file; an
-    /// `ExecLogIter` handle backing `BazelTrait.exec_log_event` hooks — each of
-    /// which would otherwise miss entries with nothing to say so. The reader waits
-    /// for the slowest subscriber. The stream's own is dropped once consumers are
-    /// bound ([`seal`](Self::seal)) and `build.wait()` releases the AXL-side ones
+    /// write an incomplete file; the spawn telemetry sink; an `ExecLogIter`
+    /// handle backing `BazelTrait.exec_log_event` hooks — each of which would
+    /// otherwise miss entries with nothing to say so. The reader waits for the
+    /// slowest subscriber. The stream's own is dropped once consumers are bound
+    /// ([`seal`](Self::seal)) and `build.wait()` releases the AXL-side ones
     /// before joining, so one that stops reading cannot hold the reader forever.
     ///
     /// A send that fails means every subscriber is gone, which is not an error:
@@ -377,7 +377,7 @@ impl ExecLogStream {
         Ok(Self {
             handle,
             recv: Some(recv),
-            file_sink_handles: vec![],
+            sink_handles: vec![],
         })
     }
 
@@ -396,30 +396,30 @@ impl ExecLogStream {
         self.recv.take();
     }
 
-    /// Take ownership of a decoded-file sink worker thread. Its lifecycle is
-    /// tied to this stream — `join()` will wait for it and propagate write
-    /// errors so a truncated artifact doesn't slip past as success.
-    pub fn attach_file_sink(&mut self, handle: JoinHandle<SinkOutcome>) {
-        self.file_sink_handles.push(handle);
+    /// Take ownership of a decoded-entry sink thread. Its lifecycle is tied to
+    /// this stream — `join()` waits for it and fails with its error or panic, so
+    /// a decoded file sink's truncated artifact doesn't slip past as success.
+    pub fn attach_sink(&mut self, handle: JoinHandle<SinkOutcome>) {
+        self.sink_handles.push(handle);
     }
 
-    /// Join the reader and every file sink, reporting what the reader found at
-    /// the log's path. See [`ReaderOutcome`] for what a caller does with it.
+    /// Join the reader and every attached sink, reporting what the reader found
+    /// at the log's path. See [`ReaderOutcome`] for what a caller does with it.
     ///
     /// Releases the stream's own subscriber if it still holds one, so that with no
     /// consumer left the reader stops decoding and drains. Then waits for the
-    /// reader thread and every attached file-sink writer, failing with every
+    /// reader thread and every attached sink, failing with every
     /// error among them (see [`combine`]).
     pub fn join(mut self) -> Result<ReaderOutcome, ExecLogStreamError> {
         self.recv.take();
         let reader_result = self.handle.join().expect("join error");
         let sink_errors = self
-            .file_sink_handles
+            .sink_handles
             .into_iter()
             .filter_map(|h| match h.join() {
                 Ok(Ok(())) => None,
                 Ok(Err(e)) => Some(e.last_error),
-                Err(_) => Some("execlog file sink panicked".to_owned()),
+                Err(_) => Some("execlog sink panicked".to_owned()),
             })
             .collect();
         combine(reader_result, sink_errors)

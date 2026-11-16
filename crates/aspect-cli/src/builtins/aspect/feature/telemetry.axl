@@ -47,7 +47,27 @@ Registers exporters from four sources:
              if ctx.std.env.var("CI_HOST") == "buildkite":
                  ctx.telemetry.exporters.add(url = "https://otel.buildkite.example/v1")
 
-This feature itself is just a convenience layer over option 4 — it reads
+`build_events` and `execution_log` (`--telemetry:build-events`,
+`--telemetry:execution-log`) set when a Bazel build's stream becomes telemetry,
+spans and metrics together:
+
+  auto    (default) when the build already has the stream
+  always  turn the stream on for every build; bare
+          `--telemetry:execution-log` means this
+  off     never
+
+The build event stream gives a span per build, failed action and test and the
+build and test metrics; the execution log a `spawn` span per spawn, which on a
+large build is tens of thousands, and `always` costs Bazel the I/O of writing
+the log. For metrics without spans, register the exporter with
+`signals = ["metrics"]`. Nothing is exported, and `always` turns on nothing,
+without an OTLP exporter for the stream's signals.
+
+A setting other than `auto` is written to `ctx.telemetry.build_events` /
+`ctx.telemetry.execution_log`, which config.axl may also set directly. `auto`
+means "leave it", so it cannot undo a policy config.axl set.
+
+Otherwise this feature is just a convenience layer over option 4 — it reads
 env vars / CLI flags and turns them into `add(...)` calls. Anything you
 can do here you can do directly via option 4.
 
@@ -69,6 +89,10 @@ catch-all is set, one endpoint is registered for all signals; if a per-signal
 endpoint is set, it is registered for just that signal (and the catch-all,
 where present, covers any remaining signals).
 """
+
+_AUTO = "auto"
+_ALWAYS = "always"
+_SOURCE_POLICIES = [_AUTO, _ALWAYS, "off"]
 
 def _parse_headers(env):
     raw = env.var("OTEL_EXPORTER_OTLP_HEADERS") or ""
@@ -209,6 +233,10 @@ def _telemetry_impl(ctx: FeatureContext):
         _register_env_endpoints(ctx)
     if ctx.args.endpoint:
         _register_endpoint_args(ctx)
+    if ctx.args.build_events != _AUTO:
+        ctx.telemetry.build_events = ctx.args.build_events
+    if ctx.args.execution_log != _AUTO:
+        ctx.telemetry.execution_log = ctx.args.execution_log
 
     trace.log("telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
     for spec in ctx.telemetry.exporters:
@@ -245,6 +273,24 @@ Telemetry = feature(
                           "all signals are enabled. For per-signal routing or " +
                           "resource_attributes, call ctx.telemetry.exporters.add() " +
                           "directly from config.axl.",
+        ),
+        "build_events": args.string(
+            default = _AUTO,
+            values = _SOURCE_POLICIES,
+            bare = _ALWAYS,
+            description = "When a Bazel build's event stream becomes spans and " +
+                          "metrics: auto (default) when the build already streams " +
+                          "build events, always to turn the stream on for every " +
+                          "build, off for never.",
+        ),
+        "execution_log": args.string(
+            default = _AUTO,
+            values = _SOURCE_POLICIES,
+            bare = _ALWAYS,
+            description = "When a Bazel build's execution log becomes a span per spawn " +
+                          "(label, mnemonic, runner, cache hit, time in each phase): " +
+                          "auto (default) when the build already writes the log, " +
+                          "always to write it for every build, off for never.",
         ),
     },
 )

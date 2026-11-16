@@ -13,6 +13,8 @@
 //! * [`label`] and [`runfiles`]: bazel's label spelling and runfiles trees.
 //! * [`rc`]: `.bazelrc` files, and the flags they resolve to for a command.
 //! * [`fanout`]: one producer's events to many subscribers.
+//! * `otel`: spans for work Bazel already finished, shared by the BES and
+//!   execlog telemetry sinks.
 //! * [`bes`], [`execlog`], [`workspace_event`]: one module per output, each
 //!   with the feed that reads it and, where there is one, the sinks that
 //!   forward it.
@@ -27,6 +29,7 @@ pub mod delimited;
 pub mod execlog;
 pub mod fanout;
 pub mod label;
+mod otel;
 pub mod process;
 pub mod rc;
 pub mod runfiles;
