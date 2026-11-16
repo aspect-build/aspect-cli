@@ -986,8 +986,8 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
 
 /// This Bazel invocation's folder in the task invocation's history, created,
 /// or `None` when it cannot be, said once per run: a history that cannot be
-/// written never fails a build. Its logs go to the temp dir instead, and one
-/// only recorded is not written at all.
+/// written never fails a build. Its logs go to the temp dir instead, where
+/// Bazel can still upload a recorded one, and the profile is left to Bazel.
 fn history_dir(history: &History) -> Option<PathBuf> {
     history
         .next_bazel_dir()
@@ -995,7 +995,8 @@ fn history_dir(history: &History) -> Option<PathBuf> {
             if history.first_failure() {
                 errln!(
                     "WARNING: could not create a history folder under {}: {err}. Builds' \
-                     logs go to the temp dir instead, and none is recorded.",
+                     execution and workspace logs go to the temp dir instead, and the \
+                     profile is left to Bazel.",
                     history.root().display(),
                 )
             }
@@ -1113,7 +1114,6 @@ impl Build {
             (profile_kept || workspace_events || asked || recording || always_telemetry)
                 .then(|| history_dir(history))
                 .flatten();
-        let recording = recording && history_dir.is_some();
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.
         let (log_on, execlog_telemetry) = telemetry
@@ -1192,7 +1192,7 @@ impl Build {
             .as_ref()
             .filter(|_| profile_kept)
             .and_then(|dir| {
-                let path = dir.join(bazel::profile::FILE_NAME);
+                let path = dir.join(bazel::profile::file_name(requested_profile.as_deref()));
                 cmd.arg(format!("{}={}", bazel::profile::FLAG, path.display()));
                 requested_profile.map(|to| (path, to))
             });
@@ -2289,17 +2289,19 @@ Test = task(implementation = _impl)
     }
 
     /// Every build's profile stays in its history folder, and a `--profile`
-    /// the caller asked for gets a copy once the client exits.
+    /// the caller asked for gets a copy once the client exits, in the format
+    /// its name asks for.
     #[cfg(unix)]
     #[test]
     fn the_profile_stays_in_history_and_a_requested_one_is_a_copy() {
         let history = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let asked = dir.path().join("asked.profile.gz");
+        let json = dir.path().join("asked.json");
         let script = format!(
             r#"
 def _impl(ctx):
-    for flags in [[], ["--profile={asked}"]]:
+    for flags in [[], ["--profile={asked}"], ["--profile={json}"]]:
         build = ctx.bazel.build(rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = []), flags = flags, stderr = None)
         if not build.wait().success: return 1
     return 0
@@ -2307,9 +2309,16 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#,
             asked = asked.to_str().unwrap(),
+            json = json.to_str().unwrap(),
         );
         run_task_with_history(&script, history.path());
         let invocation = only_invocation(history.path());
+        let uncompressed = bazel_dir(&invocation, 3).join(bazel::profile::JSON_FILE_NAME);
+        assert!(
+            uncompressed.exists() && json.exists(),
+            "a path not ending in .gz asks Bazel for plain JSON: {}",
+            uncompressed.display()
+        );
         for n in [1, 2] {
             let kept = bazel_dir(&invocation, n).join(bazel::profile::FILE_NAME);
             assert!(kept.exists(), "{}", kept.display());

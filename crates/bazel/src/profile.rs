@@ -8,8 +8,21 @@ use std::path::{Path, PathBuf};
 pub const FLAG: &str = "--profile";
 
 /// The profile's name in a history folder. Bazel compresses a profile whose
-/// path ends in `.gz`.
+/// path ends in `.gz`, and writes plain JSON otherwise.
 pub const FILE_NAME: &str = "command.profile.gz";
+
+/// [`FILE_NAME`], uncompressed, for a caller who asked for a path that does
+/// not end in `.gz`.
+pub const JSON_FILE_NAME: &str = "command.profile.json";
+
+/// The history name for a profile whose copy goes to `requested`, so the copy
+/// is in the format its own name tells Bazel and its readers to expect.
+pub fn file_name(requested: Option<&Path>) -> &'static str {
+    match requested {
+        Some(path) if !path.to_string_lossy().ends_with(".gz") => JSON_FILE_NAME,
+        _ => FILE_NAME,
+    }
+}
 
 /// The profile path something already asked Bazel for in `flags`, if any. See
 /// [`crate::rc::requested_path`] for how empty and relative values resolve.
@@ -102,6 +115,14 @@ mod tests {
             ),
             "a literal beats an rc entry"
         );
+    }
+
+    #[test]
+    fn a_requested_path_names_the_format() {
+        assert_eq!(file_name(None), FILE_NAME);
+        assert_eq!(file_name(Some(Path::new("/tmp/p.gz"))), FILE_NAME);
+        assert_eq!(file_name(Some(Path::new("/tmp/p.json"))), JSON_FILE_NAME);
+        assert_eq!(file_name(Some(Path::new("/tmp/p"))), JSON_FILE_NAME);
     }
 
     #[test]

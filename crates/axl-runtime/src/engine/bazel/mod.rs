@@ -493,11 +493,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Returns a `Build` object. The call does not block — use `.wait()` to
     /// wait for the invocation to finish and retrieve its exit status.
     ///
-    /// Each invocation gets a folder in the task invocation's history, where
-    /// Bazel writes its trace profile, and its execution and workspace logs
-    /// when they are on. A `--profile` the flags or `rc` name gets a copy once
-    /// Bazel exits; without an `rc`, or with profiling turned off, the profile
-    /// is left to Bazel.
+    /// Bazel writes the invocation's trace profile, and its execution and
+    /// workspace logs when they are on, into a folder of the task invocation's
+    /// history, made when there is one of these to keep. A `--profile` the
+    /// flags or `rc` name gets a copy once a `wait()` or `try_wait()` sees
+    /// Bazel exit, so a cancelled wait leaves it only in the history. Without
+    /// an `rc`, with profiling turned off, or with a history that cannot be
+    /// written, the profile is left to Bazel; otherwise Bazel writes none into
+    /// the output base.
     ///
     /// # Arguments
     ///
@@ -641,11 +644,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Returns a `Build` object. The call does not block — use `.wait()` to
     /// wait for the invocation to finish and retrieve its exit status.
     ///
-    /// Each invocation gets a folder in the task invocation's history, where
-    /// Bazel writes its trace profile, and its execution and workspace logs
-    /// when they are on. A `--profile` the flags or `rc` name gets a copy once
-    /// Bazel exits; without an `rc`, or with profiling turned off, the profile
-    /// is left to Bazel.
+    /// Bazel writes the invocation's trace profile, and its execution and
+    /// workspace logs when they are on, into a folder of the task invocation's
+    /// history, made when there is one of these to keep. A `--profile` the
+    /// flags or `rc` name gets a copy once a `wait()` or `try_wait()` sees
+    /// Bazel exit, so a cancelled wait leaves it only in the history. Without
+    /// an `rc`, with profiling turned off, or with a history that cannot be
+    /// written, the profile is left to Bazel; otherwise Bazel writes none into
+    /// the output base.
     ///
     /// # Arguments
     ///
@@ -1430,7 +1436,8 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// Bazel uploads it as a build tool log wherever a BES backend is wired.
     /// `record_every_build()` does the same for every build of the task.
     /// Recording needs the build's `rc`, since Bazel's own rc files could name
-    /// a log path no flag shows, and a history that can be written.
+    /// a log path no flag shows, and Bazel 7.4 or later. Without a history that
+    /// can be written the log goes to a temp file, where Bazel still uploads it.
     fn record() -> anyhow::Result<ExecLogSink> {
         Ok(ExecLogSink::Record)
     }
