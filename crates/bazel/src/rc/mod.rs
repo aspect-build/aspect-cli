@@ -1056,7 +1056,9 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
 ///
 /// An empty value clears the flag rather than naming a file, so it is not a request. A
 /// relative value is joined to `directory`, the spawn's working directory, because Bazel
-/// resolves it there while the CLI reads and writes from its own cwd.
+/// resolves the execution and workspace logs there while the CLI reads and writes from its
+/// own cwd. Bazel resolves some outputs, `--profile` among them, against the workspace
+/// root instead (see [`workspace_root`]).
 pub fn requested_path(
     args: &[String],
     name: &str,
@@ -1069,6 +1071,23 @@ pub fn requested_path(
             Some(dir) if Path::new(&path).is_relative() => Path::new(dir).join(path),
             _ => PathBuf::from(path),
         })
+}
+
+/// The files that mark a directory as the root of a Bazel workspace.
+const WORKSPACE_MARKERS: [&str; 4] = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"];
+
+/// The workspace a Bazel command run in `directory` (the CLI's own cwd when
+/// `None`) belongs to: the nearest directory at or above it holding a
+/// workspace marker file, as Bazel finds it.
+pub fn workspace_root(directory: Option<&str>) -> Option<PathBuf> {
+    let start = match directory {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir().ok()?,
+    };
+    start
+        .ancestors()
+        .find(|dir| WORKSPACE_MARKERS.iter().any(|m| dir.join(m).is_file()))
+        .map(Path::to_path_buf)
 }
 
 /// The [`DefaultOverride`] payloads among `tokens` that apply to `command`, in the order

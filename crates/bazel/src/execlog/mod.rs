@@ -1,7 +1,7 @@
 //! The execution log: bazel's record of every spawn, decoded as it is written.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod feed;
 pub mod sink;
@@ -47,10 +47,22 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// `.bazelrc` can ask Bazel for the compact log, and whoever asked reads the
 /// file at that path. When the CLI streams the log it names a file of its own,
 /// which outranks that one (the option is single-valued), so the asked-for
-/// path is written as one of the [`copies`]. See [`crate::rc::requested_path`]
-/// for how empty and relative values resolve.
+/// path is written as one of the [`copies`]. `%workspace%` stands for the
+/// workspace root, as Bazel expands it in this flag; see
+/// [`crate::rc::requested_path`] for how empty and relative values resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    crate::rc::requested_path(flags, COMPACT_FILE_FLAG, verb, directory)
+    let path = crate::rc::requested_path(flags, COMPACT_FILE_FLAG, verb, None)?;
+    let text = path.to_string_lossy();
+    let path = match crate::rc::workspace_root(directory) {
+        Some(root) if text.contains("%workspace%") => {
+            PathBuf::from(text.replace("%workspace%", &root.to_string_lossy()))
+        }
+        _ => path,
+    };
+    Some(match directory {
+        Some(dir) if path.is_relative() => Path::new(dir).join(path),
+        _ => path,
+    })
 }
 
 /// The compact copies the CLI writes from the stream: the path the caller
@@ -114,6 +126,19 @@ mod tests {
     #[test]
     fn the_history_request_value_is_the_one_aspect_flags_injects() {
         assert_eq!(IN_HISTORY, "%aspect_history%");
+    }
+
+    #[test]
+    fn workspace_in_a_requested_path_is_the_workspace_root() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
+        let pkg = ws.path().join("pkg");
+        std::fs::create_dir(&pkg).unwrap();
+        let flags = flags(&["--execution_log_compact_file=%workspace%/exec.log"]);
+        assert_eq!(
+            requested_path(&flags, "build", pkg.to_str()),
+            Some(ws.path().join("exec.log"))
+        );
     }
 
     #[test]

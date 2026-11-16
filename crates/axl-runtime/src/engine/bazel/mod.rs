@@ -496,8 +496,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Bazel writes the invocation's trace profile, and its execution and
     /// workspace logs when they are on, into a folder of the task invocation's
     /// history, made when there is one of these to keep. A `--profile` the
-    /// flags or `rc` name gets a copy once a `wait()` or `try_wait()` sees
-    /// Bazel exit, so a cancelled wait leaves it only in the history. Without
+    /// flags or `rc` name (a relative one under the workspace root, as Bazel
+    /// resolves it) gets a copy once a `wait()` or `try_wait()` sees Bazel
+    /// exit; an earlier file there is removed at the spawn, so a cancelled
+    /// wait leaves the profile only in the history. Without
     /// an `rc`, with profiling turned off, or with a history that cannot be
     /// written, the profile is left to Bazel; otherwise Bazel writes none into
     /// the output base.
@@ -647,8 +649,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Bazel writes the invocation's trace profile, and its execution and
     /// workspace logs when they are on, into a folder of the task invocation's
     /// history, made when there is one of these to keep. A `--profile` the
-    /// flags or `rc` name gets a copy once a `wait()` or `try_wait()` sees
-    /// Bazel exit, so a cancelled wait leaves it only in the history. Without
+    /// flags or `rc` name (a relative one under the workspace root, as Bazel
+    /// resolves it) gets a copy once a `wait()` or `try_wait()` sees Bazel
+    /// exit; an earlier file there is removed at the spawn, so a cancelled
+    /// wait leaves the profile only in the history. Without
     /// an `rc`, with profiling turned off, or with a history that cannot be
     /// written, the profile is left to Bazel; otherwise Bazel writes none into
     /// the output base.
