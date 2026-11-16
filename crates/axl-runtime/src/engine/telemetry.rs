@@ -15,7 +15,7 @@
 //!   to express `ASPECT_DEBUG=1` as ordinary user-space configuration.
 //!
 //! `ctx.telemetry.build_events` and `ctx.telemetry.execution_log` set when a
-//! Bazel build's stream becomes spans: a [`SourcePolicy`] each, held in
+//! Bazel build's stream becomes telemetry: a [`SourcePolicy`] each, held in
 //! [`TelemetrySources`] on the run's `Env` so every `ctx.bazel.build` reads it.
 
 use std::cell::RefCell;
@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -223,17 +223,16 @@ impl Signals {
     }
 }
 
-/// When a Bazel build's stream becomes spans. Metrics from the stream are
-/// recorded whatever the policy, because they cost a data point per series
-/// rather than one per event.
+/// When a Bazel build's stream becomes telemetry: its spans and, where it
+/// has them, its metrics, together.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SourcePolicy {
-    /// Spans when the build already has the stream.
+    /// When the build already has the stream.
     #[default]
     Auto,
-    /// Turn the stream on for every build, and export its spans.
+    /// Turn the stream on for every build.
     Always,
-    /// No spans.
+    /// Never.
     Off,
 }
 
@@ -256,9 +255,9 @@ impl SourcePolicy {
         Self::NAMES.iter().find(|(_, p)| *p == self).unwrap().0
     }
 
-    /// `(stream on, export spans)` for a build that asked for the stream as
-    /// `requested`, while an exporter is installed as `exporting`. `Always`
-    /// turns the stream on only when there is somewhere to send its spans.
+    /// `(stream on, export its telemetry)` for a build that asked for the
+    /// stream as `requested`, while `exporting` says an exporter takes that
+    /// telemetry. `Always` turns the stream on only when one does.
     pub fn resolve(self, requested: bool, exporting: bool) -> (bool, bool) {
         match self {
             SourcePolicy::Auto => (requested, requested && exporting),
@@ -269,14 +268,49 @@ impl SourcePolicy {
 }
 
 /// The run's [`SourcePolicy`] per Bazel stream, shared by `ctx.telemetry`
-/// (which sets it) and every build spawned in the run (which reads it).
+/// (which sets it) and every build spawned in the run (which reads it), and
+/// which signals the run's exporters take, set once they are collected.
 #[derive(Debug, Default)]
 pub struct TelemetrySources {
     build_events: AtomicU8,
     execution_log: AtomicU8,
+    traces: AtomicBool,
+    metrics: AtomicBool,
 }
 
 impl TelemetrySources {
+    /// Whether an OTLP exporter takes traces. File exporters (such as
+    /// `ASPECT_DEBUG=1`'s) print `tracing` output and take no exported spans.
+    pub fn traces(&self) -> bool {
+        self.traces.load(Ordering::Relaxed)
+    }
+
+    /// Whether an OTLP exporter takes metrics.
+    pub fn metrics(&self) -> bool {
+        self.metrics.load(Ordering::Relaxed)
+    }
+
+    /// Record which signals `specs` export.
+    pub fn set_exported(&self, specs: &[ExporterSpec]) {
+        let otlp = || {
+            specs.iter().filter_map(|s| match s {
+                ExporterSpec::Otlp(o) => Some(o.signals),
+                ExporterSpec::File(_) => None,
+            })
+        };
+        self.traces
+            .store(otlp().any(|s| s.traces), Ordering::Relaxed);
+        self.metrics
+            .store(otlp().any(|s| s.metrics), Ordering::Relaxed);
+    }
+
+    /// Mark every signal exported, for tests that build without exporters.
+    #[cfg(test)]
+    pub fn export_everything(&self) {
+        self.traces.store(true, Ordering::Relaxed);
+        self.metrics.store(true, Ordering::Relaxed);
+    }
+
     pub fn build_events(&self) -> SourcePolicy {
         Self::load(&self.build_events)
     }

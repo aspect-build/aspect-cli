@@ -268,7 +268,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// during phases 2-3. Intended to be called once, after
     /// `execute_features_with_args` completes and before phase 4 begins.
     pub fn drain_exporters(&self) -> Vec<ExporterSpec> {
-        telemetry::drain_exporters(self.telemetry_value)
+        let specs = telemetry::drain_exporters(self.telemetry_value);
+        self.loader.env.telemetry.set_exported(&specs);
+        specs
     }
 
     fn heap(&self) -> Heap<'v> {

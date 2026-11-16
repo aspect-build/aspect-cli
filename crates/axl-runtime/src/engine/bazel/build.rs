@@ -962,8 +962,20 @@ impl Build {
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let exporting = crate::trace::enabled();
-        let (build_events, bes_spans) = telemetry.build_events().resolve(build_events, exporting);
+        // BES telemetry is spans and metrics; the execution log's is spans.
+        let (build_events, bes_telemetry) = telemetry
+            .build_events()
+            .resolve(build_events, telemetry.traces() || telemetry.metrics());
+        let injected_execlog_path =
+            bazel::execlog::requested_path(&flags, verb, directory.as_deref());
+        // A log the user's own flags ask Bazel for is one the build already
+        // has, so `auto` reads it as well; the stream is on for the task's
+        // consumers or for that telemetry.
+        let (log_on, execlog_telemetry) = telemetry.execution_log().resolve(
+            execlog_enabled || injected_execlog_path.is_some(),
+            telemetry.traces(),
+        );
+        let execlog_enabled = execlog_enabled || (log_on && execlog_telemetry);
 
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
@@ -993,19 +1005,9 @@ impl Build {
         let targets: Vec<String> = targets.into_iter().collect();
 
         // Read before `flags` moves into the command. Whoever asked for the compact
-        // log reads the file at that path, so a second flag below must not repoint
-        // Bazel away from it; a requested BEP file is served from the stream when
-        // the CLI streams.
-        let injected_execlog_path =
-            bazel::execlog::requested_path(&flags, verb, directory.as_deref());
-        // A log the user's own flags ask Bazel for is one the build already
-        // has, so `auto` reads it for spans as well; the stream is on for the
-        // task's consumers or for those spans.
-        let (log_on, execlog_spans) = telemetry.execution_log().resolve(
-            execlog_enabled || injected_execlog_path.is_some(),
-            exporting,
-        );
-        let execlog_enabled = execlog_enabled || (log_on && execlog_spans);
+        // log (`injected_execlog_path`, above) reads the file at that path, so a
+        // second flag below must not repoint Bazel away from it; a requested BEP
+        // file is served from the stream when the CLI streams.
         let requested_bep_path =
             bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
 
@@ -1223,7 +1225,7 @@ impl Build {
                     let recv = subscriber(stream)?;
                     stream.attach_sink(bazel::execlog::sink::spawn_file(recv, path));
                 }
-                if execlog_spans {
+                if execlog_telemetry {
                     let recv = subscriber(stream)?;
                     stream.attach_sink(bazel::execlog::telemetry::spawn(recv));
                 }
@@ -1248,11 +1250,8 @@ impl Build {
             if let Some(stream) = execlog_stream.as_mut() {
                 stream.seal();
             }
-            let trace_sink = (build_events && exporting).then(|| {
-                tracing_sink::Tracing::spawn(
-                    build_event_stream.stream().unwrap().subscribe(),
-                    bes_spans,
-                )
+            let trace_sink = bes_telemetry.then(|| {
+                tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
             });
             Ok((
                 workspace_event_stream,
@@ -1496,8 +1495,7 @@ impl Build {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() => {
                     errln!(
                         "WARNING: bazel completed successfully but wrote no execution \
-                         log, so `exec_log_event` hooks and execution-log sinks saw \
-                         nothing for this invocation."
+                         log, so nothing that reads it saw this invocation."
                     );
                 }
                 Ok(_) => {}
@@ -1638,6 +1636,18 @@ mod tests {
         script: String,
         hang: &str,
     ) -> anyhow::Result<Option<u8>> {
+        run_execlog_script_with(timeout, script, hang, false)
+    }
+
+    /// [`run_execlog_script`], with every signal exported when `exporting`, so
+    /// builds attach their telemetry sinks.
+    #[cfg(unix)]
+    fn run_execlog_script_with(
+        timeout: std::time::Duration,
+        script: String,
+        hang: &str,
+        exporting: bool,
+    ) -> anyhow::Result<Option<u8>> {
         assert!(
             timeout < STAND_IN_LIFETIME,
             "the daemon stand-in ({STAND_IN_LIFETIME:?}) must outlast a leaked \
@@ -1645,7 +1655,13 @@ mod tests {
         );
         let stand_in = DaemonStandIn::new();
         let result = crate::test::with_timeout(timeout, move || {
-            crate::test::eval(&script).with_fake_bazel().run_task(0)
+            let eval = crate::test::eval(&script).with_fake_bazel();
+            let eval = if exporting {
+                eval.with_exporting()
+            } else {
+                eval
+            };
+            eval.run_task(0)
         });
         match result {
             Some(exit) => exit,
@@ -1741,14 +1757,14 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// Under the default `auto` policy a build that writes the log gets the
-    /// spawn span sink, a subscriber the producer blocks for, so it has to keep
+    /// Under the default `auto` policy, with traces exported, a build that
+    /// writes the log gets the spawn telemetry sink, a subscriber the producer blocks for, so it has to keep
     /// draining: one that stopped would park the reader at the ring and stall
     /// the iterator beside it, which the timeout catches. The iterator counting
     /// every entry is what shows the two shared the stream.
     #[cfg(unix)]
     #[test]
-    fn the_spawn_span_sink_drains_the_log_beside_an_iterator() {
+    fn the_spawn_telemetry_sink_drains_the_log_beside_an_iterator() {
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1775,11 +1791,17 @@ Test = task(implementation = _impl)
             report = report.to_str().unwrap(),
         );
 
-        run_execlog_task(
+        let exit = run_execlog_script_with(
             Duration::from_secs(60),
             script,
-            "the spawn span sink stopped draining and parked the reader",
-            "a build with spawn spans must still end cleanly",
+            "the spawn telemetry sink stopped draining and parked the reader",
+            true,
+        )
+        .expect("run_task");
+        assert_eq!(
+            exit,
+            Some(0),
+            "a build with spawn telemetry must still end cleanly"
         );
 
         let text = std::fs::read_to_string(&report).expect("the task should have reported");
