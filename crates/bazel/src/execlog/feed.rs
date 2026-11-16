@@ -19,7 +19,8 @@ use thiserror::Error;
 use zstd::Decoder;
 
 /// One `CompactFile` copy the reader writes. A copy that cannot be created,
-/// written or flushed stops being written (whatever reached the file stays) and
+/// written, flushed or copied again ([`MultiTeeReader::recopy`]) stops being
+/// written (whatever reached the file stays) and
 /// keeps why, so the other copies and the decoded stream are unaffected and
 /// [`ExecLogStream::join`] reports it.
 struct Tee {
@@ -105,18 +106,19 @@ impl<R: Read> MultiTeeReader<R> {
         self.tees.iter_mut().for_each(Tee::restart);
     }
 
-    /// Start every copy over from the file at `path` as it now stands, so the
-    /// copies end as Bazel's file does whatever order its bytes were read in.
-    fn recopy(&mut self, path: &Path) {
+    /// Start every copy over from `source`, Bazel's whole log, so the copies
+    /// end as its file does whatever order its bytes were read in. `what`
+    /// says what was being copied when a failure is reported.
+    fn recopy(&mut self, source: io::Result<File>, what: &str) {
         if self.tees.is_empty() {
             return;
         }
         self.restart();
         let fail_all = |tees: &mut Vec<Tee>, e: io::Error| {
-            let error = format!("ExecLog: copying '{}' failed: {e}", path.display());
+            let error = format!("ExecLog: {what} failed: {e}");
             tees.iter_mut().for_each(|t| t.fail(error.clone()));
         };
-        let mut file = match File::open(path) {
+        let mut file = match source {
             Ok(file) => file,
             Err(e) => return fail_all(&mut self.tees, e),
         };
@@ -212,8 +214,9 @@ pub enum ExecLogStreamError {
 /// verdict lives rather than a gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReaderOutcome {
-    /// The log appeared and was read to the end of the stream. A read error
-    /// fails the stream instead.
+    /// The log appeared and was read to the end of the stream, or stopped
+    /// decoding with nothing reading it. A read error fails the stream
+    /// instead.
     Read,
     /// The invocation ended before the log appeared.
     NeverAppeared,
@@ -393,13 +396,21 @@ impl ExecLogStream {
                         }
                     }
                 }
+                let has_readers = has_readers && !sender.is_closed();
                 let closed = sender.close();
-                if undecodable.is_some() {
+                if let Some(reason) = &undecodable {
                     let decoder = out_raw.as_mut().expect("put back after a restart");
                     pass_through(decoder);
                     let raw = decoder.get_mut().get_mut();
-                    let path = raw.inner.path().to_owned();
-                    raw.recopy(&path);
+                    let what = format!(
+                        "copying '{}' again after it stopped decoding ({reason})",
+                        raw.inner.path().display()
+                    );
+                    let source = raw
+                        .inner
+                        .rewound()
+                        .unwrap_or_else(|| Err(io::Error::other("the log was never opened")));
+                    raw.recopy(source, &what);
                 }
                 let decoder = out_raw.as_ref().expect("put back after a restart");
                 let file = &decoder.get_ref().get_ref().inner;
@@ -895,6 +906,41 @@ mod tests {
             ReaderOutcome::Undecodable(_)
         ));
         assert_eq!(std::fs::read(&copy).unwrap(), attempt2);
+    }
+
+    /// The copies come from the file Bazel wrote, not whatever is at its path
+    /// by the time the stream ends, as when another build reuses the path.
+    #[test]
+    fn a_corrupt_log_is_copied_from_its_own_file_when_the_path_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.log");
+        let copy = dir.path().join("copy.zstd");
+        let mut client = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let mut log = compact_log(1..=5);
+        log.extend_from_slice(b"not a zstd frame at all");
+        std::fs::write(&path, &log).unwrap();
+        let mut stream = ExecLogStream::spawn_with_file(
+            path.clone(),
+            client.id(),
+            client.id(),
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
+        let recv = stream.receiver().unwrap();
+        stream.seal();
+        while recv.recv().is_ok() {}
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"another build's log").unwrap();
+        let _ = client.kill();
+        let _ = client.wait();
+        assert!(matches!(
+            stream.join().unwrap(),
+            ReaderOutcome::Undecodable(_)
+        ));
+        assert_eq!(std::fs::read(&copy).unwrap(), log);
     }
 
     /// A log nobody reads is not reported for failing to decode, and its copy
