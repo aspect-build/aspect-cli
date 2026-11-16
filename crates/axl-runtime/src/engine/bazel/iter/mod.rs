@@ -27,7 +27,7 @@ use fibre::spmc::Receiver;
 /// An iterator handle `Build::spawn` subscribes to one of a build's decoded
 /// logs, and `wait()` releases.
 pub trait Handle<T: Send + Clone> {
-    /// Subscribe to `recv`. Fails for a handle already bound.
+    /// Subscribe to `recv`. Fails unless the handle is still pending.
     fn bind(&self, recv: Receiver<T>) -> anyhow::Result<()>;
     /// Unsubscribe. Idempotent.
     fn release(&self);

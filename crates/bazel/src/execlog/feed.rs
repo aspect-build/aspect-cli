@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::{BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::{env, thread};
 
@@ -184,6 +184,8 @@ pub enum ReaderOutcome {
 #[derive(Debug)]
 pub struct ExecLogStream {
     handle: JoinHandle<Result<ReaderOutcome, ExecLogStreamError>>,
+    /// Where the log is read from, for naming it in errors.
+    path: PathBuf,
     /// The ring's origin, sealed once the consumers are wired.
     origin: Origin<ExecLogEntry>,
     /// Decoded-entry sink threads owned by this stream — joined in `join()`.
@@ -276,7 +278,7 @@ impl ExecLogStream {
             server: Some(server_pid),
         }
         .gate();
-        let mut file = followed::File::follow(path, gate);
+        let mut file = followed::File::follow(path.clone(), gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
 
@@ -353,9 +355,15 @@ impl ExecLogStream {
 
         Ok(Self {
             handle,
+            path,
             origin,
             sink_handles: vec![],
         })
+    }
+
+    /// The log's path.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// A further subscriber to the decoded stream, for a consumer that will

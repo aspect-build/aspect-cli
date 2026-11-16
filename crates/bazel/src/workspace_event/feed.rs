@@ -15,7 +15,6 @@ use axl_proto::workspace_log::WorkspaceEvent;
 use fibre::CloseError;
 use fibre::spmc::Receiver;
 use prost::Message;
-use std::fmt::Debug;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -38,20 +37,13 @@ pub enum WorkspaceEventError {
     Close(#[from] CloseError),
 }
 
+#[derive(Debug)]
 pub struct WorkspaceEventStream {
     handle: JoinHandle<Result<(), WorkspaceEventError>>,
     /// Where the log is read from, for naming it in errors.
     path: PathBuf,
     /// The ring's origin, sealed once the consumers are wired.
     origin: Origin<WorkspaceEvent>,
-}
-
-impl Debug for WorkspaceEventStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkspaceEventStream")
-            .field("stream", &String::from("hidden"))
-            .finish()
-    }
 }
 
 impl WorkspaceEventStream {
@@ -64,7 +56,9 @@ impl WorkspaceEventStream {
     /// starts: the stream's own subscriber holds the ring from the first event.
     ///
     /// A file Bazel starts over is read on from the new one. A read error, or
-    /// an event that does not decode, fails [`join`](Self::join).
+    /// an event that does not decode, fails [`join`](Self::join). Events are
+    /// decoded only while a subscriber is left to receive them, so a log nobody
+    /// reads is not validated past the point its readers let go.
     pub fn spawn(log: LogFile, gate: Gate) -> Self {
         let (mut sender, origin) = ring::<WorkspaceEvent>();
         let path = log.path().to_owned();

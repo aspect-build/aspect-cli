@@ -1168,7 +1168,8 @@ impl Build {
         let parts = (|| -> io::Result<_> {
             // Started first: Bazel already has the path, so a stream dropped on
             // a later failure still reads to the client's exit, which `abandon`
-            // forces, and its file goes with it.
+            // forces. Its detached reader removes the file when it finishes,
+            // unless the process exits first.
             let mut workspace_event_stream =
                 workspace_event_file.map(|log| WorkspaceEventStream::spawn(log, pids.gate()));
 
@@ -1520,6 +1521,7 @@ impl Build {
         // never reaches the phase that creates one, and bazel has already said so)
         // and an anomaly on a successful one. See `ReaderOutcome`.
         if let Some(execlog_stream) = build.execlog_stream.take() {
+            let path = execlog_stream.path().display().to_string();
             match execlog_stream.join() {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() => {
                     errln!(
@@ -1528,7 +1530,9 @@ impl Build {
                     );
                 }
                 Ok(_) => {}
-                Err(err) => stream_errors.push(format!("execlog stream thread error: {err}")),
+                Err(err) => {
+                    stream_errors.push(format!("reading the execution log '{path}' failed: {err}"))
+                }
             }
         };
         if !stream_errors.is_empty() {
@@ -1713,12 +1717,10 @@ mod tests {
         assert_eq!(exit, Some(0), "{wrong}");
     }
 
-    /// How many entries or events basil's log scenarios write
-    /// (`execlog_beyond_capacity`, `workspace_events_beyond_capacity`,
-    /// `corrupt_workspace_log_beside_execlog` and the other `execlog_*` ones),
-    /// which hard-code the same 3000. Longer than `CHANNEL_CAPACITY`, which is
-    /// the only length that can tell a stream that delivers everything apart
-    /// from one that stops at the ring.
+    /// How many entries or events basil's log scenarios write: its
+    /// `BEYOND_CAPACITY` (crates/basil/src/main.rs), which this must match.
+    /// Longer than `CHANNEL_CAPACITY`, the only length that can tell a stream
+    /// that delivers everything apart from one that stops at the ring.
     #[cfg(unix)]
     const SCENARIO_ENTRIES: u32 = 3000;
 
