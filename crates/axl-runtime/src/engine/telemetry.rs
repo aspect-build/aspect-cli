@@ -223,8 +223,8 @@ impl Signals {
     }
 }
 
-/// When a Bazel build's stream becomes telemetry: its spans and, where it
-/// has them, its metrics, together.
+/// When a Bazel build's stream becomes telemetry: its spans and metrics,
+/// together.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SourcePolicy {
     /// When the build already has the stream.
@@ -288,6 +288,11 @@ impl TelemetrySources {
     /// Whether an OTLP exporter takes metrics.
     pub fn metrics(&self) -> bool {
         self.metrics.load(Ordering::Relaxed)
+    }
+
+    /// Whether an OTLP exporter takes a signal a build's streams feed.
+    pub fn exporting(&self) -> bool {
+        self.traces() || self.metrics()
     }
 
     /// Record which signals `specs` export.
@@ -842,6 +847,9 @@ mod tests {
             sources.set_exported(specs);
             (sources.traces(), sources.metrics())
         };
+        let metrics_only = TelemetrySources::default();
+        metrics_only.set_exported(&[otlp(false, true)]);
+        assert!(metrics_only.exporting(), "metrics alone feed the streams");
         assert_eq!(exported(&[]), (false, false));
         assert_eq!(
             exported(std::slice::from_ref(&file)),

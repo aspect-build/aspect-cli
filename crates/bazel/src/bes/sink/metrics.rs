@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn build_metrics_without_cache_statistics_record_nothing() {
+    fn empty_build_metrics_record_nothing() {
         assert!(
             recorded(|m| m.record_build_metrics(&BuildMetrics::default(), &Invocation::default()))
                 .is_empty()
