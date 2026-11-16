@@ -466,7 +466,7 @@ def history_exec_log_flags(_ctx) -> list:
     of `exec_log_flags` apply to it as to any injected flag. Bazel uploads it
     from there; the runtime takes this value off the command line and names
     the history folder itself. `ctx.bazel.info`, which reads the `build`
-    section too, passes it on as written and Bazel's `info` ignores it. For a
+    section too, takes it off as well. For a
     BES wired off a runner (`--remote`, or a hand-set env)."""
     return exec_log_flags(_EXEC_LOG_IN_HISTORY)
 

@@ -894,6 +894,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Some(rc) => rc.resolve_for_command("info")?,
             None => (read_startup_flags(this)?, Vec::new()),
         };
+        // `info` reads the `build` section, so it is handed the history request
+        // a build is; Bazel would take it for a relative log path to open.
+        let (command_flags, _) = bazel::execlog::take_history_request(command_flags);
 
         let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
 

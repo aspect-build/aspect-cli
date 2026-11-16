@@ -952,7 +952,8 @@ impl Unstarted {
 }
 
 /// `(asked, recording)`: whether something reads a build's compact execution
-/// log, and whether it is only to be recorded in the history.
+/// log, and whether it is to be recorded in the history (which may also be
+/// asked for).
 ///
 /// A list holding nothing but `record()` sinks records; any other list asks.
 /// A `requested` path, named by the caller's own flags, is written as a copy,
@@ -1104,16 +1105,7 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
                 .info()?;
-        // Every file below that stays goes into this one folder, made only
-        // when one will: `always` telemetry may ask for the log on its own.
-        let always_telemetry = telemetry
-            .execution_log()
-            .resolve(false, telemetry.exporting())
-            .0;
-        let history_dir =
-            (profile_kept || workspace_events || asked || recording || always_telemetry)
-                .then(|| history_dir(history))
-                .flatten();
+        let recording = recording && writes_execution_log(false, true, version.as_ref());
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.
         let (log_on, execlog_telemetry) = telemetry
@@ -1121,6 +1113,11 @@ impl Build {
             .resolve(asked || recording, telemetry.exporting());
         let asked = asked || (log_on && !recording);
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
+        // Every file below that stays goes into this one folder, made only
+        // when one will.
+        let history_dir = (profile_kept || workspace_events || execlog_enabled)
+            .then(|| history_dir(history))
+            .flatten();
 
         let span = tracing::info_span!(
             "ctx.bazel.build",

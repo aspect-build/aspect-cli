@@ -62,7 +62,8 @@ additive to close: a per-invocation identifier would arrive as a new accessor,
 never as a changed `on_entry` signature.
 
 A second invocation must also not re-write the trait's *file* sinks. Those are
-written by Bazel and read by the task's `build_end` hooks, and the artifact
+copies of the log the CLI writes before `wait()` returns, read by the task's
+`build_end` hooks, and the artifact
 uploader's `build_end` both uploads the execution log and deletes it — a leftover
 file leaks its highest-risk artifact, action command lines and environment
 variables, with no on-disk redaction. So an invocation that spawns Bazel after
