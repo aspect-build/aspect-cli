@@ -3,7 +3,8 @@
 //! start time as `YYYYMMDDTHHMMSSmmmZ`, so the names alone list the history in
 //! order. A subfolder per Bazel invocation it makes (`bazel/<n>`). A task ID
 //! names one run, so an explicit one already here is refused (see
-//! [`History::earlier_run`]).
+//! [`History::earlier_run`]). An entry is made only once a Bazel invocation has
+//! a file to keep in it, so a run that kept nothing leaves no trace.
 //!
 //! Bazel reads some of these files back after the build — it uploads the
 //! compact execution log as a build tool log, possibly after the client has
@@ -12,7 +13,9 @@
 //! before its first Bazel build: the oldest started first while the history is
 //! over [`Retention::budget`], never below [`Retention::keep`] invocations, and
 //! never one written to within [`Retention::guard`], which may be a build or an
-//! upload still running in another workspace.
+//! upload still running in another workspace. Liveness is read from those times
+//! alone, so a run elsewhere that has gone longer than the guard without
+//! writing, and is not among the newest kept, can lose its entry.
 
 use std::fs;
 use std::io;
@@ -97,6 +100,7 @@ impl History {
         self.record.store(true, Ordering::SeqCst);
     }
 
+    /// Whether [`record_every_build`](Self::record_every_build) was asked for.
     pub fn records_every_build(&self) -> bool {
         self.record.load(Ordering::SeqCst)
     }
@@ -112,11 +116,13 @@ impl History {
             .unwrap_or_else(|| std::env::temp_dir().join("aspect-history"))
     }
 
+    /// Where the history is kept.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// The entry an earlier run of `task_id` left here, if it is still kept.
+    /// IDs are compared ignoring ASCII case, as a UUID is.
     pub fn earlier_run(&self, task_id: &str) -> Option<PathBuf> {
         fs::read_dir(&self.root)
             .ok()?
@@ -126,7 +132,7 @@ impl History {
                 is_invocation_name(&name)
                     && name
                         .to_str()
-                        .is_some_and(|n| n[STAMP_LEN + 1..] == *task_id)
+                        .is_some_and(|n| n[STAMP_LEN + 1..].eq_ignore_ascii_case(task_id))
             })
             .map(|e| e.path())
     }
@@ -461,6 +467,10 @@ mod tests {
         let entry = dir.parent().unwrap().parent().unwrap().to_path_buf();
         assert_eq!(h.earlier_run(&id(1)), Some(entry));
         assert_eq!(h.earlier_run(&id(2)), None);
+        assert!(
+            h.earlier_run(&id(1).to_uppercase()).is_some(),
+            "a UUID in another case is the same ID"
+        );
     }
 
     #[test]

@@ -1023,10 +1023,11 @@ impl Build {
         Ok(status)
     }
 
-    /// What follows the client's exit, once it is seen: the profile Bazel has
-    /// finished by then is copied to the path the caller asked for. Only the
-    /// first call copies. A copy that fails is a warning, as a profile Bazel
-    /// cannot write is.
+    /// What follows the client's exit, once a reap sees it: the profile Bazel
+    /// has finished by then is copied to the path the caller asked for. Only
+    /// the first call copies. A copy that fails is a warning, as a profile
+    /// Bazel cannot write is. A build never reaped here (a cancelled wait, a
+    /// task that does not wait) leaves the profile only in the history.
     fn reaped(&self) {
         if let Some((from, to)) = self.profile_copy.take()
             && let Err(err) = bazel::profile::copy(&from, &to)
@@ -1076,6 +1077,9 @@ impl Build {
         // only recorded, or the profile, is then left where Bazel puts it, so
         // no path the caller set is silently overridden.
         let rc_visible = startup_flags.iter().any(|f| f == "--ignore_all_rc_files");
+        // A `--profile` would turn profiling back on for a caller who turned
+        // it off, so the profile is then left to Bazel too.
+        let profile_kept = rc_visible && !bazel::profile::turned_off(&flags, verb);
         let (asked, recording) = execlog_demand(
             execlog_enabled,
             &execlog_sinks,
@@ -1083,13 +1087,7 @@ impl Build {
             requested_execlog_path.is_some(),
             history_asked || history.records_every_build(),
         );
-
-        // `auto` telemetry reads a log the build writes anyway; `always`
-        // turning it on for its telemetry is an ask of its own.
-        let (log_on, execlog_telemetry) = telemetry
-            .execution_log()
-            .resolve(asked || recording, telemetry.exporting());
-        let asked = asked || (log_on && !recording);
+        let recording = recording && rc_visible;
 
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
@@ -1105,9 +1103,23 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
                 .info()?;
-        // Every file below that stays goes into this one folder.
-        let history_dir = history_dir(history);
-        let recording = recording && rc_visible && history_dir.is_some();
+        // Every file below that stays goes into this one folder, made only
+        // when one will: `always` telemetry may ask for the log on its own.
+        let always_telemetry = telemetry
+            .execution_log()
+            .resolve(false, telemetry.exporting())
+            .0;
+        let history_dir =
+            (profile_kept || workspace_events || asked || recording || always_telemetry)
+                .then(|| history_dir(history))
+                .flatten();
+        let recording = recording && history_dir.is_some();
+        // `auto` telemetry reads a log the build writes anyway; `always`
+        // turning it on for its telemetry is an ask of its own.
+        let (log_on, execlog_telemetry) = telemetry
+            .execution_log()
+            .resolve(asked || recording, telemetry.exporting());
+        let asked = asked || (log_on && !recording);
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
 
         let span = tracing::info_span!(
@@ -1129,7 +1141,6 @@ impl Build {
         let requested_workspace_log =
             bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
         let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
-        let profile_off = bazel::profile::turned_off(&flags, verb);
 
         let mut cmd = super::runner::SignalRunner(&signals).command();
         cmd.args(startup_flags);
@@ -1177,11 +1188,9 @@ impl Build {
         // Bazel writes the profile into the history, where it stays, as the
         // execution log does below; a profile the caller asked for is copied
         // to the caller's path once the client exits (see `Build::reaped`).
-        // Left to Bazel when the caller turned profiling off, since a
-        // `--profile` would turn it back on, or when the rc is not visible.
         let profile_copy = history_dir
             .as_ref()
-            .filter(|_| rc_visible && !profile_off)
+            .filter(|_| profile_kept)
             .and_then(|dir| {
                 let path = dir.join(bazel::profile::FILE_NAME);
                 cmd.arg(format!("{}={}", bazel::profile::FLAG, path.display()));
@@ -1277,8 +1286,8 @@ impl Build {
         let parts = (|| -> io::Result<_> {
             // Started first: Bazel already has the path, so a stream dropped on
             // a later failure still reads to the client's exit, which `abandon`
-            // forces. Its detached reader removes the file when it finishes,
-            // unless the process exits first.
+            // forces. A temp reservation's detached reader removes the file when
+            // it finishes, unless the process exits first.
             let mut workspace_event_stream = workspace_event_file
                 .map(|(log, copies)| WorkspaceEventStream::spawn(log, pids.gate(), copies));
 
@@ -2383,8 +2392,59 @@ Test = task(implementation = _impl)
         );
         run_task_with_history(&script, history.path());
         assert!(asked.exists(), "Bazel writes the caller's profile itself");
-        let kept = bazel_dir(&only_invocation(history.path()), 1).join(bazel::profile::FILE_NAME);
-        assert!(!kept.exists(), "{}", kept.display());
+        assert_eq!(
+            std::fs::read_dir(history.path()).unwrap().count(),
+            0,
+            "a build with nothing to keep makes no history entry"
+        );
+    }
+
+    /// Recording asks for no more than a file in the history, so a build with
+    /// no rendered rc, whose own rc files could name a log path, records
+    /// nothing and makes no history entry.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_rendered_rc_nothing_is_recorded() {
+        let history = tempfile::tempdir().unwrap();
+        run_task_with_history(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [bazel.execution_log.record()],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+            history.path(),
+        );
+        assert_eq!(std::fs::read_dir(history.path()).unwrap().count(), 0);
+    }
+
+    /// A `--profile` would turn profiling back on, so a caller who turned it
+    /// off gets none in the history either.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_turned_off_stays_off() {
+        let history = tempfile::tempdir().unwrap();
+        run_task_with_history(
+            r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--nogenerate_json_trace_profile"],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+            history.path(),
+        );
+        assert_eq!(std::fs::read_dir(history.path()).unwrap().count(), 0);
     }
 
     /// The workspace handle's AXL surface: `done` before binding and after

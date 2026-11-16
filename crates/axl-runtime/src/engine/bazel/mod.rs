@@ -108,8 +108,8 @@ fn partition_execution_log(
             "`execution_log = True` names no consumer of the log. Pass \
              `execution_log = [handle]` with `handle = bazel.execution_log.iterator()` \
              and iterate the handle, pass sinks such as \
-             `bazel.execution_log.compact_file(path = ...)`, or pass `[]` to only \
-             write the log."
+             `bazel.execution_log.compact_file(path = ...)`, or pass \
+             `[bazel.execution_log.record()]` to only record it in the task invocation's history."
         ),
         Either::Right(items) => {
             let mut sinks = vec![];
@@ -542,7 +542,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   handles to iterate entries in-process. Every consumer receives every entry —
     ///   the producer blocks for each rather than dropping — so a handle must be
     ///   drained **before** `wait()`, which releases any still-bound handle so an
-    ///   undrained one cannot hang the build. `[]` writes the log with no consumer.
+    ///   undrained one cannot hang the build. `[]` writes the log with no consumer;
+    ///   `[execution_log.record()]` only records it in the task invocation's
+    ///   history, which is skipped where recording cannot be done (see `record`).
     ///
     /// **Examples**
     ///
@@ -688,7 +690,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   handles to iterate entries in-process. Every consumer receives every entry —
     ///   the producer blocks for each rather than dropping — so a handle must be
     ///   drained **before** `wait()`, which releases any still-bound handle so an
-    ///   undrained one cannot hang the build. `[]` writes the log with no consumer.
+    ///   undrained one cannot hang the build. `[]` writes the log with no consumer;
+    ///   `[execution_log.record()]` only records it in the task invocation's
+    ///   history, which is skipped where recording cannot be done (see `record`).
     ///
     /// **Examples**
     ///

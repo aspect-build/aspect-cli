@@ -24,7 +24,8 @@ def output_user_root(std) -> str:
     return home + "/.cache/bazel/_bazel_" + user
 
 # Files Bazel touches as it works, newest wins, for "when was this base last
-# used": `command.profile.gz` is written per command, `java.log`,
+# used": `command.profile.gz` per command that leaves the profile to Bazel (the
+# CLI puts it in the task invocation's history otherwise), `java.log`,
 # `action_cache` and `server/` by a running server, `lock` on every invocation.
 _FRESHNESS_MARKERS = ["command.profile.gz", "java.log", "action_cache", "server", "lock"]
 
