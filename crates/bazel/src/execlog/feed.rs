@@ -98,7 +98,7 @@ impl<R: Read> MultiTeeReader<R> {
 
 /// Fail when the followed log at `path` ended `done` by breaking, naming the
 /// path and how far it got. A read error ends the file's stream like its end
-/// does, so without this a log cut short would read as read to the end.
+/// does, so without this a log cut short would pass as a complete log.
 fn broken_read(done: Option<&crate::stream::Done>, path: &std::path::Path) -> io::Result<()> {
     let path = path.display();
     match done {
@@ -584,6 +584,30 @@ mod tests {
         let err = stream.join().unwrap_err().to_string();
         assert!(
             err.contains(&format!("reading '{}' failed:", path.display())),
+            "{err}"
+        );
+    }
+
+    /// A break and a failed compact copy are both named, the break first.
+    #[test]
+    fn a_break_and_a_failed_copy_are_both_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.log");
+        std::fs::create_dir(&path).unwrap();
+        let copy = dir.path().join("missing-dir").join("copy.zstd");
+        let pid = std::process::id();
+        let stream = ExecLogStream::spawn_with_file(
+            path.clone(),
+            pid,
+            pid,
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
+        let err = stream.join().unwrap_err().to_string();
+        let read_at = err.find(&format!("reading '{}' failed", path.display()));
+        let copy_at = err.find(copy.to_str().unwrap());
+        assert!(
+            matches!((read_at, copy_at), (Some(r), Some(c)) if r < c),
             "{err}"
         );
     }
