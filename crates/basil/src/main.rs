@@ -22,6 +22,10 @@
 //!     decoded channel's 1000-entry capacity are the point — truncation past the
 //!     capacity is invisible without a log longer than it.
 //!
+//!     When `--experimental_workspace_rules_log_file <path>` is present, a
+//!     scenario with `workspace_events` writes that many length-delimited
+//!     `WorkspaceEvent` protobufs there, `location` numbering them from 1.
+//!
 //!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
 //!     [`await_pump_handshake`].
 //!
@@ -58,6 +62,7 @@ use axl_proto::build_event_stream::{
     build_finished::ExitCode,
 };
 use axl_proto::tools::protos::{ExecLogEntry, exec_log_entry};
+use axl_proto::workspace_log::WorkspaceEvent;
 use prost::Message;
 
 fn main() {
@@ -167,6 +172,12 @@ fn run_build(args: &[String], verb: &str) {
     }
 
     let s = scenario(&scenario_name);
+
+    if let Some(path) = flag("--experimental_workspace_rules_log_file")
+        && s.workspace_events > 0
+    {
+        write_workspace_log(&path, s.workspace_events);
+    }
 
     let log = || match &execlog_path {
         Some(path) if s.execlog_entries > 0 => write_execlog(path, s.execlog_entries),
@@ -336,6 +347,9 @@ struct Scenario {
     /// binary stream — so a scenario that has to get past that selection names
     /// the labels it comes back with. See [`write_json_bep`].
     json_bep_tests: &'static [&'static str],
+    /// How many `WorkspaceEvent` messages to write to
+    /// `--experimental_workspace_rules_log_file`, when the runtime asked for one.
+    workspace_events: u32,
 }
 
 /// A clean single-attempt run with no pauses and no execution log — so each
@@ -348,6 +362,7 @@ impl Default for Scenario {
             execlog_entries: 0,
             execlog_delay: Duration::ZERO,
             json_bep_tests: &[],
+            workspace_events: 0,
         }
     }
 }
@@ -492,6 +507,25 @@ fn write_execlog(path: &str, count: u32) {
         .unwrap_or_else(|e| panic!("basil: publishing execlog to {path:?}: {e}"));
 }
 
+/// Write `count` workspace events to `path`, built under a sibling `.partial`
+/// name and renamed into place as [`write_execlog`] does.
+fn write_workspace_log(path: &str, count: u32) {
+    let partial = format!("{path}.partial");
+    let bytes: Vec<u8> = (1..=count)
+        .flat_map(|n| {
+            WorkspaceEvent {
+                location: n.to_string(),
+                ..Default::default()
+            }
+            .encode_length_delimited_to_vec()
+        })
+        .collect();
+    fs::write(&partial, bytes)
+        .unwrap_or_else(|e| panic!("basil: writing workspace log {partial:?}: {e}"));
+    fs::rename(&partial, path)
+        .unwrap_or_else(|e| panic!("basil: publishing workspace log to {path:?}: {e}"));
+}
+
 /// Resolve a scenario by name. Each scenario documents the behavior or bug
 /// it targets. Add new ones here.
 fn scenario(name: &str) -> Scenario {
@@ -556,6 +590,13 @@ fn scenario(name: &str) -> Scenario {
         // 3000 is comfortably past it and still a fraction of a second to write.
         "execlog_beyond_capacity" => Scenario {
             execlog_entries: 3000,
+            ..Default::default()
+        },
+
+        // A workspace event log longer than the decoded channel's capacity, for
+        // the same reason.
+        "workspace_events_beyond_capacity" => Scenario {
+            workspace_events: 3000,
             ..Default::default()
         },
 

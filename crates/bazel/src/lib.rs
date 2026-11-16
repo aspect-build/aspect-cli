@@ -15,6 +15,8 @@
 //! * [`fanout`]: one producer's events to many subscribers.
 //! * `otel`: spans for work Bazel already finished, shared by the BES and
 //!   execlog telemetry sinks.
+//! * [`subscription`]: one releasable subscriber of a blocking broadcast
+//!   ring, behind the execution log and workspace event iterator handles.
 //! * [`bes`], [`execlog`], [`workspace_event`]: one module per output, each
 //!   with the feed that reads it and, where there is one, the sinks that
 //!   forward it.
@@ -36,6 +38,7 @@ pub mod runfiles;
 pub mod runner;
 pub mod server;
 pub mod stream;
+pub mod subscription;
 pub mod workspace_event;
 
 #[cfg(test)]

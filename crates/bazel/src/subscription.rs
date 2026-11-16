@@ -1,12 +1,11 @@
-//! The subscription state machine behind a `bazel.execution_log.iterator()`
-//! handle: one subscriber of a build's decoded execution log that the producer
-//! blocks for, bound after the handle is created, and that `build.wait()` has
-//! to be able to drop from outside.
+//! The subscription state machine behind the `bazel.execution_log.iterator()`
+//! and `bazel.workspace_events.iterator()` handles: one subscriber of a
+//! blocking broadcast ring that the producer waits for, bound after the handle
+//! is created, and that `build.wait()` has to be able to drop from outside.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use axl_proto::tools::protos::ExecLogEntry;
 use fibre::TryRecvError;
 use fibre::spmc::Receiver;
 
@@ -14,12 +13,12 @@ use crate::fanout::{Recv, recv_cancellable};
 
 /// What a [`Subscription`] is holding.
 #[derive(Debug)]
-enum State {
+enum State<T: Send + Clone> {
     /// Created but not subscribed yet. Only [`Subscription::pending`] starts
     /// here; a `bind` leaves it for good.
     Pending,
     /// Holds a subscriber the producer blocks for. Reads come from `recv`.
-    Live { recv: Receiver<ExecLogEntry> },
+    Live { recv: Receiver<T> },
     /// On loan to an in-flight blocking read, so a [`release`](Subscription::release)
     /// can land while the read is parked.
     ///
@@ -47,12 +46,20 @@ enum State {
 /// each one before joining the reader. The producer blocks for every subscriber
 /// it has, so one an AXL task stopped reading — or never started — would
 /// otherwise park the reader on a full ring and the join would never return.
-#[derive(Clone, Debug)]
-pub struct Subscription {
-    state: Arc<Mutex<State>>,
+#[derive(Debug)]
+pub struct Subscription<T: Send + Clone> {
+    state: Arc<Mutex<State<T>>>,
 }
 
-impl Subscription {
+impl<T: Send + Clone> Clone for Subscription<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<T: Send + Clone> Subscription<T> {
     /// Not subscribed yet: a handle is created before the build it will be
     /// bound to exists.
     pub fn pending() -> Self {
@@ -64,7 +71,7 @@ impl Subscription {
     /// Subscribe. `false` when this subscription is not [`State::Pending`] —
     /// bound already, released, or on loan to a read — which is what makes "one
     /// handle binds once" hold.
-    pub fn bind(&self, recv: Receiver<ExecLogEntry>) -> bool {
+    pub fn bind(&self, recv: Receiver<T>) -> bool {
         let mut state = self.state.lock().unwrap();
         if matches!(*state, State::Pending) {
             *state = State::Live { recv };
@@ -116,8 +123,8 @@ impl Subscription {
     pub fn recv_blocking(
         &self,
         cancelled: impl Fn() -> bool,
-        wants: impl Fn(&ExecLogEntry) -> bool,
-    ) -> Option<ExecLogEntry> {
+        wants: impl Fn(&T) -> bool,
+    ) -> Option<T> {
         let recv = self.take_for_read()?;
         loop {
             match recv_cancellable(&cancelled, &recv, None) {
@@ -142,7 +149,7 @@ impl Subscription {
     /// buffered qualifies. The producer runs up to the channel capacity ahead and
     /// then waits for this subscriber, so polling slowly costs time rather than
     /// entries.
-    pub fn try_pop(&self, wants: impl Fn(&ExecLogEntry) -> bool) -> Option<ExecLogEntry> {
+    pub fn try_pop(&self, wants: impl Fn(&T) -> bool) -> Option<T> {
         let mut state = self.state.lock().unwrap();
         let State::Live { recv } = &*state else {
             return None;
@@ -177,7 +184,7 @@ impl Subscription {
     /// [`recv_blocking`](Self::recv_blocking), which is the only caller that
     /// should need them. Visible to the sibling iterator modules so their tests
     /// can put a subscription on loan, which AXL itself cannot observe.
-    pub fn take_for_read(&self) -> Option<Receiver<ExecLogEntry>> {
+    pub fn take_for_read(&self) -> Option<Receiver<T>> {
         let mut state = self.state.lock().unwrap();
         match std::mem::replace(&mut *state, State::Reading) {
             State::Live { recv } => Some(recv),
@@ -192,7 +199,7 @@ impl Subscription {
     /// it was parked — in which case the release wins and the receiver drops here.
     ///
     /// See [`take_for_read`](Self::take_for_read) for why this is not private.
-    pub fn finish_read(&self, recv: Receiver<ExecLogEntry>) {
+    pub fn finish_read(&self, recv: Receiver<T>) {
         let mut state = self.state.lock().unwrap();
         if matches!(*state, State::Reading) {
             *state = State::Live { recv };
@@ -203,13 +210,14 @@ impl Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axl_proto::tools::protos::ExecLogEntry;
     use fibre::spmc::bounded;
 
     fn entry(id: u32) -> ExecLogEntry {
         ExecLogEntry { id, r#type: None }
     }
 
-    fn bound(recv: Receiver<ExecLogEntry>) -> Subscription {
+    fn bound(recv: Receiver<ExecLogEntry>) -> Subscription<ExecLogEntry> {
         let sub = Subscription::pending();
         assert!(sub.bind(recv));
         sub

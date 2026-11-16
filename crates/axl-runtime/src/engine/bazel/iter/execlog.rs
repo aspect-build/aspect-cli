@@ -36,7 +36,7 @@ use derive_more::Display;
 use fibre::spmc::Receiver;
 
 use crate::engine::cancellation::Signals;
-use bazel::execlog::subscription::Subscription;
+use bazel::subscription::Subscription;
 
 /// Proto field number of each `ExecLogEntry.type` variant — the tag a `kinds=`
 /// filter matches on. Mirrors `payload_discriminant` for build events: an
@@ -123,7 +123,7 @@ pub struct ExecLogIter {
     /// will be bound to.
     #[allocative(skip)]
     #[trace(unsafe_ignore)]
-    sub: Subscription,
+    sub: Subscription<ExecLogEntry>,
     /// The run's cancellation state, carried from construction so blocking
     /// iteration stays a safe point. Without it a drain would park in a bare
     /// `recv()` and the AXL body would stop answering signals — see `iter_next`.

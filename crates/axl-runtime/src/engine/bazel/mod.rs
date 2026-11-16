@@ -125,6 +125,23 @@ fn partition_execution_log(
     })
 }
 
+/// Split the `workspace_events=` argument into "is the stream enabled" and the
+/// iterator handles. `False` leaves the log off and a list turns it on. `True`
+/// is refused, because it names no consumer.
+fn partition_workspace_events(
+    arg: Either<bool, UnpackList<iter::WorkspaceEventIter>>,
+) -> anyhow::Result<(bool, Vec<iter::WorkspaceEventIter>)> {
+    Ok(match arg {
+        Either::Left(false) => (false, vec![]),
+        Either::Left(true) => anyhow::bail!(
+            "`workspace_events = True` names no consumer of the log. Pass \
+             `workspace_events = [handle]` with `handle = bazel.workspace_events.iterator()` \
+             and iterate the handle."
+        ),
+        Either::Right(list) => (true, list.items),
+    })
+}
+
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Plain flags are always included; conditional flags are
 /// included only when [`constraint_matches`] holds for `version`.
@@ -486,7 +503,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   invalid constraint is a hard error.
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
-    /// * `workspace_events` - Enable the workspace events stream.
+    /// * `workspace_events` - Enable the workspace event log by passing a list of
+    ///   `workspace_events.iterator()` handles, each of which receives every event.
+    ///   Drain a handle **before** `wait()`, which releases any still-bound handle so
+    ///   an undrained one cannot hang the build.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -540,7 +560,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             bool,
             UnpackList<Either<build::BuildEventSink, build::BuildEventIter>>,
         >,
-        #[starlark(require = named, default = false)] workspace_events: bool,
+        #[starlark(require = named, default = Either::Left(false))] workspace_events: Either<
+            bool,
+            UnpackList<iter::WorkspaceEventIter>,
+        >,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
             UnpackList<Either<ExecLogSink, iter::ExecLogIter>>,
@@ -566,6 +589,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
+        let workspace_events = partition_workspace_events(workspace_events)?;
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
@@ -614,7 +638,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   invalid constraint is a hard error.
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
-    /// * `workspace_events` - Enable the workspace events stream.
+    /// * `workspace_events` - Enable the workspace event log by passing a list of
+    ///   `workspace_events.iterator()` handles, each of which receives every event.
+    ///   Drain a handle **before** `wait()`, which releases any still-bound handle so
+    ///   an undrained one cannot hang the build.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -666,7 +693,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             bool,
             UnpackList<Either<build::BuildEventSink, build::BuildEventIter>>,
         >,
-        #[starlark(require = named, default = false)] workspace_events: bool,
+        #[starlark(require = named, default = Either::Left(false))] workspace_events: Either<
+            bool,
+            UnpackList<iter::WorkspaceEventIter>,
+        >,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
             UnpackList<Either<ExecLogSink, iter::ExecLogIter>>,
@@ -692,6 +722,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
+        let workspace_events = partition_workspace_events(workspace_events)?;
         let env = Env::from_eval(eval)?;
         let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
@@ -1430,8 +1461,41 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
     const BuildEventSink: StarlarkValueAsType<build::BuildEventSink> = StarlarkValueAsType::new();
     const BuildStatus: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
     const Cancellation: StarlarkValueAsType<cancel::Cancellation> = StarlarkValueAsType::new();
-    const WorkspaceEventIterator: StarlarkValueAsType<iter::WorkspaceEventIterator> =
+}
+
+#[starlark_module]
+fn register_workspace_events(globals: &mut GlobalsBuilder) {
+    const WorkspaceEventIter: StarlarkValueAsType<iter::WorkspaceEventIter> =
         StarlarkValueAsType::new();
+
+    /// Create a handle iterating this build's workspace event log: what
+    /// repository rules did, decoded as Bazel writes it. Pass it in
+    /// `workspace_events=[...]` and then `for event in handle:`.
+    ///
+    /// Every handle receives every event, because the producer blocks for each
+    /// subscriber; with two handles on one build, take turns with `try_pop()`,
+    /// since one drained to the end first waits on the other. Drain it before
+    /// `build.wait()`, which releases any
+    /// still-bound handle so a task that forgets cannot hang. Bazel writes the
+    /// log to a regular file the CLI tails, so a slow consumer never slows
+    /// Bazel down.
+    ///
+    /// Iterating blocks, but stays a safe point: a cancelled run ends the
+    /// iteration rather than parking in it.
+    ///
+    /// ```python
+    /// events = bazel.workspace_events.iterator()
+    /// build = ctx.bazel.build("//...", workspace_events = [events])
+    /// for event in events:
+    ///     print(event.context, event.location)
+    /// status = build.wait()
+    /// ```
+    #[starlark(as_type = iter::WorkspaceEventIter)]
+    fn iterator<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<iter::WorkspaceEventIter> {
+        Ok(iter::WorkspaceEventIter::new(
+            Env::from_eval(eval)?.signals.clone(),
+        ))
+    }
 }
 
 #[starlark_module]
@@ -1474,6 +1538,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         register_build_events(globals);
     });
 
+    globals.namespace("workspace_events", |globals| {
+        register_workspace_events(globals);
+    });
+
     globals.namespace("execution_log", |globals| {
         register_execlog_types(globals);
         register_execlog_sinks(globals);
@@ -1504,5 +1572,22 @@ mod tests {
     fn execution_log_false_leaves_the_log_off() {
         let (enabled, sinks, iters) = partition_execution_log(Either::Left(false)).unwrap();
         assert!(!enabled && sinks.is_empty() && iters.is_empty());
+    }
+
+    #[test]
+    fn workspace_events_true_is_refused_and_names_the_iterator() {
+        let err = partition_workspace_events(Either::Left(true))
+            .expect_err("`workspace_events = True` must be refused")
+            .to_string();
+        assert!(
+            err.contains("bazel.workspace_events.iterator()"),
+            "the refusal should name the replacement: {err}",
+        );
+    }
+
+    #[test]
+    fn workspace_events_false_leaves_the_log_off() {
+        let (enabled, iters) = partition_workspace_events(Either::Left(false)).unwrap();
+        assert!(!enabled && iters.is_empty());
     }
 }

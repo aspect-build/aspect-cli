@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 pub mod feed;
 pub mod sink;
 mod spawn_metrics;
-pub mod subscription;
 pub mod telemetry;
 
 /// The flag that names where Bazel writes the compact execution log.
