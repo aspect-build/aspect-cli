@@ -843,7 +843,11 @@ mod tests {
             (sources.traces(), sources.metrics())
         };
         assert_eq!(exported(&[]), (false, false));
-        assert_eq!(exported(std::slice::from_ref(&file)), (false, false), "file only");
+        assert_eq!(
+            exported(std::slice::from_ref(&file)),
+            (false, false),
+            "file only"
+        );
         assert_eq!(exported(&[otlp(false, false)]), (false, false), "logs only");
         assert_eq!(
             exported(&[otlp(false, true)]),
