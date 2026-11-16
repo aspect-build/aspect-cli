@@ -4,7 +4,8 @@
 //! A target's outputs are named by file sets that may arrive before or after
 //! the `target_completed` that references them, so readiness is a question
 //! asked of every event: [`Outputs::handle`] says which targets that event
-//! made ready.
+//! made ready. When Bazel retries a build in the same invocation, the tracker
+//! starts over at each attempt's `BuildStarted`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ const FILESET_DEPTH: usize = 32;
 /// Bazel's name for a target's default outputs.
 const DEFAULT_OUTPUT_GROUP: &str = "default";
 
+/// One target, as the current attempt has reported it.
 #[derive(Default)]
 struct TargetState {
     /// Output group name → fileset ids, from every `target_completed` for
@@ -41,7 +43,8 @@ pub struct Ready {
     pub extra_files: Vec<PathBuf>,
 }
 
-/// A target the stream ended on without it becoming ready.
+/// A target the stream ended on without it becoming ready, as of the last
+/// attempt.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unsettled {
     pub key: String,
@@ -135,12 +138,26 @@ impl Outputs {
                 }
                 vec![]
             }
+            (Some(Payload::Started(_)), _) => {
+                self.restart();
+                vec![]
+            }
             (Some(Payload::Finished(finished)), _) => {
                 self.exit_code = finished.exit_code.as_ref().map(|c| c.code);
                 vec![]
             }
             _ => vec![],
         }
+    }
+
+    /// Start over for a new attempt. Bazel retries an evicted build
+    /// (`REMOTE_CACHE_EVICTED`) in the same invocation as a fresh stream whose
+    /// file-set ids restart, so only the last attempt's events count. Targets
+    /// already ready stay settled.
+    fn restart(&mut self) {
+        self.targets.clear();
+        self.filesets.clear();
+        self.exit_code = None;
     }
 
     /// The stream closed: Bazel's exit code (`1` when it never said), and
@@ -241,8 +258,11 @@ impl Outputs {
 mod tests {
     use super::*;
     use axl_proto::build_event_stream::{
-        BuildEventId, File, OutputGroup, TargetComplete, WorkspaceConfig, build_event_id,
+        BuildEventId, BuildFinished, BuildStarted, File, OutputGroup, TargetComplete,
+        WorkspaceConfig, build_event_id, build_finished::ExitCode,
     };
+
+    const EVICTED: i32 = crate::bes::binary_file::REMOTE_CACHE_EVICTED;
 
     fn named_set(id: &str, files: &[(&[&str], &str)]) -> BuildEvent {
         BuildEvent {
@@ -301,6 +321,47 @@ mod tests {
         }
     }
 
+    fn started() -> BuildEvent {
+        BuildEvent {
+            payload: Some(Payload::Started(BuildStarted::default())),
+            ..Default::default()
+        }
+    }
+
+    fn finished(code: i32) -> BuildEvent {
+        BuildEvent {
+            payload: Some(Payload::Finished(BuildFinished {
+                exit_code: Some(ExitCode {
+                    code,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn failed(label: &str, groups: &[(&str, &str)]) -> BuildEvent {
+        let mut event = completed(label, groups);
+        if let Some(Payload::Completed(tc)) = &mut event.payload {
+            tc.success = false;
+        }
+        event
+    }
+
+    fn aborted(label: &str) -> BuildEvent {
+        BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::TargetCompleted(build_event_id::TargetCompletedId {
+                    label: label.to_owned(),
+                    ..Default::default()
+                })),
+            }),
+            payload: Some(Payload::Aborted(Default::default())),
+            ..Default::default()
+        }
+    }
+
     fn outputs() -> Outputs {
         Outputs::new(
             HashSet::from(["//:t".to_owned()]),
@@ -341,11 +402,10 @@ mod tests {
         let mut o = outputs();
         o.handle(&workspace("/x/_main"));
         o.handle(&named_set("1", &[(&["bin"], "tool")]));
-        let mut event = completed("//:t", &[("default", "1"), ("extra", "1")]);
-        if let Some(Payload::Completed(tc)) = &mut event.payload {
-            tc.success = false;
-        }
-        assert!(o.handle(&event).is_empty());
+        assert!(
+            o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]))
+                .is_empty()
+        );
         let (code, unsettled) = o.finish();
         assert_eq!(code, 1, "Bazel never said, so assume failure");
         assert_eq!(
@@ -356,6 +416,135 @@ mod tests {
                 has_default: true,
             }]
         );
+    }
+
+    /// Bazel retries an evicted build in the same invocation, and only the last
+    /// attempt says whether the target built.
+    #[test]
+    fn a_target_the_retried_attempt_builds_is_ready() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&workspace("/x/_main"));
+        o.handle(&named_set("1", &[(&["bin"], "tool")]));
+        assert!(
+            o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]))
+                .is_empty()
+        );
+        o.handle(&finished(EVICTED));
+
+        o.handle(&started());
+        o.handle(&named_set("1", &[(&["bin"], "tool")]));
+        let ready = o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(0));
+
+        assert_eq!(ready.len(), 1, "the retry built the target");
+        assert_eq!(o.finish(), (0, vec![]));
+    }
+
+    #[test]
+    fn a_target_every_attempt_fails_is_reported_failed() {
+        let mut o = outputs();
+        for code in [EVICTED, 1] {
+            o.handle(&started());
+            o.handle(&named_set("1", &[(&["bin"], "tool")]));
+            o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]));
+            o.handle(&finished(code));
+        }
+        let (code, unsettled) = o.finish();
+        assert_eq!(code, 1, "the last attempt's exit code");
+        assert_eq!(unsettled.len(), 1);
+        assert!(unsettled[0].failed);
+    }
+
+    /// A target aborted by the evicted attempt is judged by the retry too.
+    #[test]
+    fn a_target_aborted_before_the_retry_builds_is_ready() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&aborted("//:t"));
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        o.handle(&named_set("1", &[(&["bin"], "tool")]));
+        let ready = o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(0));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(o.finish(), (0, vec![]));
+    }
+
+    /// A retry that dies after the evicted attempt failed a target still ends
+    /// in a build failure: the target is unreported and Bazel never said.
+    #[test]
+    fn a_retry_cut_off_after_a_failure_leaves_the_target_unreported() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        assert_eq!(
+            o.finish(),
+            (
+                1,
+                vec![Unsettled {
+                    key: "//:t".to_owned(),
+                    failed: false,
+                    has_default: false,
+                }]
+            )
+        );
+    }
+
+    /// File-set ids restart with each attempt, so an id the retry reuses names
+    /// the retry's files, and a group naming one the retry has not sent yet is
+    /// not ready on the evicted attempt's set.
+    #[test]
+    fn a_reused_file_set_id_names_the_retried_attempts_files() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&workspace("/x/_main"));
+        o.handle(&named_set("1", &[(&["bin"], "old")]));
+        o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(EVICTED));
+
+        o.handle(&started());
+        assert!(
+            o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]))
+                .is_empty(),
+            "set 1 has not arrived in this attempt",
+        );
+        let ready = o.handle(&named_set("1", &[(&["bin"], "new")]));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            ready[0].default_files,
+            vec![PathBuf::from("/x/_main/bin/new")]
+        );
+    }
+
+    /// A retried attempt that stops before its `BuildFinished` reports Bazel's
+    /// silence, not the evicted attempt's code.
+    #[test]
+    fn a_retry_that_never_finishes_reports_no_exit_code() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        assert_eq!(o.finish().0, 1);
+    }
+
+    /// A target an earlier attempt already handed over stays settled.
+    #[test]
+    fn a_target_ready_before_a_retry_stays_settled() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&named_set("1", &[(&["bin"], "tool")]));
+        assert_eq!(
+            o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]))
+                .len(),
+            1
+        );
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        o.handle(&finished(0));
+        assert_eq!(o.finish(), (0, vec![]));
     }
 
     #[test]
