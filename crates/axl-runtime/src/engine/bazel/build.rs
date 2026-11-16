@@ -35,6 +35,8 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
 use axl_proto::build_event_stream::BuildEvent;
+use bazel::stream::Gate;
+use bazel::stream::file::Reservation;
 use bazel::stream::pid_pair::PidPair;
 
 use crate::engine::r#async::rt::AsyncRuntime;
@@ -881,6 +883,60 @@ fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path:
     ));
 }
 
+/// A build event stream whose reader has not started, while bazel already runs
+/// and writes its file.
+///
+/// Subscribers bind to [`Unstarted::stream`], then [`Unstarted::start`] starts
+/// the reader. If [`Build::spawn`] fails first, dropping this starts it anyway,
+/// with whatever is bound: the file is then read to its end and removed once
+/// the client exits, rather than left in the temp dir holding the build's
+/// unredacted events.
+struct Unstarted {
+    pending: Option<(
+        BuildEventStream,
+        Reservation,
+        Gate,
+        Vec<(String, Arc<FileSignal>)>,
+    )>,
+}
+
+impl Unstarted {
+    fn new(
+        file: Option<Reservation>,
+        gate: Gate,
+        file_sinks: Vec<(String, Arc<FileSignal>)>,
+    ) -> Self {
+        Self {
+            pending: file.map(|file| {
+                // BES sinks never fail the build; their warnings are how the
+                // user learns of a lost copy or upload.
+                bazel::bes::sink::set_warn(crate::diag::warn);
+                (BuildEventStream::new(), file, gate, file_sinks)
+            }),
+        }
+    }
+
+    fn stream(&self) -> Option<&BuildEventStream> {
+        self.pending.as_ref().map(|(stream, ..)| stream)
+    }
+
+    fn start(mut self) -> Option<BuildEventStream> {
+        self.start_now()
+    }
+
+    fn start_now(&mut self) -> Option<BuildEventStream> {
+        let (stream, file, gate, file_sinks) = self.pending.take()?;
+        Some(stream.start(file, gate, file_sinks))
+    }
+}
+
+impl Drop for Unstarted {
+    fn drop(&mut self) {
+        // Detached: the reader ends on its own once the client has exited.
+        drop(self.start_now());
+    }
+}
+
 impl Build {
     /// Wait for the client to exit, a safe point: once the root is cancelled
     /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
@@ -1080,12 +1136,7 @@ impl Build {
             client: child.id(),
             server: Some(pid),
         };
-        let build_event_stream = bes_file.as_ref().map(|_| {
-            // BES sinks never fail the build; their warnings are how the
-            // user learns of a lost copy or upload.
-            bazel::bes::sink::set_warn(crate::diag::warn);
-            BuildEventStream::new()
-        });
+        let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks);
 
         // The workspace log is a FIFO the server holds while writing; the
         // client's death ends the stream.
@@ -1117,7 +1168,7 @@ impl Build {
         };
 
         if !iters.is_empty() {
-            let stream = build_event_stream.as_ref().ok_or_else(|| {
+            let stream = build_event_stream.stream().ok_or_else(|| {
                 io::Error::other(
                     "ctx.bazel.build/test: build_events list contained `iterator()` handles \
                      but no BEP stream is configured",
@@ -1142,7 +1193,7 @@ impl Build {
                     invocation_id
                 );
             }
-            let stream = build_event_stream.as_ref().unwrap();
+            let stream = build_event_stream.stream().unwrap();
             for sink in grpc_sinks {
                 sink.bind_grpc(rt.clone(), stream, invocation_id.clone())
                     .map_err(io::Error::other)?;
@@ -1199,15 +1250,12 @@ impl Build {
             stream.take_initial_subscriber();
         }
         let trace_sink = build_events.then(|| {
-            tracing_sink::Tracing::spawn(build_event_stream.as_ref().unwrap().subscribe())
+            tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
         });
 
         // Start reading only now that every subscriber is bound (see
         // `BuildEventStream::new`).
-        let build_event_stream = build_event_stream.zip(bes_file).map(|(stream, file)| {
-            let gate = pids.gate();
-            stream.start(file, gate, file_sinks)
-        });
+        let build_event_stream = build_event_stream.start();
 
         drop(_enter);
         Ok(Self {
@@ -3570,6 +3618,34 @@ Test = task(implementation = _impl)
                 "1x = the iterator saw x events, not 4; 2 = bazel's exit code was lost"
             ),
         }
+    }
+
+    /// A spawn that fails once bazel runs still reads the event file bazel
+    /// goes on to write, and removes it, rather than leaving it behind.
+    #[test]
+    fn an_unstarted_stream_dropped_while_bazel_runs_still_cleans_up() {
+        use super::{BuildEventStream, Gate, Unstarted};
+        use std::path::Path;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let file = BuildEventStream::reserve();
+        let path = file.path().to_path_buf();
+        let client_exited = Arc::new(AtomicBool::new(false));
+        let exited = client_exited.clone();
+        let gate = Gate::new(move || exited.load(Ordering::SeqCst)).with_held(|_| false);
+        drop(Unstarted::new(Some(file), gate, vec![]));
+        // Bazel writes its file after the failed spawn, then exits.
+        std::fs::write(&path, b"bazel wrote this").unwrap();
+        client_exited.store(true, Ordering::SeqCst);
+        let mut moved = path.clone().into_os_string();
+        moved.push(".1");
+        let gone = || !path.exists() && !Path::new(&moved).exists();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !gone() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(gone(), "the event file was left behind");
     }
 
     /// Iterator handles are single-use; reusing one errors.
