@@ -1,4 +1,5 @@
 mod builtins;
+mod cli_metrics;
 mod cmd;
 mod crash_handler;
 mod credential_helper;
@@ -364,17 +365,22 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             report_startup(root_span, &dispatch.task_kind);
 
             // Phase 4: execute the selected task.
-            let exit = mpe
-                .execute_tasks_with_args(
-                    dispatch.task_id,
-                    dispatch.task_name.clone(),
-                    dispatch.task_name_meaningful,
-                    dispatch.task_friendly_name.clone(),
-                    dispatch.task_uuid.clone(),
-                    dispatch.timing,
-                    |t, h| dispatch.task_args(t, h),
-                )
-                .map_err(anyhow::Error::from)?;
+            let task_start = std::time::Instant::now();
+            let exit = mpe.execute_tasks_with_args(
+                dispatch.task_id,
+                dispatch.task_name.clone(),
+                dispatch.task_name_meaningful,
+                dispatch.task_friendly_name.clone(),
+                dispatch.task_uuid.clone(),
+                dispatch.timing,
+                |t, h| dispatch.task_args(t, h),
+            );
+            cli_metrics::record_task(
+                &dispatch.task_kind,
+                cli_metrics::task_exit_code(&exit),
+                task_start.elapsed(),
+            );
+            let exit = exit.map_err(anyhow::Error::from)?;
 
             mpe.finish();
             Ok(ExitCode::from(exit.unwrap_or(0)))
@@ -419,34 +425,16 @@ fn spawn_telemetry() {
         });
 }
 
-/// OTel semantic-convention histogram boundaries for durations in seconds.
-const DURATION_BUCKETS_S: [f64; 14] = [
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
-];
-
 /// Close the start-up measurement (see `axl_runtime::startup`) and attach
 /// its total to `root_span` as `startup_ms` and to the
-/// `aspect.cli.startup.duration` histogram, tagged with the task kind. The
-/// histogram is in seconds with the OTel semantic-convention boundaries for
-/// durations; the SDK's defaults are sized for milliseconds.
+/// `aspect.cli.startup.duration` histogram.
 fn report_startup(root_span: &tracing::Span, task_kind: &str) {
     axl_runtime::startup::report(task_kind);
     let Some(total) = axl_runtime::startup::total() else {
         return;
     };
     root_span.record("startup_ms", total.as_secs_f64() * 1000.0);
-    opentelemetry::global::meter("aspect-cli")
-        .f64_histogram("aspect.cli.startup.duration")
-        .with_unit("s")
-        .with_boundaries(DURATION_BUCKETS_S.to_vec())
-        .with_description(
-            "Time from the start of aspect-cli's main until the selected task begins executing",
-        )
-        .build()
-        .record(
-            total.as_secs_f64(),
-            &[opentelemetry::KeyValue::new("task", task_kind.to_string())],
-        );
+    cli_metrics::record_startup(task_kind, total);
 }
 
 /// For a task whose stdout is a machine-parsed protocol payload rather than

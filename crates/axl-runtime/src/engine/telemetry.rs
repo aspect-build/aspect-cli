@@ -223,8 +223,8 @@ impl Signals {
     }
 }
 
-/// When a Bazel build's stream becomes telemetry: its spans and, where it
-/// has them, its metrics, together.
+/// When a Bazel build's stream becomes telemetry: its spans and metrics,
+/// together.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SourcePolicy {
     /// When the build already has the stream.
@@ -288,6 +288,11 @@ impl TelemetrySources {
     /// Whether an OTLP exporter takes metrics.
     pub fn metrics(&self) -> bool {
         self.metrics.load(Ordering::Relaxed)
+    }
+
+    /// Whether an OTLP exporter takes a signal a build's streams feed.
+    pub fn exporting(&self) -> bool {
+        self.traces() || self.metrics()
     }
 
     /// Record which signals `specs` export.
@@ -792,9 +797,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_policy_decides_the_stream_and_its_spans() {
+    fn each_policy_decides_the_stream_and_its_telemetry() {
         use SourcePolicy::*;
-        // (policy, requested, exporting) -> (stream on, spans)
+        // (policy, requested, exporting) -> (stream on, telemetry)
         let table = [
             (Auto, false, false, (false, false)),
             (Auto, false, true, (false, false)),
@@ -842,6 +847,15 @@ mod tests {
             sources.set_exported(specs);
             (sources.traces(), sources.metrics())
         };
+        let exporting = |specs: &[ExporterSpec]| {
+            let sources = TelemetrySources::default();
+            sources.set_exported(specs);
+            sources.exporting()
+        };
+        assert!(!exporting(&[]));
+        assert!(!exporting(std::slice::from_ref(&file)), "file only");
+        assert!(exporting(&[otlp(true, false)]), "traces only");
+        assert!(exporting(&[otlp(false, true)]), "metrics only");
         assert_eq!(exported(&[]), (false, false));
         assert_eq!(
             exported(std::slice::from_ref(&file)),

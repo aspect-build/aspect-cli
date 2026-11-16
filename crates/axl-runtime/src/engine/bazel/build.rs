@@ -962,10 +962,9 @@ impl Build {
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        // BES telemetry is spans and metrics; the execution log's is spans.
         let (build_events, bes_telemetry) = telemetry
             .build_events()
-            .resolve(build_events, telemetry.traces() || telemetry.metrics());
+            .resolve(build_events, telemetry.exporting());
         let injected_execlog_path =
             bazel::execlog::requested_path(&flags, verb, directory.as_deref());
         // A log the user's own flags ask Bazel for is one the build already
@@ -973,7 +972,7 @@ impl Build {
         // consumers or for that telemetry.
         let (log_on, execlog_telemetry) = telemetry.execution_log().resolve(
             execlog_enabled || injected_execlog_path.is_some(),
-            telemetry.traces(),
+            telemetry.exporting(),
         );
         let execlog_enabled = execlog_enabled || (log_on && execlog_telemetry);
 

@@ -1,5 +1,6 @@
 //! Execution log → OpenTelemetry: a `spawn` span for every spawn the log
-//! records, under a `spawns` span beside the BES sink's `events`.
+//! records, under a `spawns` span beside the BES sink's `events`, and the
+//! [`SpawnInstruments`] metrics.
 //!
 //! A spawn's span starts at `SpawnMetrics.start_time` and lasts its
 //! `total_time`, both measured in this build, so a cache hit spans its lookup
@@ -30,10 +31,11 @@ use opentelemetry::{
     trace::{Status, Tracer},
 };
 
+use super::spawn_metrics::SpawnInstruments;
 use crate::fanout::SinkOutcome;
 use crate::otel::{CompletedSpan, duration, system_time};
 
-/// Instrumentation scope of the `spawn` spans.
+/// Instrumentation scope of the `spawn` spans and the spawn metrics.
 const TELEMETRY_SCOPE: &str = "aspect-cli.execlog";
 
 /// Reads one phase's duration from a spawn's metrics.
@@ -53,19 +55,22 @@ const PHASES: &[(&str, Phase)] = &[
 ];
 
 /// Reads `recv` to the end of the stream on its own thread, exporting a span
-/// per spawn under a `spawns` span opened in the caller's current span.
+/// per spawn under a `spawns` span opened in the caller's current span, and
+/// recording the spawn metrics.
 pub fn spawn(recv: Receiver<ExecLogEntry>) -> JoinHandle<SinkOutcome> {
     let spawns_span = tracing::info_span!("spawns");
     thread::spawn(move || {
         let _spawns = spawns_span.enter();
-        consume(&recv, &global::tracer(TELEMETRY_SCOPE));
+        let instruments = SpawnInstruments::new(&global::meter(TELEMETRY_SCOPE));
+        consume(&recv, &global::tracer(TELEMETRY_SCOPE), &instruments);
         Ok(())
     })
 }
 
-fn consume<T: Tracer>(recv: &Receiver<ExecLogEntry>, tracer: &T) {
+fn consume<T: Tracer>(recv: &Receiver<ExecLogEntry>, tracer: &T, instruments: &SpawnInstruments) {
     while let Ok(entry) = recv.recv() {
         if let Some(Type::Spawn(spawn)) = entry.r#type {
+            instruments.record(&spawn, failure(&spawn).is_none());
             spawn_span(&spawn, SystemTime::now()).export(tracer);
         }
     }
@@ -276,11 +281,15 @@ mod tests {
     }
 
     #[test]
-    fn spawn_spans_are_children_of_the_spawns_span() {
+    fn consume_exports_and_counts_spawn_entries_only() {
+        use crate::otel::test_support::{self, points};
+        use opentelemetry::metrics::MeterProvider as _;
+
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
+        let (meter_provider, metric_exporter) = test_support::provider();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("layer")));
         let tracer = provider.tracer("test");
@@ -288,25 +297,54 @@ mod tests {
         let (sender, recv) = bounded(8);
         tracing::subscriber::with_default(subscriber, || {
             let _spawns = tracing::info_span!("spawns").entered();
-            for entry in [
-                ExecLogEntry {
-                    id: 1,
-                    r#type: Some(Type::File(Default::default())),
-                },
-                ExecLogEntry {
-                    id: 0,
-                    r#type: Some(Type::Spawn(compiled())),
-                },
+            for r#type in [
+                Type::File(Default::default()),
+                Type::Spawn(compiled()),
+                Type::Spawn(Spawn {
+                    exit_code: 1,
+                    ..compiled()
+                }),
             ] {
-                sender.send(entry).unwrap();
+                sender
+                    .send(ExecLogEntry {
+                        id: 0,
+                        r#type: Some(r#type),
+                    })
+                    .unwrap();
             }
             drop(sender);
-            consume(&recv, &tracer);
+            consume(
+                &recv,
+                &tracer,
+                &SpawnInstruments::new(&meter_provider.meter("test")),
+            );
         });
 
         let spans: Vec<SpanData> = exporter.get_finished_spans().unwrap();
         let names: Vec<&str> = spans.iter().map(|s| s.name.as_ref()).collect();
-        assert_eq!(names, ["spawn", "spawns"], "one span per spawn entry only");
-        assert_eq!(spans[0].parent_span_id, spans[1].span_context.span_id());
+        assert_eq!(
+            names,
+            ["spawn", "spawn", "spawns"],
+            "a span per spawn entry only"
+        );
+        assert_eq!(spans[0].parent_span_id, spans[2].span_context.span_id());
+
+        meter_provider.force_flush().unwrap();
+        let counts: Vec<(Vec<String>, f64)> = points(&metric_exporter)
+            .into_iter()
+            .filter(|(name, ..)| name == "bazel.spawns")
+            .map(|(_, attrs, n)| {
+                let success = attrs.into_iter().filter(|a| a.starts_with("success="));
+                (success.collect(), n)
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                (vec!["success=false".to_owned()], 1.0),
+                (vec!["success=true".to_owned()], 1.0)
+            ],
+            "one count per spawn entry, and `success` follows the spawn's exit code"
+        );
     }
 }

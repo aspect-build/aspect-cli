@@ -56,12 +56,12 @@ spans and metrics together:
           `--telemetry:execution-log` means this
   off     never
 
-The build event stream gives a span per build, failed action and test and the
-build and test metrics; the execution log a `spawn` span per spawn, which on a
-large build is tens of thousands, and `always` costs Bazel the I/O of writing
-the log. For metrics without spans, register the exporter with
-`signals = ["metrics"]`. Nothing is exported, and `always` turns on nothing,
-without an OTLP exporter for the stream's signals.
+The build event stream gives a span per build, failed action and test, and the
+build and test metrics; the execution log gives a `spawn` span per spawn (tens
+of thousands on a large build) and the spawn count and duration metrics.
+`always` costs Bazel the I/O of writing the log. For metrics without spans,
+register the exporter with `signals = ["metrics"]`. Nothing is exported, and
+`always` turns on nothing, without an OTLP exporter for the stream's signals.
 
 A setting other than `auto` is written to `ctx.telemetry.build_events` /
 `ctx.telemetry.execution_log`, which config.axl may also set directly. `auto`
@@ -288,7 +288,8 @@ Telemetry = feature(
             values = _SOURCE_POLICIES,
             bare = _ALWAYS,
             description = "When a Bazel build's execution log becomes a span per spawn " +
-                          "(label, mnemonic, runner, cache hit, time in each phase): " +
+                          "(label, mnemonic, runner, cache hit, time in each phase) " +
+                          "and spawn count and duration metrics: " +
                           "auto (default) when the build already writes the log, " +
                           "always to write it for every build, off for never.",
         ),
