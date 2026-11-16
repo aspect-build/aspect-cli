@@ -1420,11 +1420,11 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// Block until the Bazel invocation finishes and return a `BuildStatus`.
     ///
-    /// Every decoded execution-log consumer belongs **before** this call, not
-    /// merely preferably. `wait()` releases every still-bound
-    /// `execution_log.iterator()` handle and then joins the stream, so a handle
-    /// stops yielding from here on and anything it had not been drained of is
-    /// gone.
+    /// Every `execution_log.iterator()` and `workspace_events.iterator()`
+    /// handle belongs **before** this call, not merely preferably. `wait()`
+    /// releases every still-bound handle and then joins the streams, so a
+    /// handle stops yielding from here on and anything it had not been drained
+    /// of is gone.
     ///
     /// That is deliberate: each of those is a subscriber the producer blocks for,
     /// which is what makes the iteration complete, and releasing them is the only
@@ -1462,6 +1462,16 @@ impl Build {
         let span = build.span.borrow().clone();
         let _enter = span.enter();
 
+        // Release every handle first, so no exit below — a cancel, a failed
+        // join — leaves a reader parked on one the task never drained. The task
+        // cannot read a handle once it has called `wait()`.
+        for iter in &build.workspace_event_iters {
+            iter.release();
+        }
+        for iter in &build.execlog_iters {
+            iter.release();
+        }
+
         let result = build
             .wait_child(None)?
             .expect("a wait without a timeout reports a status");
@@ -1484,19 +1494,6 @@ impl Build {
         // never fails, and it ends once it has drained the closed stream.
         if let Some(trace_sink) = build.trace_sink.take() {
             let _ = trace_sink.join();
-        }
-
-        // Release every decoded consumer still holding a subscriber, before
-        // either join. The producer blocks for each, so one the task never
-        // drained would park its reader on a full channel and hang the join.
-        // The AXL side drains before calling `wait()` (see
-        // `bazel/exec_log.axl`); this is the net under a task that does not,
-        // trading dropped entries for a build that ends.
-        for iter in &build.workspace_event_iters {
-            iter.release();
-        }
-        for iter in &build.execlog_iters {
-            iter.release();
         }
 
         // Reported after the execution log is joined, so a failed workspace
