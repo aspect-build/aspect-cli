@@ -1519,7 +1519,9 @@ impl Build {
         // code, which is what makes the warning safe to print: a log that never
         // appeared is ordinary on a failed invocation (a mistyped target pattern
         // never reaches the phase that creates one, and bazel has already said so)
-        // and an anomaly on a successful one. See `ReaderOutcome`.
+        // and an anomaly on a successful one. A log that stopped decoding is
+        // warned about either way, since Bazel says nothing about it. See
+        // `ReaderOutcome`.
         if let Some(execlog_stream) = build.execlog_stream.take() {
             let path = execlog_stream.path().display().to_string();
             match execlog_stream.join() {
@@ -1527,6 +1529,14 @@ impl Build {
                     errln!(
                         "WARNING: bazel completed successfully but wrote no execution \
                          log, so nothing that reads it saw this invocation."
+                    );
+                }
+                Ok(ReaderOutcome::Undecodable(reason)) => {
+                    errln!(
+                        "WARNING: the execution log '{path}' stopped decoding \
+                         ({reason}), so its hooks, spawn telemetry and decoded sinks \
+                         hold only the entries before that point. The build's result \
+                         and copies of the compact log are unaffected."
                     );
                 }
                 Ok(_) => {}
