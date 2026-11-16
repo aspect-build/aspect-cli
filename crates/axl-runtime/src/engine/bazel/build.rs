@@ -869,7 +869,8 @@ pub struct Build {
 /// The FIFO flag `Build::spawn` appends outranks it (the option is single-valued),
 /// so Bazel never writes the caller's file; the stream's raw bytes are mirrored
 /// there instead, complete once `wait()` has joined the stream. A file sink
-/// already naming the same path string is left as its only writer.
+/// already naming the path (compared lexically, not resolved) is left as its
+/// only writer.
 fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path: PathBuf) {
     if file_sinks.iter().any(|(p, _)| Path::new(p) == path) {
         return;
@@ -946,7 +947,8 @@ impl Build {
 
         // Read before `flags` moves into the command. Whoever asked for the compact
         // log reads the file at that path, so a second flag below must not repoint
-        // Bazel away from it; a requested BEP file is served from the stream.
+        // Bazel away from it; a requested BEP file is served from the stream when
+        // the CLI streams.
         let injected_execlog_path =
             bazel::execlog::requested_path(&flags, verb, directory.as_deref());
         let requested_bep_path =
@@ -3182,13 +3184,17 @@ Test = task(implementation = _impl)
         run_bes_task(&format!(
             r#"
 def _impl(ctx):
+    iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
         directory = {dir:?},
         flags = ["--scenario=success", "--build_event_binary_file=relative.bep"],
-        build_events = True,
+        build_events = [iter],
         stderr = None,
     )
-    return 0 if build.wait().success else 1
+    seen = len([e for e in iter])
+    if not build.wait().success: return 1
+    if seen != 2: return 2
+    return 0
 
 Test = task(implementation = _impl)
 "#,

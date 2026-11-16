@@ -403,7 +403,7 @@ fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
         // One open/write/close per attempt: the read side observes a writer
         // appear, drain bytes, and disappear — same as Bazel reopening the
         // BEP file on each retry. Like Bazel, a regular file is created and
-        // started over; both are no-ops on the CLI's FIFO.
+        // started over; creating and truncating are no-ops on the CLI's FIFO.
         let mut f = OpenOptions::new()
             .write(true)
             .create(true)
