@@ -592,6 +592,27 @@ mod tests {
         assert!(err.contains("write to 'full.zstd' failed"), "{err}");
     }
 
+    /// A copy that cannot be written again says why it was being copied, and
+    /// one that had already failed keeps its own reason.
+    #[test]
+    fn a_failed_recopy_is_named_and_an_earlier_failure_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.zstd");
+        let mut failed = failing("full.zstd", 0, false);
+        failed.write(b"x");
+        let mut tee = MultiTeeReader {
+            inner: &b""[..],
+            tees: vec![Tee::open(good.to_str().unwrap().to_owned()), failed],
+        };
+        tee.recopy(Err(io::Error::other("gone")), "copying 'exec.log' again");
+        let err = tee.finish().unwrap_err().to_string();
+        assert!(
+            err.contains("copying 'exec.log' again failed: gone")
+                && err.contains("write to 'full.zstd' failed"),
+            "{err}"
+        );
+    }
+
     /// A copy whose bytes all went through but whose flush fails is reported.
     #[test]
     fn a_tee_whose_flush_fails_is_reported() {
