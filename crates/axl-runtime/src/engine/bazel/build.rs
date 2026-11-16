@@ -1531,8 +1531,9 @@ impl Build {
                 }
                 Ok(ReaderOutcome::Undecodable(reason)) => {
                     errln!(
-                        "WARNING: the execution log stopped decoding ({reason}), so \
-                         whatever reads it saw only the entries before that point."
+                        "WARNING: the execution log '{path}' stopped decoding \
+                         ({reason}), so whatever reads it saw only the entries before \
+                         that point."
                     );
                 }
                 Ok(_) => {}
