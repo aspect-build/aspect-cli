@@ -208,12 +208,6 @@ pub struct ExecLogStream {
     /// [`CHANNEL_CAPACITY`], blocking the producer there. Gone with no consumer
     /// in its place, the first send reports `Closed` and the reader skips decoding
     /// entirely, which is what `join()` relies on.
-    ///
-    /// A stream that named no consumer keeps it instead, because
-    /// `build.execution_logs()` may still claim it. Nothing drains it until
-    /// something does, so until then the producer sits at [`CHANNEL_CAPACITY`] —
-    /// which costs the build nothing (Bazel writes a regular file that this
-    /// process tails) and is bounded by `join()` releasing it.
     recv: Option<Receiver<ExecLogEntry>>,
     /// Decoded-file sink writer threads owned by this stream — joined in `join()`.
     file_sink_handles: Vec<JoinHandle<SinkOutcome>>,
@@ -262,13 +256,11 @@ impl ExecLogStream {
     /// Entries are sent with the blocking [`fibre::spmc::Sender::send`], so every
     /// subscriber sees every entry: a decoded `File` sink, which would otherwise
     /// write an incomplete file; an
-    /// `ExecLogIter` handle backing
-    /// `BazelTrait.exec_log_event` hooks; and the stream's own subscriber, which
-    /// `build.execution_logs()` takes — each of which would otherwise miss entries
-    /// with nothing to say so. The reader waits for the slowest
-    /// subscriber; `build.wait()` releases the AXL-side consumers and then joins,
-    /// and `join()`'s first act is to release the stream's own — so one that stops
-    /// reading cannot hold the reader forever.
+    /// `ExecLogIter` handle backing `BazelTrait.exec_log_event` hooks — each of
+    /// which would otherwise miss entries with nothing to say so. The reader waits
+    /// for the slowest subscriber; `build.wait()` releases the AXL-side consumers
+    /// and then joins, and `join()`'s first act is to release the stream's own —
+    /// so one that stops reading cannot hold the reader forever.
     ///
     /// A send that fails means every subscriber is gone, which is not an error:
     /// there is nobody left to miss the remaining entries, and failing here would
@@ -390,25 +382,18 @@ impl ExecLogStream {
     }
 
     /// A further subscriber to the decoded stream, cloned from the stream's own.
-    /// `None` once that one has been given away or dropped
-    /// ([`take_initial_subscriber`](Self::take_initial_subscriber), `join()`).
+    /// `None` once that one has been dropped ([`seal`](Self::seal), `join()`).
     ///
     /// Only for a consumer that will actually drain it — see the `recv` field.
     pub fn receiver(&self) -> Option<Receiver<ExecLogEntry>> {
         self.recv.as_ref().cloned()
     }
 
-    /// Give the stream's own subscriber away, leaving it with none.
-    ///
-    /// Two callers, both with the same requirement — that the stream not keep an
-    /// unread subscriber once the real consumers are wired (see the `recv`
-    /// field). `build.execution_logs()` takes it *as* its consumer, so the one
-    /// subscriber is the one being drained; `Build::spawn` drops the value, once
-    /// the sinks and iterator handles have cloned what they need.
-    ///
-    /// `None` means it has already gone, so no further consumer can be added.
-    pub fn take_initial_subscriber(&mut self) -> Option<Receiver<ExecLogEntry>> {
-        self.recv.take()
+    /// Drop the stream's own subscriber once every consumer has cloned one from
+    /// [`receiver`](Self::receiver), so it cannot hold the ring full (see the
+    /// `recv` field). No consumer can be added afterwards.
+    pub fn seal(&mut self) {
+        self.recv.take();
     }
 
     /// Take ownership of a decoded-file sink worker thread. Its lifecycle is
@@ -746,7 +731,8 @@ mod tests {
             vec![copy.to_str().unwrap().to_owned()],
         )
         .unwrap();
-        let recv = stream.take_initial_subscriber().unwrap();
+        let recv = stream.receiver().unwrap();
+        stream.seal();
         for id in 1..=50 {
             assert_eq!(recv.recv().unwrap().id, id);
         }

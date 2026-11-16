@@ -1,5 +1,4 @@
 use crate::errln;
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -45,7 +44,6 @@ use crate::engine::children::{self, Bound, Recv, recv_cancellable};
 use tokio_util::sync::CancellationToken;
 
 use super::iter::ExecLogIter;
-use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
 use super::wrappers::ExecLogSink;
 use bazel::bes::BuildEventEnvelope;
@@ -820,23 +818,6 @@ pub struct Build {
     #[allocative(skip)]
     execlog_iters: Vec<ExecLogIter>,
 
-    /// The `build.execution_logs()` iterator, once that call has handed out the
-    /// stream's own subscriber. Held for exactly the reason `execlog_iters` is,
-    /// and it is the only way to reach that subscriber: `execution_logs()` takes
-    /// the receiver out of the stream, so `ExecLogStream::join()`'s own release
-    /// valve no longer owns it. Without a clone here, an iteration the task
-    /// abandoned — or claimed and never ran — parks the reader past the end of
-    /// the build.
-    #[allocative(skip)]
-    execution_logs_iter: RefCell<Option<ExecutionLogIterator>>,
-
-    /// Set by `wait()`, which takes `execlog_stream`. Without it a later
-    /// `execution_logs()` cannot tell "this build has no execution log" from
-    /// "its stream has already been joined", and would tell a caller who did
-    /// pass `execution_log` to pass it.
-    #[allocative(skip)]
-    execlog_joined: Cell<bool>,
-
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
     /// immediately; distinct from Bazel's `build_started.uuid`.
@@ -1162,7 +1143,6 @@ impl Build {
             // consumer slower than the decoder only lengthens the `join()` inside
             // `wait()`. And that `wait()` releases every subscriber before joining, so
             // one nobody drains cannot park the reader past the end of the build.
-            let named_consumers = !decoded_paths.is_empty() || !execlog_iters.is_empty();
             let mut execlog_stream = match execlog_path {
                 Some(p) => Some(ExecLogStream::spawn_with_file(
                     p,
@@ -1245,15 +1225,10 @@ impl Build {
                 bind_execlog_iters(stream, &execlog_iters)?;
             }
 
-            // Every named consumer has cloned what it needs, so the stream must not go
-            // on holding an unread subscriber of its own — see `ExecLogStream::recv`.
-            //
-            // A stream no consumer was named for keeps its subscriber, because
-            // `build.execution_logs()` may still claim it. Until something drains it
-            // the producer sits at the channel capacity; `join()` releasing it is what
-            // bounds that.
-            if named_consumers && let Some(stream) = execlog_stream.as_mut() {
-                stream.take_initial_subscriber();
+            // Every consumer has cloned what it needs; an unread subscriber left
+            // on the stream would cap them all (see `ExecLogStream::recv`).
+            if let Some(stream) = execlog_stream.as_mut() {
+                stream.seal();
             }
             let trace_sink = build_events.then(|| {
                 tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
@@ -1293,8 +1268,6 @@ impl Build {
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
             execlog_iters,
-            execution_logs_iter: RefCell::new(None),
-            execlog_joined: Cell::new(false),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
@@ -1337,61 +1310,6 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    /// An iterable over every entry of this build's decoded execution log.
-    ///
-    /// Takes the stream's one subscriber rather than cloning it, so it can be
-    /// called once per build and only when nothing else decodes the log: a
-    /// decoded `execution_log.file(...)` sink or an `execution_log.iterator()`
-    /// handle is refused, with a message naming the replacement. A
-    /// `compact_file(...)` sink is not one of those and combines freely.
-    ///
-    /// Iterate it before `build.wait()`. The producer blocks for this
-    /// subscriber, which is what makes the iteration complete, and `wait()`
-    /// releases it — so a `wait()` first ends the stream, and a call afterwards
-    /// is refused.
-    fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
-        let build = this.downcast_ref::<Build>().unwrap();
-        let mut execlog_stream = build.execlog_stream.borrow_mut();
-        let execlog_stream = execlog_stream.as_mut().ok_or_else(|| {
-            if build.execlog_joined.get() {
-                anyhow::anyhow!(
-                    "this build's execution log was already joined by `build.wait()`, \
-                     which ends the stream. Call `build.execution_logs()` and iterate \
-                     it before `wait()`, or pass an `execution_log.iterator()` handle \
-                     in `execution_log=[...]`, which `wait()` also releases but which \
-                     can be created before the build and drained as it runs."
-                )
-            } else {
-                anyhow::anyhow!(
-                    "call `ctx.bazel.build` with `execution_log = true` in order to \
-                     receive execution log events."
-                )
-            }
-        })?;
-
-        // Take the stream's subscriber rather than clone it. Cloning leaves the
-        // original in place with nobody reading it, which pins the broadcast
-        // ring's slowest tail at entry zero and silently truncates this iterator
-        // at the channel capacity — 1000 entries, however fast the caller reads.
-        let recv = execlog_stream
-            .take_initial_subscriber()
-            .ok_or(anyhow::anyhow!(
-                "this build's execution log already has a consumer: either \
-                 `execution_logs()` was called twice, or the build was configured \
-                 with a decoded `execution_log.file(...)` sink or an \
-                 `execution_log.iterator()` handle, each of which clones a \
-                 subscriber of its own, after which the stream's own is dropped. \
-                 Either way there is nothing left to hand out. Pass an \
-                 `execution_log.iterator()` handle in \
-                 `execution_log=[...]` and iterate that instead: a handle clones \
-                 too, so it can be combined with sinks, and its `kinds=` filter \
-                 runs in Rust before an entry becomes a Starlark value."
-            ))?;
-        let iter = ExecutionLogIterator::new(build.signals.clone(), recv);
-        build.execution_logs_iter.replace(Some(iter.clone()));
-        Ok(iter)
-    }
-
     // Creates an iterable `WorkspaceEventIterator` type.
     // Every call to this function will return a new iterator.
     fn workspace_events<'v>(this: values::Value<'v>) -> anyhow::Result<WorkspaceEventIterator> {
@@ -1461,11 +1379,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// Block until the Bazel invocation finishes and return a `BuildStatus`.
     ///
     /// Every decoded execution-log consumer belongs **before** this call, not
-    /// merely preferably. `wait()` releases each one — the `execution_logs()`
-    /// iterator and every still-bound `execution_log.iterator()` handle — and
-    /// then takes the stream, so a consumer stops yielding from here on, anything
-    /// it had not been drained of is gone, and a later `execution_logs()` finds
-    /// no stream and says so.
+    /// merely preferably. `wait()` releases every still-bound
+    /// `execution_log.iterator()` handle and then joins the stream, so a handle
+    /// stops yielding from here on and anything it had not been drained of is
+    /// gone.
     ///
     /// That is deliberate: each of those is a subscriber the producer blocks for,
     /// which is what makes the iteration complete, and releasing them is the only
@@ -1542,14 +1459,7 @@ impl Build {
         // before calling `wait()` (see `bazel/exec_log.axl`); this is the net
         // under a task that does not, trading dropped entries for a build that
         // ends.
-        //
-        // `ExecLogStream::join()` releases the stream's own subscriber, but only
-        // while the stream still owns it — `execution_logs()` takes it, so that
-        // iterator has to be released here.
         for iter in &build.execlog_iters {
-            iter.release();
-        }
-        if let Some(iter) = build.execution_logs_iter.take() {
             iter.release();
         }
 
@@ -1560,9 +1470,7 @@ impl Build {
         // appeared is ordinary on a failed invocation (a mistyped target pattern
         // never reaches the phase that creates one, and bazel has already said so)
         // and an anomaly on a successful one. See `ReaderOutcome`.
-        let execlog_stream = build.execlog_stream.take();
-        build.execlog_joined.set(true);
-        if let Some(execlog_stream) = execlog_stream {
+        if let Some(execlog_stream) = build.execlog_stream.take() {
             match execlog_stream.join() {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() => {
                     errln!(
@@ -1742,14 +1650,12 @@ mod tests {
     #[cfg(unix)]
     const SCENARIO_ENTRIES: u32 = 3000;
 
-    /// `execution_log = True` must deliver the whole log to `execution_logs()`.
+    /// An `iterator()` handle must receive the whole log.
     ///
-    /// The stream hands this iterator its one subscriber rather than cloning it,
-    /// because an unread clone left behind caps the ring (see
-    /// `ExecLogStream::recv`). That subscriber is registered when the stream
-    /// spawns, before Bazel writes anything, so the producer blocks for it exactly
-    /// as it does for a sink or a handle: every entry arrives, contiguously, and
-    /// how fast the caller reads decides only how long the build's `wait()` takes.
+    /// The handle's subscriber is cloned from the stream's own, which is
+    /// registered when the stream spawns, before Bazel writes anything, and the
+    /// producer blocks for it: every entry arrives, contiguously, and how fast
+    /// the caller reads decides only how long the build's `wait()` takes.
     ///
     /// The assertion is contiguity and the exact count, not just "more than the
     /// capacity". A short prefix is the shape the failure takes, and in a real log,
@@ -1758,7 +1664,7 @@ mod tests {
     /// one. The timeout is because a blocking producer fails by parking.
     #[cfg(unix)]
     #[test]
-    fn execution_logs_delivers_the_whole_log() {
+    fn an_iterator_handle_delivers_the_whole_log() {
         use std::time::Duration;
 
         let capacity = bazel::execlog::feed::channel_capacity() as u32;
@@ -1774,13 +1680,14 @@ mod tests {
         let script = format!(
             r#"
 def _impl(ctx):
+    entries = bazel.execution_log.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
+        execution_log = [entries],
         stderr = None,
     )
     seen = 0
-    for entry in build.execution_logs():
+    for entry in entries:
         seen += 1
         if entry.id != seen:
             # basil numbers its entries 1..N, so anything else is a gap, a
@@ -1807,27 +1714,19 @@ Test = task(implementation = _impl)
         let seen: u32 = text.trim().parse().unwrap();
         assert_eq!(
             seen, SCENARIO_ENTRIES,
-            "`execution_log = True` must be lossless; a count short of the log is the \
+            "an iterator handle must be lossless; a count short of the log is the \
              prefix a dropping producer leaves, and one short by a varying amount is \
              the race it leaves",
         );
     }
 
-    /// `execution_log = True` on a task that never calls `execution_logs()`.
+    /// `execution_log = []`: the log is on with no consumer.
     ///
-    /// This is the one behavioural cost of a blocking producer: with nobody
-    /// draining, it parks at `CHANNEL_CAPACITY`. What unparks it is `wait()` ->
-    /// `ExecLogStream::join()`, whose first act is to release the stream's own
-    /// subscriber; the blocked `send` then fails, the reader records that no
-    /// subscriber is left, and drains the remaining bytes without decoding them.
-    /// So the build still ends — and because Bazel writes the log to a regular
-    /// file that this process tails, the park never reached Bazel either.
-    ///
-    /// This covers the half where the stream still *owns* its subscriber, and so
-    /// `join()` releases it. The tests below cover the subscribers `join()` cannot
-    /// reach — the one `execution_logs()` took, and the clone an `iterator()`
-    /// handle holds — each of which `wait()` has to release itself, so no one of
-    /// these tests sees another's regression.
+    /// The stream drops its own subscriber once consumers are bound, so with none
+    /// the first `send` fails and the reader drains the remaining bytes without
+    /// decoding them. A stream that kept that subscriber would park at
+    /// `CHANNEL_CAPACITY` until `join()` released it. The tests below cover the
+    /// subscribers handles hold, which `wait()` releases itself.
     ///
     /// The timeout is the whole assertion; a regression here is a hang.
     #[cfg(unix)]
@@ -1841,7 +1740,7 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
+        execution_log = [],
         stderr = None,
     )
     status = build.wait()
@@ -1858,31 +1757,30 @@ Test = task(implementation = _impl)
 
     /// An iteration that stops early must not hold the build open.
     ///
-    /// `execution_logs()` takes the stream's own subscriber, so from then on the
-    /// receiver lives in the iterator and `ExecLogStream::join()`'s
-    /// `self.recv.take()` releases nothing. A `break` leaves that subscriber in
-    /// place, undrained, with the reader parked against it on a full ring — and
-    /// `wait()` then joins a thread that can never return. `wait()` releasing the
-    /// iterator is what makes the loop below one a task is allowed to write.
+    /// A `break` leaves the handle's subscriber in place, undrained, with the
+    /// reader parked against it on a full ring, and `ExecLogStream::join()`
+    /// cannot reach a subscriber the stream never owned. `wait()` releasing the
+    /// handle is what makes the loop below one a task is allowed to write.
     ///
     /// Ten entries of the scenario's log, so the break lands while the producer is
     /// still writing rather than after it has finished.
     #[cfg(unix)]
     #[test]
-    fn an_abandoned_execution_log_iteration_does_not_hang_the_build() {
+    fn an_abandoned_handle_iteration_does_not_hang_the_build() {
         use std::time::Duration;
 
         run_execlog_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
+    entries = bazel.execution_log.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
+        execution_log = [entries],
         stderr = None,
     )
     seen = 0
-    for entry in build.execution_logs():
+    for entry in entries:
         seen += 1
         if seen == 10:
             break
@@ -1894,55 +1792,17 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#
             .to_string(),
-            "an abandoned `execution_logs()` iteration parked the reader past the \
+            "an abandoned handle iteration parked the reader past the \
              end of the build",
             "a task that stops iterating early must still reach the end of its build",
         );
     }
 
-    /// The same, for an iterator claimed and never iterated at all.
+    /// The same, for a handle the task never iterated at all.
     ///
-    /// Distinct from the test above rather than a weaker version of it: here the
-    /// subscriber sits at entry zero, so the ring reads as full from the
-    /// producer's first thousand entries onwards and the reader parks before the
-    /// task does anything else. It is also the shape a task reaches by accident —
-    /// binding `build.execution_logs()` to a name and then taking an early return.
-    #[cfg(unix)]
-    #[test]
-    fn an_unused_execution_logs_iterator_does_not_hang_the_build() {
-        use std::time::Duration;
-
-        run_execlog_task(
-            Duration::from_secs(60),
-            r#"
-def _impl(ctx):
-    build = ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
-        stderr = None,
-    )
-    entries = build.execution_logs()
-    status = build.wait()
-    if not status.success: return 1
-    return 0
-
-Test = task(implementation = _impl)
-"#
-            .to_string(),
-            "an `execution_logs()` iterator nobody iterated parked the reader past \
-             the end of the build",
-            "claiming the iterator and not using it must still end the build",
-        );
-    }
-
-    /// The same, for an `execution_log.iterator()` handle the task never drained.
-    ///
-    /// `wait()` releases every still-bound handle for the same reason it releases
-    /// the `execution_logs()` iterator: the producer blocks for each subscriber,
-    /// so one nobody drained parks the reader on a full ring and the join never
-    /// returns. Distinct from the two tests above, which cover the receiver
-    /// `execution_logs()` took — a handle's subscriber is a clone the stream never
-    /// owned, so neither release valve covers the other.
+    /// Here the subscriber sits at entry zero, so the reader parks from the
+    /// producer's first thousand entries onwards, before the task does anything
+    /// else. `wait()` releasing every still-bound handle is what ends it.
     #[cfg(unix)]
     #[test]
     fn an_undrained_iterator_handle_does_not_hang_the_build() {
@@ -2018,92 +1878,6 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// The same `drain()` on the `build.execution_logs()` iterator, which carries
-    /// it for the same reason a handle does.
-    ///
-    /// `done()` there is `is_drained` rather than "unsubscribed", so it reads true
-    /// after the release either way; what this pins is that the release happens —
-    /// the iteration ends and the build's `wait()` returns rather than joining a
-    /// reader still parked on this subscriber.
-    #[cfg(unix)]
-    #[test]
-    fn a_drained_execution_logs_iterator_stops_consuming_mid_build() {
-        use std::time::Duration;
-
-        run_execlog_task(
-            Duration::from_secs(60),
-            r#"
-def _impl(ctx):
-    build = ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
-        stderr = None,
-    )
-    entries = build.execution_logs()
-    seen = 0
-    for _ in entries:
-        seen += 1
-        if seen == 5:
-            break
-    entries.drain()
-    entries.drain()            # idempotent
-    if not entries.done(): return 3
-    for _ in entries:
-        return 4               # a drained iterator yields nothing
-    status = build.wait()
-    if not status.success: return 1
-    if seen != 5: return 5
-    return 0
-
-Test = task(implementation = _impl)
-"#
-            .to_string(),
-            "an `execution_logs()` iterator drained mid-build left the reader parked past \
-             the end of the build",
-            "a drained `execution_logs()` iterator must yield nothing more and let the \
-             build end",
-        );
-    }
-
-    /// `execution_logs()` after `wait()` is refused, and says why.
-    ///
-    /// `wait()` takes the stream, so there is nothing left to hand out. Iterating
-    /// before `wait()` is a requirement, not a preference, so the refusal has to
-    /// name that ordering rather than fall through to "pass `execution_log = true`",
-    /// which is advice the caller has already taken.
-    #[cfg(unix)]
-    #[test]
-    fn execution_logs_after_wait_names_the_ordering() {
-        let script = r#"
-def _impl(ctx):
-    build = ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
-        stderr = None,
-    )
-    build.wait()
-    build.execution_logs()
-    return 0
-
-Test = task(implementation = _impl)
-"#;
-        // The `wait()` here is the one in
-        // `a_log_nobody_iterates_does_not_hang_the_build`, so that regression
-        // reaches this test as a hang too — hence the timeout.
-        let err = run_execlog_script(
-            std::time::Duration::from_secs(60),
-            script.to_string(),
-            "`wait()` on an un-iterated log parked the reader",
-        )
-        .expect_err("a call after `wait()` must be refused")
-        .to_string();
-        assert!(
-            err.contains("already joined by `build.wait()`") && err.contains("before `wait()`"),
-            "the refusal should name the ordering, not ask for `execution_log = true` \
-             again: {err}",
-        );
-    }
-
     /// A consumer slower than the decoder must still receive every entry.
     ///
     /// The decoder reads a log already complete on disk, so it outruns any AXL
@@ -2121,14 +1895,15 @@ Test = task(implementation = _impl)
         let script = format!(
             r#"
 def _impl(ctx):
+    entries = bazel.execution_log.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
+        execution_log = [entries],
         stderr = None,
     )
     seen = 0
     busy = 0
-    for entry in build.execution_logs():
+    for entry in entries:
         seen += 1
         if entry.id != seen:
             return 2  # a gap: the producer dropped what this loop fell behind on
@@ -2366,15 +2141,9 @@ Test = task(implementation = _impl)
 
     /// Two *distinct* compact sinks and no decoded consumer at all.
     ///
-    /// The configuration nothing else here covers: with no decoded sink and no
-    /// handle, `named_consumers` is false, so the stream keeps its own subscriber
-    /// against a `build.execution_logs()` that never comes. Nothing drains it, so
-    /// the producer sits at the channel capacity for the rest of the build and
-    /// `join()` is what releases it.
-    ///
-    /// Compact sinks are tee'd from the raw bytes before decoding, so neither file
-    /// depends on that subscriber — which is the assertion: both are complete, and
-    /// the parked decoder cost the build nothing but a short `join()`. One path is
+    /// With no decoded sink and no handle the stream has no subscriber, so the
+    /// reader skips decoding. Compact sinks are tee'd from the raw bytes before
+    /// decoding, so both files must still be complete. One path is
     /// the one lent to Bazel and the other is written by the reader thread's
     /// `MultiTeeReader`, so this covers both halves of the tee.
     #[cfg(unix)]
@@ -2439,16 +2208,18 @@ Test = task(implementation = _impl)
         let script = format!(
             r#"
 def _impl(ctx):
+    entries = bazel.execution_log.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
         execution_log = [
+            entries,
             bazel.execution_log.compact_file(path = {lent:?}),
             bazel.execution_log.compact_file(path = {bad:?}),
             bazel.execution_log.compact_file(path = {teed:?}),
         ],
         stderr = None,
     )
-    seen = len([e for e in build.execution_logs()])
+    seen = len([e for e in entries])
     ctx.std.fs.create({report:?}).write("%d\n" % seen)
     build.wait()
     return 0
@@ -2481,16 +2252,12 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// A `compact_file` sink beside `build.execution_logs()` — the combination
-    /// `ctx.bazel.build`'s own documentation advertises.
-    ///
-    /// A compact sink is not a decoded consumer: it is tee'd from the raw bytes
-    /// before decoding, so it clones no subscriber and leaves the stream's own one
-    /// for `execution_logs()` to take. Both therefore get everything, and the
-    /// refusal that fires beside a decoded `file()` sink must not fire here.
+    /// A `compact_file` sink beside an `iterator()` handle: the compact copy is
+    /// tee'd from the raw bytes and the handle reads the decoded stream, so both
+    /// get everything.
     #[cfg(unix)]
     #[test]
-    fn a_compact_sink_and_execution_logs_both_see_the_whole_log() {
+    fn a_compact_sink_and_a_handle_both_see_the_whole_log() {
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2498,13 +2265,14 @@ Test = task(implementation = _impl)
         let script = format!(
             r#"
 def _impl(ctx):
+    entries = bazel.execution_log.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = [bazel.execution_log.compact_file(path = {sink:?})],
+        execution_log = [entries, bazel.execution_log.compact_file(path = {sink:?})],
         stderr = None,
     )
     seen = 0
-    for entry in build.execution_logs():
+    for entry in entries:
         seen += 1
         if entry.id != seen:
             return 2  # a gap: the producer dropped something
@@ -2521,9 +2289,9 @@ Test = task(implementation = _impl)
         run_execlog_task(
             Duration::from_secs(60),
             script,
-            "a compact sink plus `execution_logs()` deadlocked",
+            "a compact sink plus a handle deadlocked",
             &format!(
-                "`execution_logs()` beside a compact sink must see all \
+                "a handle beside a compact sink must see all \
                  {SCENARIO_ENTRIES} entries, contiguously"
             ),
         );
@@ -2532,6 +2300,29 @@ Test = task(implementation = _impl)
             compact_entry_count(&sink_path),
             SCENARIO_ENTRIES,
             "the compact log on disk should be complete too",
+        );
+    }
+
+    /// `execution_log = True` names no consumer, so it is refused before Bazel
+    /// spawns, with a message naming the handle that replaces it.
+    #[test]
+    fn execution_log_true_is_refused_and_names_the_iterator() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.bazel.build(execution_log = True)
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect_err("`execution_log = True` must be refused")
+        .to_string();
+        assert!(
+            err.contains("bazel.execution_log.iterator()"),
+            "the refusal should name the replacement: {err}",
         );
     }
 
@@ -2788,109 +2579,6 @@ Test = task(implementation = _impl)
             "`bazel info` ran without the build's startup flags, so the server pid it \
              reports is not the server that runs the build:\n{}",
             info.map(|l| format!("  {l}\n")).collect::<String>(),
-        );
-    }
-
-    /// `build.execution_logs()` takes the stream's one subscriber rather than
-    /// cloning it, so a second consumer is refused rather than silently capping
-    /// the log for everyone.
-    ///
-    /// The documented breaking change of this API: a build configured with a
-    /// decoded sink or an `execution_log.iterator()` handle — which is what any
-    /// `exec_log_event` hook adds — can no longer also call this.
-    #[cfg(unix)]
-    #[test]
-    fn execution_logs_is_refused_beside_an_iterator_handle() {
-        let script = r#"
-def _impl(ctx):
-    entries = bazel.execution_log.iterator()
-    build = ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = [entries],
-        stderr = None,
-    )
-    build.execution_logs()
-    return 0
-
-Test = task(implementation = _impl)
-"#;
-        let err = with_daemon_stand_in(|| {
-            crate::test::eval(script)
-                .with_fake_bazel()
-                .run_task(0)
-                .expect_err("a second consumer must be refused")
-        });
-        let err = err.to_string();
-        assert!(
-            err.contains("already has a consumer") && err.contains("execution_log.iterator()"),
-            "the refusal should name the replacement: {err}",
-        );
-    }
-
-    /// The same refusal beside a decoded `file()` sink, the other consumer that
-    /// clones the stream's subscriber. A compact sink is not one — it is tee'd
-    /// from the raw bytes before decoding — so `execution_logs()` still works
-    /// alongside those.
-    #[cfg(unix)]
-    #[test]
-    fn execution_logs_is_refused_beside_a_decoded_file_sink() {
-        let dir = tempfile::tempdir().unwrap();
-        let sink_path = dir.path().join("decoded.binpb");
-        let script = format!(
-            r#"
-def _impl(ctx):
-    build = ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = [bazel.execution_log.file(path = {sink:?})],
-        stderr = None,
-    )
-    build.execution_logs()
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-            sink = sink_path.to_str().unwrap(),
-        );
-        let err = with_daemon_stand_in(move || {
-            crate::test::eval(&script)
-                .with_fake_bazel()
-                .run_task(0)
-                .expect_err("a second consumer must be refused")
-        });
-        let err = err.to_string();
-        assert!(
-            err.contains("already has a consumer") && err.contains("execution_log.iterator()"),
-            "the refusal should name the replacement: {err}",
-        );
-    }
-
-    /// The same refusal for two calls on a build with no other consumer: the
-    /// first took the subscriber, so there is none left to hand out.
-    #[cfg(unix)]
-    #[test]
-    fn execution_logs_is_refused_a_second_time() {
-        let script = r#"
-def _impl(ctx):
-    build = ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = True,
-        stderr = None,
-    )
-    first = build.execution_logs()
-    second = build.execution_logs()
-    return 0
-
-Test = task(implementation = _impl)
-"#;
-        let err = with_daemon_stand_in(|| {
-            crate::test::eval(script)
-                .with_fake_bazel()
-                .run_task(0)
-                .expect_err("the second call must be refused")
-        });
-        assert!(
-            err.to_string().contains("already has a consumer"),
-            "unexpected error: {err}",
         );
     }
 
@@ -3542,7 +3230,7 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=rejects_command_line"],
-        execution_log = True,
+        execution_log = [],
         stderr = None,
     )
     status = build.wait()

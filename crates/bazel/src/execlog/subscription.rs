@@ -1,11 +1,7 @@
-//! The subscription state machine both execution-log iterators are built on.
-//!
-//! `build.execution_logs()` and `bazel.execution_log.iterator()` differ in what
-//! they add — a `kinds=` filter and a deferred bind for the handle, neither for
-//! the other — but underneath they hold the same thing: one subscriber of a
-//! build's decoded execution log that the producer blocks for, and that
-//! `build.wait()` has to be able to drop from outside. [`Subscription`] is that
-//! thing, so the lifecycle exists once rather than once per iterator.
+//! The subscription state machine behind a `bazel.execution_log.iterator()`
+//! handle: one subscriber of a build's decoded execution log that the producer
+//! blocks for, bound after the handle is created, and that `build.wait()` has
+//! to be able to drop from outside.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -57,16 +53,8 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Already subscribed, for `build.execution_logs()`: it is handed the
-    /// stream's own receiver at construction, so it has nothing to wait for.
-    pub fn live(recv: Receiver<ExecLogEntry>) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(State::Live { recv })),
-        }
-    }
-
-    /// Not subscribed yet, for an `execution_log.iterator()` handle: it is
-    /// created before the build it will be bound to exists.
+    /// Not subscribed yet: a handle is created before the build it will be
+    /// bound to exists.
     pub fn pending() -> Self {
         Self {
             state: Arc::new(Mutex::new(State::Pending)),
@@ -99,10 +87,9 @@ impl Subscription {
         *self.state.lock().unwrap() = State::Done;
     }
 
-    /// Whether a subscriber is held right now. `false` while a read has it on
-    /// loan, so this answers "is this handle bound" and not "can more entries
-    /// arrive" — the latter is [`is_drained`](Self::is_drained). For tests only:
-    /// nothing in the AXL path needs to distinguish `Live` from `Reading`.
+    /// Whether a subscriber is held right now; `false` while a read has it on
+    /// loan. For tests only: nothing in the AXL path needs to distinguish `Live`
+    /// from `Reading`.
     pub fn is_live(&self) -> bool {
         matches!(*self.state.lock().unwrap(), State::Live { .. })
     }
@@ -110,17 +97,6 @@ impl Subscription {
     /// Whether this subscription has been unsubscribed. A `Pending` one has not.
     pub fn is_done(&self) -> bool {
         matches!(*self.state.lock().unwrap(), State::Done)
-    }
-
-    /// Whether nothing more can arrive: unsubscribed, or the stream closed with
-    /// everything buffered already taken.
-    pub fn is_drained(&self) -> bool {
-        match &*self.state.lock().unwrap() {
-            State::Live { recv } => recv.is_closed(),
-            // `Reading` is only observable from another thread, which AXL has
-            // none of; either way nothing more will arrive through this handle.
-            _ => true,
-        }
     }
 
     /// Block for the next entry `wants` accepts, or the end of the stream.
@@ -233,6 +209,12 @@ mod tests {
         ExecLogEntry { id, r#type: None }
     }
 
+    fn bound(recv: Receiver<ExecLogEntry>) -> Subscription {
+        let sub = Subscription::pending();
+        assert!(sub.bind(recv));
+        sub
+    }
+
     /// A read in flight must not look like a subscription waiting to be bound.
     /// See [`State::Reading`] for what conflating the two would cost, and why
     /// this is asserted though AXL cannot reach it.
@@ -262,7 +244,7 @@ mod tests {
     #[test]
     fn a_release_mid_read_wins_over_the_finishing_read() {
         let (sender, recv) = bounded::<ExecLogEntry>(1);
-        let sub = Subscription::live(recv);
+        let sub = bound(recv);
         let on_loan = sub.take_for_read().expect("a live subscription lends out");
 
         sub.release();
@@ -280,7 +262,7 @@ mod tests {
     #[test]
     fn try_pop_filters_and_notices_the_close() {
         let (sender, recv) = bounded::<ExecLogEntry>(8);
-        let sub = Subscription::live(recv);
+        let sub = bound(recv);
         for id in 1..=4 {
             sender.send(entry(id)).unwrap();
         }
@@ -307,7 +289,7 @@ mod tests {
             // Never written to and never closed: there is nothing to return and no
             // end-of-stream to end on.
             let (_sender, recv) = bounded::<ExecLogEntry>(4);
-            let sub = Subscription::live(recv);
+            let sub = bound(recv);
 
             (
                 sub.recv_blocking(|| true, |_| true).is_none(),
@@ -321,33 +303,5 @@ mod tests {
         };
         assert!(ended, "a cancelled read should return nothing");
         assert!(unsubscribed, "a cancelled read should unsubscribe");
-    }
-
-    /// `is_drained` is what `done` reports, so it has to mean "the stream ended
-    /// *and* everything it sent has been taken" — not merely that the producer
-    /// is gone. A subscription with no receiver to ask answers yes.
-    #[test]
-    fn is_drained_needs_the_buffer_empty_as_well_as_the_stream_closed() {
-        let (sender, recv) = bounded::<ExecLogEntry>(4);
-        let sub = Subscription::live(recv);
-        sender.send(entry(1)).unwrap();
-        assert!(!sub.is_drained(), "an open stream is not drained");
-
-        drop(sender);
-        assert!(
-            !sub.is_drained(),
-            "an entry still buffered means the caller has not seen everything yet",
-        );
-        assert_eq!(sub.try_pop(|_| true).map(|e| e.id), Some(1));
-        assert!(sub.is_drained(), "closed and emptied is drained");
-
-        assert!(
-            Subscription::pending().is_drained(),
-            "with no subscriber to ask, nothing more can arrive",
-        );
-        let (_s, r) = bounded::<ExecLogEntry>(4);
-        let released = Subscription::live(r);
-        released.release();
-        assert!(released.is_drained(), "a released subscription is drained");
     }
 }
