@@ -1373,9 +1373,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// Name a path per attempt if every attempt's log has to survive.
     ///
     /// Bazel writes one compact path itself: the first, unless the command line
-    /// already names one. The CLI writes the rest, and one of those that cannot
-    /// be written fails `build.wait()`, naming the path, while the build's other
-    /// execution-log consumers still get the whole log.
+    /// already names one. The CLI copies the log Bazel writes to the rest, and a
+    /// copy that cannot be written fails `build.wait()`, naming the path, while
+    /// the build's other execution-log consumers still get the whole log.
     fn compact_file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
         Ok(ExecLogSink::CompactFile { path })
     }
