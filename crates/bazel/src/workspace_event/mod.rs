@@ -18,7 +18,7 @@ pub const LOG_FILE_FLAG: &str = "--experimental_workspace_rules_log_file";
 /// any. See [`crate::rc::requested_path`] for how empty and relative values
 /// resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    crate::rc::requested_path(flags, LOG_FILE_FLAG, verb, directory)
+    crate::rc::requested_home_path(flags, LOG_FILE_FLAG, verb, directory)
 }
 
 /// Where Bazel writes one build's workspace log, a path this build names

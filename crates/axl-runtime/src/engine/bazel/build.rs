@@ -1084,7 +1084,8 @@ impl Build {
         // A `--profile` whose path cannot be told is left to Bazel too.
         let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
         let profile_unplaced = requested_profile.is_none()
-            && bazel::rc::requested_path(&flags, bazel::profile::FLAG, verb, None).is_some();
+            && bazel::rc::last_flag_value(&flags, bazel::profile::FLAG, verb)
+                .is_some_and(|v| !v.is_empty());
         let profile_kept =
             rc_visible && !profile_unplaced && !bazel::profile::turned_off(&flags, verb);
         let (asked, recording) = execlog_demand(

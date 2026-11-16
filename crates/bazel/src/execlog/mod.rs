@@ -52,11 +52,14 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// names no file; see
 /// [`crate::rc::requested_path`] for how empty and relative values resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    let path = crate::rc::requested_path(flags, COMPACT_FILE_FLAG, verb, None)?;
+    let path = crate::rc::requested_home_path(flags, COMPACT_FILE_FLAG, verb, None)?;
     let text = path.to_string_lossy();
     // Bazel 10 reads a boolean here (off, or stream it to remote storage),
     // which names no file.
-    if matches!(&*text, "true" | "false" | "yes" | "no" | "1" | "0") {
+    if matches!(
+        text.to_ascii_lowercase().as_str(),
+        "true" | "t" | "yes" | "y" | "1" | "false" | "f" | "no" | "n" | "0"
+    ) {
         return None;
     }
     let path = match crate::rc::workspace_root(directory) {

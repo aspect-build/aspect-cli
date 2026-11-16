@@ -1065,32 +1065,79 @@ pub fn requested_path(
     command: &str,
     directory: Option<&str>,
 ) -> Option<PathBuf> {
-    last_flag_value(args, name, command)
-        .filter(|path| !path.is_empty())
-        .map(|path| expand_home(&path))
-        .map(|path| match directory {
-            Some(dir) if path.is_relative() => Path::new(dir).join(path),
-            _ => path,
-        })
+    resolve(
+        last_flag_value(args, name, command),
+        directory,
+        |path: &str| PathBuf::from(path),
+    )
 }
 
-/// `path` with a leading `~/` made the user's home, as Bazel's path options
-/// expand it before resolving anything else.
-fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) if !home.is_empty() => Path::new(&home).join(rest),
-        _ => PathBuf::from(path),
+/// [`requested_path`] for an option whose converter makes a leading `~/` the
+/// user's home, as Bazel's path-typed options do (its build event file, a
+/// plain string, does not).
+pub fn requested_home_path(
+    args: &[String],
+    name: &str,
+    command: &str,
+    directory: Option<&str>,
+) -> Option<PathBuf> {
+    resolve(
+        last_flag_value(args, name, command),
+        directory,
+        |path: &str| match (path.strip_prefix("~/"), user_home()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => PathBuf::from(path),
+        },
+    )
+}
+
+fn resolve(
+    value: Option<String>,
+    directory: Option<&str>,
+    path: impl FnOnce(&str) -> PathBuf,
+) -> Option<PathBuf> {
+    value.filter(|v| !v.is_empty()).map(|v| {
+        let p = path(&v);
+        match directory {
+            Some(dir) if p.is_relative() => Path::new(dir).join(p),
+            _ => p,
+        }
+    })
+}
+
+/// The home Bazel's server expands `~/` to: Java's `user.home`, which is the
+/// passwd entry's home, and `$HOME` only when that has none.
+fn user_home() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpwuid returns a pointer into static storage or null, read
+        // before any other passwd call.
+        let entry = unsafe { libc::getpwuid(libc::getuid()) };
+        if !entry.is_null() {
+            let dir = unsafe { (*entry).pw_dir };
+            if !dir.is_null() {
+                let dir = unsafe { std::ffi::CStr::from_ptr(dir) };
+                if !dir.to_bytes().is_empty() {
+                    use std::os::unix::ffi::OsStrExt;
+                    return Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())));
+                }
+            }
+        }
     }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The directory a Bazel command run in `directory` (the CLI's own cwd when
 /// `None`) works in, as its client sees it: absolute, with symlinks resolved.
 pub fn spawn_dir(directory: Option<&str>) -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    match directory {
-        Some(dir) => cwd.join(dir).canonicalize().ok(),
-        None => cwd.canonicalize().ok(),
-    }
+    let dir = match directory {
+        Some(dir) if Path::new(dir).is_absolute() => PathBuf::from(dir),
+        Some(dir) => std::env::current_dir().ok()?.join(dir),
+        None => std::env::current_dir().ok()?,
+    };
+    dir.canonicalize().ok()
 }
 
 /// The files that mark a directory as the root of a Bazel workspace.
@@ -2206,13 +2253,18 @@ mod tests {
 
     #[test]
     fn a_requested_path_expands_home_first() {
-        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        let Some(home) = user_home() else {
             return;
         };
         let args = vec!["--profile=~/p.gz".to_string()];
         assert_eq!(
+            requested_home_path(&args, "--profile", "build", Some("/elsewhere")),
+            Some(home.join("p.gz"))
+        );
+        assert_eq!(
             requested_path(&args, "--profile", "build", Some("/elsewhere")),
-            Some(Path::new(&home).join("p.gz"))
+            Some(PathBuf::from("/elsewhere/~/p.gz")),
+            "a plain string option keeps its ~"
         );
     }
 

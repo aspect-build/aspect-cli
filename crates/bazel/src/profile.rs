@@ -29,7 +29,7 @@ pub fn file_name(requested: Option<&Path>) -> &'static str {
 /// directory the command runs in; `None` for one when the workspace cannot be
 /// found. See [`crate::rc::requested_path`] for empty and `~/` values.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    let path = crate::rc::requested_path(flags, FLAG, verb, None)?;
+    let path = crate::rc::requested_home_path(flags, FLAG, verb, None)?;
     if path.is_absolute() {
         return Some(path);
     }
