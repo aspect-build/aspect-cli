@@ -209,8 +209,9 @@ impl Rules {
     }
 
     /// Apply R2 to R4 to a read that returned nothing. `eof` is whether the
-    /// read saw zero bytes, as opposed to a writer attached but quiet, and
-    /// `reading` is the path `held` is asked about.
+    /// read reached the end of the file, which R2 needs; the file follower
+    /// always passes `true`, and tests pass `false` to exercise R3 and R4 on
+    /// their own. `reading` is the path `held` is asked about.
     pub(crate) fn judge(&mut self, eof: bool, reading: &Path) -> Option<Done> {
         let bytes = self.bytes;
 
@@ -291,7 +292,7 @@ mod tests {
         assert!(r.judge(true, Path::new(STREAM)).is_none());
         r.arrived(3);
         f.end();
-        // Writer attached but quiet is not EOF.
+        // Without EOF, R2 does not apply.
         assert!(r.judge(false, Path::new(STREAM)).is_none());
         // Expecting more switches it off.
         r.expect(Expect::More);

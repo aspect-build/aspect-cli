@@ -12,11 +12,12 @@
 //! [`join`]: WorkspaceEventStream::join
 
 use axl_proto::workspace_log::WorkspaceEvent;
+use fibre::CloseError;
 use fibre::spmc::Receiver;
-use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
 use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::thread::JoinHandle;
 use thiserror::Error;
@@ -33,14 +34,14 @@ pub enum WorkspaceEventError {
     IO(#[from] std::io::Error),
     #[error("prost decode error: {0}")]
     ProstDecode(#[from] prost::DecodeError),
-    #[error("send error: {0}")]
-    Send(#[from] SendError),
     #[error("close error: {0}")]
     Close(#[from] CloseError),
 }
 
 pub struct WorkspaceEventStream {
     handle: JoinHandle<Result<(), WorkspaceEventError>>,
+    /// Where the log is read from, for naming it in errors.
+    path: PathBuf,
     /// The ring's origin, sealed once the consumers are wired.
     origin: Origin<WorkspaceEvent>,
 }
@@ -66,6 +67,7 @@ impl WorkspaceEventStream {
     /// an event that does not decode, fails [`join`](Self::join).
     pub fn spawn(log: LogFile, gate: Gate) -> Self {
         let (mut sender, origin) = ring::<WorkspaceEvent>();
+        let path = log.path().to_owned();
         let mut file = log.follow(gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
@@ -94,7 +96,16 @@ impl WorkspaceEventStream {
             }
             Ok(())
         });
-        Self { handle, origin }
+        Self {
+            handle,
+            path,
+            origin,
+        }
+    }
+
+    /// The log's path.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// A further subscriber, for a consumer that will drain it. See

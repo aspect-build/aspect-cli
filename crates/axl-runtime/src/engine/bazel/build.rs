@@ -1499,10 +1499,17 @@ impl Build {
         }
 
         // Both logs are joined before either failure is reported, so one
-        // failing does not leave the other's reader running.
+        // failing does not leave the other's reader running. A failed BES join
+        // above returns first; the handles are released by then, so those
+        // readers end on their own.
         let mut stream_errors = Vec::new();
-        if let Some(Err(err)) = build.workspace_event_stream.take().map(|s| s.join()) {
-            stream_errors.push(format!("workspace event stream thread error: {err}"));
+        if let Some(stream) = build.workspace_event_stream.take() {
+            let path = stream.path().display().to_string();
+            if let Err(err) = stream.join() {
+                stream_errors.push(format!(
+                    "reading the workspace event log '{path}' failed: {err}"
+                ));
+            }
         }
 
         // Wait for Execlog stream to complete.
