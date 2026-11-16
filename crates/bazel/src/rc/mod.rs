@@ -1084,9 +1084,10 @@ pub fn requested_home_path(
     resolve(
         last_flag_value(args, name, command),
         directory,
-        |path: &str| match (path.strip_prefix("~/"), user_home()) {
-            (Some(rest), Some(home)) => home.join(rest),
-            _ => PathBuf::from(path),
+        |path: &str| {
+            path.strip_prefix("~/")
+                .and_then(|rest| Some(user_home()?.join(rest)))
+                .unwrap_or_else(|| PathBuf::from(path))
         },
     )
 }
@@ -1105,28 +1106,46 @@ fn resolve(
     })
 }
 
-/// The home Bazel's server expands `~/` to: Java's `user.home`, which is the
-/// passwd entry's home, and `$HOME` only when that has none.
+/// The home Bazel's server expands `~/` to: Java's `user.home`, which on Unix
+/// is the passwd entry's home unless that is missing or `/`, then `$HOME`, and
+/// on Windows the user's profile folder.
 fn user_home() -> Option<PathBuf> {
     #[cfg(unix)]
-    {
-        // SAFETY: getpwuid returns a pointer into static storage or null, read
-        // before any other passwd call.
-        let entry = unsafe { libc::getpwuid(libc::getuid()) };
-        if !entry.is_null() {
-            let dir = unsafe { (*entry).pw_dir };
-            if !dir.is_null() {
-                let dir = unsafe { std::ffi::CStr::from_ptr(dir) };
-                if !dir.to_bytes().is_empty() {
-                    use std::os::unix::ffi::OsStrExt;
-                    return Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())));
-                }
-            }
-        }
+    if let Some(home) = passwd_home().filter(|h| h.as_os_str().len() >= 2) {
+        return Some(home);
     }
-    std::env::var_os("HOME")
+    #[cfg(windows)]
+    let var = "USERPROFILE";
+    #[cfg(not(windows))]
+    let var = "HOME";
+    std::env::var_os(var)
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
+}
+
+/// This user's home from the passwd database.
+#[cfg(unix)]
+fn passwd_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: the reentrant call writes only into `entry` and `buf`, both
+    // live for the reads below.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut entry,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut found,
+        )
+    };
+    if status != 0 || found.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
 }
 
 /// The directory a Bazel command run in `directory` (the CLI's own cwd when
