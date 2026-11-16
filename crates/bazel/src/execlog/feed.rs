@@ -201,8 +201,8 @@ pub struct ExecLogStream {
     /// The one subscriber the stream starts with, and the only thing a further
     /// subscriber can be cloned from — so once it is gone, nothing can join.
     ///
-    /// It is an `Option` because it has to be given away or dropped as soon as
-    /// other consumers are wired: in fibre's broadcast ring the producer may not
+    /// It is an `Option` because it has to be dropped ([`seal`](Self::seal)) as
+    /// soon as the other consumers are wired: in fibre's broadcast ring the producer may not
     /// lap its slowest subscriber, and one nobody reads is a tail stuck at entry
     /// zero. Left in place beside others it caps them all at
     /// [`CHANNEL_CAPACITY`], blocking the producer there. Gone with no consumer
