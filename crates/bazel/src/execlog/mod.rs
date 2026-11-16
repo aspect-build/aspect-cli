@@ -57,7 +57,8 @@ pub struct Plan {
 /// `File::create` would truncate it mid-build. Both cases can hold one: a
 /// sink's path can already be on the command line, and two sinks can name one
 /// path, in which case the first lent it to Bazel. Sinks naming the same path
-/// share one tee.
+/// share one tee; paths are compared as written (`a//b` matches `a/b`, but
+/// `./x` does not match `x` and symlinks are not resolved).
 pub fn plan(requested: Option<PathBuf>, mut compact: Vec<String>) -> Plan {
     let (path, add_flag) = match requested {
         Some(path) => (path, false),

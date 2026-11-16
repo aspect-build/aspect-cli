@@ -280,28 +280,36 @@ impl ExecLogStream {
             };
             let mut out_raw = Decoder::new(out_raw)?;
 
-            let mut has_readers = true;
-
-            loop {
-                match delimited::next_frame(&mut out_raw, &mut buf) {
-                    Ok(Some(header)) => {
-                        if has_readers {
-                            let entry = ExecLogEntry::decode(&buf[..header.len])?;
-                            has_readers = sender.send(entry).is_ok();
+            let read = (|| -> Result<ReaderOutcome, ExecLogStreamError> {
+                let mut has_readers = true;
+                loop {
+                    match delimited::next_frame(&mut out_raw, &mut buf) {
+                        Ok(Some(header)) => {
+                            if has_readers {
+                                let entry = ExecLogEntry::decode(&buf[..header.len])?;
+                                has_readers = sender.send(entry).is_ok();
+                            }
                         }
+                        // The end: between two entries, or the stream stopped
+                        // under the decoder (Bazel killed, its client gone, the
+                        // file failing), which leaves a frame incomplete. The
+                        // entries before it were good; how it ended is the
+                        // file's to say.
+                        Ok(None) => break,
+                        Err(_) if out_raw.get_ref().get_ref().inner.done().is_some() => break,
+                        Err(err) => return Err(err.into()),
                     }
-                    // The end: between two entries, or the stream stopped under
-                    // the decoder (Bazel killed, its client gone, the file
-                    // failing), which leaves a frame incomplete. The entries
-                    // before it were good; how it ended is the file's to say.
-                    Ok(None) => break,
-                    Err(_) if out_raw.get_ref().get_ref().inner.done().is_some() => break,
-                    Err(err) => return Err(err.into()),
                 }
-            }
-            sender.close()?;
-            out_raw.get_mut().get_mut().finish()?;
-            Ok(ReaderOutcome::Read)
+                sender.close()?;
+                Ok(ReaderOutcome::Read)
+            })();
+            // Every copy is finished however reading ended, so a failed one is
+            // reported even beside a reader error.
+            let copies = out_raw.get_mut().get_mut().finish();
+            combine(
+                read,
+                copies.err().map(|e| e.to_string()).into_iter().collect(),
+            )
         });
 
         Ok(Self {
@@ -363,24 +371,24 @@ impl ExecLogStream {
     }
 }
 
-/// The reader's result, failed with the reader's error (which carries every
-/// failed compact copy) and every decoded sink's. A lone reader error is kept
-/// as it is.
+/// `result`, failed with its own error and every one in `more`. A lone error
+/// keeps its type. The reader uses it to add failed compact copies to how
+/// reading ended, and `join` to add failed decoded sinks to the reader's.
 fn combine(
-    reader: Result<ReaderOutcome, ExecLogStreamError>,
-    sink_errors: Vec<String>,
+    result: Result<ReaderOutcome, ExecLogStreamError>,
+    more: Vec<String>,
 ) -> Result<ReaderOutcome, ExecLogStreamError> {
-    if sink_errors.is_empty() {
-        return reader;
+    if more.is_empty() {
+        return result;
     }
     let mut errors = vec![];
-    if let Err(e) = reader {
+    if let Err(e) = result {
         errors.push(match e {
             ExecLogStreamError::IO(io) => io.to_string(),
             other => other.to_string(),
         });
     }
-    errors.extend(sink_errors);
+    errors.extend(more);
     Err(ExecLogStreamError::IO(io::Error::other(errors.join("; "))))
 }
 
@@ -519,6 +527,27 @@ mod tests {
         let decode = prost::DecodeError::new("bad entry");
         let err = combine(Err(ExecLogStreamError::ProstDecode(decode)), vec![]).unwrap_err();
         assert!(matches!(err, ExecLogStreamError::ProstDecode(_)));
+        let io_err = ExecLogStreamError::IO(io::Error::other("reader"));
+        let err = combine(Err(io_err), vec![]).unwrap_err();
+        assert_eq!(err.to_string(), "io error: reader");
+    }
+
+    /// A decode error and a failed copy are both reported, without a doubled
+    /// `io error:` prefix.
+    #[test]
+    fn a_reader_error_and_a_failed_copy_are_both_named() {
+        let decode = prost::DecodeError::new("bad entry");
+        let err = combine(
+            Err(ExecLogStreamError::ProstDecode(decode)),
+            vec!["ExecLog: write to '/full/c.zstd' failed: disk full".to_owned()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("bad entry") && err.contains("/full/c.zstd"),
+            "{err}"
+        );
+        assert_eq!(err.matches("io error:").count(), 1, "{err}");
     }
 
     /// Why the stream must not keep an unread subscriber once real ones exist.
