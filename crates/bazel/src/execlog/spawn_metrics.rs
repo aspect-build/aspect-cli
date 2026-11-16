@@ -70,23 +70,20 @@ impl SpawnInstruments {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::otel::test_support::{point, recorded};
     use axl_proto::tools::protos::SpawnMetrics;
-    use opentelemetry::metrics::MeterProvider as _;
-    use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
-        data::{AggregatedMetrics, MetricData},
-    };
+
+    fn compile() -> Spawn {
+        Spawn {
+            mnemonic: "CppCompile".into(),
+            runner: "remote".into(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn spawns_are_counted_and_timed_by_mnemonic_and_runner() {
-        let exporter = InMemoryMetricExporter::default();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
-        let instruments = SpawnInstruments::new(&provider.meter("test"));
         let timed = Spawn {
-            mnemonic: "CppCompile".into(),
-            runner: "remote".into(),
             metrics: Some(SpawnMetrics {
                 total_time: Some(axl_proto::Duration {
                     seconds: 2,
@@ -94,50 +91,40 @@ mod tests {
                 }),
                 ..Default::default()
             }),
-            ..Default::default()
+            ..compile()
         };
-        instruments.record(&timed, true);
-        instruments.record(&timed, true);
-        instruments.record(
-            &Spawn {
-                mnemonic: "CppCompile".into(),
-                runner: "remote".into(),
-                ..Default::default()
-            },
-            false,
-        );
-        provider.force_flush().unwrap();
-
-        let metrics = exporter.get_finished_metrics().unwrap();
-        let mut counted = Vec::new();
-        let mut timed_sum = None;
-        for metric in metrics
-            .iter()
-            .flat_map(|r| r.scope_metrics())
-            .flat_map(|s| s.metrics())
-        {
-            match metric.data() {
-                AggregatedMetrics::U64(MetricData::Sum(sum)) => {
-                    for p in sum.data_points() {
-                        let success = p
-                            .attributes()
-                            .find(|kv| kv.key.as_str() == "success")
-                            .map(|kv| kv.value.to_string());
-                        counted.push((success, p.value()));
-                    }
-                }
-                AggregatedMetrics::F64(MetricData::Histogram(h)) => {
-                    let p = h.data_points().next().unwrap();
-                    timed_sum = Some((p.count(), p.sum()));
-                }
-                _ => {}
-            }
-        }
-        counted.sort();
+        let points = recorded(|meter| {
+            let instruments = SpawnInstruments::new(meter);
+            instruments.record(&timed, true);
+            instruments.record(&timed, true);
+            instruments.record(&compile(), false);
+        });
+        let attrs = |success| {
+            [
+                "cache_hit=false",
+                "mnemonic=CppCompile",
+                "runner=remote",
+                success,
+            ]
+        };
         assert_eq!(
-            counted,
-            [(Some("false".into()), 1), (Some("true".into()), 2)]
+            points,
+            [
+                point(
+                    "bazel.spawn.duration",
+                    &["mnemonic=CppCompile", "runner=remote"],
+                    5.0
+                ),
+                point("bazel.spawns", &attrs("success=false"), 1.0),
+                point("bazel.spawns", &attrs("success=true"), 2.0),
+            ]
         );
-        assert_eq!(timed_sum, Some((2, 5.0)), "an untimed spawn is not timed");
+    }
+
+    #[test]
+    fn a_spawn_without_a_total_time_is_counted_but_not_timed() {
+        let points = recorded(|meter| SpawnInstruments::new(meter).record(&compile(), true));
+        let names: Vec<&str> = points.iter().map(|(name, ..)| name.as_str()).collect();
+        assert_eq!(names, ["bazel.spawns"]);
     }
 }

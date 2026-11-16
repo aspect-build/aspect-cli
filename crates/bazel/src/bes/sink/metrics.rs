@@ -6,7 +6,7 @@
 //! | `bazel.test.attempt.duration` | histogram | `s` | `status` |
 //! | `bazel.action_cache.lookups` | counter | `{lookup}` | `result`, `reason` |
 //! | `bazel.build.duration` | histogram | `s` | `command`, `success` |
-//! | `bazel.build.phase.duration` | histogram | `s` | `command`, `phase` |
+//! | `bazel.build.phase.duration` | histogram | `s` | `command`, `success`, `phase` |
 //!
 //! No attribute carries a target label, so the number of series stays bounded
 //! however large the build. `bazel.test.attempt.duration` records only
@@ -45,7 +45,9 @@ const BUILD_DURATION_BOUNDARIES: &[f64] = &[
 pub(super) struct Invocation {
     /// The Bazel command, from `BuildStarted`.
     pub command: Option<String>,
-    /// Whether it succeeded, from `BuildFinished`.
+    /// Whether Bazel exited 0, from `BuildFinished`. A build that found no
+    /// tests to run (exit 4) is not a success, as for Bazel's own
+    /// `overall_success`.
     pub success: Option<bool>,
 }
 
@@ -125,15 +127,16 @@ impl BesMetrics {
         self.record_action_cache(metrics);
     }
 
-    /// Phases Bazel did not time (`0`) are left out.
+    /// Durations Bazel reported as `0` are left out.
     fn record_timing(&self, timing: &TimingMetrics, invocation: &Invocation) {
-        let command = invocation
+        let attributes: Vec<KeyValue> = invocation
             .command
             .as_ref()
-            .map(|c| KeyValue::new("command", c.clone()));
+            .map(|c| KeyValue::new("command", c.clone()))
+            .into_iter()
+            .chain(invocation.success.map(|s| KeyValue::new("success", s)))
+            .collect();
         if timing.wall_time_in_ms > 0 {
-            let mut attributes: Vec<KeyValue> = command.iter().cloned().collect();
-            attributes.extend(invocation.success.map(|s| KeyValue::new("success", s)));
             self.build_duration
                 .record(seconds(timing.wall_time_in_ms), &attributes);
         }
@@ -142,7 +145,7 @@ impl BesMetrics {
             ("execution", timing.execution_phase_time_in_ms),
         ] {
             if ms > 0 {
-                let mut attributes: Vec<KeyValue> = command.iter().cloned().collect();
+                let mut attributes = attributes.clone();
                 attributes.push(KeyValue::new("phase", phase));
                 self.build_phase_duration.record(seconds(ms), &attributes);
             }
@@ -193,8 +196,9 @@ fn seconds(ms: i64) -> f64 {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::*;
+    use crate::otel::test_support::{self, Point, point};
     use axl_proto::{
         blaze::{ActionCacheStatistics, action_cache_statistics::MissDetail},
         build_event_stream::{build_metrics::ActionSummary, test_result::ExecutionInfo},
@@ -205,64 +209,8 @@ pub(super) mod tests {
         data::{AggregatedMetrics, MetricData},
     };
 
-    /// Records through `record` and returns every data point, as [`points`].
     fn recorded(record: impl FnOnce(&BesMetrics)) -> Vec<Point> {
-        let exporter = InMemoryMetricExporter::default();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
-        record(&BesMetrics::new(&provider.meter("test")));
-        provider.force_flush().unwrap();
-        points(&exporter)
-    }
-
-    /// `(instrument, sorted attributes as "key=value", value)`; a histogram's
-    /// value is its sum.
-    pub(in crate::bes::sink) type Point = (String, Vec<String>, f64);
-
-    /// Every u64 sum and f64 histogram data point `exporter` holds, sorted.
-    pub(in crate::bes::sink) fn points(exporter: &InMemoryMetricExporter) -> Vec<Point> {
-        let mut points = Vec::new();
-        for resource in exporter.get_finished_metrics().unwrap() {
-            for scope in resource.scope_metrics() {
-                for metric in scope.metrics() {
-                    let name = metric.name().to_owned();
-                    let attrs = |kvs: &mut dyn Iterator<Item = &KeyValue>| {
-                        let mut a: Vec<String> =
-                            kvs.map(|kv| format!("{}={}", kv.key, kv.value)).collect();
-                        a.sort();
-                        a
-                    };
-                    match metric.data() {
-                        AggregatedMetrics::U64(MetricData::Sum(sum)) => {
-                            for p in sum.data_points() {
-                                points.push((
-                                    name.clone(),
-                                    attrs(&mut p.attributes()),
-                                    p.value() as f64,
-                                ));
-                            }
-                        }
-                        AggregatedMetrics::F64(MetricData::Histogram(h)) => {
-                            for p in h.data_points() {
-                                points.push((name.clone(), attrs(&mut p.attributes()), p.sum()));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        points.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        points
-    }
-
-    pub(in crate::bes::sink) fn point(name: &str, attrs: &[&str], value: f64) -> Point {
-        (
-            name.to_owned(),
-            attrs.iter().map(|s| (*s).to_owned()).collect(),
-            value,
-        )
+        test_support::recorded(|meter| record(&BesMetrics::new(meter)))
     }
 
     #[test]
@@ -458,7 +406,7 @@ pub(super) mod tests {
                 ),
                 point(
                     "bazel.build.phase.duration",
-                    &["command=test", "phase=analysis"],
+                    &["command=test", "phase=analysis", "success=false"],
                     2.0
                 ),
             ]

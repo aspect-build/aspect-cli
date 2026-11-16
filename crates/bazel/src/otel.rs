@@ -54,3 +54,83 @@ pub(crate) fn system_time(ts: &Timestamp) -> SystemTime {
 pub(crate) fn duration(d: &axl_proto::Duration) -> Duration {
     Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32)
 }
+
+/// Metric assertions shared by the sinks' tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use opentelemetry::{
+        KeyValue,
+        metrics::{Meter, MeterProvider as _},
+    };
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        data::{AggregatedMetrics, MetricData},
+    };
+
+    /// Records through `record` on a fresh provider and returns every data
+    /// point, as [`points`].
+    pub(crate) fn recorded(record: impl FnOnce(&Meter)) -> Vec<Point> {
+        let (provider, exporter) = provider();
+        record(&provider.meter("test"));
+        provider.force_flush().unwrap();
+        points(&exporter)
+    }
+
+    /// A meter provider whose metrics land in the returned exporter on flush.
+    pub(crate) fn provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        (provider, exporter)
+    }
+
+    /// `(instrument, sorted attributes as "key=value", value)`; a histogram's
+    /// value is its sum.
+    pub(crate) type Point = (String, Vec<String>, f64);
+
+    /// Every u64 sum and f64 histogram data point `exporter` holds, sorted.
+    pub(crate) fn points(exporter: &InMemoryMetricExporter) -> Vec<Point> {
+        let mut points = Vec::new();
+        for resource in exporter.get_finished_metrics().unwrap() {
+            for scope in resource.scope_metrics() {
+                for metric in scope.metrics() {
+                    let name = metric.name().to_owned();
+                    let attrs = |kvs: &mut dyn Iterator<Item = &KeyValue>| {
+                        let mut a: Vec<String> =
+                            kvs.map(|kv| format!("{}={}", kv.key, kv.value)).collect();
+                        a.sort();
+                        a
+                    };
+                    match metric.data() {
+                        AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                            for p in sum.data_points() {
+                                points.push((
+                                    name.clone(),
+                                    attrs(&mut p.attributes()),
+                                    p.value() as f64,
+                                ));
+                            }
+                        }
+                        AggregatedMetrics::F64(MetricData::Histogram(h)) => {
+                            for p in h.data_points() {
+                                points.push((name.clone(), attrs(&mut p.attributes()), p.sum()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        points
+    }
+
+    pub(crate) fn point(name: &str, attrs: &[&str], value: f64) -> Point {
+        (
+            name.to_owned(),
+            attrs.iter().map(|s| (*s).to_owned()).collect(),
+            value,
+        )
+    }
+}

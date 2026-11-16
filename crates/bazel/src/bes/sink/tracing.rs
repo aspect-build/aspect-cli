@@ -16,7 +16,8 @@
 //!   `NamedSetOfFiles`, which are too frequent to be worth recording.
 //!
 //! The same loop records the [`BesMetrics`] from test and build-metrics
-//! events.
+//! events, with the command from `Started` and the outcome from
+//! `BuildFinished` on the build durations.
 
 use std::{
     collections::HashMap,
@@ -354,8 +355,8 @@ mod tests {
     use prost::{Message as _, bytes::Bytes};
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    use super::super::metrics::tests::{Point, point, points};
     use crate::fanout::Broadcaster;
+    use crate::otel::test_support::{Point, point, points};
 
     fn ts(seconds: i64, nanos: i32) -> Timestamp {
         Timestamp { seconds, nanos }

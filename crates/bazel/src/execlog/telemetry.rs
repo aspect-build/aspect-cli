@@ -282,20 +282,14 @@ mod tests {
 
     #[test]
     fn consume_exports_and_counts_spawn_entries_only() {
+        use crate::otel::test_support::{self, points};
         use opentelemetry::metrics::MeterProvider as _;
-        use opentelemetry_sdk::metrics::{
-            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
-            data::{AggregatedMetrics, MetricData},
-        };
 
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let metric_exporter = InMemoryMetricExporter::default();
-        let meter_provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(metric_exporter.clone()).build())
-            .build();
+        let (meter_provider, metric_exporter) = test_support::provider();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("layer")));
         let tracer = provider.tracer("test");
@@ -336,29 +330,15 @@ mod tests {
         assert_eq!(spans[0].parent_span_id, spans[2].span_context.span_id());
 
         meter_provider.force_flush().unwrap();
-        let mut counted = Vec::new();
-        for metric in metric_exporter
-            .get_finished_metrics()
-            .unwrap()
-            .iter()
-            .flat_map(|r| r.scope_metrics())
-            .flat_map(|s| s.metrics())
-        {
-            if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
-                for p in sum.data_points() {
-                    let success = p
-                        .attributes()
-                        .find(|kv| kv.key.as_str() == "success")
-                        .map(|kv| kv.value.to_string());
-                    counted.push((success, p.value()));
-                }
-            }
-        }
-        counted.sort();
+        let success: Vec<String> = points(&metric_exporter)
+            .into_iter()
+            .filter(|(name, ..)| name == "bazel.spawns")
+            .flat_map(|(_, attrs, _)| attrs.into_iter().filter(|a| a.starts_with("success=")))
+            .collect();
         assert_eq!(
-            counted,
-            [(Some("false".into()), 1), (Some("true".into()), 1)],
-            "`success` follows the span's status"
+            success,
+            ["success=false", "success=true"],
+            "one count per spawn entry, and `success` follows the span's status"
         );
     }
 }
