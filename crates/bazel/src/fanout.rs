@@ -48,10 +48,10 @@
 //!
 //! - Events represent real-time occurrences
 //! - Replaying history is not the broadcaster's responsibility
-//! - Higher-level code (like `BuildEventStream`) can implement buffering if needed
+//! - Higher-level code arranges for subscribers to exist in time
 //!
-//! If you need late subscribers to receive all events from the beginning,
-//! implement buffering at the stream level, not in the broadcaster.
+//! `BuildEventStream` binds every subscriber before its reader starts (see
+//! `BuildEventStream::new`), so none needs replay.
 //!
 //! ## 4. Dead Subscriber Cleanup
 //!
@@ -341,8 +341,8 @@ impl<T: Clone> Broadcaster<T> {
     /// Subscribers only receive events sent **after** they subscribe.
     /// Events sent before subscription are not replayed by the broadcaster.
     ///
-    /// **Note**: If you need late subscribers to receive all events, implement
-    /// buffering at a higher level (e.g., in `BuildEventStream`).
+    /// **Note**: `BuildEventStream` binds every subscriber before its reader
+    /// starts, so none needs replay (see `BuildEventStream::new`).
     ///
     /// # Closed Broadcaster
     ///
@@ -1161,12 +1161,11 @@ mod tests {
     }
 
     // =========================================================================
-    // Tests for late subscription scenarios (simulating ctx.bazel.build()
-    // followed by late .build_events() call)
+    // A subscriber bound after events were sent
     // =========================================================================
 
-    /// Simulates: build starts, sends all events, then user calls build_events()
-    /// Expected behavior: Late subscriber misses ALL events (broadcaster doesn't buffer)
+    /// A subscriber bound after every event was sent sees none of them: the
+    /// broadcaster does not buffer.
     #[test]
     fn test_late_subscriber_after_all_events_misses_everything() {
         let broadcaster: Broadcaster<i32> = Broadcaster::new();
@@ -1189,8 +1188,7 @@ mod tests {
         );
     }
 
-    /// Simulates: build starts, sends some events, user calls build_events(), more events sent
-    /// Expected behavior: Late subscriber only receives events sent after subscribing
+    /// A subscriber bound mid-stream sees only the events sent after it.
     #[test]
     fn test_late_subscriber_mid_stream_misses_early_events() {
         let broadcaster: Broadcaster<i32> = Broadcaster::new();
@@ -1215,8 +1213,7 @@ mod tests {
         assert!(late_sub.recv().is_err());
     }
 
-    /// Simulates: build starts in background thread, user delays calling build_events()
-    /// Expected behavior: Events sent during the delay are lost to the late subscriber
+    /// Events a producer thread sends before a subscriber binds are lost to it.
     #[test]
     fn test_late_subscriber_with_concurrent_producer() {
         let broadcaster: Broadcaster<i32> = Broadcaster::new();
@@ -1230,7 +1227,7 @@ mod tests {
             broadcaster_for_thread.close();
         });
 
-        // Simulate user delay before calling build_events()
+        // Bind after the producer has started.
         thread::sleep(Duration::from_millis(10));
 
         // Subscribe late

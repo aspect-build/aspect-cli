@@ -119,7 +119,7 @@ mod tests {
             client: client_pid,
             server: Some(server_pid),
         }
-        .gate(&path);
+        .gate();
         gate.quiet = Duration::from_millis(300);
         gate.quiet_empty = Duration::from_millis(100);
         WorkspaceEventStream::spawn(channel, gate).unwrap()
@@ -165,7 +165,7 @@ mod tests {
                 client: client.id(),
                 server: Some(server.id()),
             }
-            .gate(&path);
+            .gate();
             gate.quiet = Duration::from_millis(300);
             let stream = WorkspaceEventStream::spawn(channel, gate).unwrap();
             let recv = stream.receiver();

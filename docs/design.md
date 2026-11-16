@@ -230,4 +230,4 @@ The Bazel API (`ctx.bazel`) provides structured access to Bazel operations:
 - **query** — chainable query builder (`ctx.bazel.query().targets("//...").deps().kind("rule").eval()`) returning `TargetSet`
 - **info** — retrieve Bazel workspace info as a dict
 
-Build event streaming supports late subscription (calling `.build_events()` after `.wait()` replays buffered events) and multiple concurrent iterators over the same build.
+Each `bazel.build_events.iterator()` handle passed in `build_events=[...]` is bound before the reader starts, so every iterator sees the whole stream, early burst included, and several iterators can read one build.

@@ -11,9 +11,9 @@
 //!   - `build` / `test` — finds `--build_event_binary_file <path>`, finds
 //!     `--scenario=<name>` somewhere in argv, and writes a sequence of
 //!     length-delimited `BuildEvent` protobufs into the BES path according
-//!     to the named scenario. Each "attempt" is one open/write/close cycle
-//!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
-//!     reconnect-after-eviction behavior on a FIFO.
+//!     to the named scenario. Each "attempt" creates the file over, writes it
+//!     and closes it, as Bazel truncates and rewrites the file for each
+//!     attempt of a build it retries after a cache eviction.
 //!
 //!     When `--execution_log_compact_file <path>` is also present, a scenario
 //!     with `execlog_entries` writes that many `ExecLogEntry` protobufs there, in
@@ -186,11 +186,9 @@ fn run_build(args: &[String], verb: &str) {
         write_json_bep(&path, s.json_bep_tests, exit_code);
     }
 
-    // Before the BES write, which blocks on a FIFO until the reader opens it.
-    // Bazel writes the execution log as it executes, i.e. during the build, and
-    // the reader tails it; writing it first here is the closest a one-shot fake
-    // gets to that, and it means the entries are already on disk while the AXL
-    // side is draining BES.
+    // Written before the BES file: Bazel writes the execution log as it
+    // executes, and the reader tails it. This is the closest a one-shot fake
+    // gets to that, and the entries are on disk while the AXL side drains BES.
     if s.execlog_delay.is_zero() {
         log();
     }
@@ -313,21 +311,13 @@ enum ExitBehavior {
     Signal(i32),
 }
 
-/// One full BES interaction. Each attempt is one open/write/close cycle on
-/// the FIFO. `open_delay` sleeps after the FIFO open and before any writes —
-/// only set this on scenarios whose tests assert on what the AXL iterator
-/// received. `build.build_events()` subscribes after `Build::spawn` returns
-/// (the broadcaster doesn't replay history; see
-/// `crates/axl-runtime/src/engine/bazel/stream/broadcaster.rs:271`), so a
-/// pause widens the window for that subscribe to land before basil starts
-/// fanning out events. Scenarios whose tests only check `build.wait()`
-/// status don't need it — leave at zero.
+/// One full BES interaction. Each attempt creates the file over, writes its
+/// events and closes it (see [`write_scenario`]).
 ///
 /// `exit` controls how basil terminates after the event sequence is
 /// flushed. Defaults to `Code(0)`; set explicitly to model nonzero exits
 /// or signal kills.
 struct Scenario {
-    open_delay: Duration,
     attempts: Vec<Vec<BuildEvent>>,
     exit: ExitBehavior,
     /// How many `ExecLogEntry` messages to write to
@@ -353,7 +343,6 @@ struct Scenario {
 impl Default for Scenario {
     fn default() -> Self {
         Self {
-            open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(0, true)]],
             exit: ExitBehavior::Code(0),
             execlog_entries: 0,
@@ -397,22 +386,17 @@ fn write_json_bep(path: &str, tests: &[&str], exit_code: i32) {
     fs::write(path, out).unwrap_or_else(|e| panic!("basil: writing JSON BEP to {path:?}: {e}"));
 }
 
+/// Write each attempt as Bazel does: create the file over (`O_TRUNC`), write
+/// the attempt's events, close it. Attempts after the first wait until the
+/// reader has moved the last one's file off the path (see [`await_moved`]).
 fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
     let last_attempt = scenario.attempts.len().saturating_sub(1);
     for (attempt, events) in scenario.attempts.iter().enumerate() {
-        // One open/write/close per attempt: the read side observes a writer
-        // appear, drain bytes, and disappear — same as Bazel reopening the
-        // BEP file on each retry. Like Bazel, a regular file is created and
-        // started over; creating and truncating are no-ops on the CLI's FIFO.
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .unwrap_or_else(|e| panic!("basil: opening BES path {path:?} for write: {e}"));
-        if !scenario.open_delay.is_zero() {
-            thread::sleep(scenario.open_delay);
+        if attempt > 0 {
+            await_moved(path);
         }
+        let mut f = fs::File::create(path)
+            .unwrap_or_else(|e| panic!("basil: creating BES path {path:?}: {e}"));
         for (i, ev) in events.iter().enumerate() {
             // Holding back the last event of the last attempt is what keeps the
             // consumer's drain loop alive for the handshake.
@@ -425,6 +409,22 @@ fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
         }
     }
 }
+
+/// Wait, for at most [`ATTEMPT_TIMEOUT`], until the reader has moved the
+/// last attempt's file away from `path`, which it does as it opens it. The
+/// reader starts after basil does, and a truncation before that would lose the
+/// attempt; it need not have read any of it. Bazel's first attempt, from server
+/// connect to its final event, is far longer than the reader's start.
+fn await_moved(path: &str) {
+    let deadline = Instant::now() + ATTEMPT_TIMEOUT;
+    while Path::new(path).exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// See [`await_moved`]: long enough for a loaded machine, short enough that a
+/// reader that never comes does not hang the test.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long [`await_pump_handshake`] waits for the consumer. Long enough that a
 /// loaded machine cannot time out a working handshake, short enough that a
@@ -466,15 +466,8 @@ fn await_pump_handshake(file: &str) {
 /// enough for a consumer to count and to tell apart by `id`. `id` runs from 1 so
 /// a test can assert it received a contiguous `1..=count` and catch a prefix.
 ///
-/// Built under a sibling `.partial` name and renamed into place, so the path
-/// appears atomically. A real Bazel daemon holds the log open while it writes, so
-/// a reader that reaches the current end of file is told to wait; here the writer
-/// is this short-lived process and the nominated holder is the daemon stand-in,
-/// which never opens it. A reader arriving between `create` and the last write
-/// would therefore see an empty file, be told the holder has closed it, and fail
-/// to read even a zstd header — yielding zero entries perhaps half the time. The
-/// rename means a reader sees either no file yet (and keeps polling, since this
-/// process is alive) or the whole thing.
+/// Built under a sibling `.partial` name and renamed into place, so a reader
+/// sees either no file yet or the whole thing, never a log cut off mid-write.
 fn write_execlog(path: &str, count: u32) {
     let partial = format!("{path}.partial");
     let file = fs::File::create(&partial)
@@ -504,32 +497,20 @@ fn write_execlog(path: &str, count: u32) {
 fn scenario(name: &str) -> Scenario {
     match name {
         // Clean run: one attempt, terminates with last_message=true.
-        // 50ms open_delay so AXL's `for event in build.build_events()` (a late
-        // subscriber by API shape) lands its subscription before basil starts
-        // fanning out events. Without this, the iterator races the producer
-        // and yields zero events.
-        "success" => Scenario {
-            open_delay: Duration::from_millis(50),
-            ..Default::default()
-        },
+        "success" => Scenario::default(),
 
-        // Regression for aspect-build/aspect-cli#1060: a single attempt with
-        // REMOTE_CACHE_EVICTED (exit code 39) and last_message=true, then
-        // basil exits without writing a retry attempt. axl-runtime's stream
-        // sets `expecting_retry = true` on the evicted BuildFinished and
-        // would otherwise loop swallowing BrokenPipe forever. The fix in
-        // crates/axl-runtime/src/engine/bazel/stream/build_event.rs falls
-        // through to a graceful close once it observes the writer pid is
-        // dead, so this scenario must terminate the AXL build promptly.
+        // A single attempt with REMOTE_CACHE_EVICTED (exit code 39) and
+        // last_message=true, then basil exits without a retry. After the retry
+        // marker the reader waits for another attempt; it has to end once the
+        // client is gone, so this scenario must end the AXL build promptly
+        // (aspect-build/aspect-cli#1060).
         "cache_evicted_no_retry" => Scenario {
             attempts: vec![vec![build_started(), build_finished(39, true)]],
             ..Default::default()
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
-        // retry. Two attempts, one open/write/close each. Matches Bazel's
-        // real reconnect-after-eviction shape and exercises the
-        // `expecting_retry` swallow-BrokenPipe-and-keep-reading path.
+        // retry, each attempt starting the file over as Bazel's do.
         "cache_evicted_with_retry" => Scenario {
             attempts: vec![
                 vec![build_started(), build_finished(39, false)],
@@ -549,9 +530,8 @@ fn scenario(name: &str) -> Scenario {
         },
 
         // Bazel rejecting the command line: it exits nonzero having never
-        // opened the BEP file, so no attempts at all. The read side waits on
-        // a writer that cannot come, which is what `spawn_open_watchdog`
-        // exists to break out of.
+        // created the BEP file, so no attempts at all. The read side waits for
+        // a file that cannot come, and ends when the client does.
         "rejects_command_line" => Scenario {
             attempts: vec![],
             exit: ExitBehavior::Code(2),
@@ -574,11 +554,7 @@ fn scenario(name: &str) -> Scenario {
         // decoded channel's capacity. A shorter log cannot tell a stream that
         // delivers everything apart from one that silently stops at the capacity;
         // 3000 is comfortably past it and still a fraction of a second to write.
-        //
-        // 50ms open_delay as in `success`, so an AXL iterator that subscribes
-        // after the spawn is not racing the BES burst.
         "execlog_beyond_capacity" => Scenario {
-            open_delay: Duration::from_millis(50),
             execlog_entries: 3000,
             ..Default::default()
         },
@@ -606,7 +582,6 @@ fn scenario(name: &str) -> Scenario {
         // 1 again, so a consumer that receives `1..=3000` twice has proved that
         // every attempt got a live handle of its own.
         "execlog_retryable_failure" => Scenario {
-            open_delay: Duration::from_millis(50),
             attempts: vec![vec![build_started(), build_finished(37, true)]],
             exit: ExitBehavior::Code(37),
             execlog_entries: 3000,
@@ -634,7 +609,6 @@ fn scenario(name: &str) -> Scenario {
         // under `--build_event_publish_all_actions`, which is part of why the
         // mismatch was hard to see in a live build.
         "action_and_named_set" => Scenario {
-            open_delay: Duration::ZERO,
             attempts: vec![vec![
                 build_started(),
                 action_executed(),

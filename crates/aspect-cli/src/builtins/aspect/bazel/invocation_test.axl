@@ -184,10 +184,11 @@ def _test_resolve_targets_keeps_explicit_patterns(_):
 
 def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
     """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
-    it exit without ever opening the build-event pipe, and the invocation has
-    to surface that exit rather than wait on a writer that can never arrive.
+    it exit without ever creating the build event file, and the invocation has
+    to surface that exit rather than wait for a file that can never appear.
 
-    Requires `build_events`, since that is what puts a pipe there to wait on.
+    Requires `build_events`, since that is what gives the reader a file to wait
+    for.
     A regression stalls this task until the CI job's own timeout — loud
     enough to spot, which is the point of running it here against a real
     Bazel rather than a fake."""

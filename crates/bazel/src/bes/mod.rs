@@ -14,6 +14,9 @@ pub mod redact;
 pub mod sink;
 pub mod warning;
 
+#[cfg(test)]
+mod testing;
+
 /// One build event as a feed hands it to subscribers: decoded, and with it
 /// the exact bytes it was decoded from (re-encoded when redaction changed it).
 /// A subscriber that only forwards events — the gRPC sink — takes the bytes
