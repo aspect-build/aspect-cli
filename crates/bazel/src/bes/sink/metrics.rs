@@ -9,9 +9,9 @@
 //! | `bazel.build.phase.duration` | histogram | `s` | `command`, `success`, `phase` |
 //!
 //! No attribute carries a target label, so the number of series stays bounded
-//! however large the build. `command` and `success` are left off when the
-//! stream had no `Started` or `BuildFinished`. `bazel.test.attempt.duration` records only
-//! attempts that ran in this build; a cached attempt took no time here.
+//! however large the build. `command` is left off without a `Started`, and
+//! `success` without a `BuildFinished`. `bazel.test.attempt.duration` records
+//! only attempts that ran in this build; a cached attempt took no time here.
 //! `bazel.build.phase.duration` has an `analysis` and an `execution` phase,
 //! which overlap when Bazel interleaves them.
 

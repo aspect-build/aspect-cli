@@ -7,6 +7,9 @@
 //! `OpenTelemetrySpanExt::context`. That parent link needs the tracer and the
 //! `tracing-opentelemetry` layer to share one provider, which `aspect-cli`'s
 //! `trace::init` arranges by installing it globally.
+//!
+//! Also holds the proto time conversions the sinks share and, under test, the
+//! in-memory metric helpers their tests read points with.
 
 use std::time::{Duration, SystemTime};
 

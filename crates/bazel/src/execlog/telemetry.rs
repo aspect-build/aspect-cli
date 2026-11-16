@@ -344,7 +344,7 @@ mod tests {
                 (vec!["success=false".to_owned()], 1.0),
                 (vec!["success=true".to_owned()], 1.0)
             ],
-            "one count per spawn entry, and `success` follows the span's status"
+            "one count per spawn entry, and `success` follows the spawn's exit code"
         );
     }
 }
