@@ -19,7 +19,7 @@ use crate::stream::pipe::Pipe;
 
 /// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it
 /// again in the same invocation, reopening the file for the next attempt.
-const REMOTE_CACHE_EVICTED: i32 = 39;
+pub(crate) const REMOTE_CACHE_EVICTED: i32 = 39;
 
 /// One event as it was read.
 #[derive(Debug)]

@@ -314,8 +314,9 @@ pub fn resolve(
 /// build failure whatever else happened. One that completed with its default
 /// outputs but never got an `aspect_runinfo` group built fine and has no
 /// executable: the aspect returns nothing for a library or a filegroup. One
-/// the build never reported at all was not built, and when the build itself
-/// failed that is the likeliest reason, so the failure carries Bazel's code.
+/// the build's last attempt never reported was not built, and when the build
+/// itself failed that is the likeliest reason, so the failure carries Bazel's
+/// code.
 pub fn classify_unsettled(target: String, failed: bool, has_default: bool, code: i32) -> Failure {
     if failed {
         Failure::Build { target, code }

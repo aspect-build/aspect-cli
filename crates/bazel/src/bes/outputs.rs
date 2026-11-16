@@ -4,8 +4,8 @@
 //! A target's outputs are named by file sets that may arrive before or after
 //! the `target_completed` that references them, so readiness is a question
 //! asked of every event: [`Outputs::handle`] says which targets that event
-//! made ready. A build Bazel retries in the same invocation starts over with
-//! each attempt's `BuildStarted`.
+//! made ready. When Bazel retries a build in the same invocation, the tracker
+//! starts over at each attempt's `BuildStarted`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ const DEFAULT_OUTPUT_GROUP: &str = "default";
 #[derive(Default)]
 struct TargetState {
     /// Output group name → fileset ids, from every `target_completed` for
-    /// the label (the target's own and the aspect's).
+    /// the label in the current attempt (the target's own and the aspect's).
     groups: HashMap<String, Vec<String>>,
     /// A `target_completed` said the target failed, or an `aborted` arrived.
     failed: bool,
@@ -46,7 +46,8 @@ pub struct Ready {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unsettled {
     pub key: String,
-    /// Its own completion reported failure, or it was aborted.
+    /// Its own completion in the last attempt reported failure, or it was
+    /// aborted.
     pub failed: bool,
     /// It completed with its default outputs.
     pub has_default: bool,
@@ -148,11 +149,10 @@ impl Outputs {
         }
     }
 
-    /// Forget what an earlier attempt said about the targets still pending. Bazel
-    /// retries a build in the same invocation (after `REMOTE_CACHE_EVICTED`) as a
-    /// fresh stream that reports every target and file set again, so only the
-    /// last attempt decides whether a target built. Targets already ready stay
-    /// settled.
+    /// Start over for a new attempt. Bazel retries an evicted build
+    /// (`REMOTE_CACHE_EVICTED`) in the same invocation as a fresh stream that
+    /// reports every target and file set again and reuses file-set ids, so only
+    /// the last attempt's events count. Targets already ready stay settled.
     fn restart(&mut self) {
         self.targets.clear();
         self.filesets.clear();
@@ -346,8 +346,20 @@ mod tests {
         event
     }
 
-    /// Bazel's `REMOTE_CACHE_EVICTED`, which ends an attempt it retries.
-    const EVICTED: i32 = 39;
+    const EVICTED: i32 = crate::bes::binary_file::REMOTE_CACHE_EVICTED;
+
+    fn aborted(label: &str) -> BuildEvent {
+        BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::TargetCompleted(build_event_id::TargetCompletedId {
+                    label: label.to_owned(),
+                    ..Default::default()
+                })),
+            }),
+            payload: Some(Payload::Aborted(Default::default())),
+            ..Default::default()
+        }
+    }
 
     fn outputs() -> Outputs {
         Outputs::new(
@@ -439,7 +451,58 @@ mod tests {
         }
         let (code, unsettled) = o.finish();
         assert_eq!(code, 1, "the last attempt's exit code");
+        assert_eq!(unsettled.len(), 1);
         assert!(unsettled[0].failed);
+    }
+
+    /// A target aborted by the evicted attempt is judged by the retry too.
+    #[test]
+    fn a_target_aborted_before_the_retry_builds_is_ready() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&aborted("//:t"));
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        o.handle(&named_set("1", &[(&["bin"], "tool")]));
+        let ready = o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]));
+        assert_eq!(ready.len(), 1);
+    }
+
+    /// File-set ids restart with each attempt, so an id the retry reuses names
+    /// the retry's files, and a group naming one the retry has not sent yet is
+    /// not ready on the evicted attempt's set.
+    #[test]
+    fn a_reused_file_set_id_names_the_retried_attempts_files() {
+        let mut o = outputs();
+        o.handle(&workspace("/x/_main"));
+        o.handle(&started());
+        o.handle(&named_set("1", &[(&["bin"], "old")]));
+        o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(EVICTED));
+
+        o.handle(&started());
+        assert!(
+            o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]))
+                .is_empty(),
+            "set 1 has not arrived in this attempt",
+        );
+        let ready = o.handle(&named_set("1", &[(&["bin"], "new")]));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            ready[0].default_files,
+            vec![PathBuf::from("/x/_main/bin/new")]
+        );
+    }
+
+    /// A retried attempt that stops before its `BuildFinished` reports Bazel's
+    /// silence, not the evicted attempt's code.
+    #[test]
+    fn a_retry_that_never_finishes_reports_no_exit_code() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        assert_eq!(o.finish().0, 1);
     }
 
     /// A target an earlier attempt already handed over stays settled.
