@@ -1473,7 +1473,7 @@ fn register_workspace_events(globals: &mut GlobalsBuilder) {
     /// `workspace_events=[...]` and then `for event in handle:`.
     ///
     /// Every handle receives every event, because the producer blocks for each
-    /// subscriber; with two handles on one build, take turns with `try_pop()`,
+    /// subscriber; with two handles on one build, take turns between them,
     /// since one drained to the end first waits on the other. Drain it before
     /// `build.wait()`, which releases any
     /// still-bound handle so a task that forgets cannot hang. Bazel writes the

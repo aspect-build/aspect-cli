@@ -1944,9 +1944,9 @@ Test = task(implementation = _impl)
     /// drops its own subscriber once they are bound, so neither is capped at
     /// the ring by a subscriber nobody reads.
     ///
-    /// The producer waits for the slower handle, so the task takes turns with
-    /// `try_pop`: draining one to the end first would park it against the other
-    /// at the capacity.
+    /// The producer waits for the slower handle, so the task takes turns, one
+    /// event from each: draining one to the end first would park it against
+    /// the other at the capacity. Leaving a `for` loop does not unsubscribe.
     #[cfg(unix)]
     #[test]
     fn two_workspace_event_handles_both_receive_the_whole_log() {
@@ -1961,17 +1961,16 @@ def _impl(ctx):
         workspace_events = handles,
         stderr = None,
     )
-    seen = [0, 0]
-    for _ in range(1000000):
-        if handles[0].done and handles[1].done:
-            break
-        for i in range(2):
-            event = handles[i].try_pop()
-            if event != None:
-                seen[i] += 1
-                if event.location != str(seen[i]):
-                    return 2
-    if seen != [{SCENARIO_ENTRIES}, {SCENARIO_ENTRIES}]: return 3
+    for n in range(1, {SCENARIO_ENTRIES} + 1):
+        for handle in handles:
+            got = None
+            for event in handle:
+                got = event.location
+                break
+            if got != str(n): return 2
+    for handle in handles:
+        for _ in handle:
+            return 3
     status = build.wait()
     if not status.success: return 1
     return 0
