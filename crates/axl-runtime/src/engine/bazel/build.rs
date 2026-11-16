@@ -1048,11 +1048,9 @@ impl Build {
             None
         };
 
-        // Split execlog sinks into the two paths that serve them: compact paths go
-        // to the tee reader inside the stream thread, decoded paths to a writer
-        // thread each, cloning a subscriber of the decoded stream. Both halves are
-        // paths rather than sinks from here on, so neither loop below can be
-        // reached by the other's variant.
+        // Compact paths go to the tee reader inside the stream thread; decoded
+        // paths get a writer thread each and `telemetry()` one span exporter,
+        // each cloning a subscriber of the decoded stream.
         let mut compact_paths: Vec<String> = vec![];
         let mut decoded_paths: Vec<String> = vec![];
         let mut execlog_telemetry = false;
@@ -1221,7 +1219,7 @@ impl Build {
             }
 
             // One receiver clone each: the channel is a broadcast ring, so the handles
-            // read the same entries the file sinks do rather than competing for them.
+            // read the same entries the decoded sinks do rather than competing for them.
             if !execlog_iters.is_empty() {
                 let stream = execlog_stream.as_ref().ok_or_else(|| {
                     // `partition_execution_log` turns the stream on for any list, so a

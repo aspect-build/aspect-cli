@@ -397,8 +397,8 @@ impl ExecLogStream {
     }
 
     /// Take ownership of a decoded-entry sink thread. Its lifecycle is tied to
-    /// this stream — `join()` will wait for it and propagate write errors so a
-    /// truncated artifact doesn't slip past as success.
+    /// this stream — `join()` waits for it and fails with its error or panic, so
+    /// a decoded file sink's truncated artifact doesn't slip past as success.
     pub fn attach_sink(&mut self, handle: JoinHandle<SinkOutcome>) {
         self.sink_handles.push(handle);
     }

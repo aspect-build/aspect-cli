@@ -224,6 +224,22 @@ mod tests {
     }
 
     #[test]
+    fn a_spawn_with_a_start_but_no_total_time_is_zero_length_at_its_start() {
+        let spawn = Spawn {
+            metrics: Some(SpawnMetrics {
+                start_time: Some(Timestamp {
+                    seconds: 100,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let span = spawn_span(&spawn, at(999, 0));
+        assert_eq!((span.start, span.end), (at(100, 0), at(100, 0)));
+    }
+
+    #[test]
     fn a_failed_spawn_is_an_error_with_its_status_or_exit_code() {
         let exited = spawn_span(
             &Spawn {

@@ -542,6 +542,9 @@ const SPAN_EXPORT_BATCH_SIZE: usize = 2_048;
 const _: () = assert!(SPAN_EXPORT_BATCH_SIZE <= SPAN_QUEUE_SIZE);
 
 /// `name` parsed as a count, or `default` when it is unset or not a number.
+/// The SDK reads the `OTEL_BSP_*` settings too, but an explicit value wins, so
+/// `init` resolves them here to set its own defaults and name the queue size in
+/// the loss report.
 fn env_usize(env: impl Fn(&str) -> Option<String>, name: &str, default: usize) -> usize {
     env(name).and_then(|v| v.parse().ok()).unwrap_or(default)
 }

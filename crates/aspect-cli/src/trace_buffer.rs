@@ -71,8 +71,8 @@ impl SpanTally {
     }
 }
 
-/// Counts every sampled span that ends into a [`SpanTally`], then passes it
-/// to `inner`. Placed in front of the batch processor, whose queue drops
+/// Counts every span that ends into a [`SpanTally`], then passes it to
+/// `inner`. Placed in front of the batch processor, whose queue drops
 /// spans when it is full.
 #[derive(Debug)]
 pub struct CountingSpanProcessor<P> {
@@ -92,9 +92,7 @@ impl<P: SpanProcessor> SpanProcessor for CountingSpanProcessor<P> {
     }
 
     fn on_end(&self, span: SpanData) {
-        if span.span_context.is_sampled() {
-            SpanTally::add(&self.tally.ended, 1);
-        }
+        SpanTally::add(&self.tally.ended, 1);
         self.inner.on_end(span);
     }
 
