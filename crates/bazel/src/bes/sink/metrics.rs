@@ -204,10 +204,7 @@ mod tests {
         build_event_stream::{build_metrics::ActionSummary, test_result::ExecutionInfo},
     };
     use opentelemetry::metrics::MeterProvider as _;
-    use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
-        data::{AggregatedMetrics, MetricData},
-    };
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 
     fn recorded(record: impl FnOnce(&BesMetrics)) -> Vec<Point> {
         test_support::recorded(|meter| record(&BesMetrics::new(meter)))
@@ -276,10 +273,7 @@ mod tests {
 
     #[test]
     fn attempt_duration_uses_second_buckets() {
-        let exporter = InMemoryMetricExporter::default();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
+        let (provider, exporter) = test_support::provider();
         BesMetrics::new(&provider.meter("test")).record_test_result(&TestResult {
             test_attempt_duration: Some(axl_proto::Duration {
                 seconds: 3,

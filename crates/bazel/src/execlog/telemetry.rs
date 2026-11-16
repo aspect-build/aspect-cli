@@ -330,14 +330,20 @@ mod tests {
         assert_eq!(spans[0].parent_span_id, spans[2].span_context.span_id());
 
         meter_provider.force_flush().unwrap();
-        let success: Vec<String> = points(&metric_exporter)
+        let counts: Vec<(Vec<String>, f64)> = points(&metric_exporter)
             .into_iter()
             .filter(|(name, ..)| name == "bazel.spawns")
-            .flat_map(|(_, attrs, _)| attrs.into_iter().filter(|a| a.starts_with("success=")))
+            .map(|(_, attrs, n)| {
+                let success = attrs.into_iter().filter(|a| a.starts_with("success="));
+                (success.collect(), n)
+            })
             .collect();
         assert_eq!(
-            success,
-            ["success=false", "success=true"],
+            counts,
+            [
+                (vec!["success=false".to_owned()], 1.0),
+                (vec!["success=true".to_owned()], 1.0)
+            ],
             "one count per spawn entry, and `success` follows the span's status"
         );
     }
