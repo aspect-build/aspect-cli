@@ -2,14 +2,15 @@
 //! compact execution log, its build event file, and its workspace log.
 //!
 //! It can be read at any moment, and it may not exist yet: bazel creates it
-//! when it gets to it. So the follower opens it
-//! lazily and treats "not there yet" like "nothing written yet". The rules
-//! that decide when the stream is over are the [parent module](super)'s.
+//! when it gets to it. So the follower opens it lazily and treats "not there
+//! yet" like "nothing written yet". The rules that decide when the stream is
+//! over are the [parent module](super)'s.
 //!
 //! A file left behind by an earlier run has to be removed *before* bazel is
-//! spawned: the follower cannot tell it from this build's file, and would read
-//! the previous build's contents. A [`Reservation`] sidesteps that by minting
-//! a path nothing has used, and removes it once the read is over.
+//! spawned ([`clear_stale`]): the follower cannot tell it from this build's
+//! file, and would read the previous build's contents. A [`Reservation`]
+//! sidesteps that by minting a path nothing has used, and removes it once the
+//! read is over.
 //!
 //! # A writer that starts the file over
 //!
@@ -522,15 +523,6 @@ impl Read for File {
 mod tests {
     use super::*;
 
-    #[test]
-    fn clearing_a_stale_log_tolerates_its_absence_and_removes_a_present_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.zst");
-        assert!(clear_stale(&path).is_ok(), "nothing to clear is fine");
-        std::fs::write(&path, b"old").unwrap();
-        assert!(clear_stale(&path).is_ok());
-        assert!(!path.exists());
-    }
     use std::io::Write;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, mpsc};
@@ -542,6 +534,16 @@ mod tests {
 
     fn temp_path() -> PathBuf {
         std::env::temp_dir().join(format!("bazel-file-test-{}.log", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn clearing_a_stale_log_tolerates_its_absence_and_removes_a_present_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.zst");
+        assert!(clear_stale(&path).is_ok(), "nothing to clear is fine");
+        std::fs::write(&path, b"old").unwrap();
+        assert!(clear_stale(&path).is_ok());
+        assert!(!path.exists());
     }
 
     /// A file follower whose owner and writers are flags the test flips.

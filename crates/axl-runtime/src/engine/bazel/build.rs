@@ -77,10 +77,9 @@ fn bind_handles<T: Send + Clone, H: Handle<T>>(
 ) -> io::Result<()> {
     for (bound, handle) in handles.iter().enumerate() {
         let bind = || -> io::Result<()> {
-            let recv = receiver().ok_or_else(|| {
-                io::Error::other(format!("{log} stream has no subscriber to clone"))
-            })?;
-            handle.bind(recv).map_err(io::Error::other)
+            handle
+                .bind(subscriber(receiver(), log)?)
+                .map_err(io::Error::other)
         };
         if let Err(err) = bind() {
             handles[..bound].iter().for_each(Handle::release);
@@ -88,6 +87,14 @@ fn bind_handles<T: Send + Clone, H: Handle<T>>(
         }
     }
     Ok(())
+}
+
+/// A further subscriber to the `log` stream, or an error once it is sealed.
+fn subscriber<T: Send + Clone>(
+    receiver: Option<Receiver<T>>,
+    log: &str,
+) -> io::Result<Receiver<T>> {
+    receiver.ok_or_else(|| io::Error::other(format!("{log} stream has no subscriber to clone")))
 }
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
@@ -1233,17 +1240,12 @@ impl Build {
             // Decoded execlog sinks belong to the execlog stream — joined (and
             // write errors propagated) inside `execlog_stream.join()`.
             if let Some(stream) = execlog_stream.as_mut() {
-                let subscriber = |stream: &ExecLogStream| {
-                    stream.receiver().ok_or_else(|| {
-                        io::Error::other("execution log stream has no subscriber to clone")
-                    })
-                };
                 for path in decoded_paths {
-                    let recv = subscriber(stream)?;
+                    let recv = subscriber(stream.receiver(), "execution log")?;
                     stream.attach_sink(bazel::execlog::sink::spawn_file(recv, path));
                 }
                 if execlog_telemetry {
-                    let recv = subscriber(stream)?;
+                    let recv = subscriber(stream.receiver(), "execution log")?;
                     stream.attach_sink(bazel::execlog::telemetry::spawn(recv));
                 }
             }
@@ -1452,9 +1454,9 @@ impl Build {
         self.sink_invocation_id.borrow().clone().unwrap_or_default()
     }
 
-    /// What the `wait()` method does: wait for the client, join every
-    /// stream, release every decoded consumer. Idempotent only in that a
-    /// second call after the first finds nothing left to join.
+    /// What the `wait()` method does: release every iterator handle, wait for
+    /// the client, then join every stream. Idempotent only in that a second
+    /// call after the first finds nothing left to join.
     pub(super) fn wait_status(&self) -> anyhow::Result<BuildStatus> {
         let build = self;
 
@@ -1496,12 +1498,12 @@ impl Build {
             let _ = trace_sink.join();
         }
 
-        // Reported after the execution log is joined, so a failed workspace
-        // log does not leave that reader running.
-        let workspace_error = build
-            .workspace_event_stream
-            .take()
-            .and_then(|stream| stream.join().err());
+        // Both logs are joined before either failure is reported, so one
+        // failing does not leave the other's reader running.
+        let mut stream_errors = Vec::new();
+        if let Some(Err(err)) = build.workspace_event_stream.take().map(|s| s.join()) {
+            stream_errors.push(format!("workspace event stream thread error: {err}"));
+        }
 
         // Wait for Execlog stream to complete.
         //
@@ -1519,16 +1521,11 @@ impl Build {
                     );
                 }
                 Ok(_) => {}
-                Err(err) => match &workspace_error {
-                    Some(ws) => anyhow::bail!(
-                        "execlog stream thread error: {err}; workspace event stream thread error: {ws}"
-                    ),
-                    None => anyhow::bail!("execlog stream thread error: {}", err),
-                },
+                Err(err) => stream_errors.push(format!("execlog stream thread error: {err}")),
             }
         };
-        if let Some(err) = workspace_error {
-            anyhow::bail!("workspace event stream thread error: {}", err);
+        if !stream_errors.is_empty() {
+            anyhow::bail!("{}", stream_errors.join("; "));
         }
 
         // Drop the span to end the trace
@@ -1560,7 +1557,7 @@ mod tests {
     /// How long the daemon stand-in lives.
     ///
     /// It has to outlast the longest timeout any test passes to
-    /// [`run_execlog_script`], because a timeout leaks the stand-in
+    /// [`run_basil_script`], because a timeout leaks the stand-in
     /// ([`DaemonStandIn::leak`]) and the build that outran the timeout keeps
     /// asking this pid whether more bytes are coming. A stand-in that died first
     /// would answer "the writer is gone" to a build still writing.
@@ -1644,7 +1641,7 @@ mod tests {
     }
 
     /// Run `body` under a daemon stand-in. For a body that cannot hang; one that
-    /// can belongs in [`run_execlog_script`].
+    /// can belongs in [`run_basil_script`].
     #[cfg(unix)]
     fn with_daemon_stand_in<T>(body: impl FnOnce() -> T) -> T {
         let _stand_in = DaemonStandIn::new();
@@ -1654,23 +1651,23 @@ mod tests {
     /// Run `script` as a task under a daemon stand-in, bounded by `timeout`, and
     /// return what `run_task` reported.
     ///
-    /// Every execution-log test below fails by parking rather than by answering
+    /// Every log test below fails by parking rather than by answering
     /// wrongly, so each needs a timeout, and a timeout fires while the work is
     /// still running — hence [`DaemonStandIn::leak`] rather than an ordinary
     /// teardown. `hang` explains the timeout.
     #[cfg(unix)]
-    fn run_execlog_script(
+    fn run_basil_script(
         timeout: std::time::Duration,
         script: String,
         hang: &str,
     ) -> anyhow::Result<Option<u8>> {
-        run_execlog_script_with(timeout, script, hang, false)
+        run_basil_script_with(timeout, script, hang, false)
     }
 
-    /// [`run_execlog_script`], with every signal exported when `exporting`, so
+    /// [`run_basil_script`], with every signal exported when `exporting`, so
     /// builds attach their telemetry sinks.
     #[cfg(unix)]
-    fn run_execlog_script_with(
+    fn run_basil_script_with(
         timeout: std::time::Duration,
         script: String,
         hang: &str,
@@ -1700,18 +1697,21 @@ mod tests {
         }
     }
 
-    /// [`run_execlog_script`], asserting the task exited 0. `wrong` explains a
+    /// [`run_basil_script`], asserting the task exited 0. `wrong` explains a
     /// task that ran and returned nonzero, which is the scripts' own `return 2` /
     /// `return 3` arms.
     #[cfg(unix)]
-    fn run_execlog_task(timeout: std::time::Duration, script: String, hang: &str, wrong: &str) {
-        let exit = run_execlog_script(timeout, script, hang).expect("run_task");
+    fn run_basil_task(timeout: std::time::Duration, script: String, hang: &str, wrong: &str) {
+        let exit = run_basil_script(timeout, script, hang).expect("run_task");
         assert_eq!(exit, Some(0), "{wrong}");
     }
 
-    /// How many entries `--scenario=execlog_beyond_capacity` writes. Longer than
-    /// `CHANNEL_CAPACITY`, which is the only length that can tell a stream that
-    /// delivers everything apart from one that stops at the ring.
+    /// How many entries or events basil's log scenarios write
+    /// (`execlog_beyond_capacity`, `workspace_events_beyond_capacity`,
+    /// `corrupt_workspace_log_beside_execlog` and the other `execlog_*` ones),
+    /// which hard-code the same 3000. Longer than `CHANNEL_CAPACITY`, which is
+    /// the only length that can tell a stream that delivers everything apart
+    /// from one that stops at the ring.
     #[cfg(unix)]
     const SCENARIO_ENTRIES: u32 = 3000;
 
@@ -1768,7 +1768,7 @@ Test = task(implementation = _impl)
             report = report.to_str().unwrap(),
         );
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             script,
             "the execution log's producer parked",
@@ -1820,7 +1820,7 @@ Test = task(implementation = _impl)
             report = report.to_str().unwrap(),
         );
 
-        let exit = run_execlog_script_with(
+        let exit = run_basil_script_with(
             Duration::from_secs(60),
             script,
             "the spawn telemetry sink stopped draining and parked the reader",
@@ -1850,7 +1850,7 @@ Test = task(implementation = _impl)
     fn a_log_nobody_iterates_does_not_hang_the_build() {
         use std::time::Duration;
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
@@ -1885,7 +1885,7 @@ Test = task(implementation = _impl)
     fn an_abandoned_handle_iteration_does_not_hang_the_build() {
         use std::time::Duration;
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
@@ -1924,7 +1924,7 @@ Test = task(implementation = _impl)
     fn an_undrained_iterator_handle_does_not_hang_the_build() {
         use std::time::Duration;
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
@@ -1985,7 +1985,7 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#
         );
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             script,
             "the workspace event reader parked",
@@ -2000,7 +2000,7 @@ Test = task(implementation = _impl)
     fn an_undrained_workspace_event_handle_does_not_hang_the_build() {
         use std::time::Duration;
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
@@ -2059,7 +2059,7 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#
         );
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             script,
             "the first build's reader parked",
@@ -2090,12 +2090,26 @@ Test = task(implementation = _impl)
     }
 
     /// A workspace log already asked for on the command line is tailed where
-    /// it is and kept, not repointed to a path of the CLI's own.
+    /// it is and kept, not repointed to a path of the CLI's own. An earlier
+    /// run's log left at that path is cleared before the spawn, so none of its
+    /// events reach the handle.
     #[cfg(unix)]
     #[test]
     fn an_already_requested_workspace_log_is_read_in_place() {
+        use prost::Message;
+
         let dir = tempfile::tempdir().unwrap();
         let asked = dir.path().join("asked.log");
+        let stale: Vec<u8> = (0..5)
+            .flat_map(|_| {
+                axl_proto::workspace_log::WorkspaceEvent {
+                    location: "stale".into(),
+                    ..Default::default()
+                }
+                .encode_length_delimited_to_vec()
+            })
+            .collect();
+        std::fs::write(&asked, stale).unwrap();
         let script = format!(
             r#"
 def _impl(ctx):
@@ -2108,7 +2122,10 @@ def _impl(ctx):
         workspace_events = [events],
         stderr = None,
     )
-    seen = len([e for e in events])
+    seen = 0
+    for event in events:
+        seen += 1
+        if event.location != str(seen): return 3
     if not build.wait().success: return 1
     # Zero means the flag was added a second time and the reader tailed a
     # path of its own.
@@ -2119,13 +2136,89 @@ Test = task(implementation = _impl)
 "#,
             asked = asked.to_str().unwrap(),
         );
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             script,
             "the reader never reached the log at the requested path",
-            "the reader must tail the requested path",
+            "the reader must tail the requested path, from this build's log alone",
         );
         assert!(asked.exists(), "a requested log belongs to whoever asked");
+    }
+
+    /// The workspace handle's AXL surface: `done` before binding and after
+    /// `drain()`, `try_pop()` mid-build, and a drained handle yielding nothing
+    /// while the build still finishes.
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_event_handle_pops_drains_and_reports_done() {
+        run_basil_task(
+            std::time::Duration::from_secs(60),
+            r#"
+def _impl(ctx):
+    events = bazel.workspace_events.iterator()
+    if events.done: return 2
+    build = ctx.bazel.build(
+        flags = ["--scenario=workspace_events_beyond_capacity"],
+        workspace_events = [events],
+        stderr = None,
+    )
+    first = None
+    for event in events:
+        first = event
+        break
+    if first == None or first.location != "1": return 3
+    popped = events.try_pop()
+    if popped != None and popped.location != "2": return 4
+    events.drain()
+    if not events.done: return 5
+    if events.try_pop() != None: return 6
+    for _ in events:
+        return 7
+    if not build.wait().success: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            .to_string(),
+            "a drained workspace event handle parked the reader",
+            "the handle's done, try_pop and drain must behave as documented",
+        );
+    }
+
+    /// A workspace log Bazel never creates ends the stream once the client
+    /// has exited, rather than after [`QUIET`](bazel::stream::QUIET): an
+    /// iterating task sees no events, promptly. Timed inside the task, since
+    /// the harness around it costs more than the window.
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_log_bazel_never_writes_ends_promptly() {
+        let quiet = bazel::stream::QUIET.as_secs_f64();
+        run_basil_task(
+            std::time::Duration::from_secs(60),
+            format!(
+                r#"
+load("@std//time.axl", "monotonic")
+
+def _impl(ctx):
+    events = bazel.workspace_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        workspace_events = [events],
+        stderr = None,
+    )
+    start = monotonic()
+    for _ in events:
+        return 2
+    if monotonic() - start >= {quiet}: return 3
+    if not build.wait().success: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            ),
+            "the reader waited on a workspace log that never appeared",
+            "a log that never appears must end with no events, before the quiet window",
+        );
     }
 
     /// A workspace log that fails `wait()` must not leave the execution log's
@@ -2133,7 +2226,7 @@ Test = task(implementation = _impl)
     #[cfg(unix)]
     #[test]
     fn a_failed_workspace_log_still_releases_the_execution_log_handles() {
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             r#"
 def _impl(ctx):
@@ -2165,7 +2258,7 @@ Test = task(implementation = _impl)
     #[cfg(unix)]
     #[test]
     fn a_failed_workspace_bind_releases_the_execution_log_handles_this_spawn_bound() {
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             format!(
                 r#"
@@ -2213,7 +2306,7 @@ Test = task(implementation = _impl)
     fn a_drained_handle_stops_consuming_mid_build() {
         use std::time::Duration;
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
@@ -2287,7 +2380,7 @@ Test = task(implementation = _impl)
 "#
         );
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(120),
             script,
             "a slow consumer parked the reader for good",
@@ -2341,7 +2434,7 @@ Test = task(implementation = _impl)
 
         // The timeout is here to catch a deadlock, not to bound a healthy run,
         // which finishes in well under a second.
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             script,
             "a file sink plus a live handle deadlocked",
@@ -2426,7 +2519,7 @@ Test = task(implementation = _impl)
             asked = asked.to_str().unwrap(),
         );
 
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             script,
             "the reader never reached the log at the path already on the command line",
@@ -2492,7 +2585,7 @@ Test = task(implementation = _impl)
             sink = sink_path.to_str().unwrap(),
         );
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             script,
             "the tee truncated the log the reader was tailing",
@@ -2543,7 +2636,7 @@ Test = task(implementation = _impl)
             second = second.to_str().unwrap(),
         );
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             script,
             "compact sinks with no decoded consumer parked the reader past the end \
@@ -2601,7 +2694,7 @@ Test = task(implementation = _impl)
             report = report.to_str().unwrap(),
         );
 
-        let err = run_execlog_script(Duration::from_secs(60), script, "the reader parked")
+        let err = run_basil_script(Duration::from_secs(60), script, "the reader parked")
             .expect_err("a failed copy must fail `wait()`");
         let seen = std::fs::read_to_string(&report).unwrap();
         assert_eq!(seen.trim(), SCENARIO_ENTRIES.to_string(), "decoded entries");
@@ -2655,7 +2748,7 @@ Test = task(implementation = _impl)
             sink = sink_path.to_str().unwrap(),
         );
 
-        run_execlog_task(
+        run_basil_task(
             Duration::from_secs(60),
             script,
             "a compact sink plus a handle deadlocked",
@@ -2703,7 +2796,7 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#
         );
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             script,
             "the reader tailed \"\" and never ended",
@@ -2745,7 +2838,7 @@ Test = task(implementation = _impl)
             dir = dir.path().to_str().unwrap(),
         );
 
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(60),
             script,
             "the reader tailed a path bazel never wrote",
@@ -2839,7 +2932,7 @@ Test = task(implementation = _impl)
 
         // The timeout catches a reader parked on the stale inode rather than
         // bounding a healthy run, which takes a little over two seconds.
-        run_execlog_task(
+        run_basil_task(
             std::time::Duration::from_secs(120),
             script,
             "the reader never reached this build's log",

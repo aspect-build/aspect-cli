@@ -142,7 +142,7 @@ impl std::fmt::Display for Done {
 }
 
 /// What the protocol on top of a stream says about its writer, which neither
-/// the medium nor the [`Gate`] can. See R2 and R2′ in the [module docs](self).
+/// the file nor the [`Gate`] can. See R2 and R2′ in the [module docs](self).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Expect {
     /// Nothing: the rules decide alone.

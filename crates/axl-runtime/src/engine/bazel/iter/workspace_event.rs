@@ -59,6 +59,8 @@ impl WorkspaceEventIter {
         }
     }
 
+    /// Whether this handle still holds a subscriber; `false` once released or
+    /// finished. For tests.
     #[cfg(test)]
     pub fn is_live(&self) -> bool {
         self.sub.is_live()
@@ -74,7 +76,7 @@ impl Handle<WorkspaceEvent> for WorkspaceEventIter {
             return Ok(());
         }
         anyhow::bail!(
-            "this `bazel.workspace_events.iterator()` handle was already bound to a build; \
+            "this `bazel.workspace_events.iterator()` handle was already bound or has finished; \
              create a fresh one per build",
         )
     }
@@ -137,7 +139,7 @@ impl<'v> values::StarlarkValue<'v> for WorkspaceEventIter {
     }
 
     /// Blocks until the next event or the end of the stream. See
-    /// [`Subscription::recv_blocking`] for why it is cancellation-aware.
+    /// the [`iter`](super) module docs for why it is cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         self.sub
             .recv_blocking(|| self.signals.should_unwind(), |_| true)

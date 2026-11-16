@@ -505,9 +505,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace event log by passing a list of
-    ///   `workspace_events.iterator()` handles, each of which receives every event;
-    ///   `[]` leaves it off. Drain a handle **before** `wait()`, which releases any
-    ///   still-bound handle so an undrained one cannot hang the build.
+    ///   `bazel.workspace_events.iterator()` handles, each of which receives every
+    ///   event; `[]` leaves it off, and `True` is refused for naming no consumer.
+    ///   Drain a handle **before** `wait()`, which releases any still-bound
+    ///   handle so an undrained one cannot hang the build.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -640,9 +641,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace event log by passing a list of
-    ///   `workspace_events.iterator()` handles, each of which receives every event;
-    ///   `[]` leaves it off. Drain a handle **before** `wait()`, which releases any
-    ///   still-bound handle so an undrained one cannot hang the build.
+    ///   `bazel.workspace_events.iterator()` handles, each of which receives every
+    ///   event; `[]` leaves it off, and `True` is refused for naming no consumer.
+    ///   Drain a handle **before** `wait()`, which releases any still-bound
+    ///   handle so an undrained one cannot hang the build.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -1476,10 +1478,9 @@ fn register_workspace_events(globals: &mut GlobalsBuilder) {
     /// Every handle receives every event, because the producer blocks for each
     /// subscriber; with two handles on one build, take turns between them,
     /// since one drained to the end first waits on the other. Drain it before
-    /// `build.wait()`, which releases any
-    /// still-bound handle so a task that forgets cannot hang. Bazel writes the
-    /// log to a regular file the CLI tails, so a slow consumer never slows
-    /// Bazel down.
+    /// `build.wait()`, which releases any still-bound handle so a task that
+    /// forgets cannot hang. Bazel writes the log to a regular file the CLI
+    /// tails, so a slow consumer never slows Bazel down.
     ///
     /// Iterating blocks, but stays a safe point: a cancelled run ends the
     /// iteration rather than parking in it.

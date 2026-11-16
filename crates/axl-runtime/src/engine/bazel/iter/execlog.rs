@@ -169,7 +169,7 @@ impl Handle<ExecLogEntry> for ExecLogIter {
             return Ok(());
         }
         anyhow::bail!(
-            "this `bazel.execution_log.iterator()` handle was already bound to a build; \
+            "this `bazel.execution_log.iterator()` handle was already bound or has finished; \
              create a fresh one per build",
         )
     }
@@ -239,7 +239,7 @@ impl<'v> values::StarlarkValue<'v> for ExecLogIter {
     /// Blocks until the next entry this handle's `kinds=` filter wants, or the end
     /// of the stream. Entries of other kinds are discarded rather than yielded as
     /// `None`, unlike the BES iterator's quiet tick. See
-    /// [`Subscription::recv_blocking`] for why it is cancellation-aware.
+    /// the [`iter`](super) module docs for why it is cancellation-aware.
     unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         self.sub
             .recv_blocking(|| self.signals.should_unwind(), |entry| self.wants(entry))
@@ -514,7 +514,7 @@ mod tests {
     /// The AXL-visible half of [`Subscription`]'s on-loan guarantee: a handle
     /// mid-read is still a bound handle, so `bind` refuses it. See
     /// `subscription::State::Reading` for what conflating the two would cost,
-    /// and why this is asserted though AXL cannot reach it.
+    /// and the [`iter`](super) module docs for why AXL cannot reach it.
     #[test]
     fn a_handle_mid_read_cannot_be_rebound() {
         let (_s1, r1) = bounded::<ExecLogEntry>(4);

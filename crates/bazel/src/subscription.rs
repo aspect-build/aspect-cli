@@ -16,7 +16,11 @@ use fibre::spmc::{Receiver, Sender, bounded};
 
 use crate::fanout::{Recv, recv_cancellable};
 
-/// Entries a ring buffers per subscriber before the producer waits.
+/// How far ahead of its slowest subscriber a ring's producer may get before
+/// it blocks: the producer may not lap any subscriber, so this is the whole of
+/// the back-pressure budget, and nothing is dropped past it. It trades memory
+/// for how long a slow consumer can be slow without costing the producer a
+/// context switch per entry.
 pub const CHANNEL_CAPACITY: usize = 1000;
 
 /// A ring of [`CHANNEL_CAPACITY`]: the producer's sender, and its origin.
@@ -69,24 +73,23 @@ enum State<T: Send + Clone> {
     /// and the completing read would then decline to put its own back — one
     /// handle claiming two builds, and a subscriber leaked into `Done`.
     ///
-    /// Unreachable from AXL, which is single-threaded: a task cannot call
-    /// `ctx.bazel.build` while parked inside `iter_next`. Asserted anyway — by
-    /// `a_bind_is_refused_while_a_read_is_in_flight` here and
-    /// `a_handle_mid_read_cannot_be_rebound` on the handle — because the
-    /// guarantee belongs to these types rather than to the evaluator that
-    /// happens to make it unreachable.
+    /// A single-threaded caller cannot reach it, since it cannot bind while
+    /// parked in a read. Asserted anyway, by
+    /// `a_bind_is_refused_while_a_read_is_in_flight`, because the guarantee
+    /// belongs to this type rather than to the caller that happens to make it
+    /// unreachable.
     Reading,
-    /// Unsubscribed: drained, released by `build.wait()`, or ended by a cancel.
+    /// Unsubscribed: the stream ended, or it was released or cancelled.
     Done,
 }
 
 /// One subscriber of a decoded Bazel log, releasable from outside.
 ///
-/// `Clone`, and the state behind an `Arc`, for one reason: `Build` keeps a clone
-/// of every subscription it handed out so `wait()` can [`release`](Self::release)
-/// each one before joining the reader. The producer blocks for every subscriber
-/// it has, so one an AXL task stopped reading — or never started — would
-/// otherwise park the reader on a full ring and the join would never return.
+/// `Clone`, and the state behind an `Arc`, so whoever binds it can keep a clone
+/// and [`release`](Self::release) it before joining the producer. The producer
+/// blocks for every subscriber it has, so one whose consumer stopped reading,
+/// or never started, would otherwise park it on a full ring and the join would
+/// never return.
 #[derive(Debug)]
 pub struct Subscription<T: Send + Clone> {
     state: Arc<Mutex<State<T>>>,
@@ -124,7 +127,7 @@ impl<T: Send + Clone> Subscription<T> {
 
     /// Unsubscribe, dropping any entries still buffered. Idempotent.
     ///
-    /// `build.wait()` calls this on every subscription it handed out, because the
+    /// Called on every subscription before the producer is joined, because the
     /// subscriber each holds is one the producer blocks for. A read parked in
     /// [`recv_blocking`](Self::recv_blocking) does not hold the lock, so this
     /// lands even mid-drain and the read then declines to re-subscribe. It does
@@ -136,8 +139,7 @@ impl<T: Send + Clone> Subscription<T> {
     }
 
     /// Whether a subscriber is held right now; `false` while a read has it on
-    /// loan. For tests only: nothing in the AXL path needs to distinguish `Live`
-    /// from `Reading`.
+    /// loan. For tests: nothing else needs to tell `Live` from `Reading`.
     pub fn is_live(&self) -> bool {
         matches!(*self.state.lock().unwrap(), State::Live { .. })
     }
@@ -147,16 +149,9 @@ impl<T: Send + Clone> Subscription<T> {
         matches!(*self.state.lock().unwrap(), State::Done)
     }
 
-    /// Block for the next entry `wants` accepts, or the end of the stream.
-    ///
-    /// Cancellation-aware, as every blocking builtin must be (see
-    /// `engine::cancellation`), and here that earns its keep: a drain sits on the
-    /// critical path of every bazel-driving task, right before the one other
-    /// cancellation-aware wait, and the end-of-stream signal is the Bazel *daemon*
-    /// closing the log file — which an interrupted invocation need not make happen
-    /// promptly. A cancel ends the iteration, which also drops the subscriber and
-    /// so frees a reader blocked on it; an iterator's next call raises the task's
-    /// exit, since an iterator cannot raise one itself.
+    /// Block for the next entry `wants` accepts, or `None` at the end of the
+    /// stream or once `cancelled` says so. Either unsubscribes, which also frees
+    /// a producer blocked on this subscriber.
     ///
     /// Entries `wants` rejects are discarded rather than returned: a filtered-out
     /// entry carries nothing a caller could act on, and a log is mostly
@@ -223,8 +218,8 @@ impl<T: Send + Clone> Subscription<T> {
     ///
     /// Paired with [`finish_read`](Self::finish_read) by
     /// [`recv_blocking`](Self::recv_blocking), which is the only caller that
-    /// should need them. Visible to the sibling iterator modules so their tests
-    /// can put a subscription on loan, which AXL itself cannot observe.
+    /// should need them. Public so the iterator handles' tests in `axl-runtime`
+    /// can put a subscription on loan.
     pub fn take_for_read(&self) -> Option<Receiver<T>> {
         let mut state = self.state.lock().unwrap();
         match std::mem::replace(&mut *state, State::Reading) {
@@ -267,7 +262,7 @@ mod tests {
 
     /// A read in flight must not look like a subscription waiting to be bound.
     /// See [`State::Reading`] for what conflating the two would cost, and why
-    /// this is asserted though AXL cannot reach it.
+    /// this is asserted though a single-threaded caller cannot reach it.
     #[test]
     fn a_bind_is_refused_while_a_read_is_in_flight() {
         let (_s1, r1) = bounded::<ExecLogEntry>(4);
