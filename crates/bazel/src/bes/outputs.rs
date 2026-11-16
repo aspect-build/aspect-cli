@@ -22,10 +22,11 @@ const FILESET_DEPTH: usize = 32;
 /// Bazel's name for a target's default outputs.
 const DEFAULT_OUTPUT_GROUP: &str = "default";
 
+/// One target, as the current attempt has reported it.
 #[derive(Default)]
 struct TargetState {
     /// Output group name → fileset ids, from every `target_completed` for
-    /// the label in the current attempt (the target's own and the aspect's).
+    /// the label (the target's own and the aspect's).
     groups: HashMap<String, Vec<String>>,
     /// A `target_completed` said the target failed, or an `aborted` arrived.
     failed: bool,
@@ -42,12 +43,12 @@ pub struct Ready {
     pub extra_files: Vec<PathBuf>,
 }
 
-/// A target the stream ended on without it becoming ready.
+/// A target the stream ended on without it becoming ready, as of the last
+/// attempt.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unsettled {
     pub key: String,
-    /// Its own completion in the last attempt reported failure, or it was
-    /// aborted.
+    /// Its own completion reported failure, or it was aborted.
     pub failed: bool,
     /// It completed with its default outputs.
     pub has_default: bool,
@@ -150,9 +151,9 @@ impl Outputs {
     }
 
     /// Start over for a new attempt. Bazel retries an evicted build
-    /// (`REMOTE_CACHE_EVICTED`) in the same invocation as a fresh stream that
-    /// reports every target and file set again and reuses file-set ids, so only
-    /// the last attempt's events count. Targets already ready stay settled.
+    /// (`REMOTE_CACHE_EVICTED`) in the same invocation as a fresh stream whose
+    /// file-set ids restart, so only the last attempt's events count. Targets
+    /// already ready stay settled.
     fn restart(&mut self) {
         self.targets.clear();
         self.filesets.clear();
@@ -261,6 +262,8 @@ mod tests {
         WorkspaceConfig, build_event_id, build_finished::ExitCode,
     };
 
+    const EVICTED: i32 = crate::bes::binary_file::REMOTE_CACHE_EVICTED;
+
     fn named_set(id: &str, files: &[(&[&str], &str)]) -> BuildEvent {
         BuildEvent {
             id: Some(BuildEventId {
@@ -345,8 +348,6 @@ mod tests {
         }
         event
     }
-
-    const EVICTED: i32 = crate::bes::binary_file::REMOTE_CACHE_EVICTED;
 
     fn aborted(label: &str) -> BuildEvent {
         BuildEvent {
@@ -465,7 +466,31 @@ mod tests {
         o.handle(&started());
         o.handle(&named_set("1", &[(&["bin"], "tool")]));
         let ready = o.handle(&completed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(0));
         assert_eq!(ready.len(), 1);
+        assert_eq!(o.finish(), (0, vec![]));
+    }
+
+    /// A retry that dies after the evicted attempt failed a target still ends
+    /// in a build failure: the target is unreported and Bazel never said.
+    #[test]
+    fn a_retry_cut_off_after_a_failure_leaves_the_target_unreported() {
+        let mut o = outputs();
+        o.handle(&started());
+        o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]));
+        o.handle(&finished(EVICTED));
+        o.handle(&started());
+        assert_eq!(
+            o.finish(),
+            (
+                1,
+                vec![Unsettled {
+                    key: "//:t".to_owned(),
+                    failed: false,
+                    has_default: false,
+                }]
+            )
+        );
     }
 
     /// File-set ids restart with each attempt, so an id the retry reuses names
@@ -474,8 +499,8 @@ mod tests {
     #[test]
     fn a_reused_file_set_id_names_the_retried_attempts_files() {
         let mut o = outputs();
-        o.handle(&workspace("/x/_main"));
         o.handle(&started());
+        o.handle(&workspace("/x/_main"));
         o.handle(&named_set("1", &[(&["bin"], "old")]));
         o.handle(&failed("//:t", &[("default", "1"), ("extra", "1")]));
         o.handle(&finished(EVICTED));
