@@ -2388,7 +2388,7 @@ Test = task(implementation = _impl)
         assert!(!bad.exists());
         let err = format!("{err:#}");
         assert!(
-            err.contains(bad.to_str().unwrap()) && err.contains("cannot open"),
+            err.contains(bad.to_str().unwrap()) && err.contains("failed to create"),
             "the error should name the copy and why: {err}",
         );
     }

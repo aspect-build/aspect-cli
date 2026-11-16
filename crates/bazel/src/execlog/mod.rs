@@ -56,7 +56,8 @@ pub struct Plan {
 /// copy — except one naming the very file Bazel is writing, whose
 /// `File::create` would truncate it mid-build. Both cases can hold one: a
 /// sink's path can already be on the command line, and two sinks can name one
-/// path, in which case the first lent it to Bazel.
+/// path, in which case the first lent it to Bazel. Sinks naming the same path
+/// share one tee.
 pub fn plan(requested: Option<PathBuf>, mut compact: Vec<String>) -> Plan {
     let (path, add_flag) = match requested {
         Some(path) => (path, false),
@@ -69,7 +70,8 @@ pub fn plan(requested: Option<PathBuf>, mut compact: Vec<String>) -> Plan {
             (feed::ExecLogStream::reserve_path(direct), true)
         }
     };
-    compact.retain(|sink| Path::new(sink) != path);
+    let mut seen = std::collections::HashSet::new();
+    compact.retain(|sink| Path::new(sink) != path && seen.insert(sink.clone()));
     Plan {
         path,
         add_flag,
@@ -172,6 +174,15 @@ mod tests {
         assert_eq!(p.path, PathBuf::from("/tmp/first.zst"));
         // The duplicate of the lent path would truncate it; the other is teed.
         assert_eq!(p.tee, vec!["/tmp/second.zst".to_string()]);
+    }
+
+    #[test]
+    fn sinks_naming_one_path_share_a_tee() {
+        let p = plan(
+            Some(PathBuf::from("/tmp/asked.zst")),
+            vec!["/tmp/copy.zst".to_string(), "/tmp/copy.zst".to_string()],
+        );
+        assert_eq!(p.tee, vec!["/tmp/copy.zst".to_string()]);
     }
 
     #[test]
