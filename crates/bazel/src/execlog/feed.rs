@@ -96,6 +96,22 @@ impl<R: Read> MultiTeeReader<R> {
     }
 }
 
+/// Fail when the followed log at `path` ended `done` by breaking, naming the
+/// path and how far it got. A read error ends the file's stream like its end
+/// does, so without this a log cut short would read as read to the end.
+fn broken_read(done: Option<&crate::stream::Done>, path: &std::path::Path) -> io::Result<()> {
+    let path = path.display();
+    match done {
+        Some(crate::stream::Done::Broken { bytes: 0, error }) => Err(io::Error::other(format!(
+            "ExecLog: reading '{path}' failed: {error}"
+        ))),
+        Some(crate::stream::Done::Broken { bytes, error }) => Err(io::Error::other(format!(
+            "ExecLog: reading '{path}' failed after {bytes} bytes: {error}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ExecLogStreamError {
     #[error("io error: {0}")]
@@ -133,7 +149,8 @@ pub enum ExecLogStreamError {
 /// verdict lives rather than a gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReaderOutcome {
-    /// The log appeared and was read to the end of the stream.
+    /// The log appeared and was read to the end of the stream. A read error
+    /// fails the stream instead.
     Read,
     /// The invocation ended before the log appeared.
     NeverAppeared,
@@ -208,7 +225,7 @@ impl ExecLogStream {
     /// The thread streams the file as Bazel writes it using
     /// [`crate::stream::file::File`], which waits for the file to exist and for
     /// more bytes while Bazel holds it open, and says when the stream is over. It
-    /// self-terminates when Bazel closes the file.
+    /// self-terminates when Bazel closes the file; a read error fails `join()`.
     ///
     /// Unlike the BES FIFO, a regular file loses nothing by starting late: bytes
     /// written before the reader opens are still there to be read.
@@ -262,16 +279,16 @@ impl ExecLogStream {
 
             // Bazel exited without ever writing an execution log: an empty
             // stream, not a failure, since the build's own exit code is the thing
-            // the caller wants to see.
+            // the caller wants to see. A path that cannot be opened is a failure.
             //
             // Whether that is worth saying out loud depends on the exit code,
             // which this thread does not have — so it reports the fact and
             // `join()`'s caller decides. See [`ReaderOutcome::NeverAppeared`].
             if !file.appear() {
-                if let Some(crate::stream::Done::Broken { error, .. }) = file.take_done() {
-                    return Err(error.into());
-                }
-                sender.close()?;
+                let broken = broken_read(file.done(), file.path());
+                let closed = sender.close();
+                broken?;
+                closed?;
                 return Ok(ReaderOutcome::NeverAppeared);
             }
             let out_raw = MultiTeeReader {
@@ -300,7 +317,11 @@ impl ExecLogStream {
                         Err(err) => return Err(err.into()),
                     }
                 }
-                sender.close()?;
+                let file = &out_raw.get_ref().get_ref().inner;
+                let broken = broken_read(file.done(), file.path());
+                let closed = sender.close();
+                broken?;
+                closed?;
                 Ok(ReaderOutcome::Read)
             })();
             // Every copy is finished however reading ended, so a failed one is
@@ -548,6 +569,80 @@ mod tests {
             "{err}"
         );
         assert_eq!(err.matches("io error:").count(), 1, "{err}");
+    }
+
+    /// A log that opens and then fails to read ends the stream with an error
+    /// naming it, not as a log read to the end. A directory at the path opens
+    /// and then fails every read.
+    #[test]
+    fn a_log_that_breaks_after_it_appears_fails_the_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.log");
+        std::fs::create_dir(&path).unwrap();
+        let pid = std::process::id();
+        let stream = ExecLogStream::spawn_with_file(path.clone(), pid, pid, vec![]).unwrap();
+        let err = stream.join().unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("reading '{}' failed:", path.display())),
+            "{err}"
+        );
+    }
+
+    /// The error names the path and how many bytes arrived before the break;
+    /// any other end is not an error.
+    #[test]
+    fn broken_read_names_the_path_and_bytes() {
+        use crate::stream::Done;
+        let path = std::path::Path::new("/ws/exec.log");
+        let broken = Done::Broken {
+            bytes: 4096,
+            error: io::Error::other("Input/output error"),
+        };
+        let err = broken_read(Some(&broken), path).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "ExecLog: reading '/ws/exec.log' failed after 4096 bytes: Input/output error"
+        );
+        let at_start = Done::Broken {
+            bytes: 0,
+            error: io::Error::other("Is a directory"),
+        };
+        assert_eq!(
+            broken_read(Some(&at_start), path).unwrap_err().to_string(),
+            "ExecLog: reading '/ws/exec.log' failed: Is a directory"
+        );
+        assert!(broken_read(Some(&Done::Drained { bytes: 4096 }), path).is_ok());
+        assert!(broken_read(None, path).is_ok());
+    }
+
+    /// A log that never appears, with the invocation over, is not an error.
+    #[test]
+    fn a_log_that_never_appears_is_not_an_error() {
+        let gone = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            pid
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let stream =
+            ExecLogStream::spawn_with_file(dir.path().join("exec.log"), gone, gone, vec![])
+                .unwrap();
+        assert_eq!(stream.join().unwrap(), ReaderOutcome::NeverAppeared);
+    }
+
+    /// A path that cannot be opened at all fails the same way before the log
+    /// appears.
+    #[test]
+    fn a_log_path_that_cannot_open_fails_the_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("exec.log");
+        let pid = std::process::id();
+        let stream = ExecLogStream::spawn_with_file(path.clone(), pid, pid, vec![]).unwrap();
+        let err = stream.join().unwrap_err().to_string();
+        assert!(err.contains(path.to_str().unwrap()), "{err}");
     }
 
     /// Why the stream must not keep an unread subscriber once real ones exist.
