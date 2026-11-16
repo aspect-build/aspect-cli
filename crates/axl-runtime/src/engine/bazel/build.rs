@@ -1259,7 +1259,7 @@ impl Build {
             }
 
             // Every consumer has cloned what it needs; an unread subscriber left
-            // on the stream would cap them all (see `ExecLogStream::recv`).
+            // on the stream would cap them all (see `bazel::subscription::Origin`).
             if let Some(stream) = execlog_stream.as_mut() {
                 stream.seal();
             }
