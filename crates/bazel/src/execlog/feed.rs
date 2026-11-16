@@ -56,7 +56,7 @@ impl Tee {
         }
     }
 
-    /// Flush; why the copy is incomplete if it is.
+    /// Flush the copy; returns why it is incomplete, if it is.
     fn finish(&mut self) -> Option<String> {
         if let Some(mut out) = self.out.take()
             && let Err(e) = out.flush()
@@ -243,7 +243,7 @@ impl ExecLogStream {
     /// `CompactFile` sinks are unaffected — raw bytes are tee'd by
     /// [`MultiTeeReader`] before decoding. A copy that cannot be created or
     /// written fails alone, leaving the other copies and the decoded stream
-    /// unaffected, and the failure is the thread's result.
+    /// unaffected, and [`join`](Self::join) reports the failure.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
@@ -345,26 +345,43 @@ impl ExecLogStream {
     ///
     /// Releases the stream's own subscriber if it still holds one, so that with no
     /// consumer left the reader stops decoding and drains. Then waits for the
-    /// reader thread and every attached file-sink writer, surfacing the first
-    /// write error if any.
+    /// reader thread and every attached file-sink writer, failing with every
+    /// error among them (see [`combine`]).
     pub fn join(mut self) -> Result<ReaderOutcome, ExecLogStreamError> {
         self.recv.take();
         let reader_result = self.handle.join().expect("join error");
-        for h in self.file_sink_handles {
-            match h.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return Err(ExecLogStreamError::IO(std::io::Error::other(e.last_error)));
-                }
-                Err(_) => {
-                    return Err(ExecLogStreamError::IO(std::io::Error::other(
-                        "execlog file sink panicked",
-                    )));
-                }
-            }
-        }
-        reader_result
+        let sink_errors = self
+            .file_sink_handles
+            .into_iter()
+            .filter_map(|h| match h.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.last_error),
+                Err(_) => Some("execlog file sink panicked".to_owned()),
+            })
+            .collect();
+        combine(reader_result, sink_errors)
     }
+}
+
+/// The reader's result, failed with the reader's error (which carries every
+/// failed compact copy) and every decoded sink's. A lone reader error is kept
+/// as it is.
+fn combine(
+    reader: Result<ReaderOutcome, ExecLogStreamError>,
+    sink_errors: Vec<String>,
+) -> Result<ReaderOutcome, ExecLogStreamError> {
+    if sink_errors.is_empty() {
+        return reader;
+    }
+    let mut errors = vec![];
+    if let Err(e) = reader {
+        errors.push(match e {
+            ExecLogStreamError::IO(io) => io.to_string(),
+            other => other.to_string(),
+        });
+    }
+    errors.extend(sink_errors);
+    Err(ExecLogStreamError::IO(io::Error::other(errors.join("; "))))
 }
 
 #[cfg(test)]
@@ -452,6 +469,7 @@ mod tests {
         assert!(err.contains("write to 'full.zstd' failed"), "{err}");
     }
 
+    /// A copy whose bytes all went through but whose flush fails is reported.
     #[test]
     fn a_tee_whose_flush_fails_is_reported() {
         let mut tee = MultiTeeReader {
@@ -478,17 +496,29 @@ mod tests {
         );
     }
 
+    /// A failed compact copy and a failed decoded sink are both named.
     #[test]
-    fn tees_that_all_open_finish_cleanly() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("copy.zstd");
-        let mut tee = MultiTeeReader {
-            inner: &b"abc"[..],
-            tees: vec![Tee::open(path.to_str().unwrap().to_string())],
-        };
-        std::io::copy(&mut tee, &mut std::io::sink()).unwrap();
-        tee.finish().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+    fn join_names_a_failed_copy_and_a_failed_sink() {
+        let reader = Err(ExecLogStreamError::IO(io::Error::other(
+            "ExecLog: failed to create '/missing/y'",
+        )));
+        let err = combine(reader, vec!["ExecLog: failed to create '/ro/x'".to_owned()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/missing/y") && err.contains("/ro/x"), "{err}");
+    }
+
+    #[test]
+    fn join_keeps_a_clean_or_lone_reader_result() {
+        assert_eq!(
+            combine(Ok(ReaderOutcome::Read), vec![]).unwrap(),
+            ReaderOutcome::Read
+        );
+        let err = combine(Ok(ReaderOutcome::Read), vec!["sink".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("sink"));
+        let decode = prost::DecodeError::new("bad entry");
+        let err = combine(Err(ExecLogStreamError::ProstDecode(decode)), vec![]).unwrap_err();
+        assert!(matches!(err, ExecLogStreamError::ProstDecode(_)));
     }
 
     /// Why the stream must not keep an unread subscriber once real ones exist.

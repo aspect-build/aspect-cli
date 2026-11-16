@@ -71,7 +71,7 @@ pub fn plan(requested: Option<PathBuf>, mut compact: Vec<String>) -> Plan {
         }
     };
     let mut seen = std::collections::HashSet::new();
-    compact.retain(|sink| Path::new(sink) != path && seen.insert(sink.clone()));
+    compact.retain(|sink| Path::new(sink) != path && seen.insert(PathBuf::from(sink)));
     Plan {
         path,
         add_flag,
@@ -180,7 +180,7 @@ mod tests {
     fn sinks_naming_one_path_share_a_tee() {
         let p = plan(
             Some(PathBuf::from("/tmp/asked.zst")),
-            vec!["/tmp/copy.zst".to_string(), "/tmp/copy.zst".to_string()],
+            vec!["/tmp/copy.zst".to_string(), "/tmp//copy.zst".to_string()],
         );
         assert_eq!(p.tee, vec!["/tmp/copy.zst".to_string()]);
     }
