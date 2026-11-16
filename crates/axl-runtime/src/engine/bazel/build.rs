@@ -3299,7 +3299,7 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// Without a stream the CLI adds no FIFO flag, so the caller's flag reaches
+    /// Without a stream the CLI adds no flag of its own, so the caller's flag reaches
     /// Bazel untouched and Bazel writes the file itself.
     #[test]
     fn without_a_stream_bazel_writes_the_requested_bep_file() {
