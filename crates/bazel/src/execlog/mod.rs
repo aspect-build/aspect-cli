@@ -8,6 +8,9 @@ pub mod sink;
 mod spawn_metrics;
 pub mod telemetry;
 
+/// The log's name in a history folder.
+pub const FILE_NAME: &str = "execlog.zstd";
+
 /// The flag that names where Bazel writes the compact execution log.
 pub const COMPACT_FILE_FLAG: &str = "--execution_log_compact_file";
 
@@ -17,14 +20,16 @@ pub const COMPACT_FILE_FLAG: &str = "--execution_log_compact_file";
 /// other; [`take_history_request`] takes it off the command line.
 pub const IN_HISTORY: &str = "%aspect_history%";
 
-/// `flags` without any request for [`IN_HISTORY`], and whether there was one.
+/// `flags` without any request for [`IN_HISTORY`], and whether there was one:
+/// a literal flag in either form, or an rc entry the CLI restated as a
+/// `--default_override` token (a `common`-scoped injection renders as one).
 pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
     let inline = format!("{COMPACT_FILE_FLAG}={IN_HISTORY}");
     let mut asked = false;
     let mut kept = Vec::with_capacity(flags.len());
     let mut flags = flags.into_iter().peekable();
     while let Some(flag) = flags.next() {
-        if flag == inline {
+        if flag == inline || crate::rc::override_payload(&flag) == Some(inline.as_str()) {
             asked = true;
         } else if flag == COMPACT_FILE_FLAG && flags.peek().is_some_and(|v| v == IN_HISTORY) {
             flags.next();
@@ -125,6 +130,12 @@ mod tests {
             kept,
             flags(&["--a", "--execution_log_compact_file=/tmp/mine.zst"])
         );
+        let (kept, asked) = take_history_request(flags(&[
+            "--default_override=0:common=--execution_log_compact_file=%aspect_history%",
+            "--default_override=0:build=--a",
+        ]));
+        assert!(asked, "an rc entry restated as an override");
+        assert_eq!(kept, flags(&["--default_override=0:build=--a"]));
         let (kept, asked) = take_history_request(flags(&["--a"]));
         assert!(!asked);
         assert_eq!(kept, flags(&["--a"]));

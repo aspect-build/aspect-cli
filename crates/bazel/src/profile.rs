@@ -17,6 +17,41 @@ pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> 
     crate::rc::requested_path(flags, FLAG, verb, directory)
 }
 
+/// The option that turns the profile on or off.
+const GENERATE: &str = "--generate_json_trace_profile";
+
+/// Whether `flags` turn the profile off for `verb`. A `--profile` would turn
+/// it back on, so a caller who turned it off is not given one. Read as
+/// [`crate::rc::last_flag_value`] reads a value: a literal beats an rc entry,
+/// and the last of each wins.
+pub fn turned_off(flags: &[String], verb: &str) -> bool {
+    let negated = format!("--no{}", &GENERATE[2..]);
+    let value = |token: &str| -> Option<bool> {
+        if token == GENERATE {
+            Some(true)
+        } else if token == negated {
+            Some(false)
+        } else {
+            let value = token.strip_prefix(GENERATE)?.strip_prefix('=')?;
+            Some(!matches!(value, "false" | "no" | "0"))
+        }
+    };
+    let last = |tokens: &[&str]| tokens.iter().rev().find_map(|t| value(t));
+    let tokens: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let literals: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|t| !crate::rc::is_default_override(t))
+        .collect();
+    let on = last(&literals).or_else(|| {
+        crate::rc::override_buckets(&tokens, verb)
+            .iter()
+            .rev()
+            .find_map(|bucket| last(bucket))
+    });
+    on == Some(false)
+}
+
 /// Copy the profile Bazel wrote at `from` to `to`, once its client has
 /// exited. A build that ended before Bazel wrote one has nothing to copy,
 /// which is not an error.
@@ -30,6 +65,44 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strings(flags: &[&str]) -> Vec<String> {
+        flags.iter().map(|f| f.to_string()).collect()
+    }
+
+    #[test]
+    fn the_profile_is_off_only_when_the_last_word_says_so() {
+        assert!(!turned_off(&[], "build"));
+        assert!(turned_off(
+            &strings(&["--nogenerate_json_trace_profile"]),
+            "build"
+        ));
+        assert!(turned_off(
+            &strings(&["--generate_json_trace_profile=false"]),
+            "build"
+        ));
+        assert!(!turned_off(
+            &strings(&[
+                "--nogenerate_json_trace_profile",
+                "--generate_json_trace_profile"
+            ]),
+            "build"
+        ));
+        assert!(turned_off(
+            &strings(&["--default_override=0:build=--nogenerate_json_trace_profile"]),
+            "build"
+        ));
+        assert!(
+            !turned_off(
+                &strings(&[
+                    "--default_override=0:build=--nogenerate_json_trace_profile",
+                    "--generate_json_trace_profile",
+                ]),
+                "build"
+            ),
+            "a literal beats an rc entry"
+        );
+    }
 
     #[test]
     fn a_profile_is_copied_whole() {

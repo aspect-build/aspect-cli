@@ -16,9 +16,9 @@
 //! in for Bazel, and asserts on what the hook actually received:
 //!
 //!   * **every entry, in order** — basil's log is 3000 entries, past the decoded
-//!     channel's 1000-entry capacity, so a handle that was never opened (0), a
-//!     log repointed away from the reader (0) or a drain that stopped early
-//!     (< 3000) are all distinguishable from a complete one.
+//!     channel's 1000-entry capacity, so a handle that was never opened (0) or
+//!     a drain that stopped early (< 3000) is distinguishable from a complete
+//!     one.
 //!   * **during the build, not after it** — `BASIL_EXECLOG_PUMP_HANDSHAKE` makes
 //!     basil hold back the final build event until the hook has seen its first
 //!     entry, so `pumped` in the status file means the dispatch happened inside

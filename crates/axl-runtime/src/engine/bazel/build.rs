@@ -838,8 +838,13 @@ pub struct Build {
     #[allocative(skip)]
     workspace_event_iters: Vec<WorkspaceEventIter>,
 
+    /// Whether something reads the execution log, rather than only recording
+    /// it: a log that never appears is worth a warning only then.
+    #[allocative(skip)]
+    execlog_read: bool,
+
     /// The profile Bazel writes into the history, and the path the caller
-    /// asked for it at, which `wait()` copies it to once the client exits.
+    /// asked for it at, which [`Build::reaped`] copies it to.
     #[allocative(skip)]
     profile_copy: RefCell<Option<(PathBuf, PathBuf)>>,
 
@@ -946,8 +951,30 @@ impl Unstarted {
     }
 }
 
+/// `(asked, recording)`: whether something reads a build's compact execution
+/// log, and whether it is only to be recorded in the history.
+///
+/// A list holding nothing but `record()` sinks records; any other list asks.
+/// A `requested` path, named by the caller's own flags, is written as a copy,
+/// so it asks as a consumer does. `history_records` is the history request
+/// flag or `record_every_build()`.
+fn execlog_demand(
+    listed: bool,
+    sinks: &[ExecLogSink],
+    has_iters: bool,
+    requested: bool,
+    history_records: bool,
+) -> (bool, bool) {
+    let record_only = listed
+        && !has_iters
+        && !sinks.is_empty()
+        && sinks.iter().all(|s| matches!(s, ExecLogSink::Record));
+    let asked = (listed && !record_only) || requested;
+    (asked, record_only || history_records)
+}
+
 /// Whether a build writes its compact execution log: when something `asked`
-/// for it, or when it is only `recording` and the Bazel knows the flag (7.4
+/// for it, or when it is only `recording` and Bazel knows the flag (7.4
 /// and later, or a version that cannot be told). Recording asks for no more
 /// than the log on disk, so an older Bazel goes without rather than failing
 /// on a flag it does not know.
@@ -958,17 +985,20 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
 }
 
 /// This Bazel invocation's folder in the task invocation's history, created,
-/// or `None` with a warning when it cannot be: a history that cannot be
-/// written never fails a build, and its files go to the temp dir instead.
+/// or `None` when it cannot be, said once per run: a history that cannot be
+/// written never fails a build. Its logs go to the temp dir instead, and one
+/// only recorded is not written at all.
 fn history_dir(history: &History) -> Option<PathBuf> {
     history
         .next_bazel_dir()
         .inspect_err(|err| {
-            errln!(
-                "WARNING: could not create a history folder under {}: {err}. This build's \
-                 logs go to the temp dir instead.",
-                history.root().display(),
-            )
+            if history.first_failure() {
+                errln!(
+                    "WARNING: could not create a history folder under {}: {err}. Builds' \
+                     logs go to the temp dir instead, and none is recorded.",
+                    history.root().display(),
+                )
+            }
         })
         .ok()
 }
@@ -985,7 +1015,28 @@ impl Build {
             let mut child = self.child.borrow_mut();
             drop(child.stdin.take());
         }
-        children::wait_with(&self.bound, timeout, || self.child.borrow_mut().try_wait())
+        let status =
+            children::wait_with(&self.bound, timeout, || self.child.borrow_mut().try_wait())?;
+        if status.is_some() {
+            self.reaped();
+        }
+        Ok(status)
+    }
+
+    /// What follows the client's exit, once it is seen: the profile Bazel has
+    /// finished by then is copied to the path the caller asked for. Only the
+    /// first call copies. A copy that fails is a warning, as a profile Bazel
+    /// cannot write is.
+    fn reaped(&self) {
+        if let Some((from, to)) = self.profile_copy.take()
+            && let Err(err) = bazel::profile::copy(&from, &to)
+        {
+            errln!(
+                "WARNING: could not copy the profile from {} to {}: {err}",
+                from.display(),
+                to.display(),
+            );
+        }
     }
 
     /// Spawn one bazel command and the readers of what it writes.
@@ -1017,24 +1068,27 @@ impl Build {
         let (build_events, bes_telemetry) = telemetry
             .build_events()
             .resolve(build_events, telemetry.exporting());
-        // A path the caller's own flags name is written as a copy (see below), so
-        // it asks for the log as a consumer does, and `auto` telemetry reads it
-        // too. Recording alone asks for no more than the file on disk.
         let (flags, history_asked) = bazel::execlog::take_history_request(flags);
         let requested_execlog_path =
             bazel::execlog::requested_path(&flags, verb, directory.as_deref());
-        let record_only = execlog_enabled
-            && execlog_iters.is_empty()
-            && !execlog_sinks.is_empty()
-            && execlog_sinks
-                .iter()
-                .all(|s| matches!(s, ExecLogSink::Record));
-        let recording = record_only || history_asked || history.records_every_build();
-        let asked = (execlog_enabled && !record_only) || requested_execlog_path.is_some();
+        // Without an rc the CLI rendered, Bazel reads its own rc files, which
+        // can name an execution log or profile path no flag here shows. A file
+        // only recorded, or the profile, is then left where Bazel puts it, so
+        // no path the caller set is silently overridden.
+        let rc_visible = startup_flags.iter().any(|f| f == "--ignore_all_rc_files");
+        let (asked, recording) = execlog_demand(
+            execlog_enabled,
+            &execlog_sinks,
+            !execlog_iters.is_empty(),
+            requested_execlog_path.is_some(),
+            history_asked || history.records_every_build(),
+        );
+
+        // `auto` telemetry reads a log the build writes anyway; `always`
+        // turning it on for its telemetry is an ask of its own.
         let (log_on, execlog_telemetry) = telemetry
             .execution_log()
             .resolve(asked || recording, telemetry.exporting());
-        // `always` turning the log on for its telemetry is an ask of its own.
         let asked = asked || (log_on && !recording);
 
         // Asked with the same startup flags the build below will use, because
@@ -1051,6 +1105,9 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
                 .info()?;
+        // Every file below that stays goes into this one folder.
+        let history_dir = history_dir(history);
+        let recording = recording && rc_visible && history_dir.is_some();
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
 
         let span = tracing::info_span!(
@@ -1072,6 +1129,7 @@ impl Build {
         let requested_workspace_log =
             bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
         let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
+        let profile_off = bazel::profile::turned_off(&flags, verb);
 
         let mut cmd = super::runner::SignalRunner(&signals).command();
         cmd.args(startup_flags);
@@ -1116,17 +1174,19 @@ impl Build {
             None
         };
 
-        // Every file below that stays goes into this one folder.
-        let history_dir = history_dir(history);
-
         // Bazel writes the profile into the history, where it stays, as the
-        // execution log does below. A profile the caller asked for is copied
-        // there once the client exits (see `wait()`).
-        let profile_copy = history_dir.as_ref().map(|dir| {
-            let path = dir.join(bazel::profile::FILE_NAME);
-            cmd.arg(format!("{}={}", bazel::profile::FLAG, path.display()));
-            (path, requested_profile)
-        });
+        // execution log does below; a profile the caller asked for is copied
+        // to the caller's path once the client exits (see `Build::reaped`).
+        // Left to Bazel when the caller turned profiling off, since a
+        // `--profile` would turn it back on, or when the rc is not visible.
+        let profile_copy = history_dir
+            .as_ref()
+            .filter(|_| rc_visible && !profile_off)
+            .and_then(|dir| {
+                let path = dir.join(bazel::profile::FILE_NAME);
+                cmd.arg(format!("{}={}", bazel::profile::FLAG, path.display()));
+                requested_profile.map(|to| (path, to))
+            });
 
         // The workspace log stays in the history too; a path the caller asked
         // for is written as a copy while it is read. Without a history folder
@@ -1134,9 +1194,9 @@ impl Build {
         // reads is left to whatever asked for it.
         let workspace_event_file = workspace_events.then(|| {
             let log = match &history_dir {
-                Some(dir) => {
-                    bazel::workspace_event::LogFile::Kept(dir.join("workspace_events.binpb"))
-                }
+                Some(dir) => bazel::workspace_event::LogFile::Kept(
+                    dir.join(bazel::workspace_event::FILE_NAME),
+                ),
                 None => bazel::workspace_event::LogFile::reserve(),
             };
             cmd.arg(bazel::workspace_event::LOG_FILE_FLAG)
@@ -1161,13 +1221,15 @@ impl Build {
             }
         }
 
-        // Bazel writes the log only into this task invocation's history, where
-        // it stays: Bazel uploads it from there as a build tool log once the
-        // build is over. A path the caller asked for is written as a copy. The
-        // reader is started after the spawn, once the client pid exists.
+        // Bazel writes the log into this task invocation's history, where it
+        // stays: Bazel uploads it from there as a build tool log once the
+        // build is over. Without a history folder it goes to a fresh temp file,
+        // left in place for the same reason. A path the caller asked for is
+        // written as a copy. The reader is started after the spawn, once the
+        // client pid exists.
         let execlog_path = execlog_enabled.then(|| {
             let path = match &history_dir {
-                Some(dir) => dir.join("execlog.zstd"),
+                Some(dir) => dir.join(bazel::execlog::FILE_NAME),
                 None => std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4())),
             };
             cmd.arg(format!(
@@ -1372,7 +1434,8 @@ impl Build {
             execlog_stream: RefCell::new(execlog_stream),
             execlog_iters,
             workspace_event_iters,
-            profile_copy: RefCell::new(profile_copy.and_then(|(from, to)| Some((from, to?)))),
+            execlog_read: asked,
+            profile_copy: RefCell::new(profile_copy),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
@@ -1456,7 +1519,11 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             anyhow::bail!("timeout_ms must not be negative: {timeout_ms}");
         }
         let status = if timeout_ms == 0 {
-            children::try_wait(&mut build.child.borrow_mut(), &build.bound)?
+            let status = children::try_wait(&mut build.child.borrow_mut(), &build.bound)?;
+            if status.is_some() {
+                build.reaped();
+            }
+            status
         } else {
             build.wait_child(Some(Duration::from_millis(timeout_ms as u64)))?
         };
@@ -1527,16 +1594,6 @@ impl Build {
             .wait_child(None)?
             .expect("a wait without a timeout reports a status");
 
-        if let Some((from, to)) = build.profile_copy.take()
-            && let Err(err) = bazel::profile::copy(&from, &to)
-        {
-            errln!(
-                "WARNING: could not copy the profile from {} to {}: {err}",
-                from.display(),
-                to.display(),
-            );
-        }
-
         // Wait for BES stream to complete.
         if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
             match event_stream.join() {
@@ -1577,13 +1634,14 @@ impl Build {
         // code, which is what makes the warning safe to print: a log that never
         // appeared is ordinary on a failed invocation (a mistyped target pattern
         // never reaches the phase that creates one, and bazel has already said so)
-        // and an anomaly on a successful one. A log that stopped decoding is
-        // warned about either way, since Bazel says nothing about it. See
+        // and an anomaly on a successful one that something reads it for. A log
+        // that stopped decoding is warned about either way, since Bazel says
+        // nothing about it. See
         // `ReaderOutcome`.
         if let Some(execlog_stream) = build.execlog_stream.take() {
             let path = execlog_stream.path().display().to_string();
             match execlog_stream.join() {
-                Ok(ReaderOutcome::NeverAppeared) if result.success() => {
+                Ok(ReaderOutcome::NeverAppeared) if result.success() && build.execlog_read => {
                     errln!(
                         "WARNING: bazel completed successfully but wrote no execution \
                          log, so nothing that reads it saw this invocation."
@@ -1621,6 +1679,8 @@ impl Build {
 mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
     //! binary, selected per-test via `--scenario=<name>`.
+
+    use crate::engine::history::bazel_dir;
 
     use axl_proto::tools::protos::ExecLogEntry;
     use prost::Message;
@@ -1740,17 +1800,18 @@ mod tests {
         script: String,
         hang: &str,
     ) -> anyhow::Result<Option<u8>> {
-        run_basil_script_with(timeout, script, hang, false)
+        run_basil_script_with(timeout, script, hang, |eval| eval)
     }
 
-    /// [`run_basil_script`], with every signal exported when `exporting`, so
-    /// builds attach their telemetry sinks.
+    /// [`run_basil_script`], with the run set up further by `configure`: every
+    /// signal exported, so builds attach their telemetry sinks, or a history
+    /// root a test inspects.
     #[cfg(unix)]
     fn run_basil_script_with(
         timeout: std::time::Duration,
         script: String,
         hang: &str,
-        exporting: bool,
+        configure: impl FnOnce(crate::test::EvalBuilder) -> crate::test::EvalBuilder + Send + 'static,
     ) -> anyhow::Result<Option<u8>> {
         assert!(
             timeout < STAND_IN_LIFETIME,
@@ -1759,13 +1820,7 @@ mod tests {
         );
         let stand_in = DaemonStandIn::new();
         let result = crate::test::with_timeout(timeout, move || {
-            let eval = crate::test::eval(&script).with_fake_bazel();
-            let eval = if exporting {
-                eval.with_exporting()
-            } else {
-                eval
-            };
-            eval.run_task(0)
+            configure(crate::test::eval(&script).with_fake_bazel()).run_task(0)
         });
         match result {
             Some(exit) => exit,
@@ -1901,7 +1956,7 @@ Test = task(implementation = _impl)
             Duration::from_secs(60),
             script,
             "the spawn telemetry sink stopped draining and parked the reader",
-            true,
+            |eval| eval.with_exporting(),
         )
         .expect("run_task");
         assert_eq!(
@@ -2212,8 +2267,9 @@ Test = task(implementation = _impl)
 "#,
             asked = asked.to_str().unwrap(),
         );
-        run_execlog_task_with_history(&script, history.path());
-        let kept = only_invocation(history.path()).join("bazel/1/workspace_events.binpb");
+        run_task_with_history(&script, history.path());
+        let kept =
+            bazel_dir(&only_invocation(history.path()), 1).join(bazel::workspace_event::FILE_NAME);
         let kept = std::fs::read(&kept).unwrap_or_else(|e| panic!("{}: {e}", kept.display()));
         assert!(!kept.is_empty());
         assert_eq!(
@@ -2235,7 +2291,7 @@ Test = task(implementation = _impl)
             r#"
 def _impl(ctx):
     for flags in [[], ["--profile={asked}"]]:
-        build = ctx.bazel.build(flags = flags, stderr = None)
+        build = ctx.bazel.build(rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = []), flags = flags, stderr = None)
         if not build.wait().success: return 1
     return 0
 
@@ -2243,19 +2299,92 @@ Test = task(implementation = _impl)
 "#,
             asked = asked.to_str().unwrap(),
         );
-        run_execlog_task_with_history(&script, history.path());
+        run_task_with_history(&script, history.path());
         let invocation = only_invocation(history.path());
-        for n in ["1", "2"] {
-            let kept = invocation
-                .join("bazel")
-                .join(n)
-                .join(bazel::profile::FILE_NAME);
+        for n in [1, 2] {
+            let kept = bazel_dir(&invocation, n).join(bazel::profile::FILE_NAME);
             assert!(kept.exists(), "{}", kept.display());
         }
         assert_eq!(
             std::fs::read(&asked).unwrap(),
-            std::fs::read(invocation.join("bazel/2").join(bazel::profile::FILE_NAME)).unwrap(),
+            std::fs::read(bazel_dir(&invocation, 2).join(bazel::profile::FILE_NAME)).unwrap(),
         );
+    }
+
+    /// A history that cannot be created fails no build: the logs are read
+    /// from the temp dir, a requested workspace log is still copied, and the
+    /// caller's `--profile` is left to Bazel.
+    #[cfg(unix)]
+    #[test]
+    fn a_history_that_cannot_be_created_fails_no_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("not-a-dir");
+        std::fs::write(&root, b"").unwrap();
+        let (asked_log, asked_profile) = (dir.path().join("ws.log"), dir.path().join("p.gz"));
+        let script = format!(
+            r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--scenario=execlog_beyond_capacity", "--profile={asked_profile}"],
+        execution_log = [entries],
+        stderr = None,
+    )
+    seen = len([e for e in entries])
+    if not build.wait().success: return 1
+    if seen != {SCENARIO_ENTRIES}: return 2
+    events = bazel.workspace_events.iterator()
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = [
+            "--scenario=workspace_events_beyond_capacity",
+            "--experimental_workspace_rules_log_file={asked_log}",
+        ],
+        workspace_events = [events],
+        stderr = None,
+    )
+    seen = len([e for e in events])
+    if not build.wait().success: return 3
+    if seen != {SCENARIO_ENTRIES}: return 4
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            asked_profile = asked_profile.to_str().unwrap(),
+            asked_log = asked_log.to_str().unwrap(),
+        );
+        run_task_with_history(&script, &root);
+        assert!(asked_profile.exists(), "Bazel writes the caller's profile");
+        assert!(
+            std::fs::metadata(&asked_log).unwrap().len() > 0,
+            "the requested workspace log is still a copy"
+        );
+    }
+
+    /// Without an rc the CLI rendered, Bazel's own rc files may name a
+    /// `--profile` no flag shows, so the profile is left where Bazel puts it.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_rendered_rc_the_profile_is_left_to_bazel() {
+        let history = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("asked.profile.gz");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(flags = ["--profile={asked}"], stderr = None)
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+            asked = asked.to_str().unwrap(),
+        );
+        run_task_with_history(&script, history.path());
+        assert!(asked.exists(), "Bazel writes the caller's profile itself");
+        let kept = bazel_dir(&only_invocation(history.path()), 1).join(bazel::profile::FILE_NAME);
+        assert!(!kept.exists(), "{}", kept.display());
     }
 
     /// The workspace handle's AXL surface: `done` before binding and after
@@ -2643,26 +2772,18 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// Run `script` with its task invocation's history kept under `history`,
-    /// as [`run_execlog_task`] does otherwise.
+    /// Run `script`, which must exit 0, with its task invocation's history
+    /// kept under `history`.
     #[cfg(unix)]
-    fn run_execlog_task_with_history(script: &str, history: &std::path::Path) {
-        let timeout = std::time::Duration::from_secs(60);
-        let stand_in = DaemonStandIn::new();
-        let (script, history) = (script.to_owned(), history.to_path_buf());
-        let exit = crate::test::with_timeout(timeout, move || {
-            crate::test::eval(&script)
-                .with_fake_bazel()
-                .with_history(history)
-                .run_task(0)
-        });
-        match exit {
-            Some(exit) => assert_eq!(exit.expect("run_task"), Some(0)),
-            None => {
-                stand_in.leak();
-                panic!("timed out after {timeout:?}");
-            }
-        }
+    fn run_task_with_history(script: &str, history: &std::path::Path) {
+        let history = history.to_path_buf();
+        let exit = run_basil_script_with(
+            std::time::Duration::from_secs(60),
+            script.to_owned(),
+            "the task did not finish",
+            move |eval| eval.with_history(history),
+        );
+        assert_eq!(exit.expect("run_task"), Some(0));
     }
 
     /// The one task invocation entry under `history`.
@@ -2683,11 +2804,11 @@ Test = task(implementation = _impl)
     #[test]
     fn each_bazel_invocation_keeps_its_log_in_the_task_invocations_history() {
         let history = tempfile::tempdir().unwrap();
-        run_execlog_task_with_history(
+        run_task_with_history(
             r#"
 def _impl(ctx):
     for _ in range(2):
-        build = ctx.bazel.build(
+        build = ctx.bazel.build(rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = []),
             flags = ["--scenario=execlog_beyond_capacity"],
             execution_log = [bazel.execution_log.record()],
             stderr = None,
@@ -2700,8 +2821,8 @@ Test = task(implementation = _impl)
             history.path(),
         );
         let invocation = only_invocation(history.path());
-        for n in ["1", "2"] {
-            let log = invocation.join("bazel").join(n).join("execlog.zstd");
+        for n in [1, 2] {
+            let log = bazel_dir(&invocation, n).join(bazel::execlog::FILE_NAME);
             assert_eq!(
                 compact_entry_count(&log),
                 SCENARIO_ENTRIES,
@@ -2729,24 +2850,62 @@ Test = task(implementation = _impl)
         assert!(!writes_execution_log(false, false, None));
     }
 
+    #[test]
+    fn only_a_list_of_record_sinks_records_without_asking() {
+        use super::{ExecLogSink, execlog_demand};
+        let record = || vec![ExecLogSink::Record];
+        let copy = || ExecLogSink::CompactFile { path: "c".into() };
+        assert_eq!(
+            execlog_demand(false, &[], false, false, false),
+            (false, false)
+        );
+        assert_eq!(
+            execlog_demand(true, &record(), false, false, false),
+            (false, true)
+        );
+        assert_eq!(
+            execlog_demand(true, &record(), true, false, false),
+            (true, false),
+            "a handle beside record() reads the log",
+        );
+        assert_eq!(
+            execlog_demand(true, &[ExecLogSink::Record, copy()], false, false, false),
+            (true, false),
+        );
+        assert_eq!(
+            execlog_demand(true, &[], true, false, false),
+            (true, false),
+            "a handle alone"
+        );
+        assert_eq!(
+            execlog_demand(false, &[], false, true, false),
+            (true, false),
+            "a requested path is a copy to write",
+        );
+        assert_eq!(
+            execlog_demand(false, &[], false, false, true),
+            (false, true)
+        );
+    }
+
     /// `record_every_build()` has a build write its log with no
     /// `execution_log=` of its own, as a deployment's custom task would.
     #[cfg(unix)]
     #[test]
     fn record_every_build_writes_a_log_for_a_build_that_asks_for_none() {
         let history = tempfile::tempdir().unwrap();
-        run_execlog_task_with_history(
+        run_task_with_history(
             r#"
 def _impl(ctx):
     bazel.execution_log.record_every_build()
-    build = ctx.bazel.build(flags = ["--scenario=execlog_beyond_capacity"], stderr = None)
+    build = ctx.bazel.build(rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = []), flags = ["--scenario=execlog_beyond_capacity"], stderr = None)
     return 0 if build.wait().success else 1
 
 Test = task(implementation = _impl)
 "#,
             history.path(),
         );
-        let log = only_invocation(history.path()).join("bazel/1/execlog.zstd");
+        let log = bazel_dir(&only_invocation(history.path()), 1).join(bazel::execlog::FILE_NAME);
         assert_eq!(compact_entry_count(&log), SCENARIO_ENTRIES);
     }
 
@@ -2757,11 +2916,11 @@ Test = task(implementation = _impl)
     fn a_history_request_flag_records_the_log_in_the_history() {
         let history = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        run_execlog_task_with_history(
+        run_task_with_history(
             &format!(
                 r#"
 def _impl(ctx):
-    build = ctx.bazel.build(
+    build = ctx.bazel.build(rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = []),
         flags = ["--scenario=execlog_beyond_capacity", "--execution_log_compact_file=%aspect_history%"],
         directory = {cwd:?},
         stderr = None,
@@ -2774,7 +2933,7 @@ Test = task(implementation = _impl)
             ),
             history.path(),
         );
-        let log = only_invocation(history.path()).join("bazel/1/execlog.zstd");
+        let log = bazel_dir(&only_invocation(history.path()), 1).join(bazel::execlog::FILE_NAME);
         assert_eq!(compact_entry_count(&log), SCENARIO_ENTRIES);
         assert!(
             std::fs::read_dir(cwd.path()).unwrap().next().is_none(),
@@ -2790,7 +2949,7 @@ Test = task(implementation = _impl)
         let dir = tempfile::tempdir().unwrap();
         let asked = dir.path().join("asked.zstd");
         let history = dir.path().join("history");
-        run_execlog_task_with_history(
+        run_task_with_history(
             &format!(
                 r#"
 def _impl(ctx):
@@ -2807,7 +2966,7 @@ Test = task(implementation = _impl)
             &history,
         );
         assert_eq!(compact_entry_count(&asked), SCENARIO_ENTRIES, "the copy");
-        let kept = only_invocation(&history).join("bazel/1/execlog.zstd");
+        let kept = bazel_dir(&only_invocation(&history), 1).join(bazel::execlog::FILE_NAME);
         assert_eq!(compact_entry_count(&kept), SCENARIO_ENTRIES, "Bazel's own");
     }
 
@@ -3032,12 +3191,11 @@ Test = task(implementation = _impl)
     }
 
     /// `--execution_log_compact_file=` clears the flag rather than naming a
-    /// file, so it is not a path to reuse.
+    /// file, so it is not a path to copy the log to.
     ///
     /// An rc file setting the flag for a config and a command line clearing it
-    /// is an ordinary way to reach this. Read back as `Some("")` the reader
-    /// tails `""`, which cannot exist, and reports a clean end of stream — every
-    /// hook fires zero times and the build passes.
+    /// is an ordinary way to reach this. Read back as `Some("")` it would be a
+    /// copy at `""`, which cannot be created and fails `wait()`.
     #[cfg(unix)]
     #[test]
     fn an_empty_execution_log_flag_is_not_a_reusable_path() {
@@ -3055,7 +3213,6 @@ def _impl(ctx):
         seen += 1
     status = build.wait()
     if not status.success: return 1
-    # Zero means the empty value was taken for a path and tailed.
     if seen != {SCENARIO_ENTRIES}: return 3
     return 0
 
@@ -3065,17 +3222,15 @@ Test = task(implementation = _impl)
         run_basil_task(
             std::time::Duration::from_secs(60),
             script,
-            "the reader tailed \"\" and never ended",
-            "a cleared flag must leave this call owning the log, not tailing \"\"",
+            "the reader never ended",
+            "a cleared flag must not become a copy at \"\"",
         );
     }
 
-    /// A relative `--execution_log_compact_file` is Bazel's to resolve, and
-    /// Bazel resolves it against the cwd `Build::spawn` gives it.
-    ///
-    /// Used verbatim, the reader tails `<cli-cwd>/<path>` while Bazel writes
-    /// `<directory>/<path>` — nothing to read, and a clean empty stream again.
-    /// `format` and `gazelle` both pass a `directory` and both consume the log.
+    /// A relative `--execution_log_compact_file` names a path under the cwd
+    /// `Build::spawn` gives Bazel, as Bazel would resolve it, so its copy goes
+    /// there and not under the CLI's own cwd. `format` and `gazelle` both pass
+    /// a `directory` and both consume the log.
     #[cfg(unix)]
     #[test]
     fn a_relative_execution_log_flag_resolves_against_the_spawn_directory() {
@@ -3095,7 +3250,6 @@ def _impl(ctx):
         seen += 1
     status = build.wait()
     if not status.success: return 1
-    # Zero means the reader tailed the path relative to the CLI's own cwd.
     if seen != {SCENARIO_ENTRIES}: return 3
     return 0
 
@@ -3107,12 +3261,12 @@ Test = task(implementation = _impl)
         run_basil_task(
             std::time::Duration::from_secs(60),
             script,
-            "the reader tailed a path bazel never wrote",
-            "the reader must tail the path bazel resolved it to",
+            "the reader never ended",
+            "a relative path must be copied under the spawn's directory",
         );
         assert!(
             dir.path().join("relative.zstd").exists(),
-            "bazel writes a relative path under its own cwd",
+            "the copy of a relative path goes under the spawn's directory",
         );
     }
 

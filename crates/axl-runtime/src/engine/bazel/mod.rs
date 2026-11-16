@@ -127,8 +127,8 @@ fn partition_execution_log(
 
 /// Split the `workspace_events=` argument into "is the stream enabled" and the
 /// iterator handles. A list of handles turns the log on. `False` and `[]` leave
-/// it off: with no handle nothing would read the file, which is removed once
-/// read. `True` is refused, because it names no consumer.
+/// it off: with no handle nothing would read the log. `True` is refused,
+/// because it names no consumer.
 fn partition_workspace_events(
     arg: Either<bool, UnpackList<iter::WorkspaceEventIter>>,
 ) -> anyhow::Result<(bool, Vec<iter::WorkspaceEventIter>)> {
@@ -493,6 +493,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Returns a `Build` object. The call does not block — use `.wait()` to
     /// wait for the invocation to finish and retrieve its exit status.
     ///
+    /// Each invocation gets a folder in the task invocation's history, where
+    /// Bazel writes its trace profile, and its execution and workspace logs
+    /// when they are on. A `--profile` the flags or `rc` name gets a copy once
+    /// Bazel exits; without an `rc`, or with profiling turned off, the profile
+    /// is left to Bazel.
+    ///
     /// # Arguments
     ///
     /// * `targets` - One or more Bazel target patterns to build.
@@ -508,7 +514,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   `bazel.workspace_events.iterator()` handles, each of which receives every
     ///   event; `[]` leaves it off, and `True` is refused for naming no consumer.
     ///   Drain a handle **before** `wait()`, which releases any still-bound
-    ///   handle so an undrained one cannot hang the build.
+    ///   handle so an undrained one cannot hang the build. The log is kept in
+    ///   the task invocation's history, and a
+    ///   `--experimental_workspace_rules_log_file` the flags or rc name is
+    ///   written as a copy.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -630,6 +639,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Returns a `Build` object. The call does not block — use `.wait()` to
     /// wait for the invocation to finish and retrieve its exit status.
     ///
+    /// Each invocation gets a folder in the task invocation's history, where
+    /// Bazel writes its trace profile, and its execution and workspace logs
+    /// when they are on. A `--profile` the flags or `rc` name gets a copy once
+    /// Bazel exits; without an `rc`, or with profiling turned off, the profile
+    /// is left to Bazel.
+    ///
     /// # Arguments
     ///
     /// * `targets` - One or more Bazel target patterns to test.
@@ -645,7 +660,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   `bazel.workspace_events.iterator()` handles, each of which receives every
     ///   event; `[]` leaves it off, and `True` is refused for naming no consumer.
     ///   Drain a handle **before** `wait()`, which releases any still-bound
-    ///   handle so an undrained one cannot hang the build.
+    ///   handle so an undrained one cannot hang the build. The log is kept in
+    ///   the task invocation's history, and a
+    ///   `--experimental_workspace_rules_log_file` the flags or rc name is
+    ///   written as a copy.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -1392,9 +1410,11 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// when the task ends is the last attempt's log rather than all of them.
     /// Name a path per attempt if every attempt's log has to survive.
     ///
-    /// Bazel writes the log only into the task invocation's history; the CLI
-    /// copies it to every compact path, and to one the command line or an rc
-    /// file names. A copy that cannot be written fails `build.wait()`, naming
+    /// Bazel writes the log into the task invocation's history (a temp file
+    /// when the history cannot be written); the CLI copies it to every compact
+    /// path, and to one the command line or an rc file names. An earlier run's
+    /// file at a copy's path is removed, so a build that writes no log leaves
+    /// none there. A copy that cannot be written fails `build.wait()`, naming
     /// the path, while the build's other execution-log consumers still get the
     /// whole log.
     fn compact_file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
@@ -1405,6 +1425,8 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// read it and no copy: it is kept in the task invocation's history, and
     /// Bazel uploads it as a build tool log wherever a BES backend is wired.
     /// `record_every_build()` does the same for every build of the task.
+    /// Recording needs the build's `rc`, since Bazel's own rc files could name
+    /// a log path no flag shows, and a history that can be written.
     fn record() -> anyhow::Result<ExecLogSink> {
         Ok(ExecLogSink::Record)
     }

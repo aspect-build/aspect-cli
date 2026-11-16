@@ -21,6 +21,19 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// The variable that moves the history root (see [`History::default_root`]).
+pub const ROOT_ENV: &str = "ASPECT_HISTORY_DIR";
+
+/// The folder of a task invocation's entry that holds one subfolder per Bazel
+/// invocation.
+const BAZEL_DIR: &str = "bazel";
+
+/// The folder of Bazel invocation `n` (counted from 1) in the entry at
+/// `invocation`.
+pub fn bazel_dir(invocation: &Path, n: u32) -> PathBuf {
+    invocation.join(BAZEL_DIR).join(n.to_string())
+}
+
 /// What the history keeps.
 #[derive(Debug, Clone, Copy)]
 pub struct Retention {
@@ -50,6 +63,8 @@ pub struct History {
     current: Mutex<Option<Invocation>>,
     /// See [`History::record_every_build`].
     record: AtomicBool,
+    /// See [`History::first_failure`].
+    failed: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -66,7 +81,14 @@ impl History {
             retention,
             current: Mutex::new(None),
             record: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
         }
+    }
+
+    /// Whether this is the first folder the history could not create, so a
+    /// history that cannot be written is reported once per run, not per build.
+    pub fn first_failure(&self) -> bool {
+        !self.failed.swap(true, Ordering::SeqCst)
     }
 
     /// Have every Bazel build of the task write its compact execution log
@@ -79,12 +101,15 @@ impl History {
         self.record.load(Ordering::SeqCst)
     }
 
-    /// The default root: `$ASPECT_HISTORY_DIR`, else `<cache dir>/aspect/history`.
-    pub fn default_root() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("ASPECT_HISTORY_DIR").filter(|d| !d.is_empty()) {
-            return Some(PathBuf::from(dir));
+    /// The default root: `$ASPECT_HISTORY_DIR`, else `<cache dir>/aspect/history`,
+    /// else `aspect-history` in the temp dir on a machine with no cache dir.
+    pub fn default_root() -> PathBuf {
+        if let Some(dir) = std::env::var_os(ROOT_ENV).filter(|d| !d.is_empty()) {
+            return PathBuf::from(dir);
         }
-        dirs::cache_dir().map(|dir| dir.join("aspect").join("history"))
+        dirs::cache_dir()
+            .map(|dir| dir.join("aspect").join("history"))
+            .unwrap_or_else(|| std::env::temp_dir().join("aspect-history"))
     }
 
     pub fn root(&self) -> &Path {
@@ -134,10 +159,7 @@ impl History {
             self.prune(&invocation.dir);
         }
         invocation.bazel_invocations += 1;
-        let dir = invocation
-            .dir
-            .join("bazel")
-            .join(invocation.bazel_invocations.to_string());
+        let dir = bazel_dir(&invocation.dir, invocation.bazel_invocations);
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
@@ -275,13 +297,13 @@ mod tests {
     /// of it last written `age` ago.
     fn entry(root: &Path, n: u32, size: u64, age: Duration) -> PathBuf {
         let dir = root.join(name(n));
-        let log = dir.join("bazel").join("1").join("execlog.zstd");
+        let log = bazel_dir(&dir, 1).join(bazel::execlog::FILE_NAME);
         fs::create_dir_all(log.parent().unwrap()).unwrap();
         let file = fs::File::create(&log).unwrap();
         file.set_len(size).unwrap();
         let when = SystemTime::now() - age;
         file.set_modified(when).unwrap();
-        for d in [log.parent().unwrap(), &dir.join("bazel"), &dir] {
+        for d in [log.parent().unwrap(), &dir.join(BAZEL_DIR), &dir] {
             fs::File::open(d).unwrap().set_modified(when).unwrap();
         }
         dir
@@ -389,7 +411,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         // A later-started, recent entry keeps the total over budget when the
         // empty folder is reached, so only the guard can keep it.
-        let fresh = root.path().join(name(1)).join("bazel").join("1");
+        let fresh = bazel_dir(&root.path().join(name(1)), 1);
         fs::create_dir_all(&fresh).unwrap();
         entry(root.path(), 2, 1000, Duration::from_secs(60));
         let h = history(root.path(), 1, 0);
@@ -447,7 +469,7 @@ mod tests {
         let h = history(root.path(), 1, 0);
         h.begin(&id(1));
         let dir = h.next_bazel_dir().unwrap();
-        fs::write(dir.join("execlog.zstd"), vec![0u8; 1000]).unwrap();
+        fs::write(dir.join(bazel::execlog::FILE_NAME), vec![0u8; 1000]).unwrap();
         let other = History::at(root.path().to_path_buf(), h.retention);
         other.begin(&id(2));
         other.next_bazel_dir().unwrap();

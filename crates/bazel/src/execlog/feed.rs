@@ -12,7 +12,7 @@ use crate::delimited;
 use crate::fanout::SinkOutcome;
 use crate::stream::file as followed;
 use crate::stream::pid_pair::PidPair;
-use crate::stream::tee::{MultiTeeReader, Tee};
+use crate::stream::tee::{MultiTeeReader, Tee, clear_stale};
 use crate::subscription::{Origin, ring};
 use thiserror::Error;
 use zstd::Decoder;
@@ -159,10 +159,13 @@ impl ExecLogStream {
     /// pipe, which stalls it mid-build —
     /// https://github.com/bazelbuild/bazel/issues/28800.
     ///
-    /// `CompactFile` sinks are unaffected — raw bytes are tee'd by
-    /// [`MultiTeeReader`] before decoding. A copy that cannot be created or
-    /// written fails alone, leaving the other copies and the decoded stream
-    /// unaffected, and [`join`](Self::join) reports the failure.
+    /// Every copy (the caller's requested path and each `CompactFile` sink, see
+    /// [`crate::execlog::copies`]) is tee'd from the raw bytes by
+    /// [`MultiTeeReader`] before decoding, so none depends on a subscriber. An
+    /// earlier run's file at a copy's path is removed first, and a copy is
+    /// created once the log appears. A copy that cannot be created or written
+    /// fails alone, leaving the other copies and the decoded stream unaffected,
+    /// and [`join`](Self::join) reports the failure.
     ///
     /// A log bazel starts over in place, as it does for a retried attempt, is
     /// decoded again from its start, and every copy starts over with it.
@@ -183,7 +186,7 @@ impl ExecLogStream {
         path: PathBuf,
         server_pid: u32,
         client_pid: u32,
-        compact_sink_paths: Vec<String>,
+        copies: Vec<String>,
     ) -> io::Result<Self> {
         let (mut sender, origin) = ring::<ExecLogEntry>();
         let gate = PidPair {
@@ -194,6 +197,7 @@ impl ExecLogStream {
         let mut file = followed::File::follow(path.clone(), gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
+            clear_stale(&copies);
 
             // Bazel exited without ever writing an execution log: an empty
             // stream, not a failure, since the build's own exit code is the thing
@@ -211,7 +215,7 @@ impl ExecLogStream {
             }
             let out_raw = MultiTeeReader {
                 inner: file,
-                tees: compact_sink_paths
+                tees: copies
                     .into_iter()
                     .map(|path| Tee::open("ExecLog", path))
                     .collect(),
@@ -488,7 +492,8 @@ mod tests {
         assert!(broken_read(None, path).is_ok());
     }
 
-    /// A log that never appears, with the invocation over, is not an error.
+    /// A log that never appears, with the invocation over, is not an error,
+    /// and an earlier run's copy is not left to be read as this one's.
     #[test]
     fn a_log_that_never_appears_is_not_an_error() {
         let gone = {
@@ -498,10 +503,17 @@ mod tests {
             pid
         };
         let dir = tempfile::tempdir().unwrap();
-        let stream =
-            ExecLogStream::spawn_with_file(dir.path().join("exec.log"), gone, gone, vec![])
-                .unwrap();
+        let copy = dir.path().join("asked.zstd");
+        std::fs::write(&copy, b"an earlier run's").unwrap();
+        let stream = ExecLogStream::spawn_with_file(
+            dir.path().join("exec.log"),
+            gone,
+            gone,
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
         assert_eq!(stream.join().unwrap(), ReaderOutcome::NeverAppeared);
+        assert!(!copy.exists(), "an earlier run's copy outlived the build");
     }
 
     /// A path that cannot be opened at all fails the same way before the log

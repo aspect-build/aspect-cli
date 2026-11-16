@@ -558,7 +558,6 @@ def _deployment_impl(ctx):
     add_task_flags(t, deployment_tuning_flags(dep))
     if "bes" in dep.wired:
         register_bes_metadata(ctx, t)
-
         t.task_flags.append(history_exec_log_flags)
     if dep.capabilities:
         t.build_start.append(lambda tctx: announce_deployment_flags(tctx, dep))

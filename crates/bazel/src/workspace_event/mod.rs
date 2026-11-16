@@ -8,6 +8,9 @@ use crate::stream::file::{self, Reservation};
 
 pub mod feed;
 
+/// The log's name in a history folder.
+pub const FILE_NAME: &str = "workspace_events.binpb";
+
 /// The flag that names where Bazel writes the workspace event log.
 pub const LOG_FILE_FLAG: &str = "--experimental_workspace_rules_log_file";
 

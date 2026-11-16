@@ -9,7 +9,8 @@
 //! The follower cannot tell a file an earlier run left at its path from this
 //! build's, and would read the previous build's contents, so every path it
 //! follows is one nothing has used: a [`Reservation`], which removes it once
-//! the read is over, or a fresh folder of the task invocation's history.
+//! the read is over, a fresh folder of the task invocation's history, or a
+//! fresh uuid-named temp file.
 //!
 //! # A writer that starts the file over
 //!

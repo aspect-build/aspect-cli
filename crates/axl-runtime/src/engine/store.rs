@@ -68,11 +68,7 @@ impl Env {
             rt: AsyncRuntime::new(),
             signals: Signals::global().clone(),
             telemetry: Arc::default(),
-            history: Arc::new(History::at(
-                History::default_root()
-                    .unwrap_or_else(|| std::env::temp_dir().join("aspect-history")),
-                Retention::default(),
-            )),
+            history: Arc::new(History::at(History::default_root(), Retention::default())),
         }
     }
 

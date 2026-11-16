@@ -472,15 +472,18 @@ def history_exec_log_flags(_ctx) -> list:
 
 def runner_profile_flags(environment: WorkflowsEnvironment) -> list:
     """`--profile` placed under the runner's job tmpdir, keeping the
-    `command.profile.gz` name the backend's ingest matches on. Empty off a runner
-    or without a BES backend to upload it to."""
+    `command.profile.gz` name the backend's ingest matches on. A build that sees
+    this rc has Bazel write the profile into the task invocation's history
+    under the same name, and copies it here once Bazel exits. Empty off a
+    runner or without a BES backend to upload it to."""
     runner = environment.runner
     if runner == None or environment.build_events == None:
         return []
     return [_PROFILE + "=" + runner.job_tmpdir + "/command.profile.gz"]
 
 def runner_exec_log_path(environment: WorkflowsEnvironment) -> str:
-    """Where a runner's compact execution log is written: the job tmpdir."""
+    """Where a runner's compact execution log is copied, in the job tmpdir.
+    Bazel writes the log into the task invocation's history."""
     return environment.runner.job_tmpdir + "/exec.log.zstd"
 
 def runner_diagnostics_flags(environment: WorkflowsEnvironment) -> list:

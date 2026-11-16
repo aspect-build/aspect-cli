@@ -25,7 +25,7 @@ use thiserror::Error;
 use super::LogFile;
 use crate::delimited;
 use crate::stream::file::StartedOver;
-use crate::stream::tee::{MultiTeeReader, Tee};
+use crate::stream::tee::{MultiTeeReader, Tee, clear_stale};
 use crate::stream::{Done, Gate};
 use crate::subscription::{Origin, ring};
 
@@ -68,14 +68,26 @@ impl WorkspaceEventStream {
     pub fn spawn(log: LogFile, gate: Gate, copies: Vec<String>) -> Self {
         let (mut sender, origin) = ring::<WorkspaceEvent>();
         let path = log.path().to_owned();
-        let mut file = MultiTeeReader {
-            inner: log.follow(gate),
-            tees: copies
-                .into_iter()
-                .map(|path| Tee::open("Workspace log", path))
-                .collect(),
-        };
+        let mut followed = log.follow(gate);
         let handle = thread::spawn(move || {
+            // A copy is created once Bazel has written the log, and an earlier
+            // run's is gone before then, so a build that never writes it
+            // leaves nothing to be read as its own.
+            clear_stale(&copies);
+            if !followed.appear() {
+                if let Some(Done::Broken { error, .. }) = followed.take_done() {
+                    return Err(error.into());
+                }
+                sender.close()?;
+                return Ok(());
+            }
+            let mut file = MultiTeeReader {
+                inner: followed,
+                tees: copies
+                    .into_iter()
+                    .map(|path| Tee::open("WorkspaceLog", path))
+                    .collect(),
+            };
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             let mut has_readers = true;
             let read = (|| -> Result<(), WorkspaceEventError> {
@@ -329,6 +341,69 @@ mod tests {
         assert_eq!(outcome, Some((2, true)));
         assert_eq!(std::fs::read(&path).unwrap(), encoded(1..=2));
         assert_eq!(std::fs::read(&copy).unwrap(), encoded(1..=2));
+    }
+
+    /// Bazel starts its log over in place for a retried attempt: both attempts
+    /// reach the subscriber, and a copy holds only the last, as the kept file
+    /// does.
+    #[test]
+    fn a_log_started_over_in_place_starts_its_copies_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace_events.binpb");
+        let copy = dir.path().join("asked.log");
+        let (read_path, copy_path) = (path.clone(), copy.clone());
+        let got = crate::testing::with_timeout(Duration::from_secs(10), move || {
+            let client = spawn_pid_holder();
+            let mut gate = PidPair {
+                client: client.id(),
+                server: None,
+            }
+            .gate();
+            gate.quiet = Duration::from_millis(300);
+            std::fs::write(&read_path, encoded(1..=50)).unwrap();
+            let mut stream = WorkspaceEventStream::spawn(
+                LogFile::Kept(read_path.clone()),
+                gate,
+                vec![copy_path.to_str().unwrap().to_owned()],
+            );
+            let recv = stream.receiver().unwrap();
+            stream.seal();
+            let mut got: Vec<String> = (0..50).map(|_| recv.recv().unwrap().location).collect();
+            // Shorter than what was read, so the follower sees it truncated.
+            std::fs::write(&read_path, encoded([100])).unwrap();
+            got.push(recv.recv().unwrap().location);
+            end(client);
+            assert!(recv.recv().is_err(), "the stream ends with the client");
+            stream.join().unwrap();
+            got
+        })
+        .expect("the stream hung");
+        assert_eq!(got.len(), 51);
+        assert_eq!(got.last().unwrap(), "100");
+        assert_eq!(std::fs::read(&copy).unwrap(), encoded([100]));
+    }
+
+    /// A build that never writes the log leaves no earlier run's copy behind.
+    #[test]
+    fn a_log_that_never_appears_leaves_no_stale_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("asked.log");
+        std::fs::write(&copy, b"an earlier run's").unwrap();
+        let copy_path = copy.to_str().unwrap().to_owned();
+        let joined = crate::testing::with_timeout(Duration::from_secs(10), move || {
+            let client = spawn_pid_holder();
+            let mut gate = PidPair {
+                client: client.id(),
+                server: None,
+            }
+            .gate();
+            gate.quiet_empty = Duration::from_millis(100);
+            let stream = WorkspaceEventStream::spawn(LogFile::reserve(), gate, vec![copy_path]);
+            end(client);
+            stream.join().is_ok()
+        });
+        assert_eq!(joined, Some(true));
+        assert!(!copy.exists(), "an earlier run's copy outlived the build");
     }
 
     /// A copy that cannot be created fails the join, but the subscriber still

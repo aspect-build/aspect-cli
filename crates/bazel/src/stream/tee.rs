@@ -78,6 +78,16 @@ impl Tee {
     }
 }
 
+/// Remove what an earlier run left at each copy's path, before the log they
+/// copy appears, so a build that never writes it leaves nothing there to be
+/// read as its own. A path that cannot be removed is left for its copy to
+/// report once there is something to write.
+pub(crate) fn clear_stale(paths: &[String]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Wraps a `Read` source and tees every byte read to the [`Tee`]s, so they
 /// capture the raw bytes without a second pass.
 pub(crate) struct MultiTeeReader<R: Read> {
