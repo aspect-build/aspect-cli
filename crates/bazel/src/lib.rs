@@ -33,6 +33,7 @@ pub mod fanout;
 pub mod label;
 mod otel;
 pub mod process;
+pub mod profile;
 pub mod rc;
 pub mod runfiles;
 pub mod runner;

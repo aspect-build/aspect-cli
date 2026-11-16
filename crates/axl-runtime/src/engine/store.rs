@@ -5,8 +5,8 @@ use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
 use super::cancellation::Signals;
-use super::telemetry::TelemetrySources;
 use super::history::{History, Retention};
+use super::telemetry::TelemetrySources;
 
 static ASPECT_ROOT_DIR: OnceLock<PathBuf> = OnceLock::new();
 

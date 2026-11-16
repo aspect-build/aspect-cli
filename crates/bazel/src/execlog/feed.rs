@@ -3,9 +3,7 @@ use fibre::spmc::Receiver;
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
-use std::fs::File;
 use std::io;
-use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::thread::JoinHandle;
@@ -14,135 +12,10 @@ use crate::delimited;
 use crate::fanout::SinkOutcome;
 use crate::stream::file as followed;
 use crate::stream::pid_pair::PidPair;
+use crate::stream::tee::{MultiTeeReader, Tee};
 use crate::subscription::{Origin, ring};
 use thiserror::Error;
 use zstd::Decoder;
-
-/// One `CompactFile` copy the reader writes. A copy that cannot be created,
-/// written, flushed or copied again ([`MultiTeeReader::recopy`]) stops being
-/// written (whatever reached the file stays) and keeps why, so the other
-/// copies and the decoded stream are unaffected and [`ExecLogStream::join`]
-/// reports it.
-struct Tee {
-    path: String,
-    /// `None` once failed or finished.
-    out: Option<Box<dyn Write + Send>>,
-    error: Option<String>,
-}
-
-impl Tee {
-    fn open(path: String) -> Self {
-        match File::create(&path) {
-            Ok(f) => Self::new(path, Box::new(BufWriter::new(f))),
-            Err(e) => Self {
-                error: Some(format!("ExecLog: failed to create '{path}': {e}")),
-                path,
-                out: None,
-            },
-        }
-    }
-
-    fn new(path: String, out: Box<dyn Write + Send>) -> Self {
-        Self {
-            path,
-            out: Some(out),
-            error: None,
-        }
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        let Some(out) = self.out.as_mut() else { return };
-        if let Err(e) = out.write_all(bytes) {
-            let error = format!("ExecLog: write to '{}' failed: {e}", self.path);
-            self.fail(error);
-        }
-    }
-
-    /// Stop writing the copy, keeping why.
-    fn fail(&mut self, error: String) {
-        self.out = None;
-        self.error.get_or_insert(error);
-    }
-
-    /// Start the copy over, empty, as bazel starts its own log over for a
-    /// retried attempt. A copy that has failed stays failed.
-    fn restart(&mut self) {
-        if self.out.is_none() || self.finish().is_some() {
-            return;
-        }
-        *self = Tee::open(std::mem::take(&mut self.path));
-    }
-
-    /// Flush the copy; returns why it is incomplete, if it is.
-    fn finish(&mut self) -> Option<String> {
-        if let Some(mut out) = self.out.take()
-            && let Err(e) = out.flush()
-        {
-            self.error = Some(format!("ExecLog: flush of '{}' failed: {e}", self.path));
-        }
-        self.error.clone()
-    }
-}
-
-/// Wraps a `Read` source and tees every byte read to the [`Tee`]s, so they
-/// capture the raw bytes without a second pass.
-struct MultiTeeReader<R: Read> {
-    inner: R,
-    tees: Vec<Tee>,
-}
-
-impl<R: Read> Read for MultiTeeReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        for tee in &mut self.tees {
-            tee.write(&buf[..n]);
-        }
-        Ok(n)
-    }
-}
-
-impl<R: Read> MultiTeeReader<R> {
-    fn restart(&mut self) {
-        self.tees.iter_mut().for_each(Tee::restart);
-    }
-
-    /// Start every copy over from `source`, Bazel's whole log, so the copies
-    /// end as its file does whatever order its bytes were read in. `what`
-    /// says what was being copied when a failure is reported.
-    fn recopy(&mut self, source: io::Result<File>, what: &str) {
-        if self.tees.is_empty() {
-            return;
-        }
-        self.restart();
-        let fail_all = |tees: &mut Vec<Tee>, e: io::Error| {
-            let error = format!("ExecLog: {what} failed: {e}");
-            tees.iter_mut().for_each(|t| t.fail(error.clone()));
-        };
-        let mut file = match source {
-            Ok(file) => file,
-            Err(e) => return fail_all(&mut self.tees, e),
-        };
-        let mut buf = vec![0; 64 * 1024];
-        loop {
-            match file.read(&mut buf) {
-                Ok(0) => return,
-                Ok(n) => self.tees.iter_mut().for_each(|t| t.write(&buf[..n])),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return fail_all(&mut self.tees, e),
-            }
-        }
-    }
-
-    /// Finish every copy, failing with each failed copy's reason.
-    fn finish(&mut self) -> io::Result<()> {
-        let failures: Vec<String> = self.tees.iter_mut().filter_map(Tee::finish).collect();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(io::Error::other(failures.join("; ")))
-        }
-    }
-}
 
 /// Fail when the followed log at `path` ended `done` by breaking, naming the
 /// path and how far it got. A read error ends the file's stream like its end
@@ -338,7 +211,10 @@ impl ExecLogStream {
             }
             let out_raw = MultiTeeReader {
                 inner: file,
-                tees: compact_sink_paths.into_iter().map(Tee::open).collect(),
+                tees: compact_sink_paths
+                    .into_iter()
+                    .map(|path| Tee::open("ExecLog", path))
+                    .collect(),
             };
             // An `Option` so a restart can take the reader back from it.
             let mut out_raw = Some(Decoder::new(out_raw)?);
@@ -500,130 +376,6 @@ mod tests {
 
     fn entry(id: u32) -> ExecLogEntry {
         ExecLogEntry { id, r#type: None }
-    }
-
-    /// A copy that cannot open costs only itself: the reader still passes every
-    /// byte through, the good copy gets them all, and `finish` names the bad one.
-    #[test]
-    fn a_tee_that_cannot_open_fails_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("good.zstd");
-        let bad = dir.path().join("missing-dir").join("bad.zstd");
-        let bytes = b"compact log bytes".to_vec();
-        let mut tee = MultiTeeReader {
-            inner: bytes.as_slice(),
-            tees: [&bad, &good]
-                .map(|p| Tee::open(p.to_str().unwrap().to_string()))
-                .into(),
-        };
-
-        let mut read = vec![];
-        tee.read_to_end(&mut read).unwrap();
-        let err = tee.finish().unwrap_err().to_string();
-
-        assert_eq!(read, bytes);
-        assert_eq!(std::fs::read(&good).unwrap(), bytes);
-        assert!(
-            err.contains(bad.to_str().unwrap()) && err.contains("failed to create"),
-            "{err}"
-        );
-    }
-
-    /// A writer that accepts `budget` bytes, then fails every write or flush.
-    struct Failing {
-        budget: usize,
-        fail_flush: bool,
-    }
-
-    impl Write for Failing {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if buf.len() > self.budget {
-                return Err(io::Error::other("disk full"));
-            }
-            self.budget -= buf.len();
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            if self.fail_flush {
-                Err(io::Error::other("disk full"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn failing(path: &str, budget: usize, fail_flush: bool) -> Tee {
-        Tee::new(path.to_owned(), Box::new(Failing { budget, fail_flush }))
-    }
-
-    /// A copy whose write fails stops there; the reader still delivers every
-    /// byte, and `finish` names it.
-    #[test]
-    fn a_tee_whose_write_fails_fails_alone() {
-        let mut tee = MultiTeeReader {
-            inner: &b"0123456789"[..],
-            tees: vec![failing("full.zstd", 4, false)],
-        };
-        let mut buf = [0u8; 5];
-        let mut read = vec![];
-        loop {
-            let n = tee.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            read.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(read, b"0123456789");
-        let err = tee.finish().unwrap_err().to_string();
-        assert!(err.contains("write to 'full.zstd' failed"), "{err}");
-    }
-
-    /// A copy that cannot be written again says why it was being copied, and
-    /// one that had already failed keeps its own reason.
-    #[test]
-    fn a_failed_recopy_is_named_and_an_earlier_failure_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("good.zstd");
-        let mut failed = failing("full.zstd", 0, false);
-        failed.write(b"x");
-        let mut tee = MultiTeeReader {
-            inner: &b""[..],
-            tees: vec![Tee::open(good.to_str().unwrap().to_owned()), failed],
-        };
-        tee.recopy(Err(io::Error::other("gone")), "copying 'exec.log' again");
-        let err = tee.finish().unwrap_err().to_string();
-        assert!(
-            err.contains("copying 'exec.log' again failed: gone")
-                && err.contains("write to 'full.zstd' failed"),
-            "{err}"
-        );
-    }
-
-    /// A copy whose bytes all went through but whose flush fails is reported.
-    #[test]
-    fn a_tee_whose_flush_fails_is_reported() {
-        let mut tee = MultiTeeReader {
-            inner: &b"abc"[..],
-            tees: vec![failing("full.zstd", 100, true)],
-        };
-        std::io::copy(&mut tee, &mut std::io::sink()).unwrap();
-        let err = tee.finish().unwrap_err().to_string();
-        assert!(err.contains("flush of 'full.zstd' failed"), "{err}");
-    }
-
-    /// Every failed copy is named, not only the first.
-    #[test]
-    fn every_failed_tee_is_reported() {
-        let mut tee = MultiTeeReader {
-            inner: &b"abc"[..],
-            tees: vec![failing("one.zstd", 0, false), failing("two.zstd", 0, false)],
-        };
-        std::io::copy(&mut tee, &mut std::io::sink()).unwrap();
-        let err = tee.finish().unwrap_err().to_string();
-        assert!(
-            err.contains("one.zstd") && err.contains("two.zstd"),
-            "{err}"
-        );
     }
 
     /// A failed compact copy and a failed decoded sink are both named.

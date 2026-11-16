@@ -6,11 +6,10 @@
 //! yet" like "nothing written yet". The rules that decide when the stream is
 //! over are the [parent module](super)'s.
 //!
-//! A file left behind by an earlier run has to be removed *before* bazel is
-//! spawned ([`clear_stale`]): the follower cannot tell it from this build's
-//! file, and would read the previous build's contents. A [`Reservation`]
-//! sidesteps that by minting a path nothing has used, and removes it once the
-//! read is over.
+//! The follower cannot tell a file an earlier run left at its path from this
+//! build's, and would read the previous build's contents, so every path it
+//! follows is one nothing has used: a [`Reservation`], which removes it once
+//! the read is over, or a fresh folder of the task invocation's history.
 //!
 //! # A writer that starts the file over
 //!
@@ -85,28 +84,6 @@ impl Drop for Reservation {
         if !self.path.as_os_str().is_empty() {
             let _ = fs::remove_file(&self.path);
         }
-    }
-}
-
-/// Remove a log left at `path` by an *earlier* run, before Bazel starts.
-///
-/// A [`File`] opens whatever is at the path as soon as there is something.
-/// Left in place the reader opens the stale file immediately, races Bazel's
-/// truncation of it and loses: it delivers the previous build's records and
-/// misses this build's.
-///
-/// The exposure is in reused paths: one already on the command line, or a
-/// sink's, is fixed per build, so on a Workflows runner or an Aspect-wired
-/// deployment every build finds the last one's log waiting. Removing it is what
-/// makes the existence poll mean "wait for *this* build's log"; Bazel creates
-/// the file itself, so there is nothing to put back.
-///
-/// A log that is not there is fine. Anything else is returned for the caller
-/// to say.
-pub fn clear_stale(path: &Path) -> Result<(), io::Error> {
-    match fs::remove_file(path) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-        _ => Ok(()),
     }
 }
 
@@ -548,16 +525,6 @@ mod tests {
 
     fn temp_path() -> PathBuf {
         std::env::temp_dir().join(format!("bazel-file-test-{}.log", uuid::Uuid::new_v4()))
-    }
-
-    #[test]
-    fn clearing_a_stale_log_tolerates_its_absence_and_removes_a_present_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.zst");
-        assert!(clear_stale(&path).is_ok(), "nothing to clear is fine");
-        std::fs::write(&path, b"old").unwrap();
-        assert!(clear_stale(&path).is_ok());
-        assert!(!path.exists());
     }
 
     /// A file follower whose owner and writers are flags the test flips.
