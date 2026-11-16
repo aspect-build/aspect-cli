@@ -948,7 +948,7 @@ impl Build {
         verb: &str,
         targets: impl IntoIterator<Item = String>,
         (build_events, sinks, iters): (bool, Vec<BuildEventSink>, Vec<BuildEventIter>),
-        (execution_logs, execlog_sinks, execlog_iters): (bool, Vec<ExecLogSink>, Vec<ExecLogIter>),
+        (execlog_enabled, execlog_sinks, execlog_iters): (bool, Vec<ExecLogSink>, Vec<ExecLogIter>),
         workspace_events: bool,
         flags: Vec<String>,
         startup_flags: Vec<String>,
@@ -980,7 +980,7 @@ impl Build {
             "ctx.bazel.build",
             build_events = build_events,
             workspace_events = workspace_events,
-            execution_logs = execution_logs,
+            execution_log = execlog_enabled,
             flags = ?flags
         );
         let _enter = span.enter();
@@ -1065,7 +1065,7 @@ impl Build {
         // Reserved before the spawn so bazel can be told where to write, but the
         // reader is started after it, once the client pid exists, as the BES
         // file above is.
-        let execlog_path = if execution_logs {
+        let execlog_path = if execlog_enabled {
             let plan =
                 bazel::execlog::plan(injected_execlog_path, std::mem::take(&mut compact_paths));
             if plan.add_flag {
