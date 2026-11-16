@@ -4,9 +4,11 @@
 //!
 //! [`Reader`] turns the stream into frames and says, when it stops, whether
 //! the stream was *complete* (bazel's final event, `last_message`, arrived)
-//! or not, and if not, why.
+//! or not, and if not, why. [`requested_path`] reads the file a caller asked
+//! Bazel for, which the CLI's own FIFO flag would otherwise replace.
 
 use std::io::{self, ErrorKind};
+use std::path::PathBuf;
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -16,6 +18,15 @@ use prost::bytes::Bytes;
 use crate::delimited;
 use crate::stream::Done;
 use crate::stream::pipe::Pipe;
+
+/// The flag that names where Bazel writes the binary BEP.
+pub const FLAG: &str = "--build_event_binary_file";
+
+/// The BEP file the caller asked Bazel for in `flags`, if any; see
+/// [`crate::rc::requested_path`] for how empty and relative values resolve.
+pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
+    crate::rc::requested_path(flags, FLAG, verb, directory)
+}
 
 /// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it
 /// again in the same invocation, reopening the file for the next attempt.
@@ -192,6 +203,37 @@ impl Iterator for Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The caller's BEP file is read from the command line and from a `common`
+    /// rc entry alike, since Bazel honours both.
+    #[test]
+    fn requested_path_reads_the_binary_file_flag() {
+        let line = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            requested_path(
+                &line(&["--build_event_binary_file=/tmp/ide.bep"]),
+                "build",
+                None
+            ),
+            Some(PathBuf::from("/tmp/ide.bep")),
+        );
+        assert_eq!(
+            requested_path(
+                &line(&["--default_override=0:common=--build_event_binary_file=/tmp/rc.bep"]),
+                "test",
+                None,
+            ),
+            Some(PathBuf::from("/tmp/rc.bep")),
+        );
+        assert_eq!(
+            requested_path(
+                &line(&["--build_event_json_file=/tmp/x.json"]),
+                "build",
+                None
+            ),
+            None
+        );
+    }
     use crate::stream::Gate;
     use crate::stream::pipe::Channel;
     use axl_proto::build_event_stream::build_event::Payload;

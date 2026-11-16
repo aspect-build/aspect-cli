@@ -15,20 +15,10 @@ pub const COMPACT_FILE_FLAG: &str = "--execution_log_compact_file";
 /// A deployment wired to an Aspect BES backend, a Workflows runner, or a
 /// `.bazelrc` already asks Bazel for the compact log, and whoever asked reads
 /// the file at that path. Adding a second flag would win — a literal flag
-/// outranks rc content — and silently repoint Bazel away from it.
-///
-/// An empty value clears the flag rather than naming a file, so it is not a
-/// request; treating it as a path would have the reader tail "" and report a
-/// clean empty stream. A relative value is joined to `directory`, the spawn's
-/// directory, because that is what Bazel resolves it against while the reader
-/// runs from the CLI's own cwd.
+/// outranks rc content — and silently repoint Bazel away from it. See
+/// [`crate::rc::requested_path`] for how empty and relative values resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    crate::rc::last_flag_value(flags, COMPACT_FILE_FLAG, verb)
-        .filter(|path| !path.is_empty())
-        .map(|path| match directory {
-            Some(dir) if Path::new(&path).is_relative() => Path::new(dir).join(path),
-            _ => PathBuf::from(path),
-        })
+    crate::rc::requested_path(flags, COMPACT_FILE_FLAG, verb, directory)
 }
 
 /// Who writes the compact log, and which sinks still need their own copy.
@@ -116,30 +106,6 @@ mod tests {
             Some(PathBuf::from("/tmp/log.zst"))
         );
         assert_eq!(requested_path(&flags(&[]), "build", None), None);
-    }
-
-    #[test]
-    fn an_empty_value_clears_the_flag_and_is_not_a_request() {
-        let f = flags(&["--execution_log_compact_file="]);
-        assert_eq!(requested_path(&f, "build", None), None);
-    }
-
-    #[test]
-    fn a_relative_path_is_joined_to_the_spawn_directory() {
-        let f = flags(&["--execution_log_compact_file=out/log.zst"]);
-        assert_eq!(
-            requested_path(&f, "build", Some("/ws")),
-            Some(PathBuf::from("/ws/out/log.zst"))
-        );
-        assert_eq!(
-            requested_path(&f, "build", None),
-            Some(PathBuf::from("out/log.zst"))
-        );
-        let abs = flags(&["--execution_log_compact_file=/abs/log.zst"]);
-        assert_eq!(
-            requested_path(&abs, "build", Some("/ws")),
-            Some(PathBuf::from("/abs/log.zst"))
-        );
     }
 
     #[test]

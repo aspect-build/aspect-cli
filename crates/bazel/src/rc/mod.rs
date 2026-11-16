@@ -1051,6 +1051,26 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
         .next_back()
 }
 
+/// The output file `name` asks Bazel to write for `command`, as [`last_flag_value`] reads
+/// it, or `None` when nothing asked.
+///
+/// An empty value clears the flag rather than naming a file, so it is not a request. A
+/// relative value is joined to `directory`, the spawn's working directory, because Bazel
+/// resolves it there while the CLI reads and writes from its own cwd.
+pub fn requested_path(
+    args: &[String],
+    name: &str,
+    command: &str,
+    directory: Option<&str>,
+) -> Option<PathBuf> {
+    last_flag_value(args, name, command)
+        .filter(|path| !path.is_empty())
+        .map(|path| match directory {
+            Some(dir) if Path::new(&path).is_relative() => Path::new(dir).join(path),
+            _ => PathBuf::from(path),
+        })
+}
+
 /// The [`DefaultOverride`] payloads among `tokens` that apply to `command`, in the order
 /// Bazel parses them: a section at a time in [`sections_for`] order, and within a section
 /// one [`override_chunks`] bucket at a time. Empty buckets are dropped.
@@ -1515,6 +1535,44 @@ mod runcommand_tests {
             ),
             Some("grpc://last".to_string()),
             "repeated overrides resolve like repeated flags",
+        );
+    }
+
+    /// An empty value clears an output flag rather than naming a file.
+    #[test]
+    fn requested_path_ignores_an_empty_value() {
+        let line = args(&["--some_output_file="]);
+        assert_eq!(
+            requested_path(&line, "--some_output_file", "build", None),
+            None
+        );
+        assert_eq!(
+            requested_path(&args(&[]), "--some_output_file", "build", None),
+            None
+        );
+    }
+
+    /// A relative path is joined to the spawn directory, where Bazel resolves it;
+    /// an absolute one, or one with no directory given, is kept as is.
+    #[test]
+    fn requested_path_joins_a_relative_path_to_the_spawn_directory() {
+        let relative = args(&["--some_output_file=out/f"]);
+        assert_eq!(
+            requested_path(&relative, "--some_output_file", "build", Some("/ws")),
+            Some(PathBuf::from("/ws/out/f")),
+        );
+        assert_eq!(
+            requested_path(&relative, "--some_output_file", "build", None),
+            Some(PathBuf::from("out/f")),
+        );
+        assert_eq!(
+            requested_path(
+                &args(&["--some_output_file=/abs/f"]),
+                "--some_output_file",
+                "build",
+                Some("/ws")
+            ),
+            Some(PathBuf::from("/abs/f")),
         );
     }
 
