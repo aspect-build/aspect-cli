@@ -280,7 +280,7 @@ pub struct TelemetrySources {
 
 impl TelemetrySources {
     /// Whether an OTLP exporter takes traces. File exporters (such as
-    /// `ASPECT_DEBUG=1`'s) print `tracing` output and take no exported spans.
+    /// `ASPECT_DEBUG=1`'s) print AXL logs and events and take no spans.
     pub fn traces(&self) -> bool {
         self.traces.load(Ordering::Relaxed)
     }
@@ -319,6 +319,8 @@ impl TelemetrySources {
         Self::load(&self.execution_log)
     }
 
+    const ATTRIBUTES: [&'static str; 2] = ["build_events", "execution_log"];
+
     fn slot(&self, attribute: &str) -> Option<&AtomicU8> {
         match attribute {
             "build_events" => Some(&self.build_events),
@@ -354,7 +356,8 @@ fn sources_set_attr(
 ) -> starlark::Result<()> {
     let slot = sources.slot(attribute).ok_or_else(|| {
         starlark::Error::new_other(anyhow::anyhow!(
-            "telemetry attribute `{attribute}` is read-only"
+            "`ctx.telemetry` has no settable attribute `{attribute}`; set \
+             `build_events` or `execution_log`"
         ))
     })?;
     let name = value.unpack_str().ok_or_else(|| {
@@ -429,6 +432,14 @@ impl<'v> StarlarkValue<'v> for Telemetry<'v> {
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
         sources_set_attr(&self.sources, attribute, value)
     }
+
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
+        TelemetrySources::ATTRIBUTES.contains(&attribute)
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        TelemetrySources::ATTRIBUTES.map(String::from).to_vec()
+    }
 }
 
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
@@ -461,6 +472,14 @@ impl<'v> StarlarkValue<'v> for FrozenTelemetry {
 
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
         sources_set_attr(&self.sources, attribute, value)
+    }
+
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
+        TelemetrySources::ATTRIBUTES.contains(&attribute)
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        TelemetrySources::ATTRIBUTES.map(String::from).to_vec()
     }
 }
 
@@ -798,6 +817,47 @@ mod tests {
     }
 
     #[test]
+    fn only_otlp_exporters_count_and_each_for_its_own_signals() {
+        let otlp = |traces, metrics| {
+            ExporterSpec::Otlp(OtlpSpec {
+                url: "http://collector".into(),
+                protocol: OtlpProtocol::Grpc,
+                headers: BTreeMap::new(),
+                signals: Signals {
+                    traces,
+                    logs: true,
+                    metrics,
+                },
+                resource_attributes: BTreeMap::new(),
+            })
+        };
+        let file = ExporterSpec::File(FileSpec {
+            destination: FileDestination::Stderr,
+            format: FileFormat::parse("compact").unwrap(),
+            signals: Signals::all(),
+            resource_attributes: BTreeMap::new(),
+        });
+        let exported = |specs: &[ExporterSpec]| {
+            let sources = TelemetrySources::default();
+            sources.set_exported(specs);
+            (sources.traces(), sources.metrics())
+        };
+        assert_eq!(exported(&[]), (false, false));
+        assert_eq!(exported(&[file.clone()]), (false, false), "file only");
+        assert_eq!(exported(&[otlp(false, false)]), (false, false), "logs only");
+        assert_eq!(
+            exported(&[otlp(false, true)]),
+            (false, true),
+            "metrics only"
+        );
+        assert_eq!(exported(&[otlp(true, false), file]), (true, false));
+        assert_eq!(
+            exported(&[otlp(true, false), otlp(false, true)]),
+            (true, true)
+        );
+    }
+
+    #[test]
     fn policies_round_trip_by_name() {
         for (name, policy) in SourcePolicy::NAMES {
             assert_eq!(SourcePolicy::parse(name).unwrap(), policy);
@@ -865,5 +925,27 @@ def config(ctx):
         .expect_err("an unknown policy must be refused");
         let err = format!("{err:#}");
         assert!(err.contains("auto, always, off"), "{err}");
+    }
+
+    #[test]
+    fn dir_lists_the_settable_policies() {
+        let names = crate::test::eval(
+            r#"
+def _feature(ctx):
+    names = [n for n in dir(ctx.telemetry) if n in ("build_events", "execution_log")]
+    if names != ["build_events", "execution_log"] or not hasattr(ctx.telemetry, "execution_log"):
+        fail("dir/hasattr miss the policies: %r" % names)
+
+Probe = feature(implementation = _feature)
+
+def _impl(ctx):
+    return 0
+
+t = task(implementation = _impl)
+"#,
+        )
+        .with_features(&["Probe"])
+        .run_task(0);
+        assert_eq!(names.expect("run_task"), Some(0));
     }
 }

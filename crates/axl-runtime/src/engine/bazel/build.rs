@@ -1758,10 +1758,11 @@ Test = task(implementation = _impl)
     }
 
     /// Under the default `auto` policy, with traces exported, a build that
-    /// writes the log gets the spawn telemetry sink, a subscriber the producer blocks for, so it has to keep
-    /// draining: one that stopped would park the reader at the ring and stall
-    /// the iterator beside it, which the timeout catches. The iterator counting
-    /// every entry is what shows the two shared the stream.
+    /// writes the log gets the spawn telemetry sink, a subscriber the producer
+    /// blocks for, so it has to keep draining: one that stopped would park the
+    /// reader at the ring and stall the iterator beside it, which the timeout
+    /// catches. The iterator counting every entry is what shows the two shared
+    /// the stream.
     #[cfg(unix)]
     #[test]
     fn the_spawn_telemetry_sink_drains_the_log_beside_an_iterator() {

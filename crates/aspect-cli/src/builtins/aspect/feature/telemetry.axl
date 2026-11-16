@@ -64,7 +64,8 @@ the log. For metrics without spans, register the exporter with
 without an OTLP exporter for the stream's signals.
 
 A setting other than `auto` is written to `ctx.telemetry.build_events` /
-`ctx.telemetry.execution_log`, which config.axl may also set directly.
+`ctx.telemetry.execution_log`, which config.axl may also set directly. `auto`
+means "leave it", so it cannot undo a policy config.axl set.
 
 Otherwise this feature is just a convenience layer over option 4 — it reads
 env vars / CLI flags and turns them into `add(...)` calls. Anything you
