@@ -402,9 +402,12 @@ fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
     for (attempt, events) in scenario.attempts.iter().enumerate() {
         // One open/write/close per attempt: the read side observes a writer
         // appear, drain bytes, and disappear — same as Bazel reopening the
-        // BEP file on each retry.
+        // BEP file on each retry. Like Bazel, a regular file is created and
+        // started over; creating and truncating are no-ops on the CLI's FIFO.
         let mut f = OpenOptions::new()
             .write(true)
+            .create(true)
+            .truncate(true)
             .open(path)
             .unwrap_or_else(|e| panic!("basil: opening BES path {path:?} for write: {e}"));
         if !scenario.open_delay.is_zero() {

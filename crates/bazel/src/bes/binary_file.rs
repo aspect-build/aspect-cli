@@ -203,6 +203,16 @@ impl Iterator for Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::Gate;
+    use crate::stream::pipe::Channel;
+    use axl_proto::build_event_stream::build_event::Payload;
+    use axl_proto::build_event_stream::build_finished::ExitCode;
+    use axl_proto::build_event_stream::{BuildFinished, BuildStarted};
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     /// The caller's BEP file is read from the command line and from a `common`
     /// rc entry alike, since Bazel honours both.
@@ -234,16 +244,6 @@ mod tests {
             None
         );
     }
-    use crate::stream::Gate;
-    use crate::stream::pipe::Channel;
-    use axl_proto::build_event_stream::build_event::Payload;
-    use axl_proto::build_event_stream::build_finished::ExitCode;
-    use axl_proto::build_event_stream::{BuildFinished, BuildStarted};
-    use std::fs::{File, OpenOptions};
-    use std::io::Write;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
 
     fn started() -> BuildEvent {
         BuildEvent {
