@@ -33,6 +33,12 @@ fn fails(body: &str) -> String {
     format!("{:?}", run(body).expect_err("expected the task to fail"))
 }
 
+/// A loopback address that refuses connections. Nothing listens on port 1,
+/// and a listener asked for port 0 is given an ephemeral port, never this one,
+/// so no other test can take it. A port freed by closing a listener can be
+/// taken in between, and the connect then succeeds.
+const REFUSING_ADDR: &str = "127.0.0.1:1";
+
 /// A Unix socket path short enough for macOS's 104-byte limit.
 #[cfg(unix)]
 fn sock_path(label: &str) -> String {
@@ -84,45 +90,40 @@ assert_eq(err.kind, "unexpected_eof")
 
 #[test]
 fn a_refused_connection_is_an_io_error() {
-    ok(r#"
-l = net.tcp.listen("127.0.0.1:0")
-addr = l.local_addr()
-l.close()
-err, s = net.tcp.try_connect(addr, timeout_ms = 2000)
+    ok(&format!(
+        r#"
+err, s = net.tcp.try_connect("{REFUSING_ADDR}", timeout_ms = 2000)
 assert_eq(s, None)
 assert_eq(isinstance(err, std.io.Error), True)
 assert_eq(isinstance(err, error), True)
 assert_eq(err.kind, "connection_refused")
-"#);
+"#
+    ));
 }
 
 #[test]
 fn an_uncaught_io_error_raises_with_its_type() {
-    let msg = fails(
+    let msg = fails(&format!(
         r#"
-l = net.tcp.listen("127.0.0.1:0")
-addr = l.local_addr()
-l.close()
-net.tcp.connect(addr)
-"#,
-    );
+net.tcp.connect("{REFUSING_ADDR}")
+"#
+    ));
     assert!(msg.contains("std.io.Error"), "{msg}");
 }
 
 #[test]
 fn catch_takes_std_io_error_and_leaves_bugs_alone() {
-    ok(r#"
-def _connect_closed():
-    l = net.tcp.listen("127.0.0.1:0")
-    addr = l.local_addr()
-    l.close()
-    return net.tcp.connect(addr)
+    ok(&format!(
+        r#"
+def _connect_refused():
+    return net.tcp.connect("{REFUSING_ADDR}")
 
-err, _ = catch(_connect_closed, types = [std.io.Error])
+err, _ = catch(_connect_refused, types = [std.io.Error])
 assert_eq(err.kind, "connection_refused")
 assert_eq(repr(err).startswith("std.io.Error(message = "), True)
 assert_eq("kind = \"connection_refused\"" in repr(err), True)
-"#);
+"#
+    ));
     let msg = fails(
         r#"
 def _bug():
