@@ -32,6 +32,7 @@ use bazel::subscription::Subscription;
 use derive_more::Display;
 use fibre::spmc::Receiver;
 
+use super::Handle;
 use crate::engine::cancellation::Signals;
 
 /// A `bazel.workspace_events.iterator()` handle: a subscriber to one build's
@@ -58,10 +59,17 @@ impl WorkspaceEventIter {
         }
     }
 
+    #[cfg(test)]
+    pub fn is_live(&self) -> bool {
+        self.sub.is_live()
+    }
+}
+
+impl Handle<WorkspaceEvent> for WorkspaceEventIter {
     /// Subscribe this handle to a build's workspace event log. One handle binds
     /// once, so a handle reused across two builds is an error rather than a
     /// stream silently attached to the wrong one.
-    pub fn bind(&self, recv: Receiver<WorkspaceEvent>) -> anyhow::Result<()> {
+    fn bind(&self, recv: Receiver<WorkspaceEvent>) -> anyhow::Result<()> {
         if self.sub.bind(recv) {
             return Ok(());
         }
@@ -74,13 +82,8 @@ impl WorkspaceEventIter {
     /// Unsubscribe, dropping any events still buffered. `build.wait()` calls
     /// this before joining the stream, so an undrained handle cannot park the
     /// reader.
-    pub fn release(&self) {
+    fn release(&self) {
         self.sub.release();
-    }
-
-    #[cfg(test)]
-    pub fn is_live(&self) -> bool {
-        self.sub.is_live()
     }
 }
 

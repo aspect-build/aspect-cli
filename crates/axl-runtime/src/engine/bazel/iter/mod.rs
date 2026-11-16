@@ -14,21 +14,3 @@ pub trait Handle<T: Send + Clone> {
     /// Unsubscribe. Idempotent.
     fn release(&self);
 }
-
-impl Handle<axl_proto::tools::protos::ExecLogEntry> for ExecLogIter {
-    fn bind(&self, recv: Receiver<axl_proto::tools::protos::ExecLogEntry>) -> anyhow::Result<()> {
-        ExecLogIter::bind(self, recv)
-    }
-    fn release(&self) {
-        ExecLogIter::release(self)
-    }
-}
-
-impl Handle<axl_proto::workspace_log::WorkspaceEvent> for WorkspaceEventIter {
-    fn bind(&self, recv: Receiver<axl_proto::workspace_log::WorkspaceEvent>) -> anyhow::Result<()> {
-        WorkspaceEventIter::bind(self, recv)
-    }
-    fn release(&self) {
-        WorkspaceEventIter::release(self)
-    }
-}

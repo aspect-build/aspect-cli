@@ -1158,8 +1158,13 @@ impl Build {
         // Everything that can fail once bazel runs. A failure abandons the
         // stream (see `Unstarted`), and releases the handles this spawn bound.
         let mut execlog_bound = false;
-        let mut workspace_bound = false;
         let parts = (|| -> io::Result<_> {
+            // Started first: Bazel already has the path, so a stream dropped on
+            // a later failure still reads to the client's exit, which `abandon`
+            // forces, and its file goes with it.
+            let mut workspace_event_stream =
+                workspace_event_file.map(|log| WorkspaceEventStream::spawn(log, pids.gate()));
+
             // Same two-pid split for the execution log: the daemon writes the file, but
             // only the client can say the invocation is over and none is coming.
             //
@@ -1264,15 +1269,13 @@ impl Build {
                 stream.seal();
             }
 
-            let mut workspace_event_stream =
-                workspace_event_file.map(|file| WorkspaceEventStream::spawn(file, pids.gate()));
+            // Bound last, so no later failure can strand its handles.
             if let Some(stream) = workspace_event_stream.as_mut() {
                 bind_handles(
                     &workspace_event_iters,
                     || stream.receiver(),
                     "workspace event",
                 )?;
-                workspace_bound = true;
                 stream.seal();
             }
             let trace_sink = bes_telemetry.then(|| {
@@ -1292,11 +1295,6 @@ impl Build {
                 // would wait for forever; nothing else will release it.
                 if execlog_bound {
                     execlog_iters.iter().for_each(ExecLogIter::release);
-                }
-                if workspace_bound {
-                    workspace_event_iters
-                        .iter()
-                        .for_each(WorkspaceEventIter::release);
                 }
                 build_event_stream.abandon(|| {
                     bound.token().cancel();
@@ -1488,25 +1486,25 @@ impl Build {
             let _ = trace_sink.join();
         }
 
+        // Release every decoded consumer still holding a subscriber, before
+        // either join. The producer blocks for each, so one the task never
+        // drained would park its reader on a full channel and hang the join.
+        // The AXL side drains before calling `wait()` (see
+        // `bazel/exec_log.axl`); this is the net under a task that does not,
+        // trading dropped entries for a build that ends.
         for iter in &build.workspace_event_iters {
             iter.release();
         }
-        if let Some(workspace_event_stream) = build.workspace_event_stream.take() {
-            match workspace_event_stream.join() {
-                Ok(_) => {}
-                Err(err) => anyhow::bail!("workspace event stream thread error: {}", err),
-            }
-        };
-
-        // Release every decoded consumer still holding a subscriber. The producer
-        // blocks for each, so one the task never drained would park the reader
-        // thread on a full channel and hang the join below. The AXL side drains
-        // before calling `wait()` (see `bazel/exec_log.axl`); this is the net
-        // under a task that does not, trading dropped entries for a build that
-        // ends.
         for iter in &build.execlog_iters {
             iter.release();
         }
+
+        // Reported after the execution log is joined, so a failed workspace
+        // log does not leave that reader running.
+        let workspace_error = build
+            .workspace_event_stream
+            .take()
+            .and_then(|stream| stream.join().err());
 
         // Wait for Execlog stream to complete.
         //
@@ -1524,9 +1522,17 @@ impl Build {
                     );
                 }
                 Ok(_) => {}
-                Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
+                Err(err) => match &workspace_error {
+                    Some(ws) => anyhow::bail!(
+                        "execlog stream thread error: {err}; workspace event stream thread error: {ws}"
+                    ),
+                    None => anyhow::bail!("execlog stream thread error: {}", err),
+                },
             }
         };
+        if let Some(err) = workspace_error {
+            anyhow::bail!("workspace event stream thread error: {}", err);
+        }
 
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));
@@ -2123,6 +2129,77 @@ Test = task(implementation = _impl)
             "the reader must tail the requested path",
         );
         assert!(asked.exists(), "a requested log belongs to whoever asked");
+    }
+
+    /// A workspace log that fails `wait()` must not leave the execution log's
+    /// undrained handle subscribed: both lists are released before either join.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_workspace_log_still_releases_the_execution_log_handles() {
+        run_execlog_task(
+            std::time::Duration::from_secs(60),
+            r#"
+def _impl(ctx):
+    entries = bazel.execution_log.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=corrupt_workspace_log_beside_execlog"],
+        execution_log = [entries],
+        workspace_events = [bazel.workspace_events.iterator()],
+        stderr = None,
+    )
+    err, _ = catch(build.wait)
+    if not err: return 2
+    if "workspace event" not in err.message: return 3
+    if not entries.done: return 4
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            .to_string(),
+            "wait() hung on a failed workspace log",
+            "a failed workspace log must fail wait() and still release the execution log's handle",
+        );
+    }
+
+    /// The execution log's handles bind before the workspace log's, so a
+    /// workspace handle still bound to a running build fails the spawn after a
+    /// fresh execution log handle was bound: that one is released, and the
+    /// running build keeps its handle.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_workspace_bind_releases_the_execution_log_handles_this_spawn_bound() {
+        run_execlog_task(
+            std::time::Duration::from_secs(60),
+            format!(
+                r#"
+def _impl(ctx):
+    events = bazel.workspace_events.iterator()
+    first = ctx.bazel.build(
+        flags = ["--scenario=workspace_events_beyond_capacity"],
+        workspace_events = [events],
+        stderr = None,
+    )
+    entries = bazel.execution_log.iterator()
+    err, _ = catch(
+        ctx.bazel.build,
+        flags = ["--scenario=execlog_beyond_capacity"],
+        execution_log = [entries],
+        workspace_events = [events],
+        stderr = None,
+    )
+    if not err: return 2
+    if "already bound" not in err.message: return 3
+    if not entries.done: return 4
+    if len([e for e in events]) != {SCENARIO_ENTRIES}: return 5
+    if not first.wait().success: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#
+            ),
+            "a failed spawn left the first build's reader parked",
+            "the second spawn's execution log handle must be released and the first build's kept",
+        );
     }
 
     /// `drain()` mid-build on an `execution_log.iterator()` handle, the AXL-level
@@ -2868,6 +2945,7 @@ Test = task(implementation = _impl)
     #[cfg(unix)]
     #[test]
     fn a_failed_execlog_bind_releases_the_handles_already_bound() {
+        use super::Handle;
         use bazel::execlog::feed::ExecLogStream;
 
         // A reaped pid for the log's nominated holder, so the reader thread
@@ -2897,7 +2975,7 @@ Test = task(implementation = _impl)
         let fresh = super::ExecLogIter::new(signals, None);
 
         let err = super::bind_handles(
-            &[fresh.clone(), already],
+            &[fresh.clone(), already.clone()],
             || stream.receiver(),
             "execution log",
         )
@@ -2910,6 +2988,11 @@ Test = task(implementation = _impl)
             !fresh.is_live(),
             "the handle bound before the failure must be released, or the log \
              reader blocks on a consumer that will never read",
+        );
+        assert!(
+            already.is_live(),
+            "the handle whose bind failed belongs to another binding and must \
+             stay subscribed",
         );
     }
 

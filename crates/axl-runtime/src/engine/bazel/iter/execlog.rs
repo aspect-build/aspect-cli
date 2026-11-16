@@ -35,6 +35,7 @@ use axl_proto::tools::protos::exec_log_entry;
 use derive_more::Display;
 use fibre::spmc::Receiver;
 
+use super::Handle;
 use crate::engine::cancellation::Signals;
 use bazel::subscription::Subscription;
 
@@ -140,11 +141,30 @@ impl ExecLogIter {
         }
     }
 
+    /// Whether this handle still holds a subscriber.
+    ///
+    /// For the all-or-nothing bind in `build::bind_handles`, whose
+    /// rollback nothing else can observe: `release` and a drained handle both
+    /// end in `Done`, so a later `bind` fails whether or not the rollback ran.
+    #[cfg(test)]
+    pub fn is_live(&self) -> bool {
+        self.sub.is_live()
+    }
+
+    fn wants(&self, entry: &ExecLogEntry) -> bool {
+        match self.kinds.as_ref() {
+            Some(kinds) => entry_kind_in(entry, kinds),
+            None => true,
+        }
+    }
+}
+
+impl Handle<ExecLogEntry> for ExecLogIter {
     /// Subscribe this handle to a build's decoded execution log. Called by
     /// `Build::spawn` with a clone of the stream's receiver; one handle binds
     /// once, so a handle reused across two builds is an error rather than a
     /// stream silently attached to the wrong one.
-    pub fn bind(&self, recv: Receiver<ExecLogEntry>) -> anyhow::Result<()> {
+    fn bind(&self, recv: Receiver<ExecLogEntry>) -> anyhow::Result<()> {
         if self.sub.bind(recv) {
             return Ok(());
         }
@@ -161,25 +181,8 @@ impl ExecLogIter {
     /// subscriber, so the reader would otherwise wait on a consumer that is not
     /// coming. The AXL side drains first (`bazel/exec_log.axl`) and so loses
     /// nothing to it.
-    pub fn release(&self) {
+    fn release(&self) {
         self.sub.release();
-    }
-
-    /// Whether this handle still holds a subscriber.
-    ///
-    /// For the all-or-nothing bind in `build::bind_execlog_iters`, whose
-    /// rollback nothing else can observe: `release` and a drained handle both
-    /// end in `Done`, so a later `bind` fails whether or not the rollback ran.
-    #[cfg(test)]
-    pub fn is_live(&self) -> bool {
-        self.sub.is_live()
-    }
-
-    fn wants(&self, entry: &ExecLogEntry) -> bool {
-        match self.kinds.as_ref() {
-            Some(kinds) => entry_kind_in(entry, kinds),
-            None => true,
-        }
     }
 }
 

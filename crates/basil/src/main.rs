@@ -173,10 +173,13 @@ fn run_build(args: &[String], verb: &str) {
 
     let s = scenario(&scenario_name);
 
-    if let Some(path) = flag("--experimental_workspace_rules_log_file")
-        && s.workspace_events > 0
-    {
-        write_workspace_log(&path, s.workspace_events);
+    if let Some(path) = flag("--experimental_workspace_rules_log_file") {
+        if s.workspace_corrupt {
+            fs::write(&path, [4, 0xff, 0xff, 0xff, 0xff])
+                .unwrap_or_else(|e| panic!("basil: writing workspace log {path:?}: {e}"));
+        } else if s.workspace_events > 0 {
+            write_workspace_log(&path, s.workspace_events);
+        }
     }
 
     let log = || match &execlog_path {
@@ -350,6 +353,8 @@ struct Scenario {
     /// How many `WorkspaceEvent` messages to write to
     /// `--experimental_workspace_rules_log_file`, when the runtime asked for one.
     workspace_events: u32,
+    /// Write one event there that does not decode, instead.
+    workspace_corrupt: bool,
 }
 
 /// A clean single-attempt run with no pauses and no execution log — so each
@@ -363,6 +368,7 @@ impl Default for Scenario {
             execlog_delay: Duration::ZERO,
             json_bep_tests: &[],
             workspace_events: 0,
+            workspace_corrupt: false,
         }
     }
 }
@@ -597,6 +603,15 @@ fn scenario(name: &str) -> Scenario {
         // the same reason.
         "workspace_events_beyond_capacity" => Scenario {
             workspace_events: 3000,
+            ..Default::default()
+        },
+
+        // A workspace log that fails to decode, beside an execution log longer
+        // than the channel's capacity: the failed workspace log must not keep
+        // `wait()` from releasing the execution log's handles.
+        "corrupt_workspace_log_beside_execlog" => Scenario {
+            workspace_corrupt: true,
+            execlog_entries: 3000,
             ..Default::default()
         },
 
