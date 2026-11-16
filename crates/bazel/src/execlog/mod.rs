@@ -48,11 +48,17 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// file at that path. When the CLI streams the log it names a file of its own,
 /// which outranks that one (the option is single-valued), so the asked-for
 /// path is written as one of the [`copies`]. `%workspace%` stands for the
-/// workspace root, as Bazel expands it in this flag; see
+/// workspace root, as Bazel expands it in this flag, and a boolean value
+/// names no file; see
 /// [`crate::rc::requested_path`] for how empty and relative values resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
     let path = crate::rc::requested_path(flags, COMPACT_FILE_FLAG, verb, None)?;
     let text = path.to_string_lossy();
+    // Bazel 10 reads a boolean here (off, or stream it to remote storage),
+    // which names no file.
+    if matches!(&*text, "true" | "false" | "yes" | "no" | "1" | "0") {
+        return None;
+    }
     let path = match crate::rc::workspace_root(directory) {
         Some(root) if text.contains("%workspace%") => {
             PathBuf::from(text.replace("%workspace%", &root.to_string_lossy()))
@@ -137,8 +143,16 @@ mod tests {
         let flags = flags(&["--execution_log_compact_file=%workspace%/exec.log"]);
         assert_eq!(
             requested_path(&flags, "build", pkg.to_str()),
-            Some(ws.path().join("exec.log"))
+            Some(ws.path().canonicalize().unwrap().join("exec.log"))
         );
+    }
+
+    #[test]
+    fn a_boolean_names_no_file() {
+        for value in ["true", "false", "0"] {
+            let flags = flags(&[&format!("--execution_log_compact_file={value}")]);
+            assert_eq!(requested_path(&flags, "build", None), None, "{value}");
+        }
     }
 
     #[test]

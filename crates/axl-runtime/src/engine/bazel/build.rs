@@ -1081,7 +1081,12 @@ impl Build {
         let rc_visible = startup_flags.iter().any(|f| f == "--ignore_all_rc_files");
         // A `--profile` would turn profiling back on for a caller who turned
         // it off, so the profile is then left to Bazel too.
-        let profile_kept = rc_visible && !bazel::profile::turned_off(&flags, verb);
+        // A `--profile` whose path cannot be told is left to Bazel too.
+        let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
+        let profile_unplaced = requested_profile.is_none()
+            && bazel::rc::requested_path(&flags, bazel::profile::FLAG, verb, None).is_some();
+        let profile_kept =
+            rc_visible && !profile_unplaced && !bazel::profile::turned_off(&flags, verb);
         let (asked, recording) = execlog_demand(
             execlog_enabled,
             &execlog_sinks,
@@ -1137,7 +1142,6 @@ impl Build {
             bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
         let requested_workspace_log =
             bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
-        let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
 
         let mut cmd = super::runner::SignalRunner(&signals).command();
         cmd.args(startup_flags);

@@ -26,17 +26,16 @@ pub fn file_name(requested: Option<&Path>) -> &'static str {
 
 /// The profile path something already asked Bazel for in `flags`, if any. A
 /// relative one is under the workspace root, where Bazel resolves it, not the
-/// directory the command runs in; see [`crate::rc::requested_path`] for an
-/// empty value.
+/// directory the command runs in; `None` for one when the workspace cannot be
+/// found. See [`crate::rc::requested_path`] for empty and `~/` values.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
     let path = crate::rc::requested_path(flags, FLAG, verb, None)?;
     if path.is_absolute() {
         return Some(path);
     }
-    match crate::rc::workspace_root(directory) {
-        Some(root) => Some(root.join(path)),
-        None => crate::rc::requested_path(flags, FLAG, verb, directory),
-    }
+    // Bazel runs no command outside a workspace, so a root not found here is
+    // one this cannot name the profile's path in; the profile is left to Bazel.
+    crate::rc::workspace_root(directory).map(|root| root.join(path))
 }
 
 /// The option that turns the profile on or off.
@@ -134,7 +133,7 @@ mod tests {
         std::fs::create_dir(&pkg).unwrap();
         assert_eq!(
             requested_path(&strings(&["--profile=p.json"]), "build", pkg.to_str()),
-            Some(ws.path().join("p.json"))
+            Some(ws.path().canonicalize().unwrap().join("p.json"))
         );
         assert_eq!(
             requested_path(&strings(&["--profile=/abs/p.gz"]), "build", pkg.to_str()),

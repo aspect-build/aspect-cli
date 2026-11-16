@@ -1067,24 +1067,40 @@ pub fn requested_path(
 ) -> Option<PathBuf> {
     last_flag_value(args, name, command)
         .filter(|path| !path.is_empty())
+        .map(|path| expand_home(&path))
         .map(|path| match directory {
-            Some(dir) if Path::new(&path).is_relative() => Path::new(dir).join(path),
-            _ => PathBuf::from(path),
+            Some(dir) if path.is_relative() => Path::new(dir).join(path),
+            _ => path,
         })
+}
+
+/// `path` with a leading `~/` made the user's home, as Bazel's path options
+/// expand it before resolving anything else.
+fn expand_home(path: &str) -> PathBuf {
+    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) if !home.is_empty() => Path::new(&home).join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// The directory a Bazel command run in `directory` (the CLI's own cwd when
+/// `None`) works in, as its client sees it: absolute, with symlinks resolved.
+pub fn spawn_dir(directory: Option<&str>) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    match directory {
+        Some(dir) => cwd.join(dir).canonicalize().ok(),
+        None => cwd.canonicalize().ok(),
+    }
 }
 
 /// The files that mark a directory as the root of a Bazel workspace.
 const WORKSPACE_MARKERS: [&str; 4] = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"];
 
 /// The workspace a Bazel command run in `directory` (the CLI's own cwd when
-/// `None`) belongs to: the nearest directory at or above it holding a
-/// workspace marker file, as Bazel finds it.
+/// `None`) belongs to: the nearest directory at or above its [`spawn_dir`]
+/// holding a workspace marker file, as Bazel's client finds it.
 pub fn workspace_root(directory: Option<&str>) -> Option<PathBuf> {
-    let start = match directory {
-        Some(dir) => PathBuf::from(dir),
-        None => std::env::current_dir().ok()?,
-    };
-    start
+    spawn_dir(directory)?
         .ancestors()
         .find(|dir| WORKSPACE_MARKERS.iter().any(|m| dir.join(m).is_file()))
         .map(Path::to_path_buf)
@@ -2187,6 +2203,44 @@ mod runcommand_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_requested_path_expands_home_first() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let args = vec!["--profile=~/p.gz".to_string()];
+        assert_eq!(
+            requested_path(&args, "--profile", "build", Some("/elsewhere")),
+            Some(Path::new(&home).join("p.gz"))
+        );
+    }
+
+    #[test]
+    fn a_workspace_is_found_from_a_relative_or_symlinked_directory() {
+        let ws = tempfile::tempdir().unwrap();
+        let ws_root = ws.path().canonicalize().unwrap();
+        std::fs::write(ws_root.join("MODULE.bazel"), "").unwrap();
+        std::fs::create_dir_all(ws_root.join("e2e/pkg")).unwrap();
+        std::fs::write(ws_root.join("e2e/MODULE.bazel"), "").unwrap();
+        let pkg = ws_root.join("e2e/pkg");
+        assert_eq!(
+            workspace_root(pkg.to_str()),
+            Some(ws_root.join("e2e")),
+            "the nearest wins"
+        );
+        #[cfg(unix)]
+        {
+            let other = tempfile::tempdir().unwrap();
+            let link = other.path().join("link");
+            std::os::unix::fs::symlink(&pkg, &link).unwrap();
+            assert_eq!(
+                workspace_root(link.to_str()),
+                Some(ws_root.join("e2e")),
+                "found from where the link leads, as Bazel's client does"
+            );
+        }
+    }
     use super::*;
     use std::fs;
     use tempfile::TempDir;
