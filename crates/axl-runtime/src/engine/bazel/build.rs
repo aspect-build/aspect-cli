@@ -45,6 +45,7 @@ use crate::engine::telemetry::TelemetrySources;
 use tokio_util::sync::CancellationToken;
 
 use super::iter::ExecLogIter;
+use super::iter::Handle;
 use super::iter::WorkspaceEventIter;
 use super::wrappers::ExecLogSink;
 use bazel::bes::BuildEventEnvelope;
@@ -59,52 +60,34 @@ use bazel::fanout::Subscriber;
 use bazel::fanout::SubscriberFilter;
 use bazel::runner::Runner as _;
 use bazel::workspace_event::feed::WorkspaceEventStream;
+use fibre::spmc::Receiver;
 
-/// Bind every handle, all or nothing: a bound handle is a subscriber the
-/// producer blocks for, so one left behind by a half-finished bind would park
-/// the reader on a consumer that is never coming. `bind` clones a subscriber
-/// and binds it; `release` undoes a bind.
-fn bind_all<H>(
+/// Subscribe each iterator handle to a subscriber cloned from `receiver`, all
+/// or nothing.
+///
+/// A bound handle is a subscriber the producer blocks for, so one left behind
+/// by a half-finished bind would park the reader on a consumer that is never
+/// coming. A handle passed twice, or still bound to an earlier build, fails
+/// its bind; the handles this call bound before it are released again, and
+/// only those: the failing one may belong to a build that is still running.
+fn bind_handles<T: Send + Clone, H: Handle<T>>(
     handles: &[H],
-    bind: impl Fn(&H) -> io::Result<()>,
-    release: impl Fn(&H),
+    receiver: impl Fn() -> Option<Receiver<T>>,
+    log: &str,
 ) -> io::Result<()> {
     for (bound, handle) in handles.iter().enumerate() {
-        if let Err(err) = bind(handle) {
-            handles[..bound].iter().for_each(&release);
+        let bind = || -> io::Result<()> {
+            let recv = receiver().ok_or_else(|| {
+                io::Error::other(format!("{log} stream has no subscriber to clone"))
+            })?;
+            handle.bind(recv).map_err(io::Error::other)
+        };
+        if let Err(err) = bind() {
+            handles[..bound].iter().for_each(Handle::release);
             return Err(err);
         }
     }
     Ok(())
-}
-
-fn bind_execlog_iters(stream: &ExecLogStream, iters: &[ExecLogIter]) -> io::Result<()> {
-    bind_all(
-        iters,
-        |iter| {
-            let recv = stream.receiver().ok_or_else(|| {
-                io::Error::other("execution log stream has no subscriber to clone")
-            })?;
-            iter.bind(recv).map_err(io::Error::other)
-        },
-        ExecLogIter::release,
-    )
-}
-
-fn bind_workspace_event_iters(
-    stream: &WorkspaceEventStream,
-    iters: &[WorkspaceEventIter],
-) -> io::Result<()> {
-    bind_all(
-        iters,
-        |iter| {
-            let recv = stream.receiver().ok_or_else(|| {
-                io::Error::other("workspace event stream has no subscriber to clone")
-            })?;
-            iter.bind(recv).map_err(io::Error::other)
-        },
-        WorkspaceEventIter::release,
-    )
 }
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
@@ -1036,6 +1019,8 @@ impl Build {
         // file is served from the stream when the CLI streams.
         let requested_bep_path =
             bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
+        let requested_workspace_log =
+            bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
 
         let mut cmd = super::runner::SignalRunner(&signals).command();
         cmd.args(startup_flags);
@@ -1080,14 +1065,23 @@ impl Build {
             None
         };
 
-        let workspace_event_file = if workspace_events {
-            let file = WorkspaceEventStream::reserve();
-            cmd.arg("--experimental_workspace_rules_log_file")
-                .arg(file.path());
-            Some(file)
-        } else {
-            None
-        };
+        // A path already asked for is tailed where it is, and kept, once a log
+        // an earlier build left there is cleared (see
+        // `bazel::stream::file::clear_stale`); otherwise this build reserves a
+        // fresh path and names it.
+        let workspace_event_file = workspace_events.then(|| {
+            let log = bazel::workspace_event::LogFile::plan(requested_workspace_log);
+            if let Some(path) = log.flag_path() {
+                cmd.arg(bazel::workspace_event::LOG_FILE_FLAG).arg(path);
+            } else if let Err(err) = bazel::stream::file::clear_stale(log.path()) {
+                errln!(
+                    "WARNING: could not clear the previous workspace log at {}: {err}. \
+                     Events from an earlier build may be reported as this one's.",
+                    log.path().display(),
+                );
+            }
+            log
+        });
 
         // Compact paths go to the tee reader inside the stream thread; decoded
         // paths get a writer thread each, cloning a subscriber of the decoded
@@ -1121,9 +1115,9 @@ impl Build {
         };
 
         // A log from an earlier run has to go before Bazel starts, or the reader
-        // delivers the previous build's entries; see `bazel::execlog::clear_stale`.
+        // delivers the previous build's entries; see `bazel::stream::file::clear_stale`.
         if let Some(path) = &execlog_path {
-            if let Err(err) = bazel::execlog::clear_stale(path) {
+            if let Err(err) = bazel::stream::file::clear_stale(path) {
                 errln!(
                     "WARNING: could not clear the previous execution log at {}: {err}. \
                      Entries from an earlier build may be reported as this one's.",
@@ -1162,7 +1156,9 @@ impl Build {
         let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks);
 
         // Everything that can fail once bazel runs. A failure abandons the
-        // stream (see `Unstarted`).
+        // stream (see `Unstarted`), and releases the handles this spawn bound.
+        let mut execlog_bound = false;
+        let mut workspace_bound = false;
         let parts = (|| -> io::Result<_> {
             // Same two-pid split for the execution log: the daemon writes the file, but
             // only the client can say the invocation is over and none is coming.
@@ -1258,7 +1254,8 @@ impl Build {
                          but no execution log stream is configured",
                     )
                 })?;
-                bind_execlog_iters(stream, &execlog_iters)?;
+                bind_handles(&execlog_iters, || stream.receiver(), "execution log")?;
+                execlog_bound = true;
             }
 
             // Every consumer has cloned what it needs; an unread subscriber left
@@ -1270,7 +1267,12 @@ impl Build {
             let mut workspace_event_stream =
                 workspace_event_file.map(|file| WorkspaceEventStream::spawn(file, pids.gate()));
             if let Some(stream) = workspace_event_stream.as_mut() {
-                bind_workspace_event_iters(stream, &workspace_event_iters)?;
+                bind_handles(
+                    &workspace_event_iters,
+                    || stream.receiver(),
+                    "workspace event",
+                )?;
+                workspace_bound = true;
                 stream.seal();
             }
             let trace_sink = bes_telemetry.then(|| {
@@ -1288,10 +1290,14 @@ impl Build {
             Err(err) => {
                 // A handle bound before the failure is a subscriber its reader
                 // would wait for forever; nothing else will release it.
-                execlog_iters.iter().for_each(ExecLogIter::release);
-                workspace_event_iters
-                    .iter()
-                    .for_each(WorkspaceEventIter::release);
+                if execlog_bound {
+                    execlog_iters.iter().for_each(ExecLogIter::release);
+                }
+                if workspace_bound {
+                    workspace_event_iters
+                        .iter()
+                        .for_each(WorkspaceEventIter::release);
+                }
                 build_event_stream.abandon(|| {
                     bound.token().cancel();
                     let waited =
@@ -1482,8 +1488,6 @@ impl Build {
             let _ = trace_sink.join();
         }
 
-        // Released first for the same reason as the execution log's handles
-        // below: an undrained one would park the reader and hang the join.
         for iter in &build.workspace_event_iters {
             iter.release();
         }
@@ -1725,7 +1729,7 @@ mod tests {
     fn an_iterator_handle_delivers_the_whole_log() {
         use std::time::Duration;
 
-        let capacity = bazel::execlog::feed::channel_capacity() as u32;
+        let capacity = bazel::subscription::CHANNEL_CAPACITY as u32;
         assert!(
             SCENARIO_ENTRIES > capacity,
             "the scenario's log must outrun the ring ({capacity}) to be worth asserting on",
@@ -1986,61 +1990,139 @@ Test = task(implementation = _impl)
         );
     }
 
-    /// A workspace event handle the task never iterated, and a log with no
-    /// handle at all: neither may hold the build open. `wait()` releases the
-    /// handle, and with none bound the reader has no subscriber to wait for.
+    /// A workspace event handle the task never iterated must not hold the build
+    /// open: `wait()` releases it before joining the reader.
     #[cfg(unix)]
     #[test]
-    fn an_unread_workspace_event_log_does_not_hang_the_build() {
+    fn an_undrained_workspace_event_handle_does_not_hang_the_build() {
         use std::time::Duration;
 
         run_execlog_task(
             Duration::from_secs(60),
             r#"
 def _impl(ctx):
-    for consumers in [[bazel.workspace_events.iterator()], []]:
-        build = ctx.bazel.build(
-            flags = ["--scenario=workspace_events_beyond_capacity"],
-            workspace_events = consumers,
-            stderr = None,
-        )
-        if not build.wait().success: return 1
+    build = ctx.bazel.build(
+        flags = ["--scenario=workspace_events_beyond_capacity"],
+        workspace_events = [bazel.workspace_events.iterator()],
+        stderr = None,
+    )
+    if not build.wait().success: return 1
     return 0
 
 Test = task(implementation = _impl)
 "#
             .to_string(),
-            "an unread workspace event log parked the reader past the end of the build",
-            "a build whose workspace log nobody reads must still end cleanly",
+            "an undrained workspace event handle parked the reader past the end of the build",
+            "an undrained handle must still end the build",
         );
     }
 
-    /// A workspace handle passed twice fails its second bind, after the
-    /// execution log's handle is already bound, and the spawn fails naming why.
+    /// A handle still bound to a running build, passed to a second one: the
+    /// second spawn fails naming why, and must not release the handle, so the
+    /// first build's iteration still sees its whole log rather than ending
+    /// early as if the stream had.
     #[cfg(unix)]
-    #[test]
-    fn a_workspace_event_handle_passed_twice_fails_the_spawn() {
-        let err = run_execlog_script(
-            std::time::Duration::from_secs(60),
+    fn a_handle_reused_while_bound_still_serves_its_build(
+        scenario: &str,
+        handle: &str,
+        arg: &str,
+        check: &str,
+    ) {
+        let script = format!(
             r#"
 def _impl(ctx):
-    events = bazel.workspace_events.iterator()
-    ctx.bazel.build(
-        flags = ["--scenario=execlog_beyond_capacity"],
-        execution_log = [bazel.execution_log.iterator()],
-        workspace_events = [events, events],
+    events = {handle}
+    first = ctx.bazel.build(
+        flags = ["--scenario={scenario}"],
+        {arg} = [events],
         stderr = None,
     )
+    err, _ = catch(
+        ctx.bazel.build,
+        flags = ["--scenario={scenario}"],
+        {arg} = [events],
+        stderr = None,
+    )
+    if not err: return 2
+    if "already bound" not in err.message: return 3
+    seen = 0
+    for event in events:
+        seen += 1
+        if {check} != str(seen): return 4
+    if seen != {SCENARIO_ENTRIES}: return 5
+    if not first.wait().success: return 1
     return 0
 
 Test = task(implementation = _impl)
 "#
-            .to_string(),
-            "the failed spawn hung",
-        )
-        .expect_err("a handle bound twice must fail the spawn")
-        .to_string();
-        assert!(err.contains("already bound"), "unexpected error: {err}");
+        );
+        run_execlog_task(
+            std::time::Duration::from_secs(60),
+            script,
+            "the first build's reader parked",
+            "the second spawn must refuse the handle without releasing it",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_event_handle_reused_while_bound_still_serves_its_build() {
+        a_handle_reused_while_bound_still_serves_its_build(
+            "workspace_events_beyond_capacity",
+            "bazel.workspace_events.iterator()",
+            "workspace_events",
+            "event.location",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_execution_log_handle_reused_while_bound_still_serves_its_build() {
+        a_handle_reused_while_bound_still_serves_its_build(
+            "execlog_beyond_capacity",
+            "bazel.execution_log.iterator()",
+            "execution_log",
+            "str(event.id)",
+        );
+    }
+
+    /// A workspace log already asked for on the command line is tailed where
+    /// it is and kept, not repointed to a path of the CLI's own.
+    #[cfg(unix)]
+    #[test]
+    fn an_already_requested_workspace_log_is_read_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("asked.log");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    events = bazel.workspace_events.iterator()
+    build = ctx.bazel.build(
+        flags = [
+            "--scenario=workspace_events_beyond_capacity",
+            "--experimental_workspace_rules_log_file={asked}",
+        ],
+        workspace_events = [events],
+        stderr = None,
+    )
+    seen = len([e for e in events])
+    if not build.wait().success: return 1
+    # Zero means the flag was added a second time and the reader tailed a
+    # path of its own.
+    if seen != {SCENARIO_ENTRIES}: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            asked = asked.to_str().unwrap(),
+        );
+        run_execlog_task(
+            std::time::Duration::from_secs(60),
+            script,
+            "the reader never reached the log at the requested path",
+            "the reader must tail the requested path",
+        );
+        assert!(asked.exists(), "a requested log belongs to whoever asked");
     }
 
     /// `drain()` mid-build on an `execution_log.iterator()` handle, the AXL-level
@@ -2814,8 +2896,12 @@ Test = task(implementation = _impl)
             .expect("the first bind should succeed");
         let fresh = super::ExecLogIter::new(signals, None);
 
-        let err = super::bind_execlog_iters(&stream, &[fresh.clone(), already])
-            .expect_err("binding an already-bound handle must fail");
+        let err = super::bind_handles(
+            &[fresh.clone(), already],
+            || stream.receiver(),
+            "execution log",
+        )
+        .expect_err("binding an already-bound handle must fail");
         assert!(
             err.to_string().contains("already bound"),
             "unexpected error: {err}",

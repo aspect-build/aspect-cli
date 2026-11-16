@@ -1,6 +1,5 @@
 //! The execution log: bazel's record of every spawn, decoded as it is written.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod feed;
@@ -71,29 +70,6 @@ pub fn plan(requested: Option<PathBuf>, mut compact: Vec<String>) -> Plan {
     }
 }
 
-/// Remove a log left at `path` by an *earlier* run, before Bazel starts.
-///
-/// [`crate::stream::file::File`] opens whatever is at the path as soon as there
-/// is something. Left in place the reader opens the stale file immediately,
-/// races Bazel's truncation of it and loses: it delivers the previous build's
-/// entries — spawns that never ran, inputs that no longer exist — and misses
-/// this build's.
-///
-/// The exposure is in reused paths: a compact sink's path and one already on
-/// the command line are both fixed per build, so on a Workflows runner or an
-/// Aspect-wired deployment every build finds the last one's log waiting.
-/// Removing it is what makes the existence poll mean "wait for *this* build's
-/// log"; Bazel creates the file itself, so there is nothing to put back.
-///
-/// A log that is not there is fine. Anything else is returned for the caller
-/// to say.
-pub fn clear_stale(path: &Path) -> Result<(), io::Error> {
-    match std::fs::remove_file(path) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-        _ => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,15 +127,5 @@ mod tests {
             vec!["/tmp/copy.zst".to_string(), "/tmp//copy.zst".to_string()],
         );
         assert_eq!(p.tee, vec!["/tmp/copy.zst".to_string()]);
-    }
-
-    #[test]
-    fn clearing_a_stale_log_tolerates_its_absence_and_removes_a_present_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.zst");
-        assert!(clear_stale(&path).is_ok(), "nothing to clear is fine");
-        std::fs::write(&path, b"old").unwrap();
-        assert!(clear_stale(&path).is_ok());
-        assert!(!path.exists());
     }
 }

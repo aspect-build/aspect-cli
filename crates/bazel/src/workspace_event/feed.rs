@@ -2,18 +2,17 @@
 //!
 //! Bazel writes `--experimental_workspace_rules_log_file` as a regular file
 //! that this process tails ([`crate::stream::file`]), so the decoder never
-//! slows Bazel down. The path is a [`Reservation`]: nothing else writes it, and
-//! it is removed once the read is over.
+//! slows Bazel down. Where it is written is a [`LogFile`].
 //!
-//! The decoded channel is a blocking broadcast ring, as for the execution log:
-//! every subscriber sees every event, the producer waits for the slowest, and
-//! `build.wait()` releases the AXL-side subscribers before [`join`] so one that
-//! stopped reading cannot hold the reader forever.
+//! The decoded channel is a blocking broadcast ring
+//! ([`crate::subscription`]): every subscriber sees every event, and the
+//! producer waits for the slowest, so the caller releases its subscribers
+//! before [`join`] or one that stopped reading would hold the reader forever.
 //!
 //! [`join`]: WorkspaceEventStream::join
 
 use axl_proto::workspace_log::WorkspaceEvent;
-use fibre::spmc::{Receiver, bounded};
+use fibre::spmc::Receiver;
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
@@ -22,12 +21,11 @@ use std::thread;
 use std::thread::JoinHandle;
 use thiserror::Error;
 
+use super::LogFile;
 use crate::delimited;
-use crate::stream::file::{Reservation, StartedOver};
+use crate::stream::file::StartedOver;
 use crate::stream::{Done, Gate};
-
-/// Events the decoded channel buffers per subscriber before the producer waits.
-pub const CHANNEL_CAPACITY: usize = 1000;
+use crate::subscription::{Origin, ring};
 
 #[derive(Error, Debug)]
 pub enum WorkspaceEventError {
@@ -43,12 +41,8 @@ pub enum WorkspaceEventError {
 
 pub struct WorkspaceEventStream {
     handle: JoinHandle<Result<(), WorkspaceEventError>>,
-    /// The one subscriber the stream starts with, and the only thing a further
-    /// one can be cloned from. Dropped by [`seal`](Self::seal) once consumers
-    /// have cloned theirs: left unread beside them it would hold the ring full
-    /// at [`CHANNEL_CAPACITY`], and with no consumer at all its absence lets
-    /// the reader skip decoding.
-    recv: Option<Receiver<WorkspaceEvent>>,
+    /// The ring's origin, sealed once the consumers are wired.
+    origin: Origin<WorkspaceEvent>,
 }
 
 impl Debug for WorkspaceEventStream {
@@ -60,14 +54,7 @@ impl Debug for WorkspaceEventStream {
 }
 
 impl WorkspaceEventStream {
-    /// Reserve the path the workspace log is written to, so it can go on the
-    /// command line before bazel is spawned. Pair with [`spawn`](Self::spawn)
-    /// once the bazel client exists.
-    pub fn reserve() -> Reservation {
-        Reservation::temp("workspace-event-out")
-    }
-
-    /// Start the reader on `file`. `gate` decides when the stream is over (see
+    /// Start the reader on `log`. `gate` decides when the stream is over (see
     /// [`crate::stream`]); for a real bazel it comes from `PidPair::gate`. The
     /// workspace log has no end marker, so the stream ends only through it.
     ///
@@ -77,9 +64,9 @@ impl WorkspaceEventStream {
     ///
     /// A file Bazel starts over is read on from the new one. A read error, or
     /// an event that does not decode, fails [`join`](Self::join).
-    pub fn spawn(file: Reservation, gate: Gate) -> Self {
-        let (mut sender, recv) = bounded::<WorkspaceEvent>(CHANNEL_CAPACITY);
-        let mut file = file.follow(gate);
+    pub fn spawn(log: LogFile, gate: Gate) -> Self {
+        let (mut sender, origin) = ring::<WorkspaceEvent>();
+        let mut file = log.follow(gate);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             let mut has_readers = true;
@@ -107,28 +94,25 @@ impl WorkspaceEventStream {
             }
             Ok(())
         });
-        Self {
-            handle,
-            recv: Some(recv),
-        }
+        Self { handle, origin }
     }
 
-    /// A further subscriber, cloned from the stream's own. `None` once that
-    /// one has been dropped ([`seal`](Self::seal), `join()`).
+    /// A further subscriber, for a consumer that will drain it. See
+    /// [`Origin::receiver`].
     pub fn receiver(&self) -> Option<Receiver<WorkspaceEvent>> {
-        self.recv.as_ref().cloned()
+        self.origin.receiver()
     }
 
-    /// Drop the stream's own subscriber once every consumer has cloned one. No
-    /// consumer can be added afterwards.
+    /// Stop handing out subscribers once every consumer has one. See
+    /// [`Origin`] for why.
     pub fn seal(&mut self) {
-        self.recv.take();
+        self.origin.seal();
     }
 
     /// Release the stream's own subscriber if it still holds one, then wait for
     /// the reader.
     pub fn join(mut self) -> Result<(), WorkspaceEventError> {
-        self.recv.take();
+        self.origin.seal();
         self.handle.join().expect("join error")
     }
 }
@@ -137,6 +121,7 @@ impl WorkspaceEventStream {
 mod tests {
     use super::*;
     use crate::stream::pid_pair::PidPair;
+    use crate::subscription::CHANNEL_CAPACITY;
     use std::path::PathBuf;
     use std::process::Child;
     use std::time::Duration;
@@ -167,8 +152,8 @@ mod tests {
     /// A stream on a fresh reservation whose quiet windows suit a test, ended
     /// by `client`'s exit. Returns the path Bazel would write.
     fn spawn_for(client: &Child) -> (PathBuf, WorkspaceEventStream) {
-        let file = WorkspaceEventStream::reserve();
-        let path = file.path().to_owned();
+        let log = LogFile::plan(None);
+        let path = log.path().to_owned();
         let mut gate = PidPair {
             client: client.id(),
             server: None,
@@ -176,7 +161,7 @@ mod tests {
         .gate();
         gate.quiet = Duration::from_millis(300);
         gate.quiet_empty = Duration::from_millis(100);
-        (path, WorkspaceEventStream::spawn(file, gate))
+        (path, WorkspaceEventStream::spawn(log, gate))
     }
 
     fn end(mut client: Child) {
@@ -287,5 +272,32 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(&name))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// A path someone else asked for is read where it is and left behind.
+    #[test]
+    fn a_requested_log_is_read_in_place_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asked.log");
+        let read_path = path.clone();
+        let outcome = crate::testing::with_timeout(Duration::from_secs(10), move || {
+            let client = spawn_pid_holder();
+            let mut gate = PidPair {
+                client: client.id(),
+                server: None,
+            }
+            .gate();
+            gate.quiet = Duration::from_millis(300);
+            let mut stream =
+                WorkspaceEventStream::spawn(LogFile::Requested(read_path.clone()), gate);
+            let recv = stream.receiver().unwrap();
+            stream.seal();
+            std::fs::write(&read_path, encoded(1..=2)).unwrap();
+            end(client);
+            let got = std::iter::from_fn(|| recv.recv().ok()).count();
+            (got, stream.join().is_ok())
+        });
+        assert_eq!(outcome, Some((2, true)));
+        assert!(path.exists(), "a requested log belongs to whoever asked");
     }
 }

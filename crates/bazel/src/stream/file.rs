@@ -1,8 +1,8 @@
 //! Following a regular file that a process we launched writes to: bazel's
-//! compact execution log, and its build event file.
+//! compact execution log, its build event file, and its workspace log.
 //!
-//! Unlike a FIFO it can be read at any moment, and unlike a FIFO it may not
-//! exist yet: bazel creates it when it gets to it. So the follower opens it
+//! It can be read at any moment, and it may not exist yet: bazel creates it
+//! when it gets to it. So the follower opens it
 //! lazily and treats "not there yet" like "nothing written yet". The rules
 //! that decide when the stream is over are the [parent module](super)'s.
 //!
@@ -84,6 +84,28 @@ impl Drop for Reservation {
         if !self.path.as_os_str().is_empty() {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Remove a log left at `path` by an *earlier* run, before Bazel starts.
+///
+/// A [`File`] opens whatever is at the path as soon as there is something.
+/// Left in place the reader opens the stale file immediately, races Bazel's
+/// truncation of it and loses: it delivers the previous build's records and
+/// misses this build's.
+///
+/// The exposure is in reused paths: one already on the command line, or a
+/// sink's, is fixed per build, so on a Workflows runner or an Aspect-wired
+/// deployment every build finds the last one's log waiting. Removing it is what
+/// makes the existence poll mean "wait for *this* build's log"; Bazel creates
+/// the file itself, so there is nothing to put back.
+///
+/// A log that is not there is fine. Anything else is returned for the caller
+/// to say.
+pub fn clear_stale(path: &Path) -> Result<(), io::Error> {
+    match fs::remove_file(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
     }
 }
 
@@ -183,7 +205,7 @@ impl File {
             owned,
             moved: 0,
             awaiting: false,
-            rules: Rules::for_file(gate),
+            rules: Rules::new(gate),
             done: None,
         }
     }
@@ -499,6 +521,16 @@ impl Read for File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_a_stale_log_tolerates_its_absence_and_removes_a_present_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.zst");
+        assert!(clear_stale(&path).is_ok(), "nothing to clear is fine");
+        std::fs::write(&path, b"old").unwrap();
+        assert!(clear_stale(&path).is_ok());
+        assert!(!path.exists());
+    }
     use std::io::Write;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, mpsc};

@@ -126,8 +126,9 @@ fn partition_execution_log(
 }
 
 /// Split the `workspace_events=` argument into "is the stream enabled" and the
-/// iterator handles. `False` leaves the log off and a list turns it on. `True`
-/// is refused, because it names no consumer.
+/// iterator handles. A list of handles turns the log on. `False` and `[]` leave
+/// it off: with no handle nothing would read the file, which is removed once
+/// read. `True` is refused, because it names no consumer.
 fn partition_workspace_events(
     arg: Either<bool, UnpackList<iter::WorkspaceEventIter>>,
 ) -> anyhow::Result<(bool, Vec<iter::WorkspaceEventIter>)> {
@@ -138,7 +139,7 @@ fn partition_workspace_events(
              `workspace_events = [handle]` with `handle = bazel.workspace_events.iterator()` \
              and iterate the handle."
         ),
-        Either::Right(list) => (true, list.items),
+        Either::Right(list) => (!list.items.is_empty(), list.items),
     })
 }
 
@@ -504,9 +505,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace event log by passing a list of
-    ///   `workspace_events.iterator()` handles, each of which receives every event.
-    ///   Drain a handle **before** `wait()`, which releases any still-bound handle so
-    ///   an undrained one cannot hang the build.
+    ///   `workspace_events.iterator()` handles, each of which receives every event;
+    ///   `[]` leaves it off. Drain a handle **before** `wait()`, which releases any
+    ///   still-bound handle so an undrained one cannot hang the build.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -639,9 +640,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace event log by passing a list of
-    ///   `workspace_events.iterator()` handles, each of which receives every event.
-    ///   Drain a handle **before** `wait()`, which releases any still-bound handle so
-    ///   an undrained one cannot hang the build.
+    ///   `workspace_events.iterator()` handles, each of which receives every event;
+    ///   `[]` leaves it off. Drain a handle **before** `wait()`, which releases any
+    ///   still-bound handle so an undrained one cannot hang the build.
     /// * `cancellation` - The `cancellation.Token` the client is bound to;
     ///   `ctx.cancellation.root` unless given. Cancelling it sends the client
     ///   one SIGINT, bazel's graceful cancel.
@@ -1588,6 +1589,13 @@ mod tests {
     #[test]
     fn workspace_events_false_leaves_the_log_off() {
         let (enabled, iters) = partition_workspace_events(Either::Left(false)).unwrap();
+        assert!(!enabled && iters.is_empty());
+    }
+
+    #[test]
+    fn an_empty_workspace_events_list_leaves_the_log_off() {
+        let (enabled, iters) =
+            partition_workspace_events(Either::Right(UnpackList { items: vec![] })).unwrap();
         assert!(!enabled && iters.is_empty());
     }
 }

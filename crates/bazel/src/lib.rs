@@ -1,6 +1,6 @@
 //! Reading what bazel writes.
 //!
-//! Bazel hands its outputs over as files and FIFOs written by processes that
+//! Bazel hands its outputs over as files written by processes that
 //! start late, flush after the command has finished, crash, or never start.
 //! This crate turns them into streams that end for a reason.
 //!

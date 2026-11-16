@@ -1,15 +1,56 @@
-//! The subscription state machine behind the `bazel.execution_log.iterator()`
-//! and `bazel.workspace_events.iterator()` handles: one subscriber of a
-//! blocking broadcast ring that the producer waits for, bound after the handle
-//! is created, and that `build.wait()` has to be able to drop from outside.
+//! Subscribers of the blocking broadcast rings the decoded Bazel logs (the
+//! execution log, the workspace log) are fanned out on.
+//!
+//! * [`ring`] makes one: the producer's sender and the [`Origin`] every
+//!   consumer clones its subscriber from.
+//! * [`Subscription`] is the state machine behind the
+//!   `bazel.execution_log.iterator()` and `bazel.workspace_events.iterator()`
+//!   handles: one subscriber, bound after the handle is created, that
+//!   `build.wait()` has to be able to drop from outside.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use fibre::TryRecvError;
-use fibre::spmc::Receiver;
+use fibre::spmc::{Receiver, Sender, bounded};
 
 use crate::fanout::{Recv, recv_cancellable};
+
+/// Entries a ring buffers per subscriber before the producer waits.
+pub const CHANNEL_CAPACITY: usize = 1000;
+
+/// A ring of [`CHANNEL_CAPACITY`]: the producer's sender, and its origin.
+pub fn ring<T: Send + Clone>() -> (Sender<T>, Origin<T>) {
+    let (sender, recv) = bounded(CHANNEL_CAPACITY);
+    (sender, Origin { recv: Some(recv) })
+}
+
+/// The one subscriber a ring starts with, and the only thing a further
+/// subscriber can be cloned from — so once it is gone, nothing can join.
+///
+/// It has to be dropped ([`seal`](Self::seal)) as soon as the consumers are
+/// wired: in fibre's broadcast ring the producer may not lap its slowest
+/// subscriber, and one nobody reads is a tail stuck at entry zero. Left in
+/// place beside others it caps them all at [`CHANNEL_CAPACITY`], blocking the
+/// producer there. Gone with no consumer in its place, the first send reports
+/// `Closed` and the reader can skip decoding.
+#[derive(Debug)]
+pub struct Origin<T: Send + Clone> {
+    recv: Option<Receiver<T>>,
+}
+
+impl<T: Send + Clone> Origin<T> {
+    /// A further subscriber, starting where the origin is. `None` once sealed.
+    pub fn receiver(&self) -> Option<Receiver<T>> {
+        self.recv.as_ref().cloned()
+    }
+
+    /// Drop the origin once every consumer has cloned one. Idempotent; no
+    /// consumer can be added afterwards.
+    pub fn seal(&mut self) {
+        self.recv.take();
+    }
+}
 
 /// What a [`Subscription`] is holding.
 #[derive(Debug)]
@@ -39,7 +80,7 @@ enum State<T: Send + Clone> {
     Done,
 }
 
-/// One subscriber of a build's decoded execution log, releasable from outside.
+/// One subscriber of a decoded Bazel log, releasable from outside.
 ///
 /// `Clone`, and the state behind an `Arc`, for one reason: `Build` keeps a clone
 /// of every subscription it handed out so `wait()` can [`release`](Self::release)
@@ -211,6 +252,7 @@ impl<T: Send + Clone> Subscription<T> {
 mod tests {
     use super::*;
     use axl_proto::tools::protos::ExecLogEntry;
+    use fibre::TrySendError;
     use fibre::spmc::bounded;
 
     fn entry(id: u32) -> ExecLogEntry {
@@ -311,5 +353,41 @@ mod tests {
         };
         assert!(ended, "a cancelled read should return nothing");
         assert!(unsubscribed, "a cancelled read should unsubscribe");
+    }
+
+    /// Why an [`Origin`] must be sealed once real subscribers exist.
+    ///
+    /// In fibre's broadcast ring each subscriber has its own tail and the producer
+    /// may not lap the slowest. One that nobody reads sits at entry zero forever,
+    /// so the ring reads as full from the producer's side however diligently every
+    /// other subscriber drains — capping them all at the capacity. Blocking sends
+    /// then park, which the consumer cannot see.
+    #[test]
+    fn an_unread_subscriber_clone_stops_the_producer_once_the_ring_fills() {
+        // A small ring: the behaviour is in the tails, not the size.
+        const CAPACITY: u32 = 4;
+        let (sender, kept) = bounded::<ExecLogEntry>(CAPACITY as usize);
+        let drained = kept.clone();
+
+        for i in 0..CAPACITY {
+            sender.try_send(entry(i)).expect("the ring has room");
+        }
+        for i in 0..CAPACITY {
+            assert_eq!(drained.recv().expect("an entry").id, i);
+        }
+
+        // `drained` is caught up, but `kept` never read anything, so from the
+        // producer's side the ring is still full.
+        assert!(
+            matches!(sender.try_send(entry(99)), Err(TrySendError::Full(_))),
+            "an unread clone should hold the ring full even though every other \
+             subscriber is caught up",
+        );
+
+        drop(kept);
+        sender
+            .try_send(entry(99))
+            .expect("dropping the unread clone must free the ring");
+        assert_eq!(drained.recv().expect("an entry").id, 99);
     }
 }
