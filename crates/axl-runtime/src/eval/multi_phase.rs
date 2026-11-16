@@ -836,7 +836,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         })?;
 
         let heap = self.heap();
+        // A task ID names one run: one already in this machine's history is
+        // refused. A generated one is fresh by construction.
+        if let Some(id) = &task_id
+            && let Some(earlier) = self.loader.env.history.earlier_run(id)
+        {
+            return Err(EvalError::UnknownError(anyhow!(
+                "--task:id {id} was already used by an earlier run on this machine ({}); a \
+                 task ID names one run, so pass a new one",
+                earlier.display(),
+            )));
+        }
         let task_id = task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.loader.env.history.begin(&task_id);
         let task_args = args_builder(task, heap);
 
         let span = tracing::Span::current();

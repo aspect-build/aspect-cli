@@ -23,6 +23,7 @@ load(
     "env_task_flags",
     "exec_log_flags",
     "flag_name",
+    "history_exec_log_flags",
     "omit_flags",
     "protected_omissions",
     "runner_bes_flags",
@@ -328,6 +329,13 @@ def _test_exec_log_flags(_ctx):
     # Bazel 7.1–7.3 only know the `experimental_` spelling and would reject this one.
     _eq("7.3", _texts(_ctx.bazel.new_rc(flags = exec_log_flags("/x/e.zstd"), version = "7.3.2").expand(command = "test")), [])
 
+def _test_history_exec_log_flags(_ctx):
+    # The value is `bazel::execlog::IN_HISTORY`, which the runtime reads as
+    # "in the task invocation's history"; a Rust test pins the same string.
+    want = exec_log_flags("%aspect_history%")
+    _eq("the history request, as an exec-log flag", history_exec_log_flags(_ctx), want)
+    _eq("omittable like any injected flag", omit_flags(want, ["--execution_log_compact_file"]), [])
+
 def _test_omit_flags(_ctx):
     flags = ["--legacy_important_outputs", "--remote_timeout=3600", ("--noremote_cache_compression", ">=8.0.0"), "--remote_cache=grpcs://c"]
 
@@ -369,6 +377,7 @@ _UNIT_TESTS = [
     _test_unset_flags,
     _test_color_flags,
     _test_exec_log_flags,
+    _test_history_exec_log_flags,
     _test_omit_flags,
     _test_protected_omissions,
 ]

@@ -6,6 +6,7 @@ use starlark::{eval::Evaluator, values::ProvidesStaticType};
 use super::r#async::rt::AsyncRuntime;
 use super::cancellation::Signals;
 use super::telemetry::TelemetrySources;
+use super::history::{History, Retention};
 
 static ASPECT_ROOT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -44,6 +45,9 @@ pub struct Env {
     pub signals: Arc<Signals>,
     /// When each Bazel stream becomes spans; set through `ctx.telemetry`.
     pub telemetry: Arc<TelemetrySources>,
+    /// Where the task invocation keeps its files (see [`History`]). At
+    /// [`History::default_root`] unless a test harness gives the run its own.
+    pub history: Arc<History>,
 }
 
 impl Env {
@@ -64,6 +68,11 @@ impl Env {
             rt: AsyncRuntime::new(),
             signals: Signals::global().clone(),
             telemetry: Arc::default(),
+            history: Arc::new(History::at(
+                History::default_root()
+                    .unwrap_or_else(|| std::env::temp_dir().join("aspect-history")),
+                Retention::default(),
+            )),
         }
     }
 

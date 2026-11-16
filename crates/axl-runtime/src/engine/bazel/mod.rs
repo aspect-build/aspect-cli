@@ -620,6 +620,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &env.telemetry,
             &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
+            &env.history,
         )?;
         Ok(build)
     }
@@ -755,6 +756,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &env.telemetry,
             &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
+            &env.history,
         )?;
         Ok(test)
     }
@@ -1390,12 +1392,33 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// when the task ends is the last attempt's log rather than all of them.
     /// Name a path per attempt if every attempt's log has to survive.
     ///
-    /// Bazel writes one compact path itself: the first, unless the command line
-    /// already names one. The CLI copies the log Bazel writes to the rest, and a
-    /// copy that cannot be written fails `build.wait()`, naming the path, while
-    /// the build's other execution-log consumers still get the whole log.
+    /// Bazel writes the log only into the task invocation's history; the CLI
+    /// copies it to every compact path, and to one the command line or an rc
+    /// file names. A copy that cannot be written fails `build.wait()`, naming
+    /// the path, while the build's other execution-log consumers still get the
+    /// whole log.
     fn compact_file(#[starlark(require = named)] path: String) -> anyhow::Result<ExecLogSink> {
         Ok(ExecLogSink::CompactFile { path })
+    }
+
+    /// Have Bazel write this build's compact execution log, with nothing to
+    /// read it and no copy: it is kept in the task invocation's history, and
+    /// Bazel uploads it as a build tool log wherever a BES backend is wired.
+    /// `record_every_build()` does the same for every build of the task.
+    fn record() -> anyhow::Result<ExecLogSink> {
+        Ok(ExecLogSink::Record)
+    }
+
+    /// Have every Bazel build and test of this task invocation write its
+    /// compact execution log as `record()` does, whatever its own
+    /// `execution_log=` says: a user's config opting in to keeping every log.
+    /// The user's `--bazel-flags:omit` does not apply, so a feature asks
+    /// through a `BazelTrait.task_flags` hook naming
+    /// `--execution_log_compact_file=%aspect_history%` instead, which it does.
+    /// Skipped on a Bazel older than 7.4, which does not know the flag.
+    fn record_every_build<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<NoneType> {
+        Env::from_eval(eval)?.history.record_every_build();
+        Ok(NoneType)
     }
 
     /// Create a handle iterating this build's decoded execution log. Pass it in

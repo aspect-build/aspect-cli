@@ -33,6 +33,7 @@ use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
+use crate::engine::history::History;
 use axl_proto::build_event_stream::BuildEvent;
 use bazel::stream::Gate;
 use bazel::stream::file::Reservation;
@@ -940,6 +941,34 @@ impl Unstarted {
     }
 }
 
+/// Whether a build writes its compact execution log: when something `asked`
+/// for it, or when it is only `recording` and the Bazel knows the flag (7.4
+/// and later, or a version that cannot be told). Recording asks for no more
+/// than the log on disk, so an older Bazel goes without rather than failing
+/// on a flag it does not know.
+fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::Version>) -> bool {
+    // As the rest of the CLI gates by version: a prerelease of 7.4 knows it.
+    let knows_flag = bazel::rc::constraint_matches(">=7.4.0", version).unwrap_or(true);
+    asked || (recording && knows_flag)
+}
+
+/// Where Bazel writes this invocation's compact execution log: its folder in
+/// the task invocation's history, or a temp path with a warning when that
+/// cannot be made, so a history that cannot be written never fails a build.
+fn execlog_history_path(history: &History) -> PathBuf {
+    match history.next_bazel_dir() {
+        Ok(dir) => dir.join("execlog.zstd"),
+        Err(err) => {
+            errln!(
+                "WARNING: could not create a history folder under {}: {err}. The execution \
+                 log goes to the temp dir instead.",
+                history.root().display(),
+            );
+            std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4()))
+        }
+    }
+}
+
 impl Build {
     /// Wait for the client to exit, a safe point: once the root is cancelled
     /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
@@ -979,20 +1008,30 @@ impl Build {
         telemetry: &TelemetrySources,
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
+        history: &History,
     ) -> Result<Build, std::io::Error> {
         let (build_events, bes_telemetry) = telemetry
             .build_events()
             .resolve(build_events, telemetry.exporting());
-        let injected_execlog_path =
+        // A path the caller's own flags name is written as a copy (see below), so
+        // it asks for the log as a consumer does, and `auto` telemetry reads it
+        // too. Recording alone asks for no more than the file on disk.
+        let (flags, history_asked) = bazel::execlog::take_history_request(flags);
+        let requested_execlog_path =
             bazel::execlog::requested_path(&flags, verb, directory.as_deref());
-        // A log the user's own flags ask Bazel for is one the build already
-        // has, so `auto` reads it as well; the stream is on for the task's
-        // consumers or for that telemetry.
-        let (log_on, execlog_telemetry) = telemetry.execution_log().resolve(
-            execlog_enabled || injected_execlog_path.is_some(),
-            telemetry.exporting(),
-        );
-        let execlog_enabled = execlog_enabled || (log_on && execlog_telemetry);
+        let record_only = execlog_enabled
+            && execlog_iters.is_empty()
+            && !execlog_sinks.is_empty()
+            && execlog_sinks
+                .iter()
+                .all(|s| matches!(s, ExecLogSink::Record));
+        let recording = record_only || history_asked || history.records_every_build();
+        let asked = (execlog_enabled && !record_only) || requested_execlog_path.is_some();
+        let (log_on, execlog_telemetry) = telemetry
+            .execution_log()
+            .resolve(asked || recording, telemetry.exporting());
+        // `always` turning the log on for its telemetry is an ask of its own.
+        let asked = asked || (log_on && !recording);
 
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
@@ -1008,6 +1047,7 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
                 .info()?;
+        let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -1020,10 +1060,9 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        // Read before `flags` moves into the command. Whoever asked for the compact
-        // log (`injected_execlog_path`, above) reads the file at that path, so a
-        // second flag below must not repoint Bazel away from it; a requested BEP
-        // file is served from the stream when the CLI streams.
+        // Read before `flags` moves into the command. When the CLI streams the
+        // compact log or the BEP, its own flag below outranks the caller's, and
+        // the file the caller asked for is written from the stream instead.
         let requested_bep_path =
             bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
         let requested_workspace_log =
@@ -1099,39 +1138,25 @@ impl Build {
             match sink {
                 ExecLogSink::CompactFile { path } => compact_paths.push(path),
                 ExecLogSink::File { path } => decoded_paths.push(path),
+                ExecLogSink::Record => {}
             }
         }
 
-        // Reserved before the spawn so bazel can be told where to write, but the
-        // reader is started after it, once the client pid exists, as the BES
-        // file above is.
-        let execlog_path = if execlog_enabled {
-            let plan =
-                bazel::execlog::plan(injected_execlog_path, std::mem::take(&mut compact_paths));
-            if plan.add_flag {
-                cmd.arg(format!(
-                    "{}={}",
-                    bazel::execlog::COMPACT_FILE_FLAG,
-                    plan.path.display()
-                ));
-            }
-            compact_paths = plan.tee;
-            Some(plan.path)
-        } else {
-            None
-        };
-
-        // A log from an earlier run has to go before Bazel starts, or the reader
-        // delivers the previous build's entries; see `bazel::stream::file::clear_stale`.
-        if let Some(path) = &execlog_path {
-            if let Err(err) = bazel::stream::file::clear_stale(path) {
-                errln!(
-                    "WARNING: could not clear the previous execution log at {}: {err}. \
-                     Entries from an earlier build may be reported as this one's.",
-                    path.display(),
-                );
-            }
-        }
+        // Bazel writes the log only into this task invocation's history, where
+        // it stays: Bazel uploads it from there as a build tool log once the
+        // build is over. A path the caller asked for is written as a copy. The
+        // reader is started after the spawn, once the client pid exists.
+        let execlog_path = execlog_enabled.then(|| {
+            let path = execlog_history_path(&history);
+            cmd.arg(format!(
+                "{}={}",
+                bazel::execlog::COMPACT_FILE_FLAG,
+                path.display()
+            ));
+            compact_paths =
+                bazel::execlog::copies(requested_execlog_path, std::mem::take(&mut compact_paths));
+            path
+        });
 
         cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
         cmd.args(targets);
@@ -1182,8 +1207,8 @@ impl Build {
             // `wait()`. And that `wait()` releases every subscriber before joining, so
             // one nobody drains cannot park the reader past the end of the build.
             let mut execlog_stream = match execlog_path {
-                Some(p) => Some(ExecLogStream::spawn_with_file(
-                    p,
+                Some(path) => Some(ExecLogStream::spawn_with_file(
+                    path,
                     pid,
                     child.id(),
                     compact_paths,
@@ -2506,12 +2531,11 @@ Test = task(implementation = _impl)
 
     /// A deployment wired to an Aspect BES backend, a Workflows runner and a
     /// generated bazelrc each put `--execution_log_compact_file` on the command
-    /// line themselves, and the backend reads the file at *that* path. Adding a
-    /// second one wins on last-write-wins and silently repoints Bazel, so the
-    /// consumer tails a path nothing writes and the backend's file never appears.
+    /// line themselves, and the backend reads the file at *that* path. The CLI's
+    /// own flag outranks it, so that file is written from the stream, whole.
     #[cfg(unix)]
     #[test]
-    fn an_already_requested_execution_log_is_reused_not_repointed() {
+    fn an_already_requested_execution_log_is_written_as_a_copy() {
         let dir = tempfile::tempdir().unwrap();
         let asked = dir.path().join("deployment-asked-for-this.zstd");
         let script = format!(
@@ -2528,8 +2552,6 @@ def _impl(ctx):
         seen += 1
     status = build.wait()
     if not status.success: return 1
-    # Zero means the flag was added a second time: bazel wrote the path above
-    # and the reader tailed a freshly minted temp file instead.
     if seen != {SCENARIO_ENTRIES}: return 3
     return 0
 
@@ -2541,29 +2563,189 @@ Test = task(implementation = _impl)
         run_basil_task(
             std::time::Duration::from_secs(60),
             script,
-            "the reader never reached the log at the path already on the command line",
-            "the reader must tail the path already on the command line",
+            "the reader never reached the log",
+            "the reader must deliver the whole log",
         );
-        assert!(
-            asked.exists(),
-            "bazel must still write the log where the deployment asked, at {}",
+        assert_eq!(
+            compact_entry_count(&asked),
+            SCENARIO_ENTRIES,
+            "the log must still be written where the deployment asked, at {}",
             asked.display(),
         );
     }
 
-    /// No `CompactFile` sink may name the file Bazel is writing.
-    ///
-    /// One sink's path is lent to Bazel so it writes the caller's destination
-    /// directly; every other is served by the reader thread's `MultiTeeReader`,
-    /// which `File::create`s its path. A sink naming the path Bazel was handed
-    /// therefore truncates the log out from under it — and out from under the
-    /// reader, which has already opened the file and now sees it stop producing
-    /// bytes while the nominated holder is still alive.
-    ///
-    /// Two sinks with one path is the shape that reaches it here; a config
-    /// appending a path the artifacts feature already appended is how it arrives
-    /// in practice. The timeout is because the symptom is a stalled reader rather
-    /// than a wrong answer.
+    /// Run `script` with its task invocation's history kept under `history`,
+    /// as [`run_execlog_task`] does otherwise.
+    #[cfg(unix)]
+    fn run_execlog_task_with_history(script: &str, history: &std::path::Path) {
+        let timeout = std::time::Duration::from_secs(60);
+        let stand_in = DaemonStandIn::new();
+        let (script, history) = (script.to_owned(), history.to_path_buf());
+        let exit = crate::test::with_timeout(timeout, move || {
+            crate::test::eval(&script)
+                .with_fake_bazel()
+                .with_history(history)
+                .run_task(0)
+        });
+        match exit {
+            Some(exit) => assert_eq!(exit.expect("run_task"), Some(0)),
+            None => {
+                stand_in.leak();
+                panic!("timed out after {timeout:?}");
+            }
+        }
+    }
+
+    /// The one task invocation entry under `history`.
+    #[cfg(unix)]
+    fn only_invocation(history: &std::path::Path) -> std::path::PathBuf {
+        let entries: Vec<_> = std::fs::read_dir(history)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "one task invocation: {entries:?}");
+        entries.into_iter().next().unwrap()
+    }
+
+    /// Each Bazel invocation of a task writes its compact execution log into a
+    /// folder of its own in the task invocation's history, where it stays, and
+    /// `record()` asks for one with nothing to read it.
+    #[cfg(unix)]
+    #[test]
+    fn each_bazel_invocation_keeps_its_log_in_the_task_invocations_history() {
+        let history = tempfile::tempdir().unwrap();
+        run_execlog_task_with_history(
+            r#"
+def _impl(ctx):
+    for _ in range(2):
+        build = ctx.bazel.build(
+            flags = ["--scenario=execlog_beyond_capacity"],
+            execution_log = [bazel.execution_log.record()],
+            stderr = None,
+        )
+        if not build.wait().success: return 1
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            history.path(),
+        );
+        let invocation = only_invocation(history.path());
+        for n in ["1", "2"] {
+            let log = invocation.join("bazel").join(n).join("execlog.zstd");
+            assert_eq!(
+                compact_entry_count(&log),
+                SCENARIO_ENTRIES,
+                "{}",
+                log.display()
+            );
+        }
+    }
+
+    #[test]
+    fn recording_alone_skips_a_bazel_that_does_not_know_the_flag() {
+        use super::writes_execution_log;
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        assert!(writes_execution_log(false, true, Some(&v("7.4.0"))));
+        assert!(
+            writes_execution_log(false, true, None),
+            "an unknown version"
+        );
+        assert!(!writes_execution_log(false, true, Some(&v("7.3.2"))));
+        assert!(writes_execution_log(false, true, Some(&v("7.4.0-rc1"))));
+        assert!(
+            writes_execution_log(true, false, Some(&v("7.3.2"))),
+            "asked for"
+        );
+        assert!(!writes_execution_log(false, false, None));
+    }
+
+    /// `record_every_build()` has a build write its log with no
+    /// `execution_log=` of its own, as a deployment's custom task would.
+    #[cfg(unix)]
+    #[test]
+    fn record_every_build_writes_a_log_for_a_build_that_asks_for_none() {
+        let history = tempfile::tempdir().unwrap();
+        run_execlog_task_with_history(
+            r#"
+def _impl(ctx):
+    bazel.execution_log.record_every_build()
+    build = ctx.bazel.build(flags = ["--scenario=execlog_beyond_capacity"], stderr = None)
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+            history.path(),
+        );
+        let log = only_invocation(history.path()).join("bazel/1/execlog.zstd");
+        assert_eq!(compact_entry_count(&log), SCENARIO_ENTRIES);
+    }
+
+    /// The history request a feature injects as a flag writes the log into the
+    /// history, and nothing is written under the marker's name.
+    #[cfg(unix)]
+    #[test]
+    fn a_history_request_flag_records_the_log_in_the_history() {
+        let history = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        run_execlog_task_with_history(
+            &format!(
+                r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity", "--execution_log_compact_file=%aspect_history%"],
+        directory = {cwd:?},
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+                cwd = cwd.path().to_str().unwrap(),
+            ),
+            history.path(),
+        );
+        let log = only_invocation(history.path()).join("bazel/1/execlog.zstd");
+        assert_eq!(compact_entry_count(&log), SCENARIO_ENTRIES);
+        assert!(
+            std::fs::read_dir(cwd.path()).unwrap().next().is_none(),
+            "nothing written under the marker's name",
+        );
+    }
+
+    /// A path the caller asks for with nothing in AXL reading the log is still
+    /// written: Bazel writes the log into the history, and the CLI copies it.
+    #[cfg(unix)]
+    #[test]
+    fn a_requested_execution_log_with_no_consumer_is_written_as_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("asked.zstd");
+        let history = dir.path().join("history");
+        run_execlog_task_with_history(
+            &format!(
+                r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=execlog_beyond_capacity", "--execution_log_compact_file={asked}"],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+                asked = asked.to_str().unwrap(),
+            ),
+            &history,
+        );
+        assert_eq!(compact_entry_count(&asked), SCENARIO_ENTRIES, "the copy");
+        let kept = only_invocation(&history).join("bazel/1/execlog.zstd");
+        assert_eq!(compact_entry_count(&kept), SCENARIO_ENTRIES, "Bazel's own");
+    }
+
+    /// Two `CompactFile` sinks naming one path share one copy, rather than two
+    /// tees each `File::create`-ing it and writing the log into it twice over.
+    /// A config appending a path the artifacts feature already appended is how
+    /// it arrives in practice.
     ///
     /// The `iterator()` handle is here to count entries, and it also makes this a
     /// build with a named decoded consumer — so the stream drops its own
@@ -2607,12 +2789,10 @@ Test = task(implementation = _impl)
         run_basil_task(
             Duration::from_secs(60),
             script,
-            "the tee truncated the log the reader was tailing",
+            "the reader parked",
             &format!("two sinks naming one path must still deliver all {SCENARIO_ENTRIES} entries"),
         );
 
-        // And the file itself is whole: Bazel's own copy, not one the tee
-        // re-created empty beside it.
         assert_eq!(
             compact_entry_count(&sink_path),
             SCENARIO_ENTRIES,
@@ -2624,9 +2804,7 @@ Test = task(implementation = _impl)
     ///
     /// With no decoded sink and no handle the stream has no subscriber, so the
     /// reader skips decoding. Compact sinks are tee'd from the raw bytes before
-    /// decoding, so both files must still be complete. One path is
-    /// the one lent to Bazel and the other is written by the reader thread's
-    /// `MultiTeeReader`, so this covers both halves of the tee.
+    /// decoding, so both files must still be complete.
     #[cfg(unix)]
     #[test]
     fn two_compact_sinks_complete_with_no_decoded_consumer() {
@@ -2682,7 +2860,7 @@ Test = task(implementation = _impl)
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
-        let lent = dir.path().join("lent.zstd");
+        let first = dir.path().join("first.zstd");
         let bad = dir.path().join("missing-dir").join("bad.zstd");
         let teed = dir.path().join("teed.zstd");
         let report = dir.path().join("report.txt");
@@ -2694,7 +2872,7 @@ def _impl(ctx):
         flags = ["--scenario=execlog_beyond_capacity"],
         execution_log = [
             entries,
-            bazel.execution_log.compact_file(path = {lent:?}),
+            bazel.execution_log.compact_file(path = {first:?}),
             bazel.execution_log.compact_file(path = {bad:?}),
             bazel.execution_log.compact_file(path = {teed:?}),
         ],
@@ -2707,7 +2885,7 @@ def _impl(ctx):
 
 Test = task(implementation = _impl)
 "#,
-            lent = lent.to_str().unwrap(),
+            first = first.to_str().unwrap(),
             bad = bad.to_str().unwrap(),
             teed = teed.to_str().unwrap(),
             report = report.to_str().unwrap(),
@@ -2717,7 +2895,7 @@ Test = task(implementation = _impl)
             .expect_err("a failed copy must fail `wait()`");
         let seen = std::fs::read_to_string(&report).unwrap();
         assert_eq!(seen.trim(), SCENARIO_ENTRIES.to_string(), "decoded entries");
-        for path in [&lent, &teed] {
+        for path in [&first, &teed] {
             assert_eq!(
                 compact_entry_count(path),
                 SCENARIO_ENTRIES,
@@ -2897,24 +3075,19 @@ Test = task(implementation = _impl)
         encoder.finish().expect("finish the zstd frame");
     }
 
-    /// A log left at the reserved path by an earlier build is not this build's.
+    /// A log an earlier build left at the caller's path is not this build's.
     ///
-    /// `bazel::stream::file::File` opens whatever is at the path, so a stale
-    /// file is opened at once and read to its end while Bazel truncates and rewrites the
-    /// path underneath — the reader keeps the old inode. The consumer is then
-    /// handed the previous run's entries: spawns that never ran, inputs that are
-    /// gone, and a `kinds = ["spawn"]` hook told about actions this build did not
-    /// execute. Nothing reports an error; the build passes.
+    /// A path reused across builds is the normal case: a Workflows runner or an
+    /// Aspect-wired deployment names one. Bazel writes the log into the task
+    /// invocation's history, and the caller's path is a copy, so the old log there
+    /// is replaced, never read. Were it read, the consumer would be handed the
+    /// previous run's entries: spawns that never ran, inputs that are gone, and
+    /// a `kinds = ["spawn"]` hook told about actions this build did not execute.
     ///
     /// The stale ids are 90001-upwards so the assertion names the build the
     /// entries came from rather than counting them. `execlog_after_bes` publishes
-    /// this build's log two seconds after the event stream closes, which puts the
-    /// reader's open firmly in the window where only the stale file exists — the
-    /// race, made one-sided.
-    ///
-    /// A path reused across builds is the normal case this reaches: a Workflows
-    /// runner or an Aspect-wired deployment names one, and the CLI now tails that
-    /// path rather than minting a fresh one.
+    /// this build's log two seconds after the event stream closes, a window in
+    /// which only the stale file exists.
     #[cfg(unix)]
     #[test]
     fn a_log_left_by_an_earlier_build_is_not_delivered_as_this_one() {
@@ -2956,6 +3129,11 @@ Test = task(implementation = _impl)
             script,
             "the reader never reached this build's log",
             "the consumer must receive this build's log, not the one already at the path",
+        );
+        assert_eq!(
+            compact_entry_count(&asked),
+            SCENARIO_ENTRIES,
+            "this build's log"
         );
     }
 

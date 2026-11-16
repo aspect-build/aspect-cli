@@ -1,0 +1,456 @@
+//! Each task invocation's files, kept for later: one directory per invocation
+//! under the history root, named `<start>-<task-id>` where `<start>` is the UTC
+//! start time as `YYYYMMDDTHHMMSSmmmZ`, so the names alone list the history in
+//! order. A subfolder per Bazel invocation it makes (`bazel/<n>`). A task ID
+//! names one run, so an explicit one already here is refused (see
+//! [`History::earlier_run`]).
+//!
+//! Bazel reads some of these files back after the build — it uploads the
+//! compact execution log as a build tool log, possibly after the client has
+//! exited — so nothing here is moved or deleted by the invocation that wrote
+//! it. [`History::prune`] removes old invocations instead, once per invocation
+//! before its first Bazel build: the oldest started first while the history is
+//! over [`Retention::budget`], never below [`Retention::keep`] invocations, and
+//! never one written to within [`Retention::guard`], which may be a build or an
+//! upload still running in another workspace.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// What the history keeps.
+#[derive(Debug, Clone, Copy)]
+pub struct Retention {
+    /// The size the history is pruned down to.
+    pub budget: u64,
+    /// Invocations always kept, the most recently started, whatever their size.
+    pub keep: usize,
+    /// An invocation written to this recently is never pruned.
+    pub guard: Duration,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            budget: 5 << 30,
+            keep: 10,
+            guard: Duration::from_secs(60 * 60),
+        }
+    }
+}
+
+/// The history root, and the task invocation whose files go into it.
+#[derive(Debug)]
+pub struct History {
+    root: PathBuf,
+    retention: Retention,
+    current: Mutex<Option<Invocation>>,
+    /// See [`History::record_every_build`].
+    record: AtomicBool,
+}
+
+#[derive(Debug)]
+struct Invocation {
+    dir: PathBuf,
+    bazel_invocations: u32,
+}
+
+impl History {
+    /// The history at `root`, which need not exist yet.
+    pub fn at(root: PathBuf, retention: Retention) -> Self {
+        Self {
+            root,
+            retention,
+            current: Mutex::new(None),
+            record: AtomicBool::new(false),
+        }
+    }
+
+    /// Have every Bazel build of the task write its compact execution log
+    /// here, even with nothing to read it.
+    pub fn record_every_build(&self) {
+        self.record.store(true, Ordering::SeqCst);
+    }
+
+    pub fn records_every_build(&self) -> bool {
+        self.record.load(Ordering::SeqCst)
+    }
+
+    /// The default root: `$ASPECT_HISTORY_DIR`, else `<cache dir>/aspect/history`.
+    pub fn default_root() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("ASPECT_HISTORY_DIR").filter(|d| !d.is_empty()) {
+            return Some(PathBuf::from(dir));
+        }
+        dirs::cache_dir().map(|dir| dir.join("aspect").join("history"))
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The entry an earlier run of `task_id` left here, if it is still kept.
+    pub fn earlier_run(&self, task_id: &str) -> Option<PathBuf> {
+        fs::read_dir(&self.root)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                let name = e.file_name();
+                is_invocation_name(&name)
+                    && name
+                        .to_str()
+                        .is_some_and(|n| n[STAMP_LEN + 1..] == *task_id)
+            })
+            .map(|e| e.path())
+    }
+
+    /// Start the task invocation `task_id`, now. Nothing is created on disk
+    /// until its first Bazel invocation asks for a directory.
+    pub fn begin(&self, task_id: &str) {
+        let dir = self
+            .root
+            .join(format!("{}-{task_id}", stamp(SystemTime::now())));
+        *self.current.lock().unwrap() = Some(Invocation {
+            dir,
+            bazel_invocations: 0,
+        });
+    }
+
+    /// A new directory for the next Bazel invocation of the current task
+    /// invocation, `<invocation>/bazel/<n>`, created. The first one prunes the
+    /// history first. Without [`begin`](Self::begin) an invocation is begun
+    /// under a fresh id.
+    pub fn next_bazel_dir(&self) -> io::Result<PathBuf> {
+        let mut current = self.current.lock().unwrap();
+        if current.is_none() {
+            drop(current);
+            self.begin(&uuid::Uuid::new_v4().to_string());
+            current = self.current.lock().unwrap();
+        }
+        let invocation = current.as_mut().expect("begun above");
+        if invocation.bazel_invocations == 0 {
+            self.prune(&invocation.dir);
+        }
+        invocation.bazel_invocations += 1;
+        let dir = invocation
+            .dir
+            .join("bazel")
+            .join(invocation.bazel_invocations.to_string());
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// Remove old invocations as [`Retention`] says, leaving `current` alone.
+    /// Best effort: an entry that cannot be read or removed is skipped.
+    fn prune(&self, current: &Path) {
+        let Ok(read) = fs::read_dir(&self.root) else {
+            return;
+        };
+        let mut entries: Vec<PathBuf> = read
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| is_invocation_name(&e.file_name()))
+            .map(|e| e.path())
+            .filter(|p| p != current)
+            .collect();
+        // Names start with the start time, so this is the most recent first.
+        entries.sort();
+        entries.reverse();
+        let now = SystemTime::now();
+        let mut total = 0u64;
+        for (i, entry) in entries.iter().enumerate() {
+            let (size, newest) = tree_size_and_newest(entry);
+            total += size;
+            let recent = newest
+                .is_some_and(|t| now.duration_since(t).unwrap_or_default() < self.retention.guard);
+            if i < self.retention.keep || total <= self.retention.budget || recent {
+                continue;
+            }
+            // Gone either way, a concurrent prune having got there first.
+            match fs::remove_dir_all(entry) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {}
+                _ => total -= size,
+            }
+        }
+    }
+}
+
+/// The length of [`stamp`]'s `YYYYMMDDTHHMMSSmmmZ`.
+const STAMP_LEN: usize = 19;
+
+/// `time` in UTC as `YYYYMMDDTHHMMSSmmmZ`: sortable as text, readable, and a
+/// valid file name everywhere.
+fn stamp(time: SystemTime) -> String {
+    let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let (secs, ms) = (since.as_secs(), since.subsec_millis());
+    let (days, of_day) = (secs / 86_400, secs % 86_400);
+    let (year, month, day) = civil_from_days(days as i64);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}{ms:03}Z",
+        of_day / 3600,
+        of_day / 60 % 60,
+        of_day % 60,
+    )
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// An invocation directory's name: a [`stamp`], `-`, and a task ID, which is a
+/// UUID. Nothing else under the root is the history's to prune.
+fn is_invocation_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let b = name.as_bytes();
+    b.len() > STAMP_LEN
+        && b[..STAMP_LEN].iter().enumerate().all(|(i, c)| match i {
+            8 => *c == b'T',
+            18 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
+        && b[STAMP_LEN] == b'-'
+        && uuid::Uuid::parse_str(&name[STAMP_LEN + 1..]).is_ok()
+}
+
+/// The bytes under `dir` and the latest modification time in it, of a file or
+/// a directory: a folder a build has just made counts before its first file.
+fn tree_size_and_newest(dir: &Path) -> (u64, Option<SystemTime>) {
+    let mut size = 0;
+    let mut newest: Option<SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.filter_map(|e| e.ok()) {
+            let Ok(meta) = entry.metadata() else { continue };
+            if let Ok(modified) = meta.modified() {
+                newest = Some(newest.map_or(modified, |n| n.max(modified)));
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                size += meta.len();
+            }
+        }
+    }
+    (size, newest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `n`th test task ID.
+    fn id(n: u32) -> String {
+        format!("00000000-0000-0000-0000-{n:012}")
+    }
+
+    /// The entry name of task `n`, started `n` seconds after the epoch: a
+    /// larger `n` started later.
+    fn name(n: u32) -> String {
+        format!(
+            "{}-{}",
+            stamp(UNIX_EPOCH + Duration::from_secs(n as u64)),
+            id(n)
+        )
+    }
+
+    /// An invocation entry for task `n`, holding one file of `size` bytes, all
+    /// of it last written `age` ago.
+    fn entry(root: &Path, n: u32, size: u64, age: Duration) -> PathBuf {
+        let dir = root.join(name(n));
+        let log = dir.join("bazel").join("1").join("execlog.zstd");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        let file = fs::File::create(&log).unwrap();
+        file.set_len(size).unwrap();
+        let when = SystemTime::now() - age;
+        file.set_modified(when).unwrap();
+        for d in [log.parent().unwrap(), &dir.join("bazel"), &dir] {
+            fs::File::open(d).unwrap().set_modified(when).unwrap();
+        }
+        dir
+    }
+
+    const OLD: Duration = Duration::from_secs(2 * 60 * 60);
+
+    fn history(root: &Path, budget: u64, keep: usize) -> History {
+        History::at(
+            root.to_path_buf(),
+            Retention {
+                budget,
+                keep,
+                guard: Duration::from_secs(60 * 60),
+            },
+        )
+    }
+
+    #[test]
+    fn a_stamp_is_utc_with_milliseconds_and_sorts_as_text() {
+        let at = |ms: u64| stamp(UNIX_EPOCH + Duration::from_millis(ms));
+        assert_eq!(at(0), "19700101T000000000Z");
+        // 2000-02-29, a leap day, 03:45:01.123.
+        assert_eq!(at(951_795_901_123), "20000229T034501123Z");
+        assert!(at(951_795_901_123) < at(951_795_901_124));
+        assert_eq!(at(0).len(), STAMP_LEN);
+    }
+
+    #[test]
+    fn bazel_invocations_get_numbered_folders_under_one_task_invocation() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(root.path(), 1 << 30, 10);
+        h.begin(&id(1));
+        let first = h.next_bazel_dir().unwrap();
+        let second = h.next_bazel_dir().unwrap();
+        assert!(first.ends_with("bazel/1") && second.ends_with("bazel/2"));
+        assert_eq!(first.parent(), second.parent());
+        let entry = first
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap();
+        assert!(is_invocation_name(entry), "{entry:?}");
+        assert!(entry.to_str().unwrap().ends_with(&format!("-{}", id(1))));
+    }
+
+    #[test]
+    fn nothing_is_created_until_a_bazel_invocation_asks() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(&root.path().join("history"), 1 << 30, 10);
+        h.begin(&id(1));
+        assert!(!h.root().exists());
+    }
+
+    #[test]
+    fn the_oldest_started_go_first_once_over_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let entries: Vec<_> = (1..=5).map(|n| entry(root.path(), n, 100, OLD)).collect();
+        // Room for three of the five.
+        let h = history(root.path(), 300, 0);
+        h.begin(&id(99));
+        h.next_bazel_dir().unwrap();
+        let kept: Vec<bool> = entries.iter().map(|e| e.exists()).collect();
+        assert_eq!(kept, [false, false, true, true, true]);
+    }
+
+    #[test]
+    fn the_most_recent_are_kept_whatever_their_size() {
+        let root = tempfile::tempdir().unwrap();
+        let entries: Vec<_> = (1..=4).map(|n| entry(root.path(), n, 1000, OLD)).collect();
+        let h = history(root.path(), 1, 2);
+        h.begin(&id(99));
+        h.next_bazel_dir().unwrap();
+        let kept: Vec<bool> = entries.iter().map(|e| e.exists()).collect();
+        assert_eq!(kept, [false, false, true, true]);
+    }
+
+    #[test]
+    fn an_entry_written_to_within_the_guard_is_never_pruned() {
+        let root = tempfile::tempdir().unwrap();
+        let recent = entry(root.path(), 1, 1000, Duration::from_secs(60));
+        let stale = entry(root.path(), 2, 1000, OLD);
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        h.next_bazel_dir().unwrap();
+        assert!(recent.exists(), "still being written or uploaded, maybe");
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn only_the_first_bazel_invocation_prunes() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        h.next_bazel_dir().unwrap();
+        let late = entry(root.path(), 1, 1000, OLD);
+        h.next_bazel_dir().unwrap();
+        assert!(late.exists());
+    }
+
+    #[test]
+    fn a_folder_a_build_has_just_made_is_recent_before_its_first_file() {
+        let root = tempfile::tempdir().unwrap();
+        // A later-started, recent entry keeps the total over budget when the
+        // empty folder is reached, so only the guard can keep it.
+        let fresh = root.path().join(name(1)).join("bazel").join("1");
+        fs::create_dir_all(&fresh).unwrap();
+        entry(root.path(), 2, 1000, Duration::from_secs(60));
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        h.next_bazel_dir().unwrap();
+        assert!(fresh.exists(), "the build may not have opened its log yet");
+    }
+
+    #[test]
+    fn nothing_but_invocation_folders_is_pruned() {
+        let root = tempfile::tempdir().unwrap();
+        let other = root.path().join("not-ours");
+        fs::create_dir_all(&other).unwrap();
+        let file = other.join("big");
+        fs::File::create(&file).unwrap().set_len(1000).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(SystemTime::now() - OLD)
+            .unwrap();
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        h.next_bazel_dir().unwrap();
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn an_invocation_name_is_a_stamp_and_a_task_id() {
+        assert!(is_invocation_name(name(1).as_ref()));
+        assert!(!is_invocation_name(id(1).as_ref()), "a bare task id");
+        assert!(
+            !is_invocation_name("20000229T034501123Z-abc".as_ref()),
+            "not a uuid"
+        );
+        assert!(!is_invocation_name("logs".as_ref()));
+        assert!(!is_invocation_name("é".as_ref()));
+    }
+
+    #[test]
+    fn an_earlier_run_of_a_task_id_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(root.path(), 1 << 30, 10);
+        assert_eq!(h.earlier_run(&id(1)), None, "no history yet");
+        h.begin(&id(1));
+        let dir = h.next_bazel_dir().unwrap();
+        let entry = dir.parent().unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(h.earlier_run(&id(1)), Some(entry));
+        assert_eq!(h.earlier_run(&id(2)), None);
+    }
+
+    #[test]
+    fn the_current_invocation_is_never_pruned() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(1));
+        let dir = h.next_bazel_dir().unwrap();
+        fs::write(dir.join("execlog.zstd"), vec![0u8; 1000]).unwrap();
+        let other = History::at(root.path().to_path_buf(), h.retention);
+        other.begin(&id(2));
+        other.next_bazel_dir().unwrap();
+        assert!(dir.exists(), "written within the guard");
+    }
+}

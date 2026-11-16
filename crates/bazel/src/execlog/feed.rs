@@ -7,8 +7,8 @@ use std::fs::File;
 use std::io;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::thread::JoinHandle;
-use std::{env, thread};
 
 use crate::delimited;
 use crate::fanout::SinkOutcome;
@@ -238,22 +238,8 @@ pub struct ExecLogStream {
 }
 
 impl ExecLogStream {
-    /// Mint the path Bazel will write `--execution_log_compact_file` to, without
-    /// starting a reader. Pass `Some(path)` to reuse an existing sink path (e.g. a
-    /// `CompactFile` sink, so Bazel writes straight to the caller's destination with
-    /// no tee step); `None` names a UUID temp file. Nothing is created on disk —
-    /// Bazel writes a regular file, so there is no inode to reserve.
-    ///
-    /// Pair with [`spawn_with_file`](Self::spawn_with_file) once the caller has the
-    /// bazel client pid in hand.
-    pub fn reserve_path(out_path: Option<PathBuf>) -> PathBuf {
-        out_path.unwrap_or_else(|| {
-            env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()))
-        })
-    }
-
-    /// Spawn the execlog reader thread for a regular file at `path`, as minted by
-    /// [`reserve_path`](Self::reserve_path).
+    /// Spawn the execlog reader thread for the regular file Bazel writes at
+    /// `path`, which is left where it is: Bazel reads it back to upload it.
     ///
     /// `server_pid` is the Bazel daemon: the process that holds the file open while
     /// it writes, so once the client has exited it answers "are more bytes

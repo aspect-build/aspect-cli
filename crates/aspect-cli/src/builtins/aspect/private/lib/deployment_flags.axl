@@ -96,7 +96,7 @@ and the `--build_metadata` the Web UI reads — the same flags the
 load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
-load("./aspect_flags.axl", "add_task_flags", "endpoint_flags", "temp_exec_log_flags")
+load("./aspect_flags.axl", "add_task_flags", "endpoint_flags", "history_exec_log_flags")
 load("./deployment_rc.axl", "credential_helper_flag")
 load("./environment.axl", "detect_ci", "env_names_deployment", "info")
 
@@ -558,7 +558,8 @@ def _deployment_impl(ctx):
     add_task_flags(t, deployment_tuning_flags(dep))
     if "bes" in dep.wired:
         register_bes_metadata(ctx, t)
-        t.task_flags.append(temp_exec_log_flags)
+
+        t.task_flags.append(history_exec_log_flags)
     if dep.capabilities:
         t.build_start.append(lambda tctx: announce_deployment_flags(tctx, dep))
 

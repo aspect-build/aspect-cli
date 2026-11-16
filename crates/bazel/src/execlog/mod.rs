@@ -1,6 +1,7 @@
 //! The execution log: bazel's record of every spawn, decoded as it is written.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 pub mod feed;
 pub mod sink;
@@ -10,64 +11,58 @@ pub mod telemetry;
 /// The flag that names where Bazel writes the compact execution log.
 pub const COMPACT_FILE_FLAG: &str = "--execution_log_compact_file";
 
+/// The `--execution_log_compact_file` value that asks for the log in the task
+/// invocation's history and nowhere else. A feature injects it as an ordinary
+/// flag, so the user's flag filters and the version gate apply to it like any
+/// other; [`take_history_request`] takes it off the command line.
+pub const IN_HISTORY: &str = "%aspect_history%";
+
+/// `flags` without any request for [`IN_HISTORY`], and whether there was one.
+pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
+    let inline = format!("{COMPACT_FILE_FLAG}={IN_HISTORY}");
+    let mut asked = false;
+    let mut kept = Vec::with_capacity(flags.len());
+    let mut flags = flags.into_iter().peekable();
+    while let Some(flag) = flags.next() {
+        if flag == inline {
+            asked = true;
+        } else if flag == COMPACT_FILE_FLAG && flags.peek().is_some_and(|v| v == IN_HISTORY) {
+            flags.next();
+            asked = true;
+        } else {
+            kept.push(flag);
+        }
+    }
+    (kept, asked)
+}
+
 /// The compact log path something already asked Bazel for in `flags`, if any.
 ///
 /// A deployment wired to an Aspect BES backend, a Workflows runner, or a
-/// `.bazelrc` already asks Bazel for the compact log, and whoever asked reads
-/// the file at that path. Adding a second flag would win — a literal flag
-/// outranks rc content — and silently repoint Bazel away from it. See
-/// [`crate::rc::requested_path`] for how empty and relative values resolve.
+/// `.bazelrc` can ask Bazel for the compact log, and whoever asked reads the
+/// file at that path. When the CLI streams the log it names a file of its own,
+/// which outranks that one (the option is single-valued), so the asked-for
+/// path is written as one of the [`copies`]. See [`crate::rc::requested_path`]
+/// for how empty and relative values resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
     crate::rc::requested_path(flags, COMPACT_FILE_FLAG, verb, directory)
 }
 
-/// Who writes the compact log, and which sinks still need their own copy.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Plan {
-    /// Where Bazel writes the log, and the reader tails it.
-    pub path: PathBuf,
-    /// Whether this call owns the flag: nothing asked for the log yet, so the
-    /// command line must name `path`.
-    pub add_flag: bool,
-    /// Compact sinks served by a tee of the stream rather than by Bazel
-    /// writing to them directly.
-    pub tee: Vec<String>,
-}
-
-/// Decide who writes the log. `requested` is [`requested_path`]; `compact` are
-/// the paths of the caller's compact-file sinks.
+/// The compact copies the CLI writes from the stream: the path the caller
+/// asked Bazel for, if any (see [`requested_path`]), then each compact sink.
 ///
-/// When something already named the path, tail that file and leave the flag
-/// alone. Otherwise this call owns the flag, and a compact sink lends its path,
-/// letting Bazel write straight to the caller's destination with no temp file
-/// or tee step for that copy.
-///
-/// Every remaining compact sink is served by the tee, so each still gets its
-/// copy — except one naming the very file Bazel is writing, whose
-/// `File::create` would truncate it mid-build. Both cases can hold one: a
-/// sink's path can already be on the command line, and two sinks can name one
-/// path, in which case the first lent it to Bazel. Sinks naming the same path
-/// share one tee; paths are compared as written (`a//b` matches `a/b`, but
-/// `./x` does not match `x` and symlinks are not resolved).
-pub fn plan(requested: Option<PathBuf>, mut compact: Vec<String>) -> Plan {
-    let (path, add_flag) = match requested {
-        Some(path) => (path, false),
-        None => {
-            let direct = if compact.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(compact.remove(0)))
-            };
-            (feed::ExecLogStream::reserve_path(direct), true)
-        }
-    };
-    let mut seen = std::collections::HashSet::new();
-    compact.retain(|sink| Path::new(sink) != path && seen.insert(PathBuf::from(sink)));
-    Plan {
-        path,
-        add_flag,
-        tee: compact,
-    }
+/// Bazel writes only a file the CLI reserved, so every copy comes from the
+/// stream, whole and in order. Paths naming one file share one copy; they are
+/// compared as written (`a//b` matches `a/b`, but `./x` does not match `x` and
+/// symlinks are not resolved).
+pub fn copies(requested: Option<PathBuf>, compact: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    requested
+        .map(|path| path.to_string_lossy().into_owned())
+        .into_iter()
+        .chain(compact)
+        .filter(|path| seen.insert(PathBuf::from(path)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -89,43 +84,54 @@ mod tests {
     }
 
     #[test]
-    fn a_requested_path_leaves_the_flag_alone_and_tees_every_sink_but_its_own() {
-        let p = plan(
+    fn the_requested_path_is_the_first_copy() {
+        let c = copies(
             Some(PathBuf::from("/tmp/asked.zst")),
-            vec!["/tmp/asked.zst".to_string(), "/tmp/copy.zst".to_string()],
+            vec!["/tmp/copy.zst".to_string()],
         );
-        assert_eq!(
-            p,
-            Plan {
-                path: PathBuf::from("/tmp/asked.zst"),
-                add_flag: false,
-                tee: vec!["/tmp/copy.zst".to_string()],
-            }
-        );
+        assert_eq!(c, vec!["/tmp/asked.zst", "/tmp/copy.zst"]);
     }
 
     #[test]
-    fn with_nothing_requested_the_first_compact_sink_lends_its_path() {
-        let p = plan(
-            None,
+    fn paths_naming_one_file_share_a_copy() {
+        let c = copies(
+            Some(PathBuf::from("/tmp/asked.zst")),
             vec![
-                "/tmp/first.zst".to_string(),
-                "/tmp/first.zst".to_string(),
-                "/tmp/second.zst".to_string(),
+                "/tmp/asked.zst".to_string(),
+                "/tmp/copy.zst".to_string(),
+                "/tmp//copy.zst".to_string(),
             ],
         );
-        assert!(p.add_flag, "this call owns the flag");
-        assert_eq!(p.path, PathBuf::from("/tmp/first.zst"));
-        // The duplicate of the lent path would truncate it; the other is teed.
-        assert_eq!(p.tee, vec!["/tmp/second.zst".to_string()]);
+        assert_eq!(c, vec!["/tmp/asked.zst", "/tmp/copy.zst"]);
+    }
+
+    /// `aspect_flags.axl` spells this value out; its test pins the same one.
+    #[test]
+    fn the_history_request_value_is_the_one_aspect_flags_injects() {
+        assert_eq!(IN_HISTORY, "%aspect_history%");
     }
 
     #[test]
-    fn sinks_naming_one_path_share_a_tee() {
-        let p = plan(
-            Some(PathBuf::from("/tmp/asked.zst")),
-            vec!["/tmp/copy.zst".to_string(), "/tmp//copy.zst".to_string()],
+    fn a_history_request_is_taken_off_the_command_line() {
+        let (kept, asked) = take_history_request(flags(&[
+            "--a",
+            "--execution_log_compact_file=%aspect_history%",
+            "--execution_log_compact_file",
+            "%aspect_history%",
+            "--execution_log_compact_file=/tmp/mine.zst",
+        ]));
+        assert!(asked);
+        assert_eq!(
+            kept,
+            flags(&["--a", "--execution_log_compact_file=/tmp/mine.zst"])
         );
-        assert_eq!(p.tee, vec!["/tmp/copy.zst".to_string()]);
+        let (kept, asked) = take_history_request(flags(&["--a"]));
+        assert!(!asked);
+        assert_eq!(kept, flags(&["--a"]));
+    }
+
+    #[test]
+    fn with_nothing_asked_for_there_are_no_copies() {
+        assert!(copies(None, vec![]).is_empty());
     }
 }

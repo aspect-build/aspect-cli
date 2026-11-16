@@ -456,20 +456,19 @@ def exec_log_flags(exec_log_path: str) -> list:
     repository can drop just this."""
     return [(_EXECUTION_LOG_COMPACT_FILE + "=" + exec_log_path, ">=7.4.0", "build")]
 
-def temp_exec_log_path(std, run_id: str) -> str:
-    """A place for a task's compact execution log off a Workflows runner: under
-    the OS temp dir so nothing lands in the checkout, namespaced by `run_id`
-    since concurrent tasks on one machine share that dir. Creates the directory,
-    at the task's own run — never for an rc, which outlives the directory."""
-    dir = std.env.temp_dir().rstrip("/") + "/aspect-bazel-" + (run_id or "exec")
-    std.fs.create_dir_all(dir)
-    return dir + "/exec.log.zstd"
+# The `--execution_log_compact_file` value the runtime reads as "in the task
+# invocation's history, and nowhere else" (`bazel::execlog::IN_HISTORY`).
+_EXEC_LOG_IN_HISTORY = "%aspect_history%"
 
-def temp_exec_log_flags(ctx) -> list:
-    """The execution log at `temp_exec_log_path` for this run — a
-    `BazelTrait.task_flags` hook, since only the task knows its run id. For a
+def history_exec_log_flags(_ctx) -> list:
+    """The execution log kept in the task invocation's history — a
+    `BazelTrait.task_flags` hook, so `--bazel-flags:omit` and the version gate
+    of `exec_log_flags` apply to it as to any injected flag. Bazel uploads it
+    from there; the runtime takes this value off the command line and names
+    the history folder itself. `ctx.bazel.info`, which reads the `build`
+    section too, passes it on as written and Bazel's `info` ignores it. For a
     BES wired off a runner (`--remote`, or a hand-set env)."""
-    return exec_log_flags(temp_exec_log_path(ctx.std, ctx.task.id))
+    return exec_log_flags(_EXEC_LOG_IN_HISTORY)
 
 def runner_profile_flags(environment: WorkflowsEnvironment) -> list:
     """`--profile` placed under the runner's job tmpdir, keeping the

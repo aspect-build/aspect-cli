@@ -27,6 +27,7 @@ use tokio::runtime::Runtime;
 
 use crate::engine::arguments::Arguments;
 use crate::engine::cancellation::Signals;
+use crate::engine::history::{History, Retention};
 use crate::engine::store::Env;
 use crate::eval::api::{dialect, get_globals};
 use crate::eval::{Loader, ModuleEnv, MultiPhaseEval, PhaseFailures};
@@ -63,6 +64,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         string_list_args: vec![],
         signals: None,
         exporting: false,
+        history: None,
     }
 }
 
@@ -75,6 +77,7 @@ pub struct EvalBuilder {
     string_list_args: Vec<(String, Vec<String>)>,
     signals: Option<Arc<Signals>>,
     exporting: bool,
+    history: Option<PathBuf>,
 }
 
 impl EvalBuilder {
@@ -115,6 +118,13 @@ impl EvalBuilder {
     /// telemetry sinks.
     pub fn with_exporting(mut self) -> Self {
         self.exporting = true;
+        self
+    }
+
+    /// Keep the task invocation's history under `root`, for a test that
+    /// inspects it, rather than in a directory of the run's own.
+    pub fn with_history(mut self, root: PathBuf) -> Self {
+        self.history = Some(root);
         self
     }
 
@@ -261,6 +271,12 @@ impl EvalBuilder {
             if self.exporting {
                 loader.env.telemetry.export_everything();
             }
+            loader.env.history = Arc::new(History::at(
+                self.history
+                    .clone()
+                    .unwrap_or_else(|| tmp.path().join("history")),
+                Retention::default(),
+            ));
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
             raise_first(mpe.eval(&scripts, &root_mod, &modules))?;
