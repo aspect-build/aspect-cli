@@ -291,6 +291,10 @@ impl ExecLogStream {
     ///
     /// A log bazel starts over in place, as it does for a retried attempt, is
     /// decoded again from its start, and every copy starts over with it.
+    /// Decoded consumers get every attempt's entries, one after the other. The
+    /// restart is noticed only if the reader reaches the old end before the new
+    /// log grows past it: a reader parked by a slow consumer meanwhile reads on
+    /// into the middle of the new log, which fails to decode.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,

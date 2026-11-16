@@ -883,8 +883,8 @@ fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path:
     ));
 }
 
-/// How long [`Unstarted::abandon`] waits for a cancelled client to exit: past
-/// its SIGINT grace and the kill that follows.
+/// How long [`Build::spawn`] gives a cancelled client to exit before killing
+/// it, so that abandoning the stream is bounded.
 const ABANDON_STOP: Duration = Duration::from_secs(30);
 
 /// A build event stream whose reader has not started, while bazel already runs
@@ -1270,7 +1270,13 @@ impl Build {
             Err(err) => {
                 build_event_stream.abandon(|| {
                     bound.token().cancel();
-                    let _ = children::wait_with(&bound, Some(ABANDON_STOP), || child.try_wait());
+                    let waited =
+                        children::wait_with(&bound, Some(ABANDON_STOP), || child.try_wait());
+                    if !matches!(waited, Ok(Some(_))) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bound.mark_exited();
+                    }
                 });
                 return Err(err);
             }
