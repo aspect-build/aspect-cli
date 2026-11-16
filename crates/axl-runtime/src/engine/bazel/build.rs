@@ -883,14 +883,19 @@ fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path:
     ));
 }
 
+/// How long [`Unstarted::abandon`] waits for a cancelled client to exit: past
+/// its SIGINT grace and the kill that follows.
+const ABANDON_STOP: Duration = Duration::from_secs(30);
+
 /// A build event stream whose reader has not started, while bazel already runs
 /// and writes its file.
 ///
 /// Subscribers bind to [`Unstarted::stream`], then [`Unstarted::start`] starts
-/// the reader. If [`Build::spawn`] fails first, dropping this starts it anyway,
-/// with whatever is bound: the file is then read to its end and removed once
-/// the client exits, rather than left in the temp dir holding the build's
-/// unredacted events.
+/// the reader. If [`Build::spawn`] fails first, [`Unstarted::abandon`] stops
+/// the client and reads the file to its end, which removes it, before the
+/// error is returned: the task, and with it the CLI, may exit right after, and
+/// the file would be left in the temp dir holding the build's unredacted
+/// events.
 struct Unstarted {
     pending: Option<(
         BuildEventStream,
@@ -920,20 +925,18 @@ impl Unstarted {
         self.pending.as_ref().map(|(stream, ..)| stream)
     }
 
-    fn start(mut self) -> Option<BuildEventStream> {
-        self.start_now()
-    }
-
-    fn start_now(&mut self) -> Option<BuildEventStream> {
-        let (stream, file, gate, file_sinks) = self.pending.take()?;
+    fn start(self) -> Option<BuildEventStream> {
+        let (stream, file, gate, file_sinks) = self.pending?;
         Some(stream.start(file, gate, file_sinks))
     }
-}
 
-impl Drop for Unstarted {
-    fn drop(&mut self) {
-        // Detached: the reader ends on its own once the client has exited.
-        drop(self.start_now());
+    /// `stop_client` ends the client, so the gate can say the stream is over;
+    /// then the stream is read to its end with whatever is bound.
+    fn abandon(self, stop_client: impl FnOnce()) {
+        stop_client();
+        if let Some(mut stream) = self.start() {
+            let _ = stream.join();
+        }
     }
 }
 
@@ -1121,7 +1124,7 @@ impl Build {
 
         // Bound to `cancellation` (the root unless the task said otherwise):
         // cancelling it sends the client one SIGINT.
-        let (child, bound) = children::spawn(
+        let (mut child, bound) = children::spawn(
             &mut cmd,
             &signals,
             cancellation,
@@ -1138,120 +1141,140 @@ impl Build {
         };
         let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks);
 
-        // The workspace log is a FIFO the server holds while writing; the
-        // client's death ends the stream.
-        let workspace_event_stream = match workspace_event_channel {
-            Some(channel) => {
-                let gate = pids.gate();
-                Some(WorkspaceEventStream::spawn(channel, gate)?)
-            }
-            None => None,
-        };
+        // Everything that can fail once bazel runs. A failure abandons the
+        // stream (see `Unstarted`).
+        let parts = (|| -> io::Result<_> {
+            // The workspace log is a FIFO the server holds while writing; the
+            // client's death ends the stream.
+            let workspace_event_stream = match workspace_event_channel {
+                Some(channel) => {
+                    let gate = pids.gate();
+                    Some(WorkspaceEventStream::spawn(channel, gate)?)
+                }
+                None => None,
+            };
 
-        // Same two-pid split for the execution log: the daemon writes the file, but
-        // only the client can say the invocation is over and none is coming.
-        //
-        // The producer blocks rather than dropping. Blocking cannot reach Bazel —
-        // Bazel writes the log to a regular file and this process tails it — so a
-        // consumer slower than the decoder only lengthens the `join()` inside
-        // `wait()`. And that `wait()` releases every subscriber before joining, so
-        // one nobody drains cannot park the reader past the end of the build.
-        let named_consumers = !decoded_paths.is_empty() || !execlog_iters.is_empty();
-        let mut execlog_stream = match execlog_path {
-            Some(p) => Some(ExecLogStream::spawn_with_file(
-                p,
-                pid,
-                child.id(),
-                compact_paths,
-            )?),
-            None => None,
-        };
+            // Same two-pid split for the execution log: the daemon writes the file, but
+            // only the client can say the invocation is over and none is coming.
+            //
+            // The producer blocks rather than dropping. Blocking cannot reach Bazel —
+            // Bazel writes the log to a regular file and this process tails it — so a
+            // consumer slower than the decoder only lengthens the `join()` inside
+            // `wait()`. And that `wait()` releases every subscriber before joining, so
+            // one nobody drains cannot park the reader past the end of the build.
+            let named_consumers = !decoded_paths.is_empty() || !execlog_iters.is_empty();
+            let mut execlog_stream = match execlog_path {
+                Some(p) => Some(ExecLogStream::spawn_with_file(
+                    p,
+                    pid,
+                    child.id(),
+                    compact_paths,
+                )?),
+                None => None,
+            };
 
-        if !iters.is_empty() {
-            let stream = build_event_stream.stream().ok_or_else(|| {
-                io::Error::other(
-                    "ctx.bazel.build/test: build_events list contained `iterator()` handles \
-                     but no BEP stream is configured",
-                )
-            })?;
-            for iter in &iters {
-                iter.bind(stream).map_err(io::Error::other)?;
-            }
-        }
-
-        // One shared invocation_id across all gRPC sinks so every backend
-        // indexes this invocation under the same UUID.
-        let debug = std::env::var_os("ASPECT_DEBUG")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let sink_invocation_id: Option<String> = if !grpc_sinks.is_empty() {
-            let invocation_id = uuid::Uuid::new_v4().to_string();
-            if debug {
-                errln!(
-                    "BES sinks: spawning {} gRPC sink(s) sink_invocation_id={}",
-                    grpc_sinks.len(),
-                    invocation_id
-                );
-            }
-            let stream = build_event_stream.stream().unwrap();
-            for sink in grpc_sinks {
-                sink.bind_grpc(rt.clone(), stream, invocation_id.clone())
-                    .map_err(io::Error::other)?;
-            }
-            Some(invocation_id)
-        } else {
-            if debug {
-                let bes_backend = std::env::var("ASPECT_WORKFLOWS_BES_BACKEND")
-                    .unwrap_or_else(|_| "<unset>".to_string());
-                let bes_results = std::env::var("ASPECT_WORKFLOWS_BES_RESULTS_URL")
-                    .unwrap_or_else(|_| "<unset>".to_string());
-                errln!(
-                    "BES sinks: 0 gRPC sinks configured (skipping spawn). \
-                     ASPECT_WORKFLOWS_BES_BACKEND={bes_backend} \
-                     ASPECT_WORKFLOWS_BES_RESULTS_URL={bes_results}"
-                );
-            }
-            None
-        };
-
-        // Decoded execlog file sinks belong to the execlog stream — joined
-        // (and write errors propagated) inside `execlog_stream.join()`.
-        if let Some(stream) = execlog_stream.as_mut() {
-            for path in decoded_paths {
-                let recv = stream.receiver().ok_or_else(|| {
-                    io::Error::other("execution log stream has no subscriber to clone")
+            if !iters.is_empty() {
+                let stream = build_event_stream.stream().ok_or_else(|| {
+                    io::Error::other(
+                        "ctx.bazel.build/test: build_events list contained `iterator()` handles \
+                         but no BEP stream is configured",
+                    )
                 })?;
-                stream.attach_file_sink(bazel::execlog::sink::spawn_file(recv, path));
+                for iter in &iters {
+                    iter.bind(stream).map_err(io::Error::other)?;
+                }
             }
-        }
 
-        // One receiver clone each: the channel is a broadcast ring, so the handles
-        // read the same entries the file sinks do rather than competing for them.
-        if !execlog_iters.is_empty() {
-            let stream = execlog_stream.as_ref().ok_or_else(|| {
-                // `partition_execution_log` turns the stream on for any list, so a
-                // list holding a handle always has one. Stated, not unwrapped.
-                io::Error::other(
-                    "ctx.bazel.build/test: execution_log list contained `iterator()` handles \
-                     but no execution log stream is configured",
-                )
-            })?;
-            bind_execlog_iters(stream, &execlog_iters)?;
-        }
+            // One shared invocation_id across all gRPC sinks so every backend
+            // indexes this invocation under the same UUID.
+            let debug = std::env::var_os("ASPECT_DEBUG")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let sink_invocation_id: Option<String> = if !grpc_sinks.is_empty() {
+                let invocation_id = uuid::Uuid::new_v4().to_string();
+                if debug {
+                    errln!(
+                        "BES sinks: spawning {} gRPC sink(s) sink_invocation_id={}",
+                        grpc_sinks.len(),
+                        invocation_id
+                    );
+                }
+                let stream = build_event_stream.stream().unwrap();
+                for sink in grpc_sinks {
+                    sink.bind_grpc(rt.clone(), stream, invocation_id.clone())
+                        .map_err(io::Error::other)?;
+                }
+                Some(invocation_id)
+            } else {
+                if debug {
+                    let bes_backend = std::env::var("ASPECT_WORKFLOWS_BES_BACKEND")
+                        .unwrap_or_else(|_| "<unset>".to_string());
+                    let bes_results = std::env::var("ASPECT_WORKFLOWS_BES_RESULTS_URL")
+                        .unwrap_or_else(|_| "<unset>".to_string());
+                    errln!(
+                        "BES sinks: 0 gRPC sinks configured (skipping spawn). \
+                         ASPECT_WORKFLOWS_BES_BACKEND={bes_backend} \
+                         ASPECT_WORKFLOWS_BES_RESULTS_URL={bes_results}"
+                    );
+                }
+                None
+            };
 
-        // Every named consumer has cloned what it needs, so the stream must not go
-        // on holding an unread subscriber of its own — see `ExecLogStream::recv`.
-        //
-        // A stream no consumer was named for keeps its subscriber, because
-        // `build.execution_logs()` may still claim it. Until something drains it
-        // the producer sits at the channel capacity; `join()` releasing it is what
-        // bounds that.
-        if named_consumers && let Some(stream) = execlog_stream.as_mut() {
-            stream.take_initial_subscriber();
-        }
-        let trace_sink = build_events.then(|| {
-            tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
-        });
+            // Decoded execlog file sinks belong to the execlog stream — joined
+            // (and write errors propagated) inside `execlog_stream.join()`.
+            if let Some(stream) = execlog_stream.as_mut() {
+                for path in decoded_paths {
+                    let recv = stream.receiver().ok_or_else(|| {
+                        io::Error::other("execution log stream has no subscriber to clone")
+                    })?;
+                    stream.attach_file_sink(bazel::execlog::sink::spawn_file(recv, path));
+                }
+            }
+
+            // One receiver clone each: the channel is a broadcast ring, so the handles
+            // read the same entries the file sinks do rather than competing for them.
+            if !execlog_iters.is_empty() {
+                let stream = execlog_stream.as_ref().ok_or_else(|| {
+                    // `partition_execution_log` turns the stream on for any list, so a
+                    // list holding a handle always has one. Stated, not unwrapped.
+                    io::Error::other(
+                        "ctx.bazel.build/test: execution_log list contained `iterator()` handles \
+                         but no execution log stream is configured",
+                    )
+                })?;
+                bind_execlog_iters(stream, &execlog_iters)?;
+            }
+
+            // Every named consumer has cloned what it needs, so the stream must not go
+            // on holding an unread subscriber of its own — see `ExecLogStream::recv`.
+            //
+            // A stream no consumer was named for keeps its subscriber, because
+            // `build.execution_logs()` may still claim it. Until something drains it
+            // the producer sits at the channel capacity; `join()` releasing it is what
+            // bounds that.
+            if named_consumers && let Some(stream) = execlog_stream.as_mut() {
+                stream.take_initial_subscriber();
+            }
+            let trace_sink = build_events.then(|| {
+                tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
+            });
+            Ok((
+                workspace_event_stream,
+                execlog_stream,
+                sink_invocation_id,
+                trace_sink,
+            ))
+        })();
+        let (workspace_event_stream, execlog_stream, sink_invocation_id, trace_sink) = match parts {
+            Ok(parts) => parts,
+            Err(err) => {
+                build_event_stream.abandon(|| {
+                    bound.token().cancel();
+                    let _ = children::wait_with(&bound, Some(ABANDON_STOP), || child.try_wait());
+                });
+                return Err(err);
+            }
+        };
 
         // Start reading only now that every subscriber is bound (see
         // `BuildEventStream::new`).
@@ -3620,32 +3643,36 @@ Test = task(implementation = _impl)
         }
     }
 
-    /// A spawn that fails once bazel runs still reads the event file bazel
-    /// goes on to write, and removes it, rather than leaving it behind.
+    /// A spawn that fails once bazel runs reads the event file bazel wrote to
+    /// its end, delivering it to what was bound and removing it, before the
+    /// error is returned.
     #[test]
-    fn an_unstarted_stream_dropped_while_bazel_runs_still_cleans_up() {
-        use super::{BuildEventStream, Gate, Unstarted};
+    fn an_abandoned_stream_leaves_no_event_file_behind() {
+        use super::{BuildEvent, BuildEventStream, Gate, Unstarted};
+        use prost::Message;
         use std::path::Path;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::{Duration, Instant};
+        let last = BuildEvent {
+            last_message: true,
+            ..Default::default()
+        };
         let file = BuildEventStream::reserve();
         let path = file.path().to_path_buf();
         let client_exited = Arc::new(AtomicBool::new(false));
         let exited = client_exited.clone();
         let gate = Gate::new(move || exited.load(Ordering::SeqCst)).with_held(|_| false);
-        drop(Unstarted::new(Some(file), gate, vec![]));
-        // Bazel writes its file after the failed spawn, then exits.
-        std::fs::write(&path, b"bazel wrote this").unwrap();
-        client_exited.store(true, Ordering::SeqCst);
+        let unstarted = Unstarted::new(Some(file), gate, vec![]);
+        let sub = unstarted.stream().unwrap().subscribe();
+        unstarted.abandon(|| {
+            // Bazel wrote its file, and stopping the client ends it.
+            std::fs::write(&path, last.encode_length_delimited_to_vec()).unwrap();
+            client_exited.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(sub.recv().expect("the event was read").event, last);
         let mut moved = path.clone().into_os_string();
         moved.push(".1");
-        let gone = || !path.exists() && !Path::new(&moved).exists();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !gone() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(gone(), "the event file was left behind");
+        assert!(!path.exists() && !Path::new(&moved).exists());
     }
 
     /// Iterator handles are single-use; reusing one errors.

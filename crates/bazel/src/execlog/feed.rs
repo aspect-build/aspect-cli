@@ -56,6 +56,15 @@ impl Tee {
         }
     }
 
+    /// Start the copy over, empty, as bazel starts its own log over for a
+    /// retried attempt. A copy that has failed stays failed.
+    fn restart(&mut self) {
+        if self.out.is_none() || self.finish().is_some() {
+            return;
+        }
+        *self = Tee::open(std::mem::take(&mut self.path));
+    }
+
     /// Flush the copy; returns why it is incomplete, if it is.
     fn finish(&mut self) -> Option<String> {
         if let Some(mut out) = self.out.take()
@@ -85,6 +94,10 @@ impl<R: Read> Read for MultiTeeReader<R> {
 }
 
 impl<R: Read> MultiTeeReader<R> {
+    fn restart(&mut self) {
+        self.tees.iter_mut().for_each(Tee::restart);
+    }
+
     /// Finish every copy, failing with each failed copy's reason.
     fn finish(&mut self) -> io::Result<()> {
         let failures: Vec<String> = self.tees.iter_mut().filter_map(Tee::finish).collect();
@@ -110,6 +123,17 @@ fn broken_read(done: Option<&crate::stream::Done>, path: &std::path::Path) -> io
         ))),
         _ => Ok(()),
     }
+}
+
+/// The decoded stream over the followed file, as the reader thread holds it.
+type Decoding<'a> = Decoder<'a, io::BufReader<MultiTeeReader<followed::File>>>;
+
+/// The file under `decoder` has said why it stopped, so a decode error is the
+/// stream cut short, not corrupt.
+fn decoder_done(decoder: &Option<Decoding<'_>>) -> bool {
+    decoder
+        .as_ref()
+        .is_some_and(|d| d.get_ref().get_ref().inner.done().is_some())
 }
 
 #[derive(Error, Debug)]
@@ -264,6 +288,9 @@ impl ExecLogStream {
     /// [`MultiTeeReader`] before decoding. A copy that cannot be created or
     /// written fails alone, leaving the other copies and the decoded stream
     /// unaffected, and [`join`](Self::join) reports the failure.
+    ///
+    /// A log bazel starts over in place, as it does for a retried attempt, is
+    /// decoded again from its start, and every copy starts over with it.
     pub fn spawn_with_file(
         path: PathBuf,
         server_pid: u32,
@@ -298,12 +325,14 @@ impl ExecLogStream {
                 inner: file,
                 tees: compact_sink_paths.into_iter().map(Tee::open).collect(),
             };
-            let mut out_raw = Decoder::new(out_raw)?;
+            // An `Option` so a restart can take the reader back from it.
+            let mut out_raw = Some(Decoder::new(out_raw)?);
 
             let read = (|| -> Result<ReaderOutcome, ExecLogStreamError> {
                 let mut has_readers = true;
                 loop {
-                    match delimited::next_frame(&mut out_raw, &mut buf) {
+                    let decoder = out_raw.as_mut().expect("put back after a restart");
+                    match delimited::next_frame(decoder, &mut buf) {
                         Ok(Some(header)) => {
                             if has_readers {
                                 let entry = ExecLogEntry::decode(&buf[..header.len])?;
@@ -316,11 +345,21 @@ impl ExecLogStream {
                         // entries before it were good; how it ended is the
                         // file's to say.
                         Ok(None) => break,
-                        Err(_) if out_raw.get_ref().get_ref().inner.done().is_some() => break,
+                        // Bazel started the log over for a retried attempt: a
+                        // new zstd stream, so a new decoder, and the copies
+                        // start over with the file.
+                        Err(err) if followed::StartedOver::is(&err) => {
+                            let decoder = out_raw.take().expect("taken only here");
+                            let mut inner = decoder.finish().into_inner();
+                            inner.restart();
+                            out_raw = Some(Decoder::new(inner)?);
+                        }
+                        Err(_) if decoder_done(&out_raw) => break,
                         Err(err) => return Err(err.into()),
                     }
                 }
-                let file = &out_raw.get_ref().get_ref().inner;
+                let decoder = out_raw.as_ref().expect("put back after a restart");
+                let file = &decoder.get_ref().get_ref().inner;
                 let broken = broken_read(file.done(), file.path());
                 let closed = sender.close();
                 broken?;
@@ -329,7 +368,10 @@ impl ExecLogStream {
             })();
             // Every copy is finished however reading ended, so a failed one is
             // reported even beside a reader error.
-            let copies = out_raw.get_mut().get_mut().finish();
+            let copies = match out_raw.as_mut() {
+                Some(decoder) => decoder.get_mut().get_mut().finish(),
+                None => Ok(()),
+            };
             combine(
                 read,
                 copies.err().map(|e| e.to_string()).into_iter().collect(),
@@ -670,6 +712,49 @@ mod tests {
         let stream = ExecLogStream::spawn_with_file(path.clone(), pid, pid, vec![]).unwrap();
         let err = stream.join().unwrap_err().to_string();
         assert!(err.contains(path.to_str().unwrap()), "{err}");
+    }
+
+    /// `ids` as a compact log: one zstd stream of length-delimited entries.
+    fn compact_log(ids: impl IntoIterator<Item = u32>) -> Vec<u8> {
+        let raw: Vec<u8> = ids
+            .into_iter()
+            .flat_map(|id| entry(id).encode_length_delimited_to_vec())
+            .collect();
+        zstd::encode_all(raw.as_slice(), 0).unwrap()
+    }
+
+    /// Bazel starts its log over in place for a retried attempt: both attempts
+    /// are decoded, and a copy holds only the last, as Bazel's own file does.
+    #[test]
+    fn a_log_started_over_in_place_is_decoded_again_and_copies_start_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("exec.log");
+        let copy = dir.path().join("copy.zstd");
+        let mut client = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        std::fs::write(&log, compact_log(1..=50)).unwrap();
+        let mut stream = ExecLogStream::spawn_with_file(
+            log.clone(),
+            client.id(),
+            client.id(),
+            vec![copy.to_str().unwrap().to_owned()],
+        )
+        .unwrap();
+        let recv = stream.take_initial_subscriber().unwrap();
+        for id in 1..=50 {
+            assert_eq!(recv.recv().unwrap().id, id);
+        }
+        // Shorter than what was read, so the follower sees it truncated.
+        let attempt2 = compact_log([100]);
+        std::fs::write(&log, &attempt2).unwrap();
+        assert_eq!(recv.recv().unwrap().id, 100);
+        let _ = client.kill();
+        let _ = client.wait();
+        assert!(recv.recv().is_err(), "the stream ends with the client");
+        assert_eq!(stream.join().unwrap(), ReaderOutcome::Read);
+        assert_eq!(std::fs::read(&copy).unwrap(), attempt2);
     }
 
     /// Why the stream must not keep an unread subscriber once real ones exist.
