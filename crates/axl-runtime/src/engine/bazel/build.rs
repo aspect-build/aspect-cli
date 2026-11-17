@@ -2962,12 +2962,14 @@ Test = task(implementation = _impl)
         assert_eq!(exit.expect("run_task"), Some(0));
     }
 
-    /// The one task invocation entry under `history`.
+    /// The one task invocation entry under `history`, past the prune's own
+    /// dotfiles.
     #[cfg(unix)]
     fn only_invocation(history: &std::path::Path) -> std::path::PathBuf {
         let entries: Vec<_> = std::fs::read_dir(history)
             .unwrap()
             .map(|e| e.unwrap().path())
+            .filter(|p| !p.file_name().unwrap().to_string_lossy().starts_with('.'))
             .collect();
         assert_eq!(entries.len(), 1, "one task invocation: {entries:?}");
         entries.into_iter().next().unwrap()

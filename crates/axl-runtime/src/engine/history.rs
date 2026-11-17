@@ -16,19 +16,24 @@
 //! Bazel reads some of these files back after the build — it uploads the
 //! compact execution log as a build tool log, possibly after the client has
 //! exited — so nothing here is moved or deleted by the invocation that wrote
-//! it. [`History::prune`] removes old invocations instead, once per invocation
-//! before its first Bazel build: the oldest started first while the history is
-//! over [`Retention::budget`], never below [`Retention::keep`] invocations, and
+//! it. A [`prune`] removes old invocations instead, started in the background
+//! by an invocation's first Bazel build unless another task pruned within
+//! [`Retention::every`]: the oldest started first while the history is over
+//! [`Retention::budget`], never below [`Retention::keep`] invocations, and
 //! never one written to within [`Retention::guard`], which may be a build or an
 //! upload still running in another workspace. Liveness is read from those times
 //! alone, so a run elsewhere that has gone longer than the guard without
-//! writing, and is not among the newest kept, can lose its entry.
+//! writing, and is not among the newest kept, can lose its entry. Two dotfiles
+//! at the root serve it: `.pruned`, whose time is the last prune's, and
+//! `.sizes`, the sizes of invocations that have settled.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The variable that moves the history root (see [`History::default_root`]).
@@ -64,6 +69,8 @@ pub struct Retention {
     pub keep: usize,
     /// An invocation written to this recently is never pruned.
     pub guard: Duration,
+    /// A prune this recent, by any task, makes another wait.
+    pub every: Duration,
 }
 
 impl Default for Retention {
@@ -72,6 +79,7 @@ impl Default for Retention {
             budget: 5 << 30,
             keep: 10,
             guard: Duration::from_secs(60 * 60),
+            every: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -86,6 +94,9 @@ pub struct History {
     record: AtomicBool,
     /// See [`History::first_failure`].
     failed: AtomicBool,
+    /// The prune started by the first Bazel invocation, left to run beside
+    /// the build; see [`prune`].
+    pruning: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Debug)]
@@ -103,6 +114,7 @@ impl History {
             current: Mutex::new(None),
             record: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            pruning: Mutex::new(None),
         }
     }
 
@@ -168,9 +180,10 @@ impl History {
     }
 
     /// A new directory for the next Bazel invocation of the current task
-    /// invocation, `<invocation>/bazel/<n>`, created. The first one prunes the
-    /// history first. Without [`begin`](Self::begin) an invocation is begun
-    /// under a fresh id.
+    /// invocation, `<invocation>/bazel/<n>`, created. The first one starts a
+    /// prune of the history in the background, unless another task pruned
+    /// within [`Retention::every`]. Without [`begin`](Self::begin) an
+    /// invocation is begun under a fresh id.
     pub fn next_bazel_dir(&self) -> io::Result<PathBuf> {
         let mut current = self.current.lock().unwrap();
         if current.is_none() {
@@ -179,47 +192,173 @@ impl History {
             current = self.current.lock().unwrap();
         }
         let invocation = current.as_mut().expect("begun above");
-        if invocation.bazel_invocations == 0 {
-            self.prune(&invocation.dir);
-        }
         invocation.bazel_invocations += 1;
         let dir = bazel_dir(&invocation.dir, invocation.bazel_invocations);
         create_private_dir(&dir)?;
+        if invocation.bazel_invocations == 1 && claim_prune(&self.root, self.retention.every) {
+            let (root, retention, current) =
+                (self.root.clone(), self.retention, invocation.dir.clone());
+            let handle = std::thread::Builder::new()
+                .name("history-prune".into())
+                .spawn(move || prune(&root, retention, &current))
+                .ok();
+            *self.pruning.lock().unwrap() = handle;
+        }
         Ok(dir)
     }
 
-    /// Remove old invocations as [`Retention`] says, leaving `current` alone.
-    /// Best effort: an entry that cannot be read or removed is skipped.
-    fn prune(&self, current: &Path) {
-        let Ok(read) = fs::read_dir(&self.root) else {
-            return;
-        };
-        let mut entries: Vec<PathBuf> = read
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-            .filter(|e| is_invocation_name(&e.file_name()))
-            .map(|e| e.path())
-            .filter(|p| p != current)
-            .collect();
-        // Names start with the start time, so this is the most recent first.
-        entries.sort();
-        entries.reverse();
-        let now = SystemTime::now();
-        let mut total = 0u64;
-        for (i, entry) in entries.iter().enumerate() {
-            let (size, newest) = tree_size_and_newest(entry);
-            total += size;
-            let recent = newest
-                .is_some_and(|t| now.duration_since(t).unwrap_or_default() < self.retention.guard);
-            if i < self.retention.keep || total <= self.retention.budget || recent {
-                continue;
+    /// Wait for the prune [`next_bazel_dir`](Self::next_bazel_dir) started, if
+    /// any.
+    #[cfg(test)]
+    pub(crate) fn wait_for_prune(&self) {
+        if let Some(handle) = self.pruning.lock().unwrap().take() {
+            handle.join().expect("the prune panicked");
+        }
+    }
+}
+
+/// Marks the last prune of the history, by its modification time.
+const PRUNED_MARKER: &str = ".pruned";
+
+/// The sizes of settled invocations; see [`prune`].
+const SIZES_INDEX: &str = ".sizes";
+
+/// Whether this task prunes `root` now: when no task has within `every`. The
+/// marker is touched first, so tasks started together prune once.
+fn claim_prune(root: &Path, every: Duration) -> bool {
+    let marker = root.join(PRUNED_MARKER);
+    let recent = fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| SystemTime::now().duration_since(t).unwrap_or_default() < every);
+    !recent && fs::write(&marker, b"").is_ok()
+}
+
+/// A settled invocation's size, and the newest modification time under it
+/// when it was measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Settled {
+    size: u64,
+    newest: u64,
+}
+
+/// Remove old invocations under `root` as `retention` says, leaving `current`
+/// alone. Best effort: an entry that cannot be read or removed is skipped.
+///
+/// It runs beside the build and is not waited for: the CLI may exit midway,
+/// which leaves only a valid history, part of an entry it was removing at
+/// worst, which the next prune finishes.
+///
+/// An invocation nothing has written to within [`Retention::guard`] is
+/// settled: its size is kept in the [`SIZES_INDEX`] and not measured again,
+/// so a prune walks only new and live entries and checks each settled one's
+/// `bazel` folder, which a further Bazel invocation of it would update. The
+/// index is a cache, rebuilt from the entries whenever it is missing or
+/// unreadable, and a prune running elsewhere at once costs at most a walk.
+fn prune(root: &Path, retention: Retention, current: &Path) {
+    let Ok(read) = fs::read_dir(root) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| is_invocation_name(&e.file_name()))
+        .map(|e| e.path())
+        .filter(|p| p != current)
+        .collect();
+    // Names start with the start time, so this is the most recent first.
+    entries.sort();
+    entries.reverse();
+    let index_path = root.join(SIZES_INDEX);
+    let index = read_index(&index_path);
+    let mut settled = HashMap::new();
+    let now = SystemTime::now();
+    let within_guard = |t: SystemTime| now.duration_since(t).unwrap_or_default() < retention.guard;
+    let mut total = 0u64;
+    for (i, entry) in entries.iter().enumerate() {
+        let name = entry.file_name().unwrap().to_string_lossy().into_owned();
+        let known = index.get(&name).copied().filter(|s| {
+            fs::metadata(entry.join(BAZEL_DIR))
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| secs(t) <= s.newest)
+        });
+        let (size, recent) = match known {
+            Some(s) => (s.size, false),
+            None => {
+                let (size, newest) = tree_size_and_newest(entry);
+                let recent = newest.is_some_and(within_guard);
+                if let (Some(newest), false) = (newest, recent) {
+                    settled.insert(
+                        name.clone(),
+                        Settled {
+                            size,
+                            newest: secs(newest),
+                        },
+                    );
+                }
+                (size, recent)
             }
-            // Gone either way, a concurrent prune having got there first.
-            match fs::remove_dir_all(entry) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {}
-                _ => total -= size,
+        };
+        if let Some(s) = known {
+            settled.insert(name.clone(), s);
+        }
+        total += size;
+        if i < retention.keep || total <= retention.budget || recent {
+            continue;
+        }
+        // Gone either way, a concurrent prune having got there first.
+        match fs::remove_dir_all(entry) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {}
+            _ => {
+                total -= size;
+                settled.remove(&name);
             }
         }
+    }
+    if settled != index {
+        write_index(&index_path, &settled);
+    }
+}
+
+/// `time` in whole seconds since the epoch.
+fn secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// The [`SIZES_INDEX`] at `path`: `<name> <size> <newest>` lines. A missing
+/// or unreadable index, or a line that does not parse, is as good as none.
+fn read_index(path: &Path) -> HashMap<String, Settled> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let name = fields.next()?;
+            let size = fields.next()?.parse().ok()?;
+            let newest = fields.next()?.parse().ok()?;
+            (is_invocation_name(name.as_ref()) && fields.next().is_none())
+                .then(|| (name.to_owned(), Settled { size, newest }))
+        })
+        .collect()
+}
+
+/// Replace the index at `path` whole, through a temp file renamed over it,
+/// so a reader never sees half of one. Best effort, as the index is a cache.
+fn write_index(path: &Path, settled: &HashMap<String, Settled>) {
+    let mut names: Vec<&String> = settled.keys().collect();
+    names.sort();
+    let text: String = names
+        .into_iter()
+        .map(|name| {
+            let s = settled[name];
+            format!("{name} {} {}\n", s.size, s.newest)
+        })
+        .collect();
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    if fs::write(&temp, text).is_ok() && fs::rename(&temp, path).is_err() {
+        let _ = fs::remove_file(&temp);
     }
 }
 
@@ -342,8 +481,16 @@ mod tests {
                 budget,
                 keep,
                 guard: Duration::from_secs(60 * 60),
+                every: Duration::ZERO,
             },
         )
+    }
+
+    /// The next Bazel invocation's folder, once the prune it started is done.
+    fn next(h: &History) -> PathBuf {
+        let dir = h.next_bazel_dir().unwrap();
+        h.wait_for_prune();
+        dir
     }
 
     #[test]
@@ -361,8 +508,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let h = history(root.path(), 1 << 30, 10);
         h.begin(&id(1));
-        let first = h.next_bazel_dir().unwrap();
-        let second = h.next_bazel_dir().unwrap();
+        let first = next(&h);
+        let second = next(&h);
         assert!(first.ends_with("bazel/1") && second.ends_with("bazel/2"));
         assert_eq!(first.parent(), second.parent());
         let entry = first
@@ -391,7 +538,7 @@ mod tests {
         // Room for three of the five.
         let h = history(root.path(), 300, 0);
         h.begin(&id(99));
-        h.next_bazel_dir().unwrap();
+        next(&h);
         let kept: Vec<bool> = entries.iter().map(|e| e.exists()).collect();
         assert_eq!(kept, [false, false, true, true, true]);
     }
@@ -402,7 +549,7 @@ mod tests {
         let entries: Vec<_> = (1..=4).map(|n| entry(root.path(), n, 1000, OLD)).collect();
         let h = history(root.path(), 1, 2);
         h.begin(&id(99));
-        h.next_bazel_dir().unwrap();
+        next(&h);
         let kept: Vec<bool> = entries.iter().map(|e| e.exists()).collect();
         assert_eq!(kept, [false, false, true, true]);
     }
@@ -414,7 +561,7 @@ mod tests {
         let stale = entry(root.path(), 2, 1000, OLD);
         let h = history(root.path(), 1, 0);
         h.begin(&id(99));
-        h.next_bazel_dir().unwrap();
+        next(&h);
         assert!(recent.exists(), "still being written or uploaded, maybe");
         assert!(!stale.exists());
     }
@@ -424,9 +571,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let h = history(root.path(), 1, 0);
         h.begin(&id(99));
-        h.next_bazel_dir().unwrap();
+        next(&h);
         let late = entry(root.path(), 1, 1000, OLD);
-        h.next_bazel_dir().unwrap();
+        next(&h);
         assert!(late.exists());
     }
 
@@ -440,7 +587,7 @@ mod tests {
         entry(root.path(), 2, 1000, Duration::from_secs(60));
         let h = history(root.path(), 1, 0);
         h.begin(&id(99));
-        h.next_bazel_dir().unwrap();
+        next(&h);
         assert!(fresh.exists(), "the build may not have opened its log yet");
     }
 
@@ -459,7 +606,7 @@ mod tests {
             .unwrap();
         let h = history(root.path(), 1, 0);
         h.begin(&id(99));
-        h.next_bazel_dir().unwrap();
+        next(&h);
         assert!(other.exists());
     }
 
@@ -482,7 +629,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let h = history(&root.path().join("history"), 1 << 30, 10);
         h.begin(&id(1));
-        let mut dir = h.next_bazel_dir().unwrap();
+        let mut dir = next(&h);
         loop {
             let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{}", dir.display());
@@ -499,7 +646,7 @@ mod tests {
         let h = history(root.path(), 1 << 30, 10);
         assert_eq!(h.earlier_run(&id(1)), None, "no history yet");
         h.begin(&id(1));
-        let dir = h.next_bazel_dir().unwrap();
+        let dir = next(&h);
         let entry = dir.parent().unwrap().parent().unwrap().to_path_buf();
         assert_eq!(h.earlier_run(&id(1)), Some(entry));
         assert_eq!(h.earlier_run(&id(2)), None);
@@ -514,11 +661,98 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let h = history(root.path(), 1, 0);
         h.begin(&id(1));
-        let dir = h.next_bazel_dir().unwrap();
+        let dir = next(&h);
         fs::write(dir.join(bazel::execlog::FILE_NAME), vec![0u8; 1000]).unwrap();
         let other = History::at(root.path().to_path_buf(), h.retention);
         other.begin(&id(2));
-        other.next_bazel_dir().unwrap();
+        next(&other);
         assert!(dir.exists(), "written within the guard");
+    }
+
+    /// A prune by any task within `every` makes the next one wait.
+    #[test]
+    fn a_recent_prune_makes_the_next_wait() {
+        let root = tempfile::tempdir().unwrap();
+        let mut h = history(root.path(), 1, 0);
+        h.retention.every = Duration::from_secs(60 * 60);
+        h.begin(&id(99));
+        next(&h);
+        let old = entry(root.path(), 1, 1000, OLD);
+        let other = History::at(root.path().to_path_buf(), h.retention);
+        other.begin(&id(98));
+        next(&other);
+        assert!(old.exists(), "pruned too recently to prune again");
+    }
+
+    /// A settled entry's size comes from the index, not its files: one the
+    /// index says is large is pruned though its files are small.
+    #[test]
+    fn a_settled_entry_is_measured_once() {
+        let root = tempfile::tempdir().unwrap();
+        let old = entry(root.path(), 1, 10, OLD);
+        let h = history(root.path(), 100, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(old.exists(), "under budget");
+        let index = fs::read_to_string(root.path().join(SIZES_INDEX)).unwrap();
+        assert!(index.starts_with(&format!("{} 10 ", name(1))), "{index}");
+        fs::write(
+            root.path().join(SIZES_INDEX),
+            index.replace(" 10 ", " 1000 "),
+        )
+        .unwrap();
+        let other = History::at(root.path().to_path_buf(), h.retention);
+        other.begin(&id(98));
+        next(&other);
+        assert!(!old.exists(), "the index's size is the one counted");
+    }
+
+    /// A further Bazel invocation of a settled entry makes a new folder under
+    /// its `bazel`, so it is measured again.
+    #[test]
+    fn a_settled_entry_that_grows_is_measured_again() {
+        let root = tempfile::tempdir().unwrap();
+        let old = entry(root.path(), 1, 10, OLD);
+        let h = history(root.path(), 100, 0);
+        h.begin(&id(99));
+        next(&h);
+        let grown = bazel_dir(&old, 2);
+        fs::create_dir_all(&grown).unwrap();
+        fs::File::create(grown.join(bazel::execlog::FILE_NAME))
+            .unwrap()
+            .set_len(1000)
+            .unwrap();
+        let other = History::at(root.path().to_path_buf(), h.retention);
+        other.begin(&id(98));
+        next(&other);
+        assert!(old.exists(), "written within the guard");
+        let index = fs::read_to_string(root.path().join(SIZES_INDEX)).unwrap();
+        assert!(
+            !index.contains(&name(1)),
+            "live again, so not settled: {index}"
+        );
+    }
+
+    /// An index that does not parse is as good as none.
+    #[test]
+    fn a_damaged_index_is_rebuilt() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path()).unwrap();
+        fs::write(root.path().join(SIZES_INDEX), "not an index\n\0\0").unwrap();
+        let old = entry(root.path(), 1, 1000, OLD);
+        entry(root.path(), 2, 10, OLD);
+        let h = history(root.path(), 100, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(!old.exists());
+        let index = fs::read_to_string(root.path().join(SIZES_INDEX)).unwrap();
+        assert_eq!(
+            index,
+            format!(
+                "{} 10 {}\n",
+                name(2),
+                index.split(' ').nth(2).unwrap().trim()
+            )
+        );
     }
 }
