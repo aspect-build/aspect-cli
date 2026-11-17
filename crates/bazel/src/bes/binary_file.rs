@@ -31,10 +31,24 @@ use crate::stream::{Done, Expect};
 /// The flag that names where Bazel writes the binary BEP.
 pub const FLAG: &str = "--build_event_binary_file";
 
-/// The BEP file the caller asked Bazel for in `flags`, if any; see
-/// [`crate::rc::requested_path`] for how empty and relative values resolve.
+/// What a build's file is called in its folder of the task invocation's
+/// history: the stream as the CLI read it, redacted.
+pub const FILE_NAME: &str = "build_events.binpb";
+
+/// The BEP file the caller asked Bazel for in `flags`, if any. A relative one
+/// is under the workspace root, where Bazel resolves it, or under `directory`
+/// when no workspace can be found there; a leading `~` is literal, since the
+/// option is a plain string. See [`crate::rc::requested_path`] for empty
+/// values.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    crate::rc::requested_path(flags, FLAG, verb, directory)
+    let path = crate::rc::requested_path(flags, FLAG, verb, None)?;
+    if path.is_absolute() {
+        return Some(path);
+    }
+    match crate::rc::workspace_root(directory) {
+        Some(root) => Some(root.join(path)),
+        None => crate::rc::requested_path(flags, FLAG, verb, directory),
+    }
 }
 
 /// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it
@@ -880,6 +894,37 @@ mod tests {
                 None
             ),
             None
+        );
+    }
+
+    /// A relative path is under the workspace root, as Bazel resolves it, and
+    /// a `~` in it is literal.
+    #[test]
+    fn a_relative_requested_path_is_under_the_workspace_root() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
+        let pkg = ws.path().join("pkg");
+        std::fs::create_dir(&pkg).unwrap();
+        let root = ws.path().canonicalize().unwrap();
+        for (value, under_root) in [("out/ide.bep", "out/ide.bep"), ("~/ide.bep", "~/ide.bep")] {
+            let flags = vec![format!("{FLAG}={value}")];
+            assert_eq!(
+                requested_path(&flags, "build", pkg.to_str()),
+                Some(root.join(under_root)),
+                "{value}"
+            );
+        }
+    }
+
+    /// Outside any workspace a relative path is under the spawn directory.
+    #[test]
+    fn a_relative_requested_path_outside_a_workspace_is_under_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let flags = vec![format!("{FLAG}=ide.bep")];
+        let directory = dir.path().to_str().unwrap();
+        assert_eq!(
+            requested_path(&flags, "build", Some(directory)),
+            Some(dir.path().join("ide.bep"))
         );
     }
 }

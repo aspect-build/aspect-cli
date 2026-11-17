@@ -495,7 +495,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// Bazel writes the invocation's trace profile, and its execution and
     /// workspace logs when they are on, into a folder of the task invocation's
-    /// history, made when there is one of these to keep. A `--profile` the
+    /// history, made when there is one of these to keep; with `build_events`
+    /// on, the stream as its sinks get it, redacted, is kept there too. A
+    /// `--build_event_binary_file` the flags or `rc` name (a relative one under
+    /// the workspace root) is then written as a copy of it. A `--profile` the
     /// flags or `rc` name (a relative one under the workspace root, as Bazel
     /// resolves it) gets a copy once a `wait()` or `try_wait()` sees Bazel
     /// exit; an earlier file there is removed at the spawn, so a cancelled
@@ -648,7 +651,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// Bazel writes the invocation's trace profile, and its execution and
     /// workspace logs when they are on, into a folder of the task invocation's
-    /// history, made when there is one of these to keep. A `--profile` the
+    /// history, made when there is one of these to keep; with `build_events`
+    /// on, the stream as its sinks get it, redacted, is kept there too. A
+    /// `--build_event_binary_file` the flags or `rc` name (a relative one under
+    /// the workspace root) is then written as a copy of it. A `--profile` the
     /// flags or `rc` name (a relative one under the workspace root, as Bazel
     /// resolves it) gets a copy once a `wait()` or `try_wait()` sees Bazel
     /// exit; an earlier file there is removed at the spawn, so a cancelled

@@ -883,10 +883,14 @@ pub struct Build {
 /// option is single-valued), so Bazel never writes the caller's file; the
 /// stream's raw bytes are mirrored there instead, complete once `wait()` has
 /// joined the stream. A file sink already naming the path (compared lexically,
-/// not resolved) is left as its only writer.
+/// not resolved) is left as its only writer. Its folder is created, as Bazel
+/// creates it; one that cannot be costs only the copy, which then fails to open.
 fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path: PathBuf) {
     if file_sinks.iter().any(|(p, _)| Path::new(p) == path) {
         return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
     file_sinks.push((
         path.to_string_lossy().into_owned(),
@@ -1121,7 +1125,7 @@ impl Build {
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
         // Every file below that stays goes into this one folder, made only
         // when one will.
-        let history_dir = (profile_kept || workspace_events || execlog_enabled)
+        let history_dir = (profile_kept || build_events || workspace_events || execlog_enabled)
             .then(|| history_dir(history))
             .flatten();
 
@@ -1167,6 +1171,16 @@ impl Build {
         }
         if build_events && let Some(path) = requested_bep_path {
             tee_requested_bep_file(&mut file_sinks, path);
+        }
+        // The history keeps the stream as the sinks get it, redacted. Bazel's
+        // own file is a temp file the reader moves away at each attempt and
+        // removes, since nothing reads it by path once the stream is over.
+        if build_events && let Some(dir) = &history_dir {
+            let path = dir.join(bazel::bes::binary_file::FILE_NAME);
+            file_sinks.push((
+                path.to_string_lossy().into_owned(),
+                Arc::new(FileSignal::new()),
+            ));
         }
 
         // Reserve the BEP path now, before `cmd.spawn()`, so it can go on the
@@ -2292,6 +2306,42 @@ Test = task(implementation = _impl)
             std::fs::read(&asked).unwrap(),
             kept,
             "the copy is the log, whole"
+        );
+    }
+
+    /// A build whose events the CLI reads keeps them in its history folder, as
+    /// the stream's sinks get them, and a requested BEP file holds the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_events_stream_is_kept_in_history() {
+        let history = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("ide.bep");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=success", "--build_event_binary_file={asked}"],
+        build_events = [iter],
+        stderr = None,
+    )
+    seen = len([e for e in iter])
+    if not build.wait().success: return 1
+    if seen != 2: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            asked = asked.to_str().unwrap(),
+        );
+        run_task_with_history(&script, history.path());
+        let kept =
+            bazel_dir(&only_invocation(history.path()), 1).join(bazel::bes::binary_file::FILE_NAME);
+        assert_eq!(bep_file_kinds(&kept), ["started", "finished"]);
+        assert_eq!(
+            std::fs::read(&asked).unwrap(),
+            std::fs::read(&kept).unwrap()
         );
     }
 
@@ -3932,17 +3982,21 @@ Test = task(implementation = _impl)
         assert_eq!(bep_file_kinds(&asked), ["started", "finished"]);
     }
 
-    /// A relative path lands where Bazel would put it: under the spawn directory.
+    /// A relative path lands where Bazel would put it: under the workspace
+    /// root, in a folder created for it.
     #[test]
-    fn a_relative_bep_file_resolves_against_the_spawn_directory() {
-        let dir = tempfile::tempdir().unwrap();
+    fn a_relative_bep_file_resolves_against_the_workspace_root() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
+        let pkg = ws.path().join("pkg");
+        std::fs::create_dir(&pkg).unwrap();
         run_bes_task(&format!(
             r#"
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
         directory = {dir:?},
-        flags = ["--scenario=success", "--build_event_binary_file=relative.bep"],
+        flags = ["--scenario=success", "--build_event_binary_file=out/relative.bep"],
         build_events = [iter],
         stderr = None,
     )
@@ -3953,10 +4007,10 @@ def _impl(ctx):
 
 Test = task(implementation = _impl)
 "#,
-            dir = dir.path().to_str().unwrap(),
+            dir = pkg.to_str().unwrap(),
         ));
         assert_eq!(
-            bep_file_kinds(&dir.path().join("relative.bep")),
+            bep_file_kinds(&ws.path().join("out/relative.bep")),
             ["started", "finished"]
         );
     }
@@ -3988,7 +4042,9 @@ Test = task(implementation = _impl)
     #[test]
     fn an_unwritable_bep_file_does_not_end_the_stream() {
         let dir = tempfile::tempdir().unwrap();
-        let unwritable = dir.path().join("missing-dir").join("ide.bep");
+        let blocker = dir.path().join("a-file");
+        std::fs::write(&blocker, "").unwrap();
+        let unwritable = blocker.join("ide.bep");
         stream_with_requested_bep_file(&unwritable);
         assert!(!unwritable.exists());
     }

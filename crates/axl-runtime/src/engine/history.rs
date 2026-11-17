@@ -6,8 +6,11 @@
 //! [`History::earlier_run`]). An entry is made only once a Bazel invocation has
 //! a file to keep in it, so a run that kept nothing leaves no trace.
 //!
-//! The folders are readable by their user alone, since an execution log holds
-//! action command lines and environment variables unredacted.
+//! A Bazel invocation's folder holds its compact execution log, workspace log,
+//! trace profile and build event stream, each when the build has one (see
+//! `ctx.bazel.build`). The folders are readable by their user alone, since an
+//! execution log holds action command lines and environment variables
+//! unredacted; the build event stream is kept as the CLI redacted it.
 //!
 //! Bazel reads some of these files back after the build — it uploads the
 //! compact execution log as a build tool log, possibly after the client has
