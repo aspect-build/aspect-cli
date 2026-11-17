@@ -16,6 +16,7 @@ load(
     "ensure_import",
     "import_line",
     "imports_rc",
+    "is_boundary_file",
     "prune_configs",
     "rc_paths",
     "render_bazelrc",
@@ -224,6 +225,15 @@ def _test_defined_configs(_ctx):
     _eq("empty", defined_configs(""), [])
     _eq("missing", defined_configs(None), [])
 
+def _test_is_boundary_file(ctx):
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-boundary")
+    ctx.std.fs.write(root + "/MODULE.bazel", "")
+    ctx.std.fs.create_dir_all(root + "/WORKSPACE")
+    _eq("a file", is_boundary_file(ctx.std.fs, root + "/MODULE.bazel"), True)
+    _eq("a directory", is_boundary_file(ctx.std.fs, root + "/WORKSPACE"), False)
+    _eq("nothing", is_boundary_file(ctx.std.fs, root + "/REPO.bazel"), False)
+    ctx.std.fs.remove_dir_all(root)
+
 _UNIT_TESTS = [
     _test_rc_paths_in_a_checkout,
     _test_rc_paths_in_home_mode,
@@ -240,6 +250,7 @@ _UNIT_TESTS = [
     _test_ensure_import_appends_once,
     _test_defined_configs,
     _test_imports_rc,
+    _test_is_boundary_file,
 ]
 
 def _test_impl(ctx):

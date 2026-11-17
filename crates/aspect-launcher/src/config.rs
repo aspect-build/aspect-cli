@@ -19,7 +19,9 @@ const ASPECT_BOUNDARY_FILES: &[&str] = &[AXL_MODULE_FILE, AXL_VERSION_AXL_REL];
 
 /// Bazel repository boundary marker files (see
 /// https://bazel.build/external/overview#repository), probed only when no
-/// Aspect boundary file is found.
+/// Aspect boundary file is found. As Bazel's client reads them, one counts only
+/// if it is not a directory, so a `tools/workspace/` folder on a
+/// case-insensitive disk is no `WORKSPACE`.
 const BAZEL_BOUNDARY_FILES: &[&str] = &[
     "MODULE.bazel",
     "MODULE.bazel.lock",
@@ -29,7 +31,8 @@ const BAZEL_BOUNDARY_FILES: &[&str] = &[
 ];
 
 /// Walk ancestors of `start` and return the deepest one containing any of
-/// `markers`, skipping any ancestor equal to `except`.
+/// `markers`, skipping any ancestor equal to `except`. A Bazel boundary file
+/// counts only if it is not a directory; see [`BAZEL_BOUNDARY_FILES`].
 ///
 /// `except` guards against the user-level `~/.aspect/version.axl` being mistaken
 /// for a project boundary: it shares the [`AXL_VERSION_AXL_REL`] path with a
@@ -42,8 +45,17 @@ fn find_ancestor_with_any(
     start
         .ancestors()
         .filter(|dir| except != Some(*dir))
-        .find(|dir| markers.iter().any(|m| dir.join(m).exists()))
+        .find(|dir| markers.iter().any(|m| marks(&dir.join(m), m)))
         .map(Path::to_path_buf)
+}
+
+/// Whether `path`, the marker `name` under a directory, marks it.
+fn marks(path: &Path, name: &str) -> bool {
+    if BAZEL_BOUNDARY_FILES.contains(&name) {
+        path.metadata().is_ok_and(|m| !m.is_dir())
+    } else {
+        path.exists()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -754,6 +766,21 @@ version(
         std::fs::create_dir_all(&cwd).unwrap();
 
         assert_eq!(resolve_root(&cwd, Some(home.path())), repo);
+    }
+
+    /// A directory named like a Bazel boundary file marks no root, as Bazel's
+    /// client reads it.
+    #[test]
+    fn a_directory_named_like_a_bazel_marker_is_no_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("MODULE.bazel"), "").unwrap();
+        let tools = root.join("tools");
+        std::fs::create_dir_all(tools.join("WORKSPACE")).unwrap();
+        let cwd = tools.join("sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd, None), root);
     }
 
     /// No markers anywhere → fall back to the starting directory itself.
