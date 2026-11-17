@@ -259,9 +259,12 @@ struct Settled {
 /// alone. Best effort: an entry that cannot be read or removed is skipped.
 ///
 /// It runs beside the build and is not waited for: the CLI may exit midway,
-/// which leaves only a valid history: part of an entry it was removing, whose
-/// removals make it look recent, so a prune finishes it once it is older than
-/// the guard; or an index's temp file, removed the same way.
+/// which leaves only a valid history: part of an entry it was removing, which
+/// a later prune that would remove it finishes, once the removals that make
+/// it look recent are older than the guard; or an index's temp file, which a
+/// prune removes once it is older than the guard. A time ahead of the clock is
+/// recent, so an entry written under a clock since set back is kept until the
+/// clock catches up: keeping too much is the safe way to be wrong.
 ///
 /// An invocation nothing has written to within [`Retention::settle`] has
 /// settled: its size is kept in the [`SIZES_INDEX`] and not measured again
@@ -899,5 +902,21 @@ mod tests {
         next(&h);
         assert!(!stale.exists());
         assert!(fresh.exists(), "may be a write still in flight");
+    }
+
+    /// An entry another task has made but not yet filled is recent by its own
+    /// folder's time.
+    #[test]
+    fn an_entry_folder_being_made_is_recent() {
+        let root = tempfile::tempdir().unwrap();
+        let being_made = root.path().join(name(1));
+        fs::create_dir_all(&being_made).unwrap();
+        // Kept whatever its size, so the one being made is what a prune
+        // would remove.
+        entry(root.path(), 2, 1000, OLD);
+        let h = history(root.path(), 1, 1);
+        h.begin(&id(99));
+        next(&h);
+        assert!(being_made.exists(), "its bazel folder is not made yet");
     }
 }
