@@ -1096,9 +1096,8 @@ impl Build {
         // only recorded, or the profile, is then left where Bazel puts it, so
         // no path the caller set is silently overridden.
         let rc_visible = startup_flags.iter().any(|f| f == "--ignore_all_rc_files");
-        // A `--profile` would turn profiling back on for a caller who turned
-        // it off, so the profile is then left to Bazel too.
-        // A `--profile` whose path cannot be told is left to Bazel too.
+        // A caller who turned profiling off is given no `--profile`, and one
+        // whose `--profile` path cannot be told has it left to Bazel.
         let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
         let profile_unplaced = requested_profile.is_none()
             && bazel::rc::last_flag_value(&flags, bazel::profile::FLAG, verb)
@@ -2540,8 +2539,8 @@ Test = task(implementation = _impl)
         }
     }
 
-    /// A `--profile` would turn profiling back on, so a caller who turned it
-    /// off gets none in the history either.
+    /// A caller who turned profiling off is given no `--profile`, so gets none
+    /// in the history either.
     #[cfg(unix)]
     #[test]
     fn a_profile_turned_off_stays_off() {

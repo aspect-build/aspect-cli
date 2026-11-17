@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn the_current_invocation_is_never_pruned() {
+    fn another_invocations_prune_spares_one_written_within_the_guard() {
         let root = tempfile::tempdir().unwrap();
         let h = history(root.path(), 1, 0);
         h.begin(&id(1));

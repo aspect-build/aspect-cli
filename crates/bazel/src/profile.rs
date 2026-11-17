@@ -38,22 +38,30 @@ pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> 
     crate::rc::workspace_root(directory).map(|root| root.join(path))
 }
 
-/// The option that turns the profile on or off.
-const GENERATE: &str = "--generate_json_trace_profile";
+/// The option that turns the profile on or off, under its name and the old
+/// one Bazel still takes.
+const GENERATE: [&str; 2] = [
+    "--generate_json_trace_profile",
+    "--experimental_generate_json_trace_profile",
+];
 
-/// Whether `flags` turn the profile off for `verb`. A `--profile` would turn
-/// it back on, so a caller who turned it off is not given one. Read as
-/// [`crate::rc::last_flag_value`] reads a value: a literal beats an rc entry,
-/// and the last of each wins.
+/// Whether `flags` turn the profile off for `verb`, so a caller who turned it
+/// off is not given a `--profile`. Read as [`crate::rc::last_flag_value`]
+/// reads a value: a literal beats an rc entry, and the last of each wins.
 pub fn turned_off(flags: &[String], verb: &str) -> bool {
-    let negated = format!("--no{}", &GENERATE[2..]);
     let value = |token: &str| -> Option<bool> {
-        if token == GENERATE {
+        let name = GENERATE.iter().find(|name| {
+            token
+                .strip_prefix(**name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+                || token.strip_prefix("--no") == Some(&name[2..])
+        })?;
+        if token == *name {
             Some(true)
-        } else if token == negated {
+        } else if token.starts_with("--no") {
             Some(false)
         } else {
-            let value = token.strip_prefix(GENERATE)?.strip_prefix('=')?;
+            let value = token.strip_prefix(*name)?.strip_prefix('=')?;
             Some(!matches!(
                 value.to_ascii_lowercase().as_str(),
                 "false" | "f" | "no" | "n" | "0"
@@ -95,6 +103,10 @@ mod tests {
         ));
         assert!(turned_off(
             &strings(&["--generate_json_trace_profile=F"]),
+            "build"
+        ));
+        assert!(turned_off(
+            &strings(&["--noexperimental_generate_json_trace_profile"]),
             "build"
         ));
         assert!(!turned_off(
