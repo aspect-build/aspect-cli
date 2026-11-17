@@ -330,7 +330,13 @@ impl Case {
             .spawn()
             .unwrap_or_else(|e| panic!("spawning `aspect {}`: {e}", args.join(" ")));
         let deadline = Instant::now() + RUN_TIMEOUT;
-        while Instant::now() < deadline && !self.dir.path().join("report.txt").exists() {
+        // The hook creates the file before writing its line, so the report is
+        // whole only once that line has ended.
+        let reported = || {
+            std::fs::read_to_string(self.dir.path().join("report.txt"))
+                .is_ok_and(|text| text.ends_with('\n'))
+        };
+        while Instant::now() < deadline && !reported() {
             if child.try_wait().expect("try_wait").is_some() {
                 break;
             }
