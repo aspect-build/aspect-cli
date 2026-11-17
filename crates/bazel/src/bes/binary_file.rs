@@ -17,7 +17,7 @@
 //! a new attempt's file having appeared.
 
 use std::io::{self, ErrorKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -36,16 +36,21 @@ pub const FLAG: &str = "--build_event_binary_file";
 pub const FILE_NAME: &str = "build_events.binpb";
 
 /// The BEP file the caller asked Bazel for in `flags`, if any. A relative one
-/// is under the workspace root, where Bazel resolves it, or under `directory`
-/// when no workspace can be found there; a leading `~` is literal, since the
-/// option is a plain string. See [`crate::rc::requested_path`] for empty
+/// is under `workspace`, the root Bazel resolves it against, or under
+/// `directory` when there is none; a leading `~` is literal, since the option
+/// is a plain string. See [`crate::rc::requested_path`] for empty
 /// values.
-pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
+pub fn requested_path(
+    flags: &[String],
+    verb: &str,
+    directory: Option<&str>,
+    workspace: Option<&Path>,
+) -> Option<PathBuf> {
     let path = crate::rc::requested_path(flags, FLAG, verb, None)?;
     if path.is_absolute() {
         return Some(path);
     }
-    match crate::rc::workspace_root(directory) {
+    match workspace {
         Some(root) => Some(root.join(path)),
         None => crate::rc::requested_path(flags, FLAG, verb, directory),
     }
@@ -875,6 +880,7 @@ mod tests {
             requested_path(
                 &line(&["--build_event_binary_file=/tmp/ide.bep"]),
                 "build",
+                None,
                 None
             ),
             Some(PathBuf::from("/tmp/ide.bep")),
@@ -884,6 +890,7 @@ mod tests {
                 &line(&["--default_override=0:common=--build_event_binary_file=/tmp/rc.bep"]),
                 "test",
                 None,
+                None
             ),
             Some(PathBuf::from("/tmp/rc.bep")),
         );
@@ -891,6 +898,7 @@ mod tests {
             requested_path(
                 &line(&["--build_event_json_file=/tmp/x.json"]),
                 "build",
+                None,
                 None
             ),
             None
@@ -901,16 +909,14 @@ mod tests {
     /// a `~` in it is literal.
     #[test]
     fn a_relative_requested_path_is_under_the_workspace_root() {
-        let ws = tempfile::tempdir().unwrap();
-        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
-        let pkg = ws.path().join("pkg");
-        std::fs::create_dir(&pkg).unwrap();
-        let root = ws.path().canonicalize().unwrap();
-        for (value, under_root) in [("out/ide.bep", "out/ide.bep"), ("~/ide.bep", "~/ide.bep")] {
+        for (value, want) in [
+            ("out/ide.bep", "/ws/out/ide.bep"),
+            ("~/ide.bep", "/ws/~/ide.bep"),
+        ] {
             let flags = vec![format!("{FLAG}={value}")];
             assert_eq!(
-                requested_path(&flags, "build", pkg.to_str()),
-                Some(root.join(under_root)),
+                requested_path(&flags, "build", Some("/ws/pkg"), Some(Path::new("/ws"))),
+                Some(PathBuf::from(want)),
                 "{value}"
             );
         }
@@ -919,12 +925,10 @@ mod tests {
     /// Outside any workspace a relative path is under the spawn directory.
     #[test]
     fn a_relative_requested_path_outside_a_workspace_is_under_the_directory() {
-        let dir = tempfile::tempdir().unwrap();
         let flags = vec![format!("{FLAG}=ide.bep")];
-        let directory = dir.path().to_str().unwrap();
         assert_eq!(
-            requested_path(&flags, "build", Some(directory)),
-            Some(dir.path().join("ide.bep"))
+            requested_path(&flags, "build", Some("/elsewhere"), None),
+            Some(PathBuf::from("/elsewhere/ide.bep"))
         );
     }
 }

@@ -1083,7 +1083,7 @@ pub fn last_word<T>(
 /// relative value is joined to `directory`, the spawn's working directory, because Bazel
 /// resolves the execution and workspace logs there while the CLI reads and writes from its
 /// own cwd. Bazel resolves some outputs, `--profile` among them, against the workspace
-/// root instead (see [`workspace_root`]).
+/// root instead, which their callers pass in.
 pub fn requested_path(
     args: &[String],
     name: &str,
@@ -1099,7 +1099,10 @@ pub fn requested_path(
 
 /// [`requested_path`] for an option whose converter makes a leading `~/` the
 /// user's home, as Bazel's path-typed options do (its build event file, a
-/// plain string, does not).
+/// plain string, does not). The home is `std::env::home_dir`'s, as everywhere
+/// else in the CLI: `$HOME` before the passwd entry, where Bazel's server
+/// reads the passwd entry first, so the two differ only when `$HOME` is set
+/// to somewhere else.
 pub fn requested_home_path(
     args: &[String],
     name: &str,
@@ -1112,7 +1115,7 @@ pub fn requested_home_path(
         |path: &str| {
             // As Bazel's converter does: every `~` in a path that starts `~/`.
             path.starts_with("~/")
-                .then(user_home)
+                .then(std::env::home_dir)
                 .flatten()
                 .map(|home| PathBuf::from(path.replace('~', &home.to_string_lossy())))
                 .unwrap_or_else(|| PathBuf::from(path))
@@ -1132,72 +1135,6 @@ fn resolve(
             _ => p,
         }
     })
-}
-
-/// The home Bazel's server expands `~/` to: Java's `user.home`, which on Unix
-/// is the passwd entry's home unless that is missing or `/`, then `$HOME`, and
-/// on Windows the user's profile folder.
-fn user_home() -> Option<PathBuf> {
-    #[cfg(unix)]
-    if let Some(home) = passwd_home().filter(|h| h.as_os_str().len() >= 2) {
-        return Some(home);
-    }
-    #[cfg(windows)]
-    let var = "USERPROFILE";
-    #[cfg(not(windows))]
-    let var = "HOME";
-    std::env::var_os(var)
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-}
-
-/// This user's home from the passwd database.
-#[cfg(unix)]
-fn passwd_home() -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut found: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: the reentrant call writes only into `entry` and `buf`, both
-    // live for the reads below.
-    let status = unsafe {
-        libc::getpwuid_r(
-            libc::getuid(),
-            &mut entry,
-            buf.as_mut_ptr(),
-            buf.len(),
-            &mut found,
-        )
-    };
-    if status != 0 || found.is_null() || entry.pw_dir.is_null() {
-        return None;
-    }
-    let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
-}
-
-/// The directory a Bazel command run in `directory` (the CLI's own cwd when
-/// `None`) works in, as its client sees it: absolute, with symlinks resolved.
-pub fn spawn_dir(directory: Option<&str>) -> Option<PathBuf> {
-    let dir = match directory {
-        Some(dir) if Path::new(dir).is_absolute() => PathBuf::from(dir),
-        Some(dir) => std::env::current_dir().ok()?.join(dir),
-        None => std::env::current_dir().ok()?,
-    };
-    dir.canonicalize().ok()
-}
-
-/// The files that mark a directory as the root of a Bazel workspace.
-const WORKSPACE_MARKERS: [&str; 4] = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"];
-
-/// The workspace a Bazel command run in `directory` (the CLI's own cwd when
-/// `None`) belongs to: the nearest directory at or above its [`spawn_dir`]
-/// holding a workspace marker file, as Bazel's client finds it.
-pub fn workspace_root(directory: Option<&str>) -> Option<PathBuf> {
-    spawn_dir(directory)?
-        .ancestors()
-        .find(|dir| WORKSPACE_MARKERS.iter().any(|m| dir.join(m).is_file()))
-        .map(Path::to_path_buf)
 }
 
 /// The [`DefaultOverride`] payloads among `tokens` that apply to `command`, in the order
@@ -2300,7 +2237,7 @@ mod tests {
 
     #[test]
     fn a_requested_path_expands_home_first() {
-        let Some(home) = user_home() else {
+        let Some(home) = std::env::home_dir() else {
             return;
         };
         let args = vec!["--profile=~/p.gz".to_string()];
@@ -2322,31 +2259,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_workspace_is_found_from_a_relative_or_symlinked_directory() {
-        let ws = tempfile::tempdir().unwrap();
-        let ws_root = ws.path().canonicalize().unwrap();
-        std::fs::write(ws_root.join("MODULE.bazel"), "").unwrap();
-        std::fs::create_dir_all(ws_root.join("e2e/pkg")).unwrap();
-        std::fs::write(ws_root.join("e2e/MODULE.bazel"), "").unwrap();
-        let pkg = ws_root.join("e2e/pkg");
-        assert_eq!(
-            workspace_root(pkg.to_str()),
-            Some(ws_root.join("e2e")),
-            "the nearest wins"
-        );
-        #[cfg(unix)]
-        {
-            let other = tempfile::tempdir().unwrap();
-            let link = other.path().join("link");
-            std::os::unix::fs::symlink(&pkg, &link).unwrap();
-            assert_eq!(
-                workspace_root(link.to_str()),
-                Some(ws_root.join("e2e")),
-                "found from where the link leads, as Bazel's client does"
-            );
-        }
-    }
     use super::*;
     use std::fs;
     use tempfile::TempDir;

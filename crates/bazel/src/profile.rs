@@ -25,17 +25,17 @@ pub fn file_name(requested: Option<&Path>) -> &'static str {
 }
 
 /// The profile path something already asked Bazel for in `flags`, if any. A
-/// relative one is under the workspace root, where Bazel resolves it, not the
-/// directory the command runs in; `None` for one when the workspace cannot be
-/// found. See [`crate::rc::requested_path`] for empty and `~/` values.
-pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
+/// relative one is under `workspace`, the root Bazel resolves it against, not
+/// the directory the command runs in; `None` for one when there is no
+/// workspace. See [`crate::rc::requested_path`] for empty and `~/` values.
+pub fn requested_path(flags: &[String], verb: &str, workspace: Option<&Path>) -> Option<PathBuf> {
     let path = crate::rc::requested_home_path(flags, FLAG, verb, None)?;
     if path.is_absolute() {
         return Some(path);
     }
     // Bazel runs no command outside a workspace, so a root not found here is
     // one this cannot name the profile's path in; the profile is left to Bazel.
-    crate::rc::workspace_root(directory).map(|root| root.join(path))
+    workspace.map(|root| root.join(path))
 }
 
 /// The option that turns the profile on or off, under its name and the old
@@ -134,17 +134,19 @@ mod tests {
 
     #[test]
     fn a_relative_profile_is_under_the_workspace_root() {
-        let ws = tempfile::tempdir().unwrap();
-        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
-        let pkg = ws.path().join("pkg");
-        std::fs::create_dir(&pkg).unwrap();
+        let ws = Some(Path::new("/ws"));
         assert_eq!(
-            requested_path(&strings(&["--profile=p.json"]), "build", pkg.to_str()),
-            Some(ws.path().canonicalize().unwrap().join("p.json"))
+            requested_path(&strings(&["--profile=p.json"]), "build", ws),
+            Some(PathBuf::from("/ws/p.json"))
         );
         assert_eq!(
-            requested_path(&strings(&["--profile=/abs/p.gz"]), "build", pkg.to_str()),
+            requested_path(&strings(&["--profile=/abs/p.gz"]), "build", ws),
             Some(PathBuf::from("/abs/p.gz"))
+        );
+        assert_eq!(
+            requested_path(&strings(&["--profile=p.json"]), "build", None),
+            None,
+            "outside a workspace a relative profile is left to Bazel"
         );
     }
 

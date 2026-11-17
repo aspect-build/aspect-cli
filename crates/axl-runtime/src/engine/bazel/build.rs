@@ -989,6 +989,17 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
     asked || (recording && knows_flag)
 }
 
+/// The workspace a Bazel command run in `directory` (the CLI's own cwd when
+/// `None`) belongs to, found from where its client works: absolute, with
+/// symlinks resolved. See [`crate::project_root::find_bazel_root`].
+fn workspace_of(directory: Option<&str>) -> Option<PathBuf> {
+    let dir = match directory {
+        Some(dir) => std::env::current_dir().ok()?.join(dir),
+        None => std::env::current_dir().ok()?,
+    };
+    crate::project_root::find_bazel_root(&dir.canonicalize().ok()?)
+}
+
 /// A fresh path for an execution log there is no history folder for, in a
 /// temp folder readable by this user alone, since the log holds command lines
 /// and environment variables, or directly in the temp dir where no folder can
@@ -1089,8 +1100,13 @@ impl Build {
             .build_events()
             .resolve(build_events, telemetry.exporting());
         let (flags, history_asked) = bazel::execlog::take_history_request(flags);
-        let requested_execlog_path =
-            bazel::execlog::requested_path(&flags, verb, directory.as_deref());
+        let workspace = workspace_of(directory.as_deref());
+        let requested_execlog_path = bazel::execlog::requested_path(
+            &flags,
+            verb,
+            directory.as_deref(),
+            workspace.as_deref(),
+        );
         // Without an rc the CLI rendered, Bazel reads its own rc files, which
         // can name an execution log or profile path no flag here shows. A file
         // only recorded, or the profile, is then left where Bazel puts it, so
@@ -1098,7 +1114,7 @@ impl Build {
         let rc_visible = startup_flags.iter().any(|f| f == "--ignore_all_rc_files");
         // A caller who turned profiling off is given no `--profile`, and one
         // whose `--profile` path cannot be told has it left to Bazel.
-        let requested_profile = bazel::profile::requested_path(&flags, verb, directory.as_deref());
+        let requested_profile = bazel::profile::requested_path(&flags, verb, workspace.as_deref());
         let profile_unplaced = requested_profile.is_none()
             && bazel::rc::last_flag_value(&flags, bazel::profile::FLAG, verb)
                 .is_some_and(|v| !v.is_empty());
@@ -1158,8 +1174,12 @@ impl Build {
         // Read before `flags` moves into the command. When the CLI streams the
         // compact log or the BEP, its own flag below outranks the caller's, and
         // the file the caller asked for is written from the stream instead.
-        let requested_bep_path =
-            bazel::bes::binary_file::requested_path(&flags, verb, directory.as_deref());
+        let requested_bep_path = bazel::bes::binary_file::requested_path(
+            &flags,
+            verb,
+            directory.as_deref(),
+            workspace.as_deref(),
+        );
         let requested_workspace_log =
             bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
 
@@ -1728,6 +1748,32 @@ mod tests {
     //! binary, selected per-test via `--scenario=<name>`.
 
     use crate::engine::history::bazel_dir;
+
+    #[test]
+    fn a_workspace_is_found_from_a_relative_or_symlinked_directory() {
+        let ws = tempfile::tempdir().unwrap();
+        let ws_root = ws.path().canonicalize().unwrap();
+        std::fs::write(ws_root.join("MODULE.bazel"), "").unwrap();
+        std::fs::create_dir_all(ws_root.join("e2e/pkg")).unwrap();
+        std::fs::write(ws_root.join("e2e/MODULE.bazel"), "").unwrap();
+        let pkg = ws_root.join("e2e/pkg");
+        assert_eq!(
+            super::workspace_of(pkg.to_str()),
+            Some(ws_root.join("e2e")),
+            "the nearest wins"
+        );
+        #[cfg(unix)]
+        {
+            let other = tempfile::tempdir().unwrap();
+            let link = other.path().join("link");
+            std::os::unix::fs::symlink(&pkg, &link).unwrap();
+            assert_eq!(
+                super::workspace_of(link.to_str()),
+                Some(ws_root.join("e2e")),
+                "found from where the link leads, as Bazel's client does"
+            );
+        }
+    }
 
     use axl_proto::tools::protos::ExecLogEntry;
     use prost::Message;

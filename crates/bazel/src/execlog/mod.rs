@@ -47,12 +47,17 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// `.bazelrc` can ask Bazel for the compact log, and whoever asked reads the
 /// file at that path. When the CLI streams the log it names a file of its own,
 /// which outranks that one (the option is single-valued), so the asked-for
-/// path is written as one of the [`copies`]. `%workspace%` stands for the
-/// workspace root, as Bazel expands it in this flag, and a boolean value
-/// names no file, as does the `--no` form Bazel 10 takes. The option's old
-/// name, which Bazel still takes, is read as it. See [`crate::rc::requested_path`] for how empty and relative values
-/// resolve.
-pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
+/// path is written as one of the [`copies`]. `%workspace%` stands for
+/// `workspace`, as Bazel expands it in this flag, and a boolean value names
+/// no file, as does the `--no` form Bazel 10 takes. The option's old name,
+/// which Bazel still takes, is read as it. See [`crate::rc::requested_path`]
+/// for how empty and relative values resolve, against `directory`.
+pub fn requested_path(
+    flags: &[String],
+    verb: &str,
+    directory: Option<&str>,
+    workspace: Option<&Path>,
+) -> Option<PathBuf> {
     let flags = with_current_name(flags);
     // Bazel 10 reads the option as a boolean too, so its `--no` form turns
     // off a path set earlier.
@@ -76,7 +81,7 @@ pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> 
     ) {
         return None;
     }
-    let path = match crate::rc::workspace_root(directory) {
+    let path = match workspace {
         Some(root) if text.contains("%workspace%") => {
             PathBuf::from(text.replace("%workspace%", &root.to_string_lossy()))
         }
@@ -196,10 +201,10 @@ mod tests {
     fn a_requested_path_is_read_from_the_flag() {
         let f = flags(&["--execution_log_compact_file=/tmp/log.zst"]);
         assert_eq!(
-            requested_path(&f, "build", None),
+            requested_path(&f, "build", None, None),
             Some(PathBuf::from("/tmp/log.zst"))
         );
-        assert_eq!(requested_path(&flags(&[]), "build", None), None);
+        assert_eq!(requested_path(&flags(&[]), "build", None, None), None);
     }
 
     #[test]
@@ -232,14 +237,10 @@ mod tests {
 
     #[test]
     fn workspace_in_a_requested_path_is_the_workspace_root() {
-        let ws = tempfile::tempdir().unwrap();
-        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
-        let pkg = ws.path().join("pkg");
-        std::fs::create_dir(&pkg).unwrap();
         let flags = flags(&["--execution_log_compact_file=%workspace%/exec.log"]);
         assert_eq!(
-            requested_path(&flags, "build", pkg.to_str()),
-            Some(ws.path().canonicalize().unwrap().join("exec.log"))
+            requested_path(&flags, "build", Some("/ws/pkg"), Some(Path::new("/ws"))),
+            Some(PathBuf::from("/ws/exec.log"))
         );
     }
 
@@ -247,19 +248,12 @@ mod tests {
     /// rendered rc passes on as an override.
     #[test]
     fn workspace_in_an_rc_path_is_the_workspace_root() {
-        let ws = tempfile::tempdir().unwrap();
-        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
         let flags = flags(&[
             "--default_override=0:common=--execution_log_compact_file=%workspace%/.aspect/generated/exec.log.zstd",
         ]);
         assert_eq!(
-            requested_path(&flags, "test", ws.path().to_str()),
-            Some(
-                ws.path()
-                    .canonicalize()
-                    .unwrap()
-                    .join(".aspect/generated/exec.log.zstd")
-            )
+            requested_path(&flags, "test", Some("/ws"), Some(Path::new("/ws"))),
+            Some(PathBuf::from("/ws/.aspect/generated/exec.log.zstd"))
         );
     }
 
@@ -310,7 +304,7 @@ mod tests {
             ],
         ] {
             assert_eq!(
-                requested_path(&flags(&line), "build", None),
+                requested_path(&flags(&line), "build", None, None),
                 None,
                 "{line:?}"
             );
@@ -320,7 +314,7 @@ mod tests {
             "--execution_log_compact_file=/y",
         ]);
         assert_eq!(
-            requested_path(&on_again, "build", None),
+            requested_path(&on_again, "build", None, None),
             Some(PathBuf::from("/y"))
         );
     }
@@ -338,14 +332,14 @@ mod tests {
     fn the_old_name_is_read_as_the_current_one() {
         let line = flags(&["--experimental_execution_log_compact_file=/tmp/old.zst"]);
         assert_eq!(
-            requested_path(&line, "build", None),
+            requested_path(&line, "build", None, None),
             Some(PathBuf::from("/tmp/old.zst"))
         );
         let rc = flags(&[
             "--default_override=0:common=--experimental_execution_log_compact_file=/tmp/rc.zst",
         ]);
         assert_eq!(
-            requested_path(&rc, "build", None),
+            requested_path(&rc, "build", None, None),
             Some(PathBuf::from("/tmp/rc.zst"))
         );
         let both = flags(&[
@@ -353,7 +347,7 @@ mod tests {
             "--experimental_execution_log_compact_file=/tmp/old.zst",
         ]);
         assert_eq!(
-            requested_path(&both, "build", None),
+            requested_path(&both, "build", None, None),
             Some(PathBuf::from("/tmp/old.zst"))
         );
     }
@@ -362,7 +356,7 @@ mod tests {
     fn a_boolean_names_no_file() {
         for value in ["true", "false", "0"] {
             let flags = flags(&[&format!("--execution_log_compact_file={value}")]);
-            assert_eq!(requested_path(&flags, "build", None), None, "{value}");
+            assert_eq!(requested_path(&flags, "build", None, None), None, "{value}");
         }
     }
 
