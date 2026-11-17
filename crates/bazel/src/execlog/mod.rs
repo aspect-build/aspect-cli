@@ -150,6 +150,26 @@ mod tests {
         );
     }
 
+    /// As `aspect setup bazelrc` writes it into a checkout's rc, which a
+    /// rendered rc passes on as an override.
+    #[test]
+    fn workspace_in_an_rc_path_is_the_workspace_root() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("MODULE.bazel"), "").unwrap();
+        let flags = flags(&[
+            "--default_override=0:common=--execution_log_compact_file=%workspace%/.aspect/generated/exec.log.zstd",
+        ]);
+        assert_eq!(
+            requested_path(&flags, "test", ws.path().to_str()),
+            Some(
+                ws.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(".aspect/generated/exec.log.zstd")
+            )
+        );
+    }
+
     #[test]
     fn a_boolean_names_no_file() {
         for value in ["true", "false", "0"] {
