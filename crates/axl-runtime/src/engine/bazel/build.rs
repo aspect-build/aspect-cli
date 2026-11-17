@@ -991,8 +991,9 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
 
 /// A fresh path for an execution log there is no history folder for, in a
 /// temp folder readable by this user alone, since the log holds command lines
-/// and environment variables. It is left in place, as Bazel may upload it
-/// after the client exits.
+/// and environment variables, or directly in the temp dir where no folder can
+/// be made there. It is left in place, as Bazel may upload it after the
+/// client exits.
 fn private_temp_path() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("aspect-execlog-{}", uuid::Uuid::new_v4()));
     match crate::engine::history::create_private_dir(&dir) {

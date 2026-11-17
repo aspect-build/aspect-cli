@@ -54,7 +54,10 @@ pub fn turned_off(flags: &[String], verb: &str) -> bool {
             Some(false)
         } else {
             let value = token.strip_prefix(GENERATE)?.strip_prefix('=')?;
-            Some(!matches!(value, "false" | "no" | "0"))
+            Some(!matches!(
+                value.to_ascii_lowercase().as_str(),
+                "false" | "f" | "no" | "n" | "0"
+            ))
         }
     };
     let on = crate::rc::last_word(flags, verb, value);
@@ -88,6 +91,10 @@ mod tests {
         ));
         assert!(turned_off(
             &strings(&["--generate_json_trace_profile=false"]),
+            "build"
+        ));
+        assert!(turned_off(
+            &strings(&["--generate_json_trace_profile=F"]),
             "build"
         ));
         assert!(!turned_off(
