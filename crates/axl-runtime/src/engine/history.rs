@@ -1,7 +1,8 @@
 //! Each task invocation's files, kept for later: one directory per invocation
 //! under the history root, named `<start>-<task-id>` where `<start>` is the UTC
 //! start time as `YYYYMMDDTHHMMSSmmmZ`, so the names alone list the history in
-//! order. A subfolder per Bazel invocation it makes (`bazel/<n>`). A task ID
+//! order. A subfolder per Bazel invocation it makes that keeps a file
+//! (`bazel/<n>`, counting only those). A task ID
 //! names one run, so an explicit one already here is refused (see
 //! [`History::earlier_run`]). An entry is made only for a Bazel invocation that
 //! will keep a file in it, at its spawn, so a run that keeps nothing leaves no
@@ -17,7 +18,8 @@
 //! compact execution log as a build tool log, possibly after the client has
 //! exited — so nothing here is moved or deleted by the invocation that wrote
 //! it. A [`prune`] removes old invocations instead, started in the background
-//! by an invocation's first Bazel build unless another task pruned within
+//! by an invocation's first Bazel build that keeps a file, unless another task
+//! pruned within
 //! [`Retention::every`]: the oldest started first while the history is over
 //! [`Retention::budget`], never below [`Retention::keep`] invocations, and
 //! never one written to within [`Retention::guard`], which may be a build or an
@@ -65,7 +67,8 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 pub struct Retention {
     /// The size the history is pruned down to.
     pub budget: u64,
-    /// Invocations always kept, the most recently started, whatever their size.
+    /// Invocations always kept, the most recently started, whatever their size,
+    /// besides the current one, which a prune never removes.
     pub keep: usize,
     /// An invocation written to this recently is never pruned.
     pub guard: Duration,
