@@ -906,14 +906,15 @@ _LogChannel = record(
 
 _PROFILE_ENRICHMENT = ["--generate_json_trace_profile", "--experimental_profile_include_target_label"]
 
-def profile_flags(rc, command: str, default_path: str, workspace_root: str):
+def profile_flags(rc, command: str, default_path: str, workspace_root: str, home: str = ""):
     """`(path, flags)` for uploading the trace profile of a `command` run under
     `rc`: where Bazel will write it, and the flags to append.
 
     A `--profile` the run already carries — from an rc file, `--bazel-flag`, or
     another feature such as Workflows — is kept, and its path is the one
-    uploaded; a relative one resolves against `workspace_root`, as Bazel
-    resolves it. Only when none is set is `--profile=default_path` added.
+    uploaded. As Bazel resolves it, a leading `~/` is `home` and another
+    relative one is under `workspace_root`: the workspace of the CLI's working
+    directory, which is the build's unless it runs in another `directory`. Only when none is set is `--profile=default_path` added.
 
     `rc.flag_value` reads the option model, which covers `common` by name, so a
     `common`-scoped `--profile` is seen. One pair it answers differently from the
@@ -926,7 +927,9 @@ def profile_flags(rc, command: str, default_path: str, workspace_root: str):
     if not path:
         return (default_path, _PROFILE_ENRICHMENT + ["--profile=" + default_path])
     is_absolute = path.startswith("/") or path[1:3] in (":/", ":\\")
-    if not is_absolute and workspace_root:
+    if path.startswith("~/") and home:
+        path = home.rstrip("/") + path[1:]
+    elif not is_absolute and workspace_root:
         path = workspace_root.rstrip("/") + "/" + path
     return (path, list(_PROFILE_ENRICHMENT))
 
@@ -992,7 +995,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
     profile = {"path": profile_path}
 
     def _profile_rc_flags(ctx, rc, command):
-        path, flags = profile_flags(rc, command, profile_path, ctx.std.env.bazel_root_dir())
+        path, flags = profile_flags(rc, command, profile_path, ctx.std.env.bazel_root_dir(), ctx.std.env.home_dir() or "")
         profile["path"] = path
         return flags
 

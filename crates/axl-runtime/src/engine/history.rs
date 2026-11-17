@@ -3,8 +3,9 @@
 //! start time as `YYYYMMDDTHHMMSSmmmZ`, so the names alone list the history in
 //! order. A subfolder per Bazel invocation it makes (`bazel/<n>`). A task ID
 //! names one run, so an explicit one already here is refused (see
-//! [`History::earlier_run`]). An entry is made only once a Bazel invocation has
-//! a file to keep in it, so a run that kept nothing leaves no trace.
+//! [`History::earlier_run`]). An entry is made only for a Bazel invocation that
+//! will keep a file in it, at its spawn, so a run that keeps nothing leaves no
+//! trace; one that fails before writing its files leaves an empty folder.
 //!
 //! A Bazel invocation's folder holds its compact execution log, workspace log,
 //! trace profile and build event stream, each when the build has one (see
@@ -46,7 +47,7 @@ pub fn bazel_dir(invocation: &Path, n: u32) -> PathBuf {
 /// Create `dir` and its missing parents readable by this user alone: an
 /// execution log holds action command lines and environment variables, and
 /// nothing redacts it on disk.
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]

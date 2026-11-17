@@ -1051,6 +1051,31 @@ pub fn last_flag_value(args: &[String], name: &str, command: &str) -> Option<Str
         .next_back()
 }
 
+/// The last word `flags` have for `command` on an option, where `value` reads
+/// one token's (`None` for a token about something else): a literal beats an
+/// rc entry, and the last of each wins, as [`last_flag_value`] reads a value.
+/// For an option a bare or `--no` token sets, which `last_flag_value` does not
+/// read.
+pub fn last_word<T>(
+    flags: &[String],
+    command: &str,
+    value: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
+    let last = |tokens: &[&str]| tokens.iter().rev().find_map(|t| value(t));
+    let tokens: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let literals: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|t| !is_default_override(t))
+        .collect();
+    last(&literals).or_else(|| {
+        override_buckets(&tokens, command)
+            .iter()
+            .rev()
+            .find_map(|bucket| last(bucket))
+    })
+}
+
 /// The output file `name` asks Bazel to write for `command`, as [`last_flag_value`] reads
 /// it, or `None` when nothing asked.
 ///

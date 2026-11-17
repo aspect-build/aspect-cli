@@ -989,10 +989,17 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
     asked || (recording && knows_flag)
 }
 
-/// The execution log formats other than the compact one; Bazel takes at most
-/// one of the three.
-const EXECUTION_LOG_BINARY_FLAG: &str = "--execution_log_binary_file";
-const EXECUTION_LOG_JSON_FLAG: &str = "--execution_log_json_file";
+/// A fresh path for an execution log there is no history folder for, in a
+/// temp folder readable by this user alone, since the log holds command lines
+/// and environment variables. It is left in place, as Bazel may upload it
+/// after the client exits.
+fn private_temp_path() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("aspect-execlog-{}", uuid::Uuid::new_v4()));
+    match crate::engine::history::create_private_dir(&dir) {
+        Ok(()) => dir.join(bazel::execlog::FILE_NAME),
+        Err(_) => std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4())),
+    }
+}
 
 /// This Bazel invocation's folder in the task invocation's history, created,
 /// or `None` when it cannot be, said once per run: a history that cannot be
@@ -1106,11 +1113,7 @@ impl Build {
         );
         // Bazel refuses a build naming more than one log format, so a log
         // only recorded is skipped beside the caller's binary or JSON one.
-        let other_format = [EXECUTION_LOG_BINARY_FLAG, EXECUTION_LOG_JSON_FLAG]
-            .iter()
-            .any(|flag| {
-                bazel::rc::last_flag_value(&flags, flag, verb).is_some_and(|v| !v.is_empty())
-            });
+        let other_format = bazel::execlog::other_format(&flags, verb);
         let recording = recording && rc_visible && !other_format;
 
         // Asked with the same startup flags the build below will use, because
@@ -1272,7 +1275,7 @@ impl Build {
         let execlog_path = execlog_enabled.then(|| {
             let path = match &history_dir {
                 Some(dir) => dir.join(bazel::execlog::FILE_NAME),
-                None => std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4())),
+                None => private_temp_path(),
             };
             cmd.arg(format!(
                 "{}={}",

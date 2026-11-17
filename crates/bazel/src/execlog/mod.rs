@@ -74,6 +74,33 @@ pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> 
     })
 }
 
+/// The execution log formats other than the compact one.
+const OTHER_FORMATS: [&str; 2] = ["--execution_log_binary_file", "--execution_log_json_file"];
+
+/// Whether `flags` have Bazel write a binary or JSON execution log for
+/// `verb`, which it refuses beside a compact one. Any value names one, empty
+/// or `true` included (Bazel's default location, or a stream to remote
+/// storage), and so does the bare flag; only a false boolean or the `--no`
+/// form does not.
+pub fn other_format(flags: &[String], verb: &str) -> bool {
+    OTHER_FORMATS.iter().any(|name| {
+        let negated = format!("--no{}", &name[2..]);
+        crate::rc::last_word(flags, verb, |token| {
+            if token == *name {
+                Some(true)
+            } else if token == negated {
+                Some(false)
+            } else {
+                let value = token.strip_prefix(name)?.strip_prefix('=')?;
+                Some(!matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "false" | "f" | "no" | "n" | "0"
+                ))
+            }
+        }) == Some(true)
+    })
+}
+
 /// The compact copies the CLI writes from the stream: the path the caller
 /// asked Bazel for, if any (see [`requested_path`]), then each compact sink.
 ///
@@ -168,6 +195,36 @@ mod tests {
                     .join(".aspect/generated/exec.log.zstd")
             )
         );
+    }
+
+    #[test]
+    fn another_format_is_any_value_but_a_false_one() {
+        for (line, other) in [
+            (vec!["--execution_log_json_file=/tmp/x.json"], true),
+            (vec!["--execution_log_binary_file="], true),
+            (vec!["--execution_log_binary_file"], true),
+            (vec!["--execution_log_binary_file=true"], true),
+            (vec!["--execution_log_binary_file=False"], false),
+            (vec!["--noexecution_log_json_file"], false),
+            (
+                vec!["--execution_log_json_file=x", "--noexecution_log_json_file"],
+                false,
+            ),
+            (
+                vec!["--default_override=0:build=--execution_log_binary_file="],
+                true,
+            ),
+            (
+                vec![
+                    "--noexecution_log_binary_file",
+                    "--default_override=0:build=--execution_log_binary_file=x",
+                ],
+                false,
+            ),
+            (vec!["--execution_log_compact_file=x"], false),
+        ] {
+            assert_eq!(other_format(&flags(&line), "build"), other, "{line:?}");
+        }
     }
 
     #[test]

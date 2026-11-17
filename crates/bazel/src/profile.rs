@@ -57,19 +57,7 @@ pub fn turned_off(flags: &[String], verb: &str) -> bool {
             Some(!matches!(value, "false" | "no" | "0"))
         }
     };
-    let last = |tokens: &[&str]| tokens.iter().rev().find_map(|t| value(t));
-    let tokens: Vec<&str> = flags.iter().map(String::as_str).collect();
-    let literals: Vec<&str> = tokens
-        .iter()
-        .copied()
-        .filter(|t| !crate::rc::is_default_override(t))
-        .collect();
-    let on = last(&literals).or_else(|| {
-        crate::rc::override_buckets(&tokens, verb)
-            .iter()
-            .rev()
-            .find_map(|bucket| last(bucket))
-    });
+    let on = crate::rc::last_word(flags, verb, value);
     on == Some(false)
 }
 
