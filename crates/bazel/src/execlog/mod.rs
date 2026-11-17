@@ -107,20 +107,35 @@ pub fn compact_file_flag(version: Option<&semver::Version>) -> &'static str {
 /// `flags` with the compact log's old name spelled as its current one, on the
 /// command line and in `--default_override` payloads alike.
 fn with_current_name(flags: &[String]) -> Vec<String> {
-    let in_override = format!("={OLD_COMPACT_FILE_FLAG}");
-    let old_negated = format!("--no{}", &OLD_COMPACT_FILE_FLAG[2..]);
+    let negated = |name: &str| format!("--no{}", &name[2..]);
+    let renames = [
+        (negated(OLD_COMPACT_FILE_FLAG), negated(COMPACT_FILE_FLAG)),
+        (
+            OLD_COMPACT_FILE_FLAG.to_owned(),
+            COMPACT_FILE_FLAG.to_owned(),
+        ),
+    ];
     flags
         .iter()
         .map(|flag| {
-            if *flag == old_negated {
-                format!("--no{}", &COMPACT_FILE_FLAG[2..])
-            } else if let Some(rest) = flag.strip_prefix(OLD_COMPACT_FILE_FLAG) {
-                format!("{COMPACT_FILE_FLAG}{rest}")
-            } else if crate::rc::is_default_override(flag) && flag.contains(&in_override) {
-                flag.replacen(&in_override, &format!("={COMPACT_FILE_FLAG}"), 1)
+            let payload_at = if crate::rc::is_default_override(flag) {
+                flag.find(":")
+                    .and_then(|colon| flag[colon..].find('=').map(|eq| colon + eq + 1))
             } else {
-                flag.clone()
+                Some(0)
+            };
+            let Some(at) = payload_at else {
+                return flag.clone();
+            };
+            let (head, option) = flag.split_at(at);
+            for (old, new) in &renames {
+                if let Some(rest) = option.strip_prefix(old.as_str())
+                    && (rest.is_empty() || rest.starts_with('='))
+                {
+                    return format!("{head}{new}{rest}");
+                }
             }
+            flag.clone()
         })
         .collect()
 }
@@ -288,6 +303,10 @@ mod tests {
             vec![
                 "--default_override=0:build=--execution_log_compact_file=/x",
                 "--noexperimental_execution_log_compact_file",
+            ],
+            vec![
+                "--default_override=0:build=--execution_log_compact_file=/x",
+                "--default_override=1:build=--noexperimental_execution_log_compact_file",
             ],
         ] {
             assert_eq!(
