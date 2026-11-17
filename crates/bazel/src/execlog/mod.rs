@@ -49,11 +49,23 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// which outranks that one (the option is single-valued), so the asked-for
 /// path is written as one of the [`copies`]. `%workspace%` stands for the
 /// workspace root, as Bazel expands it in this flag, and a boolean value
-/// names no file. The option's old name, which Bazel still takes, is read as
-/// it. See [`crate::rc::requested_path`] for how empty and relative values
+/// names no file, as does the `--no` form Bazel 10 takes. The option's old
+/// name, which Bazel still takes, is read as it. See [`crate::rc::requested_path`] for how empty and relative values
 /// resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
     let flags = with_current_name(flags);
+    // Bazel 10 reads the option as a boolean too, so its `--no` form turns
+    // off a path set earlier.
+    let negated = format!("--no{}", &COMPACT_FILE_FLAG[2..]);
+    let valued = format!("{COMPACT_FILE_FLAG}=");
+    let off = crate::rc::last_word(&flags, verb, |token| {
+        (token == negated)
+            .then_some(true)
+            .or_else(|| (token == COMPACT_FILE_FLAG || token.starts_with(&valued)).then_some(false))
+    });
+    if off == Some(true) {
+        return None;
+    }
     let path = crate::rc::requested_home_path(&flags, COMPACT_FILE_FLAG, verb, None)?;
     let text = path.to_string_lossy();
     // Bazel 10 reads a boolean here (off, or stream it to remote storage),
@@ -96,10 +108,13 @@ pub fn compact_file_flag(version: Option<&semver::Version>) -> &'static str {
 /// command line and in `--default_override` payloads alike.
 fn with_current_name(flags: &[String]) -> Vec<String> {
     let in_override = format!("={OLD_COMPACT_FILE_FLAG}");
+    let old_negated = format!("--no{}", &OLD_COMPACT_FILE_FLAG[2..]);
     flags
         .iter()
         .map(|flag| {
-            if let Some(rest) = flag.strip_prefix(OLD_COMPACT_FILE_FLAG) {
+            if *flag == old_negated {
+                format!("--no{}", &COMPACT_FILE_FLAG[2..])
+            } else if let Some(rest) = flag.strip_prefix(OLD_COMPACT_FILE_FLAG) {
                 format!("{COMPACT_FILE_FLAG}{rest}")
             } else if crate::rc::is_default_override(flag) && flag.contains(&in_override) {
                 flag.replacen(&in_override, &format!("={COMPACT_FILE_FLAG}"), 1)
@@ -261,6 +276,34 @@ mod tests {
         ] {
             assert_eq!(other_format(&flags(&line), "build"), other, "{line:?}");
         }
+    }
+
+    #[test]
+    fn the_no_form_turns_off_a_path_set_before_it() {
+        for line in [
+            vec![
+                "--execution_log_compact_file=/x",
+                "--noexecution_log_compact_file",
+            ],
+            vec![
+                "--default_override=0:build=--execution_log_compact_file=/x",
+                "--noexperimental_execution_log_compact_file",
+            ],
+        ] {
+            assert_eq!(
+                requested_path(&flags(&line), "build", None),
+                None,
+                "{line:?}"
+            );
+        }
+        let on_again = flags(&[
+            "--noexecution_log_compact_file",
+            "--execution_log_compact_file=/y",
+        ]);
+        assert_eq!(
+            requested_path(&on_again, "build", None),
+            Some(PathBuf::from("/y"))
+        );
     }
 
     #[test]

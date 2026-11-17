@@ -979,10 +979,10 @@ fn execlog_demand(
 }
 
 /// Whether a build writes its compact execution log: when something `asked`
-/// for it, or when it is only `recording` and Bazel knows the flag (7.4
-/// and later, or a version that cannot be told). Recording asks for no more
-/// than the log on disk, so an older Bazel goes without rather than failing
-/// on a flag it does not know.
+/// for it, or when it is only `recording` on Bazel 7.4 or later (or a version
+/// that cannot be told). Recording starts at 7.4, where the flag has the name
+/// the history request is spelled with in an rc (see `exec_log_flags`), so an
+/// older Bazel records nothing either way.
 fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::Version>) -> bool {
     // As the rest of the CLI gates by version: a prerelease of 7.4 knows it.
     let knows_flag = bazel::rc::constraint_matches(">=7.4.0", version).unwrap_or(true);
@@ -3009,7 +3009,7 @@ Test = task(implementation = _impl)
     }
 
     #[test]
-    fn recording_alone_skips_a_bazel_that_does_not_know_the_flag() {
+    fn recording_alone_skips_a_bazel_before_7_4() {
         use super::writes_execution_log;
         let v = |s: &str| semver::Version::parse(s).unwrap();
         assert!(writes_execution_log(false, true, Some(&v("7.4.0"))));

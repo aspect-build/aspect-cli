@@ -1463,7 +1463,7 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// The user's `--bazel-flags:omit` does not apply, so a feature asks
     /// through a `BazelTrait.task_flags` hook naming
     /// `--execution_log_compact_file=%aspect_history%` instead, which it does.
-    /// Skipped on a Bazel older than 7.4, which does not know the flag.
+    /// Skipped on a Bazel older than 7.4, as `record()` is.
     fn record_every_build<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<NoneType> {
         Env::from_eval(eval)?.history.record_every_build();
         Ok(NoneType)
