@@ -23,9 +23,9 @@
 //! never one written to within [`Retention::guard`], which may be a build or an
 //! upload still running in another workspace. Liveness is read from those times
 //! alone, so a run elsewhere that has gone longer than the guard without
-//! writing, and is not among the newest kept, can lose its entry. Two dotfiles
-//! at the root serve it: `.pruned`, whose time is the last prune's, and
-//! `.sizes`, the sizes of invocations that have settled.
+//! writing, and is not among the newest kept, can lose its entry. Dotfiles at
+//! the root serve it: `.pruned`, whose time is the last prune's, and `.sizes`,
+//! the sizes of invocations that have settled (and, briefly, its temp file).
 
 use std::collections::HashMap;
 use std::fs;
@@ -71,6 +71,10 @@ pub struct Retention {
     pub guard: Duration,
     /// A prune this recent, by any task, makes another wait.
     pub every: Duration,
+    /// An invocation idle this long has settled: its size is kept rather than
+    /// measured again. Far longer than `guard`, so a build that went quiet and
+    /// wrote again is still measured.
+    pub settle: Duration,
 }
 
 impl Default for Retention {
@@ -80,6 +84,7 @@ impl Default for Retention {
             keep: 10,
             guard: Duration::from_secs(60 * 60),
             every: Duration::from_secs(10 * 60),
+            settle: Duration::from_secs(24 * 60 * 60),
         }
     }
 }
@@ -194,7 +199,8 @@ impl History {
         let invocation = current.as_mut().expect("begun above");
         invocation.bazel_invocations += 1;
         let dir = bazel_dir(&invocation.dir, invocation.bazel_invocations);
-        create_private_dir(&dir)?;
+        // Started before the folder is made, which a full disk can refuse:
+        // pruning is what frees space there.
         if invocation.bazel_invocations == 1 && claim_prune(&self.root, self.retention.every) {
             let (root, retention, current) =
                 (self.root.clone(), self.retention, invocation.dir.clone());
@@ -204,6 +210,7 @@ impl History {
                 .ok();
             *self.pruning.lock().unwrap() = handle;
         }
+        create_private_dir(&dir)?;
         Ok(dir)
     }
 
@@ -223,14 +230,21 @@ const PRUNED_MARKER: &str = ".pruned";
 /// The sizes of settled invocations; see [`prune`].
 const SIZES_INDEX: &str = ".sizes";
 
-/// Whether this task prunes `root` now: when no task has within `every`. The
-/// marker is touched first, so tasks started together prune once.
+/// Whether this task prunes `root` now: when no task has within `every`, as
+/// the marker's time says. A marker ahead of the clock has expired. The marker
+/// is touched first, which keeps most tasks started together from each
+/// pruning, though two can; a marker that cannot be written prunes anyway, as
+/// on a full disk, where pruning is what frees space.
 fn claim_prune(root: &Path, every: Duration) -> bool {
     let marker = root.join(PRUNED_MARKER);
     let recent = fs::metadata(&marker)
         .and_then(|m| m.modified())
-        .is_ok_and(|t| SystemTime::now().duration_since(t).unwrap_or_default() < every);
-    !recent && fs::write(&marker, b"").is_ok()
+        .is_ok_and(|t| !idle_for(t, every) && t <= SystemTime::now());
+    if recent {
+        return false;
+    }
+    let _ = fs::write(&marker, b"");
+    true
 }
 
 /// A settled invocation's size, and the newest modification time under it
@@ -245,14 +259,17 @@ struct Settled {
 /// alone. Best effort: an entry that cannot be read or removed is skipped.
 ///
 /// It runs beside the build and is not waited for: the CLI may exit midway,
-/// which leaves only a valid history, part of an entry it was removing at
-/// worst, which the next prune finishes.
+/// which leaves only a valid history: part of an entry it was removing,
+/// which the next prune finishes, or an index's temp file, which a prune
+/// removes once it is older than the guard.
 ///
-/// An invocation nothing has written to within [`Retention::guard`] is
-/// settled: its size is kept in the [`SIZES_INDEX`] and not measured again,
-/// so a prune walks only new and live entries and checks each settled one's
-/// `bazel` folder, which a further Bazel invocation of it would update. The
-/// index is a cache, rebuilt from the entries whenever it is missing or
+/// An invocation nothing has written to within [`Retention::settle`] has
+/// settled: its size is kept in the [`SIZES_INDEX`] and not measured again
+/// while its `bazel` folder, which a further Bazel invocation of it updates,
+/// is no newer. So a prune walks only new and live entries, and stats each
+/// settled one. Nothing is removed on the index's word: an entry the budget
+/// would remove is measured first, so one written to since it settled is
+/// seen to be live. The index is a cache, rebuilt whenever it is missing or
 /// unreadable, and a prune running elsewhere at once costs at most a walk.
 fn prune(root: &Path, retention: Retention, current: &Path) {
     let Ok(read) = fs::read_dir(root) else {
@@ -268,11 +285,26 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
     // Names start with the start time, so this is the most recent first.
     entries.sort();
     entries.reverse();
+    // An index write cut off before its rename leaves its temp file behind.
+    for e in fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+    {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| idle_for(t, retention.guard));
+        if name.starts_with(&format!("{SIZES_INDEX}.")) && name.ends_with(".tmp") && stale {
+            let _ = fs::remove_file(e.path());
+        }
+    }
     let index_path = root.join(SIZES_INDEX);
     let index = read_index(&index_path);
     let mut settled = HashMap::new();
-    let now = SystemTime::now();
-    let within_guard = |t: SystemTime| now.duration_since(t).unwrap_or_default() < retention.guard;
+    let within_guard = |t: SystemTime| !idle_for(t, retention.guard);
     let mut total = 0u64;
     for (i, entry) in entries.iter().enumerate() {
         let name = entry.file_name().unwrap().to_string_lossy().into_owned();
@@ -281,42 +313,57 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
                 .and_then(|m| m.modified())
                 .is_ok_and(|t| secs(t) <= s.newest)
         });
-        let (size, recent) = match known {
-            Some(s) => (s.size, false),
-            None => {
-                let (size, newest) = tree_size_and_newest(entry);
-                let recent = newest.is_some_and(within_guard);
-                if let (Some(newest), false) = (newest, recent) {
-                    settled.insert(
-                        name.clone(),
-                        Settled {
-                            size,
-                            newest: secs(newest),
-                        },
-                    );
-                }
-                (size, recent)
-            }
+        let measure = || {
+            let (size, newest) = tree_size_and_newest(entry);
+            let settles = newest.is_some_and(|t| idle_for(t, retention.settle));
+            (
+                size,
+                newest.is_some_and(within_guard),
+                settles.then(|| Settled {
+                    size,
+                    newest: secs(newest.unwrap()),
+                }),
+            )
         };
-        if let Some(s) = known {
-            settled.insert(name.clone(), s);
-        }
+        let (mut size, mut recent, mut settles) = match known {
+            Some(s) => (s.size, false, Some(s)),
+            None => measure(),
+        };
         total += size;
-        if i < retention.keep || total <= retention.budget || recent {
+        let candidate = i >= retention.keep && total > retention.budget;
+        // Nothing is removed on the index's word: an entry is measured again,
+        // so one written to since it settled is seen to be live.
+        if candidate && known.is_some() {
+            let size_before = size;
+            (size, recent, settles) = measure();
+            total = total - size_before + size;
+        }
+        if !candidate || total <= retention.budget || recent {
+            if let Some(s) = settles {
+                settled.insert(name, s);
+            }
             continue;
         }
         // Gone either way, a concurrent prune having got there first.
         match fs::remove_dir_all(entry) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {}
-            _ => {
-                total -= size;
-                settled.remove(&name);
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                if let Some(s) = settles {
+                    settled.insert(name, s);
+                }
             }
+            _ => total -= size,
         }
     }
     if settled != index {
         write_index(&index_path, &settled);
     }
+}
+
+/// Whether `time` is at least `long` ago. A time ahead of the clock is not.
+fn idle_for(time: SystemTime, long: Duration) -> bool {
+    SystemTime::now()
+        .duration_since(time)
+        .is_ok_and(|ago| ago >= long)
 }
 
 /// `time` in whole seconds since the epoch.
@@ -482,6 +529,7 @@ mod tests {
                 keep,
                 guard: Duration::from_secs(60 * 60),
                 every: Duration::ZERO,
+                settle: Duration::from_secs(60 * 60),
             },
         )
     }
@@ -684,27 +732,83 @@ mod tests {
         assert!(old.exists(), "pruned too recently to prune again");
     }
 
-    /// A settled entry's size comes from the index, not its files: one the
-    /// index says is large is pruned though its files are small.
+    /// A settled entry's size comes from the index, not its files: a newer
+    /// one the index says is large pushes an older one out, though the files
+    /// of both are small.
     #[test]
     fn a_settled_entry_is_measured_once() {
         let root = tempfile::tempdir().unwrap();
-        let old = entry(root.path(), 1, 10, OLD);
-        let h = history(root.path(), 100, 0);
+        let older = entry(root.path(), 1, 10, OLD);
+        entry(root.path(), 2, 10, OLD);
+        // Kept whatever their size: this first task's own entry, and entry 2.
+        let h = history(root.path(), 100, 2);
         h.begin(&id(99));
         next(&h);
-        assert!(old.exists(), "under budget");
+        assert!(older.exists(), "under budget");
         let index = fs::read_to_string(root.path().join(SIZES_INDEX)).unwrap();
-        assert!(index.starts_with(&format!("{} 10 ", name(1))), "{index}");
-        fs::write(
-            root.path().join(SIZES_INDEX),
-            index.replace(" 10 ", " 1000 "),
-        )
-        .unwrap();
+        let inflated = index.replace(&format!("{} 10 ", name(2)), &format!("{} 1000 ", name(2)));
+        assert_ne!(index, inflated, "{index}");
+        fs::write(root.path().join(SIZES_INDEX), inflated).unwrap();
         let other = History::at(root.path().to_path_buf(), h.retention);
         other.begin(&id(98));
         next(&other);
-        assert!(!old.exists(), "the index's size is the one counted");
+        assert!(!older.exists(), "the index's size is the one counted");
+    }
+
+    /// An entry is never removed on the index's word: one written to in place
+    /// since it settled is measured again and found live.
+    #[test]
+    fn a_settled_entry_written_to_again_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let settled = entry(root.path(), 1, 10, OLD);
+        let h = history(root.path(), 100, 0);
+        h.begin(&id(99));
+        next(&h);
+        let log = bazel_dir(&settled, 1).join(bazel::execlog::FILE_NAME);
+        let file = fs::File::options().write(true).open(&log).unwrap();
+        file.set_len(1000).unwrap();
+        file.set_modified(SystemTime::now()).unwrap();
+        // Kept whatever its size, with the first task's own entry, so the
+        // settled one is what a prune would remove.
+        entry(root.path(), 2, 1000, OLD);
+        let mut retention = h.retention;
+        retention.keep = 2;
+        let other = History::at(root.path().to_path_buf(), retention);
+        other.begin(&id(98));
+        next(&other);
+        assert!(settled.exists(), "written within the guard");
+    }
+
+    /// An entry idle past the guard but not yet `settle` is measured each
+    /// time, not indexed.
+    #[test]
+    fn an_entry_settles_only_once_idle_long_enough() {
+        let root = tempfile::tempdir().unwrap();
+        entry(root.path(), 1, 10, OLD);
+        let mut h = history(root.path(), 100, 0);
+        h.retention.settle = Duration::from_secs(24 * 60 * 60);
+        h.begin(&id(99));
+        next(&h);
+        let index = fs::read_to_string(root.path().join(SIZES_INDEX)).unwrap_or_default();
+        assert!(!index.contains(&name(1)), "{index}");
+    }
+
+    /// A marker ahead of the clock, as after a clock set back, has expired.
+    #[test]
+    fn a_marker_from_the_future_does_not_stop_pruning() {
+        let root = tempfile::tempdir().unwrap();
+        let old = entry(root.path(), 1, 1000, OLD);
+        let marker = root.path().join(PRUNED_MARKER);
+        fs::write(&marker, b"").unwrap();
+        fs::File::open(&marker)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(365 * 24 * 60 * 60))
+            .unwrap();
+        let mut h = history(root.path(), 1, 0);
+        h.retention.every = Duration::from_secs(60 * 60);
+        h.begin(&id(99));
+        next(&h);
+        assert!(!old.exists());
     }
 
     /// A further Bazel invocation of a settled entry makes a new folder under
