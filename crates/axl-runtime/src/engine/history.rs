@@ -69,7 +69,7 @@ pub struct Retention {
     pub keep: usize,
     /// An invocation written to this recently is never pruned.
     pub guard: Duration,
-    /// A prune this recent, by any task, makes another wait.
+    /// A task skips the prune when any task pruned this recently.
     pub every: Duration,
     /// An invocation idle this long has settled: its size is kept rather than
     /// measured again. Far longer than `guard`, so a build that went quiet and
@@ -259,17 +259,19 @@ struct Settled {
 /// alone. Best effort: an entry that cannot be read or removed is skipped.
 ///
 /// It runs beside the build and is not waited for: the CLI may exit midway,
-/// which leaves only a valid history: part of an entry it was removing,
-/// which the next prune finishes, or an index's temp file, which a prune
-/// removes once it is older than the guard.
+/// which leaves only a valid history: part of an entry it was removing, whose
+/// removals make it look recent, so a prune finishes it once it is older than
+/// the guard; or an index's temp file, removed the same way.
 ///
 /// An invocation nothing has written to within [`Retention::settle`] has
 /// settled: its size is kept in the [`SIZES_INDEX`] and not measured again
 /// while its `bazel` folder, which a further Bazel invocation of it updates,
 /// is no newer. So a prune walks only new and live entries, and stats each
-/// settled one. Nothing is removed on the index's word: an entry the budget
-/// would remove is measured first, so one written to since it settled is
-/// seen to be live. The index is a cache, rebuilt whenever it is missing or
+/// settled one. An entry the budget would remove is measured first, so one
+/// written to since it settled is seen to be live and its own size is never
+/// taken on the index's word; the sizes of the newer entries counted before
+/// it are, so a file removed by hand from a settled entry leaves the total
+/// high until the entry is measured again. The index is a cache, rebuilt whenever it is missing or
 /// unreadable, and a prune running elsewhere at once costs at most a walk.
 fn prune(root: &Path, retention: Retention, current: &Path) {
     let Ok(read) = fs::read_dir(root) else {
@@ -346,11 +348,8 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
         }
         // Gone either way, a concurrent prune having got there first.
         match fs::remove_dir_all(entry) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                if let Some(s) = settles {
-                    settled.insert(name, s);
-                }
-            }
+            // Part of it may be gone, so it is measured again next time.
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {}
             _ => total -= size,
         }
     }
@@ -460,10 +459,11 @@ fn is_invocation_name(name: &std::ffi::OsStr) -> bool {
 }
 
 /// The bytes under `dir` and the latest modification time in it, of a file or
-/// a directory: a folder a build has just made counts before its first file.
+/// a directory, `dir` included: a folder a build has just made counts before
+/// its first file, as does an entry another task is still creating.
 fn tree_size_and_newest(dir: &Path) -> (u64, Option<SystemTime>) {
     let mut size = 0;
-    let mut newest: Option<SystemTime> = None;
+    let mut newest: Option<SystemTime> = fs::metadata(dir).and_then(|m| m.modified()).ok();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(read) = fs::read_dir(&dir) else {
@@ -719,7 +719,7 @@ mod tests {
 
     /// A prune by any task within `every` makes the next one wait.
     #[test]
-    fn a_recent_prune_makes_the_next_wait() {
+    fn a_recent_prune_makes_the_next_skip() {
         let root = tempfile::tempdir().unwrap();
         let mut h = history(root.path(), 1, 0);
         h.retention.every = Duration::from_secs(60 * 60);
@@ -858,5 +858,46 @@ mod tests {
                 index.split(' ').nth(2).unwrap().trim()
             )
         );
+    }
+
+    /// An entry the budget would remove is measured first, and one smaller
+    /// than the index says is kept when its real size fits.
+    #[test]
+    fn a_removal_is_decided_on_a_fresh_measure() {
+        let root = tempfile::tempdir().unwrap();
+        let settled = entry(root.path(), 1, 10, OLD);
+        let h = history(root.path(), 100, 0);
+        h.begin(&id(99));
+        next(&h);
+        let index = fs::read_to_string(root.path().join(SIZES_INDEX)).unwrap();
+        let inflated = index.replace(&format!("{} 10 ", name(1)), &format!("{} 1000 ", name(1)));
+        assert_ne!(index, inflated, "{index}");
+        fs::write(root.path().join(SIZES_INDEX), inflated).unwrap();
+        let other = History::at(root.path().to_path_buf(), h.retention);
+        other.begin(&id(98));
+        next(&other);
+        assert!(settled.exists(), "10 bytes fit the budget");
+    }
+
+    /// An index's temp file left by a cut-off write goes once past the guard.
+    #[test]
+    fn a_stale_index_temp_file_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let (stale, fresh) = (
+            root.path().join(format!("{SIZES_INDEX}.a.tmp")),
+            root.path().join(format!("{SIZES_INDEX}.b.tmp")),
+        );
+        for path in [&stale, &fresh] {
+            fs::write(path, b"").unwrap();
+        }
+        fs::File::open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - OLD)
+            .unwrap();
+        let h = history(root.path(), 100, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(!stale.exists());
+        assert!(fresh.exists(), "may be a write still in flight");
     }
 }
