@@ -377,7 +377,12 @@ fn poll_read(path: &str, timeout: Duration, expected_len: Option<u64>) -> Option
     }
 }
 
-fn create_temp_dir(base: &std::path::Path, prefix: &str) -> std::io::Result<std::path::PathBuf> {
+/// A new directory under `base`, named `prefix` and a fresh UUID, readable by
+/// this user alone.
+pub(crate) fn create_temp_dir(
+    base: &std::path::Path,
+    prefix: &str,
+) -> std::io::Result<std::path::PathBuf> {
     fs::create_dir_all(base)?;
     for _ in 0..100 {
         let dir = base.join(format!("{}{}", prefix, uuid::Uuid::new_v4()));

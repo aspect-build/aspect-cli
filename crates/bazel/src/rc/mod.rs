@@ -1256,30 +1256,42 @@ fn flag_value_list(opts: &[RcOption], name: &str) -> Vec<String> {
     flag_values_in(&tokens, name)
 }
 
-/// Tri-state of a boolean `--name` option: `Some(true)` for `--name` /
-/// `--name=true|1|yes`, `Some(false)` for `--noname` / `--name=false|0|no`,
-/// `None` if unset. Last occurrence wins.
+/// A boolean value as Bazel's converter reads it, ignoring case: `true`, `t`,
+/// `yes`, `y`, `1` or `false`, `f`, `no`, `n`, `0`; `None` for anything else.
+pub fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "t" | "yes" | "y" | "1" => Some(true),
+        "false" | "f" | "no" | "n" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// What `token` says of the boolean-style option `name` (`--name`): `None`
+/// for a token about something else, `Some(Ok(true))` for the bare flag,
+/// `Some(Ok(false))` for `--noname`, and for `--name=value` [`parse_bool`]'s
+/// answer, or `Some(Err(value))` for a value that is not a boolean, which the
+/// caller reads as its option does (a path, say, or `auto`).
+pub fn bool_token<'a>(token: &'a str, name: &str) -> Option<Result<bool, &'a str>> {
+    let bare = name.strip_prefix("--").unwrap_or(name);
+    if token == name {
+        return Some(Ok(true));
+    }
+    if token.strip_prefix("--no") == Some(bare) {
+        return Some(Ok(false));
+    }
+    let value = token.strip_prefix(name)?.strip_prefix('=')?;
+    Some(parse_bool(value).ok_or(value))
+}
+
+/// Tri-state of a boolean `--name` option: `Some(true)` for `--name` or a true
+/// value, `Some(false)` for `--noname` or a false value (as [`parse_bool`]
+/// reads one), `None` if unset. Last occurrence wins; a value that is not a
+/// boolean is passed over.
 #[cfg(any(test, feature = "starlark"))]
 fn last_bool_flag(opts: &[RcOption], name: &str) -> Option<bool> {
-    let bare = name.strip_prefix("--").unwrap_or(name);
-    let negated = format!("--no{bare}");
-    let eq_prefix = format!("{name}=");
-    let mut state = None;
-    for opt in opts {
-        let v = opt.value.as_str();
-        if v == name {
-            state = Some(true);
-        } else if v == negated {
-            state = Some(false);
-        } else if let Some(rest) = v.strip_prefix(&eq_prefix) {
-            match rest {
-                "true" | "1" | "yes" => state = Some(true),
-                "false" | "0" | "no" => state = Some(false),
-                _ => {}
-            }
-        }
-    }
-    state
+    opts.iter()
+        .filter_map(|opt| bool_token(&opt.value, name).and_then(Result::ok))
+        .last()
 }
 
 /// `RcOption` unpacks from a plain `str` or a `(flag, version_constraint)` tuple,
@@ -1365,6 +1377,8 @@ fn runcommand_methods(registry: &mut starlark::environment::MethodsBuilder) {
 
     /// The tri-state of boolean `--name` for `command`: `True` for `--name` /
     /// `--name=true`, `False` for `--noname` / `--name=false`, `None` if unset.
+    /// A value is read as Bazel reads one, ignoring case: `true`, `t`, `yes`,
+    /// `y`, `1` and their `false` counterparts.
     /// The caller owns the default when `None` (e.g. `--enable_bzlmod` defaults
     /// on for Bazel 7+).
     fn bool_flag<'v>(
@@ -1928,6 +1942,33 @@ mod runcommand_tests {
     fn bool_flag_last_occurrence_wins() {
         let o = opts(&["--enable_bzlmod", "--noenable_bzlmod"]);
         assert_eq!(last_bool_flag(&o, "--enable_bzlmod"), Some(false));
+    }
+
+    #[test]
+    fn a_boolean_is_read_as_bazels_converter_reads_it() {
+        for (value, want) in [
+            ("true", Some(true)),
+            ("T", Some(true)),
+            ("Yes", Some(true)),
+            ("y", Some(true)),
+            ("1", Some(true)),
+            ("FALSE", Some(false)),
+            ("f", Some(false)),
+            ("no", Some(false)),
+            ("N", Some(false)),
+            ("0", Some(false)),
+            ("auto", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_bool(value), want, "{value:?}");
+        }
+        let name = "--enable_bzlmod";
+        assert_eq!(bool_token("--enable_bzlmod", name), Some(Ok(true)));
+        assert_eq!(bool_token("--noenable_bzlmod", name), Some(Ok(false)));
+        assert_eq!(bool_token("--enable_bzlmod=N", name), Some(Ok(false)));
+        assert_eq!(bool_token("--enable_bzlmod=auto", name), Some(Err("auto")));
+        assert_eq!(bool_token("--enable_bzlmod_extra", name), None);
+        assert_eq!(bool_token("--jobs=4", name), None);
     }
 
     #[test]

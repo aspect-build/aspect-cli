@@ -24,6 +24,7 @@ starlark_map = "0.14.2"
 pagable = "0.4.1"
 
 anyhow = "1.0.98"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 semver = "1"
 thiserror = "2.0.12"

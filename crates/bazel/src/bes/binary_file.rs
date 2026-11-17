@@ -46,14 +46,8 @@ pub fn requested_path(
     directory: Option<&str>,
     workspace: Option<&Path>,
 ) -> Option<PathBuf> {
-    let path = crate::rc::requested_path(flags, FLAG, verb, None)?;
-    if path.is_absolute() {
-        return Some(path);
-    }
-    match workspace {
-        Some(root) => Some(root.join(path)),
-        None => crate::rc::requested_path(flags, FLAG, verb, directory),
-    }
+    let base = workspace.and_then(Path::to_str).or(directory);
+    crate::rc::requested_path(flags, FLAG, verb, base)
 }
 
 /// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it

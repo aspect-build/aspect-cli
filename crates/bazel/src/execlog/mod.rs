@@ -61,12 +61,8 @@ pub fn requested_path(
     let flags = with_current_name(flags);
     // Bazel 10 reads the option as a boolean too, so its `--no` form turns
     // off a path set earlier.
-    let negated = format!("--no{}", &COMPACT_FILE_FLAG[2..]);
-    let valued = format!("{COMPACT_FILE_FLAG}=");
     let off = crate::rc::last_word(&flags, verb, |token| {
-        (token == negated)
-            .then_some(true)
-            .or_else(|| (token == COMPACT_FILE_FLAG || token.starts_with(&valued)).then_some(false))
+        crate::rc::bool_token(token, COMPACT_FILE_FLAG).map(|word| word == Ok(false))
     });
     if off == Some(true) {
         return None;
@@ -75,10 +71,7 @@ pub fn requested_path(
     let text = path.to_string_lossy();
     // Bazel 10 reads a boolean here (off, or stream it to remote storage),
     // which names no file.
-    if matches!(
-        text.to_ascii_lowercase().as_str(),
-        "true" | "t" | "yes" | "y" | "1" | "false" | "f" | "no" | "n" | "0"
-    ) {
+    if crate::rc::parse_bool(&text).is_some() {
         return None;
     }
     let path = match workspace {
@@ -97,12 +90,18 @@ pub fn requested_path(
 /// take as [`COMPACT_FILE_FLAG`].
 const OLD_COMPACT_FILE_FLAG: &str = "--experimental_execution_log_compact_file";
 
+/// Whether `version` knows [`COMPACT_FILE_FLAG`] by that name: 7.4 and later,
+/// or a version that cannot be told. As the rest of the CLI gates by version,
+/// a prerelease of 7.4 knows it.
+pub fn knows_compact_file_flag(version: Option<&semver::Version>) -> bool {
+    crate::rc::constraint_matches(">=7.4.0", version).unwrap_or(true)
+}
+
 /// The compact log's flag as `version` knows it: [`COMPACT_FILE_FLAG`] from
 /// 7.4, or for a version that cannot be told, and the old name before. The
 /// two name one option, so either outranks a caller's value under the other.
 pub fn compact_file_flag(version: Option<&semver::Version>) -> &'static str {
-    // As the rest of the CLI gates by version: a prerelease of 7.4 knows it.
-    if crate::rc::constraint_matches(">=7.4.0", version).unwrap_or(true) {
+    if knows_compact_file_flag(version) {
         COMPACT_FILE_FLAG
     } else {
         OLD_COMPACT_FILE_FLAG
@@ -123,16 +122,9 @@ fn with_current_name(flags: &[String]) -> Vec<String> {
     flags
         .iter()
         .map(|flag| {
-            let payload_at = if crate::rc::is_default_override(flag) {
-                flag.find(":")
-                    .and_then(|colon| flag[colon..].find('=').map(|eq| colon + eq + 1))
-            } else {
-                Some(0)
-            };
-            let Some(at) = payload_at else {
-                return flag.clone();
-            };
-            let (head, option) = flag.split_at(at);
+            // The payload is a suffix of the token, so the wrapper is kept.
+            let option = crate::rc::override_payload(flag).unwrap_or(flag);
+            let head = &flag[..flag.len() - option.len()];
             for (old, new) in &renames {
                 if let Some(rest) = option.strip_prefix(old.as_str())
                     && (rest.is_empty() || rest.starts_with('='))
@@ -155,19 +147,9 @@ const OTHER_FORMATS: [&str; 2] = ["--execution_log_binary_file", "--execution_lo
 /// form does not.
 pub fn other_format(flags: &[String], verb: &str) -> bool {
     OTHER_FORMATS.iter().any(|name| {
-        let negated = format!("--no{}", &name[2..]);
+        // A value that is not a boolean is a path, which is a format.
         crate::rc::last_word(flags, verb, |token| {
-            if token == *name {
-                Some(true)
-            } else if token == negated {
-                Some(false)
-            } else {
-                let value = token.strip_prefix(name)?.strip_prefix('=')?;
-                Some(!matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "false" | "f" | "no" | "n" | "0"
-                ))
-            }
+            crate::rc::bool_token(token, name).map(|word| word.unwrap_or(true))
         }) == Some(true)
     })
 }

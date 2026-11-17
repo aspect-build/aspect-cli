@@ -984,9 +984,7 @@ fn execlog_demand(
 /// the history request is spelled with in an rc (see `exec_log_flags`), so an
 /// older Bazel records nothing either way.
 fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::Version>) -> bool {
-    // As the rest of the CLI gates by version: a prerelease of 7.4 knows it.
-    let knows_flag = bazel::rc::constraint_matches(">=7.4.0", version).unwrap_or(true);
-    asked || (recording && knows_flag)
+    asked || (recording && bazel::execlog::knows_compact_file_flag(version))
 }
 
 /// The workspace a Bazel command run in `directory` (the CLI's own cwd when
@@ -1006,9 +1004,8 @@ fn workspace_of(directory: Option<&str>) -> Option<PathBuf> {
 /// be made there. It is left in place, as Bazel may upload it after the
 /// client exits.
 fn private_temp_path() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("aspect-execlog-{}", uuid::Uuid::new_v4()));
-    match crate::engine::history::create_private_dir(&dir) {
-        Ok(()) => dir.join(bazel::execlog::FILE_NAME),
+    match crate::engine::std::fs::create_temp_dir(&std::env::temp_dir(), "aspect-execlog-") {
+        Ok(dir) => dir.join(bazel::execlog::FILE_NAME),
         Err(_) => std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4())),
     }
 }

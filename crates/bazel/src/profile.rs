@@ -29,13 +29,10 @@ pub fn file_name(requested: Option<&Path>) -> &'static str {
 /// the directory the command runs in; `None` for one when there is no
 /// workspace. See [`crate::rc::requested_path`] for empty and `~/` values.
 pub fn requested_path(flags: &[String], verb: &str, workspace: Option<&Path>) -> Option<PathBuf> {
-    let path = crate::rc::requested_home_path(flags, FLAG, verb, None)?;
-    if path.is_absolute() {
-        return Some(path);
-    }
-    // Bazel runs no command outside a workspace, so a root not found here is
-    // one this cannot name the profile's path in; the profile is left to Bazel.
-    workspace.map(|root| root.join(path))
+    // Bazel runs no command outside a workspace, so a relative path with no
+    // root to join is one this cannot name; the profile is left to Bazel.
+    crate::rc::requested_home_path(flags, FLAG, verb, workspace.and_then(Path::to_str))
+        .filter(|path| path.is_absolute())
 }
 
 /// The option that turns the profile on or off, under its name and the old
@@ -49,24 +46,12 @@ const GENERATE: [&str; 2] = [
 /// off is not given a `--profile`. Read as [`crate::rc::last_flag_value`]
 /// reads a value: a literal beats an rc entry, and the last of each wins.
 pub fn turned_off(flags: &[String], verb: &str) -> bool {
-    let value = |token: &str| -> Option<bool> {
-        let name = GENERATE.iter().find(|name| {
-            token
-                .strip_prefix(**name)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
-                || token.strip_prefix("--no") == Some(&name[2..])
-        })?;
-        if token == *name {
-            Some(true)
-        } else if token.starts_with("--no") {
-            Some(false)
-        } else {
-            let value = token.strip_prefix(*name)?.strip_prefix('=')?;
-            Some(!matches!(
-                value.to_ascii_lowercase().as_str(),
-                "false" | "f" | "no" | "n" | "0"
-            ))
-        }
+    // A value that is not a boolean is `auto`, which is on.
+    let value = |token: &str| {
+        GENERATE
+            .iter()
+            .find_map(|name| crate::rc::bool_token(token, name))
+            .map(|word| word.unwrap_or(true))
     };
     let on = crate::rc::last_word(flags, verb, value);
     on == Some(false)

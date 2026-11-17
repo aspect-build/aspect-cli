@@ -27,6 +27,7 @@ rust_library(
         "@crates//:arc-slice",
         "@crates//:base64",
         "@crates//:blake2",
+        "@crates//:chrono",
         "@crates//:derive_more",
         "@crates//:digest",
         "@crates//:dirs",
