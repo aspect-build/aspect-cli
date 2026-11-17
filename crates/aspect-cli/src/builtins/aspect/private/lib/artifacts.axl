@@ -906,13 +906,13 @@ _LogChannel = record(
 
 _PROFILE_ENRICHMENT = ["--generate_json_trace_profile", "--experimental_profile_include_target_label"]
 
-def profile_flags(rc, command: str, default_path: str, working_directory: str):
+def profile_flags(rc, command: str, default_path: str, workspace_root: str):
     """`(path, flags)` for uploading the trace profile of a `command` run under
     `rc`: where Bazel will write it, and the flags to append.
 
     A `--profile` the run already carries — from an rc file, `--bazel-flag`, or
     another feature such as Workflows — is kept, and its path is the one
-    uploaded; a relative one resolves against `working_directory`, as Bazel
+    uploaded; a relative one resolves against `workspace_root`, as Bazel
     resolves it. Only when none is set is `--profile=default_path` added.
 
     `rc.flag_value` reads the option model, which covers `common` by name, so a
@@ -926,8 +926,8 @@ def profile_flags(rc, command: str, default_path: str, working_directory: str):
     if not path:
         return (default_path, _PROFILE_ENRICHMENT + ["--profile=" + default_path])
     is_absolute = path.startswith("/") or path[1:3] in (":/", ":\\")
-    if not is_absolute and working_directory:
-        path = working_directory.rstrip("/") + "/" + path
+    if not is_absolute and workspace_root:
+        path = workspace_root.rstrip("/") + "/" + path
     return (path, list(_PROFILE_ENRICHMENT))
 
 # Owner feature — co-located so it can bind closures to the private trait
@@ -992,7 +992,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
     profile = {"path": profile_path}
 
     def _profile_rc_flags(ctx, rc, command):
-        path, flags = profile_flags(rc, command, profile_path, ctx.std.env.current_dir())
+        path, flags = profile_flags(rc, command, profile_path, ctx.std.env.bazel_root_dir())
         profile["path"] = path
         return flags
 

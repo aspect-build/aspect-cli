@@ -60,9 +60,12 @@ impl WorkspaceEventStream {
     /// starts: the stream's own subscriber holds the ring from the first event.
     ///
     /// A file Bazel starts over is read on from the new one, and the `copies`
-    /// start over with it. A read error, or an event that does not decode,
+    /// start over with it. Once the stream is over they are written again from
+    /// Bazel's finished file, so a restart the reader missed cannot leave them
+    /// a mix of two attempts. A read error, or an event that does not decode,
     /// fails [`join`](Self::join), as does a copy that could not be written
-    /// whole, which costs only itself. Events are decoded only while a
+    /// whole, which costs only itself; an event that does not decode ends the
+    /// decoded stream there, and the file is still read to its end. Events are decoded only while a
     /// subscriber is left to receive them, so a log nobody reads is not
     /// validated past the point its readers let go.
     pub fn spawn(log: LogFile, gate: Gate, copies: Vec<String>) -> Self {
@@ -90,13 +93,20 @@ impl WorkspaceEventStream {
             };
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             let mut has_readers = true;
+            let mut undecodable = None;
             let read = (|| -> Result<(), WorkspaceEventError> {
                 loop {
                     match delimited::next_frame(&mut file, &mut buf) {
                         Ok(Some(header)) => {
                             if has_readers {
-                                let event = WorkspaceEvent::decode(&buf[..header.len])?;
-                                has_readers = sender.send(event).is_ok();
+                                match WorkspaceEvent::decode(&buf[..header.len]) {
+                                    Ok(event) => has_readers = sender.send(event).is_ok(),
+                                    Err(err) => {
+                                        has_readers = false;
+                                        sender.close()?;
+                                        undecodable = Some(err);
+                                    }
+                                }
                             }
                         }
                         // The end of the stream: between two events, or cut off
@@ -113,7 +123,13 @@ impl WorkspaceEventStream {
                 if has_readers {
                     sender.close()?;
                 }
-                Ok(())
+                let what = format!("copying '{}' again", file.inner.path().display());
+                let source = file.inner.rewound();
+                file.recopy(source, &what);
+                match undecodable {
+                    Some(err) => Err(err.into()),
+                    None => Ok(()),
+                }
             })();
             // Every copy is finished however reading ended; a reader error is
             // the one reported when both fail.
@@ -381,6 +397,62 @@ mod tests {
         assert_eq!(got.len(), 51);
         assert_eq!(got.last().unwrap(), "100");
         assert_eq!(std::fs::read(&copy).unwrap(), encoded([100]));
+    }
+
+    /// Follows a kept log with one copy, writing `first`, then after the reader
+    /// has had time to read it, `then` in its place. Returns the copy and how
+    /// the stream joined.
+    fn copy_after(first: Vec<u8>, then: Vec<u8>) -> (Vec<u8>, Result<(), WorkspaceEventError>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace_events.binpb");
+        let copy = dir.path().join("asked.log");
+        let (read_path, copy_path) = (path.clone(), copy.clone());
+        let joined = crate::testing::with_timeout(Duration::from_secs(10), move || {
+            let client = spawn_pid_holder();
+            let mut gate = PidPair {
+                client: client.id(),
+                server: None,
+            }
+            .gate();
+            gate.quiet = Duration::from_millis(300);
+            std::fs::write(&read_path, first).unwrap();
+            let mut stream = WorkspaceEventStream::spawn(
+                LogFile::Kept(read_path.clone()),
+                gate,
+                vec![copy_path.to_str().unwrap().to_owned()],
+            );
+            stream.seal();
+            std::thread::sleep(Duration::from_millis(500));
+            std::fs::write(&read_path, then).unwrap();
+            end(client);
+            stream.join()
+        })
+        .expect("the stream hung");
+        (std::fs::read(&copy).unwrap(), joined)
+    }
+
+    /// A restart the reader cannot see, because the new attempt is already
+    /// longer than what it read, still leaves the copy as Bazel's final file
+    /// rather than the old attempt with the new one's tail.
+    #[test]
+    fn a_missed_restart_leaves_the_copy_as_bazels_file() {
+        let (copy, joined) = copy_after(encoded(1..=20), encoded(100..=200));
+        assert!(joined.is_ok(), "{joined:?}");
+        assert_eq!(copy, encoded(100..=200));
+    }
+
+    /// An event that does not decode fails the stream, and the copy is still
+    /// the whole file.
+    #[test]
+    fn an_undecodable_log_is_still_copied_whole() {
+        let mut bytes = vec![4, 0xff, 0xff, 0xff, 0xff];
+        bytes.extend(encoded(2..=3));
+        let (copy, joined) = copy_after(bytes.clone(), bytes.clone());
+        assert!(
+            matches!(joined, Err(WorkspaceEventError::ProstDecode(_))),
+            "{joined:?}"
+        );
+        assert_eq!(copy, bytes);
     }
 
     /// A build that never writes the log leaves no earlier run's copy behind.

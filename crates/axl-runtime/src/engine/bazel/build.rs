@@ -989,6 +989,11 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
     asked || (recording && knows_flag)
 }
 
+/// The execution log formats other than the compact one; Bazel takes at most
+/// one of the three.
+const EXECUTION_LOG_BINARY_FLAG: &str = "--execution_log_binary_file";
+const EXECUTION_LOG_JSON_FLAG: &str = "--execution_log_json_file";
+
 /// This Bazel invocation's folder in the task invocation's history, created,
 /// or `None` when it cannot be, said once per run: a history that cannot be
 /// written never fails a build. Its logs go to the temp dir instead, where
@@ -1099,7 +1104,14 @@ impl Build {
             requested_execlog_path.is_some(),
             history_asked || history.records_every_build(),
         );
-        let recording = recording && rc_visible;
+        // Bazel refuses a build naming more than one log format, so a log
+        // only recorded is skipped beside the caller's binary or JSON one.
+        let other_format = [EXECUTION_LOG_BINARY_FLAG, EXECUTION_LOG_JSON_FLAG]
+            .iter()
+            .any(|flag| {
+                bazel::rc::last_flag_value(&flags, flag, verb).is_some_and(|v| !v.is_empty())
+            });
+        let recording = recording && rc_visible && !other_format;
 
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
@@ -1320,7 +1332,9 @@ impl Build {
             // consumer slower than the decoder only lengthens the `join()` inside
             // `wait()`. And that `wait()` releases every subscriber before joining, so
             // one nobody drains cannot park the reader past the end of the build.
-            let mut execlog_stream = match execlog_path {
+            // A log only recorded has nothing to read it, so no reader whose
+            // failure could fail the build.
+            let mut execlog_stream = match execlog_path.filter(|_| asked || execlog_telemetry) {
                 Some(path) => Some(ExecLogStream::spawn_with_file(
                     path,
                     pid,
@@ -2487,6 +2501,39 @@ Test = task(implementation = _impl)
             history.path(),
         );
         assert_eq!(std::fs::read_dir(history.path()).unwrap().count(), 0);
+    }
+
+    /// Bazel refuses a second log format, so a caller's JSON or binary log
+    /// leaves nothing recorded beside it.
+    #[cfg(unix)]
+    #[test]
+    fn a_recording_beside_another_log_format_is_skipped() {
+        for flag in ["--execution_log_json_file", "--execution_log_binary_file"] {
+            let history = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let script = format!(
+                r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--nogenerate_json_trace_profile", "{flag}={log}"],
+        execution_log = [bazel.execution_log.record()],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+                log = dir.path().join("exec.log").display(),
+            );
+            run_task_with_history(&script, history.path());
+            assert_eq!(
+                std::fs::read_dir(history.path()).unwrap().count(),
+                0,
+                "{flag}"
+            );
+        }
     }
 
     /// A `--profile` would turn profiling back on, so a caller who turned it

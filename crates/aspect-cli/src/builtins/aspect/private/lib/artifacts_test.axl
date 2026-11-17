@@ -12,8 +12,8 @@ def _eq(label, got, want):
 
 _OURS = "/tmp/abc.profile.gz"
 
-def _profile(ctx, flags, working_directory = "/ws"):
-    return profile_flags(ctx.bazel.new_rc(flags = flags), "build", _OURS, working_directory)
+def _profile(ctx, flags, workspace_root = "/ws"):
+    return profile_flags(ctx.bazel.new_rc(flags = flags), "build", _OURS, workspace_root)
 
 def _test_profile_flags(ctx):
     path, flags = _profile(ctx, ["--keep_going"])
@@ -26,7 +26,7 @@ def _test_profile_flags(ctx):
     _eq("set: none added", [f for f in flags if f.startswith("--profile")], [])
     _eq("set: still enriched", "--experimental_profile_include_target_label" in flags, True)
 
-    _eq("relative", _profile(ctx, ["--profile=out/p.gz"], "/ws/sub/")[0], "/ws/sub/out/p.gz")
+    _eq("relative to the workspace root", _profile(ctx, ["--profile=out/p.gz"], "/ws/")[0], "/ws/out/p.gz")
     _eq("windows absolute", _profile(ctx, ["--profile=C:\\t\\p.gz"])[0], "C:\\t\\p.gz")
 
 def _test_pending_testlogs(ctx):

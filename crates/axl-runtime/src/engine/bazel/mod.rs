@@ -1449,7 +1449,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// Bazel uploads it as a build tool log wherever a BES backend is wired.
     /// `record_every_build()` does the same for every build of the task.
     /// Recording needs the build's `rc`, since Bazel's own rc files could name
-    /// a log path no flag shows, and Bazel 7.4 or later. Without a history that
+    /// a log path no flag shows, and Bazel 7.4 or later, and is skipped beside
+    /// an `--execution_log_binary_file` or `--execution_log_json_file`, since
+    /// Bazel takes one format at a time. Without a history that
     /// can be written the log goes to a temp file, where Bazel still uploads it.
     fn record() -> anyhow::Result<ExecLogSink> {
         Ok(ExecLogSink::Record)
