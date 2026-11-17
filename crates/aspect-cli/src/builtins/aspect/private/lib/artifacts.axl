@@ -912,9 +912,10 @@ def profile_flags(rc, command: str, default_path: str, workspace_root: str, home
 
     A `--profile` the run already carries — from an rc file, `--bazel-flag`, or
     another feature such as Workflows — is kept, and its path is the one
-    uploaded. As Bazel resolves it, a leading `~/` is `home` and another
-    relative one is under `workspace_root`: the workspace of the CLI's working
-    directory, which is the build's unless it runs in another `directory`. Only when none is set is `--profile=default_path` added.
+    uploaded. As Bazel resolves it, every `~` in one starting `~/` is `home`,
+    and another relative one is under `workspace_root`: the workspace of the
+    CLI's working directory, which is the build's unless it runs in another
+    `directory`. Only when none is set is `--profile=default_path` added.
 
     `rc.flag_value` reads the option model, which covers `common` by name, so a
     `common`-scoped `--profile` is seen. One pair it answers differently from the
@@ -928,7 +929,7 @@ def profile_flags(rc, command: str, default_path: str, workspace_root: str, home
         return (default_path, _PROFILE_ENRICHMENT + ["--profile=" + default_path])
     is_absolute = path.startswith("/") or path[1:3] in (":/", ":\\")
     if path.startswith("~/") and home:
-        path = home.rstrip("/") + path[1:]
+        path = path.replace("~", home)
     elif not is_absolute and workspace_root:
         path = workspace_root.rstrip("/") + "/" + path
     return (path, list(_PROFILE_ENRICHMENT))

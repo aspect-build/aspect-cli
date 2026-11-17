@@ -1110,8 +1110,11 @@ pub fn requested_home_path(
         last_flag_value(args, name, command),
         directory,
         |path: &str| {
-            path.strip_prefix("~/")
-                .and_then(|rest| Some(user_home()?.join(rest)))
+            // As Bazel's converter does: every `~` in a path that starts `~/`.
+            path.starts_with("~/")
+                .then(user_home)
+                .flatten()
+                .map(|home| PathBuf::from(path.replace('~', &home.to_string_lossy())))
                 .unwrap_or_else(|| PathBuf::from(path))
         },
     )
@@ -2304,6 +2307,13 @@ mod tests {
         assert_eq!(
             requested_home_path(&args, "--profile", "build", Some("/elsewhere")),
             Some(home.join("p.gz"))
+        );
+        let every = vec!["--profile=~/a~b.gz".to_string()];
+        let home_text = home.to_string_lossy();
+        assert_eq!(
+            requested_home_path(&every, "--profile", "build", None),
+            Some(PathBuf::from(format!("{home_text}/a{home_text}b.gz"))),
+            "as Bazel's converter, every ~ in a path that starts ~/"
         );
         assert_eq!(
             requested_path(&args, "--profile", "build", Some("/elsewhere")),

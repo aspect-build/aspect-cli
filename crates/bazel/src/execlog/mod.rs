@@ -49,10 +49,12 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// which outranks that one (the option is single-valued), so the asked-for
 /// path is written as one of the [`copies`]. `%workspace%` stands for the
 /// workspace root, as Bazel expands it in this flag, and a boolean value
-/// names no file; see
-/// [`crate::rc::requested_path`] for how empty and relative values resolve.
+/// names no file. The option's old name, which Bazel still takes, is read as
+/// it. See [`crate::rc::requested_path`] for how empty and relative values
+/// resolve.
 pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    let path = crate::rc::requested_home_path(flags, COMPACT_FILE_FLAG, verb, None)?;
+    let flags = with_current_name(flags);
+    let path = crate::rc::requested_home_path(&flags, COMPACT_FILE_FLAG, verb, None)?;
     let text = path.to_string_lossy();
     // Bazel 10 reads a boolean here (off, or stream it to remote storage),
     // which names no file.
@@ -72,6 +74,28 @@ pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> 
         Some(dir) if path.is_relative() => Path::new(dir).join(path),
         _ => path,
     })
+}
+
+/// The name Bazel 7.1 to 7.3 knew the compact log by, which later ones still
+/// take as [`COMPACT_FILE_FLAG`].
+const OLD_COMPACT_FILE_FLAG: &str = "--experimental_execution_log_compact_file";
+
+/// `flags` with the compact log's old name spelled as its current one, on the
+/// command line and in `--default_override` payloads alike.
+fn with_current_name(flags: &[String]) -> Vec<String> {
+    let in_override = format!("={OLD_COMPACT_FILE_FLAG}");
+    flags
+        .iter()
+        .map(|flag| {
+            if let Some(rest) = flag.strip_prefix(OLD_COMPACT_FILE_FLAG) {
+                format!("{COMPACT_FILE_FLAG}{rest}")
+            } else if crate::rc::is_default_override(flag) && flag.contains(&in_override) {
+                flag.replacen(&in_override, &format!("={COMPACT_FILE_FLAG}"), 1)
+            } else {
+                flag.clone()
+            }
+        })
+        .collect()
 }
 
 /// The execution log formats other than the compact one.
@@ -225,6 +249,30 @@ mod tests {
         ] {
             assert_eq!(other_format(&flags(&line), "build"), other, "{line:?}");
         }
+    }
+
+    #[test]
+    fn the_old_name_is_read_as_the_current_one() {
+        let line = flags(&["--experimental_execution_log_compact_file=/tmp/old.zst"]);
+        assert_eq!(
+            requested_path(&line, "build", None),
+            Some(PathBuf::from("/tmp/old.zst"))
+        );
+        let rc = flags(&[
+            "--default_override=0:common=--experimental_execution_log_compact_file=/tmp/rc.zst",
+        ]);
+        assert_eq!(
+            requested_path(&rc, "build", None),
+            Some(PathBuf::from("/tmp/rc.zst"))
+        );
+        let both = flags(&[
+            "--execution_log_compact_file=/tmp/new.zst",
+            "--experimental_execution_log_compact_file=/tmp/old.zst",
+        ]);
+        assert_eq!(
+            requested_path(&both, "build", None),
+            Some(PathBuf::from("/tmp/old.zst"))
+        );
     }
 
     #[test]

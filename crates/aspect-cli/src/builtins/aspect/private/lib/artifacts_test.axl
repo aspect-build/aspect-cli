@@ -28,6 +28,7 @@ def _test_profile_flags(ctx):
 
     _eq("relative to the workspace root", _profile(ctx, ["--profile=out/p.gz"], "/ws/")[0], "/ws/out/p.gz")
     _eq("home", _profile(ctx, ["--profile=~/p.gz"])[0], "/home/u/p.gz")
+    _eq("every ~ is home", _profile(ctx, ["--profile=~/a~b.gz"])[0], "/home/u/a/home/ub.gz")
     _eq("windows absolute", _profile(ctx, ["--profile=C:\\t\\p.gz"])[0], "C:\\t\\p.gz")
 
 def _test_pending_testlogs(ctx):
