@@ -1279,7 +1279,7 @@ impl Build {
             };
             cmd.arg(format!(
                 "{}={}",
-                bazel::execlog::COMPACT_FILE_FLAG,
+                bazel::execlog::compact_file_flag(version.as_ref()),
                 path.display()
             ));
             compact_paths =

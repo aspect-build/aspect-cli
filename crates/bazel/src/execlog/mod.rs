@@ -80,6 +80,18 @@ pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> 
 /// take as [`COMPACT_FILE_FLAG`].
 const OLD_COMPACT_FILE_FLAG: &str = "--experimental_execution_log_compact_file";
 
+/// The compact log's flag as `version` knows it: [`COMPACT_FILE_FLAG`] from
+/// 7.4, or for a version that cannot be told, and the old name before. The
+/// two name one option, so either outranks a caller's value under the other.
+pub fn compact_file_flag(version: Option<&semver::Version>) -> &'static str {
+    // As the rest of the CLI gates by version: a prerelease of 7.4 knows it.
+    if crate::rc::constraint_matches(">=7.4.0", version).unwrap_or(true) {
+        COMPACT_FILE_FLAG
+    } else {
+        OLD_COMPACT_FILE_FLAG
+    }
+}
+
 /// `flags` with the compact log's old name spelled as its current one, on the
 /// command line and in `--default_override` payloads alike.
 fn with_current_name(flags: &[String]) -> Vec<String> {
@@ -249,6 +261,15 @@ mod tests {
         ] {
             assert_eq!(other_format(&flags(&line), "build"), other, "{line:?}");
         }
+    }
+
+    #[test]
+    fn the_flag_is_spelled_as_the_version_knows_it() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        assert_eq!(compact_file_flag(Some(&v("7.3.2"))), OLD_COMPACT_FILE_FLAG);
+        assert_eq!(compact_file_flag(Some(&v("7.4.0"))), COMPACT_FILE_FLAG);
+        assert_eq!(compact_file_flag(Some(&v("8.1.0"))), COMPACT_FILE_FLAG);
+        assert_eq!(compact_file_flag(None), COMPACT_FILE_FLAG);
     }
 
     #[test]
