@@ -44,7 +44,7 @@ message the task ended on, so no surface is left on "running".
 
 load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation", "bazel_rc")
 load("./ansi.axl", "ansi")
-load("./environment.axl", "color_enabled", "detect_ci", "feature_logger")
+load("./environment.axl", "detect_ci", "feature_logger")
 load("./health_check.axl", "HealthCheckTrait", "run_health_checks")
 load("./runner_job_history.axl", "append_runner_job_history")
 
@@ -741,8 +741,10 @@ def _emit_bk_phase_section(ctx, phase, progress_styles):
 def _phase_line_context(ctx: TaskContext, phase: Phase) -> dict:
     """The `title`, `emoji`, `highlight_style` and `highlight_reset` keys of a
     `phase` or `progress` render for `phase`; `highlight_reset` is empty when
-    there is no highlight to close."""
-    highlight = ansi.highlight_style(ctx.std, color_enabled(ctx.std))
+    there is no highlight to close. Color follows `ctx.console.color`, the same
+    decision as the runtime's header and verdict, since all of them print to
+    stderr."""
+    highlight = ansi.highlight_style(ctx.std, ctx.console.color)
     return {
         "title": phase.display_name or _titlecase_phase(phase.name),
         "emoji": phase.emoji,

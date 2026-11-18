@@ -1,17 +1,25 @@
 """Console feature: the lines Aspect prints around a task in the terminal.
 
-The terminal is a status surface like the CI ones and takes the same two args.
-`template_preset` picks a built-in layout and `templates` overrides single
-slots on top of it, flat or inside a per-task-kind block:
+The terminal is a status surface like the CI ones and takes the same four
+args. `template_preset` picks a built-in layout and `templates` overrides
+single slots on top of it for every task; `task_presets` and `task_templates`
+do the same for one task, keyed by task kind ("lint") or command path
+("worktree add"):
 
     load("@aspect//feature/console.axl", "Console")
 
     def config(ctx):
         ctx.features[Console].args.template_preset = "compact"
-        ctx.features[Console].args.templates = {
-            "header": "▶ {{ label }}",
+        ctx.features[Console].args.templates = {"header": "▶ {{ label }}"}
+        ctx.features[Console].args.task_presets = {"worktree add": "silent"}
+        ctx.features[Console].args.task_templates = {
             "lint": {"verdict": "{{ glyph }} lint {{ verb }}{{ timing }}"},
         }
+
+A task with its own preset starts from it alone, without `templates`;
+`task_templates` beat everything else, a command path's over its kind's. A
+`template_preset` typed on the command line applies to every task, over
+`task_presets`.
 
 Or for one run: `aspect test --console:template-preset=compact //...`.
 
@@ -20,6 +28,8 @@ runtime reads these args after `config.axl` runs and before the header prints.
 Disabling the feature leaves the `full` layout in place. Bazel's own output,
 warnings and errors, and stdout are never templated.
 """
+
+load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 
 def _console_impl(ctx: FeatureContext):
     pass
@@ -38,7 +48,7 @@ Console = feature(
                           "on one line with no phase breakdown), or 'silent' (nothing; the exit " +
                           "code and the task's own output carry the result). On Buildkite the " +
                           "header, phase and verdict lines, and sections a task opens itself, " +
-                          "start log sections, so they print under every preset.",
+                          "start log sections, so they print under every preset. " + TASK_PRESET_PRECEDENCE,
         ),
         "templates": args.custom(
             dict,
@@ -52,12 +62,12 @@ Console = feature(
                           "--task:timing-summary), and \"section\" (`icon`, `title`), the title of " +
                           "a Buildkite section a task opens itself, such as the Workflows runner " +
                           "metadata. Every slot also gets `buildkite` and `task` (`kind`, `group`, " +
-                          "`name`, `path`); all but \"section\" get `highlight_style` and " +
-                          "`highlight_reset`, the ANSI codes around the line's highlight (empty " +
-                          "when color is off). A task-kind key maps to a dict of slots for that " +
-                          "task alone, e.g. {\"lint\": {\"verdict\": ...}}, and is ignored where " +
-                          "no task has that kind. An empty template prints nothing. A template " +
-                          "that fails to render falls back to the preset's template for that slot.",
+                          "`name`, `path`); all but \"section\", and a \"progress\" update that " +
+                          "names no phase, get `highlight_style` and `highlight_reset`, the ANSI " +
+                          "codes around the line's highlight (empty when color is off). They apply to every task that renders with " +
+                          "`template_preset` (not one with its own `task_presets` entry); one task's own go in " +
+                          "`task_templates`. An empty template prints nothing. A template that " +
+                          "fails to render falls back to the preset's template for that slot.",
         ),
-    },
+    } | task_template_args("silent", "verdict"),
 )

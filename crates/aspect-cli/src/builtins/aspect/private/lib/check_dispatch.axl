@@ -126,7 +126,7 @@ def kind_for_task(task_kind):
     """
     return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
 
-# Keys a `templates` dict may nest an override under, as opposed to the flat
+# Keys a preset's templates may nest an override under, as opposed to the flat
 # slot keys that address every kind at once. Both a task kind ("lint") and a
 # renderer kind ("lint_results") are addressable: a `details` template is
 # written against one renderer's data, while a task kind distinguishes `build`
@@ -135,8 +135,8 @@ TEMPLATE_SCOPE_KEYS = sorted(
     list(_TASK_KIND_DEFAULTS.keys()) + list(_TASK_KIND_DEFAULTS.values()),
 )
 
-# Slots the per-kind renderers consume. Valid as a flat key or inside a
-# per-kind block; anything else in a `templates` dict is inert.
+# Slots the per-kind renderers consume, the only keys a config's `templates`
+# and `task_templates` entries take.
 RENDERER_TEMPLATE_SLOTS = ["details", "summary", "title"]
 
 # The PR/MR summary comment's only slot, owned by the comment features. Listed
@@ -165,7 +165,8 @@ def resolve_templates(templates, task_kind, base = None, renderer_kind = ""):
     """Narrow template overrides to the flat {"title", "summary", "details"} dict
     the per-kind renderers accept.
 
-    Three shapes are supported within a layer, and they compose:
+    Presets are authored in three shapes, which compose within a layer; a
+    config's own layer arrives flat from `template_presets.resolve`:
 
       {"summary": ...}                      — applies to every task
       {"format_results": {"details": ...}}  — every task the format renderer draws
@@ -184,8 +185,8 @@ def resolve_templates(templates, task_kind, base = None, renderer_kind = ""):
     task whose kind is not one of the built-in seven — a `format.alias` such as
     `buildifier`, or any custom task — leaving it on the built-in body.
 
-    `base` is an optional lower-precedence layer of the same shape — the
-    templates contributed by the selected preset — which `templates` overrides.
+    `base` is an optional lower-precedence layer — the templates contributed by
+    the selected preset — which `templates` overrides.
     Resolving the layers in order rather than merging them first is what keeps
     the levels of precedence distinct:
 

@@ -1,0 +1,37 @@
+"""The `task_presets` and `task_templates` args a templated surface declares,
+and how they meet `template_preset`.
+
+Every surface that renders per task (the `Console` feature and the per-task CI
+surfaces) takes them with the same meaning, so they are declared here once.
+Kept apart from `template_presets` so `Console`, which the runtime resolves,
+loads no CI renderers.
+"""
+
+# How `template_preset` meets `task_presets`, for `template_preset`'s help on
+# every surface that also takes `task_presets`.
+TASK_PRESET_PRECEDENCE = ("A task named in `task_presets` uses its own preset instead, unless this " +
+                          "is set on the command line, which applies it to every task.")
+
+def task_template_args(preset_example: str, slot_example: str) -> dict:
+    """The two args, for splatting into `args = {...}`. The examples name a
+    preset and a slot of the declaring surface, for its help text."""
+    return {
+        "task_presets": args.custom(
+            dict,
+            default = {},
+            description = ("A preset for one task, keyed by task kind (\"lint\") or command path " +
+                           "(\"worktree add\"), e.g. {\"worktree add\": \"%s\"}. That task starts " +
+                           "from this preset instead of `template_preset`, without `templates`, " +
+                           "unless `template_preset` is set on the command line. " +
+                           "An entry naming no task here is ignored.") % preset_example,
+        ),
+        "task_templates": args.custom(
+            dict,
+            default = {},
+            description = ("Jinja2 overrides for one task, keyed by task kind (\"lint\") or command " +
+                           "path (\"worktree add\"), each a dict of slot → template like " +
+                           "`templates`, e.g. {\"lint\": {\"%s\": ...}}. They beat `templates` and " +
+                           "the task's preset; a command-path entry beats a kind entry. An entry " +
+                           "naming no task here is ignored.") % slot_example,
+        ),
+    }

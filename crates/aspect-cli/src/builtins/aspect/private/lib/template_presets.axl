@@ -40,12 +40,41 @@ preset render the original layout exactly.
 renderer, so it governs the check-run, commit-status and annotation surfaces,
 while the PR comment and MR note keep their built-in `body`.
 
+A config's own layer reaches `resolve_templates` flat. On the per-task surfaces
+(check runs, commit statuses, annotations) it comes from four feature args,
+each holding one kind of value:
+
+    template_preset  the preset every task starts from
+    templates        slot → template, for every task
+    task_presets     task → preset name
+    task_templates   task → {slot → template}
+
+A task is keyed by its kind ("lint") or its command path ("worktree add"),
+the path winning. A task with its own preset starts from that preset alone,
+without `templates`; `task_templates` beat both. A `template_preset` typed on
+the command line applies to every task, over `task_presets`. `config`
+validates the four when the feature loads and `resolve` applies them per
+task. The comment surfaces aggregate every task, so they take only
+`template_preset` and `templates`, which `comment_body` validates.
+
+Presets themselves keep the scoped shape `resolve_templates` documents,
+because a `details` template is written against one renderer's data.
+
 Author a preset's templates as new strings, never by extracting fragments out
 of the built-in template constants — live configs `.replace()` against those
 behind their own load-time drift guards.
 """
 
-load("./check_dispatch.axl", "COMMENT_TEMPLATE_SLOT", "RENDERER_TEMPLATE_SLOTS", "TEMPLATE_SCOPE_KEYS")
+load(
+    "./check_dispatch.axl",
+    "COMMENT_TEMPLATE_SLOT",
+    "RENDERERS",
+    "RENDERER_TEMPLATE_SLOTS",
+    "TEMPLATE_SCOPE_KEYS",
+    "kind_for_task",
+    "resolve_templates",
+)
+load("./task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 load("./template_preset_default.axl", "DEFAULT_TEMPLATES")
 
 TemplatePreset = record(
@@ -72,13 +101,22 @@ _PRESETS = {
 
 _DEFAULT = "default"
 
-def _slot_errors(preset_name: str, slot: str, template) -> list[str]:
+def _template_errors(label: str, template, slot: str = "") -> list[str]:
+    """Errors in one template value, named by `label`. `""` is refused: the
+    renderers read `templates.get(slot) or BUILT_IN`, so it would yield the
+    built-in it meant to replace. A `title` can't be blanked at all: a blank
+    render falls back to the built-in layout, as GitHub requires a title."""
     if type(template) != "string":
-        return ["preset {!r}: {!r} must be a Jinja2 string, got {!r}".format(preset_name, slot, template)]
+        return ["{} must be a Jinja2 string, got {!r}".format(label, template)]
     if not template:
-        return [("preset {!r}: {!r} is empty, which yields the built-in it meant to replace. " +
-                 "Use a comment-only template such as `{{# blank #}}`.").format(preset_name, slot)]
+        if slot == "title":
+            return ["{} is empty; a title can't be blank, so leave the key out to keep the built-in".format(label)]
+        return [("{} is empty, which yields the built-in it meant to replace. " +
+                 "Use a comment-only template such as `{{# blank #}}`.").format(label)]
     return []
+
+def _slot_errors(preset_name: str, slot: str, template) -> list[str]:
+    return _template_errors("preset {!r}: {!r}".format(preset_name, slot), template, slot.split(".")[-1])
 
 # Every slot a preset may set at the top level: the renderer slots plus the
 # comment body.
@@ -165,26 +203,249 @@ def _templates(name: str) -> dict:
         fail("unknown template preset {!r}; known presets: {}".format(name, ", ".join(_NAMES)))
     return _PRESETS[name].templates
 
-def _arg_description() -> str:
+def _command_path(task) -> str:
+    """A task's command path as typed, `<group…> <kind>` (`worktree add`); a
+    top-level task's path is its kind."""
+    return " ".join(list(task.group) + [task.kind])
+
+def _task_keys(task) -> list[str]:
+    """The keys `task_presets` and `task_templates` address `task` by, least
+    specific first."""
+    path = _command_path(task)
+    return [task.kind] if path == task.kind else [task.kind, path]
+
+def _for_task(by_task: dict, task):
+    """`task`'s entry in a `task_*` arg, its command path over its kind, or None."""
+    for key in reversed(_task_keys(task)):
+        if key in by_task:
+            return by_task[key]
+    return None
+
+def _resolve(config, task, renderer_kind: str = "") -> dict | None:
+    """The flat templates `task` renders with, from a `config` result.
+
+    The base layer is the task's `task_presets` entry, else `template_preset`;
+    a `template_preset` typed on the command line applies to every task.
+    Above it sit `templates`, left out for a task with its own preset, then
+    the task's `task_templates` by kind and then by command path. The config
+    layer stays above any preset, so a preset never outranks the config that
+    selected it."""
+    own_preset = None if config.preset_from_cli else _for_task(config.task_presets, task)
+    layer = {} if own_preset else dict(config.templates)
+    for key in _task_keys(task):
+        layer.update(config.task_templates.get(key) or {})
+    return resolve_templates(
+        layer,
+        task.kind,
+        base = _templates(own_preset or config.template_preset),
+        renderer_kind = renderer_kind,
+    )
+
+def _key_order(key):
+    """Sort key for config dict keys: strings in plain order, as Console sorts
+    them, then any other key by its repr."""
+    return (type(key) != "string", key if type(key) == "string" else repr(key))
+
+def _slot_map_errors(label: str, value) -> list[str]:
+    """Errors in one slot → template dict a config supplied."""
+    if type(value) != "dict":
+        return ["{} must be a dict of slot → template, got {!r}".format(label, value)]
+    errors = []
+    for slot in sorted(value.keys(), key = _key_order):
+        if slot not in RENDERER_TEMPLATE_SLOTS:
+            errors.append("{}: {!r} is not a slot; expected one of {}".format(
+                label,
+                slot,
+                ", ".join(RENDERER_TEMPLATE_SLOTS),
+            ))
+        else:
+            errors.extend(_template_errors("{}[{!r}]".format(label, slot), value[slot], slot))
+    return errors
+
+# The built-in task kinds, which a renderer block in `templates` used to reach.
+_BUILTIN_KINDS = [k for k in TEMPLATE_SCOPE_KEYS if k not in RENDERERS]
+
+def _task_key_errors(label: str, key) -> list[str]:
+    """Errors in a `task_*` key, which must name a task, not a renderer or a
+    slot."""
+    if type(key) != "string":
+        return ["{} keys must be task kinds or command paths, got {!r}".format(label, key)]
+    if key in _TOP_LEVEL_SLOTS:
+        return ["{}[{!r}] names a slot, not a task; key by task kind or command path".format(label, key)]
+    if key in RENDERERS:
+        kinds = [k for k in _BUILTIN_KINDS if kind_for_task(k) == key]
+        return ["{}[{!r}] names a renderer; key by task kind or command path, e.g. {} for {!r}".format(
+            label,
+            key,
+            " and ".join(["%r" % k for k in kinds]),
+            key,
+        )]
+    return []
+
+def _blocks_error(feature: str, templates: dict) -> list[str]:
+    """One error for the blocks in `templates` (dict values keyed by a task or
+    a renderer), spelling out the `task_templates` that replaces them.
+
+    A renderer block becomes an entry for each built-in kind it draws, and a
+    task's own block overlays that, as it outranked the renderer's. Values are
+    elided; a comment names the block a slot came from when it isn't the
+    task's own."""
+    blocks = {k: v for k, v in templates.items() if type(v) == "dict" and k not in _TOP_LEVEL_SLOTS}
+    if not blocks:
+        return []
+    renderers = sorted([k for k in blocks if k in RENDERERS])
+    sources = {}
+    for renderer in renderers:
+        for kind in _BUILTIN_KINDS:
+            if kind_for_task(kind) == renderer:
+                sources.setdefault(kind, {}).update({slot: renderer for slot in blocks[renderer]})
+    for task in sorted([k for k in blocks if k not in RENDERERS], key = _key_order):
+        sources.setdefault(task, {}).update({slot: task for slot in blocks[task]})
+
+    lines = [("{} templates takes slot keys only ({}); a block keyed by a task or renderer goes in " +
+              "`task_templates`, keyed by task. For this config:").format(feature, ", ".join(RENDERER_TEMPLATE_SLOTS))]
+    flat = sorted([k for k in templates if k not in blocks], key = _key_order)
+    if flat:
+        lines.append("    templates = {%s}" % ", ".join(["%r: ..." % k for k in flat]))
+    lines.append("    task_templates = {")
+    for task in sorted(sources.keys(), key = _key_order):
+        slots = sources[task]
+        by_source = {}
+        for slot in sorted(slots, key = _key_order):
+            if slots[slot] != task:
+                by_source.setdefault(slots[slot], []).append("%s" % slot)
+        note = "  # " + "; ".join(["%s from templates[%r]" % (", ".join(by_source[src]), src) for src in sorted(by_source)]) if by_source else ""
+        lines.append("        %r: {%s},%s" % (task, ", ".join(["%r: ..." % slot for slot in sorted(slots, key = _key_order)]), note))
+    lines.append("    }")
+    if renderers:
+        lines.append("A renderer block also reached aliases and custom tasks drawn by it; give each its own entry.")
+    return ["\n".join(lines)]
+
+def _dict_arg(errors: list[str], label: str, value) -> dict:
+    """`value`, an `args.custom(dict)` arg, as a dict: {} when unset, and {}
+    with an error appended when a config assigned something else, since
+    `args.custom` doesn't type-check config assignments."""
+    if value == None:
+        return {}
+    if type(value) != "dict":
+        errors.append("{} must be a dict, got {!r}".format(label, value))
+        return {}
+    return value
+
+def _config_errors(feature: str, args) -> list[str]:
+    """Every problem with a per-task surface's four template args, as messages."""
+    errors = []
+    templates = _dict_arg(errors, feature + " templates", args.templates)
+    errors.extend(_blocks_error(feature, templates))
+    templates = {k: v for k, v in templates.items() if type(v) != "dict" or k in _TOP_LEVEL_SLOTS}
+    errors.extend(_slot_map_errors(feature + " templates", templates))
+    task_presets = _dict_arg(errors, feature + " task_presets", args.task_presets)
+    label = feature + " task_presets"
+    for key in sorted(task_presets.keys(), key = _key_order):
+        errors.extend(_task_key_errors(label, key))
+        name = task_presets[key]
+        if type(name) != "string" or name not in _PRESETS:
+            errors.append("{}[{!r}]: unknown template preset {!r}; known presets: {}".format(
+                label,
+                key,
+                name,
+                ", ".join(_NAMES),
+            ))
+    task_templates = _dict_arg(errors, feature + " task_templates", args.task_templates)
+    for key in sorted(task_templates.keys(), key = _key_order):
+        errors.extend(_task_key_errors(feature + " task_templates", key))
+        errors.extend(_slot_map_errors("{} task_templates[{!r}]".format(feature, key), task_templates[key]))
+    return errors
+
+def _config(feature: str, args):
+    """Validate a per-task surface's template args and return them for
+    `resolve`. Fails on anything `_config_errors` finds, so a bad config is
+    refused when the feature loads rather than when its task first reports."""
+    errors = _config_errors(feature, args)
+    if errors:
+        fail("\n".join(errors))
+    return struct(
+        template_preset = args.template_preset,
+        preset_from_cli = args.is_explicit("template_preset"),
+        templates = args.templates or {},
+        task_presets = args.task_presets or {},
+        task_templates = args.task_templates or {},
+    )
+
+def _templates_description(output: str) -> str:
+    """The `templates` help text the per-task surfaces share; `output` names
+    what the templates render."""
+    return ("Jinja2 overrides for %s on top of `template_preset`, keyed by slot: " % output +
+            "\"title\", \"summary\", \"details\". They apply to every task that renders with " +
+            "`template_preset` (not one with its own `task_presets` entry); one task's own go in " +
+            "`task_templates`. The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
+            "`state` and `status`; a broken title falls back to the built-in layout. Empty dict " +
+            "(default) leaves the selected `template_preset` in effect.")
+
+def _task_args() -> dict:
+    """The `task_presets` and `task_templates` args every per-task surface
+    declares. Splat into `args = {...}`."""
+    return task_template_args("full", "details")
+
+def _arg_description(per_task: bool) -> str:
     """The `template_preset` help text, listing each registered preset."""
     return ("Named bundle of Jinja2 templates for this feature's rendered output. " +
-            "Slots set via this feature's `templates` arg override the preset. Presets: " +
+            "Slots set via this feature's `templates` arg override the preset. " +
+            (TASK_PRESET_PRECEDENCE + " " if per_task else "") + "Presets: " +
             "; ".join(["%s is %s" % (n, _PRESETS[n].description) for n in _NAMES]) + ".")
 
-def _args() -> dict:
-    """The `template_preset` arg every status-surface feature declares. Splat into `args = {...}`."""
+def _args(per_task: bool = False) -> dict:
+    """The `template_preset` arg every status-surface feature declares. Splat
+    into `args = {...}`; `per_task` for a surface that also takes `task_args`."""
     return {
         "template_preset": args.string(
             default = _DEFAULT,
             values = _NAMES,
-            description = _arg_description(),
+            description = _arg_description(per_task),
         ),
     }
+
+def _comment_errors(feature: str, templates) -> list[str]:
+    """Every problem with a comment surface's `templates`, as messages. One
+    comment covers every task, so `body` is its only slot and nothing is
+    scoped per task."""
+    if type(templates) != "dict":
+        return ["{} templates must be a dict, got {!r}".format(feature, templates)]
+    errors = []
+    for key in sorted(templates.keys(), key = _key_order):
+        if key == COMMENT_TEMPLATE_SLOT:
+            errors.extend(_template_errors("{} templates[{!r}]".format(feature, key), templates[key]))
+        else:
+            errors.append("{} templates: {!r} is not a slot; the only one is {!r}{}".format(
+                feature,
+                key,
+                COMMENT_TEMPLATE_SLOT,
+                ", and one comment covers every task, so it takes no per-task templates" if type(templates[key]) == "dict" else "",
+            ))
+    return errors
+
+def _comment_body(feature: str, args, built_in: str) -> str:
+    """The body a comment surface renders with: its `templates` body, else
+    its preset's, else `built_in`. Fails on anything `_comment_errors` finds."""
+    templates = {} if args.templates == None else args.templates
+    errors = _comment_errors(feature, templates)
+    if errors:
+        fail("\n".join(errors))
+    return (templates.get(COMMENT_TEMPLATE_SLOT) or
+            _templates(args.template_preset).get(COMMENT_TEMPLATE_SLOT) or
+            built_in)
 
 template_presets = namespace(
     DEFAULT = _DEFAULT,
     NAMES = _NAMES,
     args = _args,
+    comment_body = _comment_body,
+    comment_errors = _comment_errors,
+    config = _config,
+    config_errors = _config_errors,
+    resolve = _resolve,
+    task_args = _task_args,
     templates = _templates,
+    templates_description = _templates_description,
     validation_errors = _validation_errors,
 )

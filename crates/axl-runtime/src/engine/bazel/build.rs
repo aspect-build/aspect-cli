@@ -814,7 +814,8 @@ pub(super) fn announce_spawn(
 /// Empty strings when stderr isn't a TTY and we're not on a recognized CI
 /// host, so file-captured / piped output stays plain. CI hosts (GitHub
 /// Actions, Buildkite, …) render ANSI in their log viewers even though
-/// stderr is a non-TTY pipe — same heuristic as `running_verb_color`.
+/// stderr is a non-TTY pipe — [`crate::color::console_supports_color`], as
+/// for every runtime line on stderr.
 ///
 /// Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
 /// Actions' log viewer silently drops SGR 2, which is the bug the original
@@ -822,8 +823,7 @@ pub(super) fn announce_spawn(
 /// and every TTY we ship to, and match the grey `tools/bazel` itself uses
 /// for its `[tools/bazel]` trace line.
 fn grey_style() -> (&'static str, &'static str) {
-    use std::io::IsTerminal;
-    if std::io::stderr().is_terminal() || crate::ci::on_recognized_ci() {
+    if crate::color::console_supports_color() {
         ("\x1b[38;5;244m", "\x1b[0m")
     } else {
         ("", "")

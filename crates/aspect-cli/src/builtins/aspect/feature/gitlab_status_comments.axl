@@ -144,6 +144,7 @@ def _own_entry(ctx, _state, run_id, run_attempt, job_name):
 
 def _gitlab_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
+    body_template = template_presets.comment_body("GitlabStatusComments", ctx.args, DEFAULT_BODY_TEMPLATE)
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -198,10 +199,6 @@ def _gitlab_status_comments(ctx: FeatureContext):
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
     coordinate = ctx.args.coordinate
 
-    templates = ctx.args.templates or {}
-    body_template = (templates.get("body") or
-                     template_presets.templates(ctx.args.template_preset).get("body") or
-                     DEFAULT_BODY_TEMPLATE)
     status_badges = dict(DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
