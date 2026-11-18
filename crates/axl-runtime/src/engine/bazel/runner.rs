@@ -2,9 +2,10 @@
 //! the cancellation root, so a cancel stops them and a wait on one is a safe
 //! point.
 
+use std::collections::HashMap;
 use std::io;
 use std::process::{Command, ExitStatus, Output};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bazel::runner::{Child, Runner};
 use bazel::server::Server;
@@ -31,26 +32,36 @@ impl Runner for SignalRunner<'_> {
     }
 }
 
-/// Process-wide cache of the Bazel release version, populated on first use.
-static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
+/// Process-wide cache of the Bazel release version, per startup flag list.
+static RELEASE_VERSION: OnceLock<Mutex<HashMap<Vec<String>, Option<semver::Version>>>> =
+    OnceLock::new();
 
-/// The Bazel release version, probed once per process via
-/// [`Server::info`] and memoized. `None` when Bazel reports a non-release
-/// build or the probe fails — callers treat that as "version unknown" (assume
-/// latest for version-gated flags).
+/// The release version of the Bazel server `startup` reaches, asked with
+/// [`Server::info`] once per process for each startup flag list and memoized;
+/// `Ok(None)` for a non-release build, which callers treat as the latest.
 ///
-/// The version is stable for the lifetime of an `aspect` invocation, so the
-/// single probe is shared by every caller (flag-gating, rc-section selection,
-/// …) instead of each shelling out to Bazel independently.
-pub(crate) fn release_version(signals: &Arc<Signals>) -> Option<semver::Version> {
-    RELEASE_VERSION
-        .get_or_init(|| {
-            Server::new(&SignalRunner(signals), &[])
-                .info()
-                .ok()
-                .and_then(|(_pid, version)| version)
-        })
-        .clone()
+/// `startup` must be the invocation's own: any other list starts, or with
+/// other server options restarts, a server the invocation does not use. The
+/// version is stable for the lifetime of an `aspect` invocation, so every
+/// caller (flag gating, rc-section selection, `ctx.bazel.version()`, each
+/// retry) shares one probe. A failed probe is not cached.
+pub(crate) fn release_version(
+    signals: &Arc<Signals>,
+    startup: &[String],
+) -> anyhow::Result<Option<semver::Version>> {
+    let cache = RELEASE_VERSION.get_or_init(Default::default);
+    if let Some(version) = cache.lock().unwrap().get(startup) {
+        return Ok(version.clone());
+    }
+    let version = Server::new(&SignalRunner(signals), startup)
+        .info()
+        .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
+        .1;
+    cache
+        .lock()
+        .unwrap()
+        .insert(startup.to_vec(), version.clone());
+    Ok(version)
 }
 
 impl Child for Spawned {

@@ -589,7 +589,8 @@ def _eviction_retries(ctx, rc, command: str, max_attempts: int) -> list:
     attempts Bazel runs inside one, starting its event file over.
 
     A `(flag, constraint)` entry for Bazel 8 and later, where those retries
-    default on; the spawn resolves it against the running Bazel. Nothing when
+    default on; the spawn resolves it against the rc's version, else the
+    running Bazel's. Nothing when
     the loop would not retry an eviction (a budget of one attempt, or a
     `build_retry` that declines REMOTE_CACHE_EVICTED), since Bazel's retries
     are then the only ones, or when `rc` (its files, `--bazel-flag`, task

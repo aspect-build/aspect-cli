@@ -12,7 +12,9 @@ as verbs the task drives in a visible loop (see `build.axl`):
 the verbs are thin forwarders over that single record, and the top-level `_do_*`
 functions thread it — no closure tower, no mutable state dict. The live
 invocation and the attempt index are threaded as values (the `_spawned` struct
-and the callsite's loop counter), never stored.
+and the callsite's loop counter), never stored. A task drives every attempt
+through `attempts` and `should_retry`: a handle that leaves cache eviction
+retries to its loop turns Bazel's own off, so one that spawns once gets none.
 
 The one thing the constructor cannot resolve is the execution-log wiring: an
 `exec_log_event` handle binds to a single build, so each attempt opens its own

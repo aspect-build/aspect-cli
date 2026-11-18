@@ -143,11 +143,9 @@ fn partition_workspace_events(
     })
 }
 
-/// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
-/// a `Vec<String>`. Plain flags are always included; conditional flags are
-/// included only when [`constraint_matches`] holds for `version`.
 /// Resolve the Bazel version a `Bazelrc` should use for version-gated
-/// options: an explicit `requested` string when given, else the running Bazel
+/// options: an explicit `requested` string when given, else the running Bazel,
+/// asked under the rc's [`probe_startup_flags`](bazel::rc::Bazelrc::probe_startup_flags)
 /// (probed only when `rc` actually carries a gated option, so the common case
 /// pays nothing). A failed probe degrades to `None` (assumed-latest).
 fn resolve_rc_version(
@@ -159,28 +157,16 @@ fn resolve_rc_version(
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(probe_version(signals, &rc.probe_startup_flags())
+        return Ok(runner::release_version(signals, &rc.probe_startup_flags())
             .ok()
             .flatten());
     }
     Ok(None)
 }
 
-/// The version of the Bazel server `startup` reaches, asked with `bazel info`.
-/// `startup` must be the invocation's own, or the question starts (or, with
-/// other server options, restarts) a server the invocation does not use.
-fn probe_version(
-    signals: &Arc<cancellation::Signals>,
-    startup: &[String],
-) -> anyhow::Result<Option<semver::Version>> {
-    Ok(
-        bazel::server::Server::new(&runner::SignalRunner(signals), startup)
-            .info()
-            .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
-            .1,
-    )
-}
-
+/// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
+/// a `Vec<String>`. Plain flags are always included; conditional flags are
+/// included only when [`constraint_matches`] holds for `version`.
 fn resolve_flags<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
     version: Option<&semver::Version>,
@@ -199,24 +185,25 @@ fn resolve_flags<'v>(
     Ok(result)
 }
 
-/// Resolve a mixed flag list against the running Bazel version.
-///
 /// Like [`resolve_flags`], but sources the version itself: `known`, the
-/// version an rc was resolved against, else a `bazel info` probe under
-/// `startup`, run only when at least one conditional `(flag, constraint)`
-/// tuple is present, so unconditional flag lists never pay for it. A
-/// non-release Bazel reports no version, in which case the constraints resolve
-/// against an assumed-latest version (see [`constraint_matches`]).
-fn resolve_flags_for_running_bazel<'v>(
+/// version an rc was resolved against, else the version of the server the
+/// invocation's own `startup` flags reach ([`runner::release_version`]),
+/// asked only when at least one conditional `(flag, constraint)` tuple is
+/// present, so unconditional flag lists never pay for it. A non-release Bazel
+/// reports no version, in which case the constraints resolve against an
+/// assumed-latest version (see [`constraint_matches`]).
+fn resolve_gated_flags<'v>(
     signals: &Arc<cancellation::Signals>,
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
     startup: &[String],
     known: Option<&semver::Version>,
 ) -> anyhow::Result<Vec<String>> {
+    if !items.iter().any(|f| f.is_right()) {
+        return resolve_flags(items, None);
+    }
     let version = match known {
-        _ if !items.iter().any(|f| f.is_right()) => None,
         Some(version) => Some(version.clone()),
-        None => probe_version(signals, startup)?,
+        None => runner::release_version(signals, startup)?,
     };
     resolve_flags(items, version.as_ref())
 }
@@ -382,9 +369,9 @@ fn effective_rc<'v>(
 /// `ctx.bazel.startup_flags` (Bazel reads its own rc).
 ///
 /// Version-gated `flags=` are resolved against the rc's version, else the
-/// version of the server the invocation's own startup flags reach. Shared by
-/// every Bazel subcommand that takes them (`build` / `test` / `query`), so they
-/// filter conditional flags identically.
+/// version of the server the invocation's own startup flags reach (see
+/// [`resolve_gated_flags`]). Shared by every Bazel subcommand that takes them
+/// (`build` / `test` / `query`), so they filter conditional flags identically.
 fn resolve_invocation_flags<'v>(
     signals: &Arc<cancellation::Signals>,
     this: values::Value<'v>,
@@ -394,19 +381,13 @@ fn resolve_invocation_flags<'v>(
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     match effective_rc(this, rc_param) {
         Some(rc) => {
-            let extras = resolve_flags_for_running_bazel(
-                signals,
-                flags,
-                &rc.probe_startup_flags(),
-                rc.version(),
-            )?;
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
-            cmd.extend(extras);
+            cmd.extend(resolve_gated_flags(signals, flags, &startup, rc.version())?);
             Ok((cmd, startup))
         }
         None => {
             let startup = read_startup_flags(this)?;
-            let extras = resolve_flags_for_running_bazel(signals, flags, &startup, None)?;
+            let extras = resolve_gated_flags(signals, flags, &startup, None)?;
             Ok((extras, startup))
         }
     }
@@ -1030,8 +1011,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
+        let startup = read_startup_flags(this)?;
         Ok(
-            match runner::release_version(&Env::from_eval(eval)?.signals) {
+            match runner::release_version(&Env::from_eval(eval)?.signals, &startup)
+                .ok()
+                .flatten()
+            {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,

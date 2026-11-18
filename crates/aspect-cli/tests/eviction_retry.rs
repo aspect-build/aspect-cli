@@ -1,7 +1,7 @@
 //! A build a remote cache eviction fails is retried by the CLI, as an
 //! invocation of its own, with Bazel's own eviction retries turned off.
 //!
-//! Each case runs `aspect build` in a fresh workspace against the `basil`
+//! Each case runs an `aspect` task in a fresh workspace against the `basil`
 //! fake, whose `cache_evicted_once` scenario exits 39 on the first invocation
 //! and succeeds on every later one. `BASIL_ARGV_LOG` records the command line
 //! of each, which is what says how often Bazel ran and with what.
@@ -126,12 +126,66 @@ fn an_eviction_is_retried_as_an_invocation_of_its_own() {
         2,
         "a history folder per attempt"
     );
-    // The version that gates the flag is asked of the server the build runs
-    // on, under the task's own startup flags, never by a bare `bazel info`.
-    for info in invocations(dir.path(), "info") {
+}
+
+/// The startup flags of a logged command line: everything before `verb`.
+fn startup_of<'a>(line: &'a str, verb: &str) -> Vec<&'a str> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let at = words.iter().position(|w| *w == verb).expect(verb);
+    words[..at].to_vec()
+}
+
+/// The version that gates the flag is asked of the server the build runs on.
+/// Every `bazel info` carries the build's own startup flags (a task's, an rc
+/// file's and a version-gated rc file's alike) on a release and on a
+/// non-release Bazel, but the one the rc's parse makes before it knows the
+/// version, which lacks only the entry that version gates.
+#[test]
+fn every_probe_asks_the_server_the_build_runs_on() {
+    for release in ["9.0.0", "development version"] {
+        let dir = workspace(
+            "startup --host_jvm_args=-Dfrom_rc=1\n\
+             try-import-if-bazel-version >=7 %workspace%/gated.bazelrc\n",
+        );
+        std::fs::write(
+            dir.path().join("gated.bazelrc"),
+            "startup --host_jvm_args=-Dgated=1\n",
+        )
+        .expect("gated.bazelrc");
+        let output_base = format!(
+            "--bazel-startup-flag=--output_base={}",
+            dir.path().join("ob").display()
+        );
+        let output = aspect(
+            dir.path(),
+            &["build", "//...", &output_base],
+            &[("BASIL_RELEASE", release)],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{release}: {stderr}");
+        let builds = invocations(dir.path(), "build");
+        assert_eq!(builds.len(), 2, "{release}: {stderr}");
+        let build = startup_of(&builds[0], "build");
         assert!(
-            info.contains("--ignore_all_rc_files"),
-            "a bare probe: {info}"
+            build.contains(&"--host_jvm_args=-Dgated=1"),
+            "{release}: {build:?}"
+        );
+        let ungated: Vec<&str> = build
+            .iter()
+            .copied()
+            .filter(|w| *w != "--host_jvm_args=-Dgated=1")
+            .collect();
+        let infos = invocations(dir.path(), "info");
+        let parse_probes: Vec<&String> = infos
+            .iter()
+            .filter(|l| startup_of(l, "info") != build)
+            .collect();
+        assert!(
+            parse_probes.len() <= 1
+                && parse_probes
+                    .iter()
+                    .all(|l| startup_of(l, "info") == ungated),
+            "{release}: the build's startup flags {build:?}, probes {infos:#?}"
         );
     }
 }

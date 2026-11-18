@@ -287,20 +287,11 @@ impl Bazelrc {
     }
 
     /// The startup flags to ask the running Bazel its version with, before
-    /// that version is known: the caller's, the rc files' `startup` entries no
-    /// version gates, and `--ignore_all_rc_files`. The same server
-    /// [`invocation_startup_flags`](Self::invocation_startup_flags) reaches,
-    /// so the question starts or restarts no other one.
+    /// that version is known: [`invocation_startup_flags`](Self::invocation_startup_flags)
+    /// without the rc files' version-gated `startup` entries, which that version
+    /// decides. The same server, unless a gated entry applies at it.
     pub fn probe_startup_flags(&self) -> Vec<String> {
-        let mut startup = self.startup_flags.clone();
-        startup.extend(
-            self.raw_options("startup")
-                .iter()
-                .filter(|o| o.version_condition.is_none())
-                .map(|o| o.value.clone()),
-        );
-        startup.push("--ignore_all_rc_files".to_string());
-        startup
+        self.startup_flags_where(|o| o.version_condition.is_none())
     }
 
     /// Whether any option (in any section) is version-gated — lets a caller
@@ -733,14 +724,20 @@ impl Bazelrc {
     /// `--ignore_all_rc_files` (the on-disk rc is already absorbed). Command-
     /// independent; the single source for build/test/query/info/health_check.
     pub fn invocation_startup_flags(&self) -> Vec<String> {
-        let mut startup = self.startup_flags.clone();
         // Gate the rc-file `startup` section by version like command options: a
         // `try-import-if-bazel-version` startup flag meant for another Bazel
         // version must not be passed to the running one.
+        self.startup_flags_where(|o| self.version_condition_holds(&o.version_condition))
+    }
+
+    /// The caller's startup flags, the rc files' `startup` entries `keep`
+    /// accepts, and `--ignore_all_rc_files`.
+    fn startup_flags_where(&self, keep: impl Fn(&RcOption) -> bool) -> Vec<String> {
+        let mut startup = self.startup_flags.clone();
         startup.extend(
             self.raw_options("startup")
                 .iter()
-                .filter(|o| self.version_condition_holds(&o.version_condition))
+                .filter(|o| keep(o))
                 .map(|o| o.value.clone()),
         );
         startup.push("--ignore_all_rc_files".to_string());
