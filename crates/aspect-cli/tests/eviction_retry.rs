@@ -135,16 +135,14 @@ fn startup_of<'a>(line: &'a str, verb: &str) -> Vec<&'a str> {
     words[..at].to_vec()
 }
 
-/// The version that gates the flag is asked of the server the build runs on.
-/// Every `bazel info` carries the build's own startup flags (a task's, an rc
-/// file's and a version-gated rc file's alike) on a release and on a
-/// non-release Bazel, but the one the rc's parse makes before it knows the
-/// version, which lacks only the entry that version gates. Each is asked once:
-/// the parse's, each attempt's own, and on a non-release Bazel, whose version
-/// the parse cannot settle, the gate's.
+/// The version that gates the flag is the Bazel binary's, which the client
+/// answers alone (`bazel --version`), once per task, on a release and on a
+/// non-release Bazel. No other `bazel info` runs than each attempt's own, under
+/// the build's startup flags (a task's, an rc file's and a version-gated rc
+/// file's alike), so nothing starts a server the build does not use.
 #[test]
 fn every_probe_asks_the_server_the_build_runs_on() {
-    for (release, infos_expected) in [("9.0.0", 3), ("development version", 4)] {
+    for release in ["9.0.0", "development version"] {
         let dir = workspace(
             "startup --host_jvm_args=-Dfrom_rc=1\n\
              try-import-if-bazel-version >=7 %workspace%/gated.bazelrc\n",
@@ -172,23 +170,15 @@ fn every_probe_asks_the_server_the_build_runs_on() {
             build.contains(&"--host_jvm_args=-Dgated=1"),
             "{release}: {build:?}"
         );
-        let ungated: Vec<&str> = build
-            .iter()
-            .copied()
-            .filter(|w| *w != "--host_jvm_args=-Dgated=1")
-            .collect();
         let infos = invocations(dir.path(), "info");
-        assert_eq!(infos.len(), infos_expected, "{release}: {infos:#?}");
-        let parse_probes: Vec<&String> = infos
-            .iter()
-            .filter(|l| startup_of(l, "info") != build)
-            .collect();
-        assert!(
-            parse_probes.len() <= 1
-                && parse_probes
-                    .iter()
-                    .all(|l| startup_of(l, "info") == ungated),
-            "{release}: the build's startup flags {build:?}, probes {infos:#?}"
+        assert_eq!(infos.len(), 2, "one per attempt: {release}: {infos:#?}");
+        for info in &infos {
+            assert_eq!(startup_of(info, "info"), build, "{release}: {info}");
+        }
+        assert_eq!(
+            invocations(dir.path(), "--version").len(),
+            1,
+            "{release}: the version is asked once"
         );
     }
 }

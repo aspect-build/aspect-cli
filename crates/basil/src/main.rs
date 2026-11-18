@@ -8,6 +8,8 @@
 //!     process's own pid; tests can override via `BASIL_SERVER_PID` so a
 //!     long-lived holder process stands in for the server whose open files
 //!     the `bazel` crate's streams ask about, for the whole test.
+//!   - `--version` — prints `bazel <release>`, from `BASIL_RELEASE` as `info`'s
+//!     `release` is.
 //!   - `build` / `test` — finds `--build_event_binary_file <path>`, finds
 //!     `--scenario=<name>` somewhere in argv, and writes a sequence of
 //!     length-delimited `BuildEvent` protobufs into the BES path according
@@ -84,6 +86,11 @@ fn main() {
         .map(String::as_str)
         .unwrap_or("");
 
+    if verb.is_empty() && args.iter().any(|a| a == "--version") {
+        let release = env::var("BASIL_RELEASE").unwrap_or_else(|_| "9.0.0".to_string());
+        println!("bazel {release}");
+        return;
+    }
     match verb {
         "info" => run_info(&args),
         "build" | "test" => run_build(&args, verb),
