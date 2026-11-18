@@ -1753,13 +1753,14 @@ impl Build {
             let compact = execlog_stream.path().to_path_buf();
             let path = compact.display().to_string();
             let outcome = execlog_stream.join();
-            // A log that stopped decoding is warned about once, below.
+            // A log that stopped decoding is warned about once, below; a file
+            // partly written from it says no more than that warning does.
             let undecodable = matches!(outcome, Ok(ReaderOutcome::Undecodable(_)));
             if let Some(logs) = &build.expanded_logs
                 && compact.exists()
             {
                 for (to, err) in logs.write_from(&compact) {
-                    if !(undecodable && err.kind() == io::ErrorKind::InvalidData) {
+                    if !(undecodable && to.exists()) {
                         errln!(
                             "WARNING: the execution log '{}' could not be written in full \
                              from '{path}' ({err}). The build's result is unaffected.",

@@ -51,8 +51,8 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// path is written as one of the [`copies`]. `%workspace%` stands for
 /// `workspace`, as Bazel expands it in this flag, and a boolean value names
 /// no file, as does the `--no` form Bazel 10 takes. The option's old name,
-/// which Bazel still takes, is read as it. See [`crate::rc::requested_path`]
-/// for how empty and relative values resolve, against `directory`.
+/// which Bazel still takes, is read as it. An empty value names no file, and
+/// a relative one is placed against `directory` (see [`place`]).
 pub fn requested_path(
     flags: &[String],
     verb: &str,
