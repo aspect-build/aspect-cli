@@ -21,7 +21,7 @@ use axl_proto::tools::protos::{ExecLogEntry, SpawnExec};
 use prost::Message;
 
 use crate::delimited;
-pub use reconstruct::Reconstructor;
+use reconstruct::Reconstructor;
 
 /// An expanded execution log format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,8 +66,8 @@ pub enum Request {
 /// [`super::requested_path`]), against `directory` and `workspace`.
 ///
 /// Up to Bazel 9 the flags take a path, and an empty one turns them off; from
-/// 10 they take a boolean too. Bazel takes only one format a build, so it
-/// refuses both at once, which the CLI, writing them itself, writes.
+/// 10 they take a boolean too. Both formats at once, which Bazel refuses, are
+/// both written.
 pub fn request(
     flags: &[String],
     verb: &str,
@@ -116,7 +116,8 @@ pub fn request(
     Request::Files { files, sorted, off }
 }
 
-/// Whether Bazel sorts a binary or JSON log: by default, it does.
+/// The flag saying whether a binary or JSON log is sorted, which it is by
+/// default.
 const SORT_FLAG: &str = "--execution_log_sort";
 
 /// Hand each spawn in the zstd-compressed compact log `compact` to `each`,
@@ -182,15 +183,22 @@ mod tests {
     macro_rules! fixture {
         ($version:literal) => {
             Fixture {
-                compact: include_bytes!(concat!("testdata/bazel-", $version, "/compact.zstd")),
-                binary: include_bytes!(concat!("testdata/bazel-", $version, "/binary.binpb")),
-                json: include_str!(concat!("testdata/bazel-", $version, "/log.json")),
+                compact: include_bytes!(concat!("testdata/v", $version, "/compact.zstd")),
+                binary: include_bytes!(concat!("testdata/v", $version, "/binary.binpb")),
+                json: include_str!(concat!("testdata/v", $version, "/log.json")),
             }
         };
     }
 
-    const FIXTURES: [(&str, Fixture); 2] =
-        [("8.8.2", fixture!("8.8.2")), ("9.0.2", fixture!("9.0.2"))];
+    const FIXTURES: [(&str, Fixture); 3] = [
+        ("7.4.1", fixture!("7.4.1")),
+        ("8.8.2", fixture!("8.8.2")),
+        ("9.0.2", fixture!("9.0.2")),
+    ];
+
+    fn latest() -> &'static Fixture {
+        &FIXTURES[FIXTURES.len() - 1].1
+    }
 
     fn spawns(compact: &[u8]) -> Vec<SpawnExec> {
         let mut spawns = Vec::new();
@@ -261,7 +269,7 @@ mod tests {
 
     #[test]
     fn metrics_print_as_bazel_prints_them() {
-        let (_, fixture) = &FIXTURES[1];
+        let fixture = latest();
         let ours = json::spawn_exec(&spawns(fixture.compact)[0]);
         let block = &ours[ours.find("\"metrics\"").unwrap()..];
         for field in [
@@ -388,7 +396,7 @@ mod tests {
 
     #[test]
     fn an_unsorted_log_keeps_bazels_execution_order() {
-        let (_, fixture) = &FIXTURES[1];
+        let fixture = latest();
         let dir = tempfile::tempdir().unwrap();
         let (compact, out) = (dir.path().join("compact"), dir.path().join("out"));
         std::fs::write(&compact, fixture.compact).unwrap();

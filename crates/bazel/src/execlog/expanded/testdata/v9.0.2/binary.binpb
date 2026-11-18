@@ -1,0 +1,58 @@
+ú
+	/bin/bash
+-c
+osource external/bazel_tools/tools/genrule/genrule-setup.sh; echo a > bazel-out/darwin_arm64-fastbuild/bin/a.txt$
+PATH/bin:/usr/bin:/usr/local/bin"Ö
+3external/bazel_tools/tools/genrule/genrule-setup.shN
+@2138ccc4608e0a41291680587baced12bb80379b6924c3c4c2d9ef272f99139f‚SHA-256**bazel-out/darwin_arm64-fastbuild/bin/a.txt08RGenruleZ{
+*bazel-out/darwin_arm64-fastbuild/bin/a.txtM
+@87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7SHA-256bdarwin-sandboxÄí//:a¢
+¿ﬁÅ
+B¿ﬁÅ
+¢
+ÂÌ˜◊¿Ñ=˚
+	/bin/bash
+-c
+œsource external/bazel_tools/tools/genrule/genrule-setup.sh; cat bazel-out/darwin_arm64-fastbuild/bin/a.txt > bazel-out/darwin_arm64-fastbuild/bin/b.txt && echo b >> bazel-out/darwin_arm64-fastbuild/bin/b.txt$
+PATH/bin:/usr/bin:/usr/local/bin"{
+*bazel-out/darwin_arm64-fastbuild/bin/a.txtM
+@87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7SHA-256"Ö
+3external/bazel_tools/tools/genrule/genrule-setup.shN
+@2138ccc4608e0a41291680587baced12bb80379b6924c3c4c2d9ef272f99139f‚SHA-256**bazel-out/darwin_arm64-fastbuild/bin/b.txt08RGenruleZ{
+*bazel-out/darwin_arm64-fastbuild/bin/b.txtM
+@911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2SHA-256bdarwin-sandboxÄí//:b¢
+Ä„æ
+BÄ„æ
+¢ÂÌ˜◊¿ÇÍπ
+	/bin/bash
+-c
+±mkdir -p bazel-out/darwin_arm64-fastbuild/bin/t/sub && echo one > bazel-out/darwin_arm64-fastbuild/bin/t/one.txt && echo two > bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt*&bazel-out/darwin_arm64-fastbuild/bin/t08RMakeTreeZ
+.bazel-out/darwin_arm64-fastbuild/bin/t/one.txtM
+@2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806SHA-256ZÉ
+2bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txtM
+@27dd8ed44a83ff94d557f9fd0412ed5a8cbca69ea04922d88c01184a07300a5aSHA-256bdarwin-sandboxÄí//:t¢
+¿ıB¿ı¢ÂÌ˜◊¿±üÜ
+	/bin/bash
+-c
+èbazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh bazel-out/darwin_arm64-fastbuild/bin/b.txt src.txt > bazel-out/darwin_arm64-fastbuild/bin/u.out"{
+*bazel-out/darwin_arm64-fastbuild/bin/b.txtM
+@911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2SHA-256"
+.bazel-out/darwin_arm64-fastbuild/bin/t/one.txtM
+@2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806SHA-256"É
+2bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txtM
+@27dd8ed44a83ff94d557f9fd0412ed5a8cbca69ea04922d88c01184a07300a5aSHA-256"Ç
+/bazel-out/darwin_arm64-opt-exec/bin/cat_tool.shM
+@45186c23371e957f59fcf94aa34e9ad95e41b9ff83494b23656bf0546e754fbbSHA-256"ù
+Jbazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh.runfiles/_main/cat_tool.shM
+@45186c23371e957f59fcf94aa34e9ad95e41b9ff83494b23656bf0546e754fbbSHA-256"ö
+Gbazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh.runfiles/_main/data.txtM
+@6667b2d1aab6a00caa5aee5af8ad9f1465e567abf1c209d15727d57b3e8f6e5fSHA-256"ô
+Fbazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh.runfiles/_repo_mappingM
+@d1940e417f6d295b6c80c3b32ece5196d979c53754dc19bd7f1d54e1487da469LSHA-256"∑
+cbazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh.runfiles/bazel_tools/tools/genrule/genrule-setup.shN
+@2138ccc4608e0a41291680587baced12bb80379b6924c3c4c2d9ef272f99139f‚SHA-256"X
+src.txtM
+@ef8aed55fba64258003f3479ff60a060ddb8301d170110a0d2dfa0ce4ea04eb3SHA-256**bazel-out/darwin_arm64-fastbuild/bin/u.out08RUseToolZ{
+*bazel-out/darwin_arm64-fastbuild/bin/u.outM
+@bfc69a20b093cea94dedd2af78d6a4e155a725b26e30df6d78d5ac86d3998799SHA-256bdarwin-sandboxÄí//:u¢
+Ä≈ÿXBÄ≈ÿX¢ÂÌ˜◊¿˜ú

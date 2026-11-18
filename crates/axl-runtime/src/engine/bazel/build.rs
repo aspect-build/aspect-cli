@@ -1176,19 +1176,20 @@ impl Build {
         // asked for is written from the compact one, which makes the CLI a
         // reader of it, and Bazel's own is turned off; one left to Bazel leaves
         // no compact log to record.
-        let (expanded_logs, expanded_off, left_to_bazel) = match expanded::request(
+        let expanded = expanded::request(
             &flags,
             verb,
             directory.as_deref(),
             workspace.as_deref(),
             version.as_ref(),
-        ) {
-            expanded::Request::Files { files, sorted, off } => (Some((files, sorted)), off, false),
-            expanded::Request::Bazels => (None, vec![], true),
-            expanded::Request::None => (None, vec![], false),
+        );
+        let recording = recording
+            && expanded != expanded::Request::Bazels
+            && writes_execution_log(false, true, version.as_ref());
+        let (expanded_logs, expanded_off) = match expanded {
+            expanded::Request::Files { files, sorted, off } => (Some((files, sorted)), off),
+            _ => (None, vec![]),
         };
-        let recording =
-            recording && !left_to_bazel && writes_execution_log(false, true, version.as_ref());
         let asked = asked || expanded_logs.is_some();
         // An earlier run's file at an asked-for path is not left to be read
         // as this build's, should this one write no log.
@@ -1750,8 +1751,8 @@ impl Build {
         // never reaches the phase that creates one, and bazel has already said so)
         // and an anomaly on a successful one that something reads it for. A log
         // that stopped decoding is warned about either way, since Bazel says
-        // nothing about it. See
-        // `ReaderOutcome`.
+        // nothing about it. See `ReaderOutcome`. The binary and JSON logs the
+        // caller asked for are written here, from the compact log once whole.
         if let Some(execlog_stream) = build.execlog_stream.take() {
             let compact = execlog_stream.path().to_path_buf();
             let path = compact.display().to_string();
