@@ -15,32 +15,6 @@ pub mod health;
 pub mod info;
 pub mod sandbox;
 
-/// The release of the Bazel binary `runner` runs, from `bazel --version`:
-/// answered by the client alone, so it starts, reaches and restarts no server,
-/// whatever startup flags an invocation goes on to use. `Ok(None)` for a
-/// non-release build.
-pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>> {
-    let mut cmd = runner.command();
-    cmd.arg("--version");
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.stdin(Stdio::null());
-    let out = runner
-        .spawn(&mut cmd)
-        .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
-        .wait_with_output()?;
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "`bazel --version` failed (exit code {:?}): {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(info::parse_version_output(&String::from_utf8_lossy(
-        &out.stdout,
-    )))
-}
-
 /// How long to wait for the Bazel client to exit after a second SIGINT
 /// before escalating to SIGKILL.
 const FORCE_KILL_TIMEOUT: Duration = Duration::from_millis(5000);

@@ -141,7 +141,7 @@ fn startup_of<'a>(line: &'a str, verb: &str) -> Vec<&'a str> {
 /// the build's startup flags (a task's, an rc file's and a version-gated rc
 /// file's alike), so nothing starts a server the build does not use.
 #[test]
-fn every_probe_asks_the_server_the_build_runs_on() {
+fn no_probe_starts_a_server_the_build_does_not_use() {
     for release in ["9.0.0", "development version"] {
         let dir = workspace(
             "startup --host_jvm_args=-Dfrom_rc=1\n\
@@ -169,6 +169,12 @@ fn every_probe_asks_the_server_the_build_runs_on() {
         assert!(
             build.contains(&"--host_jvm_args=-Dgated=1"),
             "{release}: {build:?}"
+        );
+        assert!(
+            builds
+                .iter()
+                .all(|l| l.contains(&format!("{EVICTION_RETRIES}=0"))),
+            "{release}: the gate holds, a non-release Bazel counting as the latest"
         );
         let infos = invocations(dir.path(), "info");
         assert_eq!(infos.len(), 2, "one per attempt: {release}: {infos:#?}");

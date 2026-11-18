@@ -132,14 +132,10 @@ pub fn run(
     cmd.stdout(outfile);
     cmd.stdin(Stdio::null());
 
-    // Mirror the build/test spawn disclosure: the version line costs an
-    // extra `bazel info`, so only pay for it when actually announcing.
+    // Mirror the build/test spawn disclosure.
     if announce.version || announce.command {
         let version = if announce.version {
-            bazel::server::Server::new(&runner, startup_flags)
-                .info()
-                .ok()
-                .and_then(|(_pid, version)| version)
+            super::runner::release_version(signals)
         } else {
             None
         };

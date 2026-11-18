@@ -27,14 +27,6 @@ pub fn parse_release(value: &str) -> Option<semver::Version> {
     semver::Version::parse(ver_str).ok()
 }
 
-/// Parse `bazel --version` stdout (`bazel 9.0.0`, `bazel 9.0.0-rc1`) as
-/// [`parse_release`] parses `bazel info release`: `None` for a non-release
-/// build (`bazel no_version`, `bazel development version`).
-pub fn parse_version_output(stdout: &str) -> Option<semver::Version> {
-    let line = stdout.lines().next()?.trim();
-    semver::Version::parse(line.strip_prefix("bazel ")?.trim()).ok()
-}
-
 /// Parse `bazel info` stdout into a key/value map.
 ///
 /// Bazel formats the output by how many keys were requested: exactly one key
@@ -62,8 +54,8 @@ pub fn parse_output<S: AsRef<str>>(stdout: &str, keys: &[S]) -> IndexMap<String,
 /// Pull `(server_pid, release)` out of `bazel info server_pid release` stdout.
 ///
 /// A missing or unparseable `server_pid` is an error — callers need the pid.
-/// A missing or non-release version is not: version-conditional flags fall
-/// back to assuming latest.
+/// A missing or non-release version is not: it is the server's to report, and
+/// a caller gating on it assumes the latest.
 pub(super) fn parse_server_info(stdout: &str) -> io::Result<(u32, Option<semver::Version>)> {
     let info = parse_output(stdout, &[SERVER_PID_KEY, RELEASE_KEY]);
 
@@ -90,7 +82,7 @@ pub(super) fn parse_server_info(stdout: &str) -> io::Result<(u32, Option<semver:
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_output, parse_release, parse_server_info, parse_version_output};
+    use super::{parse_output, parse_release, parse_server_info};
 
     #[test]
     fn server_info_reads_pid_and_version() {
@@ -205,21 +197,5 @@ mod tests {
         assert_eq!(parse_release("no_version"), None);
         assert_eq!(parse_release(""), None);
         assert_eq!(parse_release("   "), None);
-    }
-
-    #[test]
-    fn version_output_is_read_as_release_is() {
-        assert_eq!(
-            parse_version_output("bazel 8.1.0\n"),
-            semver::Version::parse("8.1.0").ok()
-        );
-        assert_eq!(
-            parse_version_output("bazel 9.0.0-rc1"),
-            semver::Version::parse("9.0.0-rc1").ok()
-        );
-        assert_eq!(parse_version_output("bazel no_version"), None);
-        assert_eq!(parse_version_output("bazel development version"), None);
-        assert_eq!(parse_version_output("aspect 2026.1.0"), None);
-        assert_eq!(parse_version_output(""), None);
     }
 }

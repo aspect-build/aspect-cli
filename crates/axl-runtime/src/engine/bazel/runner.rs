@@ -35,7 +35,7 @@ impl Runner for SignalRunner<'_> {
 static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
 
 /// The release of the Bazel binary the runtime runs, asked once per process
-/// with [`bazel::server::client_version`] and memoized; `None` for a
+/// with [`bazel::version::client_version`] and memoized; `None` for a
 /// non-release build or a failed probe, which callers treat as the latest.
 ///
 /// `bazel --version` is answered by the client alone, so asking starts or
@@ -45,7 +45,8 @@ static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
 pub(crate) fn release_version(signals: &Arc<Signals>) -> Option<semver::Version> {
     RELEASE_VERSION
         .get_or_init(|| {
-            bazel::server::client_version(&SignalRunner(signals))
+            bazel::version::client_version(&SignalRunner(signals))
+                .inspect_err(|e| tracing::debug!("bazel --version: {e}; assuming the latest"))
                 .ok()
                 .flatten()
         })

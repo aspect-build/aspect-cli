@@ -40,6 +40,7 @@ pub mod runner;
 pub mod server;
 pub mod stream;
 pub mod subscription;
+pub mod version;
 pub mod workspace_event;
 
 #[cfg(test)]

@@ -318,10 +318,11 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
 /// after the build.
 ///
 /// That includes the methods that only *talk to* a server rather than build —
-/// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`,
-/// and `version`. An unclaimed startup option means the active rc names a
-/// different server than the user asked for, so talking to or stopping that
-/// one is worse than doing nothing.
+/// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`
+/// — since an unclaimed startup option means the active rc names a different
+/// server than the user asked for, so talking to or stopping that one is worse
+/// than doing nothing; and `version`, which runs the Bazel client though it
+/// reaches no server, so every call that runs Bazel holds to one rule.
 ///
 /// A frozen `Bazel` (config-time) carries no task and so nothing to check.
 fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
