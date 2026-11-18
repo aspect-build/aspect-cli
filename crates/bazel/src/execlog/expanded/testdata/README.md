@@ -3,7 +3,8 @@
 `v<version>/` holds the three execution logs Bazel wrote for one build of
 `workspace/`: a genrule chain, a tree artifact, and a tool with runfiles. The
 tests convert `compact.zstd` and compare the result with `binary.binpb` and
-`log.json`, leaving out the timings, which change from run to run. Bazel 7's
+`log.json`, leaving out the timings, which change from run to run. A strict action environment keeps the
+machine's `PATH` out of them. Bazel 7's
 and 8's logs are written with `--legacy_external_runfiles` and
 `--experimental_sibling_repository_layout`, which later versions dropped.
 
@@ -18,6 +19,7 @@ for flag in compact_file="$out/compact.zstd" binary_file="$out/binary.binpb" jso
   USE_BAZEL_VERSION=$VERSION bazel --ignore_all_rc_files clean
   USE_BAZEL_VERSION=$VERSION bazel --ignore_all_rc_files build //:u //:a \
     --lockfile_mode=off --disk_cache= --noremote_accept_cached \
+    --incompatible_strict_action_env \
     $FLAGS "--execution_log_$flag"
 done
 ```

@@ -4,9 +4,7 @@
 //! names; scalars and repeated fields print even when empty, message fields
 //! only when set; 64-bit integers are strings, durations `"1.500s"`,
 //! timestamps RFC 3339 in UTC. Each message is pretty-printed, two-space
-//! indented, and messages follow one another with nothing between. Only the
-//! fields the CLI's protos (Bazel 8.0's) know are printed, so a later
-//! Bazel's `measuredMemoryPeakBytes` is not.
+//! indented, and messages follow one another with nothing between.
 
 use std::fmt::Write as _;
 

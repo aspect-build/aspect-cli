@@ -2,7 +2,7 @@ def _tree_impl(ctx):
     out = ctx.actions.declare_directory(ctx.label.name)
     ctx.actions.run_shell(
         outputs = [out],
-        command = "mkdir -p {0}/sub && echo one > {0}/one.txt && echo two > {0}/sub/two.txt".format(out.path),
+        command = "mkdir -p {0}/sub {0}/a && echo one > {0}/one.txt && echo two > {0}/sub/two.txt && echo a > {0}/a.txt && echo b > {0}/a/b.txt".format(out.path),
         mnemonic = "MakeTree",
     )
     return [DefaultInfo(files = depset([out]))]

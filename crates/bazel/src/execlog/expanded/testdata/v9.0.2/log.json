@@ -36,8 +36,8 @@
   "remoteCacheable": true,
   "targetLabel": "//:a",
   "metrics": {
-    "totalTime": "0.019s",
-    "executionWallTime": "0.019s",
+    "totalTime": "0.021s",
+    "executionWallTime": "0.021s",
     "inputBytes": "0",
     "inputFiles": "0",
     "memoryEstimateBytes": "0",
@@ -46,7 +46,7 @@
     "outputBytesLimit": "0",
     "outputFilesLimit": "0",
     "memoryBytesLimit": "0",
-    "startTime": "2026-11-18T19:05:11.615Z"
+    "startTime": "2026-11-18T19:27:09.891Z"
   }
 }{
   "commandArgs": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat bazel-out/darwin_arm64-fastbuild/bin/a.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/b.txt \u0026\u0026 echo b \u003e\u003e bazel-out/darwin_arm64-fastbuild/bin/b.txt"],
@@ -95,8 +95,8 @@
   "remoteCacheable": true,
   "targetLabel": "//:b",
   "metrics": {
-    "totalTime": "0.022s",
-    "executionWallTime": "0.022s",
+    "totalTime": "0.020s",
+    "executionWallTime": "0.020s",
     "inputBytes": "0",
     "inputFiles": "0",
     "memoryEstimateBytes": "0",
@@ -105,10 +105,10 @@
     "outputBytesLimit": "0",
     "outputFilesLimit": "0",
     "memoryBytesLimit": "0",
-    "startTime": "2026-11-18T19:05:11.638Z"
+    "startTime": "2026-11-18T19:27:09.916Z"
   }
 }{
-  "commandArgs": ["/bin/bash", "-c", "mkdir -p bazel-out/darwin_arm64-fastbuild/bin/t/sub \u0026\u0026 echo one \u003e bazel-out/darwin_arm64-fastbuild/bin/t/one.txt \u0026\u0026 echo two \u003e bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt"],
+  "commandArgs": ["/bin/bash", "-c", "mkdir -p bazel-out/darwin_arm64-fastbuild/bin/t/sub bazel-out/darwin_arm64-fastbuild/bin/t/a \u0026\u0026 echo one \u003e bazel-out/darwin_arm64-fastbuild/bin/t/one.txt \u0026\u0026 echo two \u003e bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt \u0026\u0026 echo a \u003e bazel-out/darwin_arm64-fastbuild/bin/t/a.txt \u0026\u0026 echo b \u003e bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt"],
   "environmentVariables": [],
   "inputs": [],
   "listedOutputs": ["bazel-out/darwin_arm64-fastbuild/bin/t"],
@@ -117,6 +117,24 @@
   "timeoutMillis": "0",
   "mnemonic": "MakeTree",
   "actualOutputs": [{
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt",
+    "digest": {
+      "hash": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a.txt",
+    "digest": {
+      "hash": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
     "path": "bazel-out/darwin_arm64-fastbuild/bin/t/one.txt",
     "digest": {
       "hash": "2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806",
@@ -142,8 +160,8 @@
   "remoteCacheable": true,
   "targetLabel": "//:t",
   "metrics": {
-    "totalTime": "0.020s",
-    "executionWallTime": "0.020s",
+    "totalTime": "0.022s",
+    "executionWallTime": "0.022s",
     "inputBytes": "0",
     "inputFiles": "0",
     "memoryEstimateBytes": "0",
@@ -152,7 +170,7 @@
     "outputBytesLimit": "0",
     "outputFilesLimit": "0",
     "memoryBytesLimit": "0",
-    "startTime": "2026-11-18T19:05:11.621Z"
+    "startTime": "2026-11-18T19:27:09.898Z"
   }
 }{
   "commandArgs": ["/bin/bash", "-c", "bazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh bazel-out/darwin_arm64-fastbuild/bin/b.txt src.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/u.out"],
@@ -162,6 +180,24 @@
     "digest": {
       "hash": "911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2",
       "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a.txt",
+    "digest": {
+      "hash": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt",
+    "digest": {
+      "hash": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+      "sizeBytes": "2",
       "hashFunctionName": "SHA-256"
     },
     "isTool": false,
@@ -261,8 +297,8 @@
   "remoteCacheable": true,
   "targetLabel": "//:u",
   "metrics": {
-    "totalTime": "0.185s",
-    "executionWallTime": "0.185s",
+    "totalTime": "0.196s",
+    "executionWallTime": "0.196s",
     "inputBytes": "0",
     "inputFiles": "0",
     "memoryEstimateBytes": "0",
@@ -271,6 +307,6 @@
     "outputBytesLimit": "0",
     "outputFilesLimit": "0",
     "memoryBytesLimit": "0",
-    "startTime": "2026-11-18T19:05:11.663Z"
+    "startTime": "2026-11-18T19:27:09.940Z"
   }
 }

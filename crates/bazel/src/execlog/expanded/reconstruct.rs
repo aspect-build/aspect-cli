@@ -1,7 +1,9 @@
 //! Rebuilding each spawn's `SpawnExec` from a compact log, as Bazel's
 //! `SpawnLogReconstructor` does: a port of Bazel 8's, which also honours the
 //! `legacy_external_runfiles` and `sibling_repository_layout` fields later
-//! Bazels no longer set.
+//! Bazels no longer set. Where that converter's output differs from the log
+//! Bazel writes itself (a tree's output order, the repo mapping manifest's
+//! hash function), this follows Bazel's own log.
 //!
 //! A compact log names every file, directory, runfiles tree and nested set
 //! once, by id, and each spawn refers to them; the expanded format spells each
@@ -218,7 +220,12 @@ impl Reconstructor {
                 Some(output::Type::OutputId(id)) => {
                     let input = self.input(*id)?;
                     listed.insert(input.path().to_string());
-                    actual.extend(input.files().iter().cloned());
+                    // The compact log orders a directory's files as strings;
+                    // Bazel lists a tree's outputs segment by segment, as its
+                    // paths compare (`a/b` before `a.txt`).
+                    let mut files = input.files().to_vec();
+                    files.sort_by(|a, b| a.path.split('/').cmp(b.path.split('/')));
+                    actual.extend(files);
                 }
                 Some(output::Type::InvalidOutputPath(path)) => {
                     listed.insert(path.clone());
@@ -569,8 +576,8 @@ fn sibling_generated(path: &str) -> Option<(Option<&str>, &str)> {
     let with_repo = segment(after).and_then(|(repo, rest)| {
         let (config, _) = segment(rest)?;
         let hyphenated = config
-            .find('-')
-            .is_some_and(|i| i > 0 && i < config.len() - 1);
+            .char_indices()
+            .any(|(i, c)| c == '-' && i > 0 && i + 1 < config.len());
         if !hyphenated || config == "coverage-metadata" {
             return None;
         }
@@ -628,6 +635,15 @@ mod tests {
         assert_eq!(
             sibling_generated("bazel-out/k8-fastbuild/k8-fastbuild/bin/pkg/file.txt"),
             Some((Some("k8-fastbuild"), "pkg/file.txt"))
+        );
+        assert_eq!(
+            sibling_generated("bazel-out/some_repo/-k8-opt/bin/pkg/file.txt"),
+            Some((Some("some_repo"), "pkg/file.txt")),
+            "any hyphen inside the segment marks a configuration"
+        );
+        assert_eq!(
+            sibling_generated("bazel-out/some_repo/k8-/bin/pkg/file.txt"),
+            Some((None, "bin/pkg/file.txt"))
         );
         assert_eq!(
             sibling_source("../some_repo/pkg/file.txt"),

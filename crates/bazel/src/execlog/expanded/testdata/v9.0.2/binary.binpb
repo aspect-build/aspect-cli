@@ -1,4 +1,4 @@
-œ
+ž
 	/bin/bash
 -c
 osource external/bazel_tools/tools/genrule/genrule-setup.sh; echo a > bazel-out/darwin_arm64-fastbuild/bin/a.txt$
@@ -6,11 +6,8 @@ osource external/bazel_tools/tools/genrule/genrule-setup.sh; echo a > bazel-out/
 3external/bazel_tools/tools/genrule/genrule-setup.shN
 @2138ccc4608e0a41291680587baced12bb80379b6924c3c4c2d9ef272f99139fâSHA-256**bazel-out/darwin_arm64-fastbuild/bin/a.txt08RGenruleZ{
 *bazel-out/darwin_arm64-fastbuild/bin/a.txtM
-@87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7SHA-256bdarwin-sandbox€’//:a¢
-ÀÞ
-BÀÞ
-¢
-åí÷×À„=û
+@87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7SHA-256bdarwin-sandbox€’//:a¢
+€ÑÊB€ÑÊ¢‹ø÷×Àº¢€ü
 	/bin/bash
 -c
 Ïsource external/bazel_tools/tools/genrule/genrule-setup.sh; cat bazel-out/darwin_arm64-fastbuild/bin/a.txt > bazel-out/darwin_arm64-fastbuild/bin/b.txt && echo b >> bazel-out/darwin_arm64-fastbuild/bin/b.txt$
@@ -20,23 +17,29 @@ BÀÞ
 3external/bazel_tools/tools/genrule/genrule-setup.shN
 @2138ccc4608e0a41291680587baced12bb80379b6924c3c4c2d9ef272f99139fâSHA-256**bazel-out/darwin_arm64-fastbuild/bin/b.txt08RGenruleZ{
 *bazel-out/darwin_arm64-fastbuild/bin/b.txtM
-@911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2SHA-256bdarwin-sandbox€’//:b¢
-€ã¾
-B€ã¾
-¢åí÷×À‚ê¹
+@911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2SHA-256bdarwin-sandbox€’//:b¢
+€ÚÄ	B€ÚÄ	¢‹ø÷×À¦Û‹×
 	/bin/bash
 -c
-±mkdir -p bazel-out/darwin_arm64-fastbuild/bin/t/sub && echo one > bazel-out/darwin_arm64-fastbuild/bin/t/one.txt && echo two > bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt*&bazel-out/darwin_arm64-fastbuild/bin/t08RMakeTreeZ
+Îmkdir -p bazel-out/darwin_arm64-fastbuild/bin/t/sub bazel-out/darwin_arm64-fastbuild/bin/t/a && echo one > bazel-out/darwin_arm64-fastbuild/bin/t/one.txt && echo two > bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt && echo a > bazel-out/darwin_arm64-fastbuild/bin/t/a.txt && echo b > bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt*&bazel-out/darwin_arm64-fastbuild/bin/t08RMakeTreeZ
+.bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txtM
+@0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813fSHA-256Z}
+,bazel-out/darwin_arm64-fastbuild/bin/t/a.txtM
+@87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7SHA-256Z
 .bazel-out/darwin_arm64-fastbuild/bin/t/one.txtM
 @2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806SHA-256Zƒ
 2bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txtM
-@27dd8ed44a83ff94d557f9fd0412ed5a8cbca69ea04922d88c01184a07300a5aSHA-256bdarwin-sandbox€’//:t¢
-ÀðõBÀðõ¢åí÷×À±Ÿ†
+@27dd8ed44a83ff94d557f9fd0412ed5a8cbca69ea04922d88c01184a07300a5aSHA-256bdarwin-sandbox€’//:t¢
+€ÚÄ	B€ÚÄ	¢‹ø÷×€ÚÍƒ‡
 	/bin/bash
 -c
 bazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh bazel-out/darwin_arm64-fastbuild/bin/b.txt src.txt > bazel-out/darwin_arm64-fastbuild/bin/u.out"{
 *bazel-out/darwin_arm64-fastbuild/bin/b.txtM
-@911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2SHA-256"
+@911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2SHA-256"}
+,bazel-out/darwin_arm64-fastbuild/bin/t/a.txtM
+@87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7SHA-256"
+.bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txtM
+@0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813fSHA-256"
 .bazel-out/darwin_arm64-fastbuild/bin/t/one.txtM
 @2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806SHA-256"ƒ
 2bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txtM
@@ -54,5 +57,5 @@ cbazel-out/darwin_arm64-opt-exec/bin/cat_tool.sh.runfiles/bazel_tools/tools/genr
 src.txtM
 @ef8aed55fba64258003f3479ff60a060ddb8301d170110a0d2dfa0ce4ea04eb3SHA-256**bazel-out/darwin_arm64-fastbuild/bin/u.out08RUseToolZ{
 *bazel-out/darwin_arm64-fastbuild/bin/u.outM
-@bfc69a20b093cea94dedd2af78d6a4e155a725b26e30df6d78d5ac86d3998799SHA-256bdarwin-sandbox€’//:u¢
-€ÅØXB€ÅØX¢åí÷×À÷œ
+@bfc69a20b093cea94dedd2af78d6a4e155a725b26e30df6d78d5ac86d3998799SHA-256bdarwin-sandbox€’//:u¢
+€òº]B€òº]¢‹ø÷×À’”—

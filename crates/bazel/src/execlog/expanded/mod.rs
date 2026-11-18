@@ -1,13 +1,14 @@
 //! Bazel's expanded execution log formats, written from a compact log: the
 //! binary `--execution_log_binary_file` (length-delimited `SpawnExec`s) and
-//! the JSON `--execution_log_json_file`, as Bazel's own converter writes them.
+//! the JSON `--execution_log_json_file`, as Bazel writes them itself.
 //!
 //! Bazel writes one execution log format per build. When the CLI keeps the
 //! compact log, a binary or JSON log the caller asked for is written here
 //! instead (see [`request`]), from that compact log once Bazel has finished
 //! it: each spawn is [`reconstruct`]ed, put in Bazel's [`sort`] order when the
 //! caller's `--execution_log_sort` says so, and written in the format asked
-//! for.
+//! for. Only the fields the CLI's protos (Bazel 8.0's) know are written, so a
+//! later Bazel's `measured_memory_peak_bytes` is in neither format.
 
 mod json;
 mod reconstruct;
