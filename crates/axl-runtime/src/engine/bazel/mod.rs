@@ -36,6 +36,7 @@ use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
 
+mod bazel_version;
 mod build;
 mod cancel;
 mod iter;
@@ -145,7 +146,7 @@ fn partition_workspace_events(
 
 /// Resolve the Bazel version a `Bazelrc` should use for version-gated
 /// options: an explicit `requested` string when given, else the running
-/// Bazel's ([`runner::release_version`]), asked only when `rc` actually carries
+/// Bazel's ([`bazel_version::get`]), asked only when `rc` actually carries
 /// a gated option, so the common case pays nothing. A failed probe degrades to
 /// `None` (assumed-latest). Before the version is known a gated startup entry
 /// cannot be decided, so a fallback `bazel info` asks under the ungated ones:
@@ -159,7 +160,7 @@ fn resolve_rc_version(
         return Ok(bazel::version::parse(&s));
     }
     if rc.has_version_gated_options() {
-        return Ok(runner::release_version(
+        return Ok(bazel_version::get(
             signals,
             Some(&rc.ungated_startup_flags()),
         ));
@@ -190,7 +191,7 @@ fn resolve_flags<'v>(
 
 /// Like [`resolve_flags`], but sources the version itself: `known`, the
 /// version an rc was resolved against, else the running Bazel's
-/// ([`runner::release_version`], under the invocation's `startup` flags
+/// ([`bazel_version::get`], under the invocation's `startup` flags
 /// should it need the server), asked only when at least one conditional
 /// `(flag, constraint)` tuple is present, so unconditional flag lists never pay
 /// for it. A non-release Bazel reports no version, in which case the
@@ -207,7 +208,7 @@ fn resolve_gated_flags<'v>(
     }
     let version = known
         .cloned()
-        .or_else(|| runner::release_version(signals, Some(startup)));
+        .or_else(|| bazel_version::get(signals, Some(startup)));
     resolve_flags(items, version.as_ref())
 }
 
@@ -1021,7 +1022,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         require_claimed_flags(this)?;
         let startup = read_active_rc(this).map(|rc| rc.invocation_startup_flags());
         Ok(
-            match runner::release_version(&Env::from_eval(eval)?.signals, startup.as_deref()) {
+            match bazel_version::get(&Env::from_eval(eval)?.signals, startup.as_deref()) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,
