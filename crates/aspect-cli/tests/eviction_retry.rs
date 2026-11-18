@@ -139,10 +139,12 @@ fn startup_of<'a>(line: &'a str, verb: &str) -> Vec<&'a str> {
 /// Every `bazel info` carries the build's own startup flags (a task's, an rc
 /// file's and a version-gated rc file's alike) on a release and on a
 /// non-release Bazel, but the one the rc's parse makes before it knows the
-/// version, which lacks only the entry that version gates.
+/// version, which lacks only the entry that version gates. Each is asked once:
+/// the parse's, each attempt's own, and on a non-release Bazel, whose version
+/// the parse cannot settle, the gate's.
 #[test]
 fn every_probe_asks_the_server_the_build_runs_on() {
-    for release in ["9.0.0", "development version"] {
+    for (release, infos_expected) in [("9.0.0", 3), ("development version", 4)] {
         let dir = workspace(
             "startup --host_jvm_args=-Dfrom_rc=1\n\
              try-import-if-bazel-version >=7 %workspace%/gated.bazelrc\n",
@@ -176,6 +178,7 @@ fn every_probe_asks_the_server_the_build_runs_on() {
             .filter(|w| *w != "--host_jvm_args=-Dgated=1")
             .collect();
         let infos = invocations(dir.path(), "info");
+        assert_eq!(infos.len(), infos_expected, "{release}: {infos:#?}");
         let parse_probes: Vec<&String> = infos
             .iter()
             .filter(|l| startup_of(l, "info") != build)

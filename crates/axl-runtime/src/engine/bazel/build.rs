@@ -1169,6 +1169,7 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
                 .info()?;
+        super::runner::remember_release_version(&startup_flags, version.clone());
         let recording = recording && writes_execution_log(false, true, version.as_ref());
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.

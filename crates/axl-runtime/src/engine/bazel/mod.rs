@@ -157,9 +157,7 @@ fn resolve_rc_version(
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(runner::release_version(signals, &rc.probe_startup_flags())
-            .ok()
-            .flatten());
+        return Ok(runner::release_version(signals, &rc.probe_startup_flags()));
     }
     Ok(None)
 }
@@ -203,7 +201,7 @@ fn resolve_gated_flags<'v>(
     }
     let version = match known {
         Some(version) => Some(version.clone()),
-        None => runner::release_version(signals, startup)?,
+        None => runner::release_version(signals, startup),
     };
     resolve_flags(items, version.as_ref())
 }
@@ -318,7 +316,6 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
         .unwrap_or_default())
 }
 
-/// The active `Bazelrc` set via `use_rc`, if any.
 /// Gate everything that reaches a Bazel server on the passthrough claim
 /// contract: a flag the task collected and never claimed would be silently
 /// absent from the command line we are about to run, so refuse here rather than
@@ -326,10 +323,10 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
 ///
 /// That includes the methods that only *talk to* a server rather than build —
 /// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`,
-/// and `version`, whose `bazel info release` probe is memoized for the process
-/// and runs against the *default* server. An unclaimed startup option means the
-/// active rc names a different server than the user asked for, so probing or
-/// stopping the default one is worse than doing nothing.
+/// and `version`, whose `bazel info release` probe runs under the active rc's
+/// startup flags. An unclaimed startup option means the active rc names a
+/// different server than the user asked for, so probing or stopping that one
+/// is worse than doing nothing.
 ///
 /// A frozen `Bazel` (config-time) carries no task and so nothing to check.
 fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
@@ -339,6 +336,7 @@ fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
     }
 }
 
+/// The active `Bazelrc` set via `use_rc`, if any.
 fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazel::rc::Bazelrc> {
     let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
         *b.active_rc.borrow()
@@ -987,7 +985,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// non-release build (`development version` / `no_version`) or when the
     /// probe fails.
     ///
-    /// Probed once per process (via `bazel info release`) and memoized, so
+    /// Asked (via `bazel info release`) under the active rc's startup flags, or
+    /// none without an rc, once per process for each startup flag list, so
     /// repeated calls — and other callers that need the version — share a single
     /// probe rather than each shelling out to Bazel.
     ///
@@ -1013,10 +1012,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         require_claimed_flags(this)?;
         let startup = read_startup_flags(this)?;
         Ok(
-            match runner::release_version(&Env::from_eval(eval)?.signals, &startup)
-                .ok()
-                .flatten()
-            {
+            match runner::release_version(&Env::from_eval(eval)?.signals, &startup) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,

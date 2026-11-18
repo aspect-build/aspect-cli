@@ -590,19 +590,20 @@ def _eviction_retries(ctx, rc, command: str, max_attempts: int) -> list:
 
     A `(flag, constraint)` entry for Bazel 8 and later, where those retries
     default on; the spawn resolves it against the rc's version, else the
-    running Bazel's. Nothing when
-    the loop would not retry an eviction (a budget of one attempt, or a
-    `build_retry` that declines REMOTE_CACHE_EVICTED), since Bazel's retries
-    are then the only ones, or when `rc` (its files, `--bazel-flag`, task
-    flags) sets the flag already. An injected flag, so `--bazel-flags:omit`
-    drops it.
+    running Bazel's.
+
+    Nothing when the loop would not retry an eviction (a budget of one attempt,
+    or a `build_retry` that declines REMOTE_CACHE_EVICTED), since Bazel's
+    retries are then the only ones, or when `rc` (its files, `--bazel-flag`,
+    task flags) sets the flag already. An injected flag, so
+    `--bazel-flags:omit` drops it.
 
     `build_retry` is asked about REMOTE_CACHE_EVICTED here, once, before the
     first attempt."""
     return _filter_injected(ctx, _eviction_retry_flag(ctx.traits[BazelTrait], rc, command, max_attempts))
 
 def _eviction_retry_flag(bazel_trait, rc, command: str, max_attempts: int) -> list:
-    """[`_eviction_retries`] before the user's omissions, for `bazel_trait`
+    """`_eviction_retries` before the user's omissions, for `bazel_trait`
     (which a test passes in)."""
     if rc == None or max_attempts < 2 or not bazel_trait.build_retry(exit_codes.REMOTE_CACHE_EVICTED):
         return []
