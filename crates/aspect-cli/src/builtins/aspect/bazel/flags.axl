@@ -2,6 +2,8 @@
 `args.passthrough()` buckets that let a plain Bazel flag be typed directly on an
 aspect command line, startup and command flag composition, and `--config`
 expansion. `bazel/rc.axl` parses the `.bazelrc` with what this resolves.
+`eviction_retries` is the flag a retry loop adds to leave cache eviction
+retries to itself.
 
 A flag the CLI parser does not recognize is routed by where it was typed, the
 same way Bazel splits its own command line: before the task name it joins the
@@ -122,7 +124,7 @@ deliberate.
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""
 
-load("@aspect//bazel/trait.axl", "BazelTrait")
+load("@aspect//bazel/trait.axl", "BazelTrait", "exit_codes")
 load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
 
 def _require_arg(ctx, name: str) -> None:
@@ -575,6 +577,45 @@ def _expand_config_flags(ctx, extra_flags: list, command: str = "build") -> list
 
     return _flags_delta(base, full)
 
+# Bazel's own retry of a build a cache eviction failed, within one invocation.
+_EVICTION_RETRIES_FLAG = "--experimental_remote_cache_eviction_retries"
+
+# The first Bazel whose own eviction retries are on by default (5). Before it
+# they default to 0, so turning them off would change nothing.
+_EVICTION_RETRIES_DEFAULT_ON = ">=8.0.0"
+
+def _eviction_retries(ctx, rc, command: str, max_attempts: int) -> list:
+    """The flags for a spawn whose retry loop retries cache evictions itself:
+    Bazel's own eviction retries turned off, so each attempt is a Bazel
+    invocation of its own, with its own logs and history folder, rather than
+    attempts Bazel runs inside one, starting its event file over.
+
+    A `(flag, constraint)` entry for Bazel 8 and later, where those retries
+    default on; the spawn resolves it against the rc's version, else the
+    running Bazel's.
+
+    Nothing when the loop would not retry an eviction (a budget of one attempt,
+    or a `build_retry` that declines REMOTE_CACHE_EVICTED), since Bazel's
+    retries are then the only ones, or when `rc` (its files, `--bazel-flag`,
+    task flags) sets the flag already. An injected flag, so
+    `--bazel-flags:omit` drops it.
+
+    `build_retry` is asked about REMOTE_CACHE_EVICTED here, once, before the
+    first attempt."""
+
+    # Filtered as the bare flag a filter expects, then gated.
+    kept = _filter_injected(ctx, _eviction_retry_flag(ctx.traits[BazelTrait], rc, command, max_attempts))
+    return [(flag, _EVICTION_RETRIES_DEFAULT_ON) for flag in kept]
+
+def _eviction_retry_flag(bazel_trait, rc, command: str, max_attempts: int) -> list[str]:
+    """`_eviction_retries` before the user's omissions and its version gate,
+    for `bazel_trait` (which a test passes in)."""
+    if rc == None or max_attempts < 2 or not bazel_trait.build_retry(exit_codes.REMOTE_CACHE_EVICTED):
+        return []
+    if rc.flag_value(_EVICTION_RETRIES_FLAG, command = command) != None:
+        return []
+    return [_EVICTION_RETRIES_FLAG + "=0"]
+
 bazel_flags = namespace(
     VALUE_FLAGS = BAZEL_VALUE_FLAGS,
     STARTUP_VALUE_FLAGS = BAZEL_STARTUP_VALUE_FLAGS,
@@ -584,6 +625,7 @@ bazel_flags = namespace(
     resolve_startup = _resolve_startup_flags,
     expand_config = _expand_config_flags,
     disclaim_passthrough = _disclaim_passthrough,
+    eviction_retries = _eviction_retries,
 )
 
 # Shared with the rest of `bazel/`, which composes them into the rc and the
@@ -593,6 +635,7 @@ filter_injected = _filter_injected
 requested_config_names = _requested_config_names
 
 testonly_flags_delta = _flags_delta
+testonly_eviction_retry_flag = _eviction_retry_flag
 
 # Exported for the unit tests: the per-entry section rule is only reachable from
 # AXL through a `task_flags` hook (the `extra_*_flags` fields are `list[str]`, so

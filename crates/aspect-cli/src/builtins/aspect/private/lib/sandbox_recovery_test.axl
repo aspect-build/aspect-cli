@@ -198,8 +198,8 @@ def _test_build_retry_delegation_yields_to_poisoning(_):
 def _test_build_end_signals_on_blaze_internal_error(_):
     """Final exit 37 → server persistently sick → signal unhealthy.
 
-    Per `default_retry`, 37 (BLAZE_INTERNAL_ERROR) is the canonical
-    retryable-class code; a final exit of 37 means all retries hit it."""
+    Per `server_error`, 37 (BLAZE_INTERNAL_ERROR) is the canonical
+    server-sick code; a final exit of 37 means the retries ran out on it."""
     env = _fake_environment()
     rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
@@ -218,7 +218,7 @@ def _test_build_end_signals_on_local_environmental_error(_):
     _eq("final 36 → signal on defer", recorder["spawned"], [_SIGNAL_BIN])
 
 def _test_build_end_classification_ignores_task_predicate(_):
-    """The server-sick classification is `default_retry`, deliberately not
+    """The server-sick classification is `server_error`, deliberately not
     the task's predicate: a task that declines to retry 37 has not made its
     runner healthy."""
     env = _fake_environment()
@@ -255,6 +255,16 @@ def _test_build_end_quiet_on_real_failure(_):
         _run_defers(recorder)
         _eq("final %d → no signal" % code, recorder["spawned"], [])
 
+def _test_build_end_quiet_on_cache_eviction(_):
+    """Final REMOTE_CACHE_EVICTED (39) → retried, but the remote cache's
+    trouble, not the runner's → no signal."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env)
+    ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
+    rec.build_end(ctx, 39)
+    _run_defers(recorder)
+    _eq("final 39 → no signal", recorder["spawned"], [])
+
 def _test_build_end_noops_when_binary_absent(_):
     """Missing signal binary → no spawn."""
     env = _fake_environment(signal_bin_exists = False)
@@ -279,8 +289,9 @@ def _test_impl(ctx):
     _test_build_end_classification_ignores_task_predicate(ctx)
     _test_build_end_quiet_on_success(ctx)
     _test_build_end_quiet_on_real_failure(ctx)
+    _test_build_end_quiet_on_cache_eviction(ctx)
     _test_build_end_noops_when_binary_absent(ctx)
-    print("sandbox_recovery_test.axl: OK (15 sections)")
+    print("sandbox_recovery_test.axl: OK (16 sections)")
     return 0
 
 sandbox_recovery_tests = task(

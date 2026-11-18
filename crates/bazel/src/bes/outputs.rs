@@ -150,10 +150,10 @@ impl Outputs {
         }
     }
 
-    /// Start over for a new attempt. Bazel retries an evicted build
-    /// (`REMOTE_CACHE_EVICTED`) in the same invocation as a fresh stream whose
-    /// file-set ids restart, so only the last attempt's events count. Targets
-    /// already ready stay settled.
+    /// Start over for a new attempt. With its own eviction retries on, Bazel
+    /// retries an evicted build (`REMOTE_CACHE_EVICTED`) in the same
+    /// invocation as a fresh stream whose file-set ids restart, so only the
+    /// last attempt's events count. Targets already ready stay settled.
     fn restart(&mut self) {
         self.targets.clear();
         self.filesets.clear();
@@ -418,7 +418,7 @@ mod tests {
         );
     }
 
-    /// Bazel retries an evicted build in the same invocation, and only the last
+    /// Bazel retrying an evicted build in the same invocation: only the last
     /// attempt says whether the target built.
     #[test]
     fn a_target_the_retried_attempt_builds_is_ready() {

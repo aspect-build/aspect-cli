@@ -8,6 +8,8 @@
 //!     process's own pid; tests can override via `BASIL_SERVER_PID` so a
 //!     long-lived holder process stands in for the server whose open files
 //!     the `bazel` crate's streams ask about, for the whole test.
+//!   - `--version` — prints `bazel <release>`, from `BASIL_RELEASE` as `info`'s
+//!     `release` is; with any other argument beside it, fails as Bazel does.
 //!   - `build` / `test` — finds `--build_event_binary_file <path>`, finds
 //!     `--scenario=<name>` somewhere in argv, and writes a sequence of
 //!     length-delimited `BuildEvent` protobufs into the BES path according
@@ -84,6 +86,14 @@ fn main() {
         .map(String::as_str)
         .unwrap_or("");
 
+    if args == ["--version"] {
+        println!("bazel {}", release());
+        return;
+    }
+    if args.iter().any(|a| a == "--version") {
+        eprintln!("FATAL: Unknown startup option: '--version'.");
+        process::exit(2);
+    }
     match verb {
         "info" => run_info(&args),
         "build" | "test" => run_build(&args, verb),
@@ -97,6 +107,11 @@ fn main() {
             process::exit(2);
         }
     }
+}
+
+/// The Bazel release basil reports: `BASIL_RELEASE`, else 9.0.0.
+fn release() -> String {
+    env::var("BASIL_RELEASE").unwrap_or_else(|_| "9.0.0".to_string())
 }
 
 /// Append this invocation's argv to `BASIL_ARGV_LOG`, one line per invocation,
@@ -129,7 +144,7 @@ fn run_info(args: &[String]) {
         .and_then(|s| s.parse().ok())
         .or_else(|| env::var("BASIL_SERVER_PID").ok()?.parse().ok())
         .unwrap_or_else(process::id);
-    let release = env::var("BASIL_RELEASE").unwrap_or_else(|_| "9.0.0".to_string());
+    let release = release();
 
     for key in args.iter().filter(|a| !a.starts_with('-') && *a != "info") {
         match key.as_str() {
@@ -565,6 +580,24 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(39, true)]],
             ..Default::default()
         },
+
+        // An eviction on the first invocation only, for a caller that retries
+        // with Bazel's own retries off (the CLI's loops): the first exits 39,
+        // and every later one succeeds. `BASIL_EVICTED_ONCE` names the file
+        // that marks the first one done, so the state outlives each process.
+        "cache_evicted_once" => {
+            let marker = env::var_os("BASIL_EVICTED_ONCE")
+                .unwrap_or_else(|| panic!("basil: cache_evicted_once needs BASIL_EVICTED_ONCE"));
+            if Path::new(&marker).exists() {
+                return Scenario::default();
+            }
+            fs::write(&marker, b"").unwrap_or_else(|e| panic!("basil: writing {marker:?}: {e}"));
+            Scenario {
+                attempts: vec![vec![build_started(), build_finished(39, true)]],
+                exit: ExitBehavior::Code(39),
+                ..Default::default()
+            }
+        }
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
         // retry, each attempt starting the file over as Bazel's do.

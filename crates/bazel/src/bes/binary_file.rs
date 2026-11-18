@@ -11,10 +11,10 @@
 //! only itself: a FIFO's full buffer would block bazel inside its own event
 //! writer. A build bazel retries reopens the file with `O_TRUNC` for the next
 //! attempt, which the [`File`] follows on its own (see its module docs). The
-//! retry marker says one is coming, so that the marked attempt's
-//! `last_message` does not end the stream. Bazel can also run out of retries:
-//! that `last_message` then completes the stream once the client exits without
-//! a new attempt's file having appeared.
+//! retry marker says one may be coming, so that the marked attempt's
+//! `last_message` does not end the stream. Bazel can also run out of retries,
+//! or have them off: that `last_message` then completes the stream once the
+//! client exits without a new attempt's file having appeared.
 
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -50,8 +50,9 @@ pub fn requested_path(
     crate::rc::requested_path(flags, FLAG, verb, base)
 }
 
-/// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it
-/// again in the same invocation, starting the file over for the next attempt.
+/// `REMOTE_CACHE_EVICTED`: the build ends with this code. With its own
+/// eviction retries on, bazel runs it again in the same invocation, starting
+/// the file over for the next attempt; with them off, the code is the end.
 pub(crate) const REMOTE_CACHE_EVICTED: i32 = 39;
 
 /// One event as it was read.
@@ -78,9 +79,9 @@ impl Frame {
         self.raw.slice(self.prefix_len..)
     }
 
-    /// This is the `BuildFinished` that ends an attempt bazel is about to
-    /// retry (`REMOTE_CACHE_EVICTED`): the next attempt starts the file over
-    /// at the same path.
+    /// This is the `BuildFinished` that ends an attempt bazel may retry
+    /// (`REMOTE_CACHE_EVICTED`): a next attempt starts the file over at the
+    /// same path.
     pub fn is_retry_marker(&self) -> bool {
         self.retry
     }

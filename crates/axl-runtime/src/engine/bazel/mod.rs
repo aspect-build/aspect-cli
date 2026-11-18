@@ -36,6 +36,7 @@ use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
 
+mod bazel_version;
 mod build;
 mod cancel;
 mod iter;
@@ -143,32 +144,33 @@ fn partition_workspace_events(
     })
 }
 
-/// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
-/// a `Vec<String>`. Plain flags are always included; conditional flags are
-/// included only when [`constraint_matches`] holds for `version`.
 /// Resolve the Bazel version a `Bazelrc` should use for version-gated
-/// options: an explicit `requested` string when given, else the running Bazel
-/// (probed only when `rc` actually carries a gated option, so the common case
-/// pays nothing). A failed probe degrades to `None` (assumed-latest).
+/// options: an explicit `requested` string when given, else the running
+/// Bazel's ([`bazel_version::get`]), asked only when `rc` actually carries
+/// a gated option, so the common case pays nothing. A failed probe degrades to
+/// `None` (assumed-latest). Before the version is known a gated startup entry
+/// cannot be decided, so a fallback `bazel info` asks under the ungated ones:
+/// the build's server unless such an entry then applies.
 fn resolve_rc_version(
     signals: &Arc<cancellation::Signals>,
     requested: Option<String>,
     rc: &bazel::rc::Bazelrc,
 ) -> anyhow::Result<Option<semver::Version>> {
     if let Some(s) = requested {
-        return Ok(semver::Version::parse(&s).ok());
+        return Ok(bazel::version::parse(&s));
     }
     if rc.has_version_gated_options() {
-        return Ok(
-            bazel::server::Server::new(&runner::SignalRunner(signals), &[])
-                .info()
-                .ok()
-                .and_then(|t| t.1),
-        );
+        return Ok(bazel_version::get(
+            signals,
+            Some(&rc.ungated_startup_flags()),
+        ));
     }
     Ok(None)
 }
 
+/// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
+/// a `Vec<String>`. Plain flags are always included; conditional flags are
+/// included only when [`constraint_matches`] holds for `version`.
 fn resolve_flags<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
     version: Option<&semver::Version>,
@@ -187,28 +189,26 @@ fn resolve_flags<'v>(
     Ok(result)
 }
 
-/// Resolve a mixed flag list against the running Bazel version.
-///
-/// Like [`resolve_flags`], but sources the version itself: a `bazel info`
-/// probe is run only when at least one conditional `(flag, constraint)` tuple
-/// is present, so unconditional flag lists never pay for the probe. A
-/// non-release Bazel reports no version, in which case the constraints resolve
-/// against an assumed-latest version (see [`constraint_matches`]).
-///
-/// Shared by every Bazel subcommand that accepts version-gated flags
-/// (`build` / `test` / `query`) so they filter conditional flags identically.
-fn resolve_flags_for_running_bazel<'v>(
+/// Like [`resolve_flags`], but sources the version itself: `known`, the
+/// version an rc was resolved against, else the running Bazel's
+/// ([`bazel_version::get`], under the invocation's `startup` flags
+/// should it need the server), asked only when at least one conditional
+/// `(flag, constraint)` tuple is present, so unconditional flag lists never pay
+/// for it. A non-release Bazel reports no version, in which case the
+/// constraints resolve against an assumed-latest version (see
+/// [`constraint_matches`]).
+fn resolve_gated_flags<'v>(
     signals: &Arc<cancellation::Signals>,
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    startup: &[String],
+    known: Option<&semver::Version>,
 ) -> anyhow::Result<Vec<String>> {
-    let version = if items.iter().any(|f| f.is_right()) {
-        bazel::server::Server::new(&runner::SignalRunner(signals), &[])
-            .info()
-            .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
-            .1
-    } else {
-        None
-    };
+    if !items.iter().any(|f| f.is_right()) {
+        return resolve_flags(items, None);
+    }
+    let version = known
+        .cloned()
+        .or_else(|| bazel_version::get(signals, Some(startup)));
     resolve_flags(items, version.as_ref())
 }
 
@@ -322,18 +322,18 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
         .unwrap_or_default())
 }
 
-/// The active `Bazelrc` set via `use_rc`, if any.
 /// Gate everything that reaches a Bazel server on the passthrough claim
 /// contract: a flag the task collected and never claimed would be silently
 /// absent from the command line we are about to run, so refuse here rather than
 /// after the build.
 ///
-/// That includes the methods that only *talk to* a server rather than build —
-/// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`,
-/// and `version`, whose `bazel info release` probe is memoized for the process
-/// and runs against the *default* server. An unclaimed startup option means the
-/// active rc names a different server than the user asked for, so probing or
-/// stopping the default one is worse than doing nothing.
+/// That includes the methods that only *talk to* a server rather than build:
+/// `shutdown`, `health_check`, `recover_poisoned_sandbox` and
+/// `cancel_invocation`. An unclaimed startup option means the active rc names
+/// a different server than the user asked for, so talking to or stopping that
+/// one is worse than doing nothing. `version`, which asks the active rc's
+/// server only when `bazel --version` fails, is held to the same rule, as is
+/// every call that runs Bazel.
 ///
 /// A frozen `Bazel` (config-time) carries no task and so nothing to check.
 fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
@@ -343,6 +343,7 @@ fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
     }
 }
 
+/// The active `Bazelrc` set via `use_rc`, if any.
 fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazel::rc::Bazelrc> {
     let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
         *b.active_rc.borrow()
@@ -369,8 +370,13 @@ fn effective_rc<'v>(
 
 /// Assemble `(command_flags, startup_flags)` for `command`: when a `Bazelrc`
 /// is in effect, expand it and append the per-call `flags=` as extras (auto
-/// `--ignore_all_rc_files`); otherwise fall back to raw `flags=` + the legacy
-/// `ctx.bazel.startup_flags` (Bazel reads its own rc).
+/// `--ignore_all_rc_files`); otherwise the raw `flags=` and no startup flags
+/// (Bazel reads its own rc).
+///
+/// Version-gated `flags=` are resolved against the rc's version, else the
+/// running Bazel's (see [`resolve_gated_flags`]). Shared by every Bazel
+/// subcommand that takes them (`build` / `test` / `query`), so they filter
+/// conditional flags identically.
 fn resolve_invocation_flags<'v>(
     signals: &Arc<cancellation::Signals>,
     this: values::Value<'v>,
@@ -378,14 +384,16 @@ fn resolve_invocation_flags<'v>(
     rc_param: NoneOr<values::Value<'v>>,
     flags: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let extras = resolve_flags_for_running_bazel(signals, flags)?;
     match effective_rc(this, rc_param) {
         Some(rc) => {
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
-            cmd.extend(extras);
+            cmd.extend(resolve_gated_flags(signals, flags, &startup, rc.version())?);
             Ok((cmd, startup))
         }
-        None => Ok((extras, read_startup_flags(this)?)),
+        None => {
+            let extras = resolve_gated_flags(signals, flags, &[], None)?;
+            Ok((extras, Vec::new()))
+        }
     }
 }
 
@@ -512,7 +520,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `targets` - One or more Bazel target patterns to build.
     /// * `flags` - Bazel flags. Each element is either a plain `str` that is
     ///   always included, or a `(flag, constraint)` tuple that is included only
-    ///   when the running Bazel version satisfies the
+    ///   when the rc's Bazel version, else the running Bazel's, satisfies the
     ///   [semver](https://semver.org) constraint. Pre-release versions are
     ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
     ///   invalid constraint is a hard error.
@@ -668,7 +676,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `targets` - One or more Bazel target patterns to test.
     /// * `flags` - Bazel flags. Each element is either a plain `str` that is
     ///   always included, or a `(flag, constraint)` tuple that is included only
-    ///   when the running Bazel version satisfies the
+    ///   when the rc's Bazel version, else the running Bazel's, satisfies the
     ///   [semver](https://semver.org) constraint. Pre-release versions are
     ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
     ///   invalid constraint is a hard error.
@@ -838,15 +846,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<query::Query> {
         require_claimed_flags(this)?;
-        let extras = resolve_flags_for_running_bazel(&Env::from_eval(eval)?.signals, &flags.items)?;
-        let (startup, command_flags) = match effective_rc(this, rc) {
-            Some(rc) => {
-                let (startup, mut base) = rc.resolve_for_command("query")?;
-                base.extend(extras);
-                (startup, base)
-            }
-            None => (read_startup_flags(this)?, extras),
-        };
+        let (command_flags, startup) = resolve_invocation_flags(
+            &Env::from_eval(eval)?.signals,
+            this,
+            "query",
+            rc,
+            &flags.items,
+        )?;
         query::run(
             &Env::from_eval(eval)?.signals,
             &expr,
@@ -985,14 +991,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// non-release build (`development version` / `no_version`) or when the
     /// probe fails.
     ///
-    /// Probed once per process (via `bazel info release`) and memoized, so
-    /// repeated calls — and other callers that need the version — share a single
-    /// probe rather than each shelling out to Bazel.
+    /// Asked once per process via `bazel --version`, which the client answers
+    /// without a server, and memoized, so repeated calls — and other callers
+    /// that need the version — share a single probe rather than each shelling
+    /// out to Bazel. Where a `tools/bazel` wrapper that adds startup flags
+    /// fails `--version`, the server is asked with `bazel info` under the
+    /// active rc's startup flags; without an active rc the version is `None`
+    /// until a caller that knows them asks.
     ///
     /// By default the pre-release suffix is dropped (`8.0.0-rc2` → `"8.0.0"`),
     /// which is what version-gating wants — a release candidate should match the
-    /// same constraints its release will. Pass `strip = False` for the exact
-    /// reported version (`"8.0.0-rc2"`) when you need to distinguish an rc.
+    /// same constraints its release will. Pass `strip = False` for the full
+    /// version, a release candidate's suffix normalized (Bazel's `8.0.0rc2` →
+    /// `"8.0.0-rc2"`), when you need to distinguish an rc.
     ///
     /// **Examples**
     ///
@@ -1009,8 +1020,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
+        let startup = read_active_rc(this).map(|rc| rc.invocation_startup_flags());
         Ok(
-            match runner::release_version(&Env::from_eval(eval)?.signals) {
+            match bazel_version::get(&Env::from_eval(eval)?.signals, startup.as_deref()) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,
@@ -1212,7 +1224,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .with_version(
                 version
                     .into_option()
-                    .and_then(|s| semver::Version::parse(&s).ok()),
+                    .and_then(|s| bazel::version::parse(&s)),
             );
         Ok(rc)
     }
@@ -1630,6 +1642,32 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gated flag follows the version the rc was resolved against, which a
+    /// caller may have named, without asking the running Bazel.
+    #[test]
+    fn a_gated_flag_follows_the_rcs_version() {
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let gated = Either::Right((heap.alloc_str("--new"), heap.alloc_str(">=8.0.0")));
+            let plain = Either::Left(heap.alloc_str("--plain"));
+            let items = [plain, gated];
+            let signals = cancellation::Signals::new();
+            let at = |v: &str| semver::Version::parse(v).unwrap();
+            assert_eq!(
+                resolve_gated_flags(&signals, &items, &[], Some(&at("8.1.0"))).unwrap(),
+                ["--plain", "--new"]
+            );
+            assert_eq!(
+                resolve_gated_flags(&signals, &items, &[], Some(&at("7.6.0"))).unwrap(),
+                ["--plain"]
+            );
+            assert_eq!(
+                resolve_gated_flags(&signals, &[plain], &[], None).unwrap(),
+                ["--plain"]
+            );
+        });
+    }
 
     #[test]
     fn execution_log_true_is_refused_and_names_the_iterator() {

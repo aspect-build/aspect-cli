@@ -6,12 +6,16 @@ patterns and flags for a spawn, for tasks such as `lint` that drive
 
 The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
 (`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
-and the retry budget — into one immutable `_Invocation` record. The returned handle
-exposes the flow as verbs the task drives in a visible loop (see `build.axl`):
+and the retry budget (with the flag that leaves cache eviction retries to it) —
+into one immutable `_Invocation` record. The returned handle exposes the flow
+as verbs the task drives in a visible loop (see `build.axl`):
 the verbs are thin forwarders over that single record, and the top-level `_do_*`
 functions thread it — no closure tower, no mutable state dict. The live
 invocation and the attempt index are threaded as values (the `_spawned` struct
-and the callsite's loop counter), never stored.
+and the callsite's loop counter), never stored. A task drives every attempt
+through `attempts` and `should_retry`: a handle that leaves cache eviction
+retries to its loop turns Bazel's own off, so a task that spawns once gets no
+eviction retries at all.
 
 The one thing the constructor cannot resolve is the execution-log wiring: an
 `exec_log_event` handle binds to a single build, so each attempt opens its own
@@ -38,7 +42,7 @@ load(
 load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
 load("@aspect//bazel/flags.axl", "bazel_flags")
 load("@aspect//bazel/rc.axl", "bazel_rc")
-load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "exit_code_of", "may_retry")
+load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "exit_code_of", "may_retry", "retry_attempts")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a
@@ -58,7 +62,8 @@ _Invocation = record(
     patterns = field(list[str]),
     sinks = field(list),
     dropped = field(list[str]),
-    rc_flags = field(list[str]),
+    # A flag, or a `(flag, version constraint)` pair the spawn resolves.
+    rc_flags = field(list[str | (str, str)]),
     results_url = field(str),
     bazel_streams_bes = field(bool),
     announce_version = field(bool),
@@ -172,7 +177,8 @@ def _resolve(ctx, command: str) -> _Invocation:
     results_url = advertised_results_url(trait.bes_results_sources, rc, sinks, command)
     rc_flags.extend(bes_results_url_flag(trait.bes_results_sources, rc, command))
 
-    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    max_attempts = retry_attempts(ctx)
+    rc_flags.extend(bazel_flags.eviction_retries(ctx, rc, command, max_attempts))
 
     return _Invocation(
         ctx = ctx,
@@ -187,7 +193,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         bazel_streams_bes = bes_streamed_by_bazel(trait.bes_results_sources, rc, command),
         announce_version = announce_version,
         announce_command = announce_command,
-        max_attempts = max(1, requested),
+        max_attempts = max_attempts,
     )
 
 def _do_start(inv: _Invocation) -> None:

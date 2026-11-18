@@ -6,8 +6,9 @@ A fake `bazel` binary used to drive integration tests of `ctx.bazel.build`.
 
 `basil` mimics just enough of Bazel's CLI to satisfy `axl-runtime`. Tests point the runtime at it via `BAZEL_REAL=<path-to-basil>` (the bazelisk convention) and basil pretends to be Bazel for the duration of the call.
 
-It supports two verbs:
+It supports:
 
+- `basil --version` — prints `bazel <release>` (`BASIL_RELEASE`, default 9.0.0); like Bazel, only as the sole argument.
 - `basil info <key>...` — prints the small set of `key: value` lines the runtime parses (`server_pid`, `release`, `output_base`).
 - `basil build` / `basil test` — writes a canned sequence of Build Event Protocol messages to the path passed in `--build_event_binary_file`, then exits.
 

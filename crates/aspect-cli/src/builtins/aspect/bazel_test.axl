@@ -30,6 +30,7 @@ _MEMBERS = {
         "VALUE_FLAGS",
         "args",
         "disclaim_passthrough",
+        "eviction_retries",
         "expand_config",
         "passthrough_args",
         "resolve",

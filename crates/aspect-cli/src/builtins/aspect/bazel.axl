@@ -43,6 +43,8 @@ load(
     _exit_code_of = "exit_code_of",
     _exit_codes = "exit_codes",
     _may_retry = "may_retry",
+    _retry_attempts = "retry_attempts",
+    _server_error = "server_error",
 )
 load("./private/lib/runnable.axl", _normalize_label = "normalize_label")
 
@@ -62,4 +64,6 @@ dispatch_bazel_build_end = _dispatch_bazel_build_end
 exit_code_of = _exit_code_of
 exit_codes = _exit_codes
 may_retry = _may_retry
+retry_attempts = _retry_attempts
+server_error = _server_error
 normalize_label = _normalize_label

@@ -280,6 +280,34 @@ impl Bazelrc {
         &self.startup_flags
     }
 
+    /// The startup flags to ask the running Bazel its version under, before
+    /// that version is known: [`invocation_startup_flags`](Self::invocation_startup_flags)
+    /// without the rc files' version-gated `startup` entries, which the version
+    /// decides. The same server, unless a gated entry applies at it.
+    pub fn ungated_startup_flags(&self) -> Vec<String> {
+        self.startup_flags_where(|o| o.version_condition.is_none())
+    }
+
+    /// The caller's startup flags, the rc files' `startup` entries `keep`
+    /// accepts, and `--ignore_all_rc_files`.
+    fn startup_flags_where(&self, keep: impl Fn(&RcOption) -> bool) -> Vec<String> {
+        let mut startup = self.startup_flags.clone();
+        startup.extend(
+            self.raw_options("startup")
+                .iter()
+                .filter(|o| keep(o))
+                .map(|o| o.value.clone()),
+        );
+        startup.push("--ignore_all_rc_files".to_string());
+        startup
+    }
+
+    /// The Bazel version version-gated options are evaluated against, `None`
+    /// when it was not resolved (they then hold as for the latest).
+    pub fn version(&self) -> Option<&semver::Version> {
+        self.version.as_ref()
+    }
+
     /// Whether any option (in any section) is version-gated — lets a caller
     /// skip probing the Bazel version when no gate would consult it.
     pub fn has_version_gated_options(&self) -> bool {
@@ -710,32 +738,22 @@ impl Bazelrc {
     /// `--ignore_all_rc_files` (the on-disk rc is already absorbed). Command-
     /// independent; the single source for build/test/query/info/health_check.
     pub fn invocation_startup_flags(&self) -> Vec<String> {
-        let mut startup = self.startup_flags.clone();
         // Gate the rc-file `startup` section by version like command options: a
         // `try-import-if-bazel-version` startup flag meant for another Bazel
         // version must not be passed to the running one.
-        startup.extend(
-            self.raw_options("startup")
-                .iter()
-                .filter(|o| self.version_condition_holds(&o.version_condition))
-                .map(|o| o.value.clone()),
-        );
-        startup.push("--ignore_all_rc_files".to_string());
-        startup
+        self.startup_flags_where(|o| self.version_condition_holds(&o.version_condition))
     }
 
     /// Whether a version-gated option's `condition` holds at this bazelrc's
-    /// configured Bazel version (assumed-latest when unset). `None` → always.
-    /// A malformed constraint is treated as applicable; the build surfaces it.
+    /// configured Bazel version, as [`constraint_matches`] decides it (a
+    /// release candidate as its release, assumed-latest when unset). `None` →
+    /// always. A malformed constraint is treated as applicable; the build
+    /// surfaces it.
     fn version_condition_holds(&self, condition: &Option<String>) -> bool {
         let Some(cond) = condition else {
             return true;
         };
-        let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
-        let probe = self.version.as_ref().unwrap_or(&assumed_latest);
-        semver::VersionReq::parse(cond)
-            .map(|req| req.matches(probe))
-            .unwrap_or(true)
+        constraint_matches(cond, self.version.as_ref()).unwrap_or(true)
     }
 
     /// Config-expanded options for `command`, filtered to those that apply at
@@ -760,21 +778,16 @@ impl Bazelrc {
         }
 
         let version = match version_override {
-            Some(v) => semver::Version::parse(v).ok(),
+            Some(v) => crate::version::parse(v),
             None => self.version.clone(),
         };
-        let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
-        let probe = version.as_ref().unwrap_or(&assumed_latest);
 
         let mut out = Vec::with_capacity(opts.len());
         for opt in opts {
             match &opt.version_condition {
                 None => out.push(opt),
                 Some(cond) => {
-                    let req = semver::VersionReq::parse(cond).map_err(|e| {
-                        anyhow::anyhow!("invalid version constraint '{}': {}", cond, e)
-                    })?;
-                    if req.matches(probe) {
+                    if constraint_matches(cond, version.as_ref())? {
                         out.push(opt);
                     }
                 }
@@ -1173,20 +1186,22 @@ pub fn override_payload(token: &str) -> Option<&str> {
     DefaultOverride::parse(token).map(|over| over.option)
 }
 
-/// Whether a semver `constraint` is satisfied by the running Bazel `version`.
+/// Whether a semver `constraint` is satisfied by a Bazel `version`: the one an
+/// rc was resolved against, or the running Bazel's.
 ///
-/// `version` is `None` when Bazel reports a non-release build (a
-/// `development version` has no version number to parse). Such a build is
-/// compiled from HEAD, so it is effectively newer than any release: it is
-/// matched against a max version, so lower-bound gates (`>=N`, the usual
-/// shape) match and upper-bound gates (`<N`) don't.
+/// `version` is `None` when it is unknown: a non-release build (a
+/// `development version` has no version number to parse), a failed probe, or
+/// an rc whose version was never resolved. That is taken as newer than any
+/// release: it is matched against a max version, so lower-bound gates (`>=N`,
+/// the usual shape) match and upper-bound gates (`<N`) don't.
 ///
 /// An unparseable constraint is a hard error naming the offending value.
 ///
 /// The version's pre-release suffix is ignored: semver `VersionReq` matching
 /// treats a pre-release specially (e.g. `8.0.0-rc2` does NOT satisfy `>=8.0.0`),
-/// but for flag gating a release candidate should match the same constraints its
-/// release will. So `8.0.0-rc2` is compared as `8.0.0`.
+/// but for gating flags and rc entries a release candidate or rolling release
+/// should match the same constraints its release will. So `8.0.0-rc2` and
+/// `9.0.0-pre.20250101.1` are compared as `8.0.0` and `9.0.0`.
 pub fn constraint_matches(
     constraint: &str,
     version: Option<&semver::Version>,
@@ -2244,6 +2259,57 @@ mod runcommand_tests {
             &["--output_base=/a", "--host_jvm_args=-Xmx2g"]
         );
         assert_eq!(merged.version, Some(semver::Version::new(8, 0, 0)));
+    }
+
+    /// Before the version is known, a probe asks under the startup entries no
+    /// version gates.
+    #[test]
+    fn ungated_startup_flags_leave_out_the_gated_entries() {
+        let mut rc = Bazelrc::blank(&[]).with_startup_flags(vec!["--output_base=/ob".to_string()]);
+        rc.options
+            .entry("startup".to_string())
+            .or_default()
+            .extend([
+                RcOption {
+                    value: "--host_jvm_args=-Dall=1".to_string(),
+                    ..RcOption::default()
+                },
+                RcOption {
+                    value: "--host_jvm_args=-Dold=1".to_string(),
+                    version_condition: Some("<8.0.0".to_string()),
+                    ..RcOption::default()
+                },
+            ]);
+        assert_eq!(
+            rc.ungated_startup_flags(),
+            [
+                "--output_base=/ob",
+                "--host_jvm_args=-Dall=1",
+                "--ignore_all_rc_files"
+            ]
+        );
+    }
+
+    /// A release candidate or rolling release keeps what its release would:
+    /// Bazel's `8.0.0rc1` passes `>=8` and `>=7` gates, in the rc's sections
+    /// and its options alike.
+    #[test]
+    fn a_release_candidate_keeps_its_releases_gated_options() {
+        let rc = Bazelrc::blank(&[RcOption {
+            value: "--gated".to_string(),
+            version_condition: Some(">=8.0.0".to_string()),
+            ..RcOption::default()
+        }])
+        .with_version(crate::version::parse("8.0.0rc1"));
+        assert!(rc.version_condition_holds(&Some(">=7.0.0".to_string())));
+        let (_, cmd) = rc.resolve_for_command("build").unwrap();
+        assert!(cmd.contains(&"--gated".to_string()), "{cmd:?}");
+        let rolling = rc.with_version(crate::version::parse("8.1.0-pre.20250101.1"));
+        let (_, cmd) = rolling.resolve_for_command("build").unwrap();
+        assert!(
+            cmd.contains(&"--gated".to_string()),
+            "a rolling release: {cmd:?}"
+        );
     }
 
     #[test]
