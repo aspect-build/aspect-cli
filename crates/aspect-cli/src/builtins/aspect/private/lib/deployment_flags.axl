@@ -106,6 +106,15 @@ REMOTE_REFUSED_BY_ENV = (
     "BES_BACKEND / REMOTE_EXECUTOR variables to build against a configured deployment instead."
 )
 
+def no_bazel_endpoint_message(target: str, choose: str) -> str:
+    """Why `--remote` against `target`, a deployment serving no cache, BES or
+    executor, is refused. `choose` is how the caller's command picks another.
+    Shared with `aspect bazelrc`."""
+    return ("--remote requires a deployment that serves a Bazel endpoint, but %s advertises none, " % target +
+            "as with a deployment configured through its web UI alone. To use its remote cache or BES, run " +
+            "`aspect auth configure <host>` against that remote cache or BES host; otherwise choose another " +
+            "deployment (see `aspect auth status`) with %s." % choose)
+
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
 
@@ -379,10 +388,7 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     # it had any.
     if not serves_bazel_endpoint(endpoints) and not auto:
         target = ("deployment '%s'" if ctx.args.deployment else "the default (%s)") % endpoints.name
-        fail("--remote requires a deployment that serves a Bazel endpoint, but %s advertises none. " % target +
-             "If it has gained one since it was configured, run `aspect auth configure <host>` to refresh it; " +
-             "otherwise choose another deployment (see `aspect auth status`) with " +
-             "`aspect auth use <name>` or --deployment <name>.")
+        fail(no_bazel_endpoint_message(target, "`aspect auth use <name>` or --deployment <name>"))
 
     base_flags = []
     bes_backends = []
