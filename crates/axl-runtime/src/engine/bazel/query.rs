@@ -134,7 +134,7 @@ pub fn run(
 
     if announce.version || announce.command {
         let version = if announce.version {
-            super::runner::release_version(signals, startup_flags)
+            super::runner::release_version(signals, Some(startup_flags))
         } else {
             None
         };

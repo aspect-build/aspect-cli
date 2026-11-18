@@ -280,6 +280,22 @@ impl Bazelrc {
         &self.startup_flags
     }
 
+    /// The startup flags to ask the running Bazel its version under, before
+    /// that version is known: [`invocation_startup_flags`](Self::invocation_startup_flags)
+    /// without the rc files' version-gated `startup` entries, which the version
+    /// decides. The same server, unless a gated entry applies at it.
+    pub fn ungated_startup_flags(&self) -> Vec<String> {
+        let mut startup = self.startup_flags.clone();
+        startup.extend(
+            self.raw_options("startup")
+                .iter()
+                .filter(|o| o.version_condition.is_none())
+                .map(|o| o.value.clone()),
+        );
+        startup.push("--ignore_all_rc_files".to_string());
+        startup
+    }
+
     /// The Bazel version version-gated options are evaluated against, `None`
     /// when it was not resolved (they then hold as for the latest).
     pub fn version(&self) -> Option<&semver::Version> {

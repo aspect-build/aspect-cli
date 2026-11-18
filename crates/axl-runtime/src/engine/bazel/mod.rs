@@ -157,9 +157,12 @@ fn resolve_rc_version(
         return Ok(bazel::version::parse(&s));
     }
     if rc.has_version_gated_options() {
+        // Before the version is known, a gated startup entry cannot be
+        // decided, so a fallback `bazel info` asks under the ungated ones:
+        // the build's server unless such an entry then applies.
         return Ok(runner::release_version(
             signals,
-            &rc.invocation_startup_flags(),
+            Some(&rc.ungated_startup_flags()),
         ));
     }
     Ok(None)
@@ -205,7 +208,7 @@ fn resolve_gated_flags<'v>(
     }
     let version = known
         .cloned()
-        .or_else(|| runner::release_version(signals, startup));
+        .or_else(|| runner::release_version(signals, Some(startup)));
     resolve_flags(items, version.as_ref())
 }
 
@@ -328,8 +331,9 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
 /// `shutdown`, `health_check`, `recover_poisoned_sandbox` and
 /// `cancel_invocation`. An unclaimed startup option means the active rc names
 /// a different server than the user asked for, so talking to or stopping that
-/// one is worse than doing nothing. `version` reaches no server but is held to
-/// the same rule, as is every call that runs Bazel.
+/// one is worse than doing nothing. `version`, which asks the active rc's
+/// server only when `bazel --version` fails, is held to the same rule, as is
+/// every call that runs Bazel.
 ///
 /// A frozen `Bazel` (config-time) carries no task and so nothing to check.
 fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
@@ -988,10 +992,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// non-release build (`development version` / `no_version`) or when the
     /// probe fails.
     ///
-    /// Asked once per process (via `bazel --version`, which the client answers
-    /// without a server) and memoized, so repeated calls — and other callers
+    /// Asked once per process via `bazel --version`, which the client answers
+    /// without a server, and memoized, so repeated calls — and other callers
     /// that need the version — share a single probe rather than each shelling
-    /// out to Bazel.
+    /// out to Bazel. Where a `tools/bazel` wrapper fails `--version`, the
+    /// server is asked with `bazel info` under the active rc's startup flags;
+    /// without an active rc the version is `None` until a caller that knows
+    /// them asks.
     ///
     /// By default the pre-release suffix is dropped (`8.0.0-rc2` → `"8.0.0"`),
     /// which is what version-gating wants — a release candidate should match the
@@ -1014,9 +1021,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
-        let startup = read_startup_flags(this)?;
+        let startup = read_active_rc(this).map(|rc| rc.invocation_startup_flags());
         Ok(
-            match runner::release_version(&Env::from_eval(eval)?.signals, &startup) {
+            match runner::release_version(&Env::from_eval(eval)?.signals, startup.as_deref()) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,

@@ -9,7 +9,9 @@ use std::process::Stdio;
 use crate::runner::Runner;
 
 /// The release of the Bazel binary `runner` runs; `Ok(None)` for a non-release
-/// build. `--version` must be the only argument, as Bazel takes it only alone.
+/// build, and an error when the output has no `bazel <version>` line at all
+/// (a wrapper speaking for Bazel). `--version` must be the only argument, as
+/// Bazel takes it only alone.
 pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>> {
     let mut cmd = runner.command();
     cmd.arg("--version");
@@ -27,7 +29,14 @@ pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(parse_version_output(&String::from_utf8_lossy(&out.stdout)))
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !stdout.lines().any(|l| l.trim().starts_with("bazel ")) {
+        return Err(io::Error::other(format!(
+            "`bazel --version` printed no `bazel <version>` line: {}",
+            stdout.trim()
+        )));
+    }
+    Ok(parse_version_output(&stdout))
 }
 
 /// The version in `bazel --version` stdout: the last line that reads

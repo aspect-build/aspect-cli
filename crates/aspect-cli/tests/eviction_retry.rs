@@ -300,12 +300,20 @@ fn deliverys_first_phase_retries_an_eviction() {
 
 /// A wrapper that adds a startup flag of its own fails `bazel --version`,
 /// which Bazel takes only alone, so the version is asked of the server instead:
-/// Bazel 7 behind one still gets no flag, and is still retried.
+/// Bazel 7 behind one still gets no flag, is still retried, and keeps the rc's
+/// startup entry gated to it. Every `bazel info` is under the build's startup
+/// flags, but the rc's parse's one question, asked before the version decides
+/// that entry, without it.
 #[cfg(unix)]
 #[test]
 fn a_wrapper_adding_startup_flags_still_tells_the_version() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = workspace("");
+    let dir = workspace("try-import-if-bazel-version <8 %workspace%/old.bazelrc\n");
+    std::fs::write(
+        dir.path().join("old.bazelrc"),
+        "startup --host_jvm_args=-Dold=1\n",
+    )
+    .expect("old.bazelrc");
     let wrapper = dir.path().join("wrapper.sh");
     std::fs::write(
         &wrapper,
@@ -329,5 +337,21 @@ fn a_wrapper_adding_startup_flags_still_tells_the_version() {
     assert!(
         builds.iter().all(|l| !l.contains(EVICTION_RETRIES)),
         "{builds:?}"
+    );
+    let build = startup_of(&builds[0], "build");
+    assert!(build.contains(&"--host_jvm_args=-Dold=1"), "{build:?}");
+    let ungated: Vec<&str> = build
+        .iter()
+        .copied()
+        .filter(|w| *w != "--host_jvm_args=-Dold=1")
+        .collect();
+    let infos = invocations(dir.path(), "info");
+    let before_the_version: Vec<&String> = infos
+        .iter()
+        .filter(|l| startup_of(l, "info") != build)
+        .collect();
+    assert!(
+        before_the_version.len() == 1 && startup_of(before_the_version[0], "info") == ungated,
+        "the build's {build:?}, probes {infos:#?}"
     );
 }

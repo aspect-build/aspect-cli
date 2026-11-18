@@ -39,32 +39,44 @@ static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
 /// with [`bazel::version::client_version`] and memoized; `None` for a
 /// non-release build or a failed probe, which callers treat as the latest.
 ///
-/// `bazel --version` is answered by the client alone, so asking starts or
-/// restarts no server, whatever startup flags the invocation then uses, and
-/// every caller (flag gating, rc-section selection, `ctx.bazel.version()`)
-/// shares the one answer.
+/// `bazel --version` itself is answered by the client alone, so it starts or
+/// restarts no server, and every caller (flag gating, rc-section selection,
+/// `ctx.bazel.version()`) shares its answer.
 ///
 /// Bazel takes `--version` only alone, so a `tools/bazel` wrapper that adds a
 /// startup flag of its own fails it. Then the server is asked instead, with
-/// `bazel info` under `startup`, the invocation's own startup flags, so the
-/// question reaches the server the invocation uses.
+/// `bazel info` under `startup`: the startup flags the invocation runs with,
+/// which a caller passes only when it knows them, so the question reaches the
+/// server the invocation uses. A caller that does not (`None`) gets `None`,
+/// left unmemoized for one that does.
 pub(crate) fn release_version(
     signals: &Arc<Signals>,
-    startup: &[String],
+    startup: Option<&[String]>,
 ) -> Option<semver::Version> {
-    RELEASE_VERSION
-        .get_or_init(|| {
-            let runner = SignalRunner(signals);
-            bazel::version::client_version(&runner)
-                .or_else(|e| {
-                    tracing::debug!("bazel --version: {e}; asking bazel info");
-                    Ok::<_, std::io::Error>(Server::new(&runner, startup).info()?.1)
-                })
-                .inspect_err(|e| tracing::debug!("bazel info: {e}; assuming the latest"))
-                .ok()
-                .flatten()
-        })
-        .clone()
+    if let Some(version) = RELEASE_VERSION.get() {
+        return version.clone();
+    }
+    let runner = SignalRunner(signals);
+    let answer = match bazel::version::client_version(&runner) {
+        Ok(version) => Some(version),
+        Err(e) => match startup {
+            Some(startup) => {
+                tracing::debug!("bazel --version: {e}; asking bazel info");
+                Some(
+                    Server::new(&runner, startup)
+                        .info()
+                        .inspect_err(|e| tracing::debug!("bazel info: {e}; assuming the latest"))
+                        .ok()
+                        .and_then(|(_pid, version)| version),
+                )
+            }
+            None => {
+                tracing::debug!("bazel --version: {e}; assuming the latest for now");
+                None
+            }
+        },
+    };
+    answer.and_then(|version| RELEASE_VERSION.get_or_init(|| version).clone())
 }
 
 impl Child for Spawned {
