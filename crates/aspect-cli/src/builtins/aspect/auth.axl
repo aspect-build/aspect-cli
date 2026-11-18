@@ -213,10 +213,14 @@ def _print_configured_usage_hint(summary):
     """The `--remote` hint for a configured deployment, naming the remote
     capabilities it actually advertises. Names `--remote=exec` only when the
     deployment serves remote execution, since it is never wired by default.
-    Says nothing for a deployment that serves none of them, such as one
-    advertising only its web UI. Leads with a blank line to set it apart."""
+    One advertising only its web UI gets the `aspect mcp` hint instead, and one
+    serving nothing gets nothing. Leads with a blank line to set it apart."""
     caps = capability_labels(summary, only = REMOTE_DEFAULT_CAPS)
     if not caps and not summary.exec:
+        if summary.results_url:
+            print("")
+            print("Run `aspect mcp --deployment=" + summary.name + "` to serve this deployment's build results to an AI tool.")
+            print("It advertises no remote cache, BES or remote executor, so --remote cannot use it.")
         return
     flag = ("--remote" if caps else "--remote=exec") + " --deployment=" + summary.name
     print("")
@@ -335,8 +339,8 @@ def _print_login_summary(ctx: TaskContext, deployment: str, creds):
 
     Reads the recorded entries once, so the target is named and its capabilities
     listed from the same snapshot. Says nothing beyond the identity line when the
-    target serves no build endpoints — which is every stdin-token login, since
-    those configure nothing."""
+    target advertises nothing — which is every stdin-token login, since those
+    configure nothing."""
     entries = ctx.aspect.auth.list()
     matched = [d for d in entries if d.name == deployment] if deployment else [d for d in entries if d.builtin]
     target = matched[0] if matched else None
