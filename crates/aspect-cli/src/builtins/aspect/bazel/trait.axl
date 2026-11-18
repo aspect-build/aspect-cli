@@ -1,6 +1,7 @@
 """The `BazelTrait` interface, the `ExecLogHook` subscription record, Bazel exit
-codes, the retry budget constants, and the `dispatch_*` helpers that fire the
-trait's lifecycle hooks.
+codes, the retry policy (budget, retryable codes, and the flag that hands cache
+eviction retries to it), and the `dispatch_*` helpers that fire the trait's
+lifecycle hooks.
 
 The `exec_log_event` hooks are driven from `./exec_log.axl` rather than by a
 `dispatch_*` helper here: unlike `build_end`, they need a handle created before
@@ -52,21 +53,34 @@ DEFAULT_BAZEL_RETRY_ATTEMPTS = 3
 BAZEL_RETRY_ATTEMPTS_DESCRIPTION = (
     "Maximum number of Bazel invocation attempts (including the first attempt) before giving up. " +
     "Only retried for exit codes the build_retry trait predicate accepts " +
-    "(BLAZE_INTERNAL_ERROR (37) and LOCAL_ENVIRONMENTAL_ERROR (36) by default). " +
-    "Set to 1 to disable retries."
+    "(BLAZE_INTERNAL_ERROR (37), LOCAL_ENVIRONMENTAL_ERROR (36) and REMOTE_CACHE_EVICTED (39) by default). " +
+    "While it retries cache evictions, Bazel's own retries of them are turned off, so each attempt is " +
+    "an invocation of its own. Set to 1 to disable retries."
 )
 
-# https://bazel.build/run/scripts#exit-codes
-def default_retry(code: int) -> bool:
-    """Returns True if the given exit code is retryable.
+def retry_attempts(ctx: TaskContext) -> int:
+    """The task's attempt budget: its `--bazel-retry-attempts`, or
+    `DEFAULT_BAZEL_RETRY_ATTEMPTS` for a task that declares none, and at least
+    one so Bazel always runs."""
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    return max(1, requested)
 
-    Retryable codes are those indicating transient infrastructure failures
-    where re-running the command may succeed:
+# https://bazel.build/run/scripts#exit-codes
+def server_error(code: int) -> bool:
+    """Whether `code` says the Bazel server itself is in trouble:
       - BLAZE_INTERNAL_ERROR (37): Bazel server crash.
       - LOCAL_ENVIRONMENTAL_ERROR (36): Local env failure, often caused by
         a queued command failing because the server is crashing.
     """
     return code == exit_codes.BLAZE_INTERNAL_ERROR or code == exit_codes.LOCAL_ENVIRONMENTAL_ERROR
+
+def default_retry(code: int) -> bool:
+    """Returns True if the given exit code is retryable: a transient failure
+    where re-running the command may succeed. A `server_error`, or
+    REMOTE_CACHE_EVICTED (39): the remote cache lost outputs the build relied
+    on. Bazel drops what it knew of remote outputs as that command ends, so the
+    next invocation runs the actions again."""
+    return server_error(code) or code == exit_codes.REMOTE_CACHE_EVICTED
 
 # One `exec_log_event` subscription: the callback, plus the entry kinds it wants.
 #
@@ -175,7 +189,7 @@ BazelTrait = trait(
     build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
     build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build. A task may drive Bazel several times, and an event names no invocation; read `ctx.task.current_phase().name` to tell them apart (`build`, `deliver`, `build_retry_2`, ...) and `ctx.task.name` for the task"),
     exec_log_event = attr(list[ExecLogHook], default = [], description = "Hooks called for each compact execution log entry Bazel writes during the build. Each is an `ExecLogHook(on_entry = fn, kinds = [...])`; the union of every hook's `kinds` is filtered in Rust before dispatch, so name them. A hook sees every entry of the kinds it asked for, never a sample: the execution log's producer blocks for its subscribers rather than dropping what one fell behind on"),
-    build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
+    build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build. While it accepts REMOTE_CACHE_EVICTED (39), as `default_retry` does, the build and test tasks and delivery's first phase turn off Bazel's own eviction retries (unless the rc sets them), so the retry is this one"),
     bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code (128 + the signal when a signal ended the client, which is never retried). Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
     build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code (128 + the signal when a signal ended the client; see `exit_code_of`)"),
 )
@@ -193,6 +207,25 @@ def may_retry(bazel_trait: BazelTrait, status) -> bool:
     if code == None or code == exit_codes.SUCCESS or code == exit_codes.INTERRUPTED:
         return False
     return bazel_trait.build_retry(code)
+
+# Bazel's own retry of a build a cache eviction failed, within one invocation.
+_EVICTION_RETRIES_FLAG = "--experimental_remote_cache_eviction_retries"
+
+def eviction_retry_flags(bazel_trait: BazelTrait, rc, command: str, max_attempts: int) -> list:
+    """The flags for a spawn whose retry loop retries cache evictions itself:
+    Bazel's own eviction retries turned off, so each attempt is a Bazel
+    invocation of its own, with its own logs and its own history folder, rather
+    than a file Bazel starts over. Bazel 8 retries up to 5 times by default.
+
+    Nothing when the loop would not retry one (a budget of one attempt, or a
+    `build_retry` that declines REMOTE_CACHE_EVICTED), since Bazel's retries
+    are then the only ones, or when the rc sets the flag already. Gated to
+    Bazel 6.2, the first to know it."""
+    if max_attempts < 2 or not bazel_trait.build_retry(exit_codes.REMOTE_CACHE_EVICTED):
+        return []
+    if rc.flag_value(_EVICTION_RETRIES_FLAG, command = command) != None:
+        return []
+    return [(_EVICTION_RETRIES_FLAG + "=0", ">=6.2.0")]
 
 def dispatch_bazel_attempt_end(ctx: TaskContext, bazel_trait: BazelTrait, exit_code: int) -> None:
     """Fire every `bazel_attempt_end` hook with `exit_code`."""

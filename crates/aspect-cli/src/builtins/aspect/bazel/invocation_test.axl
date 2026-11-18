@@ -22,7 +22,7 @@ Run with:
 """
 
 load("@aspect//bazel/invocation.axl", "resolve_targets", "target_patterns")
-load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of", "may_retry")
+load("@aspect//bazel.axl", "BazelTrait", "default_retry", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "eviction_retry_flags", "exit_code_of", "exit_codes", "may_retry", "server_error")
 
 def _eq(label, got, want):
     if got != want:
@@ -223,8 +223,33 @@ def _test_exit_codes_and_retries_for_a_signal_ended_client(_):
     _eq("the policy says yes", may_retry(always, status(37)), True)
     _eq("the policy says no", may_retry(never, status(37)), False)
 
+def _test_a_cache_eviction_is_retried_and_is_no_server_error(_):
+    for code, retried, server in [
+        (exit_codes.BLAZE_INTERNAL_ERROR, True, True),
+        (exit_codes.LOCAL_ENVIRONMENTAL_ERROR, True, True),
+        (exit_codes.REMOTE_CACHE_EVICTED, True, False),
+        (exit_codes.BUILD_FAILURE, False, False),
+        (exit_codes.TESTS_FAILED, False, False),
+    ]:
+        _eq("default_retry(%d)" % code, default_retry(code), retried)
+        _eq("server_error(%d)" % code, server_error(code), server)
+
+def _test_eviction_retries_are_left_to_the_loop_that_retries_them(ctx: TaskContext) -> None:
+    flag = "--experimental_remote_cache_eviction_retries"
+    off = [(flag + "=0", ">=6.2.0")]
+    rc = ctx.bazel.new_rc(flags = [])
+    _eq("a loop that retries evictions", eviction_retry_flags(BazelTrait(), rc, "build", 3), off)
+    _eq("one attempt leaves Bazel's retries on", eviction_retry_flags(BazelTrait(), rc, "build", 1), [])
+    declines = BazelTrait(build_retry = lambda code: code != exit_codes.REMOTE_CACHE_EVICTED)
+    _eq("a policy that declines evictions", eviction_retry_flags(declines, rc, "build", 3), [])
+    mine = ctx.bazel.new_rc(flags = [flag + "=2"])
+    _eq("the rc's own setting is kept", eviction_retry_flags(BazelTrait(), mine, "build", 3), [])
+    _eq("for test too", eviction_retry_flags(BazelTrait(), mine, "test", 3), [])
+
 def _test_impl(ctx: TaskContext) -> int:
     _test_exit_codes_and_retries_for_a_signal_ended_client(ctx)
+    _test_a_cache_eviction_is_retried_and_is_no_server_error(ctx)
+    _test_eviction_retries_are_left_to_the_loop_that_retries_them(ctx)
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
     _test_attempt_dispatch_invokes_in_order(ctx)
@@ -244,7 +269,7 @@ def _test_impl(ctx: TaskContext) -> int:
     # Spawns a real Bazel; keep it last so a stall cannot mask the pure
     # sections above.
     _test_rejected_command_line_does_not_hang(ctx)
-    print("invocation_test.axl: OK (16 sections)")
+    print("invocation_test.axl: OK (18 sections)")
     return 0
 
 invocation_tests = task(

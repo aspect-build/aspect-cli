@@ -566,6 +566,24 @@ fn scenario(name: &str) -> Scenario {
             ..Default::default()
         },
 
+        // A cache eviction the client retries itself, as the CLI does with
+        // Bazel's own retries off: the first invocation exits 39, and every
+        // later one succeeds. `BASIL_EVICTED_ONCE` names the file that marks
+        // the first one done, so the state outlives each basil process.
+        "cache_evicted_once" => {
+            let marker = env::var_os("BASIL_EVICTED_ONCE")
+                .unwrap_or_else(|| panic!("basil: cache_evicted_once needs BASIL_EVICTED_ONCE"));
+            if Path::new(&marker).exists() {
+                return Scenario::default();
+            }
+            fs::write(&marker, b"").unwrap_or_else(|e| panic!("basil: writing {marker:?}: {e}"));
+            Scenario {
+                attempts: vec![vec![build_started(), build_finished(39, true)]],
+                exit: ExitBehavior::Code(39),
+                ..Default::default()
+            }
+        }
+
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
         // retry, each attempt starting the file over as Bazel's do.
         "cache_evicted_with_retry" => Scenario {

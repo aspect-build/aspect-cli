@@ -25,10 +25,11 @@ whose hooks the Workflows feature registers when
    `LOCAL_ENVIRONMENTAL_ERROR (36)`, the Bazel server is persistently
    sick (could be #23880 the disk-scan missed, JVM OOM, native crash,
    corrupt lock file, etc.). The retry loop only continues on codes
-   the retry predicate accepts, so a final exit that is itself
-   retryable-class implies every prior attempt was too. The final code
-   alone therefore detects "all attempts hit server-internal trouble"
-   without tracking per-attempt history. Wired as `build_end`.
+   the retry predicate accepts, so a final server error means the
+   server was still failing once the retries ran out; the final code
+   alone detects that without tracking per-attempt history. Only a
+   server error counts (`server_error`): a remote cache eviction, which
+   is retried too, says nothing of the runner. Wired as `build_end`.
 
 **Never signal unhealthy while the task is still running.**
 `signal_instance_unhealthy` is not a drain request: on AWS it flips the
@@ -59,7 +60,7 @@ recorded, and exit 1 is not server-internal-error class. The runner is
 healthy enough to produce a verdict.
 """
 
-load("@aspect//bazel.axl", "default_retry")
+load("@aspect//bazel.axl", "default_retry", "server_error")
 load("./ansi.axl", "ansi")
 
 def _signal_unhealthy(ctx, environment) -> None:
@@ -150,14 +151,15 @@ def _new(environment, retry_predicate = default_retry):
         """Defer the unhealthy signal when a build's final exit code is
         server-internal-error class.
 
-        Classification is `default_retry`, not `retry_predicate`: a task
-        that declines to retry 37 has not thereby made its runner healthy.
+        Classification is `server_error`, not `retry_predicate`: a task
+        that declines to retry 37 has not thereby made its runner healthy,
+        and a remote cache that evicted outputs says nothing of the runner.
         A non-retryable code (success, build failure, test failure, user
         error, …) means the server produced a verdict, so the runner is
         fine. Fires per *build*, so a multi-build task (delivery) may call
         this more than once; `_defer_signal` is idempotent.
         """
-        if not default_retry(exit_code):
+        if not server_error(exit_code):
             return
         _defer_signal(
             ctx,
