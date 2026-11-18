@@ -165,9 +165,13 @@ rust_test(
     name = "interrupt_test",
     srcs = ["tests/interrupt.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/interrupt.rs",
-    data = [":aspect-cli"],
+    data = [
+        ":aspect-cli",
+        "//crates/basil",
+    ],
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+        "BASIL_BIN": "$(rootpath //crates/basil)",
     },
     deps = [
         "@crates//:libc",

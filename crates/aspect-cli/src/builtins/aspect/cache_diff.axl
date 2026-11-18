@@ -65,7 +65,7 @@ both sides or neither). The probe resolves flags from the same rc/config as
 """
 
 load("@aspect//bazel/invocation.axl", "target_patterns")
-load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "exit_code_of")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
 load("./private/lib/ansi.axl", "ansi")
@@ -234,8 +234,8 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
     # config) must not be reported as a partial affected set with exit 0. If the
     # probe failed and it isn't solely require-cached denials — no cache lookups
     # happened at all, or stderr carries a non-denial ERROR — surface it and fail.
-    if status.code != 0 and (not entries or _probe_has_unexpected_error(ctx, err_path)):
-        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(status.code))
+    if not status.success and (not entries or _probe_has_unexpected_error(ctx, err_path)):
+        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(exit_code_of(status)))
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return None
@@ -273,8 +273,8 @@ def _build_missing_non_test(ctx: TaskContext, bazel_trait, patterns: list, rc, e
     bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
     status = build.wait()
     timing["build"] = time.monotonic() - _t
-    if status.code != 0:
-        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(status.code))
+    if not status.success:
+        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(exit_code_of(status)))
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return False

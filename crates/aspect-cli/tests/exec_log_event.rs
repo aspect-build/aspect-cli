@@ -47,10 +47,9 @@
 
 mod common;
 
-use common::{aspect_cli, base_env};
-use std::path::{Path, PathBuf};
+use common::{aspect_cli, base_env, basil_bin};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Entries per log basil writes for the scenarios used here, from its
@@ -192,47 +191,6 @@ def config(ctx: ConfigContext):
         scenario = scenario,
         setup = setup,
     )
-}
-
-/// Locate basil, the fake `bazel` the CLI is pointed at.
-///
-/// Bazel sets `BASIL_BIN` from the `rust_test` rule's `env` via
-/// `$(rootpath //crates/basil)`, relative to the runfiles root that is a
-/// Bazel-run test's cwd. Under cargo, `CARGO_BIN_EXE_*` covers only this
-/// crate's own binaries, so basil is built on demand and found next to this
-/// test executable — the same recursive-cargo pattern `axl_runtime::test` uses.
-fn basil_bin() -> &'static str {
-    static BIN: OnceLock<String> = OnceLock::new();
-    BIN.get_or_init(|| {
-        if let Ok(p) = std::env::var("BASIL_BIN") {
-            return std::fs::canonicalize(&p)
-                .unwrap_or_else(|e| panic!("BASIL_BIN={p:?} not found: {e}"))
-                .to_string_lossy()
-                .into_owned();
-        }
-        let test_exe = std::env::current_exe().expect("current_exe");
-        let mut path: PathBuf = test_exe.parent().expect("test exe parent").to_path_buf();
-        if path.ends_with("deps") {
-            path.pop();
-        }
-        path.push("basil");
-        if !path.exists() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .expect("workspace root above crates/aspect-cli")
-                .to_path_buf();
-            let status = Command::new(&cargo)
-                .args(["build", "--quiet", "-p", "basil"])
-                .current_dir(&workspace_root)
-                .status()
-                .expect("invoking cargo to build basil");
-            assert!(status.success(), "cargo build -p basil failed: {status}");
-        }
-        assert!(path.exists(), "basil not found at {}", path.display());
-        path.to_string_lossy().into_owned()
-    })
 }
 
 /// A scratch workspace plus the live process that stands in for the Bazel

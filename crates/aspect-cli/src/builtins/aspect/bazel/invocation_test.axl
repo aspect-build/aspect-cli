@@ -22,7 +22,7 @@ Run with:
 """
 
 load("@aspect//bazel/invocation.axl", "resolve_targets", "target_patterns")
-load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of", "may_retry")
 
 def _eq(label, got, want):
     if got != want:
@@ -207,7 +207,24 @@ def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
         fail("expected Bazel to reject --definitely_not_a_flag")
     _eq("rejected command line yields no events", seen, 0)
 
+def _test_exit_codes_and_retries_for_a_signal_ended_client(_):
+    """A client a signal ended has no `code`: it stands for 128 + the signal,
+    and is never retried, nor is a success or an interrupt, whatever the
+    policy says; any other code is the policy's to decide."""
+    status = lambda code = None, signal = None: struct(code = code, signal = signal)
+    _eq("own code", exit_code_of(status(3)), 3)
+    _eq("SIGKILL", exit_code_of(status(signal = 9)), 137)
+    _eq("neither", exit_code_of(status()), 1)
+    always = BazelTrait(build_retry = lambda code: True)
+    never = BazelTrait(build_retry = lambda code: False)
+    _eq("a signal kill", may_retry(always, status(signal = 9)), False)
+    _eq("a success", may_retry(always, status(0)), False)
+    _eq("an interrupt", may_retry(always, status(8)), False)
+    _eq("the policy says yes", may_retry(always, status(37)), True)
+    _eq("the policy says no", may_retry(never, status(37)), False)
+
 def _test_impl(ctx: TaskContext) -> int:
+    _test_exit_codes_and_retries_for_a_signal_ended_client(ctx)
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
     _test_attempt_dispatch_invokes_in_order(ctx)

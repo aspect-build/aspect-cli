@@ -289,7 +289,7 @@ User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of", "may_retry")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
@@ -897,7 +897,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     for attempt in range(max_attempts):
         if attempt > 0:
             # Archive the failed attempt before resetting state.
-            prior_attempts = archive_bazel_attempt(data, attempt, status.code)
+            prior_attempts = archive_bazel_attempt(data, attempt, exit_code_of(status))
             data.clear()
             data.update(pre_loop_state)
 
@@ -992,17 +992,17 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
             sink.wait()
         summarize_bes_upload(ctx, build_events)
 
-        dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
+        dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code_of(status))
 
-        if status.code == 0 or not bazel_trait.build_retry(status.code):
+        if not may_retry(bazel_trait, status):
             break
 
     # Append the final attempt so bazel_attempts holds the full history.
     if data.get("bazel_attempts"):
-        archive_bazel_attempt(data, attempt + 1, status.code)
+        archive_bazel_attempt(data, attempt + 1, exit_code_of(status))
 
-    if status.code != 0:
-        return {}, {}, [], status.code
+    if not status.success:
+        return {}, {}, [], exit_code_of(status)
     info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2. Parse the gRPC log regardless of exit code — non-zero usually
@@ -1118,7 +1118,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
 
     # `build_end` not fired here — the outer caller dispatches it once with
     # the aggregate build_code after `_get_output_shas` returns.
-    dispatch_bazel_attempt_end(ctx, bazel_trait, phase2_status.code)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code_of(phase2_status))
 
     # Tear down the dummy executor now the build exited (Bazel only talks to
     # it while building). Done here, at the one point all return paths pass
@@ -1143,7 +1143,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
         _surface_phase_stderr(ctx, 2, phase2_log_path)
-        return {}, {}, uncacheable_actions, (phase2_status.code if phase2_status.code != 0 else 1)
+        return {}, {}, uncacheable_actions, (exit_code_of(phase2_status) if not phase2_status.success else 1)
 
     log_file = ctx.std.fs.open(log_path)
     getactionresult_count = 0
@@ -2189,17 +2189,17 @@ def _delivery_impl(ctx):
                 if phase3_events.done:
                     bazel_exec_log.close(ctx, xl)  # must precede wait(); see bazel/exec_log.axl
                     status = runs.wait()
-                    dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
+                    dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code_of(status))
 
                     # phase 1/2 skipped → phase 3 is the only build; else the
                     # caller already fired `build_end`.
                     if not phase_1_2_runs:
-                        dispatch_bazel_build_end(ctx, bazel_trait, status.code)
-                    if status.code != 0 and release_build["cancelled"]:
+                        dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(status))
+                    if not status.success and release_build["cancelled"]:
                         info(ctx.std, "Delivery build cancelled: a DeliveryTrait.delivery_target hook raised.")
-                    elif status.code != 0:
-                        build_exit_code = status.code
-                        error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
+                    elif not status.success:
+                        build_exit_code = exit_code_of(status)
+                        error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(build_exit_code, phase3_log_path))
                         _surface_phase_stderr(ctx, 3, phase3_log_path)
                     else:
                         info(ctx.std, "Delivery build took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))

@@ -40,7 +40,9 @@ load(
     _default_retry = "default_retry",
     _dispatch_bazel_attempt_end = "dispatch_bazel_attempt_end",
     _dispatch_bazel_build_end = "dispatch_bazel_build_end",
+    _exit_code_of = "exit_code_of",
     _exit_codes = "exit_codes",
+    _may_retry = "may_retry",
 )
 load("./private/lib/runnable.axl", _normalize_label = "normalize_label")
 
@@ -57,5 +59,7 @@ ExecLogHook = _ExecLogHook
 default_retry = _default_retry
 dispatch_bazel_attempt_end = _dispatch_bazel_attempt_end
 dispatch_bazel_build_end = _dispatch_bazel_build_end
+exit_code_of = _exit_code_of
 exit_codes = _exit_codes
+may_retry = _may_retry
 normalize_label = _normalize_label

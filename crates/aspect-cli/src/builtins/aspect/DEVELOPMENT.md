@@ -107,7 +107,7 @@ for event in events:                             # `None` on a quiet tick_ms tic
             lifecycle.task_update(running)       # streamed metadata + targets
 bazel_exec_log.close(ctx, xl)                    # the rest of the log; before wait()
 build_status = build.wait()
-bazel_trait.build_end(ctx, build_status.code)    # ArtifactUpload uploads
+dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(build_status))  # ArtifactUpload uploads
 ... task-specific work (run formatter, parse SARIF, etc.) ...
 lifecycle.task_update(passed | failed, final=True)  # terminal — final body
 return <TaskConclusion>
@@ -920,8 +920,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #    subscriber the log producer blocks for, and `wait()` joins that producer.
     bazel_exec_log.close(ctx, xl)
     build_status = build.wait()
-    for hook in bazel_trait.build_end:
-        hook(ctx, build_status.code)
+    #    Hooks take `exit_code_of(build_status)`: `code` is None when a signal
+    #    ended the client.
+    dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(build_status))
 
     if not build_status.success:
         data["<kind>"]["build_failed"] = True   # kind-specific failure flag

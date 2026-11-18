@@ -174,9 +174,36 @@ BazelTrait = trait(
     build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build. A task may drive Bazel several times, and an event names no invocation; read `ctx.task.current_phase().name` to tell them apart (`build`, `deliver`, `build_retry_2`, ...) and `ctx.task.name` for the task"),
     exec_log_event = attr(list[ExecLogHook], default = [], description = "Hooks called for each compact execution log entry Bazel writes during the build. Each is an `ExecLogHook(on_entry = fn, kinds = [...])`; the union of every hook's `kinds` is filtered in Rust before dispatch, so name them. A hook sees every entry of the kinds it asked for, never a sample: the execution log's producer blocks for its subscribers rather than dropping what one fell behind on"),
     build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
-    bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code. Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
-    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code"),
+    bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code (128 + the signal when a signal ended the client, which is never retried). Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
+    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code (128 + the signal when a signal ended the client; see `exit_code_of`)"),
 )
+
+def exit_code_of(status) -> int:
+    """The exit code a Bazel client's `wait()` status stands for. Hooks typed
+    `exit_code: int` take this, never `status.code`, which is None when a
+    signal ended the client (SIGKILLed, or crashed).
+
+    A process a signal ends has no exit code, so this is the client's own
+    code, or 128 + the signal as shells report one (130 for SIGINT, 137 for
+    SIGKILL), which is also how the CLI reports its own signals
+    (`axl-runtime`'s `cancellation.rs`). Bazel's own codes stay well below
+    128. A status with neither, which no platform produces, is
+    `BUILD_FAILURE`."""
+    if status.code != None:
+        return status.code
+    if status.signal != None:
+        return 128 + status.signal
+    return exit_codes.BUILD_FAILURE
+
+def may_retry(bazel_trait: BazelTrait, status) -> bool:
+    """Whether `bazel_trait.build_retry` may be asked to retry the attempt
+    that ended with `status`, and what it says. Never one that succeeded,
+    one Bazel interrupted (a cancel), or a client a signal ended: nothing a
+    retry fixes, and the policy takes an exit code."""
+    code = status.code
+    if code == None or code == exit_codes.SUCCESS or code == exit_codes.INTERRUPTED:
+        return False
+    return bazel_trait.build_retry(code)
 
 def dispatch_bazel_attempt_end(ctx: TaskContext, bazel_trait: BazelTrait, exit_code: int) -> None:
     """Fire every `bazel_attempt_end` hook with `exit_code`."""
