@@ -158,6 +158,7 @@ load(
     "defined_configs",
     "ensure_import",
     "imports_rc",
+    "is_boundary_file",
     "is_config_chain",
     "prune_configs",
     "rc_paths",
@@ -190,10 +191,11 @@ def _home(ctx: TaskContext) -> str:
 def _find_workspace(ctx: TaskContext) -> str:
     """Bazel's workspace root — the directory it substitutes for `%workspace%`
     in an rc `import`, found from the working directory the way Bazel finds it,
-    by the nearest boundary file. `""` where the working directory is in none,
-    which home mode does not need."""
+    by the nearest boundary file, which counts only if it is not a directory.
+    `""` where the working directory is in none, which home mode does not
+    need."""
     root = ctx.std.env.bazel_root_dir().rstrip("/")
-    if not any([ctx.std.fs.exists(root + "/" + marker) for marker in _BAZEL_BOUNDARY_FILES]):
+    if not any([is_boundary_file(ctx.std.fs, root + "/" + marker) for marker in _BAZEL_BOUNDARY_FILES]):
         return ""
     return root
 

@@ -146,14 +146,19 @@ const ROOT_MARKERS: &[&str] = &[
     "WORKSPACE.bazel",
 ];
 
-/// Nearest ancestor of `start` holding a project-root marker.
+/// Nearest ancestor of `start` holding a project-root marker. A marker counts
+/// only if it is not a directory, as Bazel's client reads a boundary file, so
+/// a `tools/workspace/` folder on a case-insensitive disk is no `WORKSPACE`.
 ///
 /// Walked here rather than taken from a caller so this crate stays a leaf
 /// dependency of the CLI and the launcher.
 fn workspace_root_from(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
-        if ROOT_MARKERS.iter().any(|m| dir.join(m).exists()) {
+        if ROOT_MARKERS
+            .iter()
+            .any(|m| dir.join(m).metadata().is_ok_and(|meta| !meta.is_dir()))
+        {
             return Some(dir);
         }
         if !dir.pop() {
@@ -386,6 +391,19 @@ mod tests {
         // A nearer marker wins over the outer one.
         std::fs::write(root.join("a/WORKSPACE"), "").unwrap();
         assert_eq!(workspace_root_from(&nested).unwrap(), root.join("a"));
+    }
+
+    /// A directory named like a marker marks no root.
+    #[test]
+    fn a_directory_named_like_a_marker_is_no_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let nested = root.join("tools/sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("MODULE.bazel"), "").unwrap();
+        std::fs::create_dir_all(root.join("tools/WORKSPACE")).unwrap();
+
+        assert_eq!(workspace_root_from(&nested).unwrap(), root);
     }
 
     /// Aspect projects without any Bazel workspace still resolve a root, so

@@ -8,6 +8,9 @@ startup flags, enabled groups, and `RcConfig` sections become text, and how that
 text lands without disturbing what a user or another setup step already put in
 their rc.
 
+`is_boundary_file` is how a caller tells the workspace root is one, as Bazel's
+client does.
+
 `rc_paths` is the whole layout: one shape under a base directory the caller
 resolves (the workspace root, or the home directory in home mode), plus the
 overrides. It is a pure function of that base and the task's arguments, so the
@@ -259,3 +262,9 @@ def ensure_import(existing: str | None, imported: str) -> ImportResult:
         return ImportResult(content = existing, action = ImportAction("unchanged"))
     content = block + ("\n" + existing.lstrip("\n") if existing.strip() else "")
     return ImportResult(content = content, action = ImportAction("prepended"))
+
+def is_boundary_file(fs, path: str) -> bool:
+    """Whether `path` exists and is not a directory, as Bazel's client tests a
+    workspace boundary file: a `workspace/` folder on a case-insensitive disk
+    is no `WORKSPACE`. `fs` is `ctx.std.fs`."""
+    return fs.exists(path) and not fs.is_dir(path)
