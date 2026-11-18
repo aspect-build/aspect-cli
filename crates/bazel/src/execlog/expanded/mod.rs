@@ -119,7 +119,7 @@ pub fn request(
                 Some(value) if !value.is_empty() => value,
                 _ => continue,
             },
-            (_, Some(Ok(false))) => continue,
+            (Some(false), Some(Ok(false))) => continue,
             (Some(false), Some(Err(value))) if !value.is_empty() => value,
             _ => return Request::Bazels,
         };
@@ -429,6 +429,11 @@ mod tests {
                 "{v:?}"
             );
             assert_eq!(asked(&[], v.clone()), Request::None, "{v:?}");
+            assert_eq!(
+                asked(&["--execution_log_json_file=false"], v.clone()),
+                Request::Bazels,
+                "{v:?}: a path up to Bazel 9, off from 10"
+            );
         }
     }
 

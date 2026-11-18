@@ -1784,12 +1784,16 @@ impl Build {
                     }
                 }
                 Ok(ReaderOutcome::Undecodable(reason)) => {
+                    let expanded = if build.expanded_logs.is_some() {
+                        ", as do the binary and JSON logs written from it"
+                    } else {
+                        ""
+                    };
                     errln!(
                         "WARNING: the execution log '{path}' stopped decoding \
                          ({reason}), so its hooks, spawn telemetry and decoded sinks \
-                         hold only the entries before that point, as do binary and JSON \
-                         logs written from it. The build's result and copies of the \
-                         compact log are unaffected."
+                         hold only the entries before that point{expanded}. The \
+                         build's result and copies of the compact log are unaffected."
                     );
                 }
                 Ok(_) => {}
@@ -2658,6 +2662,36 @@ Test = task(implementation = _impl)
                 "{format:?}: the spawn is in it"
             );
         }
+    }
+
+    /// Asking for a JSON log alone has Bazel write the compact log, which
+    /// nothing else reads, for the CLI to write the JSON one from.
+    #[cfg(unix)]
+    #[test]
+    fn a_json_log_alone_is_written_from_the_compact_one() {
+        let history = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("exec.json");
+        run_task_with_history(
+            &format!(
+                r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--nogenerate_json_trace_profile", "--scenario=execlog_one_spawn", "--execution_log_json_file={log}"],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+                log = log.display(),
+            ),
+            history.path(),
+        );
+        let json = std::fs::read_to_string(&log).unwrap();
+        assert!(json.contains("\"mnemonic\": \"Basil\""), "{json}");
     }
 
     /// A binary or JSON log that cannot be written is warned about, and the

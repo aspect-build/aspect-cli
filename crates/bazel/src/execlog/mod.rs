@@ -52,7 +52,7 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// `workspace`, as Bazel expands it in this flag, and a boolean value names
 /// no file, as does the `--no` form Bazel 10 takes. The option's old name,
 /// which Bazel still takes, is read as it. An empty value names no file, and
-/// a relative one is placed against `directory` (see [`place`]).
+/// a relative one is placed against `directory`, as `place` says.
 pub fn requested_path(
     flags: &[String],
     verb: &str,
