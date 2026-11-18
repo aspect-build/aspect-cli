@@ -85,6 +85,16 @@ pub(crate) struct Deployment {
     /// this empty, so a first login has somewhere to relay through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     login_redirect_uri: Option<String>,
+    /// The token endpoint this deployment's login exchanges its authorization
+    /// code at, and its credential refreshes at, exactly as it advertised it —
+    /// used in place of the one the issuer's OIDC discovery names. A deployment
+    /// whose IdP demands a client secret on every token request (Google) serves a
+    /// proxy here that attaches it server-side, so the CLI's PKCE request needs
+    /// no secret of its own. The authorize endpoint is still discovered from the
+    /// issuer. Absent (the usual case) means the discovered one; see
+    /// [`login_token_endpoint`] for the https rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_endpoint: Option<String>,
 }
 
 /// The OAuth scopes the login flow requests when the deployment advertises none,
@@ -164,6 +174,11 @@ struct AuthEnv {
     /// Extra authorize-request parameters the deployment advertised, appended to
     /// the authorize URL as-is.
     authorize_params: BTreeMap<String, String>,
+    /// The deployment's advertised token endpoint, once [`login_token_endpoint`]
+    /// has vetted it, which the browser login exchanges its code at instead of
+    /// the discovered one and records on the credential for refresh. Filled in
+    /// by the browser login only: no other flow reaches a token endpoint.
+    token_endpoint: Option<String>,
 }
 
 /// Aspect Cloud, seeded so a fresh install can `aspect auth login` with no
@@ -378,6 +393,7 @@ fn aspect_cloud_deployment() -> Deployment {
         scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
         authorize_params: BTreeMap::new(),
         endpoints,
+        token_endpoint: None,
     }
 }
 
@@ -554,7 +570,9 @@ fn overlay_config_sources(
 /// The issuer and `api_url` are never taken, so a hand-edited config can extend
 /// Aspect Cloud but cannot redirect its login. Neither are scopes or
 /// `authorize_params`: the seed states its own, and widening the adopted set is a
-/// separate decision from rotating the client.
+/// separate decision from rotating the client. Nor is a `token_endpoint`: Aspect
+/// Cloud's issuer takes a PKCE exchange as-is, and adopting one would let a
+/// config entry send its authorization codes and refresh tokens somewhere else.
 fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
     if entry
         .issuer
@@ -760,6 +778,7 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
             client_id: client_id.clone(),
             scopes: login_scopes(&deployment.scopes),
             authorize_params: deployment.authorize_params.clone(),
+            token_endpoint: None,
         }),
         _ => Err(anyhow::anyhow!(
             "deployment {:?} advertised no login config, so the CLI cannot log in \
@@ -823,6 +842,10 @@ struct AspectAuthServer {
     /// see [`Deployment::authorize_params`].
     #[serde(default)]
     authorize_params: BTreeMap<String, String>,
+    /// Where to exchange codes and refresh tokens instead of the issuer's own
+    /// token endpoint; see [`Deployment::token_endpoint`].
+    #[serde(default)]
+    token_endpoint: String,
 }
 
 /// A usable OAuth config the CLI can log in with: an issuer paired with its PKCE
@@ -835,6 +858,7 @@ struct AuthServer {
     client_id: String,
     scopes: Vec<String>,
     authorize_params: BTreeMap<String, String>,
+    token_endpoint: Option<String>,
 }
 
 /// Whether two issuers name the same authorization server, tolerant of how a
@@ -921,6 +945,7 @@ impl ProtectedResource {
                 client_id: s.client_id.clone(),
                 scopes: s.scopes.clone(),
                 authorize_params: s.authorize_params.clone(),
+                token_endpoint: non_empty(Some(s.token_endpoint.clone())),
             })
             .collect();
         if !nested.is_empty() {
@@ -943,6 +968,7 @@ impl ProtectedResource {
                 // The flat RFC 9728 shape has no slot for these; only the
                 // aspect_authorization_servers extension carries them.
                 authorize_params: BTreeMap::new(),
+                token_endpoint: None,
             })
             .collect()
     }
@@ -1203,6 +1229,7 @@ fn deployment_from_discovery(
             .map(|s| s.authorize_params.clone())
             .unwrap_or_default(),
         endpoints,
+        token_endpoint: selected.and_then(|s| s.token_endpoint.clone()),
     }
 }
 
@@ -1523,6 +1550,15 @@ struct CredentialsEntry {
     /// written before this field existed load as plain OIDC sessions.
     #[serde(default, skip_serializing_if = "IssuerKind::is_oidc")]
     issuer_kind: IssuerKind,
+    /// The token endpoint the login exchanged its code at when the deployment
+    /// advertised one ([`Deployment::token_endpoint`]), so every refresh goes
+    /// there too rather than to the issuer's discovered endpoint. Recorded here,
+    /// beside the issuer and client it pairs with, because a refresh sees only the
+    /// credential. Absent for every other credential, including those written
+    /// before this field existed, which refresh at the discovered endpoint as
+    /// they always have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_token_endpoint: Option<String>,
 }
 
 /// What an issuer offers beyond OAuth, as far as the CLI can tell.
@@ -1620,6 +1656,7 @@ impl CredentialsEntry {
             auth_client_id,
             prefer_id_token,
             issuer_kind,
+            auth_token_endpoint: None,
         })
     }
 
@@ -1628,14 +1665,16 @@ impl CredentialsEntry {
     /// back ([`merged_refresh_token`]).
     fn renewed(&self, token_resp: TokenResponse) -> anyhow::Result<CredentialsEntry> {
         let refresh_token = merged_refresh_token(&self.refresh_token, &token_resp.refresh_token);
-        CredentialsEntry::from_bearer(
+        let mut renewed = CredentialsEntry::from_bearer(
             token_resp.bearer(self.prefer_id_token)?,
             refresh_token,
             self.auth_domain.clone(),
             self.auth_client_id.clone(),
             self.prefer_id_token,
             self.issuer_kind,
-        )
+        )?;
+        renewed.auth_token_endpoint = self.auth_token_endpoint.clone();
+        Ok(renewed)
     }
 
     /// Every tenant the bearer says its user belongs to (the `tenantIds` claim),
@@ -1658,6 +1697,12 @@ impl CredentialsEntry {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("no auth_client_id stored — cannot refresh"))?;
         Ok((auth_domain, client_id))
+    }
+
+    /// Where this credential's refresh grant is sent: the token endpoint its
+    /// login recorded, else `discovered`, the issuer's own.
+    fn token_url<'a>(&'a self, discovered: &'a str) -> &'a str {
+        self.auth_token_endpoint.as_deref().unwrap_or(discovered)
     }
 }
 
@@ -2687,6 +2732,28 @@ fn login_redirect_uri(selected: &Deployment) -> Option<String> {
     callback_host(selected).map(|host| format!("https://{host}/oauth2/callback"))
 }
 
+/// The token endpoint `selected`'s browser login exchanges its code at, and its
+/// credential later refreshes at, when the deployment advertised one
+/// ([`Deployment::token_endpoint`]). `None` means the issuer's discovered endpoint.
+///
+/// An advertised endpoint must be `https`. It receives the authorization code, the
+/// PKCE verifier and every refresh token, and the document is server-controlled,
+/// so a plaintext one is refused and the discovered endpoint used instead — the
+/// same rule [`login_redirect_uri`] applies to an advertised redirect, and
+/// [`resolve_oidc_endpoints`] to a discovered token endpoint.
+fn login_token_endpoint(selected: &Deployment) -> Option<String> {
+    let endpoint = non_empty(selected.token_endpoint.clone())?;
+    if is_https(&endpoint) {
+        return Some(endpoint);
+    }
+    tracing::warn!(
+        "ignoring the token endpoint advertised by deployment {:?}: {:?} is not https",
+        selected.name,
+        endpoint
+    );
+    None
+}
+
 fn callback_host(selected: &Deployment) -> Option<String> {
     [&selected.endpoints.cache, &selected.endpoints.bes]
         .into_iter()
@@ -2799,7 +2866,8 @@ async fn refresh_access_token(
     let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
-    let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id)
+    let token_url = entry.token_url(&endpoints.token);
+    let mut refreshed = refresh_with_grant(entry, token_url, client_id)
         .await
         .map_err(failed)?;
     if let Some(now) = tenant_moved(entry, &refreshed) {
@@ -2810,8 +2878,7 @@ async fn refresh_access_token(
             });
         }
         refreshed =
-            restore_default_tenant(entry, refreshed, auth_domain, &endpoints.token, client_id)
-                .await?;
+            restore_default_tenant(entry, refreshed, auth_domain, token_url, client_id).await?;
     }
     refreshed.issuer_kind = issuer_kind;
     Ok(refreshed)
@@ -2871,8 +2938,9 @@ fn tenant_moved(prior: &CredentialsEntry, fresh: &CredentialsEntry) -> Option<St
     moved.then(|| fresh.tenant_id.clone())
 }
 
-/// The standard OAuth refresh grant against `token_url`, the issuer's token
-/// endpoint as [`resolve_oidc_endpoints`] found it.
+/// The standard OAuth refresh grant against `token_url`: the issuer's token
+/// endpoint as [`resolve_oidc_endpoints`] found it, or the one the credential's
+/// login recorded ([`CredentialsEntry::token_url`]).
 async fn refresh_with_grant(
     entry: &CredentialsEntry,
     token_url: &str,
@@ -2937,8 +3005,8 @@ async fn select_tenant(
         return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
     }
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
-    let refreshed =
-        switch_and_refresh(entry, tenant_id, auth_domain, &endpoints.token, client_id).await?;
+    let token_url = entry.token_url(&endpoints.token);
+    let refreshed = switch_and_refresh(entry, tenant_id, auth_domain, token_url, client_id).await?;
     if refreshed.tenant_id != tenant_id {
         return Err(anyhow::anyhow!(
             "the issuer minted a token for organization {} instead",
@@ -3129,6 +3197,7 @@ pub struct AuthCredentials {
     pub(crate) auth_client_id: Option<String>,
     pub(crate) prefer_id_token: bool,
     pub(crate) issuer_kind: IssuerKind,
+    pub(crate) auth_token_endpoint: Option<String>,
 }
 
 starlark_simple_value!(AuthCredentials);
@@ -3250,6 +3319,7 @@ impl AuthCredentials {
             auth_client_id: entry.auth_client_id.clone(),
             prefer_id_token: entry.prefer_id_token,
             issuer_kind: entry.issuer_kind,
+            auth_token_endpoint: entry.auth_token_endpoint.clone(),
         }
     }
 
@@ -3264,6 +3334,7 @@ impl AuthCredentials {
             auth_client_id: self.auth_client_id.clone(),
             prefer_id_token: self.prefer_id_token,
             issuer_kind: self.issuer_kind,
+            auth_token_endpoint: self.auth_token_endpoint.clone(),
         }
     }
 }
@@ -3442,7 +3513,10 @@ impl AuthSessionInner {
         }
         let endpoints = resolve_oidc_endpoints(&self.env.domain).await;
         let token_resp = exchange_code(
-            &endpoints.token,
+            self.env
+                .token_endpoint
+                .as_deref()
+                .unwrap_or(&endpoints.token),
             &self.env.client_id,
             &self.redirect_uri,
             &code,
@@ -3453,7 +3527,7 @@ impl AuthSessionInner {
         // Recorded so refresh keeps minting the same kind rather than downgrading
         // to whatever the grant happens to return.
         let prefer_id_token = self.prefer_id_token;
-        CredentialsEntry::from_bearer(
+        let mut entry = CredentialsEntry::from_bearer(
             token_resp.bearer(prefer_id_token)?,
             refresh_token,
             Some(self.env.domain.clone()),
@@ -3463,7 +3537,10 @@ impl AuthSessionInner {
             // so one discovery request failing does not record a plain OIDC
             // credential for an issuer with the tenant API.
             self.issuer_kind.or(endpoints.issuer_kind),
-        )
+        )?;
+        // The refresh token goes back to where it came from.
+        entry.auth_token_endpoint = self.env.token_endpoint;
+        Ok(entry)
     }
 }
 
@@ -4201,7 +4278,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::Value<'v>> {
         let deployments = load_deployments()?;
         let selected = select_aspect_cloud_or_deployment(&deployments, deployment)?;
-        let env = auth_env_from(&selected).map_err(|e| TaskExit::error(e.to_string()))?;
+        let mut env = auth_env_from(&selected).map_err(|e| TaskExit::error(e.to_string()))?;
 
         if let Some(token) = token {
             let claims = decode_jwt_claims(token).map_err(|e| login_failure(&e, None))?;
@@ -4215,6 +4292,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 auth_client_id: None,
                 prefer_id_token: false,
                 issuer_kind: IssuerKind::Oidc,
+                auth_token_endpoint: None,
             };
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
@@ -4238,6 +4316,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 selected.name
             ))
         })?;
+        env.token_endpoint = login_token_endpoint(&selected);
         let session = build_login_session(env, redirect_uri, !selected.builtin, selected.builtin)?;
         Ok(heap.alloc(session))
     }
@@ -4631,6 +4710,7 @@ mod tests {
             auth_client_id: None,
             prefer_id_token: false,
             issuer_kind: IssuerKind::Oidc,
+            auth_token_endpoint: None,
         }
     }
 
@@ -4742,6 +4822,7 @@ mod tests {
             authorize_params: BTreeMap::new(),
             endpoints: Endpoints::default(),
             login_redirect_uri: None,
+            token_endpoint: None,
         }
     }
 
@@ -5479,6 +5560,7 @@ mod tests {
             client_id: client_id.to_string(),
             scopes: vec!["openid".to_string()],
             authorize_params: BTreeMap::new(),
+            token_endpoint: String::new(),
         }
     }
 
@@ -5664,6 +5746,7 @@ mod tests {
                 client_id: "nested-client".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
                 authorize_params: BTreeMap::new(),
+                token_endpoint: String::new(),
             }],
             vec!["https://legacy.auth.aspect.build"],
             "legacy-client",
@@ -5794,6 +5877,7 @@ mod tests {
             scopes: vec![],
             endpoints: Endpoints::default(),
             authorize_params: BTreeMap::new(),
+            token_endpoint: None,
         };
         // No advertised scopes → the standard OIDC login set.
         assert_eq!(auth_env_from(&d).unwrap().scopes, DEFAULT_LOGIN_SCOPES);
@@ -6498,6 +6582,7 @@ mod tests {
                 client_id: client_id.to_string(),
                 scopes: vec!["openid".to_string()],
                 authorize_params: BTreeMap::new(),
+                token_endpoint: String::new(),
             }],
             authorization_servers: Vec::new(),
             client_id: String::new(),
@@ -7020,6 +7105,7 @@ mod tests {
                     ("access_type".to_string(), "offline".to_string()),
                     ("prompt".to_string(), "consent".to_string()),
                 ]),
+                token_endpoint: String::new(),
             }],
             vec![],
             "",
@@ -7956,6 +8042,7 @@ mod tests {
                     client_id: "client".to_string(),
                     scopes: Vec::new(),
                     authorize_params: BTreeMap::new(),
+                    token_endpoint: None,
                 },
                 expected_state: "nonce.54321".to_string(),
                 prefer_id_token: false,
@@ -8306,5 +8393,244 @@ mod tests {
             &[&["false"], &["aspect-no-such-browser-launcher"]],
             "https://example.com"
         ));
+    }
+
+    /// The Google shape with a gateway token proxy: the deployment's discovery
+    /// document as the CLI parses it, JSON and all.
+    fn google_doc_with_token_endpoint(token_endpoint: &str) -> ProtectedResource {
+        serde_json::from_value(serde_json::json!({
+            "resource": "https://app.acme.example",
+            "aspect_authorization_servers": [{
+                "issuer": "https://accounts.google.com",
+                "client_id": "c.apps.googleusercontent.com",
+                "scopes": ["openid", "email"],
+                "authorize_params": {"access_type": "offline", "prompt": "consent"},
+                "token_endpoint": token_endpoint,
+            }],
+            "aspect_endpoints": {"cache": "cache.acme.example"},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_advertised_token_endpoint_is_parsed_and_persisted() {
+        let doc = google_doc_with_token_endpoint("https://app.acme.example/auth/cli/token");
+        let servers = doc.auth_servers();
+        assert_eq!(
+            servers[0].token_endpoint.as_deref(),
+            Some("https://app.acme.example/auth/cli/token")
+        );
+
+        let recorded = deployment_from_discovery(
+            "acme".to_string(),
+            "app.acme.example",
+            &doc,
+            Some(&servers[0]),
+        );
+        let json = serde_json::to_string(&recorded).unwrap();
+        let reloaded: Deployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded, recorded);
+        assert_eq!(
+            login_token_endpoint(&reloaded).as_deref(),
+            Some("https://app.acme.example/auth/cli/token")
+        );
+
+        // An entry that omits it, or advertises a blank one, records nothing and
+        // writes no key, so the login uses the issuer's discovered endpoint.
+        let omitted: ProtectedResource = serde_json::from_value(serde_json::json!({
+            "aspect_authorization_servers": [{
+                "issuer": "https://accounts.google.com",
+                "client_id": "c.apps.googleusercontent.com",
+            }],
+        }))
+        .unwrap();
+        for doc in [omitted, google_doc_with_token_endpoint("")] {
+            let servers = doc.auth_servers();
+            assert_eq!(servers[0].token_endpoint, None);
+            let recorded = deployment_from_discovery(
+                "acme".to_string(),
+                "app.acme.example",
+                &doc,
+                Some(&servers[0]),
+            );
+            assert_eq!(recorded.token_endpoint, None);
+            assert!(
+                !serde_json::to_string(&recorded)
+                    .unwrap()
+                    .contains("token_endpoint")
+            );
+            assert_eq!(login_token_endpoint(&recorded), None);
+        }
+    }
+
+    #[test]
+    fn the_flat_legacy_shape_gets_no_token_endpoint() {
+        // RFC 9728's flat fields have no slot for one; a stray top-level key is
+        // not read as one.
+        let doc: ProtectedResource = serde_json::from_value(serde_json::json!({
+            "authorization_servers": ["https://auth.acme.example"],
+            "client_id": "legacy",
+            "token_endpoint": "https://app.acme.example/auth/cli/token",
+        }))
+        .unwrap();
+        let servers = doc.auth_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].token_endpoint, None);
+    }
+
+    #[test]
+    fn a_plaintext_token_endpoint_is_ignored() {
+        let mut d = dep("acme", false);
+        d.token_endpoint = Some("http://app.acme.example/auth/cli/token".to_string());
+        assert_eq!(login_token_endpoint(&d), None);
+        d.token_endpoint = Some("HTTPS://app.acme.example/auth/cli/token".to_string());
+        assert_eq!(
+            login_token_endpoint(&d).as_deref(),
+            Some("HTTPS://app.acme.example/auth/cli/token")
+        );
+        d.token_endpoint = None;
+        assert_eq!(login_token_endpoint(&d), None);
+        // Never filled in outside the browser login, which vets it.
+        d.token_endpoint = Some("https://app.acme.example/auth/cli/token".to_string());
+        assert_eq!(auth_env_from(&d).unwrap().token_endpoint, None);
+    }
+
+    #[test]
+    fn aspect_cloud_never_adopts_a_token_endpoint() {
+        let mut seed = aspect_cloud_deployment();
+        let mut entry = aspect_cloud_deployment();
+        entry.token_endpoint = Some("https://elsewhere.example/token".to_string());
+        merge_into_seed(&mut seed, entry);
+        assert_eq!(seed.token_endpoint, None);
+    }
+
+    #[test]
+    fn config_and_credentials_written_before_the_field_still_load() {
+        let d: Deployment = serde_json::from_value(serde_json::json!({
+            "name": "acme",
+            "issuer": "https://auth.acme.example",
+            "client_id": "abc",
+        }))
+        .unwrap();
+        assert_eq!(d.token_endpoint, None);
+
+        let jwt = jwt_with_payload(r#"{"tenantId":"t1"}"#);
+        let e: CredentialsEntry = serde_json::from_value(serde_json::json!({
+            "access_token": jwt,
+            "refresh_token": "r",
+            "email": "",
+            "name": "",
+            "tenant_id": "t1",
+            "auth_domain": "https://auth.acme.example",
+            "auth_client_id": "abc",
+        }))
+        .unwrap();
+        assert_eq!(e.auth_token_endpoint, None);
+        assert_eq!(
+            e.token_url("https://auth.acme.example/token"),
+            "https://auth.acme.example/token"
+        );
+        assert!(
+            !serde_json::to_string(&e)
+                .unwrap()
+                .contains("auth_token_endpoint")
+        );
+    }
+
+    /// The gateway's token proxy path in these tests, served by the same mock as
+    /// the issuer so a request to the issuer's own `/oauth/token` would show up.
+    const PROXY_TOKEN_PATH: &str = "/auth/cli/token";
+
+    #[test]
+    fn the_code_is_exchanged_at_the_advertised_token_endpoint() {
+        let token = jwt_with_payload(r#"{"tenantId":"t1"}"#);
+        let body = format!(r#"{{"access_token":"{token}","refresh_token":"refresh"}}"#);
+        let issuer = MockIssuer::start(2, move |request| match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            PROXY_TOKEN_PATH => (200, body.clone()),
+            other => panic!("unexpected request to {other}"),
+        });
+        let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
+        let session = pasted_code_session(issuer.url());
+        session
+            .inner
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .env
+            .token_endpoint = Some(proxy.clone());
+        let runtime = tokio_runtime();
+        let _runtime = runtime.enter();
+
+        let credentials = finish_auth_session(&session, Some("auth-code")).unwrap();
+        assert_eq!(credentials.access_token, token);
+        // Recorded on the credential, through the Starlark value and back, so the
+        // refresh token is spent where it was minted.
+        assert_eq!(credentials.auth_token_endpoint.as_deref(), Some(&*proxy));
+        assert_eq!(
+            credentials.to_entry().auth_token_endpoint.as_deref(),
+            Some(&*proxy)
+        );
+
+        let received = issuer.finish();
+        let paths: Vec<_> = received.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/.well-known/openid-configuration", PROXY_TOKEN_PATH]
+        );
+        let exchange = &received[1];
+        assert_eq!(exchange.method, "POST");
+        assert!(exchange.body.contains("grant_type=authorization_code"));
+        assert!(exchange.body.contains("code=auth-code"));
+        assert!(exchange.body.contains("code_verifier=verifier"));
+        assert!(!exchange.body.contains("client_secret"));
+    }
+
+    #[test]
+    fn a_refresh_goes_to_the_token_endpoint_the_login_recorded() {
+        let issuer = MockIssuer::start(2, |request| match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            PROXY_TOKEN_PATH => (200, token_body_for("t1")),
+            other => panic!("unexpected request to {other}"),
+        });
+        let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
+        let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+        entry.auth_token_endpoint = Some(proxy.clone());
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.refresh_token, "rotated");
+        // Kept, so the next refresh goes there too.
+        assert_eq!(refreshed.auth_token_endpoint.as_deref(), Some(&*proxy));
+        let reloaded: CredentialsEntry =
+            serde_json::from_str(&serde_json::to_string(&refreshed).unwrap()).unwrap();
+        assert_eq!(reloaded.auth_token_endpoint.as_deref(), Some(&*proxy));
+
+        let received = issuer.finish();
+        let paths: Vec<_> = received.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/.well-known/openid-configuration", PROXY_TOKEN_PATH]
+        );
+        assert!(received[1].body.contains("grant_type=refresh_token"));
+        assert!(received[1].body.contains("refresh_token=refresh-token"));
+        assert!(!received[1].body.contains("client_secret"));
+    }
+
+    #[test]
+    fn a_credential_without_a_recorded_token_endpoint_refreshes_at_the_issuer() {
+        let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.auth_token_endpoint, None);
+        let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec!["/.well-known/openid-configuration", "/oauth/token"]
+        );
     }
 }
