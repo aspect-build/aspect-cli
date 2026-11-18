@@ -40,14 +40,8 @@ pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>
 
 /// The version in `bazel --version` stdout: the last line that reads
 /// `bazel <version>` (`bazel 9.0.0`, `bazel 10.0.0rc3`), so a wrapper that
-/// prints first is read past. `None` for a non-release build (`bazel
-/// no_version`, `bazel development version`) or no such line.
-pub fn parse_version_output(stdout: &str) -> Option<semver::Version> {
-    read_version_output(stdout).flatten()
-}
-
-/// [`parse_version_output`], telling no `bazel ...` line at all (`None`) from
-/// a non-release one (`Some(None)`): the last such line decides.
+/// prints first is read past. `Some(None)` for a non-release build (`bazel
+/// no_version`, `bazel development version`), `None` for no such line.
 fn read_version_output(stdout: &str) -> Option<Option<semver::Version>> {
     stdout
         .lines()
@@ -74,35 +68,32 @@ pub fn parse(version: &str) -> Option<semver::Version> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_version_output, read_version_output};
+    use super::{parse, read_version_output};
 
     fn version(v: &str) -> Option<semver::Version> {
         semver::Version::parse(v).ok()
     }
 
     #[test]
-    fn a_release_and_a_candidate_are_read() {
-        assert_eq!(parse_version_output("bazel 8.1.0\n"), version("8.1.0"));
+    fn the_last_bazel_line_decides() {
+        assert_eq!(read_version_output("bazel 8.1.0\n"), Some(version("8.1.0")));
         assert_eq!(
-            parse_version_output("bazel 10.0.0rc3"),
-            version("10.0.0-rc3")
+            read_version_output("bazel 10.0.0rc3"),
+            Some(version("10.0.0-rc3"))
         );
-    }
-
-    #[test]
-    fn a_wrapper_printing_first_is_read_past() {
         assert_eq!(
-            parse_version_output("hello from tools/bazel\nbazel 7.1.0\n"),
-            version("7.1.0")
+            read_version_output("hello from tools/bazel\nbazel 7.1.0\n"),
+            Some(version("7.1.0")),
+            "a wrapper printing first is read past"
         );
-    }
-
-    #[test]
-    fn a_non_release_build_or_no_version_line_has_none() {
-        assert_eq!(parse_version_output("bazel no_version"), None);
-        assert_eq!(parse_version_output("bazel development version"), None);
-        assert_eq!(parse_version_output("aspect 2026.1.0"), None);
-        assert_eq!(parse_version_output(""), None);
+        assert_eq!(read_version_output("bazel no_version"), Some(None));
+        assert_eq!(read_version_output("bazel development version"), Some(None));
+        assert_eq!(
+            read_version_output("aspect 2026.1.0\n"),
+            None,
+            "no bazel line"
+        );
+        assert_eq!(read_version_output(""), None);
     }
 
     #[test]
@@ -120,15 +111,5 @@ mod tests {
         assert_eq!(parse("rc1"), None);
         assert_eq!(parse("v8.0.0"), None);
         assert_eq!(parse("8.0rc1"), None);
-    }
-
-    /// No `bazel ...` line at all is not a non-release build, which
-    /// `client_version` turns into a failure.
-    #[test]
-    fn no_version_line_is_told_from_a_non_release_one() {
-        assert_eq!(read_version_output("aspect 2026.1.0\n"), None);
-        assert_eq!(read_version_output(""), None);
-        assert_eq!(read_version_output("bazel development version"), Some(None));
-        assert_eq!(read_version_output("bazel 8.1.0"), Some(version("8.1.0")));
     }
 }

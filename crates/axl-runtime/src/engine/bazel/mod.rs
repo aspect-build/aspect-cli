@@ -994,10 +994,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// without a server, and memoized, so repeated calls — and other callers
     /// that need the version — share a single probe rather than each shelling
     /// out to Bazel. Where a `tools/bazel` wrapper that adds startup flags
-    /// fails `--version`, the
-    /// server is asked with `bazel info` under the active rc's startup flags;
-    /// without an active rc the version is `None` until a caller that knows
-    /// them asks.
+    /// fails `--version`, the server is asked with `bazel info` under the
+    /// active rc's startup flags; without an active rc the version is `None`
+    /// until a caller that knows them asks.
     ///
     /// By default the pre-release suffix is dropped (`8.0.0-rc2` → `"8.0.0"`),
     /// which is what version-gating wants — a release candidate should match the
@@ -1664,8 +1663,7 @@ mod tests {
             );
             assert_eq!(
                 resolve_gated_flags(&signals, &[plain], &[], None).unwrap(),
-                ["--plain"],
-                "no gated flag, no version asked"
+                ["--plain"]
             );
         });
     }

@@ -583,8 +583,8 @@ fn scenario(name: &str) -> Scenario {
 
         // An eviction on the first invocation only, for a caller that retries
         // with Bazel's own retries off (the CLI's loops): the first exits 39,
-        // and every later one succeeds. `BASIL_EVICTED_ONCE` names the file that marks
-        // the first one done, so the state outlives each basil process.
+        // and every later one succeeds. `BASIL_EVICTED_ONCE` names the file
+        // that marks the first one done, so the state outlives each process.
         "cache_evicted_once" => {
             let marker = env::var_os("BASIL_EVICTED_ONCE")
                 .unwrap_or_else(|| panic!("basil: cache_evicted_once needs BASIL_EVICTED_ONCE"));
