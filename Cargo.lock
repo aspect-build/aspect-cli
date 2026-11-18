@@ -355,6 +355,7 @@ dependencies = [
  "base64 0.22.1",
  "bazel",
  "blake2",
+ "chrono",
  "clap",
  "derive_more 2.0.1",
  "digest",

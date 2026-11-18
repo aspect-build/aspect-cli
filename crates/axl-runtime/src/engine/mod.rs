@@ -35,6 +35,7 @@ pub mod children;
 pub mod config_context;
 pub mod feature_context;
 pub mod feature_map;
+pub mod history;
 pub mod store;
 pub mod task;
 pub mod task_context;

@@ -24,7 +24,9 @@ pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 const ASPECT_BOUNDARY_FILES: &[&str] = &[AXL_MODULE_FILE, ".aspect/version.axl"];
 
 /// Markers identifying a Bazel workspace root (see
-/// <https://bazel.build/external/overview#repository>).
+/// <https://bazel.build/external/overview#repository>). As Bazel's client
+/// reads them, one counts only if it is not a directory, so a `tools/workspace/`
+/// folder on a case-insensitive disk is no `WORKSPACE`.
 pub const BAZEL_BOUNDARY_FILES: &[&str] = &[
     "MODULE.bazel",
     "MODULE.bazel.lock",
@@ -40,7 +42,8 @@ pub const BAZEL_BOUNDARY_FILES: &[&str] = &[
 /// pure-Bazel monorepo still resolves to a sane project anchor. `None` only when
 /// neither marker exists anywhere in the ancestry.
 pub fn find_aspect_root(start: &Path) -> Option<PathBuf> {
-    find_root_with_fallback(start, ASPECT_BOUNDARY_FILES, BAZEL_BOUNDARY_FILES)
+    find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES, exists)
+        .or_else(|| find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES, not_a_dir))
 }
 
 /// The Aspect project root of the current working directory, for a caller with
@@ -60,32 +63,40 @@ pub fn aspect_root_from_cwd() -> Option<PathBuf> {
 /// `/proj/e2e/sub/` puts the Aspect root at `/proj` and the Bazel root at
 /// `/proj/e2e`.
 pub fn find_bazel_root(start: &Path) -> Option<PathBuf> {
-    find_root_with_fallback(start, BAZEL_BOUNDARY_FILES, ASPECT_BOUNDARY_FILES)
+    find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES, not_a_dir)
+        .or_else(|| find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES, exists))
 }
 
 /// Git repository root — the directory holding the `.git` entry, which is a
 /// directory in a normal clone and a file in a worktree. `None` outside a
 /// repository.
 pub fn find_git_root(start: &Path) -> Option<PathBuf> {
-    find_ancestor_with_any(start, &[".git"])
+    find_ancestor_with_any(start, &[".git"], exists)
 }
 
-/// Walk ancestors of `start` for `primary`; on a miss, walk again for
-/// `fallback`. Two passes rather than one, so the *shallower* primary marker
-/// still beats a deeper fallback.
-fn find_root_with_fallback(start: &Path, primary: &[&str], fallback: &[&str]) -> Option<PathBuf> {
-    find_ancestor_with_any(start, primary).or_else(|| find_ancestor_with_any(start, fallback))
+/// Whether `path` exists, as a file or a directory.
+fn exists(path: &Path) -> bool {
+    path.try_exists().unwrap_or(false)
 }
 
-/// The deepest ancestor of `start` (itself included) holding any of `markers`.
-fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBuf> {
+/// Whether `path` exists and is not a directory, as Bazel's client tests a
+/// workspace boundary file.
+fn not_a_dir(path: &Path) -> bool {
+    path.metadata().is_ok_and(|m| !m.is_dir())
+}
+
+/// The deepest ancestor of `start` (itself included) holding one of
+/// `markers` that `counts`. A root found by a primary marker set is looked
+/// for whole before a fallback set, so a shallower primary marker still beats
+/// a deeper fallback one.
+fn find_ancestor_with_any(
+    start: &Path,
+    markers: &[&str],
+    counts: fn(&Path) -> bool,
+) -> Option<PathBuf> {
     start
         .ancestors()
-        .find(|ancestor| {
-            markers
-                .iter()
-                .any(|marker| ancestor.join(marker).try_exists().unwrap_or(false))
-        })
+        .find(|ancestor| markers.iter().any(|marker| counts(&ancestor.join(marker))))
         .map(Path::to_path_buf)
 }
 
@@ -125,6 +136,21 @@ mod tests {
 
         assert_eq!(find_aspect_root(&cwd), Some(root.clone()));
         assert_eq!(find_bazel_root(&cwd), Some(root.join("e2e")));
+    }
+
+    /// A directory named like a boundary file marks no workspace, as Bazel's
+    /// client reads it: a `tools/workspace/` folder is not a `WORKSPACE` on a
+    /// case-insensitive disk.
+    #[test]
+    fn a_directory_named_like_a_marker_is_no_workspace() {
+        let (_tmp, root) = setup(&["MODULE.bazel"]);
+        for name in ["WORKSPACE", "workspace", "MODULE.bazel", "REPO.bazel"] {
+            let tools = root.join("tools");
+            std::fs::create_dir_all(tools.join(name)).unwrap();
+            let cwd = subdir(&root, "tools/sub");
+            assert_eq!(find_bazel_root(&cwd), Some(root.clone()), "{name}");
+            std::fs::remove_dir_all(&tools).unwrap();
+        }
     }
 
     /// Pure-Aspect workspace → both roots resolve to the Aspect marker.

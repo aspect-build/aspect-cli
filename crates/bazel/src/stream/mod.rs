@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 
 pub mod file;
 pub mod pid_pair;
+pub(crate) mod tee;
 #[cfg(test)]
 pub(crate) mod testing;
 

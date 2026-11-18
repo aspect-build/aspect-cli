@@ -480,6 +480,7 @@ fn start<'v>(
         &env.telemetry,
         cancellation,
         env.rt.clone(),
+        &env.history,
     )?;
 
     let recv = ours

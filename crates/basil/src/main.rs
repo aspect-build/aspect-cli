@@ -30,6 +30,9 @@
 //!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
 //!     [`await_pump_handshake`].
 //!
+//!     When `--profile <path>` is present, any build writes a stand-in
+//!     profile there before the client exits, as Bazel finishes its own.
+//!
 //!     When `--build_event_json_file <path>` is present, a scenario with
 //!     `json_bep_tests` writes the loading-only test selection that
 //!     `aspect cache diff` establishes its scope from — see [`write_json_bep`].
@@ -65,6 +68,9 @@ use axl_proto::build_event_stream::{
 use axl_proto::tools::protos::{ExecLogEntry, exec_log_entry};
 use axl_proto::workspace_log::WorkspaceEvent;
 use prost::Message;
+
+/// What basil writes at `--profile <path>`, standing in for a trace profile.
+const BASIL_PROFILE: &[u8] = b"basil profile\n";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -145,6 +151,10 @@ fn run_build(args: &[String], verb: &str) {
     let flag = |name: &str| bazel::rc::last_flag_value(args, name, verb);
     let bes_path = flag("--build_event_binary_file");
     let execlog_path = flag("--execution_log_compact_file");
+    // Bazel finishes the profile before its client exits; any build writes one.
+    if let Some(path) = flag("--profile") {
+        fs::write(&path, BASIL_PROFILE).unwrap_or_else(|e| panic!("basil: writing {path}: {e}"));
+    }
     let scenario_name = flag("--scenario").unwrap_or_else(|| "success".to_string());
     if scenario_name == "async_bep_tail_after_client_exit" {
         let bes_path = bes_path.unwrap_or_else(|| {

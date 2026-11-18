@@ -17,7 +17,7 @@
 //! a new attempt's file having appeared.
 
 use std::io::{self, ErrorKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -31,10 +31,23 @@ use crate::stream::{Done, Expect};
 /// The flag that names where Bazel writes the binary BEP.
 pub const FLAG: &str = "--build_event_binary_file";
 
-/// The BEP file the caller asked Bazel for in `flags`, if any; see
-/// [`crate::rc::requested_path`] for how empty and relative values resolve.
-pub fn requested_path(flags: &[String], verb: &str, directory: Option<&str>) -> Option<PathBuf> {
-    crate::rc::requested_path(flags, FLAG, verb, directory)
+/// What a build's file is called in its folder of the task invocation's
+/// history: the stream as the CLI read it, redacted.
+pub const FILE_NAME: &str = "build_events.binpb";
+
+/// The BEP file the caller asked Bazel for in `flags`, if any. A relative one
+/// is under `workspace`, the root Bazel resolves it against, or under
+/// `directory` when there is none; a leading `~` is literal, since the option
+/// is a plain string. See [`crate::rc::requested_path`] for empty
+/// values.
+pub fn requested_path(
+    flags: &[String],
+    verb: &str,
+    directory: Option<&str>,
+    workspace: Option<&Path>,
+) -> Option<PathBuf> {
+    let base = workspace.and_then(Path::to_str).or(directory);
+    crate::rc::requested_path(flags, FLAG, verb, base)
 }
 
 /// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it
@@ -861,6 +874,7 @@ mod tests {
             requested_path(
                 &line(&["--build_event_binary_file=/tmp/ide.bep"]),
                 "build",
+                None,
                 None
             ),
             Some(PathBuf::from("/tmp/ide.bep")),
@@ -870,6 +884,7 @@ mod tests {
                 &line(&["--default_override=0:common=--build_event_binary_file=/tmp/rc.bep"]),
                 "test",
                 None,
+                None
             ),
             Some(PathBuf::from("/tmp/rc.bep")),
         );
@@ -877,9 +892,37 @@ mod tests {
             requested_path(
                 &line(&["--build_event_json_file=/tmp/x.json"]),
                 "build",
+                None,
                 None
             ),
             None
+        );
+    }
+
+    /// A relative path is under the workspace root, as Bazel resolves it, and
+    /// a `~` in it is literal.
+    #[test]
+    fn a_relative_requested_path_is_under_the_workspace_root() {
+        for (value, want) in [
+            ("out/ide.bep", "/ws/out/ide.bep"),
+            ("~/ide.bep", "/ws/~/ide.bep"),
+        ] {
+            let flags = vec![format!("{FLAG}={value}")];
+            assert_eq!(
+                requested_path(&flags, "build", Some("/ws/pkg"), Some(Path::new("/ws"))),
+                Some(PathBuf::from(want)),
+                "{value}"
+            );
+        }
+    }
+
+    /// Outside any workspace a relative path is under the spawn directory.
+    #[test]
+    fn a_relative_requested_path_outside_a_workspace_is_under_the_directory() {
+        let flags = vec![format!("{FLAG}=ide.bep")];
+        assert_eq!(
+            requested_path(&flags, "build", Some("/elsewhere"), None),
+            Some(PathBuf::from("/elsewhere/ide.bep"))
         );
     }
 }

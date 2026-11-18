@@ -24,7 +24,7 @@ use starlark::StarlarkResultExt;
 use starlark::values::ValueLike;
 
 mod env;
-mod fs;
+pub(crate) mod fs;
 pub mod io;
 mod net;
 pub(crate) mod process;

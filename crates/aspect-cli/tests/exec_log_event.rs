@@ -16,9 +16,9 @@
 //! in for Bazel, and asserts on what the hook actually received:
 //!
 //!   * **every entry, in order** — basil's log is 3000 entries, past the decoded
-//!     channel's 1000-entry capacity, so a handle that was never opened (0), a
-//!     log repointed away from the reader (0) or a drain that stopped early
-//!     (< 3000) are all distinguishable from a complete one.
+//!     channel's 1000-entry capacity, so a handle that was never opened (0) or
+//!     a drain that stopped early (< 3000) is distinguishable from a complete
+//!     one.
 //!   * **during the build, not after it** — `BASIL_EXECLOG_PUMP_HANDSHAKE` makes
 //!     basil hold back the final build event until the hook has seen its first
 //!     entry, so `pumped` in the status file means the dispatch happened inside
@@ -71,6 +71,9 @@ const RC_LOG: &str = "rc-log.binpb.zst";
 /// Filename, under a case's directory, of basil's argv record — every invocation
 /// the CLI made, one line each. What the CLI asked Bazel for is only legible here.
 const ARGV_LOG: &str = "argv.log";
+
+/// The case's history root, so no case writes to the user's cache.
+const HISTORY: &str = "history";
 
 /// Bound on a single `aspect` invocation. Generous: it is here to turn a hang
 /// (a `close` that waits on a producer joined by `wait()`) into a failure, not
@@ -251,6 +254,7 @@ impl Case {
             .env("BASIL_EXECLOG_PUMP_HANDSHAKE", root.join("pumped"))
             .env("BASIL_ARGV_LOG", root.join(ARGV_LOG))
             .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
+            .env("ASPECT_HISTORY_DIR", root.join(HISTORY))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -284,7 +288,13 @@ impl Case {
             .spawn()
             .unwrap_or_else(|e| panic!("spawning `aspect {}`: {e}", args.join(" ")));
         let deadline = Instant::now() + RUN_TIMEOUT;
-        while Instant::now() < deadline && !self.dir.path().join("report.txt").exists() {
+        // The hook creates the file before writing its line, so the report is
+        // whole only once that line has ended.
+        let reported = || {
+            std::fs::read_to_string(self.dir.path().join("report.txt"))
+                .is_ok_and(|text| text.ends_with('\n'))
+        };
+        while Instant::now() < deadline && !reported() {
             if child.try_wait().expect("try_wait").is_some() {
                 break;
             }
@@ -654,35 +664,45 @@ fn entries_arrive_without_a_bes_event_stream_to_pump_from() {
     );
 }
 
-/// An execution log path set in the user's own `.bazelrc` is the path Bazel writes
-/// and the path the CLI reads — whichever section it was written in.
+/// An execution log path set in the user's own `.bazelrc` is written, whole,
+/// whichever section it was written in.
 ///
 /// Running Bazel with `--ignore_all_rc_files` means the CLI restates rc content
 /// itself, wrapping each entry in `--default_override=0:<section>=…` under the
-/// section it was written in. All three sections are asserted together because
-/// sameness is the claim — exactly one request reaches Bazel, at the path the rc file named, and
-/// the hook still gets every entry. A second request would mean the CLI missed this
-/// one and repointed Bazel at a temp path of its own, leaving the user's file
-/// uncreated.
+/// section it was written in. The CLI's own request follows it, outranks it,
+/// and names a file in the task invocation's history, which stays there; the
+/// rc file's path is written from the stream. All three sections are asserted
+/// together because sameness is the claim.
 #[test]
-fn an_rc_set_execution_log_path_is_the_one_used() {
+fn an_rc_set_execution_log_path_is_written() {
     for section in ["always", "common", "build"] {
         let rc = format!("{section} --execution_log_compact_file={CASE_DIR}/{RC_LOG}\n");
         let case = Case::new("execlog_beyond_capacity", Fixture::default(), Some(&rc));
         let report = case.run(&["build", "//..."]);
         let want = case.dir.path().join(RC_LOG);
 
+        let paths = case.execution_log_paths();
         assert_eq!(
-            case.execution_log_paths(),
-            vec![want.display().to_string()],
-            "`{section}`: the rc file's path should be the only execution log Bazel is \
-             asked for; a second one means the CLI did not see this one",
+            paths.first().map(String::as_str),
+            Some(want.to_str().unwrap()),
+            "`{section}`: the rc file's request should reach Bazel: {paths:?}",
+        );
+        let own = paths.last().unwrap();
+        assert_ne!(
+            own,
+            &want.display().to_string(),
+            "`{section}`: the CLI's own request comes last"
         );
         assert_complete(&format!("`{section}`-scoped rc log"), &report, 1);
         assert!(
             std::fs::metadata(&want).is_ok_and(|m| m.len() > 0),
             "`{section}`: the log should be at the path the rc file named, {}",
             want.display(),
+        );
+        assert!(
+            own.starts_with(case.dir.path().join(HISTORY).to_str().unwrap())
+                && std::fs::metadata(own).is_ok_and(|m| m.len() > 0),
+            "`{section}`: Bazel's own log should stay in the task's history: {own}",
         );
     }
 }
@@ -943,5 +963,27 @@ fn every_retry_attempt_dispatches_its_own_log_to_a_build_start_hook() {
         Some("pumped"),
         "the hook a build_start hook registered must receive attempt 0's entries \
          during attempt 0, not only once the build is over",
+    );
+}
+
+/// A task ID names one run: a second run passing an ID already in this
+/// machine's history is refused before it starts, naming the earlier run.
+#[test]
+fn a_task_id_already_in_the_history_is_refused() {
+    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None);
+    let id = "8f9c7d0e-1111-4222-8333-444455556666";
+    let flag = format!("--task:id={id}");
+    let first = case.raw(&["build", &flag, "//..."]);
+    assert!(
+        first.status.success(),
+        "the first run: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = case.raw(&["build", &flag, "//..."]);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!second.status.success(), "a reused task ID must be refused");
+    assert!(
+        stderr.contains("already used by an earlier run") && stderr.contains(id),
+        "{stderr}"
     );
 }
