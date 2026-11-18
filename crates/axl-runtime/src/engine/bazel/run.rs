@@ -386,7 +386,7 @@ fn prepare_flags(
     flags: &mut Vec<String>,
     startup_flags: &[String],
 ) -> anyhow::Result<SymlinksMode> {
-    let runner = super::runner::SignalRunner(signals);
+    let runner = super::runner::CancellableRunner(signals);
     let server = bazel::server::Server::new(&runner, startup_flags);
     bazel::command::run::prepare_flags(&server, flags, BUILD_COMMAND).map_err(|e| match e {
         PrepareError::Refused(message) => RunError { message }.into(),

@@ -1167,7 +1167,7 @@ impl Build {
         // attempt's file if the server is still writing it once the next has
         // started.
         let (pid, version) =
-            bazel::server::Server::new(&super::runner::SignalRunner(&signals), &startup_flags)
+            bazel::server::Server::new(&super::runner::CancellableRunner(&signals), &startup_flags)
                 .info()?;
         let recording = recording && writes_execution_log(false, true, version.as_ref());
         // `auto` telemetry reads a log the build writes anyway; `always`
@@ -1206,7 +1206,7 @@ impl Build {
         let requested_workspace_log =
             bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
 
-        let mut cmd = super::runner::SignalRunner(&signals).command();
+        let mut cmd = super::runner::CancellableRunner(&signals).command();
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);

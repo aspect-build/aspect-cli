@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use bazel::server::Server;
 
-use super::runner::SignalRunner;
+use super::runner::CancellableRunner;
 use crate::engine::builtins::sleep;
 use crate::engine::cancellation::Signals;
 
@@ -174,11 +174,11 @@ fn validate_wait_params(timeout_ms: u64, force_kill_after_ms: u64) -> anyhow::Re
 /// Send a forceful cancellation signal following Bazel's 3-SIGINT protocol;
 /// see [`Server::force_kill`].
 fn force_kill(signals: &Arc<Signals>, startup_flags: &[String]) -> bool {
-    Server::new(&SignalRunner(signals), startup_flags).force_kill()
+    Server::new(&CancellableRunner(signals), startup_flags).force_kill()
 }
 
 fn is_busy(signals: &Arc<Signals>, startup_flags: &[String]) -> bool {
-    Server::new(&SignalRunner(signals), startup_flags).is_busy()
+    Server::new(&CancellableRunner(signals), startup_flags).is_busy()
 }
 
 #[cfg(test)]

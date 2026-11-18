@@ -916,7 +916,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 
         let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
 
-        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
+        let mut cmd = runner::CancellableRunner(&Env::from_eval(eval)?.signals).command();
         cmd.args(&startup_flags);
         cmd.arg("info");
         cmd.args(&command_flags);
@@ -976,7 +976,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
 
-        let mut cmd = runner::SignalRunner(&Env::from_eval(eval)?.signals).command();
+        let mut cmd = runner::CancellableRunner(&Env::from_eval(eval)?.signals).command();
         cmd.args(&startup_flags);
         cmd.arg("shutdown");
         cmd.stdin(Stdio::null());
@@ -1282,7 +1282,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         // Send SIGINT to the Bazel client holding the server lock.
         // client_pid() uses --noblock_for_lock so it returns immediately.
         if let Some(pid) =
-            bazel::server::Server::new(&runner::SignalRunner(&signals), &all_flags).client_pid()
+            bazel::server::Server::new(&runner::CancellableRunner(&signals), &all_flags)
+                .client_pid()
         {
             bazel::process::signal::interrupt(bazel::process::signal::Target::Pid(pid));
         }

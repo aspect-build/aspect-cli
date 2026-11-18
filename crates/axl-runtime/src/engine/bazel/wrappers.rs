@@ -16,7 +16,7 @@ use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::{NoSerialize, ProvidesStaticType, Trace, UnpackValue, ValueLike};
 
-use super::runner::SignalRunner;
+use super::runner::CancellableRunner;
 use crate::engine::cancellation::Signals;
 
 /// Probe the Bazel server and recover from a held lock or a wedged server
@@ -27,7 +27,7 @@ pub fn health_check(
     startup_flags: &[String],
     log: &mut dyn FnMut(&str),
 ) -> HealthCheckResult {
-    Server::new(&SignalRunner(signals), startup_flags)
+    Server::new(&CancellableRunner(signals), startup_flags)
         .health(log)
         .into()
 }
@@ -234,7 +234,7 @@ pub(crate) fn materialize_aspects(
             output_groups: a.output_groups.clone(),
         })
         .collect();
-    let runner = SignalRunner(signals);
+    let runner = CancellableRunner(signals);
     bazel::aspect::materialize(&Server::new(&runner, startup_flags), &aspects)
 }
 

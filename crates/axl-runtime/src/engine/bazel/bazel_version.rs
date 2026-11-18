@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use bazel::server::Server;
 
-use super::runner::SignalRunner;
+use super::runner::CancellableRunner;
 use crate::engine::cancellation::Signals;
 
 /// The memo: the first answer a caller can stand on (see [`get`]).
@@ -29,7 +29,7 @@ static VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
 /// so callers that degrade to the latest do not ask again. A caller that does
 /// not know them (`None`) gets `None`, left unmemoized for one that does.
 pub(crate) fn get(signals: &Arc<Signals>, startup: Option<&[String]>) -> Option<semver::Version> {
-    let runner = SignalRunner(signals);
+    let runner = CancellableRunner(signals);
     remembered(
         &VERSION,
         || bazel::version::client_version(&runner),
