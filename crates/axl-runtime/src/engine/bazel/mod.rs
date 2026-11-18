@@ -563,7 +563,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   history, which is skipped where recording cannot be done (see `record`).
     ///   A binary or JSON log `flags` name is written by `wait()` from the
     ///   compact one (see `record`), so a build whose `wait()` does not get
-    ///   that far leaves none.
+    ///   that far leaves none. Bazel then writes, and uploads to a BES
+    ///   backend, the compact log, kept as `record()` keeps it.
     ///
     /// **Examples**
     ///
@@ -722,7 +723,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   history, which is skipped where recording cannot be done (see `record`).
     ///   A binary or JSON log `flags` name is written by `wait()` from the
     ///   compact one (see `record`), so a build whose `wait()` does not get
-    ///   that far leaves none.
+    ///   that far leaves none. Bazel then writes, and uploads to a BES
+    ///   backend, the compact log, kept as `record()` keeps it.
     ///
     /// **Examples**
     ///
