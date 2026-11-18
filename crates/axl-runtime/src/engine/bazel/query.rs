@@ -26,7 +26,7 @@ use bazel::command::query as bazel_query;
 
 use std::sync::Arc;
 
-use super::runner::SignalRunner;
+use super::runner::CancellableRunner;
 use crate::engine::cancellation::Signals;
 use crate::engine::children;
 
@@ -115,7 +115,7 @@ pub fn run(
     directory: Option<String>,
     announce: super::build::AnnounceSpawn,
 ) -> anyhow::Result<Query> {
-    let runner = SignalRunner(signals);
+    let runner = CancellableRunner(signals);
     let mut cmd = bazel_query::command(&runner, expr, startup_flags, flags, directory);
     let out = temp_dir().join("query.bin");
     let _ = fs::remove_file(&out);

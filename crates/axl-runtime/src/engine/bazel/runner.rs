@@ -11,9 +11,12 @@ use bazel::runner::{Child, Runner};
 use crate::engine::cancellation::Signals;
 use crate::engine::children::{self, Spawned};
 
-pub(crate) struct SignalRunner<'a>(pub(crate) &'a Arc<Signals>);
+/// Runs bazel clients bound to the run's cancellation state, [`Signals`]: a
+/// cancel (Ctrl-C, a `SIGTERM` to the CLI) stops them, and waiting on one is a
+/// point where the task can unwind.
+pub(crate) struct CancellableRunner<'a>(pub(crate) &'a Arc<Signals>);
 
-impl Runner for SignalRunner<'_> {
+impl Runner for CancellableRunner<'_> {
     /// Honors the `BAZEL_REAL` env var (the bazelisk convention) so wrapped
     /// invocations and tests can substitute their own binary; falls back to
     /// plain `"bazel"` and lets the OS resolve it via `PATH`.
