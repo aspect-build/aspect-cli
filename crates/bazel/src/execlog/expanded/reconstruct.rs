@@ -77,11 +77,14 @@ fn invalid(message: String) -> io::Error {
 
 impl Reconstructor {
     /// Take in one entry; a spawn comes back as its `SpawnExec`. Symlink
-    /// actions have no place in the expanded format and yield nothing.
+    /// actions have no place in the expanded format and yield nothing, nor
+    /// does an entry of a type newer than the CLI's protos, whose id is kept
+    /// as taken.
     pub fn push(&mut self, entry: ExecLogEntry) -> io::Result<Option<SpawnExec>> {
         let id = entry.id;
         let Some(kind) = entry.r#type else {
-            return Err(invalid(format!("entry {id} has no type")));
+            self.put_slot(id, None)?;
+            return Ok(None);
         };
         match kind {
             entry::Type::Invocation(invocation) => {
@@ -128,6 +131,10 @@ impl Reconstructor {
     }
 
     fn put(&mut self, id: u32, stored: Stored) -> io::Result<()> {
+        self.put_slot(id, Some(stored))
+    }
+
+    fn put_slot(&mut self, id: u32, stored: Option<Stored>) -> io::Result<()> {
         if id == 0 {
             // Never referenced, so not kept.
             return Ok(());
@@ -138,7 +145,7 @@ impl Reconstructor {
                 self.entries.len()
             )));
         }
-        self.entries.push(Some(stored));
+        self.entries.push(stored);
         Ok(())
     }
 

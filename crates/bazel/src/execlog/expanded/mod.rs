@@ -150,23 +150,27 @@ fn write(spawn: &SpawnExec, format: Format, out: &mut impl Write) -> io::Result<
 
 /// Write the compact log at `compact` to `out` as `format`: in Bazel's
 /// stable order when `sorted`, which holds every spawn in memory to sort
-/// them, as Bazel does, and otherwise each as it is read.
+/// them, as Bazel does, and otherwise each as it is read. A log that stops
+/// decoding, cut short by a killed Bazel say, is written up to that point
+/// and its error returned.
 pub fn convert(compact: &Path, out: &Path, format: Format, sorted: bool) -> io::Result<()> {
     let compact = io::BufReader::new(File::open(compact)?);
     let mut file = BufWriter::new(File::create(out)?);
-    if sorted {
+    let read = if sorted {
         let mut spawns = Vec::new();
-        each_spawn(compact, |spawn| {
+        let read = each_spawn(compact, |spawn| {
             spawns.push(spawn);
             Ok(())
-        })?;
+        });
         for spawn in sort::stable_sort(spawns) {
             write(&spawn, format, &mut file)?;
         }
+        read
     } else {
-        each_spawn(compact, |spawn| write(&spawn, format, &mut file))?;
-    }
-    file.flush()
+        each_spawn(compact, |spawn| write(&spawn, format, &mut file))
+    };
+    file.flush()?;
+    read
 }
 
 #[cfg(test)]
@@ -405,5 +409,49 @@ mod tests {
         let mut theirs = spawns(fixture.compact);
         theirs.iter_mut().for_each(|s| s.metrics = None);
         assert_eq!(timeless(&std::fs::read(out).unwrap()), theirs);
+    }
+
+    #[test]
+    fn a_log_cut_short_is_written_up_to_the_cut() {
+        let fixture = latest();
+        let mut whole = Vec::new();
+        zstd::stream::copy_decode(fixture.compact, &mut whole).unwrap();
+        let cut = zstd::encode_all(&whole[..whole.len() - 10], 0).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (compact, out) = (dir.path().join("compact"), dir.path().join("out"));
+        std::fs::write(&compact, cut).unwrap();
+        for sorted in [true, false] {
+            assert!(convert(&compact, &out, Format::Binary, sorted).is_err());
+            let written = timeless(&std::fs::read(&out).unwrap());
+            assert_eq!(
+                written.len(),
+                3,
+                "the spawns before the last, sorted: {sorted}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_of_a_newer_type_is_passed_over() {
+        let unknown = ExecLogEntry {
+            id: 1,
+            r#type: None,
+        };
+        let file = ExecLogEntry {
+            id: 2,
+            r#type: Some(axl_proto::tools::protos::exec_log_entry::Type::File(
+                axl_proto::tools::protos::exec_log_entry::File {
+                    path: "f".into(),
+                    digest: None,
+                },
+            )),
+        };
+        let mut reconstructor = Reconstructor::default();
+        assert_eq!(reconstructor.push(unknown).unwrap(), None);
+        assert_eq!(
+            reconstructor.push(file).unwrap(),
+            None,
+            "its id stays taken"
+        );
     }
 }

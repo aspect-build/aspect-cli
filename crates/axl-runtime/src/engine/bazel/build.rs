@@ -1764,10 +1764,11 @@ impl Build {
             {
                 for (format, to) in files {
                     if let Err(err) = expanded::convert(&compact, to, *format, *sorted) {
-                        stream_errors.push(format!(
-                            "writing the execution log '{}' from '{path}' failed: {err}",
+                        errln!(
+                            "WARNING: the execution log '{}' could not be written in full \
+                             from '{path}' ({err}). The build's result is unaffected.",
                             to.display()
-                        ));
+                        );
                     }
                 }
             }
@@ -1782,8 +1783,9 @@ impl Build {
                     errln!(
                         "WARNING: the execution log '{path}' stopped decoding \
                          ({reason}), so its hooks, spawn telemetry and decoded sinks \
-                         hold only the entries before that point. The build's result \
-                         and copies of the compact log are unaffected."
+                         hold only the entries before that point, as do binary and JSON \
+                         logs written from it. The build's result and copies of the \
+                         compact log are unaffected."
                     );
                 }
                 Ok(_) => {}
