@@ -1189,7 +1189,9 @@ fn is_advertisable_name(name: &str) -> bool {
 /// `results_url` is the top-level `aspect_bes_results_url`. A web-UI-only
 /// document names its origin in `aspect_endpoints.results_url` instead, which is
 /// recorded in its place when there is no BES: that origin is not a viewer
-/// prefix, so it must never be paired with a BES as `--bes_results_url`.
+/// prefix, so it is not paired with an advertised BES as `--bes_results_url`.
+/// ([`keep_build_endpoints`] may still pair it with a BES recorded earlier
+/// without a viewer.)
 fn deployment_from_discovery(
     name: String,
     configured_host: &str,
@@ -1330,8 +1332,17 @@ fn upsert_deployment(
 /// inherit its endpoints, or the auth gate would hand the new login's token to
 /// the old one's cache.
 ///
+/// Matched by name alone. A web UI advertising a `resource_name` the entry was
+/// not recorded under (one recorded before the deployment advertised it, or
+/// under `--name`) is recorded as a second deployment; `configure --name
+/// <recorded name>` refreshes the recorded one instead. Nothing else safely
+/// ties the two: a login can be shared across deployments, and the recorded
+/// hosts never include the web UI's.
+///
 /// A kept BES keeps the `results_url` recorded with it, since the refreshed one
-/// may be a bare web UI origin that is no viewer prefix for that BES.
+/// may be a bare web UI origin that is no viewer prefix for that BES. When none
+/// was recorded the refreshed one stays: it is the only web UI `aspect mcp` can
+/// reach, though Bazel is then handed that origin as `--bes_results_url`.
 fn keep_build_endpoints(refreshed: &mut Deployment, recorded: &Deployment) {
     if refreshed.endpoints.serves_build_endpoints()
         || !recorded.endpoints.serves_build_endpoints()
@@ -1344,7 +1355,7 @@ fn keep_build_endpoints(refreshed: &mut Deployment, recorded: &Deployment) {
     refreshed.endpoints.cache = recorded.endpoints.cache.clone();
     refreshed.endpoints.bes = recorded.endpoints.bes.clone();
     refreshed.endpoints.exec = recorded.endpoints.exec.clone();
-    if !recorded.endpoints.bes.is_empty() {
+    if !recorded.endpoints.bes.is_empty() && !recorded.endpoints.results_url.is_empty() {
         refreshed.endpoints.results_url = recorded.endpoints.results_url.clone();
     }
     for host in &recorded.hosts {
@@ -6591,6 +6602,22 @@ mod tests {
         upsert_deployment(&mut existing, moved, false).unwrap();
         assert_eq!(existing[0].endpoints.cache, "cache2.acme.example.com");
         assert_eq!(existing[0].endpoints.bes, "");
+    }
+
+    /// A deployment recorded through its remote-cache host with no viewer keeps
+    /// the web UI origin a refresh through that UI finds, since it is the only one
+    /// `aspect mcp` can reach, along with the recorded cache and BES.
+    #[test]
+    fn a_web_ui_refresh_keeps_its_origin_when_no_viewer_was_recorded() {
+        let mut recorded = through_cache("acme");
+        recorded.endpoints.results_url = String::new();
+        let mut existing = vec![recorded];
+        upsert_deployment(&mut existing, through_web_ui("acme"), false).unwrap();
+
+        let kept = &existing[0];
+        assert_eq!(kept.endpoints.results_url, "https://app.acme.example.com");
+        assert_eq!(kept.endpoints.cache, "cache.acme.example.com");
+        assert_eq!(kept.endpoints.bes, "bes.acme.example.com");
     }
 
     /// A name reused for another login inherits nothing, so its token is never
