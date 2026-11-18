@@ -237,7 +237,7 @@ def _test_a_cache_eviction_is_retried_and_is_no_server_error(_):
 
 def _test_eviction_retries_are_left_to_the_loop_that_retries_them(ctx: TaskContext) -> None:
     flag = "--experimental_remote_cache_eviction_retries"
-    off = [(flag + "=0", ">=8.0.0")]
+    off = [flag + "=0"]
     every = BazelTrait()
 
     def flags(rc, attempts = 3, bazel_trait = every, command = "build"):

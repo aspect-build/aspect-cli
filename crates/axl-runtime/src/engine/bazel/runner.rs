@@ -8,6 +8,7 @@ use std::process::{Command, ExitStatus, Output};
 use std::sync::{Arc, OnceLock};
 
 use bazel::runner::{Child, Runner};
+use bazel::server::Server;
 
 use crate::engine::cancellation::Signals;
 use crate::engine::children::{self, Spawned};
@@ -42,11 +43,24 @@ static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
 /// restarts no server, whatever startup flags the invocation then uses, and
 /// every caller (flag gating, rc-section selection, `ctx.bazel.version()`)
 /// shares the one answer.
-pub(crate) fn release_version(signals: &Arc<Signals>) -> Option<semver::Version> {
+///
+/// Bazel takes `--version` only alone, so a `tools/bazel` wrapper that adds a
+/// startup flag of its own fails it. Then the server is asked instead, with
+/// `bazel info` under `startup`, the invocation's own startup flags, so the
+/// question reaches the server the invocation uses.
+pub(crate) fn release_version(
+    signals: &Arc<Signals>,
+    startup: &[String],
+) -> Option<semver::Version> {
     RELEASE_VERSION
         .get_or_init(|| {
-            bazel::version::client_version(&SignalRunner(signals))
-                .inspect_err(|e| tracing::debug!("bazel --version: {e}; assuming the latest"))
+            let runner = SignalRunner(signals);
+            bazel::version::client_version(&runner)
+                .or_else(|e| {
+                    tracing::debug!("bazel --version: {e}; asking bazel info");
+                    Ok::<_, std::io::Error>(Server::new(&runner, startup).info()?.1)
+                })
+                .inspect_err(|e| tracing::debug!("bazel info: {e}; assuming the latest"))
                 .ok()
                 .flatten()
         })

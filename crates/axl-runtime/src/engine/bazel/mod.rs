@@ -157,7 +157,10 @@ fn resolve_rc_version(
         return Ok(bazel::version::parse(&s));
     }
     if rc.has_version_gated_options() {
-        return Ok(runner::release_version(signals));
+        return Ok(runner::release_version(
+            signals,
+            &rc.invocation_startup_flags(),
+        ));
     }
     Ok(None)
 }
@@ -185,7 +188,8 @@ fn resolve_flags<'v>(
 
 /// Like [`resolve_flags`], but sources the version itself: `known`, the
 /// version an rc was resolved against, else the running Bazel's
-/// ([`runner::release_version`]), asked only when at least one conditional
+/// ([`runner::release_version`], under the invocation's `startup` flags
+/// should it need the server), asked only when at least one conditional
 /// `(flag, constraint)` tuple is present, so unconditional flag lists never pay
 /// for it. A non-release Bazel reports no version, in which case the
 /// constraints resolve against an assumed-latest version (see
@@ -193,12 +197,15 @@ fn resolve_flags<'v>(
 fn resolve_gated_flags<'v>(
     signals: &Arc<cancellation::Signals>,
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    startup: &[String],
     known: Option<&semver::Version>,
 ) -> anyhow::Result<Vec<String>> {
     if !items.iter().any(|f| f.is_right()) {
         return resolve_flags(items, None);
     }
-    let version = known.cloned().or_else(|| runner::release_version(signals));
+    let version = known
+        .cloned()
+        .or_else(|| runner::release_version(signals, startup));
     resolve_flags(items, version.as_ref())
 }
 
@@ -376,12 +383,12 @@ fn resolve_invocation_flags<'v>(
     match effective_rc(this, rc_param) {
         Some(rc) => {
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
-            cmd.extend(resolve_gated_flags(signals, flags, rc.version())?);
+            cmd.extend(resolve_gated_flags(signals, flags, &startup, rc.version())?);
             Ok((cmd, startup))
         }
         None => {
             let startup = read_startup_flags(this)?;
-            let extras = resolve_gated_flags(signals, flags, None)?;
+            let extras = resolve_gated_flags(signals, flags, &startup, None)?;
             Ok((extras, startup))
         }
     }
@@ -510,7 +517,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `targets` - One or more Bazel target patterns to build.
     /// * `flags` - Bazel flags. Each element is either a plain `str` that is
     ///   always included, or a `(flag, constraint)` tuple that is included only
-    ///   when the running Bazel version satisfies the
+    ///   when the rc's Bazel version, else the running Bazel's, satisfies the
     ///   [semver](https://semver.org) constraint. Pre-release versions are
     ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
     ///   invalid constraint is a hard error.
@@ -666,7 +673,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `targets` - One or more Bazel target patterns to test.
     /// * `flags` - Bazel flags. Each element is either a plain `str` that is
     ///   always included, or a `(flag, constraint)` tuple that is included only
-    ///   when the running Bazel version satisfies the
+    ///   when the rc's Bazel version, else the running Bazel's, satisfies the
     ///   [semver](https://semver.org) constraint. Pre-release versions are
     ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
     ///   invalid constraint is a hard error.
@@ -1007,8 +1014,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<String>> {
         require_claimed_flags(this)?;
+        let startup = read_startup_flags(this)?;
         Ok(
-            match runner::release_version(&Env::from_eval(eval)?.signals) {
+            match runner::release_version(&Env::from_eval(eval)?.signals, &startup) {
                 Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
                 Some(v) => NoneOr::Other(v.to_string()),
                 None => NoneOr::None,
@@ -1641,15 +1649,15 @@ mod tests {
             let signals = cancellation::Signals::new();
             let at = |v: &str| semver::Version::parse(v).unwrap();
             assert_eq!(
-                resolve_gated_flags(&signals, &items, Some(&at("8.1.0"))).unwrap(),
+                resolve_gated_flags(&signals, &items, &[], Some(&at("8.1.0"))).unwrap(),
                 ["--plain", "--new"]
             );
             assert_eq!(
-                resolve_gated_flags(&signals, &items, Some(&at("7.6.0"))).unwrap(),
+                resolve_gated_flags(&signals, &items, &[], Some(&at("7.6.0"))).unwrap(),
                 ["--plain"]
             );
             assert_eq!(
-                resolve_gated_flags(&signals, &[plain], None).unwrap(),
+                resolve_gated_flags(&signals, &[plain], &[], None).unwrap(),
                 ["--plain"],
                 "no gated flag, no version asked"
             );

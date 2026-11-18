@@ -602,16 +602,19 @@ def _eviction_retries(ctx, rc, command: str, max_attempts: int) -> list:
 
     `build_retry` is asked about REMOTE_CACHE_EVICTED here, once, before the
     first attempt."""
-    return _filter_injected(ctx, _eviction_retry_flag(ctx.traits[BazelTrait], rc, command, max_attempts))
 
-def _eviction_retry_flag(bazel_trait, rc, command: str, max_attempts: int) -> list:
-    """`_eviction_retries` before the user's omissions, for `bazel_trait`
-    (which a test passes in)."""
+    # Filtered as the bare flag a filter expects, then gated.
+    kept = _filter_injected(ctx, _eviction_retry_flag(ctx.traits[BazelTrait], rc, command, max_attempts))
+    return [(flag, _EVICTION_RETRIES_DEFAULT_ON) for flag in kept]
+
+def _eviction_retry_flag(bazel_trait, rc, command: str, max_attempts: int) -> list[str]:
+    """`_eviction_retries` before the user's omissions and its version gate,
+    for `bazel_trait` (which a test passes in)."""
     if rc == None or max_attempts < 2 or not bazel_trait.build_retry(exit_codes.REMOTE_CACHE_EVICTED):
         return []
     if rc.flag_value(_EVICTION_RETRIES_FLAG, command = command) != None:
         return []
-    return [(_EVICTION_RETRIES_FLAG + "=0", _EVICTION_RETRIES_DEFAULT_ON)]
+    return [_EVICTION_RETRIES_FLAG + "=0"]
 
 bazel_flags = namespace(
     VALUE_FLAGS = BAZEL_VALUE_FLAGS,

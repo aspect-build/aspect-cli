@@ -297,3 +297,37 @@ fn deliverys_first_phase_retries_an_eviction() {
     );
     assert!(!builds[2].contains(EVICTION_RETRIES), "{}", builds[2]);
 }
+
+/// A wrapper that adds a startup flag of its own fails `bazel --version`,
+/// which Bazel takes only alone, so the version is asked of the server instead:
+/// Bazel 7 behind one still gets no flag, and is still retried.
+#[cfg(unix)]
+#[test]
+fn a_wrapper_adding_startup_flags_still_tells_the_version() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = workspace("");
+    let wrapper = dir.path().join("wrapper.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec {} --host_jvm_args=-Dwrapper=1 \"$@\"\n",
+            basil_bin()
+        ),
+    )
+    .expect("wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let wrapper = wrapper.to_string_lossy().into_owned();
+    let (output, builds) = run(
+        dir.path(),
+        "build",
+        &[],
+        &[("BAZEL_REAL", wrapper.as_str()), ("BASIL_RELEASE", "7.6.0")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(builds.len(), 2, "still retried:\n{stderr}");
+    assert!(
+        builds.iter().all(|l| !l.contains(EVICTION_RETRIES)),
+        "{builds:?}"
+    );
+}

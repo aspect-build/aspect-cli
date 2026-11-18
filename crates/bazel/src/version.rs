@@ -41,9 +41,10 @@ pub fn parse_version_output(stdout: &str) -> Option<semver::Version> {
         .find_map(|line| parse(line.trim().strip_prefix("bazel ")?))
 }
 
-/// A Bazel version string as semver, the pre-release suffix kept: Bazel spells
-/// a release candidate `10.0.0rc3`, which reads as `10.0.0-rc3`, and a rolling
-/// release `9.0.0-pre.20250101.1` as it is. `None` for anything else.
+/// A Bazel version string as semver, the pre-release suffix kept: any semver
+/// as it is (a rolling release's `9.0.0-pre.20250101.1`), and Bazel's
+/// spelling of a release candidate, `10.0.0rc3`, as `10.0.0-rc3`. `None`
+/// otherwise.
 pub fn parse(version: &str) -> Option<semver::Version> {
     let version = version.trim();
     if let Ok(v) = semver::Version::parse(version) {

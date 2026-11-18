@@ -1172,20 +1172,22 @@ pub fn override_payload(token: &str) -> Option<&str> {
     DefaultOverride::parse(token).map(|over| over.option)
 }
 
-/// Whether a semver `constraint` is satisfied by the running Bazel `version`.
+/// Whether a semver `constraint` is satisfied by a Bazel `version`: the one an
+/// rc was resolved against, or the running Bazel's.
 ///
-/// `version` is `None` when Bazel reports a non-release build (a
-/// `development version` has no version number to parse). Such a build is
-/// compiled from HEAD, so it is effectively newer than any release: it is
-/// matched against a max version, so lower-bound gates (`>=N`, the usual
-/// shape) match and upper-bound gates (`<N`) don't.
+/// `version` is `None` when it is unknown: a non-release build (a
+/// `development version` has no version number to parse), a failed probe, or
+/// an rc whose version was never resolved. That is taken as newer than any
+/// release: it is matched against a max version, so lower-bound gates (`>=N`,
+/// the usual shape) match and upper-bound gates (`<N`) don't.
 ///
 /// An unparseable constraint is a hard error naming the offending value.
 ///
 /// The version's pre-release suffix is ignored: semver `VersionReq` matching
 /// treats a pre-release specially (e.g. `8.0.0-rc2` does NOT satisfy `>=8.0.0`),
-/// but for flag gating a release candidate should match the same constraints its
-/// release will. So `8.0.0-rc2` is compared as `8.0.0`.
+/// but for gating flags and rc entries a release candidate or rolling release
+/// should match the same constraints its release will. So `8.0.0-rc2` and
+/// `9.0.0-pre.20250101.1` are compared as `8.0.0` and `9.0.0`.
 pub fn constraint_matches(
     constraint: &str,
     version: Option<&semver::Version>,
@@ -2245,8 +2247,9 @@ mod runcommand_tests {
         assert_eq!(merged.version, Some(semver::Version::new(8, 0, 0)));
     }
 
-    /// A release candidate keeps what its release would: Bazel's `8.0.0rc1`
-    /// passes `>=8` and `>=7` gates, in the rc's sections and its options alike.
+    /// A release candidate or rolling release keeps what its release would:
+    /// Bazel's `8.0.0rc1` passes `>=8` and `>=7` gates, in the rc's sections
+    /// and its options alike.
     #[test]
     fn a_release_candidate_keeps_its_releases_gated_options() {
         let rc = Bazelrc::blank(&[RcOption {
@@ -2258,6 +2261,12 @@ mod runcommand_tests {
         assert!(rc.version_condition_holds(&Some(">=7.0.0".to_string())));
         let (_, cmd) = rc.resolve_for_command("build").unwrap();
         assert!(cmd.contains(&"--gated".to_string()), "{cmd:?}");
+        let rolling = rc.with_version(crate::version::parse("8.1.0-pre.20250101.1"));
+        let (_, cmd) = rolling.resolve_for_command("build").unwrap();
+        assert!(
+            cmd.contains(&"--gated".to_string()),
+            "a rolling release: {cmd:?}"
+        );
     }
 
     #[test]
