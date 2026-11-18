@@ -42,15 +42,20 @@ def config(ctx: ConfigContext):
 /// Runs `aspect build //... <args>` in `root`, returning its output and the
 /// command lines of the Bazel builds it ran.
 fn build(root: &Path, args: &[&str]) -> (Output, Vec<String>) {
-    let argv = root.join("argv.log");
+    run(root, "build", args)
+}
+
+/// Runs `aspect <verb> //... <args>` in `root`, returning its output and the
+/// command lines of the Bazel `<verb>` invocations it ran.
+fn run(root: &Path, verb: &str, args: &[&str]) -> (Output, Vec<String>) {
     let output = Command::new(aspect_cli())
-        .args(["build", "//..."])
+        .args([verb, "//..."])
         .args(args)
         .current_dir(root)
         .env_clear()
         .envs(base_env())
         .env("BAZEL_REAL", basil_bin())
-        .env("BASIL_ARGV_LOG", &argv)
+        .env("BASIL_ARGV_LOG", root.join("argv.log"))
         .env("BASIL_EVICTED_ONCE", root.join("evicted"))
         .env("ASPECT_HISTORY_DIR", root.join("history"))
         .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
@@ -59,13 +64,17 @@ fn build(root: &Path, args: &[&str]) -> (Output, Vec<String>) {
         .stdin(Stdio::null())
         .output()
         .expect("running aspect build");
-    let builds = std::fs::read_to_string(&argv)
+    (output, invocations(root, verb))
+}
+
+/// The command lines of the Bazel `<verb>` invocations basil logged in `root`.
+fn invocations(root: &Path, verb: &str) -> Vec<String> {
+    std::fs::read_to_string(root.join("argv.log"))
         .unwrap_or_default()
         .lines()
-        .filter(|l| l.split_whitespace().any(|a| a == "build"))
+        .filter(|l| l.split_whitespace().any(|a| a == verb))
         .map(str::to_owned)
-        .collect();
-    (output, builds)
+        .collect()
 }
 
 /// The `bazel/<n>` folders of the one task invocation in the history.
@@ -111,6 +120,46 @@ fn an_eviction_is_retried_as_an_invocation_of_its_own() {
         2,
         "a history folder per attempt"
     );
+    // Deciding on the flag reads the version the task's rc was resolved
+    // against; it asks no Bazel of its own, without the task's startup flags.
+    for info in invocations(dir.path(), "info") {
+        assert!(
+            info.contains("--ignore_all_rc_files"),
+            "a bare probe: {info}"
+        );
+    }
+}
+
+/// `aspect test` retries an eviction the same way.
+#[test]
+fn a_test_eviction_is_retried_too() {
+    let dir = workspace("");
+    let (output, tests) = run(dir.path(), "test", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(tests.len(), 2, "one retry:\n{stderr}");
+    let off = format!("{EVICTION_RETRIES}=0");
+    assert!(tests.iter().all(|l| l.contains(&off)), "{tests:?}");
+}
+
+/// A value the user passes is theirs, and `--bazel-flags:omit` drops the
+/// CLI's: either way the CLI adds no `=0`.
+#[test]
+fn the_users_flags_decide_over_the_clis() {
+    let off = format!("{EVICTION_RETRIES}=0");
+    let passed = format!("--bazel-flag={EVICTION_RETRIES}=1");
+    let omitted = format!("--bazel-flags:omit={EVICTION_RETRIES}");
+    for args in [[passed.as_str()], [omitted.as_str()]] {
+        let dir = workspace("");
+        let (output, builds) = build(dir.path(), &args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {stderr}");
+        assert_eq!(builds.len(), 2, "{args:?}: {stderr}");
+        assert!(
+            builds.iter().all(|l| !l.contains(&off)),
+            "{args:?}: {builds:?}"
+        );
+    }
 }
 
 /// With no retry to hand them to, Bazel's own eviction retries are left as

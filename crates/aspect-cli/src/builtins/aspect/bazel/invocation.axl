@@ -7,8 +7,8 @@ patterns and flags for a spawn, for tasks such as `lint` that drive
 The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
 (`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
 and the retry budget (with the flag that leaves cache eviction retries to it) —
-into one immutable `_Invocation` record. The returned handle
-exposes the flow as verbs the task drives in a visible loop (see `build.axl`):
+into one immutable `_Invocation` record. The returned handle exposes the flow
+as verbs the task drives in a visible loop (see `build.axl`):
 the verbs are thin forwarders over that single record, and the top-level `_do_*`
 functions thread it — no closure tower, no mutable state dict. The live
 invocation and the attempt index are threaded as values (the `_spawned` struct
@@ -39,7 +39,7 @@ load(
 load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
 load("@aspect//bazel/flags.axl", "bazel_flags")
 load("@aspect//bazel/rc.axl", "bazel_rc")
-load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "eviction_retry_flags", "exit_code_of", "may_retry", "retry_attempts")
+load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "exit_code_of", "may_retry", "retry_attempts")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a
@@ -59,8 +59,7 @@ _Invocation = record(
     patterns = field(list[str]),
     sinks = field(list),
     dropped = field(list[str]),
-    # A flag, or a `(flag, version constraint)` pair as `ctx.bazel.build` takes.
-    rc_flags = field(list[str | (str, str)]),
+    rc_flags = field(list[str]),
     results_url = field(str),
     bazel_streams_bes = field(bool),
     announce_version = field(bool),
@@ -175,7 +174,7 @@ def _resolve(ctx, command: str) -> _Invocation:
     rc_flags.extend(bes_results_url_flag(trait.bes_results_sources, rc, command))
 
     max_attempts = retry_attempts(ctx)
-    rc_flags.extend(eviction_retry_flags(trait, rc, command, max_attempts))
+    rc_flags.extend(bazel_flags.eviction_retries(ctx, rc, command, max_attempts))
 
     return _Invocation(
         ctx = ctx,

@@ -40,7 +40,6 @@ load(
     _default_retry = "default_retry",
     _dispatch_bazel_attempt_end = "dispatch_bazel_attempt_end",
     _dispatch_bazel_build_end = "dispatch_bazel_build_end",
-    _eviction_retry_flags = "eviction_retry_flags",
     _exit_code_of = "exit_code_of",
     _exit_codes = "exit_codes",
     _may_retry = "may_retry",
@@ -62,7 +61,6 @@ ExecLogHook = _ExecLogHook
 default_retry = _default_retry
 dispatch_bazel_attempt_end = _dispatch_bazel_attempt_end
 dispatch_bazel_build_end = _dispatch_bazel_build_end
-eviction_retry_flags = _eviction_retry_flags
 exit_code_of = _exit_code_of
 exit_codes = _exit_codes
 may_retry = _may_retry

@@ -50,8 +50,9 @@ pub fn requested_path(
     crate::rc::requested_path(flags, FLAG, verb, base)
 }
 
-/// `REMOTE_CACHE_EVICTED`: the build ends with this code and bazel runs it
-/// again in the same invocation, starting the file over for the next attempt.
+/// `REMOTE_CACHE_EVICTED`: the build ends with this code. With its own
+/// eviction retries on, bazel runs it again in the same invocation, starting
+/// the file over for the next attempt; with them off, the code is the end.
 pub(crate) const REMOTE_CACHE_EVICTED: i32 = 39;
 
 /// One event as it was read.
@@ -78,9 +79,9 @@ impl Frame {
         self.raw.slice(self.prefix_len..)
     }
 
-    /// This is the `BuildFinished` that ends an attempt bazel is about to
-    /// retry (`REMOTE_CACHE_EVICTED`): the next attempt starts the file over
-    /// at the same path.
+    /// This is the `BuildFinished` that ends an attempt bazel may retry
+    /// (`REMOTE_CACHE_EVICTED`): a next attempt starts the file over at the
+    /// same path.
     pub fn is_retry_marker(&self) -> bool {
         self.retry
     }

@@ -289,7 +289,7 @@ User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "eviction_retry_flags", "exit_code_of", "may_retry", "retry_attempts")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of", "may_retry", "retry_attempts")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
@@ -891,7 +891,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     pre_loop_state = dict(data)
 
     max_attempts = retry_attempts(ctx)
-    phase1_flags.extend(eviction_retry_flags(bazel_trait, rc, "build", max_attempts))
+    phase1_flags.extend(bazel_flags.eviction_retries(ctx, rc, "build", max_attempts))
     for attempt in range(max_attempts):
         if attempt > 0:
             # Archive the failed attempt before resetting state.

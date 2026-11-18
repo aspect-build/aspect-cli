@@ -21,8 +21,9 @@ Run with:
   aspect dev test-bazel-invocation
 """
 
+load("@aspect//bazel/flags.axl", "testonly_eviction_retry_flag")
 load("@aspect//bazel/invocation.axl", "resolve_targets", "target_patterns")
-load("@aspect//bazel.axl", "BazelTrait", "default_retry", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "eviction_retry_flags", "exit_code_of", "exit_codes", "may_retry", "server_error")
+load("@aspect//bazel.axl", "BazelTrait", "default_retry", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of", "exit_codes", "may_retry", "server_error")
 
 def _eq(label, got, want):
     if got != want:
@@ -236,15 +237,23 @@ def _test_a_cache_eviction_is_retried_and_is_no_server_error(_):
 
 def _test_eviction_retries_are_left_to_the_loop_that_retries_them(ctx: TaskContext) -> None:
     flag = "--experimental_remote_cache_eviction_retries"
-    off = [(flag + "=0", ">=6.2.0")]
-    rc = ctx.bazel.new_rc(flags = [])
-    _eq("a loop that retries evictions", eviction_retry_flags(BazelTrait(), rc, "build", 3), off)
-    _eq("one attempt leaves Bazel's retries on", eviction_retry_flags(BazelTrait(), rc, "build", 1), [])
+    off = [flag + "=0"]
+    every = BazelTrait()
+
+    def flags(rc, attempts = 3, bazel_trait = every, command = "build"):
+        return testonly_eviction_retry_flag(ctx, bazel_trait, rc, command, attempts)
+
+    rc = ctx.bazel.new_rc(flags = [], version = "8.4.0")
+    _eq("a loop that retries evictions", flags(rc), off)
+    _eq("for test too", flags(rc, command = "test"), off)
+    _eq("a version that cannot be told", flags(ctx.bazel.new_rc(flags = [])), off)
+    _eq("one attempt leaves Bazel's retries on", flags(rc, attempts = 1), [])
     declines = BazelTrait(build_retry = lambda code: code != exit_codes.REMOTE_CACHE_EVICTED)
-    _eq("a policy that declines evictions", eviction_retry_flags(declines, rc, "build", 3), [])
-    mine = ctx.bazel.new_rc(flags = [flag + "=2"])
-    _eq("the rc's own setting is kept", eviction_retry_flags(BazelTrait(), mine, "build", 3), [])
-    _eq("for test too", eviction_retry_flags(BazelTrait(), mine, "test", 3), [])
+    _eq("a policy that declines evictions", flags(rc, bazel_trait = declines), [])
+    _eq("before Bazel 7", flags(ctx.bazel.new_rc(flags = [], version = "6.5.0")), [])
+    _eq("no rc", flags(None), [])
+    mine = ctx.bazel.new_rc(flags = [flag + "=2"], version = "8.4.0")
+    _eq("the rc's own setting is kept", flags(mine), [])
 
 def _test_impl(ctx: TaskContext) -> int:
     _test_exit_codes_and_retries_for_a_signal_ended_client(ctx)
