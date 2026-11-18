@@ -254,11 +254,12 @@ def _say(streaming: bool, line: str) -> None:
 
 def _run(ctx: TaskContext, cmd: str, args: list[str]):
     """`(exit code, stdout)` of `cmd args`, stderr discarded; `(-1, "")` when
-    the command cannot be started at all — a slim image without `ps` or
-    `realpath` is a missing answer, not a crash."""
+    the command gives no answer: it cannot be started at all (a slim image
+    without `ps` or `realpath` is a missing answer, not a crash), or a
+    signal ended it."""
     err, out = catch(lambda: ctx.std.process.command(cmd).args(args)
         .stdout("piped").stderr("null").spawn().wait_with_output())
-    if err != None:
+    if err != None or out.status.code == None:
         return (-1, "")
     return (out.status.code, out.stdout)
 

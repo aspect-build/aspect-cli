@@ -628,10 +628,11 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     # Real errors (config, missing plugin) = non-zero exit + empty stdout;
     # stderr already printed, so just fail hard.
     if not diff_status.success and not diff_stdout.strip():
-        error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % diff_status.code)
+        code = exit_code_of(diff_status)
+        error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % code)
         data["gazelle"]["gazelle_error"] = True
-        data["gazelle"]["gazelle_error_code"] = diff_status.code
-        return diff_status.code
+        data["gazelle"]["gazelle_error_code"] = code
+        return code
 
     if not diff_stdout.strip():
         # Clean, regardless of --severity / --check-only.
@@ -666,11 +667,11 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
             .stdout("piped").stderr("piped").spawn().wait_with_output()
         ctx.std.fs.remove_file(patch_path)
         if not apply_result.status.success:
-            error(ctx.std, "Failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply." % (apply_result.status.code, apply_result.stderr.strip(), ctx.args.gazelle_target))
+            error(ctx.std, "Failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply." % (exit_code_of(apply_result.status), apply_result.stderr.strip(), ctx.args.gazelle_target))
             data["gazelle"]["affected_files"] = affected
             data["gazelle"]["apply_error"] = True
             data["gazelle"]["apply_error_msg"] = apply_result.stderr.strip()
-            return apply_result.status.code
+            return exit_code_of(apply_result.status)
 
     verb = "would update" if check_only else "updated"
     if affected:

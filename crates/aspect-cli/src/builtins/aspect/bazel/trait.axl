@@ -13,6 +13,8 @@ https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtool
 Loaded through the `@aspect//bazel.axl` facade, which re-exports everything here.
 """
 
+load("../private/lib/exit_status.axl", _exit_code_of = "exit_code_of")
+
 exit_codes = struct(
     SUCCESS = 0,
     BUILD_FAILURE = 1,
@@ -178,22 +180,9 @@ BazelTrait = trait(
     build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code (128 + the signal when a signal ended the client; see `exit_code_of`)"),
 )
 
-def exit_code_of(status) -> int:
-    """The exit code a Bazel client's `wait()` status stands for. Hooks typed
-    `exit_code: int` take this, never `status.code`, which is None when a
-    signal ended the client (SIGKILLed, or crashed).
-
-    A process a signal ends has no exit code, so this is the client's own
-    code, or 128 + the signal as shells report one (130 for SIGINT, 137 for
-    SIGKILL), which is also how the CLI reports its own signals
-    (`axl-runtime`'s `cancellation.rs`). Bazel's own codes stay well below
-    128. A status with neither, which no platform produces, is
-    `BUILD_FAILURE`."""
-    if status.code != None:
-        return status.code
-    if status.signal != None:
-        return 128 + status.signal
-    return exit_codes.BUILD_FAILURE
+# `exit_code_of(status)`: a Bazel client's code, or 128 + the signal that
+# ended it; hooks typed `exit_code: int` take it. See `exit_status.axl`.
+exit_code_of = _exit_code_of
 
 def may_retry(bazel_trait: BazelTrait, status) -> bool:
     """Whether `bazel_trait.build_retry` may be asked to retry the attempt

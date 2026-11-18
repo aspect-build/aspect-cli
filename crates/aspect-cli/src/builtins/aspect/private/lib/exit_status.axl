@@ -1,0 +1,21 @@
+"""The exit code a finished process stands for, whatever ended it.
+
+A process a signal ends (SIGKILLed, or crashed) has no exit code: its `wait()`
+status has `code = None` and `signal` set. That holds for a Bazel client's
+`bazel.build.BuildStatus` and a `ctx.std.process` child's `ExitStatus` alike,
+so anything that formats a code with `%d`, returns it as a task's exit code or
+passes it to something typed `int` takes `exit_code_of(status)`, never
+`status.code`.
+"""
+
+def exit_code_of(status) -> int:
+    """The process's own exit code, or, when a signal ended it, 128 + the
+    signal as shells report one (130 for SIGINT, 137 for SIGKILL), which is
+    also how the CLI reports its own signals (`axl-runtime`'s
+    `cancellation.rs`). A status with neither, which no platform produces,
+    is 1."""
+    if status.code != None:
+        return status.code
+    if status.signal != None:
+        return 128 + status.signal
+    return 1

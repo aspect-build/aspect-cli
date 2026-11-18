@@ -26,6 +26,7 @@ After rendering, `tools/repin` regenerates the language lockfiles the template
 ships as placeholders (unless `--skip-repin`).
 """
 
+load("./private/lib/exit_status.axl", "exit_code_of")
 load("./private/lib/init_render.axl", "load_config", "preset_flags", "preset_names", "render")
 load("./private/lib/prompt.axl", "prompt_choice")
 
@@ -49,7 +50,7 @@ def _run(ctx, argv, current_dir = None):
         cmd = cmd.current_dir(current_dir)
     status = cmd.spawn().wait()
     if not status.success:
-        fail("command failed ({}): {}".format(status.code, " ".join(argv)))
+        fail("command failed ({}): {}".format(exit_code_of(status), " ".join(argv)))
 
 _TEMPLATE_SCHEME = enum("github", "file")
 

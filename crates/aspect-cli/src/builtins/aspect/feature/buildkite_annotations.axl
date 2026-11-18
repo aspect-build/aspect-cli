@@ -113,6 +113,7 @@ load(
 )
 load("../private/lib/ci.axl", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../private/lib/exit_status.axl", "exit_code_of")
 load(
     "../private/lib/lifecycle.axl",
     "Phases",
@@ -284,7 +285,7 @@ def _write_annotation(ctx, style, body, context_id):
         stderr = (out.stderr or "").strip()
         stdout = (out.stdout or "").strip()
         _LOG.warn(ctx.std, "Annotation failed (ctx=%s style=%s): code=%s stderr=%r stdout=%r body_written=%d/%d" %
-                           (context_id, style, str(out.status.code), stderr, stdout, written, len(body)))
+                           (context_id, style, str(exit_code_of(out.status)), stderr, stdout, written, len(body)))
         return
     _LOG.trace("annotation ok (ctx=%s wrote=%d/%d bytes)" %
                (context_id, written, len(body)))
@@ -310,7 +311,7 @@ def _remove_annotation(ctx, context_id):
 
     if not out.status.success:
         _LOG.trace("annotation remove failed (ctx=%s code=%s stderr=%r) — already absent?" %
-                   (context_id, str(out.status.code), (out.stderr or "").strip()))
+                   (context_id, str(exit_code_of(out.status)), (out.stderr or "").strip()))
         return
     _LOG.trace("annotation removed (ctx=%s)" % context_id)
 
@@ -353,7 +354,7 @@ def _buildkite_annotations(ctx: FeatureContext):
         .stdout("piped").stderr("piped").spawn().wait()
     if not probe.success:
         _LOG.warn(ctx.std, "`buildkite-agent --version` returned code=%s; skipping." %
-                           str(probe.code))
+                           str(exit_code_of(probe)))
         return
     _LOG.trace("buildkite-agent probe ok")
 

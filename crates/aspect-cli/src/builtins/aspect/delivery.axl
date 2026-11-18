@@ -2286,7 +2286,7 @@ def _delivery_impl(ctx):
                     # Output was redirected to files, so wait() has no pipe to
                     # drain; read them after exit, print atomically, upload as
                     # CI artifacts (no-op off-CI), then delete this target's files.
-                    exit_code = child.wait().code
+                    exit_code = exit_code_of(child.wait())
                     stdout = ctx.std.fs.read_to_string(stdout_path) if ctx.std.fs.exists(stdout_path) else ""
                     stderr = ctx.std.fs.read_to_string(stderr_path) if ctx.std.fs.exists(stderr_path) else ""
                     _print_captured_output(label, exit_code, stdout, stderr, color)
@@ -2298,7 +2298,7 @@ def _delivery_impl(ctx):
                     ctx.std.fs.remove_file(stdout_path)
                     ctx.std.fs.remove_file(stderr_path)
                 else:
-                    exit_code = child.wait().code
+                    exit_code = exit_code_of(child.wait())
                 duration = fmt_elapsed(time.monotonic() - t_start)
                 forced_marker = " (FORCED)" if is_forced else ""
                 file_metadata = _read_metadata_file(ctx, label, metadata_path)
