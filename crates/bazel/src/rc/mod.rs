@@ -285,11 +285,17 @@ impl Bazelrc {
     /// without the rc files' version-gated `startup` entries, which the version
     /// decides. The same server, unless a gated entry applies at it.
     pub fn ungated_startup_flags(&self) -> Vec<String> {
+        self.startup_flags_where(|o| o.version_condition.is_none())
+    }
+
+    /// The caller's startup flags, the rc files' `startup` entries `keep`
+    /// accepts, and `--ignore_all_rc_files`.
+    fn startup_flags_where(&self, keep: impl Fn(&RcOption) -> bool) -> Vec<String> {
         let mut startup = self.startup_flags.clone();
         startup.extend(
             self.raw_options("startup")
                 .iter()
-                .filter(|o| o.version_condition.is_none())
+                .filter(|o| keep(o))
                 .map(|o| o.value.clone()),
         );
         startup.push("--ignore_all_rc_files".to_string());
@@ -732,18 +738,10 @@ impl Bazelrc {
     /// `--ignore_all_rc_files` (the on-disk rc is already absorbed). Command-
     /// independent; the single source for build/test/query/info/health_check.
     pub fn invocation_startup_flags(&self) -> Vec<String> {
-        let mut startup = self.startup_flags.clone();
         // Gate the rc-file `startup` section by version like command options: a
         // `try-import-if-bazel-version` startup flag meant for another Bazel
         // version must not be passed to the running one.
-        startup.extend(
-            self.raw_options("startup")
-                .iter()
-                .filter(|o| self.version_condition_holds(&o.version_condition))
-                .map(|o| o.value.clone()),
-        );
-        startup.push("--ignore_all_rc_files".to_string());
-        startup
+        self.startup_flags_where(|o| self.version_condition_holds(&o.version_condition))
     }
 
     /// Whether a version-gated option's `condition` holds at this bazelrc's
@@ -2261,6 +2259,35 @@ mod runcommand_tests {
             &["--output_base=/a", "--host_jvm_args=-Xmx2g"]
         );
         assert_eq!(merged.version, Some(semver::Version::new(8, 0, 0)));
+    }
+
+    /// Before the version is known, a probe asks under the startup entries no
+    /// version gates.
+    #[test]
+    fn ungated_startup_flags_leave_out_the_gated_entries() {
+        let mut rc = Bazelrc::blank(&[]).with_startup_flags(vec!["--output_base=/ob".to_string()]);
+        rc.options
+            .entry("startup".to_string())
+            .or_default()
+            .extend([
+                RcOption {
+                    value: "--host_jvm_args=-Dall=1".to_string(),
+                    ..RcOption::default()
+                },
+                RcOption {
+                    value: "--host_jvm_args=-Dold=1".to_string(),
+                    version_condition: Some("<8.0.0".to_string()),
+                    ..RcOption::default()
+                },
+            ]);
+        assert_eq!(
+            rc.ungated_startup_flags(),
+            [
+                "--output_base=/ob",
+                "--host_jvm_args=-Dall=1",
+                "--ignore_all_rc_files"
+            ]
+        );
     }
 
     /// A release candidate or rolling release keeps what its release would:

@@ -30,13 +30,12 @@ pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>
         )));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    if !stdout.lines().any(|l| l.trim().starts_with("bazel ")) {
-        return Err(io::Error::other(format!(
+    read_version_output(&stdout).ok_or_else(|| {
+        io::Error::other(format!(
             "`bazel --version` printed no `bazel <version>` line: {}",
             stdout.trim()
-        )));
-    }
-    Ok(parse_version_output(&stdout))
+        ))
+    })
 }
 
 /// The version in `bazel --version` stdout: the last line that reads
@@ -44,10 +43,17 @@ pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>
 /// prints first is read past. `None` for a non-release build (`bazel
 /// no_version`, `bazel development version`) or no such line.
 pub fn parse_version_output(stdout: &str) -> Option<semver::Version> {
+    read_version_output(stdout).flatten()
+}
+
+/// [`parse_version_output`], telling no `bazel ...` line at all (`None`) from
+/// a non-release one (`Some(None)`): the last such line decides.
+fn read_version_output(stdout: &str) -> Option<Option<semver::Version>> {
     stdout
         .lines()
         .rev()
-        .find_map(|line| parse(line.trim().strip_prefix("bazel ")?))
+        .find_map(|line| line.trim().strip_prefix("bazel "))
+        .map(parse)
 }
 
 /// A Bazel version string as semver, the pre-release suffix kept: any semver
@@ -68,7 +74,7 @@ pub fn parse(version: &str) -> Option<semver::Version> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_version_output};
+    use super::{parse, parse_version_output, read_version_output};
 
     fn version(v: &str) -> Option<semver::Version> {
         semver::Version::parse(v).ok()
@@ -114,5 +120,15 @@ mod tests {
         assert_eq!(parse("rc1"), None);
         assert_eq!(parse("v8.0.0"), None);
         assert_eq!(parse("8.0rc1"), None);
+    }
+
+    /// No `bazel ...` line at all is not a non-release build, which
+    /// `client_version` turns into a failure.
+    #[test]
+    fn no_version_line_is_told_from_a_non_release_one() {
+        assert_eq!(read_version_output("aspect 2026.1.0\n"), None);
+        assert_eq!(read_version_output(""), None);
+        assert_eq!(read_version_output("bazel development version"), Some(None));
+        assert_eq!(read_version_output("bazel 8.1.0"), Some(version("8.1.0")));
     }
 }

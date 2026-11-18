@@ -147,7 +147,9 @@ fn partition_workspace_events(
 /// options: an explicit `requested` string when given, else the running
 /// Bazel's ([`runner::release_version`]), asked only when `rc` actually carries
 /// a gated option, so the common case pays nothing. A failed probe degrades to
-/// `None` (assumed-latest).
+/// `None` (assumed-latest). Before the version is known a gated startup entry
+/// cannot be decided, so a fallback `bazel info` asks under the ungated ones:
+/// the build's server unless such an entry then applies.
 fn resolve_rc_version(
     signals: &Arc<cancellation::Signals>,
     requested: Option<String>,
@@ -157,9 +159,6 @@ fn resolve_rc_version(
         return Ok(bazel::version::parse(&s));
     }
     if rc.has_version_gated_options() {
-        // Before the version is known, a gated startup entry cannot be
-        // decided, so a fallback `bazel info` asks under the ungated ones:
-        // the build's server unless such an entry then applies.
         return Ok(runner::release_version(
             signals,
             Some(&rc.ungated_startup_flags()),
@@ -391,9 +390,8 @@ fn resolve_invocation_flags<'v>(
             Ok((cmd, startup))
         }
         None => {
-            let startup = read_startup_flags(this)?;
-            let extras = resolve_gated_flags(signals, flags, &startup, None)?;
-            Ok((extras, startup))
+            let extras = resolve_gated_flags(signals, flags, &[], None)?;
+            Ok((extras, Vec::new()))
         }
     }
 }
@@ -995,7 +993,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Asked once per process via `bazel --version`, which the client answers
     /// without a server, and memoized, so repeated calls — and other callers
     /// that need the version — share a single probe rather than each shelling
-    /// out to Bazel. Where a `tools/bazel` wrapper fails `--version`, the
+    /// out to Bazel. Where a `tools/bazel` wrapper that adds startup flags
+    /// fails `--version`, the
     /// server is asked with `bazel info` under the active rc's startup flags;
     /// without an active rc the version is `None` until a caller that knows
     /// them asks.

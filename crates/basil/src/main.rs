@@ -581,9 +581,9 @@ fn scenario(name: &str) -> Scenario {
             ..Default::default()
         },
 
-        // A cache eviction the client retries itself, as the CLI does with
-        // Bazel's own retries off: the first invocation exits 39, and every
-        // later one succeeds. `BASIL_EVICTED_ONCE` names the file that marks
+        // An eviction on the first invocation only, for a caller that retries
+        // with Bazel's own retries off (the CLI's loops): the first exits 39,
+        // and every later one succeeds. `BASIL_EVICTED_ONCE` names the file that marks
         // the first one done, so the state outlives each basil process.
         "cache_evicted_once" => {
             let marker = env::var_os("BASIL_EVICTED_ONCE")
