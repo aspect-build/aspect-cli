@@ -1122,18 +1122,17 @@ pub fn requested_home_path(
     command: &str,
     directory: Option<&str>,
 ) -> Option<PathBuf> {
-    resolve(
-        last_flag_value(args, name, command),
-        directory,
-        |path: &str| {
-            // As Bazel's converter does: every `~` in a path that starts `~/`.
-            path.starts_with("~/")
-                .then(std::env::home_dir)
-                .flatten()
-                .map(|home| PathBuf::from(path.replace('~', &home.to_string_lossy())))
-                .unwrap_or_else(|| PathBuf::from(path))
-        },
-    )
+    resolve(last_flag_value(args, name, command), directory, home_path)
+}
+
+/// `path` as Bazel's path converter reads it: every `~` in a path that starts
+/// `~/` is the user's home, as [`requested_home_path`] says.
+pub fn home_path(path: &str) -> PathBuf {
+    path.starts_with("~/")
+        .then(std::env::home_dir)
+        .flatten()
+        .map(|home| PathBuf::from(path.replace('~', &home.to_string_lossy())))
+        .unwrap_or_else(|| PathBuf::from(path))
 }
 
 fn resolve(

@@ -55,6 +55,7 @@ use bazel::bes::kind::{self, event_kind_help, event_kind_in};
 use bazel::bes::sink::grpc;
 use bazel::bes::sink::retry::{RetryConfig, SinkStats};
 use bazel::bes::sink::tracing as tracing_sink;
+use bazel::execlog::expanded;
 use bazel::execlog::feed::{ExecLogStream, ReaderOutcome};
 use bazel::fanout::SinkOutcome;
 use bazel::fanout::Subscriber;
@@ -869,6 +870,11 @@ pub struct Build {
     #[allocative(skip)]
     execlog_read: bool,
 
+    /// The binary and JSON logs the caller asked for, which `wait()` writes
+    /// from the compact log once its stream ends, sorted or not.
+    #[allocative(skip)]
+    expanded_logs: Option<(Vec<(expanded::Format, PathBuf)>, bool)>,
+
     /// The profile Bazel writes into the history, and the path the caller
     /// asked for it at, which [`Build::reaped`] copies it to.
     #[allocative(skip)]
@@ -1150,10 +1156,7 @@ impl Build {
             requested_execlog_path.is_some(),
             history_asked || history.records_every_build(),
         );
-        // Bazel refuses a build naming more than one log format, so a log
-        // only recorded is skipped beside the caller's binary or JSON one.
-        let other_format = bazel::execlog::other_format(&flags, verb);
-        let recording = recording && rc_visible && !other_format;
+        let recording = recording && rc_visible;
 
         // Asked with the same startup flags the build below will use, because
         // that is what decides which server answers. Bazel kills a running
@@ -1169,7 +1172,29 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::CancellableRunner(&signals), &startup_flags)
                 .info()?;
-        let recording = recording && writes_execution_log(false, true, version.as_ref());
+        // Bazel writes one log format a build. A binary or JSON log the caller
+        // asked for is written from the compact one, which makes the CLI a
+        // reader of it, and Bazel's own is turned off; one left to Bazel leaves
+        // no compact log to record.
+        let (expanded_logs, expanded_off, left_to_bazel) = match expanded::request(
+            &flags,
+            verb,
+            directory.as_deref(),
+            workspace.as_deref(),
+            version.as_ref(),
+        ) {
+            expanded::Request::Files { files, sorted, off } => (Some((files, sorted)), off, false),
+            expanded::Request::Bazels => (None, vec![], true),
+            expanded::Request::None => (None, vec![], false),
+        };
+        let recording =
+            recording && !left_to_bazel && writes_execution_log(false, true, version.as_ref());
+        let asked = asked || expanded_logs.is_some();
+        // An earlier run's file at an asked-for path is not left to be read
+        // as this build's, should this one write no log.
+        for (_, path) in expanded_logs.iter().flat_map(|(files, _)| files) {
+            let _ = std::fs::remove_file(path);
+        }
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.
         let (log_on, execlog_telemetry) = telemetry
@@ -1210,6 +1235,7 @@ impl Build {
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);
+        cmd.args(expanded_off);
 
         if let Some(directory) = directory {
             cmd.current_dir(directory);
@@ -1525,6 +1551,7 @@ impl Build {
             execlog_iters,
             workspace_event_iters,
             execlog_read: asked,
+            expanded_logs,
             profile_copy: RefCell::new(profile_copy),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
@@ -1726,8 +1753,24 @@ impl Build {
         // nothing about it. See
         // `ReaderOutcome`.
         if let Some(execlog_stream) = build.execlog_stream.take() {
-            let path = execlog_stream.path().display().to_string();
-            match execlog_stream.join() {
+            let compact = execlog_stream.path().to_path_buf();
+            let path = compact.display().to_string();
+            let outcome = execlog_stream.join();
+            if let (
+                Some((files, sorted)),
+                Ok(ReaderOutcome::Read | ReaderOutcome::Undecodable(_)),
+            ) = (&build.expanded_logs, &outcome)
+            {
+                for (format, to) in files {
+                    if let Err(err) = expanded::convert(&compact, to, *format, *sorted) {
+                        stream_errors.push(format!(
+                            "writing the execution log '{}' from '{path}' failed: {err}",
+                            to.display()
+                        ));
+                    }
+                }
+            }
+            match outcome {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() && build.execlog_read => {
                     errln!(
                         "WARNING: bazel completed successfully but wrote no execution \
@@ -2569,21 +2612,23 @@ Test = task(implementation = _impl)
         assert_eq!(std::fs::read_dir(history.path()).unwrap().count(), 0);
     }
 
-    /// Bazel refuses a second log format, so a caller's JSON or binary log
-    /// leaves nothing recorded beside it.
+    /// Bazel writes one log format a build, so a JSON or binary log the caller
+    /// asks for is written from the compact one, which is recorded beside it.
     #[cfg(unix)]
     #[test]
-    fn a_recording_beside_another_log_format_is_skipped() {
-        for flag in ["--execution_log_json_file", "--execution_log_binary_file"] {
+    fn a_binary_or_json_log_is_written_from_the_recorded_one() {
+        use bazel::execlog::expanded::{Format, convert};
+        for format in [Format::Json, Format::Binary] {
             let history = tempfile::tempdir().unwrap();
             let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("exec.log");
             let script = format!(
                 r#"
 def _impl(ctx):
     rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
     build = ctx.bazel.build(
         rc = rc,
-        flags = ["--nogenerate_json_trace_profile", "{flag}={log}"],
+        flags = ["--nogenerate_json_trace_profile", "--scenario=execlog_one_spawn", "{flag}={log}"],
         execution_log = [bazel.execution_log.record()],
         stderr = None,
     )
@@ -2591,15 +2636,48 @@ def _impl(ctx):
 
 Test = task(implementation = _impl)
 "#,
-                log = dir.path().join("exec.log").display(),
+                flag = format.flag(),
+                log = log.display(),
             );
             run_task_with_history(&script, history.path());
-            assert_eq!(
-                std::fs::read_dir(history.path()).unwrap().count(),
-                0,
-                "{flag}"
+            let compact =
+                bazel_dir(&only_invocation(history.path()), 1).join(bazel::execlog::FILE_NAME);
+            let want = dir.path().join("want");
+            convert(&compact, &want, format, true).unwrap();
+            let written = std::fs::read(&log).unwrap();
+            assert_eq!(written, std::fs::read(want).unwrap(), "{format:?}");
+            assert!(
+                written.windows(5).any(|w| w == b"Basil"),
+                "{format:?}: the spawn is in it"
             );
         }
+    }
+
+    /// Up to Bazel 9 an empty binary or JSON log path turns the format off,
+    /// which leaves the compact log to record.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_binary_or_json_log_path_still_records() {
+        let history = tempfile::tempdir().unwrap();
+        run_task_with_history(
+            r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--nogenerate_json_trace_profile", "--scenario=execlog_one_spawn", "--execution_log_json_file="],
+        execution_log = [bazel.execution_log.record()],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+            history.path(),
+        );
+        let compact =
+            bazel_dir(&only_invocation(history.path()), 1).join(bazel::execlog::FILE_NAME);
+        assert_eq!(compact_entry_count(&compact), 2);
     }
 
     /// A caller who turned profiling off is given no `--profile`, so gets none
