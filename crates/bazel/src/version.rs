@@ -1,6 +1,7 @@
 //! The release of the Bazel binary itself, from `bazel --version`, which the
 //! client answers alone: asking starts, reaches and restarts no server,
-//! whatever startup flags an invocation goes on to use.
+//! whatever startup flags an invocation goes on to use. Also how a Bazel
+//! version string reads as semver, for `bazel info release` too.
 
 use std::io;
 use std::process::Stdio;
@@ -30,19 +31,34 @@ pub fn client_version(runner: &dyn Runner) -> io::Result<Option<semver::Version>
 }
 
 /// The version in `bazel --version` stdout: the last line that reads
-/// `bazel <version>` (`bazel 9.0.0`, `bazel 9.0.0-rc1`), so a wrapper that
+/// `bazel <version>` (`bazel 9.0.0`, `bazel 10.0.0rc3`), so a wrapper that
 /// prints first is read past. `None` for a non-release build (`bazel
 /// no_version`, `bazel development version`) or no such line.
 pub fn parse_version_output(stdout: &str) -> Option<semver::Version> {
     stdout
         .lines()
         .rev()
-        .find_map(|line| semver::Version::parse(line.trim().strip_prefix("bazel ")?.trim()).ok())
+        .find_map(|line| parse(line.trim().strip_prefix("bazel ")?))
+}
+
+/// A Bazel version string as semver, the pre-release suffix kept: Bazel spells
+/// a release candidate `10.0.0rc3`, which reads as `10.0.0-rc3`, and a rolling
+/// release `9.0.0-pre.20250101.1` as it is. `None` for anything else.
+pub fn parse(version: &str) -> Option<semver::Version> {
+    let version = version.trim();
+    if let Ok(v) = semver::Version::parse(version) {
+        return Some(v);
+    }
+    let core = version.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+    if core == 0 || !version[core..].starts_with("rc") {
+        return None;
+    }
+    semver::Version::parse(&format!("{}-{}", &version[..core], &version[core..])).ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version_output;
+    use super::{parse, parse_version_output};
 
     fn version(v: &str) -> Option<semver::Version> {
         semver::Version::parse(v).ok()
@@ -52,8 +68,8 @@ mod tests {
     fn a_release_and_a_candidate_are_read() {
         assert_eq!(parse_version_output("bazel 8.1.0\n"), version("8.1.0"));
         assert_eq!(
-            parse_version_output("bazel 9.0.0-rc1"),
-            version("9.0.0-rc1")
+            parse_version_output("bazel 10.0.0rc3"),
+            version("10.0.0-rc3")
         );
     }
 
@@ -71,5 +87,18 @@ mod tests {
         assert_eq!(parse_version_output("bazel development version"), None);
         assert_eq!(parse_version_output("aspect 2026.1.0"), None);
         assert_eq!(parse_version_output(""), None);
+    }
+
+    #[test]
+    fn bazels_version_spellings_read_as_semver() {
+        assert_eq!(parse("9.3.2"), version("9.3.2"));
+        assert_eq!(parse("10.0.0rc3"), version("10.0.0-rc3"));
+        assert_eq!(
+            parse("9.0.0-pre.20250101.1"),
+            version("9.0.0-pre.20250101.1")
+        );
+        assert_eq!(parse("development version"), None);
+        assert_eq!(parse("no_version"), None);
+        assert_eq!(parse("rc1"), None);
     }
 }

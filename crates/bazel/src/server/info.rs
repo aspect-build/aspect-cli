@@ -12,19 +12,14 @@ pub(super) const RELEASE_KEY: &str = "release";
 
 /// Parse the value of `bazel info release` into a semver version.
 ///
-/// The value looks like `release 9.0.0`, or `release 9.0.0-rc1` for a
-/// release candidate. Non-release builds report a value with no version
-/// number — `development version` (built from source) or `no_version` —
-/// and return `None` rather than erroring, so a non-release Bazel doesn't
-/// abort the task. Callers treat `None` as "version unknown".
-///
-/// The full version is preserved, **including** any pre-release suffix (so
-/// `ctx.bazel.version(strip=False)` can surface `9.0.0-rc1`). Flag gating
-/// ignores the suffix at the comparison site (see `constraint_matches`), so an
-/// rc still matches the same constraints its release will.
+/// The value looks like `release 9.0.0`, or `release 10.0.0rc3` for a
+/// release candidate, read as [`crate::version::parse`] reads it. Non-release
+/// builds report a value with no version number — `development version`
+/// (built from source) or `no_version` — and return `None` rather than
+/// erroring, so a non-release Bazel doesn't abort the task. Callers treat
+/// `None` as "version unknown".
 pub fn parse_release(value: &str) -> Option<semver::Version> {
-    let ver_str = value.trim().trim_start_matches("release ").trim();
-    semver::Version::parse(ver_str).ok()
+    crate::version::parse(value.trim().trim_start_matches("release "))
 }
 
 /// Parse `bazel info` stdout into a key/value map.

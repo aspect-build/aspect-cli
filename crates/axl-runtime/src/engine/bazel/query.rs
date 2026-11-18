@@ -132,7 +132,6 @@ pub fn run(
     cmd.stdout(outfile);
     cmd.stdin(Stdio::null());
 
-    // Mirror the build/test spawn disclosure.
     if announce.version || announce.command {
         let version = if announce.version {
             super::runner::release_version(signals)

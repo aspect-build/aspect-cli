@@ -2,6 +2,8 @@
 `args.passthrough()` buckets that let a plain Bazel flag be typed directly on an
 aspect command line, startup and command flag composition, and `--config`
 expansion. `bazel/rc.axl` parses the `.bazelrc` with what this resolves.
+`eviction_retries` is the flag a retry loop adds to leave cache eviction
+retries to itself.
 
 A flag the CLI parser does not recognize is routed by where it was typed, the
 same way Bazel splits its own command line: before the task name it joins the

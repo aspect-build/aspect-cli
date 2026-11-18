@@ -39,18 +39,17 @@ def config(ctx: ConfigContext):
     dir
 }
 
-/// Runs `aspect build //... <args>` in `root`, returning its output and the
-/// command lines of the Bazel builds it ran.
-fn build(root: &Path, args: &[&str]) -> (Output, Vec<String>) {
-    run(root, "build", args)
+/// The flag that turns Bazel's own eviction retries off.
+fn retries_off() -> String {
+    format!("{EVICTION_RETRIES}=0")
 }
 
-/// Runs `aspect <verb> //... <args>` in `root`, returning its output and the
-/// command lines of the Bazel `<verb>` invocations it ran.
-fn run(root: &Path, verb: &str, args: &[&str]) -> (Output, Vec<String>) {
+/// Runs `aspect <verb> //... <args>` in `root` with `env` on top, returning its
+/// output and the command lines of the Bazel `<verb>` invocations it ran.
+fn run(root: &Path, verb: &str, args: &[&str], env: &[(&str, &str)]) -> (Output, Vec<String>) {
     let mut argv = vec![verb, "//..."];
     argv.extend(args);
-    (aspect(root, &argv, &[]), invocations(root, verb))
+    (aspect(root, &argv, env), invocations(root, verb))
 }
 
 /// Runs `aspect <args>` in `root` against basil, with `env` on top.
@@ -104,11 +103,11 @@ fn bazel_folders(history: &Path) -> Vec<PathBuf> {
 #[test]
 fn an_eviction_is_retried_as_an_invocation_of_its_own() {
     let dir = workspace("");
-    let (output, builds) = build(dir.path(), &[]);
+    let (output, builds) = run(dir.path(), "build", &[], &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert_eq!(builds.len(), 2, "one retry:\n{stderr}");
-    let off = format!("{EVICTION_RETRIES}=0");
+    let off = retries_off();
     for line in &builds {
         assert!(line.contains(&off), "Bazel's retries off: {line}");
     }
@@ -156,14 +155,14 @@ fn no_probe_starts_a_server_the_build_does_not_use() {
             "--bazel-startup-flag=--output_base={}",
             dir.path().join("ob").display()
         );
-        let output = aspect(
+        let (output, builds) = run(
             dir.path(),
-            &["build", "//...", &output_base],
+            "build",
+            &[&output_base],
             &[("BASIL_RELEASE", release)],
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(0), "{release}: {stderr}");
-        let builds = invocations(dir.path(), "build");
         assert_eq!(builds.len(), 2, "{release}: {stderr}");
         let build = startup_of(&builds[0], "build");
         assert!(
@@ -171,9 +170,7 @@ fn no_probe_starts_a_server_the_build_does_not_use() {
             "{release}: {build:?}"
         );
         assert!(
-            builds
-                .iter()
-                .all(|l| l.contains(&format!("{EVICTION_RETRIES}=0"))),
+            builds.iter().all(|l| l.contains(&retries_off())),
             "{release}: the gate holds, a non-release Bazel counting as the latest"
         );
         let infos = invocations(dir.path(), "info");
@@ -193,11 +190,11 @@ fn no_probe_starts_a_server_the_build_does_not_use() {
 #[test]
 fn a_test_eviction_is_retried_too() {
     let dir = workspace("");
-    let (output, tests) = run(dir.path(), "test", &[]);
+    let (output, tests) = run(dir.path(), "test", &[], &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert_eq!(tests.len(), 2, "one retry:\n{stderr}");
-    let off = format!("{EVICTION_RETRIES}=0");
+    let off = retries_off();
     assert!(tests.iter().all(|l| l.contains(&off)), "{tests:?}");
 }
 
@@ -205,12 +202,12 @@ fn a_test_eviction_is_retried_too() {
 /// CLI's: either way the CLI adds no `=0`.
 #[test]
 fn the_users_flags_decide_over_the_clis() {
-    let off = format!("{EVICTION_RETRIES}=0");
+    let off = retries_off();
     let passed = format!("--bazel-flag={EVICTION_RETRIES}=1");
     let omitted = format!("--bazel-flags:omit={EVICTION_RETRIES}");
     for args in [[passed.as_str()], [omitted.as_str()]] {
         let dir = workspace("");
-        let (output, builds) = build(dir.path(), &args);
+        let (output, builds) = run(dir.path(), "build", &args, &[]);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(0), "{args:?}: {stderr}");
         assert_eq!(builds.len(), 2, "{args:?}: {stderr}");
@@ -218,6 +215,13 @@ fn the_users_flags_decide_over_the_clis() {
             builds.iter().all(|l| !l.contains(&off)),
             "{args:?}: {builds:?}"
         );
+        if args[0] == passed {
+            let theirs = format!("{EVICTION_RETRIES}=1");
+            assert!(
+                builds.iter().all(|l| l.contains(&theirs)),
+                "theirs reaches Bazel: {builds:?}"
+            );
+        }
     }
 }
 
@@ -226,7 +230,7 @@ fn the_users_flags_decide_over_the_clis() {
 #[test]
 fn one_attempt_leaves_bazels_retries_alone() {
     let dir = workspace("");
-    let (output, builds) = build(dir.path(), &["--bazel-retry-attempts=1"]);
+    let (output, builds) = run(dir.path(), "build", &["--bazel-retry-attempts=1"], &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(39), "{stderr}");
     assert_eq!(builds.len(), 1, "{stderr}");
@@ -238,11 +242,11 @@ fn one_attempt_leaves_bazels_retries_alone() {
 #[test]
 fn an_rc_setting_is_kept() {
     let dir = workspace(&format!("build {EVICTION_RETRIES}=2\n"));
-    let (output, builds) = build(dir.path(), &[]);
+    let (output, builds) = run(dir.path(), "build", &[], &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert_eq!(builds.len(), 2, "{stderr}");
-    let off = format!("{EVICTION_RETRIES}=0");
+    let off = retries_off();
     for line in &builds {
         assert!(!line.contains(&off), "the rc's setting stands: {line}");
     }
@@ -253,13 +257,8 @@ fn an_rc_setting_is_kept() {
 #[test]
 fn before_bazel_8_no_flag_is_added() {
     let dir = workspace("");
-    let output = aspect(
-        dir.path(),
-        &["build", "//..."],
-        &[("BASIL_RELEASE", "7.6.0")],
-    );
+    let (output, builds) = run(dir.path(), "build", &[], &[("BASIL_RELEASE", "7.6.0")]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let builds = invocations(dir.path(), "build");
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert_eq!(builds.len(), 2, "still retried:\n{stderr}");
     assert!(
@@ -291,7 +290,7 @@ fn deliverys_first_phase_retries_an_eviction() {
         builds.len() >= 3,
         "phase 1, its retry and phase 2: {builds:?}"
     );
-    let off = format!("{EVICTION_RETRIES}=0");
+    let off = retries_off();
     assert!(
         builds[0].contains(&off) && builds[1].contains(&off),
         "{builds:?}"

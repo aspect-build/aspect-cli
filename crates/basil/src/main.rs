@@ -94,7 +94,7 @@ fn main() {
     }
     if args.iter().any(|a| a == "--version") {
         eprintln!("FATAL: Unknown startup option: '--version'.");
-        process::exit(36);
+        process::exit(2);
     }
     match verb {
         "info" => run_info(&args),

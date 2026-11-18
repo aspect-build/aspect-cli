@@ -882,7 +882,9 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     # `--nokeep_state_after_build`) so the runner's shared analysis stays warm
     # for build/test jobs — phase 2 forces its own re-evaluation via the aspect
     # nonce instead of discarding the graph.
+    max_attempts = retry_attempts(ctx)
     phase1_flags = ["--remote_download_outputs=minimal"] + endpoint_auth_flags
+    phase1_flags.extend(bazel_flags.eviction_retries(ctx, rc, "build", max_attempts))
     _t_phase1 = time.monotonic()
     announce_version, announce_command = bazel_announce.resolve(ctx)
 
@@ -890,8 +892,6 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     # setup. Restored via clear+update to keep the caller's `data` ref valid.
     pre_loop_state = dict(data)
 
-    max_attempts = retry_attempts(ctx)
-    phase1_flags.extend(bazel_flags.eviction_retries(ctx, rc, "build", max_attempts))
     for attempt in range(max_attempts):
         if attempt > 0:
             # Archive the failed attempt before resetting state.

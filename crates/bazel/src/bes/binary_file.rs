@@ -11,10 +11,10 @@
 //! only itself: a FIFO's full buffer would block bazel inside its own event
 //! writer. A build bazel retries reopens the file with `O_TRUNC` for the next
 //! attempt, which the [`File`] follows on its own (see its module docs). The
-//! retry marker says one is coming, so that the marked attempt's
-//! `last_message` does not end the stream. Bazel can also run out of retries:
-//! that `last_message` then completes the stream once the client exits without
-//! a new attempt's file having appeared.
+//! retry marker says one may be coming, so that the marked attempt's
+//! `last_message` does not end the stream. Bazel can also run out of retries,
+//! or have them off: that `last_message` then completes the stream once the
+//! client exits without a new attempt's file having appeared.
 
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};

@@ -317,12 +317,12 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
 /// absent from the command line we are about to run, so refuse here rather than
 /// after the build.
 ///
-/// That includes the methods that only *talk to* a server rather than build —
-/// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`
-/// — since an unclaimed startup option means the active rc names a different
-/// server than the user asked for, so talking to or stopping that one is worse
-/// than doing nothing; and `version`, which runs the Bazel client though it
-/// reaches no server, so every call that runs Bazel holds to one rule.
+/// That includes the methods that only *talk to* a server rather than build:
+/// `shutdown`, `health_check`, `recover_poisoned_sandbox` and
+/// `cancel_invocation`. An unclaimed startup option means the active rc names
+/// a different server than the user asked for, so talking to or stopping that
+/// one is worse than doing nothing. `version` reaches no server but is held to
+/// the same rule, as is every call that runs Bazel.
 ///
 /// A frozen `Bazel` (config-time) carries no task and so nothing to check.
 fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
@@ -1627,6 +1627,33 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gated flag follows the version the rc was resolved against, which a
+    /// caller may have named, without asking the running Bazel.
+    #[test]
+    fn a_gated_flag_follows_the_rcs_version() {
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let gated = Either::Right((heap.alloc_str("--new"), heap.alloc_str(">=8.0.0")));
+            let plain = Either::Left(heap.alloc_str("--plain"));
+            let items = [plain, gated];
+            let signals = cancellation::Signals::new();
+            let at = |v: &str| semver::Version::parse(v).unwrap();
+            assert_eq!(
+                resolve_gated_flags(&signals, &items, Some(&at("8.1.0"))).unwrap(),
+                ["--plain", "--new"]
+            );
+            assert_eq!(
+                resolve_gated_flags(&signals, &items, Some(&at("7.6.0"))).unwrap(),
+                ["--plain"]
+            );
+            assert_eq!(
+                resolve_gated_flags(&signals, &[plain], None).unwrap(),
+                ["--plain"],
+                "no gated flag, no version asked"
+            );
+        });
+    }
 
     #[test]
     fn execution_log_true_is_refused_and_names_the_iterator() {
