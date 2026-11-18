@@ -202,8 +202,8 @@ def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spaw
         ph.update(
             "running",
             phases.ProgressStyles(
-                body = "%s exited with code %s — watching for changes..." % (target, child_status.code),
-                stream = "%s exited with code %s" % (target, child_status.code),
+                body = "%s exited with code %d — watching for changes..." % (target, exit_code_of(child_status)),
+                stream = "%s exited with code %d" % (target, exit_code_of(child_status)),
             ),
             kind = "bazel_results",
         )
@@ -420,7 +420,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
-    code = resolved.runnable.command(args = forward_args, cwd = spawn_cwd).spawn().wait().code
+    code = exit_code_of(resolved.runnable.command(args = forward_args, cwd = spawn_cwd).spawn().wait())
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
 

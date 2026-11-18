@@ -1,5 +1,7 @@
 """Buildkite artifact upload library."""
 
+load("./exit_status.axl", "exit_code_of")
+
 def _upload_artifact(ctx, path, name):
     """Upload a single file to Buildkite using the buildkite-agent CLI.
 
@@ -35,8 +37,8 @@ def _upload_artifact(ctx, path, name):
         if ctx.std.fs.exists(dest):
             ctx.std.fs.remove_file(dest)
 
-    if status.code != 0:
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["exit " + str(status.code)]}
+    if not status.success:
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["exit " + str(exit_code_of(status))]}
 
     # Resolve the stable artifact URL via `artifact search`. Best-effort —
     # any failure (older agent without `%u` support, no matching artifact,
@@ -79,7 +81,7 @@ def _resolve_artifact_url(ctx, name):
         .spawn() \
         .wait_with_output()
     trace.log("artifact search: query=" + name +
-              " exit=" + str(out.status.code) +
+              " exit=" + str(exit_code_of(out.status)) +
               " stdout=" + repr(out.stdout or "") +
               " stderr=" + repr(out.stderr or ""))
 

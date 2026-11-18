@@ -43,6 +43,7 @@ load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
 load("./environment.axl", "detect_ci", "info", "warn")
+load("./exit_status.axl", "exit_code_of")
 load("./github.axl", "github")
 load("./report.axl", "REPORT_ARTIFACT_KIND", "REPORT_ARTIFACT_NAME", "build_report")
 load("./tar.axl", "tar_create", "zip_create")
@@ -378,11 +379,11 @@ def _upload_group_buildkite(ctx, group, entries, name):
     status = child.wait()
     ctx.std.process.command("rm").args(["-rf", tmp_dir]).spawn().wait()
 
-    if status.code == 0:
+    if status.success:
         group["last_count"] = count
         return True
 
-    warn(ctx.std, "Artifact upload failed — buildkite-agent exited with code " + str(status.code) + ".")
+    warn(ctx.std, "Artifact upload failed — buildkite-agent exited with code " + str(exit_code_of(status)) + ".")
     return False
 
 def _upload_group_per_file(ctx, provider, group, entries, name):

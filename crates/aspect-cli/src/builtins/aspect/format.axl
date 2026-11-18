@@ -40,7 +40,7 @@ def _git_capture(ctx, *args):
     result = ctx.std.process.command("git").args(list(args)) \
         .current_dir(ctx.std.env.current_dir()) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
-    return result.stdout, result.status.code, result.stderr
+    return result.stdout, exit_code_of(result.status), result.stderr
 
 def _git_diff_capture(ctx, *args):
     """`_git_capture` for `git diff <args>`, independent of user git config."""
@@ -530,10 +530,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not exit.success:
         # Formatter itself errored — skip the formatting-required check;
         # whatever it wrote stays on disk for inspection.
-        error(ctx.std, "Formatter exited with code %d." % exit.code)
+        code = exit_code_of(exit)
+        error(ctx.std, "Formatter exited with code %d." % code)
         data["format"]["formatter_error"] = True
-        data["format"]["formatter_error_code"] = exit.code
-        return _emit_final(ph, exit.code)
+        data["format"]["formatter_error_code"] = code
+        return _emit_final(ph, code)
 
     # No HEAD (no git repo / no initial commit) → no snapshot, can't diff. The
     # formatter ran; degrade detection with a warning rather than failing.

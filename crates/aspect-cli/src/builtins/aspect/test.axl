@@ -2,7 +2,7 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation", "exit_code_of")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -67,9 +67,9 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
 
     print("Running coverage tool: " + bin + " " + " ".join(final_args))
     status = ctx.std.process.command(bin).args(final_args).spawn().wait()
-    if status.code != 0:
+    if not status.success:
         ctx.std.io.stderr.write(
-            "--coverage-tool: '" + bin + "' exited with code " + str(status.code) +
+            "--coverage-tool: '" + bin + "' exited with code " + str(exit_code_of(status)) +
             " (continuing; tool failure does not fail the test task)\n",
         )
 

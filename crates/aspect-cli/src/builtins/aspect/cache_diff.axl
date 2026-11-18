@@ -468,7 +468,7 @@ def _impl(ctx: TaskContext) -> int:
     if using_exec:
         if not affected:
             return 0
-        return ctx.std.process.command("bash").args(["-c", ctx.args.exec + ' "$@"', "bash"] + affected).spawn().wait().code
+        return exit_code_of(ctx.std.process.command("bash").args(["-c", ctx.args.exec + ' "$@"', "bash"] + affected).spawn().wait())
 
     if fmt == "json":
         _emit_json(ctx, mode, test_targets, affected, causes)

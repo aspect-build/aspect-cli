@@ -8,9 +8,10 @@
 //! only (never to the child, which is in its own process group where needed),
 //! and reads what the task printed on the way out.
 //!
-//! A Bazel client a signal ends (SIGKILLed, or crashed) has no exit code; the
-//! built-in tasks end with the code a shell reports for it, 128 + the signal,
-//! and never retry it. (Ctrl-C itself the client handles: it exits 8.)
+//! A process a signal ends (SIGKILLed, or crashed), a Bazel client or a
+//! tool a task runs, has no exit code; the built-in tasks end with the code
+//! a shell reports for it, 128 + the signal, and never retry a Bazel client
+//! that way. (Ctrl-C itself the Bazel client handles: it exits 8.)
 
 #![cfg(unix)]
 
@@ -525,4 +526,48 @@ def config(ctx: ConfigContext):
         builds, 1,
         "a client a signal ended is never retried:\n{stderr}"
     );
+}
+
+/// A tool a task runs that a signal ends has no exit code either: the
+/// warming archiver SIGKILLing itself ends `aspect ci warming` with 137,
+/// rather than with a traceback from formatting the missing code.
+#[test]
+fn a_tool_a_signal_ends_ends_the_task_with_its_shell_code() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
+    let archiver = root.join("archiver.sh");
+    std::fs::write(&archiver, "#!/bin/sh\nkill -9 $$\n").expect("archiver");
+    std::fs::set_permissions(&archiver, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // The Workflows feature asks the `bazel` on PATH for its version.
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).expect("bin");
+    std::os::unix::fs::symlink(basil_bin(), bin.join("bazel")).expect("bazel on PATH");
+    let mut env = base_env();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        env.get("PATH").cloned().unwrap_or_default()
+    );
+    env.insert("PATH".into(), path);
+    let output = Command::new(aspect_cli())
+        .args(["ci", "warming", "//..."])
+        .current_dir(root)
+        .env_clear()
+        .envs(env)
+        .env("BAZEL_REAL", basil_bin())
+        .env("ASPECT_WORKFLOWS_RUNNER", "1")
+        .env("ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER", &archiver)
+        .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
+        .env("HOME", root.join("home"))
+        .env("DO_NOT_TRACK", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("running aspect ci warming");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
+    assert!(!stderr.contains("Traceback"), "{stderr}");
 }
