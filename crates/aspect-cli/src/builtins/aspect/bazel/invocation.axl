@@ -59,7 +59,8 @@ _Invocation = record(
     patterns = field(list[str]),
     sinks = field(list),
     dropped = field(list[str]),
-    rc_flags = field(list[str]),
+    # A flag, or a `(flag, version constraint)` pair the spawn resolves.
+    rc_flags = field(list[str | (str, str)]),
     results_url = field(str),
     bazel_streams_bes = field(bool),
     announce_version = field(bool),

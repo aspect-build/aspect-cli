@@ -20,7 +20,7 @@ whose hooks the Workflows feature registers when
    offending entries. Wired as `bazel_attempt_end` so a *repaired*
    sandbox gives the next retry a clean state to try again on.
 
-2. **Persistent server-internal failure across all retries**. When
+2. **Server-internal failure on the final attempt**. When
    the FINAL attempt exits with `BLAZE_INTERNAL_ERROR (37)` or
    `LOCAL_ENVIRONMENTAL_ERROR (36)`, the Bazel server is persistently
    sick (could be #23880 the disk-scan missed, JVM OOM, native crash,
@@ -154,9 +154,9 @@ def _new(environment, retry_predicate = default_retry):
         Classification is `server_error`, not `retry_predicate`: a task
         that declines to retry 37 has not thereby made its runner healthy,
         and a remote cache that evicted outputs says nothing of the runner.
-        A non-retryable code (success, build failure, test failure, user
-        error, …) means the server produced a verdict, so the runner is
-        fine. Fires per *build*, so a multi-build task (delivery) may call
+        Any other code (success, build failure, test failure, user error,
+        an eviction, …) means the server produced a verdict, so the runner
+        is fine. Fires per *build*, so a multi-build task (delivery) may call
         this more than once; `_defer_signal` is idempotent.
         """
         if not server_error(exit_code):

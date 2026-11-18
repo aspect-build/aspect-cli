@@ -159,14 +159,26 @@ fn resolve_rc_version(
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(
-            bazel::server::Server::new(&runner::SignalRunner(signals), &[])
-                .info()
-                .ok()
-                .and_then(|t| t.1),
-        );
+        return Ok(probe_version(signals, &rc.probe_startup_flags())
+            .ok()
+            .flatten());
     }
     Ok(None)
+}
+
+/// The version of the Bazel server `startup` reaches, asked with `bazel info`.
+/// `startup` must be the invocation's own, or the question starts (or, with
+/// other server options, restarts) a server the invocation does not use.
+fn probe_version(
+    signals: &Arc<cancellation::Signals>,
+    startup: &[String],
+) -> anyhow::Result<Option<semver::Version>> {
+    Ok(
+        bazel::server::Server::new(&runner::SignalRunner(signals), startup)
+            .info()
+            .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
+            .1,
+    )
 }
 
 fn resolve_flags<'v>(
@@ -189,25 +201,22 @@ fn resolve_flags<'v>(
 
 /// Resolve a mixed flag list against the running Bazel version.
 ///
-/// Like [`resolve_flags`], but sources the version itself: a `bazel info`
-/// probe is run only when at least one conditional `(flag, constraint)` tuple
-/// is present, so unconditional flag lists never pay for the probe. A
+/// Like [`resolve_flags`], but sources the version itself: `known`, the
+/// version an rc was resolved against, else a `bazel info` probe under
+/// `startup`, run only when at least one conditional `(flag, constraint)`
+/// tuple is present, so unconditional flag lists never pay for it. A
 /// non-release Bazel reports no version, in which case the constraints resolve
 /// against an assumed-latest version (see [`constraint_matches`]).
-///
-/// Shared by every Bazel subcommand that accepts version-gated flags
-/// (`build` / `test` / `query`) so they filter conditional flags identically.
 fn resolve_flags_for_running_bazel<'v>(
     signals: &Arc<cancellation::Signals>,
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    startup: &[String],
+    known: Option<&semver::Version>,
 ) -> anyhow::Result<Vec<String>> {
-    let version = if items.iter().any(|f| f.is_right()) {
-        bazel::server::Server::new(&runner::SignalRunner(signals), &[])
-            .info()
-            .map_err(|e| anyhow::Error::new(e).context("failed to get Bazel server info"))?
-            .1
-    } else {
-        None
+    let version = match known {
+        _ if !items.iter().any(|f| f.is_right()) => None,
+        Some(version) => Some(version.clone()),
+        None => probe_version(signals, startup)?,
     };
     resolve_flags(items, version.as_ref())
 }
@@ -371,6 +380,11 @@ fn effective_rc<'v>(
 /// is in effect, expand it and append the per-call `flags=` as extras (auto
 /// `--ignore_all_rc_files`); otherwise fall back to raw `flags=` + the legacy
 /// `ctx.bazel.startup_flags` (Bazel reads its own rc).
+///
+/// Version-gated `flags=` are resolved against the rc's version, else the
+/// version of the server the invocation's own startup flags reach. Shared by
+/// every Bazel subcommand that takes them (`build` / `test` / `query`), so they
+/// filter conditional flags identically.
 fn resolve_invocation_flags<'v>(
     signals: &Arc<cancellation::Signals>,
     this: values::Value<'v>,
@@ -378,14 +392,23 @@ fn resolve_invocation_flags<'v>(
     rc_param: NoneOr<values::Value<'v>>,
     flags: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let extras = resolve_flags_for_running_bazel(signals, flags)?;
     match effective_rc(this, rc_param) {
         Some(rc) => {
+            let extras = resolve_flags_for_running_bazel(
+                signals,
+                flags,
+                &rc.probe_startup_flags(),
+                rc.version(),
+            )?;
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
             cmd.extend(extras);
             Ok((cmd, startup))
         }
-        None => Ok((extras, read_startup_flags(this)?)),
+        None => {
+            let startup = read_startup_flags(this)?;
+            let extras = resolve_flags_for_running_bazel(signals, flags, &startup, None)?;
+            Ok((extras, startup))
+        }
     }
 }
 
@@ -838,15 +861,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<query::Query> {
         require_claimed_flags(this)?;
-        let extras = resolve_flags_for_running_bazel(&Env::from_eval(eval)?.signals, &flags.items)?;
-        let (startup, command_flags) = match effective_rc(this, rc) {
-            Some(rc) => {
-                let (startup, mut base) = rc.resolve_for_command("query")?;
-                base.extend(extras);
-                (startup, base)
-            }
-            None => (read_startup_flags(this)?, extras),
-        };
+        let (command_flags, startup) = resolve_invocation_flags(
+            &Env::from_eval(eval)?.signals,
+            this,
+            "query",
+            rc,
+            &flags.items,
+        )?;
         query::run(
             &Env::from_eval(eval)?.signals,
             &expr,

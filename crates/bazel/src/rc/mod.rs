@@ -280,6 +280,29 @@ impl Bazelrc {
         &self.startup_flags
     }
 
+    /// The Bazel version version-gated options are evaluated against, `None`
+    /// when it was not resolved (they then hold as for the latest).
+    pub fn version(&self) -> Option<&semver::Version> {
+        self.version.as_ref()
+    }
+
+    /// The startup flags to ask the running Bazel its version with, before
+    /// that version is known: the caller's, the rc files' `startup` entries no
+    /// version gates, and `--ignore_all_rc_files`. The same server
+    /// [`invocation_startup_flags`](Self::invocation_startup_flags) reaches,
+    /// so the question starts or restarts no other one.
+    pub fn probe_startup_flags(&self) -> Vec<String> {
+        let mut startup = self.startup_flags.clone();
+        startup.extend(
+            self.raw_options("startup")
+                .iter()
+                .filter(|o| o.version_condition.is_none())
+                .map(|o| o.value.clone()),
+        );
+        startup.push("--ignore_all_rc_files".to_string());
+        startup
+    }
+
     /// Whether any option (in any section) is version-gated — lets a caller
     /// skip probing the Bazel version when no gate would consult it.
     pub fn has_version_gated_options(&self) -> bool {
@@ -2275,6 +2298,36 @@ mod runcommand_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// A probe asks the server the invocation will run on: the caller's startup
+    /// flags and the rc's ungated ones, never a gated one before the version
+    /// that gates it is known, and no rc files.
+    #[test]
+    fn a_probe_uses_the_ungated_startup_flags() {
+        let mut rc = Bazelrc::blank(&[]).with_startup_flags(vec!["--output_base=/ob".to_string()]);
+        rc.options
+            .entry("startup".to_string())
+            .or_default()
+            .extend([
+                RcOption {
+                    value: "--host_jvm_args=-Xmx1g".to_string(),
+                    ..RcOption::default()
+                },
+                RcOption {
+                    value: "--gated".to_string(),
+                    version_condition: Some(">=99.0.0".to_string()),
+                    ..RcOption::default()
+                },
+            ]);
+        assert_eq!(
+            rc.probe_startup_flags(),
+            [
+                "--output_base=/ob",
+                "--host_jvm_args=-Xmx1g",
+                "--ignore_all_rc_files"
+            ]
+        );
+    }
 
     #[test]
     fn a_requested_path_expands_home_first() {

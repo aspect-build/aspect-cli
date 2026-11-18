@@ -48,8 +48,14 @@ fn build(root: &Path, args: &[&str]) -> (Output, Vec<String>) {
 /// Runs `aspect <verb> //... <args>` in `root`, returning its output and the
 /// command lines of the Bazel `<verb>` invocations it ran.
 fn run(root: &Path, verb: &str, args: &[&str]) -> (Output, Vec<String>) {
-    let output = Command::new(aspect_cli())
-        .args([verb, "//..."])
+    let mut argv = vec![verb, "//..."];
+    argv.extend(args);
+    (aspect(root, &argv, &[]), invocations(root, verb))
+}
+
+/// Runs `aspect <args>` in `root` against basil, with `env` on top.
+fn aspect(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    Command::new(aspect_cli())
         .args(args)
         .current_dir(root)
         .env_clear()
@@ -61,10 +67,10 @@ fn run(root: &Path, verb: &str, args: &[&str]) -> (Output, Vec<String>) {
         .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
         .env("HOME", root.join("home"))
         .env("DO_NOT_TRACK", "1")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .output()
-        .expect("running aspect build");
-    (output, invocations(root, verb))
+        .expect("running aspect")
 }
 
 /// The command lines of the Bazel `<verb>` invocations basil logged in `root`.
@@ -120,8 +126,8 @@ fn an_eviction_is_retried_as_an_invocation_of_its_own() {
         2,
         "a history folder per attempt"
     );
-    // Deciding on the flag reads the version the task's rc was resolved
-    // against; it asks no Bazel of its own, without the task's startup flags.
+    // The version that gates the flag is asked of the server the build runs
+    // on, under the task's own startup flags, never by a bare `bazel info`.
     for info in invocations(dir.path(), "info") {
         assert!(
             info.contains("--ignore_all_rc_files"),
@@ -187,4 +193,55 @@ fn an_rc_setting_is_kept() {
     for line in &builds {
         assert!(!line.contains(&off), "the rc's setting stands: {line}");
     }
+}
+
+/// Before Bazel 8 its own eviction retries default off, so the CLI adds no
+/// flag, and still retries the eviction.
+#[test]
+fn before_bazel_8_no_flag_is_added() {
+    let dir = workspace("");
+    let output = aspect(
+        dir.path(),
+        &["build", "//..."],
+        &[("BASIL_RELEASE", "7.6.0")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let builds = invocations(dir.path(), "build");
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(builds.len(), 2, "still retried:\n{stderr}");
+    assert!(
+        builds.iter().all(|l| !l.contains(EVICTION_RETRIES)),
+        "{builds:?}"
+    );
+}
+
+/// Delivery's first phase retries an eviction with Bazel's retries off; its
+/// change-detection build, which has no retry loop, keeps them. The task
+/// fails after that phase for want of a gRPC log, which is not this case's.
+#[test]
+fn deliverys_first_phase_retries_an_eviction() {
+    let dir = workspace("build --remote_cache=grpc://127.0.0.1:1\n");
+    aspect(
+        dir.path(),
+        &[
+            "delivery",
+            "--mode=always",
+            "--dry-run",
+            "--track-state=false",
+            "--commit-sha=0000000000000000000000000000000000000000",
+            "//...",
+        ],
+        &[],
+    );
+    let builds = invocations(dir.path(), "build");
+    assert!(
+        builds.len() >= 3,
+        "phase 1, its retry and phase 2: {builds:?}"
+    );
+    let off = format!("{EVICTION_RETRIES}=0");
+    assert!(
+        builds[0].contains(&off) && builds[1].contains(&off),
+        "{builds:?}"
+    );
+    assert!(!builds[2].contains(EVICTION_RETRIES), "{}", builds[2]);
 }
