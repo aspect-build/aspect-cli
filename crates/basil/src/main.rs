@@ -33,6 +33,8 @@
 //!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
 //!     [`await_pump_handshake`].
 //!
+//!     More than one execution log format fails the build, as in Bazel.
+//!
 //!     When `--profile <path>` is present, any build writes a stand-in
 //!     profile there before the client exits, as Bazel finishes its own.
 //!
@@ -163,10 +165,32 @@ fn run_info(args: &[String]) {
     }
 }
 
+/// Exit as Bazel does when more than one execution log format is asked for:
+/// a value names one unless it is empty or, from Bazel 10, `false`.
+fn refuse_more_than_one_log_format(args: &[String], verb: &str) {
+    let formats = [
+        "--execution_log_compact_file",
+        "--execution_log_binary_file",
+        "--execution_log_json_file",
+    ];
+    let asked = formats
+        .iter()
+        .filter(|name| {
+            bazel::rc::last_flag_value(args, name, verb)
+                .is_some_and(|v| !v.is_empty() && v != "false")
+        })
+        .count();
+    if asked > 1 {
+        eprintln!("basil: Must specify at most one of {}", formats.join(", "));
+        process::exit(2);
+    }
+}
+
 fn run_build(args: &[String], verb: &str) {
     let flag = |name: &str| bazel::rc::last_flag_value(args, name, verb);
     let bes_path = flag("--build_event_binary_file");
     let execlog_path = flag("--execution_log_compact_file");
+    refuse_more_than_one_log_format(args, verb);
     // Bazel finishes the profile before its client exits; any build writes one.
     if let Some(path) = flag("--profile") {
         fs::write(&path, BASIL_PROFILE).unwrap_or_else(|e| panic!("basil: writing {path}: {e}"));

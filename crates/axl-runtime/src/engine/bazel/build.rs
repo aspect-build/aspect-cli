@@ -873,7 +873,7 @@ pub struct Build {
     /// The binary and JSON logs the caller asked for, which `wait()` writes
     /// from the compact log once its stream ends, sorted or not.
     #[allocative(skip)]
-    expanded_logs: Option<(Vec<(expanded::Format, PathBuf)>, bool)>,
+    expanded_logs: Option<expanded::Logs>,
 
     /// The profile Bazel writes into the history, and the path the caller
     /// asked for it at, which [`Build::reaped`] copies it to.
@@ -1187,15 +1187,10 @@ impl Build {
             && expanded != expanded::Request::Bazels
             && writes_execution_log(false, true, version.as_ref());
         let (expanded_logs, expanded_off) = match expanded {
-            expanded::Request::Files { files, sorted, off } => (Some((files, sorted)), off),
+            expanded::Request::Files { logs, off } => (Some(logs), off),
             _ => (None, vec![]),
         };
         let asked = asked || expanded_logs.is_some();
-        // An earlier run's file at an asked-for path is not left to be read
-        // as this build's, should this one write no log.
-        for (_, path) in expanded_logs.iter().flat_map(|(files, _)| files) {
-            let _ = std::fs::remove_file(path);
-        }
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.
         let (log_on, execlog_telemetry) = telemetry
@@ -1366,6 +1361,10 @@ impl Build {
         cmd.stdout(stdout);
         cmd.stderr(stderr);
         cmd.stdin(Stdio::null());
+
+        if let Some(logs) = &expanded_logs {
+            logs.remove_stale();
+        }
 
         // Bound to `cancellation` (the root unless the task said otherwise):
         // cancelling it sends the client one SIGINT.
@@ -1757,13 +1756,12 @@ impl Build {
             let compact = execlog_stream.path().to_path_buf();
             let path = compact.display().to_string();
             let outcome = execlog_stream.join();
-            if let (
-                Some((files, sorted)),
-                Ok(ReaderOutcome::Read | ReaderOutcome::Undecodable(_)),
-            ) = (&build.expanded_logs, &outcome)
+            // A log that stopped decoding is warned about once, below.
+            if let Some(logs) = &build.expanded_logs
+                && compact.exists()
             {
-                for (format, to) in files {
-                    if let Err(err) = expanded::convert(&compact, to, *format, *sorted) {
+                for (to, err) in logs.write_from(&compact) {
+                    if !matches!(outcome, Ok(ReaderOutcome::Undecodable(_))) {
                         errln!(
                             "WARNING: the execution log '{}' could not be written in full \
                              from '{path}' ({err}). The build's result is unaffected.",

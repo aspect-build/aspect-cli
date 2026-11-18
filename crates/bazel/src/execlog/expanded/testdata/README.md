@@ -3,13 +3,13 @@
 `v<version>/` holds the three execution logs Bazel wrote for one build of
 `workspace/`: a genrule chain, a tree artifact, and a tool with runfiles. The
 tests convert `compact.zstd` and compare the result with `binary.binpb` and
-`log.json`, leaving out the timings, which change from run to run. A strict action environment keeps the
-machine's `PATH` out of them. Bazel 7's
-and 8's logs are written with `--legacy_external_runfiles` and
-`--experimental_sibling_repository_layout`, which later versions dropped.
+`log.json`, leaving out the timings, which change from run to run. A strict
+action environment keeps the machine's `PATH` out of them.
 
 The workspace's files end in `.in` so this repository's Bazel doesn't load them
-as a package. To regenerate a version's logs, with `$FLAGS` set as above:
+as a package. To regenerate a version's logs, set `VERSION`, and `FLAGS` to
+`--legacy_external_runfiles --experimental_sibling_repository_layout` for
+Bazel 7 and 8 (later versions dropped both), then run:
 
 ```sh
 ws=$(mktemp -d)

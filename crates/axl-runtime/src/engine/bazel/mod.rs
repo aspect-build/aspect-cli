@@ -562,7 +562,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   `[execution_log.record()]` only records it in the task invocation's
     ///   history, which is skipped where recording cannot be done (see `record`).
     ///   A binary or JSON log `flags` name is written by `wait()` from the
-    ///   compact one (see `record`), so a build never waited on leaves none.
+    ///   compact one (see `record`), so a build whose `wait()` does not get
+    ///   that far leaves none.
     ///
     /// **Examples**
     ///
@@ -720,7 +721,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   `[execution_log.record()]` only records it in the task invocation's
     ///   history, which is skipped where recording cannot be done (see `record`).
     ///   A binary or JSON log `flags` name is written by `wait()` from the
-    ///   compact one (see `record`), so a build never waited on leaves none.
+    ///   compact one (see `record`), so a build whose `wait()` does not get
+    ///   that far leaves none.
     ///
     /// **Examples**
     ///

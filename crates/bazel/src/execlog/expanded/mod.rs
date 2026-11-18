@@ -2,10 +2,9 @@
 //! binary `--execution_log_binary_file` (length-delimited `SpawnExec`s) and
 //! the JSON `--execution_log_json_file`, as Bazel writes them itself.
 //!
-//! Bazel writes one execution log format per build. When the CLI keeps the
-//! compact log, a binary or JSON log the caller asked for is written here
-//! instead (see [`request`]), from that compact log once Bazel has finished
-//! it: each spawn is [`reconstruct`]ed, put in Bazel's [`sort`] order when the
+//! Bazel writes one execution log format per build, so the CLI has it write
+//! the compact log and writes a binary or JSON log the caller asked for (see
+//! [`request`]) here, from that compact log once Bazel has finished it: each spawn is [`reconstruct`]ed, put in Bazel's [`sort`] order when the
 //! caller's `--execution_log_sort` says so, and written in the format asked
 //! for. Only the fields the CLI's protos (Bazel 8.0's) know are written, so a
 //! later Bazel's `measured_memory_peak_bytes` is in neither format.
@@ -49,17 +48,44 @@ impl Format {
 pub enum Request {
     /// Neither.
     None,
-    /// Files the CLI writes from the compact log, each in its format, sorted
-    /// or not. `off` turns Bazel's own formats off, after the caller's flags.
-    Files {
-        files: Vec<(Format, PathBuf)>,
-        sorted: bool,
-        off: Vec<String>,
-    },
+    /// Logs the CLI writes from the compact log. `off` turns Bazel's own
+    /// formats off, after the caller's flags.
+    Files { logs: Logs, off: Vec<String> },
     /// A format left to Bazel, which then writes no compact log: Bazel 10's
     /// default location or remote stream (an empty or `true` value), a Bazel
     /// older than 7.4, or one whose version cannot be told.
     Bazels,
+}
+
+/// The binary and JSON logs a build's caller asked for, each in its format,
+/// sorted or not.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Logs {
+    pub files: Vec<(Format, PathBuf)>,
+    pub sorted: bool,
+}
+
+impl Logs {
+    /// Remove an earlier run's file at each path, so that one is not read
+    /// as this build's should it write no log.
+    pub fn remove_stale(&self) {
+        for (_, path) in &self.files {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Write each log from the compact log at `compact` (see [`convert`]),
+    /// returning the ones that could not be written in full.
+    pub fn write_from(&self, compact: &Path) -> Vec<(&Path, io::Error)> {
+        self.files
+            .iter()
+            .filter_map(|(format, to)| {
+                convert(compact, to, *format, self.sorted)
+                    .err()
+                    .map(|err| (to.as_path(), err))
+            })
+            .collect()
+    }
 }
 
 /// What `flags` ask of the binary and JSON formats for `verb` on `version`.
@@ -114,7 +140,10 @@ pub fn request(
         crate::rc::bool_token(t, SORT_FLAG).and_then(Result::ok)
     })
     .unwrap_or(true);
-    Request::Files { files, sorted, off }
+    Request::Files {
+        logs: Logs { files, sorted },
+        off,
+    }
 }
 
 /// The flag saying whether a binary or JSON log is sorted, which it is by
@@ -303,8 +332,10 @@ mod tests {
 
     fn files(files: &[(Format, &str)], sorted: bool, off: &[&str]) -> Request {
         Request::Files {
-            files: files.iter().map(|(f, p)| (*f, PathBuf::from(p))).collect(),
-            sorted,
+            logs: Logs {
+                files: files.iter().map(|(f, p)| (*f, PathBuf::from(p))).collect(),
+                sorted,
+            },
             off: off.iter().map(|s| s.to_string()).collect(),
         }
     }
