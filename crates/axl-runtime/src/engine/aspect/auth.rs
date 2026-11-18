@@ -1335,9 +1335,9 @@ fn upsert_deployment(
 /// Matched by name alone. A web UI advertising a `resource_name` the entry was
 /// not recorded under (one recorded before the deployment advertised it, or
 /// under `--name`) is recorded as a second deployment; `configure --name
-/// <recorded name>` refreshes the recorded one instead. Nothing else safely
-/// ties the two: a login can be shared across deployments, and the recorded
-/// hosts never include the web UI's.
+/// <recorded name>` refreshes the recorded one instead. A cross-name match (the
+/// same login, plus a recorded viewer URL or host on the web UI's host) is not
+/// attempted: a login alone can be shared across deployments.
 ///
 /// A kept BES keeps the `results_url` recorded with it, since the refreshed one
 /// may be a bare web UI origin that is no viewer prefix for that BES. When none
