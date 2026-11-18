@@ -8,6 +8,7 @@ pub mod banner;
 pub mod builtins;
 pub mod ci;
 pub mod color;
+pub mod console;
 pub mod diag;
 pub mod docs;
 pub mod engine;

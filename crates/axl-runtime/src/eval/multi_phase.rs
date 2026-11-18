@@ -1,6 +1,7 @@
 use crate::errln;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use starlark::environment::{FrozenModule, Module};
@@ -10,11 +11,13 @@ use uuid::Uuid;
 
 use crate::banner;
 use crate::ci::on_recognized_ci;
+use crate::console::{Console, Slot, TaskIdentity};
 use crate::diag;
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::{Bazel, ClaimCheck};
 use crate::engine::cancellation::Signals;
 use crate::engine::config_context::ConfigContext;
+use crate::engine::console as console_value;
 use crate::engine::feature::{Feature, FeatureLike, FrozenFeature};
 use crate::engine::feature_context::FeatureContext;
 use crate::engine::feature_map::FeatureMap;
@@ -89,6 +92,9 @@ fn task_command_path(group: &[String], kind: &str) -> String {
         format!("{} {}", group.join(" "), kind)
     }
 }
+
+/// CLI prefix of the builtin feature whose args select the terminal surface.
+const CONSOLE_FEATURE: &str = "console";
 
 /// Pure core of [`task_label`], env-injected for testing.
 ///
@@ -703,9 +709,44 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         Ok(())
     }
 
-    /// Print the universal "task starting" announcement — the `→ 🎬 Running …`
-    /// line, or `--- :aspect: Running …` BK section header — for the task at
-    /// `task_index` in `self.tasks()`.
+    /// Resolve the terminal surface for the task at `task_index` from the
+    /// builtin `Console` feature's merged args (`args_builder` applies the CLI
+    /// and `config.axl` precedence, as for `execute_features_with_args`).
+    ///
+    /// Runs after `execute_configs` and before the header, so a config's
+    /// templates frame the whole run. Without the feature the run gets the
+    /// `full` layout; see [`console_value::from_feature_args`] for the rest.
+    pub fn resolve_console(
+        &self,
+        task_index: usize,
+        task_name: &str,
+        args_builder: impl Fn(&dyn FeatureLike<'v>, Heap<'v>) -> Arguments<'v>,
+    ) -> Result<Arc<Console>, EvalError> {
+        let task = *self.tasks().get(task_index).ok_or_else(|| {
+            EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
+        })?;
+        let identity = TaskIdentity {
+            kind: task.kind(),
+            group: task.group().clone(),
+            name: task_name.to_owned(),
+            path: task_command_path(task.group(), &task.kind()),
+        };
+        let console = match self
+            .features()
+            .into_iter()
+            .find(|f| f.name() == CONSOLE_FEATURE)
+        {
+            None => Console::builtin(identity),
+            Some(feature) => {
+                console_value::from_feature_args(&args_builder(feature, self.heap()), identity)
+                    .map_err(|e| EvalError::UnknownError(anyhow!(e)))?
+            }
+        };
+        Ok(Arc::new(console))
+    }
+
+    /// Print the banner and the task's opening `header` slot through
+    /// `console`, for the task at `task_index` in `self.tasks()`.
     ///
     /// Called from the CLI before `execute_features_with_args` so that any
     /// diagnostic output emitted during feature initialization (auth WARNINGs,
@@ -714,6 +755,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// look like it preceded any task running.
     pub fn print_running_task_header(
         &self,
+        console: &Console,
         task_index: usize,
         task_name: &str,
         task_name_meaningful: bool,
@@ -725,17 +767,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
-            errln!("{}\n", banner::line_from_pkg());
+            console.emit(Slot::Banner, banner::console_context());
         }
-        if std::env::var_os("BUILDKITE").is_some() {
-            // The BK section header replaces the `→` line on BK (avoids
-            // duplicating the same text in the BK log viewer).
-            errln!("--- :aspect: {}Running{} {}", verb_seq, reset, label);
-        } else {
-            // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌ as
-            // the task's bookend.
-            errln!("→ 🎬 {}Running{} {}", verb_seq, reset, label);
-        }
+        console.emit(
+            Slot::Header,
+            minijinja::context! { label => label, highlight_style => verb_seq, highlight_reset => reset },
+        );
         Ok(())
     }
 
@@ -803,11 +840,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// The index refers to the position in `self.tasks()` (same Vec returned to
     /// the CLI when building the command tree). `args_builder` returns the
     /// fully-merged `Arguments` (callers handle CLI/override/default precedence).
+    /// `console` is the surface from [`Self::resolve_console`]; it backs
+    /// `ctx.console` and renders the bookend.
     ///
     /// Runs, in order: the pre-task hooks, `_impl`, the post-task hooks with
     /// the resolved conclusion, the `ctx.defer` callbacks, and the closing
-    /// bookend (see [`TaskHooks`]). Returns the task's exit code: what `_impl`
-    /// returned, or the code of a [`TaskExit`] it or a pre-task hook raised,
+    /// bookend, the console's `verdict` slot (see [`TaskHooks`]). Returns the
+    /// task's exit code: what `_impl` returned, or the code of a [`TaskExit`]
+    /// it or a pre-task hook raised,
     /// which is reported without a traceback. Any other error propagates once
     /// the hooks and defers have run, with no bookend.
     #[tracing::instrument(
@@ -829,6 +869,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         task_friendly_name: Option<String>,
         task_id: Option<String>,
         timing: TimingMode,
+        console: Arc<Console>,
         args_builder: impl FnOnce(&dyn TaskLike<'v>, Heap<'v>) -> Arguments<'v>,
     ) -> Result<Option<u8>, EvalError> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
@@ -873,14 +914,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_id,
         );
 
-        // The opening `→ 🎬 Running …` (or BK `--- :aspect: Running …`)
-        // header is printed by `print_running_task_header` BEFORE phase
-        // 3 (feature impls) so that any diagnostic output emitted during
-        // feature initialization is framed by the header. Only the
-        // closing announcement is built here; phase boundaries inside
-        // the task body are still announced from AXL via
-        // `lib/lifecycle.axl::announce`. Color setup mirrors the helper
-        // so the verdict glyph and labels match.
+        // The header printed before the features ran; only the verdict is
+        // rendered here, in colors matching the header's.
         let color = std::io::stderr().is_terminal() || on_recognized_ci();
         let sgr = |params: &str| {
             if color {
@@ -928,6 +963,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             bazel,
             self.hooks_value,
             self.loader.env.signals.clone(),
+            console.clone(),
         ));
 
         let mut eval = Evaluator::new(&self.env.0);
@@ -995,23 +1031,31 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
 
         let failed = matches!(exit_code, Some(code) if code != 0);
-        let breakdown = render_phase_breakdown(&phases, timing, failed);
-        let timing_segment = render_timing_segment(timing, elapsed);
-        let conclusion_suffix = if conclusion.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", conclusion)
-        };
         let exit_suffix = match exit_code {
             Some(code) if code != 0 => format!(" (exit code {})", code),
             _ => String::new(),
         };
-        let on_bk = std::env::var_os("BUILDKITE")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
         let label = task_label(&task_group, &task_kind, &task_name, task_name_meaningful);
         let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
-        if on_bk {
+        let context = minijinja::context! {
+            verdict => verdict.name,
+            glyph => verdict.glyph,
+            shortcode => verdict.bk_shortcode,
+            verb => verdict.verb,
+            highlight_style => verdict.color,
+            highlight_reset => reset,
+            label => label,
+            exit_code => exit_code.unwrap_or(0),
+            exit => exit_suffix,
+            elapsed => format_duration(elapsed),
+            elapsed_ms => elapsed.as_millis() as u64,
+            timing => render_timing_segment(timing, elapsed),
+            conclusion => conclusion,
+            breakdown => render_phase_breakdown(&phases, timing, failed, true),
+            plain_breakdown => render_phase_breakdown(&phases, timing, failed, false),
+            phases => phases.iter().map(phase_context).collect::<Vec<_>>(),
+        };
+        if console.buildkite() && (failed || flagged) {
             // On a non-clean verdict, retroactively expand the section that is
             // still open — the last phase the task emitted, i.e. the one that
             // failed or got flagged. BK's `^^^ +++` expands the currently-open
@@ -1025,40 +1069,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             // "auto-expand the last collapsed `---` group when nothing is
             // explicitly expanded" rule — so the timing-summary bookend below
             // would collapse. Open it with `+++` on this path so both the
-            // failing phase and the summary stay expanded. On a clean run we
-            // keep `---` and let the auto-expand handle the summary.
-            let unclean = failed || flagged;
-            if unclean {
-                errln!("^^^ +++");
-            }
-            let bookend_marker = if unclean { "+++" } else { "---" };
-            errln!(
-                "{} {} {}{}{} · {}{}{}{}{}",
-                bookend_marker,
-                verdict.bk_shortcode,
-                verdict.color,
-                verdict.verb,
-                reset,
-                label,
-                exit_suffix,
-                timing_segment,
-                conclusion_suffix,
-                breakdown,
-            );
+            // failing phase and the summary stay expanded. On a clean run
+            // `emit` keeps `---` and BK's auto-expand handles the summary.
+            errln!("^^^ +++");
+            console.emit_section("+++", Slot::Verdict, context);
         } else {
-            errln!();
-            errln!(
-                "→ {} {}{}{} {}{}{}{}{}",
-                verdict.glyph,
-                verdict.color,
-                verdict.verb,
-                reset,
-                label,
-                exit_suffix,
-                timing_segment,
-                conclusion_suffix,
-                breakdown,
-            );
+            console.emit(Slot::Verdict, context);
         }
 
         Ok(exit_code)
@@ -1133,6 +1149,8 @@ fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
 /// expanded failing phase, else `---` (collapsed, auto-expanded by BK as
 /// the last group).
 struct Verdict<'a> {
+    /// `passed` | `flagged` | `failed`, the `verdict` key of the template context.
+    name: &'a str,
     /// BK emoji shortcode (e.g. `:white_check_mark:`); used in the
     /// `--- :<shortcode>: <verb> …` BK section header.
     bk_shortcode: &'a str,
@@ -1158,24 +1176,49 @@ impl<'a> Verdict<'a> {
     ) -> Self {
         match (exit_code, flagged) {
             (Some(0) | None, false) => Self {
+                name: "passed",
                 bk_shortcode: ":white_check_mark:",
                 glyph: "✅",
                 verb: "Passed",
                 color: bold_green,
             },
             (Some(0) | None, true) => Self {
+                name: "flagged",
                 bk_shortcode: ":warning:",
                 glyph: "⚠️ ",
                 verb: "Flagged",
                 color: bold_yellow,
             },
             (Some(_), _) => Self {
+                name: "failed",
                 bk_shortcode: ":x:",
                 glyph: "❌",
                 verb: "Failed",
                 color: bold_red,
             },
         }
+    }
+}
+
+/// A phase's display label: its `display_name`, else its title-cased name.
+fn phase_title(p: &PhaseRecord) -> String {
+    if p.display_name.is_empty() {
+        titlecase(&p.name)
+    } else {
+        p.display_name.clone()
+    }
+}
+
+/// One entry of the `verdict` slot's `phases` list.
+fn phase_context(p: &PhaseRecord) -> minijinja::Value {
+    minijinja::context! {
+        name => p.name,
+        title => phase_title(p),
+        emoji => p.emoji,
+        description => p.description,
+        duration => format_duration(p.duration),
+        duration_ms => p.duration.as_millis() as u64,
+        interrupted => p.interrupted,
     }
 }
 
@@ -1283,7 +1326,15 @@ fn render_timing_segment(mode: TimingMode, elapsed: std::time::Duration) -> Stri
 /// it's the phase that was active when the task hit a non-zero exit.
 /// On success or a non-failed exit, `interrupted` is treated as a
 /// normal completed entry.
-fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool) -> String {
+///
+/// `emoji` prefixes each phase with its `Phase(emoji=...)`; without it the
+/// rows carry the bare titles, still aligned.
+fn render_phase_breakdown(
+    phases: &[PhaseRecord],
+    mode: TimingMode,
+    failed: bool,
+    emoji: bool,
+) -> String {
     if phases.is_empty() || mode == TimingMode::None || mode == TimingMode::Total {
         return String::new();
     }
@@ -1299,16 +1350,11 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
     if visible.is_empty() {
         return String::new();
     }
-    // Prefix the caller-supplied `Phase(emoji=...)` when present; an empty
-    // emoji stays bare. The Detailed branch aligns columns by `display_width`
-    // (which counts the emoji as two cells); Short mode has no columns.
+    // The Detailed branch aligns columns by `display_width` (which counts the
+    // emoji as two cells); Short mode has no columns.
     let phase_label = |p: &PhaseRecord| -> String {
-        let name = if p.display_name.is_empty() {
-            titlecase(&p.name)
-        } else {
-            p.display_name.clone()
-        };
-        if p.emoji.is_empty() {
+        let name = phase_title(p);
+        if !emoji || p.emoji.is_empty() {
             name
         } else {
             format!("{} {}", p.emoji, name)
@@ -1638,17 +1684,32 @@ fails = task(implementation = _fails, args = {"rest": args.passthrough(position 
     #[test]
     fn phase_breakdown_empty_for_none_and_total() {
         let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
-        assert_eq!(render_phase_breakdown(&phases, TimingMode::None, false), "");
         assert_eq!(
-            render_phase_breakdown(&phases, TimingMode::Total, false),
+            render_phase_breakdown(&phases, TimingMode::None, false, true),
+            ""
+        );
+        assert_eq!(
+            render_phase_breakdown(&phases, TimingMode::Total, false, true),
             ""
         );
     }
 
     #[test]
+    fn phase_breakdown_without_emoji_keeps_bare_titles() {
+        let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
+        let short = render_phase_breakdown(&phases, TimingMode::Short, false, false);
+        assert!(short.starts_with(" — Setup "), "{short}");
+        assert!(!short.contains('🔧') && !short.contains('🔨'), "{short}");
+        let detailed = render_phase_breakdown(&phases, TimingMode::Detailed, false, false);
+        let rows: Vec<&str> = detailed.lines().filter(|l| !l.is_empty()).collect();
+        assert!(rows[0].trim_start().starts_with("Setup "), "{detailed}");
+        assert!(rows[1].trim_start().starts_with("Build "), "{detailed}");
+    }
+
+    #[test]
     fn phase_breakdown_short_is_inline() {
         let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
-        let out = render_phase_breakdown(&phases, TimingMode::Short, false);
+        let out = render_phase_breakdown(&phases, TimingMode::Short, false, true);
         assert!(out.starts_with(" — "), "Short form is inline; got: {out}");
         assert!(
             out.contains(" · "),
@@ -1695,6 +1756,7 @@ fails = task(implementation = _fails, args = {"rest": args.passthrough(position 
             &[phase("setup", "🔧", 2), phase("compute_digests", "", 1)],
             TimingMode::Detailed,
             false,
+            true,
         );
         let desc_cols: Vec<usize> = out
             .lines()

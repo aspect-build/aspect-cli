@@ -1,0 +1,63 @@
+"""Console feature: the lines Aspect prints around a task in the terminal.
+
+The terminal is a status surface like the CI ones and takes the same two args.
+`template_preset` picks a built-in layout and `templates` overrides single
+slots on top of it, flat or inside a per-task-kind block:
+
+    load("@aspect//feature/console.axl", "Console")
+
+    def config(ctx):
+        ctx.features[Console].args.template_preset = "compact"
+        ctx.features[Console].args.templates = {
+            "header": "▶ {{ label }}",
+            "lint": {"verdict": "{{ glyph }} lint {{ verb }}{{ timing }}"},
+        }
+
+Or for one run: `aspect test --console:template-preset=compact //...`.
+
+The runtime does the rendering, so this feature's implementation is empty: the
+runtime reads these args after `config.axl` runs and before the header prints.
+Disabling the feature leaves the `full` layout in place. Bazel's own output,
+warnings and errors, and stdout are never templated.
+"""
+
+def _console_impl(ctx: FeatureContext):
+    pass
+
+Console = feature(
+    display_name = "Console",
+    summary = "Choose and customize the lines Aspect prints around a task.",
+    implementation = _console_impl,
+    args = {
+        "template_preset": args.string(
+            default = "full",
+            values = ["full", "plain", "compact", "silent"],
+            description = "Built-in terminal layout: 'full' (the banner, the header, every phase and " +
+                          "progress line, and the verdict with its phase breakdown; default), " +
+                          "'plain' (the same lines without emojis), 'compact' (the verdict alone, " +
+                          "on one line with no phase breakdown), or 'silent' (nothing; the exit " +
+                          "code and the task's own output carry the result). On Buildkite the " +
+                          "header, phase and verdict lines, and sections a task opens itself, " +
+                          "start log sections, so they print under every preset.",
+        ),
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Jinja2 overrides on top of `template_preset`, keyed by slot: \"banner\" " +
+                          "(`line`, `version`, `debug_build`, `docs_url`), \"header\" (`label`), " +
+                          "\"phase\" and \"progress\" (`text`, `title`, `emoji`), \"verdict\" " +
+                          "(`verdict`, `glyph`, `shortcode`, `verb`, `label`, `exit_code`, `exit`, " +
+                          "`elapsed`, `elapsed_ms`, `timing`, `conclusion`, `breakdown`, " +
+                          "`plain_breakdown`, `phases`; `timing` and both breakdowns follow " +
+                          "--task:timing-summary), and \"section\" (`icon`, `title`), the title of " +
+                          "a Buildkite section a task opens itself, such as the Workflows runner " +
+                          "metadata. Every slot also gets `buildkite` and `task` (`kind`, `group`, " +
+                          "`name`, `path`); all but \"section\" get `highlight_style` and " +
+                          "`highlight_reset`, the ANSI codes around the line's highlight (empty " +
+                          "when color is off). A task-kind key maps to a dict of slots for that " +
+                          "task alone, e.g. {\"lint\": {\"verdict\": ...}}, and is ignored where " +
+                          "no task has that kind. An empty template prints nothing. A template " +
+                          "that fails to render falls back to the preset's template for that slot.",
+        ),
+    },
+)

@@ -15,9 +15,12 @@ during a task) and `repro_fix_suggestion` (per surface emit, so a user's
 `config.axl` can accept/reject/modify each repro/fix suggestion). See
 `ph.suggest_fixes` / `ph.dispatch`.
 
-`ph.update(status, progress, ...)` both prints `→ <progress>` to stderr and
-emits a `TaskUpdate` to every `Phases.task_update` handler — paired to keep
-CI logs and the BK annotation / GHSC "Last update" line in sync.
+`ph.update(status, progress, ...)` both prints the progress to stderr through
+the console's `phase` / `progress` slot (`→ <progress>` in the `full` layout;
+see `feature/console.axl`) and emits a `TaskUpdate` to every
+`Phases.task_update` handler — paired to keep CI logs and the BK annotation /
+GHSC "Last update" line in sync. A layout that prints nothing changes only
+the first half.
 
 `progress` is either a str (same text every surface; stream verbatim,
 body ANSI-stripped) or a `ProgressStyles` (per-style; unset → "").
@@ -26,8 +29,8 @@ Without a `kind`, surfaces skip template dispatch (they filter by kind),
 so the basic call is CLI-only on surfaces; the TaskUpdate still reaches
 every handler so non-template observers see it.
 
-The closing `→ Completed/Failed <Task> task in <duration>` line is
-emitted automatically by the runtime after `implementation` returns.
+The closing verdict line (the console's `verdict` slot) is emitted
+automatically by the runtime after `implementation` returns.
 Status surfaces flip to the verdict via the task's own terminal
 `phases.update(..., "passed"|"failed", ...)`. If the task ends before it
 sends one — an early `exit`, a hard error, a `return` above it — the handle's
@@ -687,11 +690,6 @@ _ENDED_EARLY = {
     "failed": "Failed",
 }
 
-# `Phase.emoji` fallback: a Buildkite shortcode rendering the Aspect
-# brand glyph on BK (literal text elsewhere), so custom phases without an
-# emoji still get a section marker.
-_ASPECT_BK_SHORTCODE = ":aspect:"
-
 def _publish_expanded_phases(ctx, phase_names: list) -> None:
     """Record `phase_names` as the phases whose Buildkite section headers should
     be emitted expanded (`+++`), read later by `_emit_bk_phase_section` during the
@@ -721,11 +719,10 @@ def _bk_phase_section_marker(ctx, phase) -> str:
                 return "+++"
     return "---"
 
-def _emit_bk_phase_section(ctx, phase, progress_styles = None):
-    """Emit a per-phase BK section header `<marker> <emoji> <Phase> · <cli>`
-    (1:1 AXL-phase → BK collapsible section). The `<cli>` mirrors the live
+def _emit_bk_phase_section(ctx, phase, progress_styles):
+    """Emit a per-phase BK section header `<marker> <console phase slot>`
+    (1:1 AXL-phase → BK collapsible section). The slot's `text` mirrors the live
     `→` print (`progress_styles.stream`, falling back to `.body`).
-    `phase.emoji` → `:aspect:`, `phase.display_name` → titlecase(name).
 
     `<marker>` is `+++` (expanded) when `_bk_phase_section_marker` resolves it for
     this phase — either `Phase.expanded` or a `--buildkite-annotations:expand-phase`
@@ -734,17 +731,24 @@ def _emit_bk_phase_section(ctx, phase, progress_styles = None):
     that auto-expansion of a later section (e.g. the closing bookend)."""
     if not ctx.std.env.var("BUILDKITE"):
         return
-    label = phase.display_name or _titlecase_phase(phase.name)
-    style = ansi.highlight_style(ctx.std, color_enabled(ctx.std))
-    if style:
-        label = style + label + ansi.RESET
-    suffix = ""
-    if progress_styles != None:
-        cli = progress_styles.stream or progress_styles.body
-        if cli:
-            suffix = " · " + cli
-    marker = _bk_phase_section_marker(ctx, phase)
-    print(marker + " " + (phase.emoji or _ASPECT_BK_SHORTCODE) + " " + label + suffix)
+    title = ctx.console.render(
+        "phase",
+        text = progress_styles.stream or progress_styles.body,
+        **_phase_line_context(ctx, phase)
+    )
+    print(_bk_phase_section_marker(ctx, phase) + " " + title)
+
+def _phase_line_context(ctx: TaskContext, phase: Phase) -> dict:
+    """The `title`, `emoji`, `highlight_style` and `highlight_reset` keys of a
+    `phase` or `progress` render for `phase`; `highlight_reset` is empty when
+    there is no highlight to close."""
+    highlight = ansi.highlight_style(ctx.std, color_enabled(ctx.std))
+    return {
+        "title": phase.display_name or _titlecase_phase(phase.name),
+        "emoji": phase.emoji,
+        "highlight_style": highlight,
+        "highlight_reset": ansi.RESET if highlight else "",
+    }
 
 def _titlecase_phase(phase):
     """Title-case a phase id (underscores → spaces, first char upper).
@@ -767,8 +771,9 @@ def _resolve_progress_styles(progress):
     return progress
 
 def _update(ctx, surface, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
-    """Emit a TaskUpdate to all `Phases.task_update` handlers and print
-    `→ <progress>` to stderr. When `final = True`, returns a
+    """Emit a TaskUpdate to all `Phases.task_update` handlers and print the
+    progress through the console's `phase` / `progress` slot (`→ <progress>`
+    in the `full` layout) to stderr. When `final = True`, returns a
     `TaskConclusion(exit_code, text=conclusion, flagged=(status=="warning"))`
     that `_impl` returns to drive the runtime's closing bookend (else None).
 
@@ -802,8 +807,8 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
     # Resolve once — every downstream consumer reads this same record.
     progress_styles = _resolve_progress_styles(progress)
 
-    # True after a BK section header is printed, so the `→` print below
-    # skips itself to avoid duplicating the text.
+    # True after a BK section header is printed, so the line below doesn't
+    # repeat its text.
     bk_section_emitted = False
 
     phase_change = False
@@ -824,29 +829,15 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
             bk_section_emitted = bool(ctx.std.env.var("BUILDKITE"))
             phase_change = True
 
+    # Off BK a phase-tagged update is a `phase` line; on BK the section header
+    # already carries it, so only same-phase updates stream, as `progress`.
     cli_text = progress_styles.stream
-    if cli_text:
-        # Phase entries lead with a styled `<emoji> <Title>` + a leading
-        # blank line to break up the `→` stream; mid-phase is plain `→ <text>`.
-        if phase != None:
-            style = ansi.highlight_style(ctx.std, color_enabled(ctx.std))
-            label = phase.display_name or _titlecase_phase(phase.name)
-            if phase.emoji:
-                label = phase.emoji + " " + label
-            if style:
-                cli_text = style + label + ansi.RESET + " · " + cli_text
-            else:
-                cli_text = label + " · " + cli_text
-
-            # On BK the just-printed section marker is the visual break.
-            if not ctx.std.env.var("BUILDKITE"):
-                print("")
-
-        # Skip on BK: the section header already carries this text. Mid-phase
-        # emits still print `→` to keep streaming progress visible.
-        if not bk_section_emitted:
-            # `print()` writes to stderr here — the right channel for labels.
-            print("→ " + cli_text)
+    if cli_text and not bk_section_emitted:
+        phase_context = _phase_line_context(ctx, phase) if phase != None else {}
+        slot = "phase" if phase != None and not ctx.std.env.var("BUILDKITE") else "progress"
+        line = ctx.console.render(slot, text = cli_text, **phase_context)
+        if line:
+            print(line)
 
     update = TaskUpdate(
         kind = kind,

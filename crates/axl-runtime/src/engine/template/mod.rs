@@ -37,7 +37,7 @@ use minijinja::{Environment as MinijinjaEnvironment, value::Value as MinijinjaVa
 /// "tried to use + operator on unsupported types map and map".
 ///
 /// Building the minijinja value directly sidesteps the tagged form.
-fn json_to_minijinja(value: &JsonValue) -> MinijinjaValue {
+pub(super) fn json_to_minijinja(value: &JsonValue) -> MinijinjaValue {
     match value {
         JsonValue::Null => MinijinjaValue::from(()),
         JsonValue::Bool(b) => MinijinjaValue::from(*b),

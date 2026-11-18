@@ -54,6 +54,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.template` — template rendering
 - `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)
 - `ctx.task` — task metadata (kind, friendly_kind, name, friendly_name, group, id)
+- `ctx.console` — the terminal layout the `Console` feature selected (`template_preset`, `render(slot, **context)`)
 
 Task execution is inherently non-deterministic. It interacts with the outside world — building code, fetching URLs, writing files, running processes. The determinism guarantee applies only to evaluation; execution is where real work happens.
 
