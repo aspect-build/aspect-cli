@@ -16,7 +16,7 @@ Usage:
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
@@ -408,11 +408,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for sink in bes_sinks:
         sink.wait()
     summarize_bes_upload(ctx, bes_sinks)
-    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
-    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code_of(build_status))
+    dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(build_status))
 
     if not build_status.success:
-        _emit_final(ph, build_status.code or 1)
+        _emit_final(ph, exit_code_of(build_status))
         fail("Building the formatter has failed.")
 
     err, ep = runs.get(ctx.args.formatter_target).catch(bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable).block()

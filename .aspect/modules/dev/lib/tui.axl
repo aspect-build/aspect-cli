@@ -1,3 +1,4 @@
+load("@aspect//bazel.axl", "exit_code_of")
 load("@std//time.axl", "sleep_iter")
 
 def _fancy_tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.BuildEventIter) -> int:
@@ -35,8 +36,7 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.B
                 ctx.std.io.stderr.flush()
 
             if events.done:
-                exit = build.wait()
-                return exit.code
+                return exit_code_of(build.wait())
 
         elif timer % rate == 0 and in_flight:
             clear()
@@ -55,8 +55,7 @@ def _simple_tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.
             ctx.std.io.stderr.write(event.payload.stderr)
             ctx.std.io.stderr.flush()
 
-    build_status = build.wait()
-    return build_status.code
+    return exit_code_of(build.wait())
 
 def tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.BuildEventIter) -> int:
     stdout = ctx.std.io.stdout

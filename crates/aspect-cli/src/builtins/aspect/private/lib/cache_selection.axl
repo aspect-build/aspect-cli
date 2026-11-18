@@ -1,5 +1,6 @@
 """Resolve cache-diff test scope through Bazel's test loading phase."""
 
+load("@aspect//bazel/trait.axl", "exit_code_of")
 load("./runnable.axl", "normalize_label")
 
 def testonly_selected_tests(events: list, exit_code: int) -> list[str] | None:
@@ -86,9 +87,9 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
                 events = []
                 break
             events.append(event)
-    tests = None if malformed else testonly_selected_tests(events, status.code)
+    tests = None if malformed else testonly_selected_tests(events, exit_code_of(status))
     if tests == None:
-        ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (Bazel {}, exit {}). This requires Bazel 7+ with complete loading-only BEP events; no query fallback is used because it cannot preserve test filters.\n".format(version or "unknown", status.code))
+        ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (Bazel {}, exit {}). This requires Bazel 7+ with complete loading-only BEP events; no query fallback is used because it cannot preserve test filters.\n".format(version or "unknown", exit_code_of(status)))
         if malformed:
             ctx.std.io.stderr.write("ERROR: line {} of Bazel's build event JSON file is not a JSON object; the log is truncated or corrupt.\n".format(malformed))
         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(error_path))

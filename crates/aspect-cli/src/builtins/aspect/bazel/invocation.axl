@@ -38,7 +38,7 @@ load(
 load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
 load("@aspect//bazel/flags.axl", "bazel_flags")
 load("@aspect//bazel/rc.axl", "bazel_rc")
-load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "exit_code_of", "may_retry")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a
@@ -283,7 +283,7 @@ def _do_wait(inv: _Invocation, handle, xl: struct):
     for sink in inv.sinks:
         sink.wait()
     for handler in inv.trait.bazel_attempt_end:
-        handler(inv.ctx, status.code)
+        handler(inv.ctx, exit_code_of(status))
     return status
 
 def _do_on_event(inv: _Invocation, xl: struct, event) -> None:
@@ -308,16 +308,15 @@ def _do_on_event(inv: _Invocation, xl: struct, event) -> None:
 
 def _do_should_retry(inv: _Invocation, sp, w) -> bool:
     """Retry the attempt `sp` produced? Explicit at the callsite, never folded
-    into wait(). The index is read straight off the spawned struct."""
-
-    # 8 is bazel's "interrupted": a cancel, never something a retry fixes.
-    return w.code != 0 and w.code != 8 and inv.trait.build_retry(w.code) and sp.index < inv.max_attempts - 1
+    into wait(). The index is read straight off the spawned struct; the rest
+    is `may_retry`'s."""
+    return may_retry(inv.trait, w) and sp.index < inv.max_attempts - 1
 
 def _do_finish(inv: _Invocation, w) -> None:
     """Conclude: summarize the BES upload, then fire `build_end` with the final
     exit code. Merges the old `summary()` + `end()` and owns the code coercion."""
     summarize_bes_upload(inv.ctx, inv.sinks)
-    code = 0 if w.success else (w.code or 1)
+    code = 0 if w.success else exit_code_of(w)
     for handler in inv.trait.build_end:
         handler(inv.ctx, code)
 

@@ -7,6 +7,10 @@
 //! stderr once its child is running, sends the signal to the CLI process
 //! only (never to the child, which is in its own process group where needed),
 //! and reads what the task printed on the way out.
+//!
+//! A Bazel client a signal ends (SIGKILLed, or crashed) has no exit code; the
+//! built-in tasks end with the code a shell reports for it, 128 + the signal,
+//! and never retry it. (Ctrl-C itself the client handles: it exits 8.)
 
 #![cfg(unix)]
 
@@ -16,7 +20,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use common::aspect_cli;
+use common::{aspect_cli, base_env, basil_bin};
 
 /// A fixture task running in a scratch workspace.
 struct Run {
@@ -467,5 +471,58 @@ watching = task(summary = "Test fixture.", implementation = _impl)
     assert!(
         wait_gone(target_pid, Duration::from_secs(5)),
         "the watched target outlived aspect-cli"
+    );
+}
+
+/// A Bazel client a signal ends has no exit code: `aspect build` ends with
+/// 128 + the signal, its hooks get that code, and it is not retried, however
+/// willing the retry policy, rather than failing on the missing code.
+#[test]
+fn a_bazel_client_a_signal_ends_ends_the_build_with_its_shell_code() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
+    std::fs::create_dir(root.join(".aspect")).expect(".aspect");
+    std::fs::write(
+        root.join(".aspect").join("config.axl"),
+        r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    t = ctx.traits[BazelTrait]
+    t.extra_flags.append("--scenario=signal_killed_sigkill")
+    t.build_retry = lambda code: True
+    t.bazel_attempt_end.append(lambda ctx, code: print("attempt_end=%d" % code))
+    t.build_end.append(lambda ctx, code: print("build_end=%d" % code))
+"#,
+    )
+    .expect("config.axl");
+    let argv = root.join("argv.log");
+    let output = Command::new(aspect_cli())
+        .args(["build", "//..."])
+        .current_dir(root)
+        .env_clear()
+        .envs(base_env())
+        .env("BAZEL_REAL", basil_bin())
+        .env("BASIL_ARGV_LOG", &argv)
+        .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
+        .env("HOME", root.join("home"))
+        .env("DO_NOT_TRACK", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("running aspect build");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
+    assert!(!stderr.contains("Traceback"), "{stderr}");
+    assert_eq!(stderr.matches("attempt_end=137").count(), 1, "{stderr}");
+    assert!(stderr.contains("build_end=137"), "{stderr}");
+    let builds = std::fs::read_to_string(&argv)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_whitespace().any(|a| a == "build"))
+        .count();
+    assert_eq!(
+        builds, 1,
+        "a client a signal ended is never retried:\n{stderr}"
     );
 }

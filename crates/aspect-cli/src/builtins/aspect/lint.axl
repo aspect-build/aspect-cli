@@ -22,7 +22,7 @@ Usage:
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel/invocation.axl", "resolve_targets")
-load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_invocation", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_invocation", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
@@ -968,7 +968,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         sink.wait()
     summarize_bes_upload(ctx, bes_sinks)
 
-    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code_of(build_status))
 
     # Final drain: poll until pending downloads land or timeout. --remote_download_regex
     # transfers are async, so files can still be in flight after build.wait().
@@ -1021,7 +1021,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
 
     # 8. BazelTrait.build_end hooks
-    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(build_status))
 
     # Scope patches to the strategy so we neither rewrite out-of-scope files
     # locally nor publish an artifact of unrelated fixes. soft/hard keep all.

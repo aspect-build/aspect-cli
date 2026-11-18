@@ -148,6 +148,22 @@ fn dup_fd<H: std::os::windows::io::AsHandle>(h: &H) -> io::Result<Stdio> {
 pub struct BuildStatus {
     success: bool,
     code: Option<i32>,
+    signal: Option<i32>,
+}
+
+impl BuildStatus {
+    /// The client's exit: its code, or, when a signal ended it, which.
+    fn of(status: std::process::ExitStatus) -> Self {
+        #[cfg(unix)]
+        let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+        #[cfg(not(unix))]
+        let signal = None;
+        BuildStatus {
+            success: status.success(),
+            code: status.code(),
+            signal,
+        }
+    }
 }
 
 impl<'v> AllocValue<'v> for BuildStatus {
@@ -171,10 +187,20 @@ pub(crate) fn build_status_methods(registry: &mut MethodsBuilder) {
     fn success<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         Ok(this.downcast_ref::<BuildStatus>().unwrap().success)
     }
+    /// The client's exit code; None when a signal ended it (see `signal`).
     #[starlark(attribute)]
     fn code<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<i32>> {
         Ok(NoneOr::from_option(
             this.downcast_ref::<BuildStatus>().unwrap().code,
+        ))
+    }
+
+    /// The signal that ended the client, such as 9 when it was SIGKILLed;
+    /// None when it exited with a code.
+    #[starlark(attribute)]
+    fn signal<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<i32>> {
+        Ok(NoneOr::from_option(
+            this.downcast_ref::<BuildStatus>().unwrap().signal,
         ))
     }
 }
@@ -1413,10 +1439,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             build.wait_child(Some(Duration::from_millis(timeout_ms as u64)))?
         };
         Ok(match status {
-            Some(status) => NoneOr::Other(BuildStatus {
-                success: status.success(),
-                code: status.code(),
-            }),
+            Some(status) => NoneOr::Other(BuildStatus::of(status)),
             None => NoneOr::None,
         })
     }
@@ -1552,10 +1575,7 @@ impl Build {
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));
 
-        Ok(BuildStatus {
-            success: result.success(),
-            code: result.code(),
-        })
+        Ok(BuildStatus::of(result))
     }
 }
 
@@ -3632,6 +3652,30 @@ Test = task(implementation = _impl)
             server_status.success(),
             "fake Bazel server writer failed: {server_status}"
         );
+    }
+
+    /// A client a signal ended has no exit code; its status names the
+    /// signal instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_client_a_signal_ends_reports_the_signal() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    status = ctx.bazel.build(flags = ["--scenario=signal_killed_sigkill"], stderr = None).wait()
+    if status.success or status.code != None: return 1
+    if status.signal != 9: return 2
+    ok = ctx.bazel.build(flags = ["--scenario=success"], stderr = None).wait()
+    if ok.code != 0 or ok.signal != None: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
     }
 
     /// A mistyped flag reaches Bazel, which rejects the command line and
