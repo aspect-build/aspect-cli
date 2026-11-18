@@ -33,6 +33,7 @@ pub(crate) mod builtins;
 pub mod cancellation;
 pub mod children;
 pub mod config_context;
+pub mod console;
 pub mod feature_context;
 pub mod feature_map;
 pub mod history;

@@ -291,6 +291,9 @@ impl EvalBuilder {
                 mpe.execute_features_with_args(|_f, _h| Arguments::new())
                     .map_err(anyhow::Error::from)?;
             }
+            let console = mpe
+                .resolve_console(task_index, "_test", |_f, _h| Arguments::new())
+                .map_err(anyhow::Error::from)?;
             let exit = mpe
                 .execute_tasks_with_args(
                     task_index,
@@ -299,6 +302,7 @@ impl EvalBuilder {
                     None,
                     None,
                     crate::eval::TimingMode::default(),
+                    console,
                     |_t, heap| {
                         let args = Arguments::new();
                         for (name, values) in &self.string_list_args {

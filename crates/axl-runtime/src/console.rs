@@ -1,0 +1,809 @@
+//! The terminal status surface: the lines Aspect itself prints around a task.
+//!
+//! Six slots cover them — `banner`, `header`, `phase`, `progress`, `verdict`
+//! and `section` — each a Jinja2 template rendered with the context documented
+//! on [`Slot`]. The runtime renders `banner`, `header` and `verdict`; AXL
+//! renders the rest through `ctx.console.render(...)` (see
+//! `lib/lifecycle.axl`). Bazel's own output, `warn()` / `error()` diagnostics
+//! and stdout never pass through here.
+//!
+//! The `Console` feature (`feature/console.axl`) selects the templates the same
+//! way the CI status surfaces do: a `template_preset` names a built-in
+//! [`Preset`] and `templates` overrides single slots on top of it, either flat
+//! or inside a per-task-kind block. Layers resolve in order, so a preset never
+//! outranks the config that selected it:
+//!
+//! ```text
+//! preset  <  templates flat  <  templates[<task kind>]
+//! ```
+//!
+//! Two rules keep a template from costing the reader the task's outcome or the
+//! log's structure:
+//!
+//! - An override that fails to render falls back to the selected preset's
+//!   template for that slot, with one warning per slot.
+//! - On Buildkite, `header`, `phase`, `verdict` and `section` open log
+//!   sections. The section marker is printed for them, leading whitespace is
+//!   dropped so it is never untitled, and a blank render is replaced by the
+//!   preset's text (or `full`'s), so collapsing and the failing-phase
+//!   expansion survive every layout.
+//!
+//! Overrides are compiled when the console is resolved, so a syntax error fails
+//! the run before the task starts rather than mid-task.
+
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Mutex;
+
+use minijinja::{Environment, Value as JinjaValue};
+
+/// One line-shaped piece of the terminal surface.
+///
+/// Every slot's context also carries `buildkite` (bool) and `task`
+/// (`kind`, `group`, `name`, `path`). Where a slot has `highlight_style`, it
+/// is the ANSI escape that opens the line's highlight and `highlight_reset`
+/// the one that closes it; both are empty when color is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Slot {
+    /// Identity line above the header, shown only on a TTY or a recognized CI
+    /// host. Context: `line` (the whole built-in line, pre-styled), `version`,
+    /// `debug_build` (bool), `docs_url`, `highlight_style`, `highlight_reset`.
+    Banner,
+    /// Opening line. Context: `label`, `highlight_style`, `highlight_reset`.
+    Header,
+    /// A phase entry (off Buildkite) or a phase's section (on Buildkite).
+    /// Context: `title`, `emoji`, `highlight_style`, `highlight_reset`,
+    /// `text`.
+    Phase,
+    /// A mid-phase update. Context: `text`; `title`, `emoji`,
+    /// `highlight_style`, `highlight_reset` when the update names its phase.
+    Progress,
+    /// Closing line, styled in the verdict's color. Context: `verdict`
+    /// (`passed` | `flagged` | `failed`), `glyph`, `shortcode`, `verb`,
+    /// `highlight_style`, `highlight_reset`, `label`, `exit_code`,
+    /// `exit`, `elapsed`, `elapsed_ms`, `timing`, `conclusion`, `breakdown`,
+    /// `plain_breakdown` (the same without phase emojis),
+    /// and `phases` (every recorded phase, the synthetic `init` included:
+    /// `name`, `title`, `emoji`, `description`, `duration`, `duration_ms`,
+    /// `interrupted`).
+    Verdict,
+    /// A Buildkite log section a task or feature opens itself, such as the
+    /// Workflows runner metadata; only printed on Buildkite. Context: `icon`
+    /// (a Buildkite emoji shortcode, or empty), `title`.
+    Section,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 6] = [
+        Slot::Banner,
+        Slot::Header,
+        Slot::Phase,
+        Slot::Progress,
+        Slot::Verdict,
+        Slot::Section,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::Banner => "banner",
+            Slot::Header => "header",
+            Slot::Phase => "phase",
+            Slot::Progress => "progress",
+            Slot::Verdict => "verdict",
+            Slot::Section => "section",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Slot> {
+        Slot::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    fn opens_buildkite_section(self) -> bool {
+        matches!(
+            self,
+            Slot::Header | Slot::Phase | Slot::Verdict | Slot::Section
+        )
+    }
+
+    fn parse(name: &str, at: &str) -> Result<Slot, String> {
+        Slot::from_name(name).ok_or_else(|| {
+            format!(
+                "Console {at}: {name:?} is not a slot; expected one of {}",
+                Slot::ALL.map(Slot::name).join(", ")
+            )
+        })
+    }
+}
+
+/// A named built-in layout: one template per [`Slot`]. The `Console` feature's
+/// `template_preset` arg lists the same names and describes each.
+pub struct Preset {
+    pub name: &'static str,
+    banner: &'static str,
+    header: &'static str,
+    phase: &'static str,
+    progress: &'static str,
+    verdict: &'static str,
+    section: &'static str,
+}
+
+impl Preset {
+    fn template(&self, slot: Slot) -> &'static str {
+        match slot {
+            Slot::Banner => self.banner,
+            Slot::Header => self.header,
+            Slot::Phase => self.phase,
+            Slot::Progress => self.progress,
+            Slot::Verdict => self.verdict,
+            Slot::Section => self.section,
+        }
+    }
+}
+
+/// The verdict after its leading `→ ` (off Buildkite) and its icon, up to the
+/// phase breakdown.
+macro_rules! verdict_text {
+    () => {
+        concat!(
+            "{{ highlight_style }}{{ verb }}{{ highlight_reset }} ",
+            "{% if buildkite %}· {% endif %}{{ label }}{{ exit }}{{ timing }}",
+            "{% if conclusion %} · {{ conclusion }}{% endif %}",
+        )
+    };
+}
+
+/// The header after its icon.
+macro_rules! header_text {
+    () => {
+        "{{ highlight_style }}Running{{ highlight_reset }} {{ label }}"
+    };
+}
+
+/// The verdict's icon: its glyph off Buildkite, its emoji shortcode on it.
+macro_rules! verdict_icon {
+    () => {
+        "{{ shortcode if buildkite else glyph }} "
+    };
+}
+
+/// The layout Aspect has always printed, and a blank Buildkite section's last
+/// fallback.
+///
+/// Off Buildkite a phase line is set off by a blank line and its emoji sits
+/// inside the highlight; on Buildkite the line is a section title, so the
+/// emoji leads it and a phase without one shows `:aspect:`.
+const FULL: Preset = Preset {
+    name: "full",
+    // Jinja drops one trailing newline, so two keep the blank line under it.
+    banner: "{{ line }}\n\n",
+    header: concat!("{{ ':aspect:' if buildkite else '→ 🎬' }} ", header_text!()),
+    phase: concat!(
+        "{% if not buildkite %}\n→ {{ highlight_style }}{% endif %}",
+        "{% if emoji or buildkite %}{{ emoji or ':aspect:' }} {% endif %}",
+        "{% if buildkite %}{{ highlight_style }}{% endif %}",
+        "{{ title }}{{ highlight_reset }}{% if text %} · {{ text }}{% endif %}",
+    ),
+    progress: "→ {% if title %}{{ highlight_style }}{% if emoji %}{{ emoji }} {% endif %}{{ title }}{{ highlight_reset }} · {% endif %}{{ text }}",
+    verdict: concat!(
+        "{% if not buildkite %}\n→ {% endif %}",
+        verdict_icon!(),
+        verdict_text!(),
+        "{{ breakdown }}"
+    ),
+    section: "{% if icon %}{{ icon }} {% endif %}{{ title }}",
+};
+
+/// `full` without emojis or Buildkite emoji shortcodes.
+const PLAIN: Preset = Preset {
+    name: "plain",
+    banner: FULL.banner,
+    header: concat!("{% if not buildkite %}→ {% endif %}", header_text!()),
+    phase: concat!(
+        "{% if not buildkite %}\n→ {% endif %}",
+        "{{ highlight_style }}{{ title }}{{ highlight_reset }}{% if text %} · {{ text }}{% endif %}",
+    ),
+    progress: "→ {% if title %}{{ highlight_style }}{{ title }}{{ highlight_reset }} · {% endif %}{{ text }}",
+    verdict: concat!(
+        "{% if not buildkite %}\n→ {% endif %}",
+        verdict_text!(),
+        "{{ plain_breakdown }}"
+    ),
+    section: "{{ title }}",
+};
+
+const COMPACT: Preset = Preset {
+    name: "compact",
+    banner: "",
+    header: "",
+    phase: "",
+    progress: "",
+    verdict: concat!(
+        "{% if not buildkite %}→ {% endif %}",
+        verdict_icon!(),
+        verdict_text!()
+    ),
+    section: "",
+};
+
+const SILENT: Preset = Preset {
+    name: "silent",
+    banner: "",
+    header: "",
+    phase: "",
+    progress: "",
+    verdict: "",
+    section: "",
+};
+
+/// Built-in presets, in the order `--help` lists them.
+pub const PRESETS: [&Preset; 4] = [&FULL, &PLAIN, &COMPACT, &SILENT];
+
+/// The preset a run uses when nothing selects another.
+pub const DEFAULT_PRESET: &str = FULL.name;
+
+/// A `templates` value as the `Console` feature receives it, before it is
+/// narrowed to one task kind.
+#[derive(Debug, Default, Clone)]
+pub struct Overrides {
+    flat: BTreeMap<Slot, String>,
+    per_kind: BTreeMap<String, BTreeMap<Slot, String>>,
+}
+
+impl Overrides {
+    /// Override `slot` (a slot name) for every task.
+    pub fn set(&mut self, slot: &str, template: String) -> Result<(), String> {
+        let slot = Slot::parse(slot, "templates")?;
+        self.flat.insert(slot, template);
+        Ok(())
+    }
+
+    /// Override `slot` (a slot name) for tasks of `kind` only.
+    pub fn set_for_kind(&mut self, kind: &str, slot: &str, template: String) -> Result<(), String> {
+        let slot = Slot::parse(slot, &format!("templates[{kind:?}]"))?;
+        self.per_kind
+            .entry(kind.to_owned())
+            .or_default()
+            .insert(slot, template);
+        Ok(())
+    }
+
+    /// Every override with the `templates[…]` path naming it.
+    fn iter(&self) -> impl Iterator<Item = (String, &str)> {
+        let flat = self
+            .flat
+            .iter()
+            .map(|(slot, t)| (format!("templates[{:?}]", slot.name()), t.as_str()));
+        let scoped = self.per_kind.iter().flat_map(|(kind, block)| {
+            block.iter().map(move |(slot, t)| {
+                (
+                    format!("templates[{kind:?}][{:?}]", slot.name()),
+                    t.as_str(),
+                )
+            })
+        });
+        flat.chain(scoped)
+    }
+
+    /// The flat overrides with `kind`'s block layered over them.
+    fn for_kind(&self, kind: &str) -> BTreeMap<Slot, String> {
+        let mut resolved = self.flat.clone();
+        if let Some(block) = self.per_kind.get(kind) {
+            resolved.extend(block.iter().map(|(slot, t)| (*slot, t.clone())));
+        }
+        resolved
+    }
+}
+
+/// Identity of the running task, shared by every slot's context.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TaskIdentity {
+    pub kind: String,
+    pub group: Vec<String>,
+    pub name: String,
+    /// `<group…> <kind>`, as typed on the command line.
+    pub path: String,
+}
+
+/// The resolved surface for one task run.
+#[derive(Debug)]
+pub struct Console {
+    preset: &'static Preset,
+    overrides: BTreeMap<Slot, String>,
+    buildkite: bool,
+    task: TaskIdentity,
+    warned: Mutex<HashSet<Slot>>,
+}
+
+impl std::fmt::Debug for Preset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+impl Console {
+    /// The `full` layout with no overrides: what a run without the `Console`
+    /// feature (or with it disabled) prints.
+    pub fn builtin(task: TaskIdentity) -> Console {
+        Console::new(&FULL, BTreeMap::new(), task)
+    }
+
+    /// Resolve `preset_name` plus `overrides` for `task`.
+    ///
+    /// Fails on an unknown preset or an override that does not compile,
+    /// wherever it is scoped. A block for a kind no task has is compiled but
+    /// otherwise inert, as on the CI surfaces: a user-level `config.axl` applies
+    /// to every repo, and only some of them define that task.
+    pub fn resolve(
+        preset_name: &str,
+        overrides: &Overrides,
+        task: TaskIdentity,
+    ) -> Result<Console, String> {
+        let preset = PRESETS
+            .into_iter()
+            .find(|p| p.name == preset_name)
+            .ok_or_else(|| {
+                format!(
+                    "Console template_preset: unknown preset {preset_name:?}; expected one of {}",
+                    PRESETS.map(|p| p.name).join(", ")
+                )
+            })?;
+        let env = Environment::new();
+        for (at, template) in overrides.iter() {
+            env.template_from_str(template)
+                .map_err(|e| format!("Console {at} does not compile: {e}"))?;
+        }
+        Ok(Console::new(preset, overrides.for_kind(&task.kind), task))
+    }
+
+    fn new(
+        preset: &'static Preset,
+        overrides: BTreeMap<Slot, String>,
+        task: TaskIdentity,
+    ) -> Console {
+        Console {
+            preset,
+            overrides,
+            buildkite: std::env::var_os("BUILDKITE").is_some_and(|v| !v.is_empty()),
+            task,
+            warned: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Name of the selected preset.
+    pub fn preset(&self) -> &'static str {
+        self.preset.name
+    }
+
+    pub fn buildkite(&self) -> bool {
+        self.buildkite
+    }
+
+    /// Render `slot` with `context`, plus the shared `buildkite` and `task`
+    /// keys. Returns `""` for a slot the layout leaves blank, except where
+    /// Buildkite needs the line to open a section.
+    pub fn render(&self, slot: Slot, context: JinjaValue) -> String {
+        let context = minijinja::context! {
+            buildkite => self.buildkite,
+            task => JinjaValue::from_serialize(&self.task),
+            ..context
+        };
+        let rendered = match self.overrides.get(&slot) {
+            None => render_builtin(self.preset, slot, &context),
+            Some(template) => render_str(template, &context).unwrap_or_else(|e| {
+                self.warn_once(slot, &e);
+                render_builtin(self.preset, slot, &context)
+            }),
+        };
+        if self.buildkite && slot.opens_buildkite_section() {
+            return self.section_title(slot, &rendered, &context);
+        }
+        rendered
+    }
+
+    /// `rendered` as the text after a Buildkite section marker. Leading
+    /// whitespace, such as the line break a terminal layout uses to set a line
+    /// off, would leave the marker untitled, so it goes; a title still blank
+    /// after that comes from the preset, or from `full` where the preset leaves
+    /// the slot blank.
+    fn section_title(&self, slot: Slot, rendered: &str, context: &JinjaValue) -> String {
+        let title = rendered.trim_start();
+        if !title.is_empty() {
+            return title.to_owned();
+        }
+        [self.preset, &FULL]
+            .into_iter()
+            .map(|preset| render_builtin(preset, slot, context))
+            .find(|text| !text.trim().is_empty())
+            .unwrap_or_default()
+    }
+
+    fn warn_once(&self, slot: Slot, error: &minijinja::Error) {
+        if self
+            .warned
+            .lock()
+            .expect("console warning set")
+            .insert(slot)
+        {
+            crate::diag::warn(&format!(
+                "Console template for {:?} failed to render ({error}); using the '{}' layout",
+                slot.name(),
+                self.preset.name
+            ));
+        }
+    }
+
+    /// Print `slot` to stderr, unless it renders blank. On Buildkite a section
+    /// slot opens a collapsed (`---`) section; see [`Console::emit_section`]
+    /// for another marker.
+    pub fn emit(&self, slot: Slot, context: JinjaValue) {
+        if self.buildkite && slot.opens_buildkite_section() {
+            return self.emit_section("---", slot, context);
+        }
+        let text = self.render(slot, context);
+        if !text.is_empty() {
+            crate::errln!("{text}");
+        }
+    }
+
+    /// Print `slot` as a Buildkite section: `marker`, then the rendered text.
+    pub fn emit_section(&self, marker: &str, slot: Slot, context: JinjaValue) {
+        let text = self.render(slot, context);
+        crate::errln!("{marker} {text}");
+    }
+}
+
+fn render_str(template: &str, context: &JinjaValue) -> Result<String, minijinja::Error> {
+    Environment::new().render_str(template, context)
+}
+
+/// Built-in templates are covered by this module's tests, so a failure here is
+/// a bug in a preset; it renders nothing rather than aborting the task.
+fn render_builtin(preset: &Preset, slot: Slot, context: &JinjaValue) -> String {
+    render_str(preset.template(slot), context).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task() -> TaskIdentity {
+        TaskIdentity {
+            kind: "test".into(),
+            group: vec![],
+            name: "test".into(),
+            path: "test".into(),
+        }
+    }
+
+    fn console(preset: &str, overrides: &Overrides, buildkite: bool) -> Console {
+        let mut c = Console::resolve(preset, overrides, task()).unwrap();
+        c.buildkite = buildkite;
+        c
+    }
+
+    fn verdict(failed: bool) -> JinjaValue {
+        minijinja::context! {
+            verdict => if failed { "failed" } else { "passed" },
+            glyph => if failed { "❌" } else { "✅" },
+            shortcode => if failed { ":x:" } else { ":white_check_mark:" },
+            verb => if failed { "Failed" } else { "Passed" },
+            highlight_style => "", highlight_reset => "",
+            label => "test task",
+            exit_code => if failed { 3 } else { 0 },
+            exit => if failed { " (exit code 3)" } else { "" },
+            elapsed => "1.2s", elapsed_ms => 1200,
+            timing => " in 1.2s",
+            conclusion => "4 tests",
+            breakdown => " — 🔨 Build 1.0s",
+            plain_breakdown => " — Build 1.0s",
+            phases => Vec::<JinjaValue>::new(),
+        }
+    }
+
+    fn header() -> JinjaValue {
+        minijinja::context! { label => "test task", highlight_style => "<c>", highlight_reset => "<r>" }
+    }
+
+    fn text(t: &str) -> JinjaValue {
+        minijinja::context! { text => t }
+    }
+
+    #[test]
+    fn full_renders_the_historical_lines() {
+        let c = console("full", &Overrides::default(), false);
+        assert_eq!(
+            c.render(
+                Slot::Banner,
+                minijinja::context! { line => "Aspect CLI v1" }
+            ),
+            "Aspect CLI v1\n"
+        );
+        assert_eq!(
+            c.render(Slot::Header, header()),
+            "→ 🎬 <c>Running<r> test task"
+        );
+        assert_eq!(
+            c.render(
+                Slot::Phase,
+                minijinja::context! { title => "Build", emoji => "🔨", highlight_style => "<s>", highlight_reset => "<r>", text => "Building" }
+            ),
+            "\n→ <s>🔨 Build<r> · Building"
+        );
+        assert_eq!(c.render(Slot::Progress, text("12 of 40")), "→ 12 of 40");
+        assert_eq!(
+            c.render(
+                Slot::Progress,
+                minijinja::context! { title => "Build", emoji => "", highlight_style => "", highlight_reset => "", text => "12 of 40" }
+            ),
+            "→ Build · 12 of 40"
+        );
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(true)),
+            "\n→ ❌ Failed test task (exit code 3) in 1.2s · 4 tests — 🔨 Build 1.0s"
+        );
+    }
+
+    #[test]
+    fn full_renders_the_historical_buildkite_sections() {
+        let c = console("full", &Overrides::default(), true);
+        assert_eq!(
+            c.render(Slot::Header, header()),
+            ":aspect: <c>Running<r> test task"
+        );
+        assert_eq!(
+            c.render(
+                Slot::Phase,
+                minijinja::context! { title => "Build", emoji => "", highlight_style => "", highlight_reset => "", text => "" }
+            ),
+            ":aspect: Build"
+        );
+        assert_eq!(
+            c.render(
+                Slot::Phase,
+                minijinja::context! { title => "Build", emoji => "🔨", highlight_style => "<s>", highlight_reset => "<r>", text => "Building" }
+            ),
+            "🔨 <s>Build<r> · Building"
+        );
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(false)),
+            ":white_check_mark: Passed · test task in 1.2s · 4 tests — 🔨 Build 1.0s"
+        );
+    }
+
+    #[test]
+    fn a_task_section_drops_its_icon_only_under_plain() {
+        let section = || minijinja::context! { icon => ":rocket:", title => "Runner metadata" };
+        let rendered = |preset: &str| {
+            console(preset, &Overrides::default(), true).render(Slot::Section, section())
+        };
+        assert_eq!(rendered("full"), ":rocket: Runner metadata");
+        assert_eq!(rendered("plain"), "Runner metadata");
+        assert_eq!(
+            rendered("silent"),
+            ":rocket: Runner metadata",
+            "a section is never blank"
+        );
+        assert_eq!(
+            console("full", &Overrides::default(), true).render(
+                Slot::Section,
+                minijinja::context! { icon => "", title => "Runner metadata" }
+            ),
+            "Runner metadata"
+        );
+    }
+
+    #[test]
+    fn the_banner_can_be_rebuilt_from_its_pieces() {
+        let mut o = Overrides::default();
+        o.set(
+            "banner",
+            "{{ highlight_style }}aspect {{ version }}{% if debug_build %}+debug{% endif %} · {{ docs_url }}{{ highlight_reset }}"
+                .into(),
+        )
+        .unwrap();
+        let line =
+            console("full", &o, false).render(Slot::Banner, crate::banner::console_context());
+        assert!(line.starts_with("\x1b[38;5;244maspect "), "{line:?}");
+        assert!(
+            line.ends_with(" · https://aspect.build/docs/cli\x1b[0m"),
+            "{line:?}"
+        );
+        let full = console("full", &Overrides::default(), false)
+            .render(Slot::Banner, crate::banner::console_context());
+        assert_eq!(full, format!("{}\n", crate::banner::line_from_pkg()));
+    }
+
+    #[test]
+    fn plain_is_full_without_emojis() {
+        let phase = minijinja::context! {
+            title => "Build", emoji => "🔨", highlight_style => "<s>", highlight_reset => "<r>", text => "Building"
+        };
+        let c = console("plain", &Overrides::default(), false);
+        assert_eq!(
+            c.render(Slot::Header, header()),
+            "→ <c>Running<r> test task"
+        );
+        assert_eq!(
+            c.render(Slot::Phase, phase.clone()),
+            "\n→ <s>Build<r> · Building"
+        );
+        assert_eq!(c.render(Slot::Progress, text("12 of 40")), "→ 12 of 40");
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(true)),
+            "\n→ Failed test task (exit code 3) in 1.2s · 4 tests — Build 1.0s"
+        );
+        let bk = console("plain", &Overrides::default(), true);
+        assert_eq!(bk.render(Slot::Header, header()), "<c>Running<r> test task");
+        assert_eq!(bk.render(Slot::Phase, phase), "<s>Build<r> · Building");
+        assert_eq!(
+            bk.render(Slot::Verdict, verdict(false)),
+            "Passed · test task in 1.2s · 4 tests — Build 1.0s"
+        );
+    }
+
+    #[test]
+    fn compact_keeps_only_the_verdict_without_its_breakdown() {
+        let c = console("compact", &Overrides::default(), false);
+        for slot in [Slot::Banner, Slot::Header, Slot::Phase, Slot::Progress] {
+            assert_eq!(c.render(slot, header()), "", "{slot:?}");
+        }
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(true)),
+            "→ ❌ Failed test task (exit code 3) in 1.2s · 4 tests"
+        );
+        let bk = console("compact", &Overrides::default(), true);
+        assert_eq!(
+            bk.render(Slot::Verdict, verdict(false)),
+            ":white_check_mark: Passed · test task in 1.2s · 4 tests"
+        );
+    }
+
+    #[test]
+    fn buildkite_sections_never_render_blank() {
+        let mut blank_header = Overrides::default();
+        blank_header.set("header", "{# blank #}".into()).unwrap();
+        for (preset, overrides) in [("silent", Overrides::default()), ("full", blank_header)] {
+            let c = console(preset, &overrides, true);
+            assert_eq!(
+                c.render(Slot::Header, header()),
+                ":aspect: <c>Running<r> test task"
+            );
+        }
+        let silent = console("silent", &Overrides::default(), true);
+        assert_eq!(
+            silent.render(Slot::Progress, text("x")),
+            "",
+            "progress opens no section"
+        );
+        let off_bk = console("silent", &Overrides::default(), false);
+        assert_eq!(off_bk.render(Slot::Verdict, verdict(true)), "");
+    }
+
+    #[test]
+    fn a_blank_buildkite_section_keeps_the_presets_text() {
+        let mut blank_header = Overrides::default();
+        blank_header.set("header", "".into()).unwrap();
+        let c = console("plain", &blank_header, true);
+        assert_eq!(c.render(Slot::Header, header()), "<c>Running<r> test task");
+    }
+
+    #[test]
+    fn a_buildkite_section_drops_leading_whitespace() {
+        let phase = minijinja::context! { title => "Build", text => "Building" };
+        for template in [
+            "\n→ {{ title }} · {{ text }}",
+            "  \n\t→ {{ title }} · {{ text }}",
+        ] {
+            let mut o = Overrides::default();
+            o.set("phase", template.into()).unwrap();
+            assert_eq!(
+                console("full", &o, true).render(Slot::Phase, phase.clone()),
+                "→ Build · Building",
+                "{template:?}"
+            );
+        }
+        let mut o = Overrides::default();
+        o.set("phase", "\n→ {{ title }} · {{ text }}".into())
+            .unwrap();
+        assert_eq!(
+            console("full", &o, false).render(Slot::Phase, phase),
+            "\n→ Build · Building",
+            "off Buildkite the line keeps its spacing"
+        );
+    }
+
+    #[test]
+    fn overrides_layer_flat_then_task_kind() {
+        let mut o = Overrides::default();
+        o.set("progress", "flat {{ text }}".into()).unwrap();
+        o.set("header", "flat {{ task.path }}".into()).unwrap();
+        o.set_for_kind("test", "progress", "test {{ text }}".into())
+            .unwrap();
+        o.set_for_kind("lint", "header", "lint".into()).unwrap();
+        let c = console("silent", &o, false);
+        assert_eq!(c.render(Slot::Progress, text("x")), "test x");
+        assert_eq!(c.render(Slot::Header, header()), "flat test");
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(true)),
+            "",
+            "the preset fills the rest"
+        );
+    }
+
+    #[test]
+    fn a_failing_override_falls_back_to_its_preset() {
+        let mut o = Overrides::default();
+        o.set("progress", "{{ text.nope.deeper }}".into()).unwrap();
+        assert_eq!(
+            console("full", &o, false).render(Slot::Progress, text("x")),
+            "→ x"
+        );
+        assert_eq!(
+            console("silent", &o, false).render(Slot::Progress, text("x")),
+            ""
+        );
+    }
+
+    #[test]
+    fn task_identity_reaches_every_slot() {
+        let mut o = Overrides::default();
+        o.set(
+            "verdict",
+            "{{ task.kind }}|{{ task.path }}|{{ buildkite }}".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            console("full", &o, false).render(Slot::Verdict, verdict(false)),
+            "test|test|false"
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_what_could_never_render() {
+        let resolve = |preset: &str, o: &Overrides| {
+            Console::resolve(preset, o, task()).map(|_| ()).unwrap_err()
+        };
+        assert!(resolve("loud", &Overrides::default()).contains("unknown preset \"loud\""));
+
+        let mut o = Overrides::default();
+        o.set_for_kind("other", "verdict", "{% if %}".into())
+            .unwrap();
+        assert!(
+            resolve("full", &o).contains(r#"templates["other"]["verdict"] does not compile"#),
+            "a block for another task is still checked"
+        );
+
+        let mut o = Overrides::default();
+        o.set_for_kind("test", "verdict", "{% if %}".into())
+            .unwrap();
+        assert!(resolve("full", &o).contains(r#"templates["test"]["verdict"] does not compile"#));
+
+        let mut o = Overrides::default();
+        o.set("phase", "{{ unclosed".into()).unwrap();
+        assert!(resolve("full", &o).contains(r#"templates["phase"] does not compile"#));
+
+        let err = Overrides::default().set("verdcit", "x".into()).unwrap_err();
+        assert!(
+            err.contains(r#"templates: "verdcit" is not a slot"#),
+            "{err}"
+        );
+        let err = Overrides::default()
+            .set_for_kind("lint", "verdcit", "x".into())
+            .unwrap_err();
+        assert!(
+            err.contains(r#"templates["lint"]: "verdcit" is not a slot"#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn every_preset_template_compiles_and_the_default_is_listed() {
+        let env = Environment::new();
+        for p in PRESETS {
+            for slot in Slot::ALL {
+                env.template_from_str(p.template(slot))
+                    .unwrap_or_else(|e| panic!("{} {slot:?}: {e}", p.name));
+            }
+        }
+        assert!(PRESETS.iter().any(|p| p.name == DEFAULT_PRESET));
+    }
+}

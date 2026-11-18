@@ -319,11 +319,21 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             let dispatch = step("dispatch", || cmd.dispatch(matches))?;
 
+            // Resolve the `Console` feature's templates before anything is
+            // printed, so they frame the whole run. Templates it cannot use
+            // are a config error.
+            let console = mpe
+                .resolve_console(dispatch.task_id, &dispatch.task_name, |f, h| {
+                    dispatch.feature_args(f, h)
+                })
+                .map_err(|e| anyhow::Error::from(e).context(ConfigError))?;
+
             // Print the "Running <task>" header before feature
             // implementations run so any diagnostic output from feature
             // initialization (auth WARNINGs, tip blocks, etc.) is
             // framed by the header.
             mpe.print_running_task_header(
+                &console,
                 dispatch.task_id,
                 &dispatch.task_name,
                 dispatch.task_name_meaningful,
@@ -373,6 +383,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 dispatch.task_friendly_name.clone(),
                 dispatch.task_uuid.clone(),
                 dispatch.timing,
+                console,
                 |t, h| dispatch.task_args(t, h),
             );
             cli_metrics::record_task(

@@ -4,7 +4,9 @@
 //! `→ 🎬 Running …` task header at runtime — so users always know which CLI
 //! they're holding and where to find docs, even when aspect is invoked through
 //! a `tools/bazel` wrapper or a custom org alias. Both call sites render the
-//! same string in the same color from here so the two can't drift.
+//! same string in the same color from here so the two can't drift. At runtime
+//! the line reaches the console's `banner` slot, which a `Console` layout may
+//! leave blank (see [`crate::console`]).
 
 use std::io::IsTerminal;
 
@@ -54,6 +56,19 @@ pub fn line_colored(version: &str, color: bool) -> String {
 /// sites that don't have the resolved version handy.
 pub fn line_from_pkg() -> String {
     line(&cargo_pkg_short_version())
+}
+
+/// The console's `banner` slot context: the built-in [`line_from_pkg`] whole,
+/// and its pieces for a template that lays the line out itself.
+pub fn console_context() -> minijinja::Value {
+    minijinja::context! {
+        line => line_from_pkg(),
+        version => cargo_pkg_short_version(),
+        debug_build => is_debug_build(),
+        docs_url => DOCS_URL,
+        highlight_style => GREY,
+        highlight_reset => RESET,
+    }
 }
 
 /// Whether to print the banner above a runtime task header.

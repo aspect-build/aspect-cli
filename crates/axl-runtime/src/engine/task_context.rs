@@ -28,11 +28,13 @@ use super::bazel::{Bazel, FrozenBazel};
 use std::sync::Arc;
 
 use super::cancellation::{Cancellation, Signals};
+use super::console::Console;
 use super::http::Http;
 use super::std::Std;
 use super::task_info::TaskInfo;
 use super::template::Template;
 use super::trait_map::{FrozenTraitMap, TraitMap};
+use crate::console::Console as Surface;
 
 use super::wasm::Wasm;
 
@@ -67,6 +69,9 @@ pub struct TaskContext<'v> {
     /// The run's cancellation state, behind `ctx.cancellation`.
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// The resolved terminal surface, behind `ctx.console`.
+    #[allocative(skip)]
+    console: Arc<Surface>,
     #[allocative(skip)]
     pub defers: RefCell<Vec<Defer<'v>>>,
 }
@@ -92,6 +97,7 @@ impl<'v> TaskContext<'v> {
         bazel: values::Value<'v>,
         hooks: values::Value<'v>,
         signals: Arc<Signals>,
+        console: Arc<Surface>,
     ) -> Self {
         Self {
             args,
@@ -100,6 +106,7 @@ impl<'v> TaskContext<'v> {
             bazel,
             hooks,
             signals,
+            console,
             defers: RefCell::new(Vec::new()),
         }
     }
@@ -137,6 +144,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
             bazel: self.bazel.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
             signals: self.signals,
+            console: self.console,
         })
     }
 }
@@ -165,6 +173,14 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     fn cancellation<'v>(this: values::Value<'v>) -> starlark::Result<Cancellation> {
         let ctx = this.downcast_ref_err::<TaskContext>()?;
         Ok(Cancellation::new(ctx.signals.clone()))
+    }
+
+    /// The terminal surface the `Console` feature resolved for this run:
+    /// `ctx.console.render(slot, **context)` renders one of its templates.
+    #[starlark(attribute)]
+    fn console<'v>(this: values::Value<'v>) -> starlark::Result<Console> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(Console(ctx.console.clone()))
     }
 
     /// Identity of the currently running task — its name, group(s),
@@ -263,6 +279,8 @@ pub struct FrozenTaskContext {
     hooks: values::FrozenValue,
     #[allocative(skip)]
     signals: Arc<Signals>,
+    #[allocative(skip)]
+    console: Arc<Surface>,
 }
 
 starlark_simple_value!(FrozenTaskContext);
@@ -302,6 +320,13 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     fn cancellation<'v>(this: values::Value<'v>) -> starlark::Result<Cancellation> {
         let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
         Ok(Cancellation::new(ctx.signals.clone()))
+    }
+
+    /// The terminal surface the `Console` feature resolved for this run.
+    #[starlark(attribute)]
+    fn console<'v>(this: values::Value<'v>) -> starlark::Result<Console> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(Console(ctx.console.clone()))
     }
 
     /// Identity of the currently running task — its name, group(s),

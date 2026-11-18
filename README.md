@@ -26,6 +26,8 @@ INFO: Build Event Protocol files produced successfully.
 
 Every `aspect <task>` ends with that per-phase breakdown, so the slow part of a CI step is always called out by name. The same content gets posted back to your PR as Buildkite annotations, GitHub Status Checks, and a PR task summary comment (see [examples below](#see-it-in-action)). [The CLI overview](https://aspect.build/docs/cli/overview#what-youll-see) shows `aspect format`, `aspect buildifier`, and `aspect lint` runs too — including the hold-the-line output (linter surfaces findings in unmodified files; the task still passes because no *new* violations were introduced).
 
+Want a shorter log, say for a coding agent? `--console:template-preset=compact` keeps only the verdict line, `plain` prints the same lines without emojis, and the `Console` feature's `templates` arg rewrites any of these lines in Jinja2.
+
 ## Configure and extend in AXL
 
 [AXL, the Aspect Extension Language](https://aspect.build/docs/cli/overview#aspect-extension-language), is how you configure built-in tasks (in `.aspect/config.axl`) and add your own (as `.aspect/*.axl` files). It's a [typed Starlark](https://github.com/facebook/starlark-rust/blob/main/docs/types.md) dialect evaluated by the [Rust Starlark](https://github.com/facebook/starlark-rust) interpreter built by the [Buck2](https://buck2.build/) team, so `.axl` files catch type errors at parse time and parse fast even on huge repos.
