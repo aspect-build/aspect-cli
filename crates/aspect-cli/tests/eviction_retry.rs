@@ -141,7 +141,7 @@ fn startup_of<'a>(line: &'a str, verb: &str) -> Vec<&'a str> {
 /// file's alike), so nothing starts a server the build does not use.
 #[test]
 fn no_probe_starts_a_server_the_build_does_not_use() {
-    for release in ["9.0.0", "development version"] {
+    for release in ["9.0.0", "8.0.0rc1", "development version"] {
         let dir = workspace(
             "startup --host_jvm_args=-Dfrom_rc=1\n\
              try-import-if-bazel-version >=7 %workspace%/gated.bazelrc\n",
@@ -288,7 +288,7 @@ fn deliverys_first_phase_retries_an_eviction() {
     let builds = invocations(dir.path(), "build");
     assert!(
         builds.len() >= 3,
-        "phase 1, its retry and phase 2: {builds:?}"
+        "phase 1, its retry and the change-detection build: {builds:?}"
     );
     let off = retries_off();
     assert!(

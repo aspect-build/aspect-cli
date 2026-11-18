@@ -97,8 +97,12 @@ mod tests {
             parse("9.0.0-pre.20250101.1"),
             version("9.0.0-pre.20250101.1")
         );
+        assert_eq!(parse("8.0.0rc"), version("8.0.0-rc"));
+        assert_eq!(parse("7.4.0-homebrew"), version("7.4.0-homebrew"));
         assert_eq!(parse("development version"), None);
         assert_eq!(parse("no_version"), None);
         assert_eq!(parse("rc1"), None);
+        assert_eq!(parse("v8.0.0"), None);
+        assert_eq!(parse("8.0rc1"), None);
     }
 }

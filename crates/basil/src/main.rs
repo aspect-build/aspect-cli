@@ -86,8 +86,6 @@ fn main() {
         .map(String::as_str)
         .unwrap_or("");
 
-    // As Bazel's client, `--version` only alone, and any startup option beside
-    // it is fatal.
     if args == ["--version"] {
         println!("bazel {}", release());
         return;

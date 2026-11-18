@@ -731,17 +731,15 @@ impl Bazelrc {
     }
 
     /// Whether a version-gated option's `condition` holds at this bazelrc's
-    /// configured Bazel version (assumed-latest when unset). `None` → always.
-    /// A malformed constraint is treated as applicable; the build surfaces it.
+    /// configured Bazel version, as [`constraint_matches`] decides it (a
+    /// release candidate as its release, assumed-latest when unset). `None` →
+    /// always. A malformed constraint is treated as applicable; the build
+    /// surfaces it.
     fn version_condition_holds(&self, condition: &Option<String>) -> bool {
         let Some(cond) = condition else {
             return true;
         };
-        let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
-        let probe = self.version.as_ref().unwrap_or(&assumed_latest);
-        semver::VersionReq::parse(cond)
-            .map(|req| req.matches(probe))
-            .unwrap_or(true)
+        constraint_matches(cond, self.version.as_ref()).unwrap_or(true)
     }
 
     /// Config-expanded options for `command`, filtered to those that apply at
@@ -766,21 +764,16 @@ impl Bazelrc {
         }
 
         let version = match version_override {
-            Some(v) => semver::Version::parse(v).ok(),
+            Some(v) => crate::version::parse(v),
             None => self.version.clone(),
         };
-        let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
-        let probe = version.as_ref().unwrap_or(&assumed_latest);
 
         let mut out = Vec::with_capacity(opts.len());
         for opt in opts {
             match &opt.version_condition {
                 None => out.push(opt),
                 Some(cond) => {
-                    let req = semver::VersionReq::parse(cond).map_err(|e| {
-                        anyhow::anyhow!("invalid version constraint '{}': {}", cond, e)
-                    })?;
-                    if req.matches(probe) {
+                    if constraint_matches(cond, version.as_ref())? {
                         out.push(opt);
                     }
                 }
@@ -2250,6 +2243,21 @@ mod runcommand_tests {
             &["--output_base=/a", "--host_jvm_args=-Xmx2g"]
         );
         assert_eq!(merged.version, Some(semver::Version::new(8, 0, 0)));
+    }
+
+    /// A release candidate keeps what its release would: Bazel's `8.0.0rc1`
+    /// passes `>=8` and `>=7` gates, in the rc's sections and its options alike.
+    #[test]
+    fn a_release_candidate_keeps_its_releases_gated_options() {
+        let rc = Bazelrc::blank(&[RcOption {
+            value: "--gated".to_string(),
+            version_condition: Some(">=8.0.0".to_string()),
+            ..RcOption::default()
+        }])
+        .with_version(crate::version::parse("8.0.0rc1"));
+        assert!(rc.version_condition_holds(&Some(">=7.0.0".to_string())));
+        let (_, cmd) = rc.resolve_for_command("build").unwrap();
+        assert!(cmd.contains(&"--gated".to_string()), "{cmd:?}");
     }
 
     #[test]

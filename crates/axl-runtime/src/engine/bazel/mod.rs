@@ -154,7 +154,7 @@ fn resolve_rc_version(
     rc: &bazel::rc::Bazelrc,
 ) -> anyhow::Result<Option<semver::Version>> {
     if let Some(s) = requested {
-        return Ok(semver::Version::parse(&s).ok());
+        return Ok(bazel::version::parse(&s));
     }
     if rc.has_version_gated_options() {
         return Ok(runner::release_version(signals));
@@ -988,8 +988,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// By default the pre-release suffix is dropped (`8.0.0-rc2` → `"8.0.0"`),
     /// which is what version-gating wants — a release candidate should match the
-    /// same constraints its release will. Pass `strip = False` for the exact
-    /// reported version (`"8.0.0-rc2"`) when you need to distinguish an rc.
+    /// same constraints its release will. Pass `strip = False` for the full
+    /// version, a release candidate's suffix normalized (Bazel's `8.0.0rc2` →
+    /// `"8.0.0-rc2"`), when you need to distinguish an rc.
     ///
     /// **Examples**
     ///
@@ -1209,7 +1210,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .with_version(
                 version
                     .into_option()
-                    .and_then(|s| semver::Version::parse(&s).ok()),
+                    .and_then(|s| bazel::version::parse(&s)),
             );
         Ok(rc)
     }

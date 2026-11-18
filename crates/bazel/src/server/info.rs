@@ -181,6 +181,10 @@ mod tests {
             semver::Version::parse("9.0.0-rc1").ok()
         );
         assert_eq!(
+            parse_release("release 10.0.0rc3"),
+            semver::Version::parse("10.0.0-rc3").ok()
+        );
+        assert_eq!(
             parse_release("release 8.0.0-pre.20251201.1"),
             semver::Version::parse("8.0.0-pre.20251201.1").ok()
         );
