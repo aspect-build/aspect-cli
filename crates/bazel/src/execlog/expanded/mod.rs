@@ -4,7 +4,8 @@
 //!
 //! Bazel writes one execution log format per build, so the CLI has it write
 //! the compact log and writes a binary or JSON log the caller asked for (see
-//! [`request`]) here, from that compact log once Bazel has finished it: each spawn is [`reconstruct`]ed, put in Bazel's [`sort`] order when the
+//! [`request`]) here, from that compact log once Bazel has finished it: each
+//! spawn is [`reconstruct`]ed, put in Bazel's [`sort`] order when the
 //! caller's `--execution_log_sort` says so, and written in the format asked
 //! for. Only the fields the CLI's protos (Bazel 8.0's) know are written, so a
 //! later Bazel's `measured_memory_peak_bytes` is in neither format.
@@ -103,7 +104,8 @@ pub fn request(
     version: Option<&semver::Version>,
 ) -> Request {
     // `None` when the version cannot be told, which could read a value either
-    // way, so a format asked for is left to Bazel.
+    // way, so a format asked for is left to Bazel. A prerelease reads as its
+    // release, so a Bazel 10 rolling release is taken to read booleans.
     let before_10 =
         version.map(|v| crate::rc::constraint_matches("<10.0.0", Some(v)).unwrap_or(false));
     let mut files = Vec::new();
@@ -484,5 +486,18 @@ mod tests {
             None,
             "its id stays taken"
         );
+    }
+
+    #[test]
+    fn a_stale_log_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("exec.json");
+        std::fs::write(&stale, "earlier").unwrap();
+        Logs {
+            files: vec![(Format::Json, stale.clone())],
+            sorted: true,
+        }
+        .remove_stale();
+        assert!(!stale.exists());
     }
 }

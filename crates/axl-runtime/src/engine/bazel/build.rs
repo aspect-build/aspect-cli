@@ -1172,10 +1172,7 @@ impl Build {
         let (pid, version) =
             bazel::server::Server::new(&super::runner::CancellableRunner(&signals), &startup_flags)
                 .info()?;
-        // Bazel writes one log format a build. A binary or JSON log the caller
-        // asked for is written from the compact one, which makes the CLI a
-        // reader of it, and Bazel's own is turned off; one left to Bazel leaves
-        // no compact log to record.
+        // Bazel writes one log format a build; see `expanded::request`.
         let expanded = expanded::request(
             &flags,
             verb,
@@ -1757,11 +1754,12 @@ impl Build {
             let path = compact.display().to_string();
             let outcome = execlog_stream.join();
             // A log that stopped decoding is warned about once, below.
+            let undecodable = matches!(outcome, Ok(ReaderOutcome::Undecodable(_)));
             if let Some(logs) = &build.expanded_logs
                 && compact.exists()
             {
                 for (to, err) in logs.write_from(&compact) {
-                    if !matches!(outcome, Ok(ReaderOutcome::Undecodable(_))) {
+                    if !(undecodable && err.kind() == io::ErrorKind::InvalidData) {
                         errln!(
                             "WARNING: the execution log '{}' could not be written in full \
                              from '{path}' ({err}). The build's result is unaffected.",
@@ -1776,6 +1774,13 @@ impl Build {
                         "WARNING: bazel completed successfully but wrote no execution \
                          log, so nothing that reads it saw this invocation."
                     );
+                    for (_, to) in build.expanded_logs.iter().flat_map(|l| &l.files) {
+                        errln!(
+                            "WARNING: no execution log was written to '{}', as bazel \
+                             wrote no compact log to write it from.",
+                            to.display()
+                        );
+                    }
                 }
                 Ok(ReaderOutcome::Undecodable(reason)) => {
                     errln!(
@@ -2652,6 +2657,39 @@ Test = task(implementation = _impl)
                 "{format:?}: the spawn is in it"
             );
         }
+    }
+
+    /// A binary or JSON log that cannot be written is warned about, and the
+    /// build still succeeds with its compact log recorded.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_or_json_log_that_cannot_be_written_leaves_the_build_alone() {
+        let history = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("missing/exec.json");
+        run_task_with_history(
+            &format!(
+                r#"
+def _impl(ctx):
+    rc = ctx.bazel.parse_rc(startup_flags = ["--ignore_all_rc_files"], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = ["--nogenerate_json_trace_profile", "--scenario=execlog_one_spawn", "--execution_log_json_file={log}"],
+        execution_log = [bazel.execution_log.record()],
+        stderr = None,
+    )
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl)
+"#,
+                log = log.display(),
+            ),
+            history.path(),
+        );
+        assert!(!log.exists());
+        let compact =
+            bazel_dir(&only_invocation(history.path()), 1).join(bazel::execlog::FILE_NAME);
+        assert_eq!(compact_entry_count(&compact), 2);
     }
 
     /// Up to Bazel 9 an empty binary or JSON log path turns the format off,
