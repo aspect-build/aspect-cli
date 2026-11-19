@@ -721,12 +721,9 @@ fn web_ui_only_config(home: &Path, default: bool) {
 /// What `setup bazelrc` says, on an `ERROR:` line, for an explicit `--remote`
 /// against a default deployment that serves no Bazel endpoint. `aspect build
 /// --remote` says the same, plus how to pick another deployment by `--deployment`.
-const WEB_UI_ONLY_REFUSAL: &str = "--remote requires a deployment that serves a Bazel \
-endpoint, but the default (acme) advertises no remote cache, BES or remote executor, as with a \
-deployment configured through its web UI alone. If it serves one, or has gained one since it was \
-configured, run `aspect auth configure <remote cache or BES host> --name acme` to refresh what it \
-advertises. Otherwise choose another deployment (see `aspect auth status`) with `aspect auth use \
-<name>`.";
+const WEB_UI_ONLY_REFUSAL: &str = "--remote needs a remote cache, BES or remote executor, and \
+the default (acme) serves none. Re-run `aspect auth configure` if it has gained one; otherwise \
+choose another deployment with `aspect auth use <name>`.";
 
 /// An explicit `--remote` against a default deployment that advertises only its
 /// web UI fails the whole run, rather than writing an rc with no remote sections

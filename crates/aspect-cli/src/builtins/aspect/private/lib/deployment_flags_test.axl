@@ -278,21 +278,16 @@ def _test_serves_bazel_endpoint(ctx):
 def _test_remote_refuses_a_deployment_serving_no_bazel_endpoint(ctx):
     """`--remote` (bare or `exec`) against a web-UI-only deployment ends the task
     with an `ERROR:` line rather than a traceback, naming it whether it is the
-    default or named with `--deployment`, and points at refreshing the recorded
-    entry through its remote cache or BES host rather than the web UI again."""
+    default or named with `--deployment`, and says how to choose another."""
     web_ui = _endpoints("acme", results_url = "https://app.acme")
     default_message = (
-        "--remote requires a deployment that serves a Bazel endpoint, but the default (acme) advertises no remote cache, " +
-        "BES or remote executor, as with a deployment configured through its web UI alone. If it serves one, " +
-        "or has gained one since it was configured, run `aspect auth configure <remote cache or BES host> --name acme` " +
-        "to refresh what it advertises. Otherwise choose another deployment (see `aspect auth status`) with " +
+        "--remote needs a remote cache, BES or remote executor, and the default (acme) serves none. " +
+        "Re-run `aspect auth configure` if it has gained one; otherwise choose another deployment with " +
         "`aspect auth use <name>` or --deployment <name>."
     )
     named_message = (
-        "--remote requires a deployment that serves a Bazel endpoint, but deployment 'acme' advertises no remote cache, " +
-        "BES or remote executor, as with a deployment configured through its web UI alone. If it serves one, " +
-        "or has gained one since it was configured, run `aspect auth configure <remote cache or BES host> --name acme` " +
-        "to refresh what it advertises. Otherwise choose another deployment (see `aspect auth status`) with " +
+        "--remote needs a remote cache, BES or remote executor, and deployment 'acme' serves none. " +
+        "Re-run `aspect auth configure` if it has gained one; otherwise choose another deployment with " +
         "`aspect auth use <name>` or --deployment <name>."
     )
     for (label, deployment, remote, message) in [
