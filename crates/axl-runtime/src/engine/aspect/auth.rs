@@ -485,9 +485,14 @@ fn shadowed_deployments() -> anyhow::Result<Vec<ShadowedDeployment>> {
 }
 
 /// Fold `sources` onto the built-in seed in order, returning the merged
-/// deployment list and the entries skipped for taking a reserved name. Exactly
-/// one entry stays `default` — [`select_deployment`] re-derives the default
-/// rather than trusting the flag on every entry.
+/// deployment list and the entries skipped for taking a reserved name.
+///
+/// A later source's default wins: a source that marks one clears every earlier
+/// default, the seed's included, so a user `config.json` can move the default off
+/// a repo-declared deployment. A source marking none leaves the standing default
+/// alone, and the seed keeps it when no source claims one. Selecting Aspect Cloud
+/// is written as "no default", so a user file cannot move the default back to
+/// Aspect Cloud over a repo default.
 ///
 /// Kept free of filesystem access (that is [`config_sources`]) so the overlay and
 /// shadowing rules are directly testable.
@@ -497,6 +502,11 @@ fn overlay_config_sources(
     let mut merged: Vec<Deployment> = vec![aspect_cloud_deployment()];
     let mut shadowed: Vec<ShadowedDeployment> = Vec::new();
     for source in sources {
+        if source.entries.iter().any(claims_default) {
+            for d in merged.iter_mut() {
+                d.default = false;
+            }
+        }
         for entry in source.entries {
             if names_aspect_cloud(&entry.name) {
                 if let Some(seed) = merged.iter_mut().find(|d| d.builtin) {
@@ -529,8 +539,13 @@ fn overlay_config_sources(
             }
         }
     }
-    reconcile_seed_default(&mut merged);
     (merged, shadowed)
+}
+
+/// Whether a `config.json` entry's `default` flag takes effect. A reserved name
+/// is skipped or folded into the seed, so it cannot claim the default.
+fn claims_default(entry: &Deployment) -> bool {
+    entry.default && !is_reserved_name(&entry.name)
 }
 
 /// Fold a `config.json` entry under Aspect Cloud's own name into the seed.
@@ -582,19 +597,6 @@ fn merge_into_seed(seed: &mut Deployment, entry: Deployment) {
 /// `value` unless it is empty, so an advertised-but-blank field reads as absent.
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.is_empty())
-}
-
-/// The seed is re-created `default = true` on every load, but a configured
-/// deployment marked default must win. So clear the seed's default whenever any
-/// configured deployment claims it — leaving the seed as default only when
-/// nothing configured does (which is also the "logged out of the default" state).
-fn reconcile_seed_default(deployments: &mut [Deployment]) {
-    let configured_default = deployments.iter().any(|d| d.default && !d.builtin);
-    if configured_default {
-        if let Some(seed) = deployments.iter_mut().find(|d| d.builtin) {
-            seed.default = false;
-        }
-    }
 }
 
 /// The repo-level `.aspect/config.json`, checked in so a team shares a
@@ -1675,7 +1677,35 @@ type ProfileCredentials = HashMap<String, CredentialsEntry>;
 type AllCredentials = HashMap<String, ProfileCredentials>;
 
 fn load_all_credentials() -> anyhow::Result<AllCredentials> {
-    CredentialStore::resolve()?.load_all()
+    CredentialStore::resolve()?.load_all(parse_legacy_credentials)
+}
+
+/// Read a `credentials.json` written before the keyring backend, as current
+/// [`AllCredentials`]; `None` for anything else, the current layout included.
+///
+/// Those releases logged in to Aspect Cloud only and stored `{ profile: entry }`,
+/// or a single bare entry for the default profile, so each entry is filed under
+/// Aspect Cloud within its profile.
+fn parse_legacy_credentials(raw: &str) -> Option<AllCredentials> {
+    if serde_json::from_str::<AllCredentials>(raw).is_ok() {
+        return None;
+    }
+    let by_profile = serde_json::from_str::<HashMap<String, CredentialsEntry>>(raw)
+        .or_else(|_| {
+            serde_json::from_str::<CredentialsEntry>(raw)
+                .map(|entry| HashMap::from([(DEFAULT_PROFILE.to_string(), entry)]))
+        })
+        .ok()?;
+    Some(
+        by_profile
+            .into_iter()
+            .map(|(profile, entry)| {
+                let deployments =
+                    HashMap::from([(ASPECT_CLOUD_DEPLOYMENT_NAME.to_string(), entry)]);
+                (profile, deployments)
+            })
+            .collect(),
+    )
 }
 
 fn save_all_credentials(map: &AllCredentials) -> anyhow::Result<()> {
@@ -4634,6 +4664,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_credentials_by_profile_file_under_aspect_cloud() {
+        let raw = serde_json::to_string(&HashMap::from([
+            ("default", entry("tok-a".into())),
+            ("bob", entry("tok-b".into())),
+        ]))
+        .unwrap();
+        let got = parse_legacy_credentials(&raw).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got["bob"][ASPECT_CLOUD_DEPLOYMENT_NAME].access_token,
+            "tok-b"
+        );
+        assert_eq!(got["default"].len(), 1);
+    }
+
+    #[test]
+    fn a_bare_legacy_entry_is_the_default_profile() {
+        let raw = serde_json::to_string(&entry("tok".into())).unwrap();
+        let got = parse_legacy_credentials(&raw).unwrap();
+        assert_eq!(
+            got[DEFAULT_PROFILE][ASPECT_CLOUD_DEPLOYMENT_NAME].access_token,
+            "tok"
+        );
+    }
+
+    #[test]
+    fn current_or_unrecognized_credentials_are_not_legacy() {
+        let current: AllCredentials = HashMap::from([(
+            "default".to_string(),
+            HashMap::from([("acme".to_string(), entry("tok".into()))]),
+        )]);
+        assert!(parse_legacy_credentials(&serde_json::to_string(&current).unwrap()).is_none());
+        assert!(parse_legacy_credentials("{}").is_none());
+        assert!(parse_legacy_credentials("not json").is_none());
+    }
+
     fn now() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5410,7 +5477,7 @@ mod tests {
         // The user entry won, so its `default` claim is the one that took effect.
         let shared = merged.iter().find(|d| d.name == "shared").unwrap();
         assert!(shared.default);
-        // ...and it displaced the seed's default (reconcile_seed_default ran).
+        // ...and it displaced the seed's default.
         assert!(!merged.iter().find(|d| d.builtin).unwrap().default);
     }
 
@@ -6854,18 +6921,52 @@ mod tests {
         assert!(existing.iter().find(|d| d.name == "emca").unwrap().default);
     }
 
-    #[test]
-    fn reconcile_seed_default_yields_to_configured_default() {
-        // Seed loads default=true; a configured default clears it.
-        let mut merged = vec![aspect_cloud_deployment(), dep("acme", true)];
-        reconcile_seed_default(&mut merged);
-        assert!(!merged[0].default, "seed yields to configured default");
-        assert!(merged[1].default);
+    fn defaults(merged: &[Deployment]) -> Vec<&str> {
+        merged
+            .iter()
+            .filter(|d| d.default)
+            .map(|d| d.name.as_str())
+            .collect()
+    }
 
-        // No configured default → the seed stays default (the fallback state).
-        let mut none_configured = vec![aspect_cloud_deployment(), dep("acme", false)];
-        reconcile_seed_default(&mut none_configured);
-        assert!(none_configured[0].default, "seed is the default fallback");
+    #[test]
+    fn a_later_source_default_wins_over_an_earlier_one() {
+        let merged = overlay_config_sources(vec![
+            src("/repo/c.json", vec![dep("acme", true)], false),
+            src("/user/c.json", vec![dep("emca", true)], true),
+        ])
+        .0;
+        assert_eq!(defaults(&merged), ["emca"]);
+        assert_eq!(select_deployment(&merged, None).unwrap().name, "emca");
+    }
+
+    #[test]
+    fn a_source_without_a_default_keeps_the_standing_one() {
+        let merged = overlay_config_sources(vec![
+            src("/repo/c.json", vec![dep("acme", true)], false),
+            src("/user/c.json", vec![dep("emca", false)], true),
+        ])
+        .0;
+        assert_eq!(defaults(&merged), ["acme"]);
+    }
+
+    #[test]
+    fn the_seed_stays_default_when_no_source_claims_one() {
+        let merged =
+            overlay_config_sources(vec![src("/user/c.json", vec![dep("acme", false)], true)]).0;
+        assert_eq!(defaults(&merged), [ASPECT_CLOUD_DEPLOYMENT_NAME]);
+    }
+
+    #[test]
+    fn a_skipped_entry_cannot_take_the_default() {
+        // A reserved-name entry is ignored, so its `default` must not clear the
+        // repo's.
+        let merged = overlay_config_sources(vec![
+            src("/repo/c.json", vec![dep("acme", true)], false),
+            src("/user/c.json", vec![dep(DEFAULT_PROFILE, true)], true),
+        ])
+        .0;
+        assert_eq!(defaults(&merged), ["acme"]);
     }
 
     #[test]
