@@ -15,7 +15,7 @@ when Bazel is the uploader (the CLI-streamed path announces the URL itself; see
 `bes_sinks.axl::announce_bes_results_url`).
 """
 
-load("./deployment_flags.axl", "AUTO", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "auto_remote_explanation", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "no_bazel_endpoint_message", "parse_remote", "serves_bazel_endpoint")
+load("./deployment_flags.axl", "AUTO", "BARE", "REMOTE_DEFAULT_CAPS", "REMOTE_REFUSED_BY_ENV", "auto_remote_explanation", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "deployment_tuning_flags", "join_and", "parse_remote", "serves_bazel_endpoint")
 
 def _eq(label, got, want):
     if got != want:
@@ -276,19 +276,35 @@ def _test_serves_bazel_endpoint(ctx):
     _eq("exec only", serves_bazel_endpoint(_endpoints("acme", exec = "exec.acme")), True)
 
 def _test_remote_refuses_a_deployment_serving_no_bazel_endpoint(ctx):
-    """`--remote` against a web-UI-only deployment fails, naming it, whether it
-    is the default or named with `--deployment`, and points at configuring its
-    remote cache or BES host rather than the web UI again."""
+    """`--remote` (bare or `exec`) against a web-UI-only deployment ends the task
+    with an `ERROR:` line rather than a traceback, naming it whether it is the
+    default or named with `--deployment`, and points at refreshing the recorded
+    entry through its remote cache or BES host rather than the web UI again."""
     web_ui = _endpoints("acme", results_url = "https://app.acme")
-    choose = "`aspect auth use <name>` or --deployment <name>"
-    for (label, deployment, target) in [
-        ("default", "", "the default (acme)"),
-        ("named", "acme", "deployment 'acme'"),
+    default_message = (
+        "--remote requires a deployment that serves a Bazel endpoint, but the default (acme) advertises no remote cache, " +
+        "BES or remote executor, as with a deployment configured through its web UI alone. If it serves one, " +
+        "or has gained one since it was configured, run `aspect auth configure <remote cache or BES host> --name acme` " +
+        "to refresh what it advertises. Otherwise choose another deployment (see `aspect auth status`) with " +
+        "`aspect auth use <name>` or --deployment <name>."
+    )
+    named_message = (
+        "--remote requires a deployment that serves a Bazel endpoint, but deployment 'acme' advertises no remote cache, " +
+        "BES or remote executor, as with a deployment configured through its web UI alone. If it serves one, " +
+        "or has gained one since it was configured, run `aspect auth configure <remote cache or BES host> --name acme` " +
+        "to refresh what it advertises. Otherwise choose another deployment (see `aspect auth status`) with " +
+        "`aspect auth use <name>` or --deployment <name>."
+    )
+    for (label, deployment, remote, message) in [
+        ("default", "", BARE, default_message),
+        ("named", "acme", BARE, named_message),
+        ("default exec", "", "exec", default_message),
+        ("named exec", "acme", "exec", named_message),
     ]:
-        err, _ = catch(deployment_endpoint_flags, _ctx(web_ui, deployment = deployment, remote = BARE))
-        _eq(label + " → refused", err != None, True)
-        _eq(label + " → message", err.message, no_bazel_endpoint_message(target, choose))
-    _eq("names the remote cache or BES host", "against that remote cache or BES host" in no_bazel_endpoint_message("x", choose), True)
+        exits = []
+        got = deployment_endpoint_flags(_ctx(web_ui, deployment = deployment, remote = remote, exits = exits))
+        _eq(label + " → refused with the message", exits, [(1, message)])
+        _eq(label + " → nothing wired", got.base_flags, [])
 
 def _test_auto_leaves_an_env_named_deployment_to_the_feature(ctx):
     """`--remote` against a machine whose environment already names its

@@ -449,7 +449,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     # no remote sections and say nothing; `auto` and `none` ask for nothing.
     marked = _marked_default(deployments)
     if machine_rc and ctx.args.remote not in ["", AUTO] and any(spec.on.values()) and marked != None and default == None:
-        return TaskConclusion(exit_code = 1, message = no_bazel_endpoint_message("the default (%s)" % marked.name, "`aspect auth use <name>`"))
+        return TaskConclusion(exit_code = 1, message = no_bazel_endpoint_message("the default (%s)" % marked.name, marked.name, "`aspect auth use <name>`"))
 
     # `auto` declines a deployment nothing here can authenticate, since the
     # helper reaching its endpoints would have no token to give and Bazel

@@ -106,14 +106,19 @@ REMOTE_REFUSED_BY_ENV = (
     "BES_BACKEND / REMOTE_EXECUTOR variables to build against a configured deployment instead."
 )
 
-def no_bazel_endpoint_message(target: str, choose: str) -> str:
-    """Why `--remote` against `target`, a deployment serving no cache, BES or
-    executor, is refused. `choose` is how the caller's command picks another.
-    Shared with `aspect bazelrc`."""
-    return ("--remote requires a deployment that serves a Bazel endpoint, but %s advertises none, " % target +
-            "as with a deployment configured through its web UI alone. To use its remote cache or BES, run " +
-            "`aspect auth configure <host>` against that remote cache or BES host; otherwise choose another " +
-            "deployment (see `aspect auth status`) with %s." % choose)
+def no_bazel_endpoint_message(target: str, name: str, choose: str) -> str:
+    """Why `--remote` against `target`, the deployment recorded as `name` that
+    serves no cache, BES or executor, is refused. `choose` is how the caller's
+    command picks another. Shared with `aspect bazelrc`.
+
+    The configure command carries `--name` so it refreshes the recorded entry: a
+    remote cache host can derive a different name than the web UI did, which
+    would record a second deployment beside this one."""
+    return ("--remote requires a deployment that serves a Bazel endpoint, but %s advertises no remote cache, " % target +
+            "BES or remote executor, as with a deployment configured through its web UI alone. If it serves one, " +
+            "or has gained one since it was configured, run `aspect auth configure <remote cache or BES host> " +
+            "--name %s` to refresh what it advertises. Otherwise choose another deployment (see `aspect auth status`) " % name +
+            "with %s." % choose)
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
@@ -342,9 +347,11 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     and nothing elsewhere, and steps aside — rather than failing — wherever a
     named capability could not be satisfied (see the module docstring).
 
-    `fail`s when `--deployment` is passed without `--remote`, when no deployment is
-    available to draw endpoints from, and when a *named* capability can't be satisfied;
-    a defaulted capability the deployment doesn't advertise is skipped.
+    `fail`s when `--deployment` is passed without `--remote` and when a *named*
+    capability can't be satisfied; a defaulted capability the deployment doesn't
+    advertise is skipped. Ends the task with an `ERROR:` line instead when the
+    environment already names this machine's deployment, and when the deployment
+    serves no Bazel endpoint at all.
     """
     if not hasattr(ctx.args, "remote"):
         return _NOTHING
@@ -386,9 +393,12 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     # always advertises — the built-in entry states its endpoints — so this is a
     # configured deployment with no public cache or BES, or one recorded before
     # it had any.
+    # A user error, so it ends the task like `aspect setup bazelrc`'s refusal
+    # does, with no traceback.
     if not serves_bazel_endpoint(endpoints) and not auto:
         target = ("deployment '%s'" if ctx.args.deployment else "the default (%s)") % endpoints.name
-        fail(no_bazel_endpoint_message(target, "`aspect auth use <name>` or --deployment <name>"))
+        ctx.std.process.exit(1, no_bazel_endpoint_message(target, endpoints.name, "`aspect auth use <name>` or --deployment <name>"))
+        return _NOTHING
 
     base_flags = []
     bes_backends = []
