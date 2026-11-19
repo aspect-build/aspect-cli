@@ -19,8 +19,8 @@
 //! cancelled. The children themselves are already stopping by then.
 //!
 //! A child that shares our process group already has a signal the terminal
-//! delivered (`Origin::Terminal`); the sequences skip the signal it already
-//! has rather than send it twice.
+//! delivered (`Origin::Terminal`) while it ran; the sequences skip the signal
+//! it already has rather than send it twice.
 //!
 //! No registry of PIDs exists. [`Signals`] keeps the stop states only so that
 //! process exit can wait for sequences in flight and the backstop can kill
@@ -39,7 +39,7 @@ use crate::engine::cancellation::Signals;
 use crate::eval::TaskExit;
 
 use bazel::process::signal as os;
-use bazel::process::signal::Target;
+use bazel::process::signal::{Target, Terminal};
 
 /// How long a signalled process gets to exit before the next rung: SIGINT,
 /// then SIGTERM, then SIGKILL.
@@ -75,6 +75,9 @@ pub(crate) struct Stop {
     pid: u32,
     group: Option<i32>,
     kind: Kind,
+    /// [`Signals::terminal_signals`] when the child was bound: only a later
+    /// one reached it.
+    terminal_signals_at_bind: u32,
     token: CancellationToken,
     signals: Arc<Signals>,
     /// The child was reaped by a wait, so its pid may be reused: never
@@ -153,9 +156,10 @@ impl Stop {
     }
 
     /// Whether a terminal already delivered the signal to this child: it
-    /// shares our process group, and the signal came from the terminal.
+    /// shares our process group, and the terminal signalled it since it was
+    /// bound.
     fn already_signalled(&self) -> bool {
-        self.group.is_none() && self.signals.group_signalled()
+        self.group.is_none() && self.signals.terminal_signals() > self.terminal_signals_at_bind
     }
 
     /// What cancellation means for this child. Runs once, on its runtime
@@ -287,6 +291,7 @@ pub fn bind(
         pid,
         group,
         kind,
+        terminal_signals_at_bind: signals.terminal_signals(),
         token: token.clone(),
         signals: signals.clone(),
         exited: AtomicBool::new(false),
@@ -309,26 +314,91 @@ pub fn bind(
     Bound { token, stop }
 }
 
-/// Spawn `cmd` bound to `parent`: the runtime's spawn-time configuration,
-/// then [`bind`]. `group` is the process group the command was configured
-/// to lead, if any.
+/// Where [`spawn`] puts a child, applied there so that the group its stop
+/// sequence signals is always the one it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    /// Ours: the stop sequence signals the child alone.
+    Ours,
+    /// Process group `n`, or with `0` a new one the child leads.
+    Process(i32),
+    /// A new session the child leads, and so a new group, with no
+    /// controlling terminal: a terminal it inherits stays usable, with none
+    /// of the job control that stops a background group touching it. On
+    /// Windows, a new group as for [`Group::Process`].
+    Session,
+}
+
+/// Spawn `cmd` bound to `parent`, in `group`: the runtime's spawn-time
+/// configuration, then [`bind`].
 pub fn spawn(
     cmd: &mut Command,
     signals: &Arc<Signals>,
     parent: &CancellationToken,
-    group: Option<i32>,
+    group: Group,
     kind: Kind,
 ) -> io::Result<(Child, Bound)> {
     os::creation_flags(cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        match group {
+            Group::Ours => {}
+            Group::Process(group) => {
+                cmd.process_group(group);
+            }
+            // The hook stays on `cmd` and runs again on a respawn, after any
+            // group a later spawn sets: a child that already leads its
+            // session or group (EPERM) is where it should be.
+            Group::Session => unsafe {
+                cmd.pre_exec(|| {
+                    use nix::libc;
+                    if libc::getsid(0) != libc::getpid()
+                        && libc::setsid() < 0
+                        && io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            },
+        }
+    }
     let child = cmd.spawn()?;
-    let group = group.map(|g| if g == 0 { child.id() as i32 } else { g });
-    let bound = bind(signals, parent, child.id(), group, kind);
+    let leader = match group {
+        Group::Ours => None,
+        Group::Process(0) | Group::Session => Some(child.id() as i32),
+        Group::Process(group) => Some(group),
+    };
+    let bound = bind(signals, parent, child.id(), leader, kind);
     Ok((child, bound))
+}
+
+/// Where a child the runtime spawns on the user's behalf goes, so that a
+/// stop reaches everything it started without the terminal stopping it:
+///
+/// - with no controlling terminal, or on CI (a Buildkite job's pty has
+///   nobody at it), a session of its own: it leads its own group, and job
+///   control never applies to a terminal it inherits;
+/// - as the foreground job of a terminal, our group, so it can read and
+///   configure the terminal and Ctrl+C reaches it from there; a stop the
+///   runtime sends reaches the child alone;
+/// - as a background job, a new group in our session, which the shell's job
+///   control stops on a terminal read as it would us.
+pub fn runnable_group() -> Group {
+    if crate::ci::on_recognized_ci() {
+        return Group::Session;
+    }
+    match os::terminal() {
+        Terminal::None => Group::Session,
+        Terminal::Foreground => Group::Ours,
+        Terminal::Background => Group::Process(0),
+    }
 }
 
 /// Spawn a bazel client bound to the root.
 pub fn spawn_bazel(cmd: &mut Command, signals: &Arc<Signals>) -> io::Result<Spawned> {
-    let (child, bound) = spawn(cmd, signals, signals.root(), None, Kind::Bazel)?;
+    let (child, bound) = spawn(cmd, signals, signals.root(), Group::Ours, Kind::Bazel)?;
     Ok(Spawned {
         child: RefCell::new(Some(child)),
         bound,
@@ -481,16 +551,12 @@ mod tests {
     use crate::engine::cancellation::{Kind as SignalKind, Origin};
     use std::process::Stdio;
 
-    fn sleeper(group: bool) -> Command {
-        use std::os::unix::process::CommandExt;
+    fn sleeper() -> Command {
         let mut cmd = Command::new("sleep");
         cmd.arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if group {
-            cmd.process_group(0);
-        }
         cmd
     }
 
@@ -505,7 +571,7 @@ mod tests {
         with_runtime(|signals| {
             let token = CancellationToken::new();
             let (child, bound) =
-                spawn(&mut sleeper(false), &signals, &token, None, Kind::Process).unwrap();
+                spawn(&mut sleeper(), &signals, &token, Group::Ours, Kind::Process).unwrap();
             let cell = RefCell::new(Some(child));
             token.cancel();
             let status = wait(&cell, &bound, Some(Duration::from_secs(5)))
@@ -529,7 +595,8 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Process).unwrap();
+            let (child, bound) =
+                spawn(&mut cmd, &signals, &token, Group::Ours, Kind::Process).unwrap();
             let cell = RefCell::new(Some(child));
             std::thread::sleep(Duration::from_millis(200));
             let started = Instant::now();
@@ -563,11 +630,13 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            {
-                use std::os::unix::process::CommandExt;
-                cmd.process_group(0);
-            }
-            let (child, bound) = spawn(&mut cmd, &signals, &token, Some(0), Kind::Process).unwrap();
+            let (child, bound) =
+                spawn(&mut cmd, &signals, &token, Group::Process(0), Kind::Process).unwrap();
+            assert_eq!(
+                nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(child.id() as i32))).unwrap(),
+                nix::unistd::Pid::from_raw(child.id() as i32),
+                "spawn put the child in a new group it leads"
+            );
             let deadline = Instant::now() + Duration::from_secs(2);
             while !pid_file.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
@@ -608,7 +677,8 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Bazel).unwrap();
+            let (child, bound) =
+                spawn(&mut cmd, &signals, &token, Group::Ours, Kind::Bazel).unwrap();
             std::thread::sleep(Duration::from_millis(300));
             token.cancel();
             let cell = RefCell::new(Some(child));
@@ -645,7 +715,8 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Process).unwrap();
+            let (child, bound) =
+                spawn(&mut cmd, &signals, &token, Group::Ours, Kind::Process).unwrap();
             std::thread::sleep(Duration::from_millis(200));
             token.cancel();
             // Interrupted and ignoring it: still alive, still tracked.
@@ -682,8 +753,14 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) =
-                spawn(&mut cmd, &signals, signals.root(), None, Kind::Process).unwrap();
+            let (child, bound) = spawn(
+                &mut cmd,
+                &signals,
+                signals.root(),
+                Group::Ours,
+                Kind::Process,
+            )
+            .unwrap();
             std::thread::sleep(Duration::from_millis(300));
             signals.record(SignalKind::Interrupt, Origin::Terminal);
             let cell = RefCell::new(Some(child));
@@ -700,6 +777,26 @@ mod tests {
     }
 
     #[test]
+    fn a_child_spawned_after_a_terminal_signal_still_gets_its_interrupt() {
+        with_runtime(|signals| {
+            signals.record(SignalKind::Interrupt, Origin::Terminal);
+            let token = CancellationToken::new();
+            let (child, bound) =
+                spawn(&mut sleeper(), &signals, &token, Group::Ours, Kind::Process).unwrap();
+            let cell = RefCell::new(Some(child));
+            token.cancel();
+            let status = wait(&cell, &bound, Some(Duration::from_secs(5)))
+                .unwrap()
+                .expect("child exits after the interrupt");
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                status.signal(),
+                Some(nix::sys::signal::Signal::SIGINT as i32)
+            );
+        });
+    }
+
+    #[test]
     fn a_wait_ends_with_the_exit_once_the_body_is_forced() {
         with_runtime(|signals| {
             let mut cmd = Command::new("sh");
@@ -707,8 +804,14 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (child, bound) =
-                spawn(&mut cmd, &signals, signals.root(), None, Kind::Process).unwrap();
+            let (child, bound) = spawn(
+                &mut cmd,
+                &signals,
+                signals.root(),
+                Group::Ours,
+                Kind::Process,
+            )
+            .unwrap();
             let cell = RefCell::new(Some(child));
             let raiser = signals.clone();
             std::thread::spawn(move || {
@@ -742,8 +845,14 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let (child, bound) =
-                spawn(&mut cmd, &signals, signals.root(), None, Kind::Process).unwrap();
+            let (child, bound) = spawn(
+                &mut cmd,
+                &signals,
+                signals.root(),
+                Group::Ours,
+                Kind::Process,
+            )
+            .unwrap();
             let out = wait_with_output(child, &bound).unwrap();
             assert_eq!(out.status.code(), Some(3));
             assert_eq!(out.stdout, b"out\n");

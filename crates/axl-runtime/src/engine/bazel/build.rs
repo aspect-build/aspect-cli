@@ -1346,7 +1346,7 @@ impl Build {
             &mut cmd,
             &signals,
             cancellation,
-            None,
+            children::Group::Ours,
             children::Kind::Bazel,
         )
         .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
