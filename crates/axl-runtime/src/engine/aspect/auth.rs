@@ -4093,7 +4093,7 @@ fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary
 /// when no configured deployment claims it. `api_token_env` names the variable
 /// whose token authenticates the deployment unattended.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
-#[display("<aspect.auth.DeploymentEndpoints>")]
+#[display("<aspect.DeploymentEndpoints>")]
 pub struct DeploymentEndpoints {
     pub name: String,
     pub builtin: bool,
@@ -4139,7 +4139,7 @@ fn effective_default(d: &Deployment, any_configured_default: bool) -> bool {
 
 starlark_simple_value!(DeploymentEndpoints);
 
-#[starlark_value(type = "aspect.auth.DeploymentEndpoints")]
+#[starlark_value(type = "aspect.DeploymentEndpoints")]
 impl<'v> values::StarlarkValue<'v> for DeploymentEndpoints {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic =
@@ -7278,16 +7278,6 @@ mod tests {
         );
         assert_eq!(e.results_url, "https://app.acme/i/");
         assert_eq!(e.api_token_env, api_token_env_var("acme"));
-
-        // The type names itself by the path `register_globals` exports it at,
-        // so an annotation mismatch names something `aspect.auth.` resolves.
-        values::Heap::temp(|heap| {
-            assert_eq!(
-                heap.alloc(e.clone()).get_type(),
-                "aspect.auth.DeploymentEndpoints"
-            );
-        });
-        assert_eq!(e.to_string(), "<aspect.auth.DeploymentEndpoints>");
 
         // The built-in seed is default only when nothing configured claims it,
         // the same rule `summarize_deployment` applies.

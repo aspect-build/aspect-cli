@@ -31,7 +31,7 @@ def _lacks(label, flags, fragment):
     _eq(label, any([fragment in f for f in _texts(flags)]), False)
 
 def _summary(name, builtin = False, default = False, cache = "", bes = "", exec = "", results_url = "", api_token_env = ""):
-    """A stand-in for an `aspect.auth.DeploymentEndpoints` row from `ctx.aspect.auth.deployments()`."""
+    """A stand-in for an `aspect.DeploymentEndpoints` row from `ctx.aspect.auth.deployments()`."""
     return struct(name = name, builtin = builtin, default = default, cache = cache, bes = bes, exec = exec, results_url = results_url, api_token_env = api_token_env)
 
 _CLOUD = _summary("aspect-cloud", builtin = True, default = True, cache = "cache.aspect.build", bes = "bes.aspect.build", results_url = "https://app.aspect.build/i/", api_token_env = "ASPECT_API_TOKEN")
