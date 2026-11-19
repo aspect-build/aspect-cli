@@ -278,6 +278,8 @@ def _test_impl(ctx):
         _reason = reason,
     )
     _eq("authenticate / generic CI no-creds kind", reason.get("kind"), "no-credentials")
+    if "Aspect account, not your deployment's" not in (reason.get("reason") or ""):
+        fail("authenticate / CI reason should name the Aspect account credential: %r" % reason.get("reason"))
 
     # Local (no CI env vars) + missing creds → kind="not-logged-in".
     reason = {}

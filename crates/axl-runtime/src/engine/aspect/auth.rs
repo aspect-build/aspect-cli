@@ -1987,6 +1987,63 @@ pub(crate) fn api_token_env_var(deployment: &str) -> String {
 
 const API_TOKEN_ENV: &str = "ASPECT_API_TOKEN";
 
+/// The API token `deployment` takes, issued by `issuer`: an Aspect account token
+/// for Aspect Cloud, the deployment's own for anything else.
+fn api_token_kind(deployment: &str, issuer: &str) -> String {
+    if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
+        format!("an API token for your Aspect account, issued by {issuer}")
+    } else {
+        format!(
+            "an API token for the Aspect Workflows deployment '{deployment}', issued by {issuer}"
+        )
+    }
+}
+
+/// What belongs in `deployment`'s [`api_token_env_var`], and where the other kind
+/// of token goes.
+fn api_token_env_kind(deployment: &str, issuer: &str) -> String {
+    let var = api_token_env_var(deployment);
+    let kind = api_token_kind(deployment, issuer);
+    if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
+        format!(
+            "{var} takes {kind}. A token for your own Aspect Workflows deployment goes in \
+             {API_TOKEN_ENV}_<NAME>, named for the deployment."
+        )
+    } else {
+        format!("{var} takes {kind}. An Aspect account API token goes in {API_TOKEN_ENV}.")
+    }
+}
+
+/// A malformed or refused [`api_token_env_var`] token for `deployment`, exchanged
+/// with `issuer`: the variable, the cause, and [`api_token_env_kind`].
+fn api_token_env_error(deployment: &str, issuer: &str, err: &anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: {err:#}\n\n{}",
+        api_token_env_var(deployment),
+        api_token_env_kind(deployment, issuer)
+    )
+}
+
+/// The error for `deployment` holding no credential: the login that fixes it, and
+/// the variable that does on CI.
+pub fn not_logged_in_message(deployment: &str) -> String {
+    let named = if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
+        "Aspect Cloud".to_string()
+    } else {
+        format!("the Aspect Workflows deployment '{deployment}'")
+    };
+    let var = api_token_env_var(deployment);
+    let kind = if deployment == ASPECT_CLOUD_DEPLOYMENT_NAME {
+        "an API token for your Aspect account".to_string()
+    } else {
+        format!("an API token for '{deployment}'")
+    };
+    format!(
+        "not logged in to {named}; run `{}`, or on CI set {var} to {kind}",
+        login_hint(deployment)
+    )
+}
+
 /// Configured deployments whose [`api_token_env_var`] collide, as
 /// `(variable, names)`. Empty in every ordinary configuration.
 fn api_token_env_collisions(deployments: &[Deployment]) -> Vec<(String, Vec<String>)> {
@@ -2013,6 +2070,10 @@ fn api_token_env_collisions(deployments: &[Deployment]) -> Vec<(String, Vec<Stri
 /// Exchanged against `deployment`'s own issuer, because that is who issued it. A
 /// token is minted by one IdP for one deployment, so one exchanged against
 /// another's issuer would be rejected by the endpoints it was meant for.
+///
+/// A malformed token or a failed exchange names the variable, the issuer, and
+/// which kind of token belongs in it ([`api_token_env_kind`]): the likeliest
+/// mistake is the Aspect account token and a deployment's token swapped.
 ///
 /// Subsequent calls within the same process reuse the cached exchange result until
 /// the JWT approaches expiry.
@@ -2044,9 +2105,11 @@ fn credentials_from_api_token_env(deployment: &str) -> anyhow::Result<Option<Cre
         }
     }
 
-    let (client_id, secret, shape) =
-        api_token_pair(&token).map_err(|e| anyhow::anyhow!("{var}: {e}"))?;
-    let entry = block_on(exchange_api_token(client_id, secret, shape, &env))?;
+    let entry = api_token_pair(&token)
+        .and_then(|(client_id, secret, shape)| {
+            block_on(exchange_api_token(client_id, secret, shape, &env))
+        })
+        .map_err(|e| api_token_env_error(deployment, &env.domain, &e))?;
 
     // Store for subsequent calls. Clearing on lock-poison is fine — the
     // next caller will just miss and re-exchange.
@@ -3576,13 +3639,16 @@ fn oauth_error_hint(code: &str, target: &LoginTarget) -> Option<String> {
     })
 }
 
-/// What a user can do about an API token the exchange refused.
-fn api_token_hint(err: &anyhow::Error) -> Option<String> {
+/// What a user can do about an API token `issuer` refused for a login to
+/// `deployment`: name the kind of token that login takes.
+fn api_token_hint(err: &anyhow::Error, deployment: &str, issuer: &str) -> Option<String> {
     let refusal = err.downcast_ref::<HttpRefusal>()?;
     matches!(refusal.status.as_u16(), 401 | 403).then(|| {
-        "The API token was rejected. Check that it has not been revoked or expired, and that \
-         it was issued for this deployment."
-            .to_owned()
+        format!(
+            "The API token was rejected. Check that it has not been revoked or expired, and \
+             that it is {}.",
+            api_token_kind(deployment, issuer)
+        )
     })
 }
 
@@ -4224,7 +4290,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 .and_then(|(client_id, secret, shape)| {
                     block_on(exchange_api_token(client_id, secret, shape, &env))
                 })
-                .map_err(|e| login_failure(&e, api_token_hint(&e)))?;
+                .map_err(|e| login_failure(&e, api_token_hint(&e, &selected.name, &env.domain)))?;
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
@@ -8185,16 +8251,65 @@ mod tests {
             }
             .into()
         };
-        assert!(
-            api_token_hint(&refusal(401))
-                .unwrap()
-                .starts_with("The API token was rejected.")
-        );
-        assert!(api_token_hint(&refusal(403)).is_some());
-        assert_eq!(api_token_hint(&refusal(500)), None);
+        let issuer = "https://auth.example";
+        let hint = |err: &anyhow::Error, deployment: &str| api_token_hint(err, deployment, issuer);
         assert_eq!(
-            api_token_hint(&anyhow::anyhow!("invalid API token format")),
+            hint(&refusal(401), ASPECT_CLOUD_DEPLOYMENT_NAME).as_deref(),
+            Some(
+                "The API token was rejected. Check that it has not been revoked or expired, and \
+                 that it is an API token for your Aspect account, issued by https://auth.example."
+            )
+        );
+        assert_eq!(
+            hint(&refusal(403), "acme").as_deref(),
+            Some(
+                "The API token was rejected. Check that it has not been revoked or expired, and \
+                 that it is an API token for the Aspect Workflows deployment 'acme', issued by \
+                 https://auth.example."
+            )
+        );
+        assert_eq!(hint(&refusal(500), "acme"), None);
+        assert_eq!(
+            hint(&anyhow::anyhow!("invalid API token format"), "acme"),
             None
+        );
+    }
+
+    #[test]
+    fn api_token_errors_name_the_variable_and_the_kind_of_token() {
+        assert_eq!(
+            api_token_env_kind(ASPECT_CLOUD_DEPLOYMENT_NAME, "https://auth.example"),
+            "ASPECT_API_TOKEN takes an API token for your Aspect account, issued by \
+             https://auth.example. A token for your own Aspect Workflows deployment goes in \
+             ASPECT_API_TOKEN_<NAME>, named for the deployment."
+        );
+        assert_eq!(
+            api_token_env_kind("gcp.acme", "https://idp.acme.example"),
+            "ASPECT_API_TOKEN_GCP_ACME takes an API token for the Aspect Workflows deployment \
+             'gcp.acme', issued by https://idp.acme.example. An Aspect account API token goes in \
+             ASPECT_API_TOKEN."
+        );
+        assert_eq!(
+            api_token_env_error(
+                "acme",
+                "https://idp.acme.example",
+                &anyhow::anyhow!("invalid API token format")
+            )
+            .to_string(),
+            "ASPECT_API_TOKEN_ACME: invalid API token format\n\nASPECT_API_TOKEN_ACME takes an \
+             API token for the Aspect Workflows deployment 'acme', issued by \
+             https://idp.acme.example. An Aspect account API token goes in ASPECT_API_TOKEN."
+        );
+        assert_eq!(
+            not_logged_in_message(ASPECT_CLOUD_DEPLOYMENT_NAME),
+            "not logged in to Aspect Cloud; run `aspect auth login`, or on CI set \
+             ASPECT_API_TOKEN to an API token for your Aspect account"
+        );
+        assert_eq!(
+            not_logged_in_message("gcp.acme"),
+            "not logged in to the Aspect Workflows deployment 'gcp.acme'; run `aspect auth \
+             login --deployment gcp.acme`, or on CI set ASPECT_API_TOKEN_GCP_ACME to an API \
+             token for 'gcp.acme'"
         );
     }
 
