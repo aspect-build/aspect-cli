@@ -226,7 +226,7 @@ def organization_label(org) -> str:
     the id alone when no name came back for it."""
     return org.name if org.name == org.id else org.name + " (" + org.id + ")"
 
-def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -> aspect.auth.AuthCredentials | None:
+def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials, deployment: str | None) -> aspect.auth.AuthCredentials | None:
     """The login re-minted for the organization this session should use.
 
     A user who belongs to several organizations has a default at the issuer,
@@ -237,7 +237,7 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
     organization, or an issuer that reports none, needs no choice.
     """
     if ctx.args.org:
-        return creds.with_organization(ctx.args.org)
+        return creds.with_organization(ctx.args.org, deployment = deployment)
     orgs = creds.organizations()
     if len(orgs) <= 1:
         return creds
@@ -251,7 +251,7 @@ def _choose_organization(ctx: TaskContext, creds: aspect.auth.AuthCredentials) -
         error(ctx.std, "Your account belongs to multiple organizations; pass --org=<name>.")
         error(ctx.std, "Choose one of: " + ", ".join([organization_label(o) for o in orgs]))
         return None
-    return creds.with_organization(chosen.name)
+    return creds.with_organization(chosen.name, deployment = deployment)
 
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:
@@ -300,7 +300,7 @@ def _login_impl(ctx: TaskContext) -> int:
         if creds == None:
             error(ctx.std, "No authorization code entered; not logged in.")
             return 1
-        creds = _choose_organization(ctx, creds)
+        creds = _choose_organization(ctx, creds, deployment)
         if creds == None:
             return 1
 

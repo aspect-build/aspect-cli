@@ -1724,13 +1724,18 @@ impl CredentialsEntry {
     /// grants go to in place of the issuer's discovered one; `Ok(None)` when it
     /// recorded none. Checked again here, not only at login, because the file is
     /// only as trustworthy as whatever last wrote it: a recorded endpoint that is
-    /// not https, or one on Aspect Cloud's issuer, is refused.
+    /// not https, or one on Aspect Cloud's issuer, is refused, and so is one that
+    /// is not exactly the endpoint `owner`, the deployment the credential is filed
+    /// under ([`token_endpoint_owner`]), advertises now ([`vetted_token_endpoint`]).
+    /// The last binds the refresh token to the deployment the way
+    /// [`credential_fits_deployment`] binds it at login, so a credentials file
+    /// written by anything else cannot send it to some other https host.
     ///
     /// Refused rather than replaced by the discovered endpoint. The deployment
     /// advertised one because its issuer refuses this client's token requests
     /// without a secret, so the discovered endpoint would fail anyway, and failing
     /// here says why rather than with the issuer's `client_secret is missing`.
-    fn recorded_token_endpoint(&self) -> Result<Option<&str>, String> {
+    fn recorded_token_endpoint(&self, owner: Option<&Deployment>) -> Result<Option<&str>, String> {
         let Some(endpoint) = self.auth_token_endpoint.as_deref() else {
             return Ok(None);
         };
@@ -1749,7 +1754,25 @@ impl CredentialsEntry {
         {
             return refuse("Aspect Cloud's issuer takes token requests directly");
         }
-        Ok(Some(endpoint))
+        let reconfigure = "re-run `aspect auth configure <host>` against the deployment to \
+                           record the token endpoint it advertises";
+        let Some(owner) = owner else {
+            return refuse(&format!(
+                "no configured deployment holds this credential; {reconfigure}"
+            ));
+        };
+        match vetted_token_endpoint(owner) {
+            Ok(Some(vetted)) if vetted == endpoint => Ok(Some(endpoint)),
+            Ok(Some(vetted)) => refuse(&format!(
+                "deployment {:?} advertises {vetted:?}; {reconfigure}",
+                owner.name
+            )),
+            Ok(None) => refuse(&format!(
+                "deployment {:?} advertises no token endpoint; {reconfigure}",
+                owner.name
+            )),
+            Err(why) => refuse(&token_endpoint_refusal(&why)),
+        }
     }
 }
 
@@ -2882,6 +2905,22 @@ fn token_endpoint_refusal(why: &str) -> String {
     format!("{why}\n\n{fix}")
 }
 
+/// The configured deployment named `name`, the one `entry` is filed under, for
+/// [`CredentialsEntry::recorded_token_endpoint`] to bind its token endpoint to.
+/// The config is read only when `entry` records a token endpoint, so a credential
+/// without one refreshes as it always has, config or no config.
+fn token_endpoint_owner(
+    entry: &CredentialsEntry,
+    name: &str,
+) -> anyhow::Result<Option<Deployment>> {
+    if entry.auth_token_endpoint.is_none() {
+        return Ok(None);
+    }
+    Ok(load_deployments()?
+        .into_iter()
+        .find(|d| names_deployment(d, name)))
+}
+
 /// Whether `entry` may be filed for `d`: a credential that refreshes at a token
 /// endpoint must have been minted by `d`'s own vetted one, so a credential from
 /// another deployment's login cannot carry its endpoint in under `d`'s name.
@@ -3012,8 +3051,12 @@ impl RefreshFailure {
 /// refused ([`RefreshFailure::TenantChanged`]). The issuer is looked at again on
 /// the way ([`resolve_oidc_endpoints`]), so a credential whose login missed the
 /// tenant API is upgraded to it here and persisted that way by the caller.
+///
+/// `owner` is the deployment `entry` is filed under ([`token_endpoint_owner`]),
+/// whose token endpoint a recorded one must be.
 async fn refresh_access_token(
     entry: &CredentialsEntry,
+    owner: Option<&Deployment>,
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let failed = |cause: anyhow::Error| {
         crate::trace!("refreshing the stored credential failed: {cause:#}");
@@ -3021,7 +3064,7 @@ async fn refresh_access_token(
     };
     let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let recorded = entry
-        .recorded_token_endpoint()
+        .recorded_token_endpoint(owner)
         .map_err(RefreshFailure::TokenEndpoint)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
@@ -3155,16 +3198,18 @@ async fn switch_and_refresh(
 /// Re-mint `entry` for `tenant_id`, one of its user's organizations, by making
 /// it the user's default tenant at the issuer and re-running the refresh grant
 /// ([`switch_and_refresh`]). Errors unless the result is for `tenant_id`.
+/// `owner` is as for [`refresh_access_token`].
 async fn select_tenant(
     entry: &CredentialsEntry,
     tenant_id: &str,
+    owner: Option<&Deployment>,
 ) -> anyhow::Result<CredentialsEntry> {
     let (auth_domain, client_id) = entry.refresh_target()?;
     if entry.refresh_token.is_empty() {
         return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
     }
     let recorded = entry
-        .recorded_token_endpoint()
+        .recorded_token_endpoint(owner)
         .map_err(|why| anyhow::anyhow!("the stored session cannot be refreshed: {why}"))?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let token_url = recorded.unwrap_or(&endpoints.token);
@@ -3337,7 +3382,8 @@ pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<O
         TokenAction::Use => Ok(Some(entry.access_token)),
         TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
         TokenAction::Refresh => {
-            let refreshed = block_on(refresh_access_token(&entry))
+            let owner = token_endpoint_owner(&entry, deployment)?;
+            let refreshed = block_on(refresh_access_token(&entry, owner.as_ref()))
                 .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
             store_credential(profile, deployment, refreshed.clone())?;
             Ok(Some(refreshed.access_token))
@@ -3436,9 +3482,14 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
     /// ([`select_tenant`]), which the caller can tell from the changed
     /// `tenant_id`. Ends the task with a message when `org` names none of the
     /// user's organizations or the issuer will not mint for it.
+    ///
+    /// `deployment` names the deployment this login is for, as `login` and
+    /// `persist` take it (omitted means Aspect Cloud); a token endpoint the
+    /// credential records must be that deployment's.
     fn with_organization<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] org: &str,
+        #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let creds = this
@@ -3451,12 +3502,20 @@ fn auth_credentials_methods(registry: &mut MethodsBuilder) {
         if chosen.id == entry.tenant_id {
             return Ok(heap.alloc(creds.clone()));
         }
-        let selected = block_on(select_tenant(&entry, &chosen.id)).map_err(|e| {
-            TaskExit::error(format!(
-                "could not log in to organization {} ({}): {e}",
-                chosen.name, chosen.id
-            ))
-        })?;
+        let owner = match entry.auth_token_endpoint {
+            Some(_) => Some(select_aspect_cloud_or_deployment(
+                &load_deployments()?,
+                deployment.into_option().as_deref(),
+            )?),
+            None => None,
+        };
+        let selected =
+            block_on(select_tenant(&entry, &chosen.id, owner.as_ref())).map_err(|e| {
+                TaskExit::error(format!(
+                    "could not log in to organization {} ({}): {e}",
+                    chosen.name, chosen.id
+                ))
+            })?;
         Ok(heap.alloc(AuthCredentials::from_entry(&selected)))
     }
 
@@ -4648,7 +4707,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // later 401s.
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
-            TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
+            TokenAction::Refresh => match block_on(refresh_access_token(
+                &entry,
+                token_endpoint_owner(&entry, &deployment)?.as_ref(),
+            )) {
                 Ok(refreshed) => {
                     store_credential(&profile, &deployment, refreshed.clone())?;
                     refreshed
@@ -7764,7 +7826,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.tenant_id, "t1");
         assert_eq!(refreshed.refresh_token, "rotated");
@@ -7786,7 +7848,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
         assert_eq!(refreshed.tenant_id, "t1");
@@ -7834,7 +7896,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.tenant_id, "t1");
         assert_eq!(refreshed.refresh_token, "rotated");
@@ -7862,7 +7924,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(
             failure,
@@ -7894,7 +7956,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(
             failure,
@@ -7918,7 +7980,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(
             failure,
@@ -7936,7 +7998,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.issuer_kind, IssuerKind::Oidc);
 
@@ -7956,7 +8018,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(failure, RefreshFailure::Failed);
         issuer.finish();
@@ -7989,7 +8051,7 @@ mod tests {
         let mut entry = stored_entry("http://127.0.0.1:1", "t1", IssuerKind::TenantApi);
         entry.refresh_token.clear();
         let error = current_thread_runtime()
-            .block_on(select_tenant(&entry, "t2"))
+            .block_on(select_tenant(&entry, "t2", None))
             .unwrap_err()
             .to_string();
         assert!(error.contains("no refresh token stored"), "{error}");
@@ -8012,7 +8074,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let selected = current_thread_runtime()
-            .block_on(select_tenant(&entry, "t2"))
+            .block_on(select_tenant(&entry, "t2", None))
             .unwrap();
         assert_eq!(selected.tenant_id, "t2");
 
@@ -8822,7 +8884,7 @@ mod tests {
         ] {
             entry.auth_token_endpoint = Some(recorded.to_string());
             let failure = current_thread_runtime()
-                .block_on(refresh_access_token(&entry))
+                .block_on(refresh_access_token(&entry, None))
                 .unwrap_err();
             let RefreshFailure::TokenEndpoint(why) = &failure else {
                 panic!("{failure:?}");
@@ -8839,11 +8901,11 @@ mod tests {
         let mut entry = stored_entry(DEFAULT_ISSUER, "t1", IssuerKind::TenantApi);
         entry.auth_token_endpoint = Some("https://app.acme.example/auth/cli/token".to_string());
         assert!(matches!(
-            current_thread_runtime().block_on(refresh_access_token(&entry)),
+            current_thread_runtime().block_on(refresh_access_token(&entry, None)),
             Err(RefreshFailure::TokenEndpoint(_))
         ));
         let error = current_thread_runtime()
-            .block_on(select_tenant(&entry, "t2"))
+            .block_on(select_tenant(&entry, "t2", None))
             .unwrap_err()
             .to_string();
         assert!(
@@ -8886,7 +8948,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(e.auth_token_endpoint, None);
-        assert_eq!(e.recorded_token_endpoint(), Ok(None));
+        assert_eq!(e.recorded_token_endpoint(None), Ok(None));
         assert!(
             !serde_json::to_string(&e)
                 .unwrap()
@@ -8954,9 +9016,10 @@ mod tests {
         let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
         let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
         entry.auth_token_endpoint = Some(proxy.clone());
+        let owner = proxy_owner(&proxy);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, Some(&owner)))
             .unwrap();
         assert_eq!(refreshed.refresh_token, "rotated");
         // Kept, so the next refresh goes there too.
@@ -8974,6 +9037,16 @@ mod tests {
         assert!(received[1].body.contains("grant_type=refresh_token"));
         assert!(received[1].body.contains("refresh_token=refresh-token"));
         assert!(!received[1].body.contains("client_secret"));
+    }
+
+    /// A configured deployment that advertises `proxy`, a token endpoint on the
+    /// tests' loopback issuer, as its own: what a credential that records `proxy`
+    /// is filed under.
+    fn proxy_owner(proxy: &str) -> Deployment {
+        let mut d = dep("acme", false);
+        d.hosts = vec!["127.0.0.1".to_string()];
+        d.token_endpoint = Some(proxy.to_string());
+        d
     }
 
     /// Every `refresh_token` grant in `received` went to the proxy, and there
@@ -9017,9 +9090,10 @@ mod tests {
         let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
         let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
         entry.auth_token_endpoint = Some(proxy.clone());
+        let owner = proxy_owner(&proxy);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, Some(&owner)))
             .unwrap();
         assert_eq!(refreshed.tenant_id, "t1");
         assert_eq!(refreshed.auth_token_endpoint.as_deref(), Some(&*proxy));
@@ -9049,9 +9123,10 @@ mod tests {
         let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
         let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
         entry.auth_token_endpoint = Some(proxy.clone());
+        let owner = proxy_owner(&proxy);
 
         let selected = current_thread_runtime()
-            .block_on(select_tenant(&entry, "t2"))
+            .block_on(select_tenant(&entry, "t2", Some(&owner)))
             .unwrap();
         assert_eq!(selected.tenant_id, "t2");
         assert_eq!(selected.auth_token_endpoint.as_deref(), Some(&*proxy));
@@ -9074,7 +9149,7 @@ mod tests {
         let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.auth_token_endpoint, None);
         let paths: Vec<_> = issuer.finish().into_iter().map(|r| r.path).collect();
@@ -9082,5 +9157,68 @@ mod tests {
             paths,
             vec!["/.well-known/openid-configuration", "/oauth/token"]
         );
+    }
+
+    #[test]
+    fn a_recorded_token_endpoint_the_deployment_does_not_advertise_is_never_sent_a_refresh() {
+        // The credentials file names a token endpoint on another host than the
+        // one the deployment advertises. Nothing may reach it: no discovery, no
+        // grant, no tenant switch.
+        let attacker = MockIssuer::start(0, |request| panic!("sent {}", request.path));
+        let stolen = format!("{}/steal", attacker.url());
+        let mut entry = stored_entry(&attacker.url(), "t1", IssuerKind::TenantApi);
+        entry.auth_token_endpoint = Some(stolen.clone());
+        let advertised = proxied("https://app.acme.example/auth/cli/token");
+        let moved = proxy_owner(&format!("{}/elsewhere", attacker.url()));
+        let mut from_repo = proxy_owner(&stolen);
+        from_repo.token_endpoint_from_repo = Some("/repo/.aspect/config.json".to_string());
+        let owners = [
+            ("another host", Some(advertised)),
+            ("same host, another path", Some(moved)),
+            ("no endpoint", Some(dep("acme", false))),
+            ("repository config", Some(from_repo)),
+            ("no deployment", None),
+        ];
+        for (case, owner) in &owners {
+            let failure = current_thread_runtime()
+                .block_on(refresh_access_token(&entry, owner.as_ref()))
+                .unwrap_err();
+            let RefreshFailure::TokenEndpoint(why) = &failure else {
+                panic!("{case}: {failure:?}");
+            };
+            assert!(why.contains(&stolen), "{case}: {why}");
+            let message = failure.message("acme");
+            assert!(message.contains("cannot be refreshed"), "{case}: {message}");
+            assert!(
+                message.contains("aspect auth configure"),
+                "{case}: {message}"
+            );
+            assert!(
+                message.contains("aspect auth login --deployment acme"),
+                "{case}: {message}"
+            );
+
+            let error = current_thread_runtime()
+                .block_on(select_tenant(&entry, "t2", owner.as_ref()))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("the stored session cannot be refreshed:"),
+                "{case}: {error}"
+            );
+        }
+        assert!(attacker.finish().is_empty());
+    }
+
+    #[test]
+    fn a_credential_without_a_recorded_token_endpoint_needs_no_deployment() {
+        let entry = stored_entry("https://auth.acme.example", "t1", IssuerKind::Oidc);
+        assert_eq!(entry.recorded_token_endpoint(None), Ok(None));
+        assert_eq!(
+            entry.recorded_token_endpoint(Some(&proxied("https://app.acme.example/t"))),
+            Ok(None)
+        );
+        // Nor reads the config to find one.
+        assert!(token_endpoint_owner(&entry, "acme").unwrap().is_none());
     }
 }
