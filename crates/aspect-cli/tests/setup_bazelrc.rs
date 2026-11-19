@@ -700,6 +700,93 @@ fn remote_exec_enables_the_executor_a_deployment_serves() {
     );
 }
 
+/// A `~/.aspect/config.json` holding a deployment configured through its web UI
+/// alone: it advertises its web UI origin and no cache, BES or executor.
+fn web_ui_only_config(home: &Path, default: bool) {
+    std::fs::create_dir_all(home.join(".aspect")).expect(".aspect");
+    std::fs::write(
+        home.join(".aspect/config.json"),
+        format!(
+            concat!(
+                r#"{{"deployments":[{{"name":"acme","default":{default},"#,
+                r#""issuer":"https://auth.aspect.build","endpoints":{{"#,
+                r#""results_url":"https://app.acme.example.com"}}}}]}}"#,
+            ),
+            default = default,
+        ),
+    )
+    .expect("config.json");
+}
+
+/// What `setup bazelrc` says, on an `ERROR:` line, for an explicit `--remote`
+/// against a default deployment that serves no Bazel endpoint. `aspect build
+/// --remote` says the same, plus how to pick another deployment by `--deployment`.
+const WEB_UI_ONLY_REFUSAL: &str = "--remote needs a remote cache, BES or remote executor, and \
+the default (acme) serves none. Re-run `aspect auth configure` if it has gained one; otherwise \
+choose another deployment with `aspect auth use <name>`.";
+
+/// An explicit `--remote` against a default deployment that advertises only its
+/// web UI fails the whole run, rather than writing an rc with no remote sections
+/// and saying nothing: the caller asked for endpoints this default cannot give.
+/// It is a user error, so it is an `ERROR:` line, not a traceback.
+#[test]
+fn an_explicit_remote_refuses_a_web_ui_only_default() {
+    for remote in ["--remote", "--remote=exec"] {
+        let home = tempfile::tempdir().expect("temp home");
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        web_ui_only_config(home.path(), true);
+
+        let out = setup_bazelrc_unconfigured(home.path(), cwd.path(), true, &["--home", remote]);
+        assert_eq!(out.status.code(), Some(1), "{remote} is refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr
+                .lines()
+                .any(|l| l.contains("ERROR") && l.ends_with(WEB_UI_ONLY_REFUSAL)),
+            "{remote} gets the shared message as an ERROR line:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("Traceback"),
+            "a user error, not a bug:\n{stderr}"
+        );
+        assert!(
+            !home.path().join(".aspect/bazelrc").exists(),
+            "{remote}: the refusal aborts the rc rather than writing one without remote sections"
+        );
+    }
+}
+
+/// Only an explicit `--remote` is refused. `auto` (the default, here on CI) and
+/// `none` ask for nothing, so they write the rc as before, treating the
+/// web-UI-only default as no default; and with the entry not marked default,
+/// Aspect Cloud is the default and `--remote` wires it.
+#[test]
+fn a_web_ui_only_deployment_leaves_other_remote_values_as_they_were() {
+    for (default, args) in [
+        (true, &["--home"][..]),
+        (true, &["--home", "--remote=none"][..]),
+        (false, &["--home", "--remote"][..]),
+    ] {
+        let home = tempfile::tempdir().expect("temp home");
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        web_ui_only_config(home.path(), default);
+
+        let out = setup_bazelrc_unconfigured(home.path(), cwd.path(), true, args);
+        assert_success(&out);
+        let rc = read(&home.path().join(".aspect/bazelrc"));
+        assert!(
+            !rc.contains("app.acme.example.com") && !rc.contains("aspect-acme"),
+            "{args:?}: the web-UI-only deployment wires nothing:\n{rc}"
+        );
+        if !default {
+            assert!(
+                enabled_groups(&rc).contains(&"aspect-cache"),
+                "{args:?}: Aspect Cloud is the default and --remote enables it:\n{rc}"
+            );
+        }
+    }
+}
+
 /// The section check does not ask a checkout for an `-exec` section the
 /// deployment could never have. Without that, `--remote=exec` against a
 /// deployment with no executor reported the checkout as missing

@@ -9,7 +9,7 @@ mcp = task(
     description = """Run a Model Context Protocol server over stdio exposing read-only build and test results from a Workflows deployment's REST API — invocations, logs, targets, and cross-invocation target statistics. Not interactive: an AI tool launches it and speaks MCP on stdin/stdout.
 
 Setup, once per developer:
-  1. `aspect auth configure remote.<deployment-domain>`   (records the deployment; often already done for the remote cache)
+  1. `aspect auth configure app.<deployment-domain>`      (records the deployment; skip if already configured through its remote cache)
   2. `aspect auth login --deployment <name>`              (browser login against the deployment's IdP; `configure` prints the name)
   3. Register the server in the AI tool's MCP config, e.g. `.mcp.json`:
        {"mcpServers": {"aspect": {"command": "aspect", "args": ["mcp"]}}}

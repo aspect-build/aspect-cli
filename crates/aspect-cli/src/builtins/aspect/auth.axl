@@ -210,16 +210,29 @@ def _print_aspect_cloud_usage_hint(ctx: TaskContext):
         _print_default_usage_hint(aspect_cloud[0], len([d for d in entries if not d.builtin]))
 
 def _print_configured_usage_hint(summary):
-    """Post-configure hint naming the just-configured deployment and the remote
+    """The `--remote` hint for a configured deployment, naming the remote
     capabilities it actually advertises. Names `--remote=exec` only when the
     deployment serves remote execution, since it is never wired by default.
-    Leads with a blank line to set it apart."""
-    flag = "--remote --deployment=" + summary.name
+    One advertising only its web UI gets the hint to register `aspect mcp` (a
+    stdio server an AI tool launches, not a command to run here) instead, and
+    one serving nothing gets nothing. Leads with a blank line to set it apart."""
+    caps = capability_labels(summary, only = REMOTE_DEFAULT_CAPS)
+    if not caps and not summary.exec:
+        if summary.results_url:
+            print("")
+            print("To give an AI tool this deployment's build results, add `aspect mcp --deployment=" + summary.name + "`")
+            print("as an MCP server in the tool's config (see `aspect mcp --help`).")
+            print("It advertises no remote cache, BES or remote executor, so --remote cannot use this deployment.")
+        return
+    flag = ("--remote" if caps else "--remote=exec") + " --deployment=" + summary.name
     print("")
     print("Pass " + flag + " to a task (e.g. `aspect build " + flag + "`)")
-    print("to use this deployment's " + join_and(capability_labels(summary, only = REMOTE_DEFAULT_CAPS)) + ".")
-    if summary.exec:
-        print("Remote execution is opt-in: use --remote=exec to enable it.")
+    if caps:
+        print("to use this deployment's " + join_and(caps) + ".")
+        if summary.exec:
+            print("Remote execution is opt-in: use --remote=exec to enable it.")
+    else:
+        print("to use this deployment's remote executor.")
 
 def organization_label(org) -> str:
     """How an organization reads in a prompt or a list: its name with its id, or
@@ -328,8 +341,8 @@ def _print_login_summary(ctx: TaskContext, deployment: str, creds):
 
     Reads the recorded entries once, so the target is named and its capabilities
     listed from the same snapshot. Says nothing beyond the identity line when the
-    target serves no build endpoints — which is every stdin-token login, since
-    those configure nothing."""
+    target advertises nothing — which is every stdin-token login, since those
+    configure nothing."""
     entries = ctx.aspect.auth.list()
     matched = [d for d in entries if d.name == deployment] if deployment else [d for d in entries if d.builtin]
     target = matched[0] if matched else None
@@ -342,7 +355,7 @@ def _print_login_summary(ctx: TaskContext, deployment: str, creds):
         return
     if builtin:
         _print_default_usage_hint(target, len([d for d in entries if not d.builtin]))
-    elif capability_labels(target, only = REMOTE_DEFAULT_CAPS):
+    else:
         _print_configured_usage_hint(target)
 
 def _print_aspect_cloud_followups(ctx: TaskContext, info):
@@ -419,7 +432,14 @@ def _discover_deployment(ctx, host):
             return None
         if info.status == "not_a_deployment":
             error(ctx.std, "'" + host + "' is not an Aspect Workflows deployment authentication endpoint.")
-            error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
+            error(ctx.std, "Double-check the URL — it should be the deployment's web UI, remote-cache or BES host (e.g. app.<deployment>.example.com).")
+            return None
+        if info.status == "no_build_endpoints":
+            error(ctx.std, "'" + host + "' advertises no remote cache, BES or remote executor, so it cannot be recorded as Aspect Cloud.")
+            if ctx.args.name:
+                error(ctx.std, "Pass a different --name to record it as a deployment of its own.")
+            else:
+                error(ctx.std, "Run `aspect auth login` to record Aspect Cloud's endpoints.")
             return None
         if info.status == "issuer_not_advertised":
             # `reason` is the issuer actually looked for — for `--name aspect-cloud` that
@@ -444,7 +464,7 @@ def _discover_deployment(ctx, host):
 
 def _configure_impl(ctx: TaskContext) -> int:
     if len(ctx.args.host) != 1:
-        error(ctx.std, "Provide exactly one deployment host, e.g. `aspect auth configure remote.acme.aspect.build`.")
+        error(ctx.std, "Provide exactly one deployment host, e.g. `aspect auth configure app.acme.aspect.build`.")
         return 1
     host = ctx.args.host[0]
     info = _discover_deployment(ctx, host)
@@ -501,7 +521,7 @@ configure = task(
     implementation = _configure_impl,
     args = {
         "host": args.positional(
-            description = "A deployment host or endpoint URL (e.g. remote.acme.aspect.build). Its /.well-known/oauth-protected-resource document is fetched to discover the auth config.",
+            description = "A deployment host or endpoint URL: its web UI, remote cache or BES (e.g. app.acme.aspect.build). Its /.well-known/oauth-protected-resource document is fetched to discover the auth config.",
         ),
         "name": args.string(
             description = "Name for this deployment. Defaults to a name derived from the host.",
