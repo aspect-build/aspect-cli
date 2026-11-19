@@ -1574,10 +1574,12 @@ struct CredentialsEntry {
     /// The token endpoint the login exchanged its code at when the deployment
     /// advertised one ([`Deployment::token_endpoint`]), so every refresh goes
     /// there too rather than to the issuer's discovered endpoint. Recorded here,
-    /// beside the issuer and client it pairs with, because a refresh sees only the
-    /// credential. Absent for every other credential, including those written
-    /// before this field existed, which refresh at the discovered endpoint as
-    /// they always have.
+    /// beside the issuer and client it pairs with, so the refresh token goes back
+    /// to the endpoint that minted it; a refresh also requires it to be the one
+    /// the deployment the credential is filed under advertises now
+    /// ([`CredentialsEntry::recorded_token_endpoint`]). Absent for every other
+    /// credential, including those written before this field existed, which
+    /// refresh at the discovered endpoint as they always have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auth_token_endpoint: Option<String>,
 }
@@ -9164,12 +9166,16 @@ mod tests {
         // The credentials file names a token endpoint on another host than the
         // one the deployment advertises. Nothing may reach it: no discovery, no
         // grant, no tenant switch.
-        let attacker = MockIssuer::start(0, |request| panic!("sent {}", request.path));
-        let stolen = format!("{}/steal", attacker.url());
-        let mut entry = stored_entry(&attacker.url(), "t1", IssuerKind::TenantApi);
+        // A listener nothing accepts on, so any connection attempt stays queued
+        // for the assertion at the end to see.
+        let attacker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        attacker.set_nonblocking(true).unwrap();
+        let attacker_url = format!("http://{}", attacker.local_addr().unwrap());
+        let stolen = format!("{attacker_url}/steal");
+        let mut entry = stored_entry(&attacker_url, "t1", IssuerKind::TenantApi);
         entry.auth_token_endpoint = Some(stolen.clone());
         let advertised = proxied("https://app.acme.example/auth/cli/token");
-        let moved = proxy_owner(&format!("{}/elsewhere", attacker.url()));
+        let moved = proxy_owner(&format!("{attacker_url}/elsewhere"));
         let mut from_repo = proxy_owner(&stolen);
         from_repo.token_endpoint_from_repo = Some("/repo/.aspect/config.json".to_string());
         let owners = [
@@ -9207,7 +9213,11 @@ mod tests {
                 "{case}: {error}"
             );
         }
-        assert!(attacker.finish().is_empty());
+        let accepted = attacker.accept();
+        assert!(
+            matches!(&accepted, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "a connection reached the recorded endpoint: {accepted:?}"
+        );
     }
 
     #[test]
