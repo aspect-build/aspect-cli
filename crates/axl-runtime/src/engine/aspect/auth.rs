@@ -85,6 +85,96 @@ pub(crate) struct Deployment {
     /// this empty, so a first login has somewhere to relay through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     login_redirect_uri: Option<String>,
+    /// Which token of a grant this deployment's endpoints validate, as its
+    /// selected authorization server advertised it at `configure`. Absent when it
+    /// advertised none. Login and refresh re-read the live document first and use
+    /// this only when it cannot be fetched, or for a refresh not fetched in time —
+    /// see [`current_bearer`] and [`refresh_bearer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bearer: Option<BearerKind>,
+}
+
+/// Which of a grant's tokens the CLI sends to a deployment's endpoints, as a
+/// deployment advertises it in the `bearer` field of an
+/// `aspect_authorization_servers` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum BearerKind {
+    #[serde(rename = "access_token")]
+    AccessToken,
+    #[serde(rename = "id_token")]
+    IdToken,
+}
+
+impl BearerKind {
+    /// The kind an advertised `bearer` value names. An empty value is absent, and
+    /// an unknown one is ignored (logged at debug), so a newer deployment's value
+    /// never stops an older CLI from logging in.
+    fn from_advertised(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" => None,
+            "access_token" => Some(BearerKind::AccessToken),
+            "id_token" => Some(BearerKind::IdToken),
+            other => {
+                tracing::debug!(
+                    "ignoring the unknown bearer this deployment advertises: {other:?}"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Which token of a grant becomes the bearer, and how strictly.
+///
+/// `AccessTokenElseIdToken` is Aspect Cloud's rule and that of a stored
+/// credential that never preferred the id_token: the access_token, falling back to
+/// the id_token. The other two are strict, because a deployment that names one is
+/// saying its endpoints reject the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BearerRule {
+    IdToken,
+    AccessToken,
+    AccessTokenElseIdToken,
+}
+
+impl BearerRule {
+    /// The rule for a browser login to `deployment`, given the `bearer` it
+    /// `advertised`. Aspect Cloud always sends the access_token. Another deployment
+    /// sends what it advertises, and the id_token when it advertises nothing.
+    fn for_login(deployment: &Deployment, advertised: Option<BearerKind>) -> Self {
+        if deployment.builtin {
+            return BearerRule::AccessTokenElseIdToken;
+        }
+        match advertised {
+            Some(kind) => kind.into(),
+            None => BearerRule::IdToken,
+        }
+    }
+
+    /// The rule for refreshing a stored credential, given the `bearer` its
+    /// deployment `advertised` now: that, when it advertises one, else whatever
+    /// the credential was minted with.
+    fn for_refresh(prefer_id_token: bool, advertised: Option<BearerKind>) -> Self {
+        match advertised {
+            Some(kind) => kind.into(),
+            None if prefer_id_token => BearerRule::IdToken,
+            None => BearerRule::AccessTokenElseIdToken,
+        }
+    }
+
+    /// What a credential minted under this rule records as `prefer_id_token`.
+    fn prefers_id_token(self) -> bool {
+        self == BearerRule::IdToken
+    }
+}
+
+impl From<BearerKind> for BearerRule {
+    fn from(kind: BearerKind) -> Self {
+        match kind {
+            BearerKind::AccessToken => BearerRule::AccessToken,
+            BearerKind::IdToken => BearerRule::IdToken,
+        }
+    }
 }
 
 /// The OAuth scopes the login flow requests when the deployment advertises none,
@@ -377,6 +467,7 @@ fn aspect_cloud_deployment() -> Deployment {
         // asking for the token.
         scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
         authorize_params: BTreeMap::new(),
+        bearer: None,
         endpoints,
     }
 }
@@ -823,6 +914,12 @@ struct AspectAuthServer {
     /// see [`Deployment::authorize_params`].
     #[serde(default)]
     authorize_params: BTreeMap<String, String>,
+    /// Which token of this issuer's grants the deployment's endpoints validate:
+    /// `"access_token"` or `"id_token"`. Kept as a string so an unknown value is
+    /// ignored rather than failing the whole document; see
+    /// [`BearerKind::from_advertised`].
+    #[serde(default)]
+    bearer: String,
 }
 
 /// A usable OAuth config the CLI can log in with: an issuer paired with its PKCE
@@ -835,6 +932,7 @@ struct AuthServer {
     client_id: String,
     scopes: Vec<String>,
     authorize_params: BTreeMap<String, String>,
+    bearer: Option<BearerKind>,
 }
 
 /// Whether two issuers name the same authorization server, tolerant of how a
@@ -863,7 +961,9 @@ fn issuers_match(a: &str, b: &str) -> bool {
 /// as a fallback by [`ProtectedResource::auth_servers`] when no usable
 /// `aspect_authorization_servers` entry is present (older deployments). `scopes`
 /// are overridable per deployment for a bring-your-own IdP that doesn't accept
-/// the standard OIDC set, and empty falls back to [`DEFAULT_LOGIN_SCOPES`].
+/// the standard OIDC set, and empty falls back to [`DEFAULT_LOGIN_SCOPES`]. An
+/// entry's optional `bearer` says which token of the grant the deployment's
+/// endpoints validate ([`BearerKind`]); the legacy shape has no slot for it.
 ///
 /// `aspect_endpoints` is the capability → host map the deployment serves (remote
 /// cache + BES share one client, so one login covers every host); the CLI records
@@ -921,6 +1021,7 @@ impl ProtectedResource {
                 client_id: s.client_id.clone(),
                 scopes: s.scopes.clone(),
                 authorize_params: s.authorize_params.clone(),
+                bearer: BearerKind::from_advertised(&s.bearer),
             })
             .collect();
         if !nested.is_empty() {
@@ -943,9 +1044,69 @@ impl ProtectedResource {
                 // The flat RFC 9728 shape has no slot for these; only the
                 // aspect_authorization_servers extension carries them.
                 authorize_params: BTreeMap::new(),
+                bearer: None,
             })
             .collect()
     }
+
+    /// The `bearer` this document advertises for `deployment`'s authorization
+    /// server: the entry whose issuer and client match the ones recorded for it.
+    /// `None` when that entry advertises none, or when no entry matches (the
+    /// deployment moved issuers since `configure`; re-running it picks that up).
+    fn bearer_for(&self, deployment: &Deployment) -> Option<BearerKind> {
+        let (Some(issuer), Some(client_id)) = (&deployment.issuer, &deployment.client_id) else {
+            return None;
+        };
+        self.auth_servers()
+            .into_iter()
+            .find(|s| issuers_match(&s.issuer, issuer) && &s.client_id == client_id)
+            .and_then(|s| s.bearer)
+    }
+}
+
+/// The `bearer` `deployment` advertises now, read off its live discovery
+/// document the way the issuer's kind is re-read at every login and refresh
+/// ([`resolve_oidc_endpoints`]), so a deployment that changes its answer is
+/// followed without a re-login or re-`configure`.
+///
+/// Aspect Cloud is never asked: its bearer is fixed ([`BearerRule::for_login`]).
+/// The document is fetched from the host `configure` was run against. When it
+/// cannot be fetched, the value recorded at `configure` stands in; when it is
+/// fetched but advertises none for this deployment's issuer, the answer is `None`.
+async fn current_bearer(deployment: &Deployment) -> Option<BearerKind> {
+    if deployment.builtin {
+        return None;
+    }
+    let Some(host) = deployment.hosts.first() else {
+        return deployment.bearer;
+    };
+    match probe_protected_resource(host).await {
+        Discovery::Reachable(info) => info.bearer_for(deployment),
+        Discovery::Unreachable(_) | Discovery::NotADeployment => deployment.bearer,
+    }
+}
+
+/// How long a refresh waits for [`current_bearer`] before using the recorded
+/// value. A refresh runs inside the credential helper, which Bazel gives 10
+/// seconds by default (`--credential_helper_timeout`), and the token grant needs
+/// most of that.
+const REFRESH_BEARER_WAIT: Duration = Duration::from_secs(1);
+
+/// [`current_bearer`] for a refresh of the deployment named `name`: bounded by
+/// [`REFRESH_BEARER_WAIT`], after which the value recorded at `configure` stands
+/// in, as it does for a document that cannot be fetched. `None` when no such
+/// deployment is configured.
+async fn refresh_bearer(name: &str) -> Option<BearerKind> {
+    let deployments = load_deployments().ok()?;
+    let deployment = deployments.iter().find(|d| d.name == name)?;
+    bounded_bearer(deployment, REFRESH_BEARER_WAIT).await
+}
+
+/// [`current_bearer`], or `deployment`'s recorded `bearer` once `wait` passes.
+async fn bounded_bearer(deployment: &Deployment, wait: Duration) -> Option<BearerKind> {
+    tokio::time::timeout(wait, current_bearer(deployment))
+        .await
+        .unwrap_or(deployment.bearer)
 }
 
 /// The outcome of picking which advertised authorization server to configure,
@@ -1161,7 +1322,7 @@ fn is_advertisable_name(name: &str) -> bool {
 /// caller from [`ProtectedResource::auth_servers`]; `None` when the endpoint
 /// advertises no issuer, recording a deployment that can't log in).
 ///
-/// `issuer` + `client_id` + `scopes` come from `selected`. `hosts` are the
+/// `issuer` + `client_id` + `scopes` + `bearer` come from `selected`. `hosts` are the
 /// endpoints this deployment's token covers: the configured host, the advertised
 /// `resource` host, and every `aspect_endpoints` host, deduped. The typed
 /// `endpoints` map is recorded (hosts normalized) so `--deployment` can wire each
@@ -1202,6 +1363,7 @@ fn deployment_from_discovery(
         authorize_params: selected
             .map(|s| s.authorize_params.clone())
             .unwrap_or_default(),
+        bearer: selected.and_then(|s| s.bearer),
         endpoints,
     }
 }
@@ -1509,11 +1671,12 @@ struct CredentialsEntry {
     auth_domain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auth_client_id: Option<String>,
-    // True when this session's bearer is the OIDC id_token (the self-hosted
-    // endpoint flow), so a subsequent refresh keeps minting an id_token rather
-    // than downgrading to the access_token. Absent/false for the Aspect Cloud
-    // flow (access_token bearer). Defaulted so entries written before this field
-    // existed load as cloud sessions.
+    /// True when this session's bearer is the OIDC id_token, so a refresh keeps
+    /// minting one rather than downgrading to the access_token — unless the
+    /// deployment now advertises a `bearer`, which wins ([`BearerRule::for_refresh`]).
+    /// False for an access_token bearer (Aspect Cloud, or a deployment that
+    /// advertises `access_token`). Defaulted so entries written before this field
+    /// existed load as access_token sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     prefer_id_token: bool,
     /// What kind of issuer minted this credential, read off the discovery
@@ -1598,8 +1761,8 @@ impl CredentialsEntry {
     /// email/name/tenant claims for display and recording the issuer + client_id
     /// so the credential can be refreshed. `refresh_token` may be empty (api-token
     /// and raw-token logins are not refreshable). `prefer_id_token` records that the
-    /// bearer is an id_token (the self-hosted endpoint flow) so refresh preserves
-    /// that kind. `issuer_kind` records what the issuer offers beyond OAuth
+    /// bearer is an id_token so refresh preserves that kind when the deployment
+    /// advertises none. `issuer_kind` records what the issuer offers beyond OAuth
     /// ([`IssuerKind`]).
     fn from_bearer(
         bearer: String,
@@ -1623,17 +1786,24 @@ impl CredentialsEntry {
         })
     }
 
-    /// This credential re-minted from `token_resp`: the same issuer, client,
-    /// bearer kind and provider, with the rotated refresh token when one came
-    /// back ([`merged_refresh_token`]).
-    fn renewed(&self, token_resp: TokenResponse) -> anyhow::Result<CredentialsEntry> {
+    /// This credential re-minted from `token_resp`: the same issuer, client and
+    /// provider, with the rotated refresh token when one came back
+    /// ([`merged_refresh_token`]). The bearer is picked by `rule`, which is the
+    /// credential's own kind unless its deployment now advertises another
+    /// ([`BearerRule::for_refresh`]); the result records the kind it was minted
+    /// with, so a switch made here sticks.
+    fn renewed(
+        &self,
+        token_resp: TokenResponse,
+        rule: BearerRule,
+    ) -> anyhow::Result<CredentialsEntry> {
         let refresh_token = merged_refresh_token(&self.refresh_token, &token_resp.refresh_token);
         CredentialsEntry::from_bearer(
-            token_resp.bearer(self.prefer_id_token)?,
+            token_resp.bearer(rule)?,
             refresh_token,
             self.auth_domain.clone(),
             self.auth_client_id.clone(),
-            self.prefer_id_token,
+            rule.prefers_id_token(),
             self.issuer_kind,
         )
     }
@@ -2292,9 +2462,8 @@ fn callback_page(title: &str, heading: &str, message: &str, auto_close: bool) ->
     )
 }
 
-/// An OAuth token response. The bearer the CLI attaches to endpoints is the
-/// `id_token` when present (self-hosted edges validate the OIDC id_token), else
-/// the `access_token` (the Aspect Cloud flow).
+/// An OAuth token response. Which of its tokens the CLI attaches to endpoints is
+/// a [`BearerRule`]'s call ([`TokenResponse::bearer`]).
 #[derive(Deserialize)]
 struct TokenResponse {
     #[serde(default)]
@@ -2306,24 +2475,29 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
-    /// The bearer to attach to endpoints. When `prefer_id_token` (the self-hosted
-    /// endpoint flow — those edges validate the OIDC id_token), require the
-    /// id_token and error if the grant omitted it, rather than silently returning
-    /// the access_token: a refresh grant that drops the id_token (permitted by RFC
-    /// 6749 §5.1) would otherwise downgrade a working session to a bearer the edge
-    /// rejects with 401. When not preferring the id_token (the Aspect Cloud flow,
-    /// which validates the access_token), return the access_token, falling back to
-    /// the id_token only if the access_token is absent.
-    fn bearer(self, prefer_id_token: bool) -> anyhow::Result<String> {
-        if prefer_id_token {
-            return if !self.id_token.is_empty() {
-                Ok(self.id_token)
-            } else {
-                Err(anyhow::anyhow!(
-                    "token response contained no id_token (self-hosted endpoints \
-                     validate the id_token); re-run `aspect auth login`"
-                ))
-            };
+    /// The bearer to attach to endpoints, picked by `rule`.
+    ///
+    /// The strict rules require their token and error if the grant omitted it,
+    /// rather than silently returning the other: a refresh grant that drops the
+    /// id_token (permitted by RFC 6749 §5.1) would otherwise downgrade a working
+    /// session to a bearer the edge rejects with 401, and the same holds for a
+    /// deployment that asks for the access_token. [`BearerRule::AccessTokenElseIdToken`]
+    /// returns the access_token, falling back to the id_token only if the
+    /// access_token is absent.
+    fn bearer(self, rule: BearerRule) -> anyhow::Result<String> {
+        match rule {
+            BearerRule::IdToken if self.id_token.is_empty() => {
+                return Err(anyhow::anyhow!(
+                    "token response contained no id_token, which this deployment's \
+                     endpoints validate; re-run `aspect auth login`"
+                ));
+            }
+            BearerRule::IdToken => return Ok(self.id_token),
+            BearerRule::AccessToken if self.access_token.is_empty() => {
+                return Err(NoAccessToken.into());
+            }
+            BearerRule::AccessToken => return Ok(self.access_token),
+            BearerRule::AccessTokenElseIdToken => {}
         }
         if !self.access_token.is_empty() {
             Ok(self.access_token)
@@ -2336,6 +2510,12 @@ impl TokenResponse {
         }
     }
 }
+
+/// A token response with no access_token, from an issuer whose deployment asks
+/// for one ([`BearerRule::AccessToken`]).
+#[derive(Debug, thiserror::Error)]
+#[error("token response contained no access_token, which this deployment's endpoints validate")]
+struct NoAccessToken;
 
 /// POST an `application/x-www-form-urlencoded` body to a token/exchange endpoint
 /// and deserialize the JSON response ([`send_json`]).
@@ -2705,14 +2885,14 @@ fn callback_host(selected: &Deployment) -> Option<String> {
 /// advertised value, or one derived from a machine edge. It must be registered as
 /// an allowed redirect with the deployment's IdP.
 ///
-/// `prefer_id_token` selects which of the grant's tokens becomes the bearer, which
-/// is a property of what the credential is sent to rather than of this flow — see
-/// [`AuthSessionInner::prefer_id_token`]. `aspect_cloud` says whose client the
-/// login uses, for what a refusal tells the user ([`LoginTarget`]).
+/// `bearer` selects which of the grant's tokens becomes the bearer, which is a
+/// property of what the credential is sent to rather than of this flow — see
+/// [`AuthSessionInner::bearer`]. `aspect_cloud` says whose client the login
+/// uses, for what a refusal tells the user ([`LoginTarget`]).
 fn build_login_session(
     env: AuthEnv,
     redirect_uri: String,
-    prefer_id_token: bool,
+    bearer: BearerRule,
     aspect_cloud: bool,
 ) -> anyhow::Result<AuthSession> {
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
@@ -2743,7 +2923,7 @@ fn build_login_session(
             redirect_uri,
             env,
             expected_state: state,
-            prefer_id_token,
+            bearer,
             aspect_cloud,
             issuer_kind: endpoints.issuer_kind,
         })),
@@ -2764,6 +2944,10 @@ enum RefreshFailure {
     /// log (`ASPECT_DEBUG=1`) where it happened; the user is told to log in
     /// again.
     Failed,
+    /// The deployment asks for the access_token and the grant carried none
+    /// ([`NoAccessToken`]). Told apart from [`Self::Failed`] because a re-login
+    /// may not fix it: the identity provider has to issue one.
+    NoAccessToken,
 }
 
 impl RefreshFailure {
@@ -2775,6 +2959,7 @@ impl RefreshFailure {
                 tenant_changed_message(deployment, was, now)
             }
             RefreshFailure::Failed => session_expired_message(deployment),
+            RefreshFailure::NoAccessToken => no_access_token_message(deployment),
         }
     }
 }
@@ -2789,17 +2974,29 @@ impl RefreshFailure {
 /// refused ([`RefreshFailure::TenantChanged`]). The issuer is looked at again on
 /// the way ([`resolve_oidc_endpoints`]), so a credential whose login missed the
 /// tenant API is upgraded to it here and persisted that way by the caller.
+///
+/// `advertised` is the `bearer` the credential's deployment advertises now
+/// ([`refresh_bearer`]), `None` for Aspect Cloud or a deployment that advertises
+/// none; it picks the bearer ([`BearerRule::for_refresh`]). A credential minted
+/// with the id_token switches to the access_token here when its deployment asks
+/// for one, and the refresh fails when the grant carries no access_token.
 async fn refresh_access_token(
     entry: &CredentialsEntry,
+    advertised: Option<BearerKind>,
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let failed = |cause: anyhow::Error| {
         crate::trace!("refreshing the stored credential failed: {cause:#}");
-        RefreshFailure::Failed
+        if cause.downcast_ref::<NoAccessToken>().is_some() {
+            RefreshFailure::NoAccessToken
+        } else {
+            RefreshFailure::Failed
+        }
     };
     let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let issuer_kind = entry.issuer_kind.or(endpoints.issuer_kind);
-    let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id)
+    let rule = BearerRule::for_refresh(entry.prefer_id_token, advertised);
+    let mut refreshed = refresh_with_grant(entry, &endpoints.token, client_id, rule)
         .await
         .map_err(failed)?;
     if let Some(now) = tenant_moved(entry, &refreshed) {
@@ -2809,9 +3006,15 @@ async fn refresh_access_token(
                 now,
             });
         }
-        refreshed =
-            restore_default_tenant(entry, refreshed, auth_domain, &endpoints.token, client_id)
-                .await?;
+        refreshed = restore_default_tenant(
+            entry,
+            refreshed,
+            auth_domain,
+            &endpoints.token,
+            client_id,
+            rule,
+        )
+        .await?;
     }
     refreshed.issuer_kind = issuer_kind;
     Ok(refreshed)
@@ -2829,17 +3032,19 @@ const RESTORE_DEFAULT_ATTEMPTS: usize = 3;
 /// `wanted`'s tenant again. `current` is the credential the grant minted; each
 /// attempt continues from the latest one, since the grant rotates the refresh
 /// token. Gives up after [`RESTORE_DEFAULT_ATTEMPTS`] so the caller asks for a
-/// re-login rather than run against another organization.
+/// re-login rather than run against another organization. `rule` picks each
+/// grant's bearer, as it did for the first.
 async fn restore_default_tenant(
     wanted: &CredentialsEntry,
     mut current: CredentialsEntry,
     auth_domain: &str,
     token_url: &str,
     client_id: &str,
+    rule: BearerRule,
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let was = wanted.tenant_id.as_str();
     for attempt in 1..=RESTORE_DEFAULT_ATTEMPTS {
-        match switch_and_refresh(&current, was, auth_domain, token_url, client_id).await {
+        match switch_and_refresh(&current, was, auth_domain, token_url, client_id, rule).await {
             Ok(restored) if restored.tenant_id == was => return Ok(restored),
             Ok(minted) => {
                 crate::trace!(
@@ -2872,11 +3077,13 @@ fn tenant_moved(prior: &CredentialsEntry, fresh: &CredentialsEntry) -> Option<St
 }
 
 /// The standard OAuth refresh grant against `token_url`, the issuer's token
-/// endpoint as [`resolve_oidc_endpoints`] found it.
+/// endpoint as [`resolve_oidc_endpoints`] found it, with `rule` picking the
+/// bearer ([`CredentialsEntry::renewed`]).
 async fn refresh_with_grant(
     entry: &CredentialsEntry,
     token_url: &str,
     client_id: &str,
+    rule: BearerRule,
 ) -> anyhow::Result<CredentialsEntry> {
     let token_resp: TokenResponse = post_form(
         token_url,
@@ -2888,7 +3095,7 @@ async fn refresh_with_grant(
         "token refresh",
     )
     .await?;
-    entry.renewed(token_resp)
+    entry.renewed(token_resp, rule)
 }
 
 /// Set the user's default tenant at the issuer, the one its login and refresh
@@ -2920,14 +3127,16 @@ async fn switch_and_refresh(
     auth_domain: &str,
     token_url: &str,
     client_id: &str,
+    rule: BearerRule,
 ) -> anyhow::Result<CredentialsEntry> {
     set_default_tenant(auth_domain, &current.access_token, tenant_id).await?;
-    refresh_with_grant(current, token_url, client_id).await
+    refresh_with_grant(current, token_url, client_id, rule).await
 }
 
 /// Re-mint `entry` for `tenant_id`, one of its user's organizations, by making
 /// it the user's default tenant at the issuer and re-running the refresh grant
-/// ([`switch_and_refresh`]). Errors unless the result is for `tenant_id`.
+/// ([`switch_and_refresh`]), keeping the bearer kind `entry` was minted with.
+/// Errors unless the result is for `tenant_id`.
 async fn select_tenant(
     entry: &CredentialsEntry,
     tenant_id: &str,
@@ -2937,8 +3146,16 @@ async fn select_tenant(
         return Err(anyhow::anyhow!("no refresh token stored — cannot re-mint"));
     }
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
-    let refreshed =
-        switch_and_refresh(entry, tenant_id, auth_domain, &endpoints.token, client_id).await?;
+    let rule = BearerRule::for_refresh(entry.prefer_id_token, None);
+    let refreshed = switch_and_refresh(
+        entry,
+        tenant_id,
+        auth_domain,
+        &endpoints.token,
+        client_id,
+        rule,
+    )
+    .await?;
     if refreshed.tenant_id != tenant_id {
         return Err(anyhow::anyhow!(
             "the issuer minted a token for organization {} instead",
@@ -2976,6 +3193,17 @@ fn session_expired_message(profile: &str) -> String {
     format!(
         "session expired\n\nRun `{}` to re-authenticate.",
         login_hint(profile)
+    )
+}
+
+/// Shown when `deployment` asks for the access_token and its issuer's refresh
+/// grant returned none ([`RefreshFailure::NoAccessToken`]).
+fn no_access_token_message(deployment: &str) -> String {
+    format!(
+        "the identity provider returned no access token, which deployment {deployment:?} \
+         asks for\n\nRun `{}` to log in again. If that fails the same way, the \
+         deployment's identity provider must issue access tokens to its CLI client.",
+        login_hint(deployment)
     )
 }
 
@@ -3107,7 +3335,8 @@ pub fn resolve_access_token(profile: &str, deployment: &str) -> anyhow::Result<O
         TokenAction::Use => Ok(Some(entry.access_token)),
         TokenAction::Expired => Err(anyhow::anyhow!(session_expired_message(deployment))),
         TokenAction::Refresh => {
-            let refreshed = block_on(refresh_access_token(&entry))
+            let advertised = block_on(refresh_bearer(deployment));
+            let refreshed = block_on(refresh_access_token(&entry, advertised))
                 .map_err(|failure| anyhow::anyhow!(failure.message(deployment)))?;
             store_credential(profile, deployment, refreshed.clone())?;
             Ok(Some(refreshed.access_token))
@@ -3410,12 +3639,13 @@ struct AuthSessionInner {
     /// there is always one; see [`login_state`] for the port suffix the relay
     /// reads.
     expected_state: String,
-    /// Whether this login's bearer is the OIDC `id_token` rather than the
-    /// `access_token`. A property of what the credential will be *sent to*, not of
-    /// how the browser came back: a deployment's cache/BES edges validate the
-    /// id_token, while Aspect Cloud addresses an API that validates the
-    /// access_token — and both may reach the IdP through the same relay.
-    prefer_id_token: bool,
+    /// Which of the grant's tokens is this login's bearer ([`BearerRule::for_login`]).
+    /// A property of what the credential will be *sent to*, not of how the browser
+    /// came back: Aspect Cloud addresses an API that validates the access_token,
+    /// while a deployment's cache/BES edges validate whichever token its discovery
+    /// document names, the id_token when it names none — and both may reach the
+    /// IdP through the same relay.
+    bearer: BearerRule,
     /// Whether this is an Aspect Cloud login, whose OAuth client is Aspect's
     /// rather than the deployment's.
     aspect_cloud: bool,
@@ -3428,9 +3658,8 @@ impl AuthSessionInner {
     /// With `require_state = false`, an omitted state is allowed but a supplied one
     /// is still validated.
     ///
-    /// Returns the credential for this session's bearer — the `id_token` for a
-    /// self-hosted deployment, the `access_token` for Aspect Cloud, per
-    /// `prefer_id_token`. One grant, one credential.
+    /// Returns the credential for this session's bearer, per
+    /// [`Self::bearer`]. One grant, one credential.
     async fn complete(
         self,
         code: String,
@@ -3450,15 +3679,14 @@ impl AuthSessionInner {
         )
         .await?;
         let refresh_token = token_resp.refresh_token.clone();
-        // Recorded so refresh keeps minting the same kind rather than downgrading
-        // to whatever the grant happens to return.
-        let prefer_id_token = self.prefer_id_token;
         CredentialsEntry::from_bearer(
-            token_resp.bearer(prefer_id_token)?,
+            token_resp.bearer(self.bearer)?,
             refresh_token,
             Some(self.env.domain.clone()),
             Some(self.env.client_id.clone()),
-            prefer_id_token,
+            // Recorded so refresh keeps minting the same kind rather than
+            // downgrading to whatever the grant happens to return.
+            self.bearer.prefers_id_token(),
             // Two looks at the issuer, when the authorize URL was built and now,
             // so one discovery request failing does not record a plain OIDC
             // credential for an issuer with the tenant API.
@@ -4228,9 +4456,6 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
-        // The bearer is a separate question from the flow: a deployment's cache/BES
-        // edges validate the id_token, while Aspect Cloud addresses an API that
-        // validates the access_token and has the id_token filed alongside it.
         let redirect_uri = login_redirect_uri(&selected).ok_or_else(|| {
             TaskExit::error(format!(
                 "deployment {:?} advertises no login redirect URI and serves no endpoint to \
@@ -4238,7 +4463,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 selected.name
             ))
         })?;
-        let session = build_login_session(env, redirect_uri, !selected.builtin, selected.builtin)?;
+        let bearer = BearerRule::for_login(&selected, block_on(current_bearer(&selected)));
+        let session = build_login_session(env, redirect_uri, bearer, selected.builtin)?;
         Ok(heap.alloc(session))
     }
 
@@ -4399,7 +4625,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // later 401s.
         let entry = match classify_token(&entry) {
             TokenAction::Use => entry,
-            TokenAction::Refresh => match block_on(refresh_access_token(&entry)) {
+            TokenAction::Refresh => match block_on(async {
+                refresh_access_token(&entry, refresh_bearer(&deployment).await).await
+            }) {
                 Ok(refreshed) => {
                     store_credential(&profile, &deployment, refreshed.clone())?;
                     refreshed
@@ -4742,6 +4970,7 @@ mod tests {
             authorize_params: BTreeMap::new(),
             endpoints: Endpoints::default(),
             login_redirect_uri: None,
+            bearer: None,
         }
     }
 
@@ -5479,6 +5708,7 @@ mod tests {
             client_id: client_id.to_string(),
             scopes: vec!["openid".to_string()],
             authorize_params: BTreeMap::new(),
+            bearer: String::new(),
         }
     }
 
@@ -5664,6 +5894,7 @@ mod tests {
                 client_id: "nested-client".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
                 authorize_params: BTreeMap::new(),
+                bearer: String::new(),
             }],
             vec!["https://legacy.auth.aspect.build"],
             "legacy-client",
@@ -5794,6 +6025,7 @@ mod tests {
             scopes: vec![],
             endpoints: Endpoints::default(),
             authorize_params: BTreeMap::new(),
+            bearer: None,
         };
         // No advertised scopes → the standard OIDC login set.
         assert_eq!(auth_env_from(&d).unwrap().scopes, DEFAULT_LOGIN_SCOPES);
@@ -6498,6 +6730,7 @@ mod tests {
                 client_id: client_id.to_string(),
                 scopes: vec!["openid".to_string()],
                 authorize_params: BTreeMap::new(),
+                bearer: String::new(),
             }],
             authorization_servers: Vec::new(),
             client_id: String::new(),
@@ -6655,22 +6888,44 @@ mod tests {
 
     #[test]
     fn cloud_bearer_prefers_access_token_then_id_token() {
-        // The Aspect Cloud flow (prefer_id_token = false) validates the
+        // The Aspect Cloud flow validates the
         // access_token, falling back to the id_token only if absent.
-        assert_eq!(token_response("acc", "idt").bearer(false).unwrap(), "acc");
-        assert_eq!(token_response("", "idt").bearer(false).unwrap(), "idt");
-        assert!(token_response("", "").bearer(false).is_err());
+        assert_eq!(
+            token_response("acc", "idt")
+                .bearer(BearerRule::AccessTokenElseIdToken)
+                .unwrap(),
+            "acc"
+        );
+        assert_eq!(
+            token_response("", "idt")
+                .bearer(BearerRule::AccessTokenElseIdToken)
+                .unwrap(),
+            "idt"
+        );
+        assert!(
+            token_response("", "")
+                .bearer(BearerRule::AccessTokenElseIdToken)
+                .is_err()
+        );
     }
 
     #[test]
     fn endpoint_bearer_requires_id_token_and_never_downgrades() {
-        // The self-hosted endpoint flow (prefer_id_token = true) validates the
-        // id_token, so bearer() must return it even when an access_token is also
+        // A deployment that validates the id_token needs bearer() to return it even when an access_token is also
         // present...
-        assert_eq!(token_response("acc", "idt").bearer(true).unwrap(), "idt");
+        assert_eq!(
+            token_response("acc", "idt")
+                .bearer(BearerRule::IdToken)
+                .unwrap(),
+            "idt"
+        );
         // ...and must error rather than downgrade to the access_token when a
         // (refresh) grant drops the id_token — the edge would 401 on it.
-        assert!(token_response("acc", "").bearer(true).is_err());
+        assert!(
+            token_response("acc", "")
+                .bearer(BearerRule::IdToken)
+                .is_err()
+        );
     }
 
     #[test]
@@ -7020,6 +7275,7 @@ mod tests {
                     ("access_type".to_string(), "offline".to_string()),
                     ("prompt".to_string(), "consent".to_string()),
                 ]),
+                bearer: String::new(),
             }],
             vec![],
             "",
@@ -7503,7 +7759,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.tenant_id, "t1");
         assert_eq!(refreshed.refresh_token, "rotated");
@@ -7525,7 +7781,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.issuer_kind, IssuerKind::TenantApi);
         assert_eq!(refreshed.tenant_id, "t1");
@@ -7573,7 +7829,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.tenant_id, "t1");
         assert_eq!(refreshed.refresh_token, "rotated");
@@ -7601,7 +7857,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(
             failure,
@@ -7633,7 +7889,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(
             failure,
@@ -7657,7 +7913,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(
             failure,
@@ -7675,7 +7931,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let refreshed = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap();
         assert_eq!(refreshed.issuer_kind, IssuerKind::Oidc);
 
@@ -7695,7 +7951,7 @@ mod tests {
         let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
 
         let failure = current_thread_runtime()
-            .block_on(refresh_access_token(&entry))
+            .block_on(refresh_access_token(&entry, None))
             .unwrap_err();
         assert_eq!(failure, RefreshFailure::Failed);
         issuer.finish();
@@ -7958,7 +8214,7 @@ mod tests {
                     authorize_params: BTreeMap::new(),
                 },
                 expected_state: "nonce.54321".to_string(),
-                prefer_id_token: false,
+                bearer: BearerRule::AccessTokenElseIdToken,
                 aspect_cloud: false,
                 issuer_kind: IssuerKind::Oidc,
             })),
@@ -8306,5 +8562,216 @@ mod tests {
             &[&["false"], &["aspect-no-such-browser-launcher"]],
             "https://example.com"
         ));
+    }
+
+    /// A discovery document whose one authorization server advertises `bearer`
+    /// verbatim, or omits the field when `None`.
+    fn document_with_bearer(bearer: Option<&str>) -> ProtectedResource {
+        let field = bearer
+            .map(|b| format!(r#","bearer":"{b}""#))
+            .unwrap_or_default();
+        serde_json::from_str(&format!(
+            r#"{{
+                "aspect_authorization_servers": [
+                    {{"issuer": "https://auth.acme.example", "client_id": "acme-cli"{field}}}
+                ],
+                "aspect_endpoints": {{"cache": "remote.acme.example"}}
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn advertised_bearer_is_parsed_per_authorization_server() {
+        let bearer = |doc: ProtectedResource| doc.auth_servers()[0].bearer;
+        assert_eq!(bearer(document_with_bearer(None)), None);
+        assert_eq!(bearer(document_with_bearer(Some(""))), None);
+        assert_eq!(
+            bearer(document_with_bearer(Some("access_token"))),
+            Some(BearerKind::AccessToken)
+        );
+        assert_eq!(
+            bearer(document_with_bearer(Some("id_token"))),
+            Some(BearerKind::IdToken)
+        );
+        // An unknown value is ignored rather than failing the document.
+        let unknown = document_with_bearer(Some("refresh_token"));
+        assert_eq!(unknown.auth_servers().len(), 1);
+        assert_eq!(bearer(unknown), None);
+    }
+
+    #[test]
+    fn configure_records_the_advertised_bearer_and_omits_an_absent_one() {
+        let record = |doc: &ProtectedResource| {
+            let servers = doc.auth_servers();
+            deployment_from_discovery(
+                "acme".to_string(),
+                "remote.acme.example",
+                doc,
+                Some(&servers[0]),
+            )
+        };
+        let advertised = record(&document_with_bearer(Some("access_token")));
+        assert_eq!(advertised.bearer, Some(BearerKind::AccessToken));
+        let json = serde_json::to_string(&advertised).unwrap();
+        assert!(json.contains(r#""bearer":"access_token""#), "{json}");
+        let back: Deployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.bearer, Some(BearerKind::AccessToken));
+
+        let absent = record(&document_with_bearer(None));
+        assert_eq!(absent.bearer, None);
+        assert!(!serde_json::to_string(&absent).unwrap().contains("bearer"));
+    }
+
+    #[test]
+    fn the_live_bearer_is_the_one_advertised_for_the_recorded_issuer() {
+        let doc = document_with_bearer(Some("access_token"));
+        let servers = doc.auth_servers();
+        let recorded = deployment_from_discovery(
+            "acme".into(),
+            "remote.acme.example",
+            &doc,
+            Some(&servers[0]),
+        );
+        assert_eq!(doc.bearer_for(&recorded), Some(BearerKind::AccessToken));
+
+        // Another issuer's or client's entry says nothing about this deployment.
+        let mut other_client = recorded.clone();
+        other_client.client_id = Some("someone-else".into());
+        assert_eq!(doc.bearer_for(&other_client), None);
+        let mut other_issuer = recorded.clone();
+        other_issuer.issuer = Some("https://auth.elsewhere.example".into());
+        assert_eq!(doc.bearer_for(&other_issuer), None);
+    }
+
+    #[test]
+    fn a_refresh_does_not_wait_out_a_silent_discovery_host() {
+        // Accepts the connection and never answers the TLS handshake.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut deployment = dep("acme", false);
+        deployment.hosts = vec![silent.local_addr().unwrap().to_string()];
+        deployment.bearer = Some(BearerKind::AccessToken);
+
+        let started = Instant::now();
+        let bearer = current_thread_runtime()
+            .block_on(bounded_bearer(&deployment, Duration::from_millis(200)));
+        assert_eq!(bearer, Some(BearerKind::AccessToken));
+        assert!(
+            started.elapsed() < DISCOVERY_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_login_sends_the_bearer_the_deployment_asks_for() {
+        let configured = dep("acme", false);
+        assert_eq!(
+            BearerRule::for_login(&configured, None),
+            BearerRule::IdToken
+        );
+        assert_eq!(
+            BearerRule::for_login(&configured, Some(BearerKind::IdToken)),
+            BearerRule::IdToken
+        );
+        assert_eq!(
+            BearerRule::for_login(&configured, Some(BearerKind::AccessToken)),
+            BearerRule::AccessToken
+        );
+
+        // Aspect Cloud's bearer is fixed, whatever is advertised.
+        let cloud = aspect_cloud_deployment();
+        for advertised in [
+            None,
+            Some(BearerKind::IdToken),
+            Some(BearerKind::AccessToken),
+        ] {
+            assert_eq!(
+                BearerRule::for_login(&cloud, advertised),
+                BearerRule::AccessTokenElseIdToken
+            );
+        }
+    }
+
+    #[test]
+    fn an_access_token_bearer_is_required_when_asked_for() {
+        assert_eq!(
+            token_response("acc", "idt")
+                .bearer(BearerRule::AccessToken)
+                .unwrap(),
+            "acc"
+        );
+        let err = token_response("", "idt")
+            .bearer(BearerRule::AccessToken)
+            .unwrap_err();
+        assert!(err.downcast_ref::<NoAccessToken>().is_some(), "{err}");
+    }
+
+    /// An expired id_token credential from `issuer`, as a login to a deployment
+    /// that advertised no `bearer` stores it.
+    fn stored_id_token_entry(issuer: &str) -> CredentialsEntry {
+        let mut entry = stored_entry(issuer, "t1", IssuerKind::Oidc);
+        entry.prefer_id_token = true;
+        entry
+    }
+
+    /// The refresh grant's routes, answering with `body` as the token response.
+    fn respond_with_tokens(request: &Received, body: &str) -> (u16, String) {
+        match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            "/oauth/token" => (200, body.to_string()),
+            other => panic!("unexpected request to {other}"),
+        }
+    }
+
+    #[test]
+    fn a_stored_id_token_credential_switches_when_its_deployment_asks_for_the_access_token() {
+        let access = jwt_with_payload(r#"{"tenantId":"t1","kind":"access"}"#);
+        let id = jwt_with_payload(r#"{"tenantId":"t1","kind":"id"}"#);
+        let body =
+            format!(r#"{{"access_token":"{access}","id_token":"{id}","refresh_token":"rotated"}}"#);
+        let issuer = MockIssuer::start(2, move |request| respond_with_tokens(request, &body));
+        let entry = stored_id_token_entry(&issuer.url());
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry, Some(BearerKind::AccessToken)))
+            .unwrap();
+        assert_eq!(refreshed.access_token, access);
+        // Recorded, so the next refresh stays on the access_token even if the
+        // deployment stops advertising.
+        assert!(!refreshed.prefer_id_token);
+        assert_eq!(issuer.finish().len(), 2);
+    }
+
+    #[test]
+    fn a_stored_id_token_credential_keeps_its_kind_when_nothing_is_advertised() {
+        let access = jwt_with_payload(r#"{"tenantId":"t1","kind":"access"}"#);
+        let id = jwt_with_payload(r#"{"tenantId":"t1","kind":"id"}"#);
+        let body =
+            format!(r#"{{"access_token":"{access}","id_token":"{id}","refresh_token":"rotated"}}"#);
+        let issuer = MockIssuer::start(2, move |request| respond_with_tokens(request, &body));
+        let entry = stored_id_token_entry(&issuer.url());
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry, None))
+            .unwrap();
+        assert_eq!(refreshed.access_token, id);
+        assert!(refreshed.prefer_id_token);
+        assert_eq!(issuer.finish().len(), 2);
+    }
+
+    #[test]
+    fn a_refresh_asked_for_the_access_token_fails_when_the_grant_has_none() {
+        let id = jwt_with_payload(r#"{"tenantId":"t1"}"#);
+        let body = format!(r#"{{"id_token":"{id}","refresh_token":"rotated"}}"#);
+        let issuer = MockIssuer::start(2, move |request| respond_with_tokens(request, &body));
+        let entry = stored_id_token_entry(&issuer.url());
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry, Some(BearerKind::AccessToken)));
+        let failure = refreshed.unwrap_err();
+        assert_eq!(failure, RefreshFailure::NoAccessToken);
+        assert!(failure.message("acme").contains("no access token"));
+        assert_eq!(issuer.finish().len(), 2);
     }
 }
