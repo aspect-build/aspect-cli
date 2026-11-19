@@ -11,11 +11,13 @@ two spellings but not the two hosts is the behaviour these pin down.
 
 load(
     "@aspect//worktree.axl",
+    "testonly_age_out",
     "testonly_base_note",
     "testonly_being_set_up",
     "testonly_capped",
     "testonly_closest",
     "testonly_collected_refusal",
+    "testonly_drop_deferred",
     "testonly_follow_caller",
     "testonly_free_columns",
     "testonly_held_by",
@@ -23,6 +25,7 @@ load(
     "testonly_history_columns",
     "testonly_history_rows",
     "testonly_hook_view",
+    "testonly_hooked_prunable",
     "testonly_hosted_lease",
     "testonly_indented",
     "testonly_is_branch",
@@ -34,9 +37,13 @@ load(
     "testonly_own_subagent",
     "testonly_porcelain_entries",
     "testonly_protected_from",
+    "testonly_prune_call",
+    "testonly_prune_choices",
+    "testonly_prune_released",
     "testonly_push_command",
     "testonly_release_all_plan",
     "testonly_release_grade",
+    "testonly_release_report",
     "testonly_remote_branches",
     "testonly_render_sessions",
     "testonly_reservation_may_clear",
@@ -115,6 +122,7 @@ load(
     "work_in",
     "write_registry",
 )
+load("./worktrees_trait.axl", "Worktrees")
 
 def _eq(label, got, want):
     if got != want:
@@ -2736,6 +2744,366 @@ def _test_an_interrupted_add_takes_its_own_checkout_with_it(ctx):
     }}}
     _eq("nothing in it to keep", testonly_reservation_may_clear(ctx, clean.pool, registry, clean.slot_id), True)
 
+def _prune_pool(ctx):
+    """A pool under a throwaway home, with a second pool beside it, and a free
+    slot directory for each id asked for. Returns the pool, the output root, a
+    function restoring HOME, and the throwaway home."""
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-wt-prune")
+    root = home + "/.aspect/worktrees"
+    pool = {"id": "github.com/acme/web", "git_common_dir": home + "/clone/.git", "dir": root + "/github.com/acme/web"}
+    ctx.std.fs.create_dir_all(pool["dir"])
+    ctx.std.fs.create_dir_all(root + "/github.com/acme/api")
+    ctx.std.fs.write(root + "/github.com/acme/api/registry.json", json.encode({"version": 1, "slots": {
+        "eeeeeeeeeeee": _slot("/other/.git", state = LEASED),
+    }}))
+    saved = ctx.std.env.var("HOME")
+    ctx.std.env.set_var("HOME", home)
+
+    def restore():
+        if saved != None:
+            ctx.std.env.set_var("HOME", saved)
+
+    return struct(pool = pool, root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root"), restore = restore, home = home)
+
+def _test_the_prune_hook_overrides_the_idle_rule_both_ways(ctx):
+    """`prune_slot` decides for this clone's free slots in either direction: a
+    fresh slot it names goes, a stale one it keeps stays, and None leaves the
+    idle rule in charge. Leased slots and another clone's are never asked about,
+    and each call sees the slot and the pool as documented."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    mine = pool["git_common_dir"]
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(mine, age_days = 0),
+        "bbbbbbbbbbbb": _slot(mine, age_days = 31),
+        "cccccccccccc": _slot(mine, age_days = 0),
+        "dddddddddddd": _slot(mine, state = LEASED, age_days = 900),
+    }}
+    for sid in registry["slots"]:
+        ctx.std.fs.create_dir_all(slot_path(pool, sid))
+    seen = []
+
+    def hook(c, slot, p):
+        seen.append((slot, p))
+        return {"aaaaaaaaaaaa": True, "bbbbbbbbbbbb": False}.get(slot["id"])
+
+    dropped = testonly_age_out(ctx, pool, registry, env.root, hooks = [hook])
+    env.restore()
+    _eq("one went", dropped, 1)
+    _eq("what is left", sorted(registry["slots"].keys()), ["bbbbbbbbbbbb", "cccccccccccc", "dddddddddddd"])
+    _eq("its directory with it", ctx.std.fs.exists(slot_path(pool, "aaaaaaaaaaaa")), False)
+    _eq("only the free ones are asked", sorted([s["id"] for s, _ in seen]), ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"])
+
+    slot, p = seen[0]
+    _eq("the slot's fields", sorted(slot.keys()), sorted([
+        "base_present",
+        "created_ms",
+        "id",
+        "idle_ms",
+        "last_branch",
+        "last_commit",
+        "lease_count",
+        "lock_digest",
+        "output_base",
+        "path",
+        "server_pid",
+    ]))
+    _eq("its path", slot["path"], slot_path(pool, slot["id"]))
+    _eq("no server", slot["server_pid"], 0)
+    _eq("the event", p["event"], "add")
+    _eq("the threshold in effect", p["max_idle_days"], 30)
+    _eq("not a dry run", p["dry_run"], False)
+    _eq("this pool's counts", p["slots"], {"total": 4, "free": 3, "leased": 1, "reserved": 0})
+    _eq("what max_slots counts", p["owned"], 4)
+    _eq("the clone", p["clone"], env.home + "/clone")
+    _eq("the other pool, by id", [o["id"] for o in p["other_pools"]], ["github.com/acme/api"])
+    _eq("and its counts", p["other_pools"][0]["slots"], {"total": 1, "free": 0, "leased": 1, "reserved": 0})
+
+    # Left to the built-in, the stale slot goes and the fresh one stays.
+    env = _prune_pool(ctx)
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(env.pool["git_common_dir"], age_days = 0),
+        "bbbbbbbbbbbb": _slot(env.pool["git_common_dir"], age_days = 31),
+    }}
+    testonly_age_out(ctx, env.pool, registry, env.root, hooks = [lambda c, s, p: None])
+    env.restore()
+    _eq("None is the idle rule", sorted(registry["slots"].keys()), ["aaaaaaaaaaaa"])
+
+def _test_prune_tells_the_hook_its_threshold_and_asks_once(ctx):
+    """An `aspect worktree prune` that names no slot asks the hook with its own
+    `--max-idle-days` and `--dry-run`. Its answers are kept, so the re-check
+    after the confirmation judges a re-read registry by the same answers
+    without asking again, and a slot leased meanwhile drops out."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    mine = pool["git_common_dir"]
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(mine, age_days = 0),
+        "bbbbbbbbbbbb": _slot(mine, age_days = 10),
+        "cccccccccccc": _slot(mine, age_days = 10),
+    }}
+    calls = []
+
+    def hook(c, slot, p):
+        calls.append((slot["id"], p["event"], p["max_idle_days"], p["dry_run"]))
+        return {"aaaaaaaaaaaa": True, "bbbbbbbbbbbb": False}.get(slot["id"])
+
+    call = testonly_prune_call("prune", 7, True)
+    first = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, hooks = [hook])
+    _eq("chosen, built-in, and kept", first.ids, ["aaaaaaaaaaaa", "cccccccccccc"])
+    _eq("told the command's own settings", calls[0][1:], ("prune", 7, True))
+
+    registry["slots"]["aaaaaaaaaaaa"]["state"] = LEASED
+    again = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, previous = first, hooks = [hook])
+    _eq("not asked again", len(calls), 3)
+    _eq("a slot leased meanwhile is out", again.ids, ["cccccccccccc"])
+
+    # Leased and given back while the prompt sat there: no longer the slot the
+    # hook judged, so the built-in rule judges it, and it has just been used.
+    registry["slots"]["aaaaaaaaaaaa"] = _slot(mine, age_days = 0)
+    registry["slots"]["aaaaaaaaaaaa"]["lease_count"] = 1
+    again = testonly_hooked_prunable(ctx, pool, registry, env.root, call, True, previous = first, hooks = [hook])
+    env.restore()
+    _eq("a slot used since is judged afresh", again.ids, ["cccccccccccc"])
+    _eq("still not asked again", len(calls), 3)
+
+def _test_add_keeps_the_slot_it_reuses_whatever_the_hook_says(ctx):
+    """On `add`, the slots the hook chooses are deferred rather than deleted
+    in the sweep, and go only once `add` has picked its own: deleting the free
+    slot it would reuse would just make it build a new one cold. The idle
+    rule's own picks still go at once."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    mine = pool["git_common_dir"]
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(mine),
+        "bbbbbbbbbbbb": _slot(mine, age_days = 31),
+        "cccccccccccc": _slot(mine),
+    }}
+    for sid in registry["slots"]:
+        ctx.std.fs.create_dir_all(slot_path(pool, sid))
+    deferred = []
+    dropped = testonly_age_out(ctx, pool, registry, env.root, deferred = deferred, hooks = [
+        lambda c, s, p: True if s["id"] != "bbbbbbbbbbbb" else None,
+    ])
+    _eq("the idle rule's pick goes at once", (dropped, "bbbbbbbbbbbb" in registry["slots"]), (1, False))
+    _eq("the hook's wait", deferred, ["aaaaaaaaaaaa", "cccccccccccc"])
+    _eq("and are still there to pick from", sorted(registry["slots"].keys()), ["aaaaaaaaaaaa", "cccccccccccc"])
+
+    # `add` reserves the slot it picked, so that one is no longer free.
+    registry["slots"]["aaaaaaaaaaaa"]["state"] = RESERVED
+    testonly_drop_deferred(ctx, pool, registry, env.root, deferred)
+    env.restore()
+    _eq("the rest go after the pick", sorted(registry["slots"].keys()), ["aaaaaaaaaaaa"])
+    _eq("persisted", sorted(read_registry(ctx.std, pool["dir"])["slots"].keys()), ["aaaaaaaaaaaa"])
+
+def _test_a_slot_with_no_owner_recorded_is_asked_about(ctx):
+    """A free slot with no `owner_git_dir` ages out as this clone's own
+    (`prunable_slots`), so the hook is asked about it too."""
+    env = _prune_pool(ctx)
+    registry = {"slots": {"aaaaaaaaaaaa": _slot("")}}
+    seen = []
+    testonly_hooked_prunable(ctx, env.pool, registry, env.root, testonly_prune_call("add", 30), False, hooks = [
+        lambda c, s, p: seen.append(s["id"]),
+    ])
+    env.restore()
+    _eq("asked", seen, ["aaaaaaaaaaaa"])
+
+def _test_release_asks_the_hook_about_the_slot_it_freed(ctx):
+    """On `release` the hook is asked once, with no idle threshold: True
+    deletes the slot there and then, False and None keep it, and a slot whose
+    base a server holds is kept with the reason said."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    sid = "aaaaaaaaaaaa"
+    seen = []
+
+    def remembers(answer):
+        def hook(c, slot, p):
+            seen.append((p["event"], p["max_idle_days"], p["dry_run"]))
+            return answer
+
+        return hook
+
+    for answer in [None, False]:
+        registry = {"slots": {sid: _slot(pool["git_common_dir"])}}
+        out = testonly_prune_released(ctx, pool, registry, sid, env.root, [remembers(answer)])
+        _eq("kept for %r" % answer, (out.dropped, out.kept, sid in registry["slots"]), (False, "", True))
+
+    registry = {"slots": {sid: _slot(pool["git_common_dir"])}}
+    ctx.std.fs.create_dir_all(slot_path(pool, sid))
+    out = testonly_prune_released(ctx, pool, registry, sid, env.root, [remembers(True)])
+    _eq("deleted", (out.dropped, sid in registry["slots"], ctx.std.fs.exists(slot_path(pool, sid))), (True, False, False))
+    _eq("told it is a release", seen[-1], ("release", None, False))
+
+    registry = {"slots": {sid: _slot(pool["git_common_dir"])}}
+    base = output_base_of(ctx.std, slot_path(pool, sid), root = env.root)
+    ctx.std.fs.create_dir_all(base + "/server")
+    server = ctx.std.process.command("sh").args(["-c", "sleep 30; true", "sh", "--output_base=" + base]).stdout("null").stderr("null").spawn()
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(server.id()) + "\n")
+    out = testonly_prune_released(ctx, pool, registry, sid, env.root, [remembers(True)])
+    server.kill()
+    server.wait()
+    env.restore()
+    _eq("not under a live server", (out.dropped, sid in registry["slots"]), (False, True))
+    _eq("and says why", "Bazel server" in out.kept, True)
+
+def _released(pruned, server = 0):
+    """What `_release_report` reads of a released slot, with nothing else to
+    report: no head, so no remote is asked about it."""
+    return struct(
+        pruned = pruned,
+        target = "aaaaaaaaaaaa",
+        path = "/pool/slot",
+        head = "",
+        branched = "",
+        released = "fix/login",
+        holder = {},
+        overrode = False,
+        orphans = 0,
+        counted = "",
+        tips = [],
+        tip = "",
+        discarded = [],
+        server = server,
+        left = False,
+    )
+
+def _test_the_release_report_says_what_the_hook_did(ctx):
+    """`slot_deleted` says whether the hook's choice went through. A choice
+    `drop_slot` refused is said as such, in place of the plain warning about
+    the server that refused it, and the hook's own failures are reported."""
+    pool = {"git_common_dir": "/clone/.git"}
+    codes = lambda doc: [w["code"] for w in doc["warnings"]]
+
+    doc = testonly_release_report(ctx, pool, _released(struct(dropped = True, kept = "", warnings = [])), "")
+    _eq("deleted", (doc["slot_deleted"], codes(doc)), (True, []))
+
+    refused = struct(dropped = False, kept = "a Bazel server (pid 7) still holds it", warnings = [])
+    doc = testonly_release_report(ctx, pool, _released(refused, server = 7), "")
+    _eq("refused, said once", (doc["slot_deleted"], codes(doc)), (False, ["prune_refused"]))
+    _eq("with the reason", doc["warnings"][0]["reason"], refused.kept)
+
+    kept = struct(dropped = False, kept = "", warnings = [{"code": "prune_hook_failed", "message": "m"}])
+    doc = testonly_release_report(ctx, pool, _released(kept, server = 7), "")
+    _eq("a broken hook and the warm server", codes(doc), ["prune_hook_failed", "bazel_server_running"])
+
+def _test_nothing_to_prune_names_the_hook_when_it_kept_slots(ctx):
+    """A pool whose free slots the hook kept must not be reported as having
+    none idle long enough, which would send the reader to `--max-idle-days`."""
+    registry = {"slots": {"aaaaaaaaaaaa": _slot("/clone/.git")}}
+    _eq("the hook", testonly_nothing_to_prune(registry, "/clone/.git", 30, 1), "nothing to prune: the prune_slot hook kept 1 free slot, and no other free slot has been idle for 30 days")
+    _eq("the threshold", testonly_nothing_to_prune(registry, "/clone/.git", 30), "nothing to prune: no free slot has been idle for 30 days")
+
+def _test_a_broken_prune_hook_is_reported_by_add(ctx):
+    """The age-out runs inside `add`, so a hook that fails there is reported
+    in `add`'s own warnings, not only on stderr — and the idle rule still runs."""
+    env = _prune_pool(ctx)
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(env.pool["git_common_dir"], age_days = 31),
+    }}
+    warnings = []
+    dropped = testonly_age_out(ctx, env.pool, registry, env.root, warnings, hooks = [lambda c, s, p: fail("nope")])
+    env.restore()
+    _eq("said", [w["code"] for w in warnings], ["prune_hook_failed"])
+    _eq("the idle rule still ran", dropped, 1)
+
+def _test_a_slow_prune_hook_is_cut_off_and_counted_right(ctx):
+    """Past the budget every answer is discarded, and the warning counts the
+    slots asked, including those the hook left to the built-in."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    registry = {"slots": {sid: _slot(pool["git_common_dir"]) for sid in ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]}}
+
+    def slow(c, s, p):
+        time.sleep(1100)
+        return None
+
+    out = testonly_prune_choices(ctx, pool, registry, sorted(registry["slots"].keys()), env.root, testonly_prune_call("add", 30), [slow])
+    env.restore()
+    _eq("nothing chosen", out.chosen, {})
+    _eq("counted by slots asked", "for 2 of 3 slots" in out.warnings[0]["message"], True)
+
+def _test_the_prune_hook_cannot_delete_under_a_live_server(ctx):
+    """Whatever the hook says, `drop_slot` keeps a slot whose output base a
+    Bazel server still holds — the usual state just after a `release`."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    sid = "aaaaaaaaaaaa"
+    registry = {"slots": {sid: _slot(pool["git_common_dir"])}}
+    path = slot_path(pool, sid)
+    base = output_base_of(ctx.std, path, root = env.root)
+    ctx.std.fs.create_dir_all(path)
+    ctx.std.fs.create_dir_all(base + "/server")
+    server = ctx.std.process.command("sh").args(["-c", "sleep 30; true", "sh", "--output_base=" + base]).stdout("null").stderr("null").spawn()
+    ctx.std.fs.write(base + "/server/server.pid.txt", str(server.id()) + "\n")
+    pids = []
+
+    def hook(c, slot, p):
+        pids.append(slot["server_pid"])
+        return True
+
+    dropped = testonly_age_out(ctx, pool, registry, env.root, hooks = [hook])
+    server.kill()
+    server.wait()
+    env.restore()
+    _eq("nothing went", dropped, 0)
+    _eq("the slot stays", sid in registry["slots"], True)
+    _eq("the hook was shown the server", pids, [server.id()])
+
+def _test_a_broken_prune_hook_falls_back_to_the_built_in(ctx):
+    """A hook that fails or answers with anything but True, False or None has
+    every answer discarded, said once, so no command judges some slots by the
+    hook and others by the built-in. A hook cannot change what the next call
+    is shown."""
+    env = _prune_pool(ctx)
+    pool = env.pool
+    registry = {"slots": {
+        "aaaaaaaaaaaa": _slot(pool["git_common_dir"]),
+        "bbbbbbbbbbbb": _slot(pool["git_common_dir"]),
+    }}
+    ids = sorted(registry["slots"].keys())
+    calls = []
+
+    def fails_second(c, s, p):
+        calls.append(s["id"])
+        if len(calls) > 1:
+            fail("hook exploded")
+        return True
+
+    out = testonly_prune_choices(ctx, pool, registry, ids, env.root, testonly_prune_call("add", 30), [fails_second])
+    _eq("nothing chosen", out.chosen, {})
+    _eq("one warning", [w["code"] for w in out.warnings], ["prune_hook_failed"])
+    _eq("naming the error", "hook exploded" in out.warnings[0]["message"], True)
+
+    out = testonly_prune_choices(ctx, pool, registry, ids, env.root, testonly_prune_call("release"), [lambda c, s, p: 1])
+    _eq("an int is not an answer", out.chosen, {})
+    _eq("said as a type", "returned a value of type int" in out.warnings[0]["message"], True)
+
+    events = []
+
+    def meddles(c, s, p):
+        events.append(p["event"])
+        p["event"] = "evil"
+        return False
+
+    out = testonly_prune_choices(ctx, pool, registry, ids, env.root, testonly_prune_call("release"), [meddles, lambda c, s, p: True])
+    _eq("only the first hook decides", out.chosen, {"aaaaaaaaaaaa": False, "bbbbbbbbbbbb": False})
+    _eq("each call sees the pool as it is", events, ["release", "release"])
+    _eq("nothing to say", out.warnings, [])
+
+    frees = []
+
+    def meddles_deep(c, s, p):
+        frees.append(p["slots"]["free"])
+        p["slots"]["free"] = 99
+        p["other_pools"].append({"id": "evil"})
+        return None
+
+    testonly_prune_choices(ctx, pool, registry, ids, env.root, testonly_prune_call("add", 30), [meddles_deep])
+    env.restore()
+    _eq("nor what is nested in it", frees, [2, 2])
+
 def _broken_hook(ctx, slot, want):
     fail("hook exploded")
 
@@ -3843,6 +4211,17 @@ _UNIT_TESTS = [
     _test_a_lease_stands_while_the_checkout_is_there,
     _test_an_interrupted_add_takes_its_own_checkout_with_it,
     _test_a_broken_score_hook_falls_back_to_the_built_in,
+    _test_the_prune_hook_overrides_the_idle_rule_both_ways,
+    _test_the_prune_hook_cannot_delete_under_a_live_server,
+    _test_prune_tells_the_hook_its_threshold_and_asks_once,
+    _test_release_asks_the_hook_about_the_slot_it_freed,
+    _test_add_keeps_the_slot_it_reuses_whatever_the_hook_says,
+    _test_a_slot_with_no_owner_recorded_is_asked_about,
+    _test_the_release_report_says_what_the_hook_did,
+    _test_nothing_to_prune_names_the_hook_when_it_kept_slots,
+    _test_a_broken_prune_hook_is_reported_by_add,
+    _test_a_slow_prune_hook_is_cut_off_and_counted_right,
+    _test_a_broken_prune_hook_falls_back_to_the_built_in,
     _test_another_clones_slot_is_found_by_its_branch,
     _test_a_stranded_slot_is_not_counted_as_another_clones,
     _test_push_advice_names_a_remote_the_clone_has,
@@ -3901,5 +4280,6 @@ worktree_tests = task(
     kind = "test-worktree",
     group = ["dev"],
     implementation = _test_impl,
+    traits = [Worktrees],
     args = {},
 )
