@@ -150,6 +150,20 @@ rust_test(
 )
 
 rust_test(
+    name = "auth_login_test",
+    srcs = ["tests/auth_login.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/auth_login.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "setup_bazelrc_test",
     srcs = ["tests/setup_bazelrc.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/setup_bazelrc.rs",
