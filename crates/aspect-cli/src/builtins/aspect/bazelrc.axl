@@ -362,14 +362,14 @@ def _serves_remote_execution(endpoint_env, default) -> bool:
         return True
     return default != None and default.exec != ""
 
-def _marked_default(deployments: list):
+def _marked_default(deployments: list[aspect.auth.DeploymentEndpoints]) -> aspect.auth.DeploymentEndpoints | None:
     """The deployment marked default, whatever it serves, or `None`."""
     for d in deployments:
         if d.default:
             return d
     return None
 
-def _default_deployment(deployments: list):
+def _default_deployment(deployments: list[aspect.auth.DeploymentEndpoints]) -> aspect.auth.DeploymentEndpoints | None:
     """The deployment a `bazel` call reaches without naming one, or `None` —
     also when the default serves no Bazel endpoint (one advertising only its web
     UI), since a `bazel` call reaches nothing of it."""
