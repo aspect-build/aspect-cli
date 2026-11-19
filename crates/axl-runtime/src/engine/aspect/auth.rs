@@ -3207,7 +3207,15 @@ async fn restore_default_tenant(
             Err(e) => {
                 crate::trace!(
                     "attempt {attempt}: could not set the default organization back: {e:#}"
-                )
+                );
+                // A busy endpoint already had its retries ([`post_form`]);
+                // trying the switch again only multiplies the wait, and the
+                // tenant change is not what failed.
+                if let Some(refusal) = e.downcast_ref::<HttpRefusal>()
+                    && refusal.is_busy()
+                {
+                    return Err(RefreshFailure::Busy(refusal.status.as_u16()));
+                }
             }
         }
     }
@@ -8307,6 +8315,39 @@ mod tests {
                 .message("acme")
                 .contains("is temporarily unavailable")
         );
+    }
+
+    #[test]
+    fn a_busy_endpoint_while_restoring_the_tenant_is_busy_not_a_tenant_change() {
+        // The first grant lands in t2; the re-grant after the switch is
+        // rate-limited through every retry.
+        let grants = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let issuer = MockIssuer::start_raw(3 + TOKEN_ENDPOINT_ATTEMPTS as usize, {
+            let grants = grants.clone();
+            move |request| match request.path.as_str() {
+                TENANT_API_SWITCH_PATH => (200, String::new(), "{}".into()),
+                "/oauth/token" if grants.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 => {
+                    (429, "Retry-After: 1\r\n".into(), BUSY_BODY.into())
+                }
+                _ => {
+                    let (status, body) = respond_to_grant(request, "t2");
+                    (status, String::new(), body)
+                }
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+        take_backoff_sleeps();
+
+        let failure = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap_err();
+        assert_eq!(failure, RefreshFailure::Busy(429));
+        let switches = issuer
+            .finish()
+            .iter()
+            .filter(|r| r.path == TENANT_API_SWITCH_PATH)
+            .count();
+        assert_eq!(switches, 1);
     }
 
     #[test]
