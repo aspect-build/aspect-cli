@@ -2868,6 +2868,20 @@ fn token_endpoint_host(endpoint: &str) -> Result<String, String> {
     Ok(host)
 }
 
+/// The login error for a token endpoint [`vetted_token_endpoint`] refused, with
+/// the step that fixes it. One from a repository's config is fixed by recording
+/// the deployment in the user's own; anything else is how the deployment
+/// advertises it, which re-running `configure` would only record again.
+fn token_endpoint_refusal(why: &str) -> String {
+    let fix = if why.contains("only your own ~/.aspect/config.json") {
+        "Run `aspect auth configure <host>` against the deployment to record it in \
+         your own config."
+    } else {
+        "The deployment has to advertise a usable one; ask its administrator."
+    };
+    format!("{why}\n\n{fix}")
+}
+
 /// Whether `entry` may be filed for `d`: a credential that refreshes at a token
 /// endpoint must have been minted by `d`'s own vetted one, so a credential from
 /// another deployment's login cannot carry its endpoint in under `d`'s name.
@@ -2915,11 +2929,7 @@ fn build_login_session(
     aspect_cloud: bool,
 ) -> anyhow::Result<AuthSession> {
     if let Err(why) = &env.token_endpoint {
-        return Err(TaskExit::error(format!(
-            "{why}\n\nRe-run `aspect auth configure <host>` against the deployment to record \
-             the token endpoint it advertises."
-        ))
-        .into());
+        return Err(TaskExit::error(token_endpoint_refusal(why)).into());
     }
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .map_err(|e| anyhow::anyhow!("failed to bind the login callback port: {}", e))?;
@@ -3155,7 +3165,7 @@ async fn select_tenant(
     }
     let recorded = entry
         .recorded_token_endpoint()
-        .map_err(|why| anyhow::anyhow!("the stored session {why}"))?;
+        .map_err(|why| anyhow::anyhow!("the stored session cannot be refreshed: {why}"))?;
     let endpoints = resolve_oidc_endpoints(auth_domain).await;
     let token_url = recorded.unwrap_or(&endpoints.token);
     let refreshed = switch_and_refresh(entry, tenant_id, auth_domain, token_url, client_id).await?;
@@ -8737,6 +8747,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("/repo/.aspect/config.json"), "{error}");
+        assert!(error.contains("aspect auth configure"), "{error}");
 
         // The user's own file, which `configure` writes, may carry one.
         let (merged, _) = overlay_config_sources(sources(true));
@@ -8771,7 +8782,8 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("it is not https"), "{error}");
-        assert!(error.contains("aspect auth configure"), "{error}");
+        assert!(error.contains("ask its administrator"), "{error}");
+        assert!(!error.contains("aspect auth configure"), "{error}");
 
         let summary = summarize_deployment(&d, &HashMap::new(), false);
         assert!(
@@ -8834,7 +8846,13 @@ mod tests {
             .block_on(select_tenant(&entry, "t2"))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("token endpoint"), "{error}");
+        assert!(
+            error.starts_with(
+                "the stored session cannot be refreshed: its recorded token endpoint \
+                 \"https://app.acme.example/auth/cli/token\" is unusable: Aspect Cloud's"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
