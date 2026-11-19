@@ -4677,15 +4677,13 @@ fn endpoint_host_str(arg: &str) -> String {
 
 // Registers the auth value types usable as Starlark type annotations. Only types a
 // caller annotates need registering; the record types returned by `list` /
-// `shadowed` are never annotated, so they stay out.
+// `shadowed` / `deployment_endpoints` are never annotated, so they stay out.
 #[starlark_module]
 fn register_auth_types(globals: &mut GlobalsBuilder) {
     const Auth: StarlarkValueAsType<Auth> = StarlarkValueAsType::new();
     const AuthSession: StarlarkValueAsType<AuthSession> = StarlarkValueAsType::new();
     const AuthCredentials: StarlarkValueAsType<AuthCredentials> = StarlarkValueAsType::new();
     const DeploymentInfo: StarlarkValueAsType<DeploymentInfo> = StarlarkValueAsType::new();
-    const DeploymentEndpoints: StarlarkValueAsType<DeploymentEndpoints> =
-        StarlarkValueAsType::new();
 }
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {
