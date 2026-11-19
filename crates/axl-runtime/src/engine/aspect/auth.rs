@@ -8958,6 +8958,99 @@ mod tests {
         assert!(!received[1].body.contains("client_secret"));
     }
 
+    /// Every `refresh_token` grant in `received` went to the proxy, and there
+    /// were `grants` of them.
+    fn assert_grants_hit_the_proxy(received: &[Received], grants: usize) {
+        let refreshes: Vec<_> = received
+            .iter()
+            .filter(|r| r.body.contains("grant_type=refresh_token"))
+            .collect();
+        assert_eq!(refreshes.len(), grants);
+        for r in refreshes {
+            assert_eq!(r.path, PROXY_TOKEN_PATH);
+            assert!(!r.body.contains("client_secret"));
+        }
+    }
+
+    #[test]
+    fn restoring_the_default_tenant_refreshes_at_the_recorded_token_endpoint() {
+        // The first grant lands in t2; setting the default back goes to the
+        // issuer's tenant API, but both grants go to the proxy, never the issuer.
+        let switched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let issuer = MockIssuer::start(4, {
+            let switched = switched.clone();
+            move |request| match request.path.as_str() {
+                "/.well-known/openid-configuration" => (404, String::new()),
+                TENANT_API_SWITCH_PATH => {
+                    switched.store(true, std::sync::atomic::Ordering::SeqCst);
+                    (200, "{}".into())
+                }
+                PROXY_TOKEN_PATH => {
+                    let tenant = if switched.load(std::sync::atomic::Ordering::SeqCst) {
+                        "t1"
+                    } else {
+                        "t2"
+                    };
+                    (200, token_body_for(tenant))
+                }
+                other => panic!("unexpected request to {other}"),
+            }
+        });
+        let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
+        let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+        entry.auth_token_endpoint = Some(proxy.clone());
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.tenant_id, "t1");
+        assert_eq!(refreshed.auth_token_endpoint.as_deref(), Some(&*proxy));
+
+        let received = issuer.finish();
+        let paths: Vec<_> = received.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/.well-known/openid-configuration",
+                PROXY_TOKEN_PATH,
+                TENANT_API_SWITCH_PATH,
+                PROXY_TOKEN_PATH
+            ]
+        );
+        assert_grants_hit_the_proxy(&received, 2);
+    }
+
+    #[test]
+    fn selecting_an_organization_refreshes_at_the_recorded_token_endpoint() {
+        let issuer = MockIssuer::start(3, |request| match request.path.as_str() {
+            "/.well-known/openid-configuration" => (404, String::new()),
+            TENANT_API_SWITCH_PATH => (200, "{}".into()),
+            PROXY_TOKEN_PATH => (200, token_body_for("t2")),
+            other => panic!("unexpected request to {other}"),
+        });
+        let proxy = format!("{}{PROXY_TOKEN_PATH}", issuer.url());
+        let mut entry = stored_entry(&issuer.url(), "t1", IssuerKind::TenantApi);
+        entry.auth_token_endpoint = Some(proxy.clone());
+
+        let selected = current_thread_runtime()
+            .block_on(select_tenant(&entry, "t2"))
+            .unwrap();
+        assert_eq!(selected.tenant_id, "t2");
+        assert_eq!(selected.auth_token_endpoint.as_deref(), Some(&*proxy));
+
+        let received = issuer.finish();
+        let paths: Vec<_> = received.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/.well-known/openid-configuration",
+                TENANT_API_SWITCH_PATH,
+                PROXY_TOKEN_PATH
+            ]
+        );
+        assert_grants_hit_the_proxy(&received, 1);
+    }
+
     #[test]
     fn a_credential_without_a_recorded_token_endpoint_refreshes_at_the_issuer() {
         let issuer = MockIssuer::start(2, |request| respond_to_grant(request, "t1"));
