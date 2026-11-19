@@ -2431,12 +2431,114 @@ impl TokenResponse {
 
 /// POST an `application/x-www-form-urlencoded` body to a token/exchange endpoint
 /// and deserialize the JSON response ([`send_json`]).
+///
+/// A 429 or 503 is retried a few times ([`token_endpoint_retry_delay`]): a
+/// deployment's token proxy rate-limits per client IP, so a fleet of CI runners
+/// behind one NAT refreshing at once can trip it, and it answers 503 while it
+/// cannot reach the issuer. Both say the server did not act on the request, so
+/// resending it is safe even for the authorization-code exchange, whose code is
+/// single-use: a code is consumed by a grant the server processes, and a 429 or
+/// 503 is the server declining to process it (RFC 6585 §4, RFC 9110 §15.6.4).
+/// Any other status, and a transport error (which may have reached the server),
+/// is not retried. When the tries run out the last refusal is returned, so the
+/// caller can tell a busy endpoint from a refused grant ([`HttpRefusal::is_busy`]).
 async fn post_form<T: serde::de::DeserializeOwned>(
     url: &str,
     form: &[(&str, &str)],
     what: &str,
 ) -> anyhow::Result<T> {
-    send_json(reqwest::Client::new().post(url).form(form), what).await
+    let mut attempt = 1;
+    loop {
+        let result = send_json(reqwest::Client::new().post(url).form(form), what).await;
+        let Err(e) = &result else { return result };
+        let Some(refusal) = e.downcast_ref::<HttpRefusal>() else {
+            return result;
+        };
+        let jitter = rand::Rng::r#gen::<f64>(&mut rand::thread_rng());
+        let Some(wait) =
+            token_endpoint_retry_delay(refusal.status, refusal.retry_after, attempt, jitter)
+        else {
+            return result;
+        };
+        crate::trace!(
+            "{what}: HTTP {} on attempt {attempt}; retrying in {wait:?}",
+            refusal.status
+        );
+        backoff_sleep(wait).await;
+        attempt += 1;
+    }
+}
+
+/// How many times a token endpoint request is sent in all, the first included,
+/// while the endpoint answers 429 or 503.
+const TOKEN_ENDPOINT_ATTEMPTS: u32 = 4;
+
+/// The longest the CLI waits before one retry. A `Retry-After` asking for
+/// longer ends the retries instead: the CLI does not resend before the server
+/// said it may, and a run blocked for minutes is worse than a clear error.
+const TOKEN_ENDPOINT_MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// The wait before the first retry when the server sent no usable
+/// `Retry-After`; it doubles for each retry after.
+const TOKEN_ENDPOINT_BACKOFF: Duration = Duration::from_secs(1);
+
+/// How long to wait before resending a token endpoint request that got
+/// `status` on try `attempt` (1-based), or `None` when it is not to be resent:
+/// a status other than 429/503, the tries used up ([`TOKEN_ENDPOINT_ATTEMPTS`]),
+/// or a `Retry-After` beyond [`TOKEN_ENDPOINT_MAX_WAIT`].
+///
+/// The base wait is the server's `Retry-After` (delta-seconds) when it sent
+/// one, else [`TOKEN_ENDPOINT_BACKOFF`] doubling per retry. `jitter` (uniform in
+/// `[0, 1)`) adds up to half the base, at least a second's worth, on top, never
+/// less, so runners refused together do not come back together, and none comes
+/// back before the server asked. The total is capped at the max wait.
+fn token_endpoint_retry_delay(
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+    attempt: u32,
+    jitter: f64,
+) -> Option<Duration> {
+    if !is_busy_status(status) || attempt >= TOKEN_ENDPOINT_ATTEMPTS {
+        return None;
+    }
+    let base = retry_after.unwrap_or(TOKEN_ENDPOINT_BACKOFF * 2u32.pow(attempt - 1));
+    if base > TOKEN_ENDPOINT_MAX_WAIT {
+        return None;
+    }
+    let spread = (base / 2).max(Duration::from_secs(1));
+    Some((base + spread.mul_f64(jitter.clamp(0.0, 1.0))).min(TOKEN_ENDPOINT_MAX_WAIT))
+}
+
+/// Whether `status` says the server declined to handle a request for now (429
+/// Too Many Requests, 503 Service Unavailable) rather than refused what was
+/// asked: the same request can succeed later.
+fn is_busy_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+}
+
+/// Sleep `wait` before a retry. Test builds record the wait instead of
+/// sleeping ([`tests::take_backoff_sleeps`]), so the retry tests run instantly
+/// and can assert what the CLI would have waited.
+async fn backoff_sleep(wait: Duration) {
+    #[cfg(test)]
+    tests::BACKOFF_SLEEPS.with(|sleeps| sleeps.borrow_mut().push(wait));
+    #[cfg(not(test))]
+    tokio::time::sleep(wait).await;
+}
+
+/// A `Retry-After` header's delta-seconds. An HTTP-date is ignored, leaving
+/// the CLI's own backoff: the token proxy sends seconds, and a date would
+/// have to be trusted against this machine's clock.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 /// Send `request` and deserialize its JSON body. Every failure names `what`: a
@@ -2464,10 +2566,12 @@ async fn send_ok(
         .map_err(|e| anyhow::anyhow!("{what} request failed: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
+        let retry_after = retry_after(resp.headers());
         let body = resp.text().await.unwrap_or_default();
         return Err(HttpRefusal {
             what: what.to_owned(),
             status,
+            retry_after,
             body,
         }
         .into());
@@ -2482,10 +2586,18 @@ async fn send_ok(
 struct HttpRefusal {
     what: String,
     status: reqwest::StatusCode,
+    /// The response's `Retry-After`, when it sent one in delta-seconds.
+    retry_after: Option<Duration>,
     body: String,
 }
 
 impl HttpRefusal {
+    /// Whether the server declined to handle the request for now
+    /// ([`is_busy_status`]): nothing about what was sent is wrong.
+    fn is_busy(&self) -> bool {
+        is_busy_status(self.status)
+    }
+
     /// The OAuth error code of an RFC 6749 §5.2 error body, `{"error": "..."}`.
     fn oauth_error(&self) -> Option<String> {
         #[derive(Deserialize)]
@@ -2983,6 +3095,10 @@ enum RefreshFailure {
     /// The credential records a token endpoint it may not use
     /// ([`CredentialsEntry::recorded_token_endpoint`]), so nothing was sent.
     TokenEndpoint(String),
+    /// The token endpoint kept answering 429 or 503 through every retry
+    /// ([`post_form`]). It did not look at the refresh token, so the stored
+    /// credential is kept as it is and a later run can refresh it.
+    Busy(u16),
 }
 
 impl RefreshFailure {
@@ -2998,6 +3114,17 @@ impl RefreshFailure {
                 "the stored session cannot be refreshed: {why}\n\nRun `{}` to re-authenticate.",
                 login_hint(deployment)
             ),
+            RefreshFailure::Busy(status) => {
+                let state = if *status == 429 {
+                    "is rate-limiting requests"
+                } else {
+                    "is temporarily unavailable"
+                };
+                format!(
+                    "the token endpoint for {deployment} {state} (HTTP {status}), so the \
+                     session could not be refreshed. The stored session is kept; retry shortly."
+                )
+            }
         }
     }
 }
@@ -3017,7 +3144,10 @@ async fn refresh_access_token(
 ) -> Result<CredentialsEntry, RefreshFailure> {
     let failed = |cause: anyhow::Error| {
         crate::trace!("refreshing the stored credential failed: {cause:#}");
-        RefreshFailure::Failed
+        match cause.downcast_ref::<HttpRefusal>() {
+            Some(refusal) if refusal.is_busy() => RefreshFailure::Busy(refusal.status.as_u16()),
+            _ => RefreshFailure::Failed,
+        }
     };
     let (auth_domain, client_id) = entry.refresh_target().map_err(failed)?;
     let recorded = entry
@@ -3756,7 +3886,9 @@ fn finish_auth_session(
         })
     }
     .map_err(|err| {
-        let hint = oauth_error_code(&err).and_then(|code| oauth_error_hint(&code, &target));
+        let hint = oauth_error_code(&err)
+            .and_then(|code| oauth_error_hint(&code, &target))
+            .or_else(|| busy_login_hint(&err));
         login_failure(&err, hint)
     })?;
     Ok(AuthCredentials::from_entry(&entry))
@@ -3810,6 +3942,18 @@ fn oauth_error_hint(code: &str, target: &LoginTarget) -> Option<String> {
         "access_denied" => "The login was declined in the browser.".to_owned(),
         _ => return None,
     })
+}
+
+/// What to do about a login whose code exchange found the token endpoint
+/// rate-limiting or unavailable through every retry ([`post_form`]).
+fn busy_login_hint(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<HttpRefusal>()
+        .filter(|refusal| refusal.is_busy())
+        .map(|_| {
+            "The token endpoint is rate-limiting or temporarily unavailable. Wait a moment \
+             and run the login again."
+                .to_owned()
+        })
 }
 
 /// What a user can do about an API token the exchange refused.
@@ -4660,7 +4804,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                     return Err(TaskExit::error(failure.message(&deployment)).into());
                 }
                 Err(_) if !required => return Ok(values::Value::new_none()),
-                Err(_) => return Err(anyhow::anyhow!(session_expired_message(&deployment))),
+                Err(failure) => return Err(anyhow::anyhow!(failure.message(&deployment))),
             },
             TokenAction::Expired if !required => return Ok(values::Value::new_none()),
             TokenAction::Expired => {
@@ -7633,6 +7777,23 @@ mod tests {
             respond: impl Fn(&Received) -> (u16, String) + Send + 'static,
             trace_header: bool,
         ) -> Self {
+            let trace = if trace_header {
+                format!("{TENANT_API_TRACE_HEADER}: mock\r\n")
+            } else {
+                String::new()
+            };
+            Self::start_raw(connections, move |request| {
+                let (status, body) = respond(request);
+                (status, trace.clone(), body)
+            })
+        }
+
+        /// [`MockIssuer::start`] with `respond` also giving the extra header
+        /// lines to send, each ending in `\r\n` (a `Retry-After`, say).
+        fn start_raw(
+            connections: usize,
+            respond: impl Fn(&Received) -> (u16, String, String) + Send + 'static,
+        ) -> Self {
             use std::io::Write;
 
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -7643,22 +7804,19 @@ mod tests {
                 for _ in 0..connections {
                     let (mut stream, _) = listener.accept().unwrap();
                     let request = Self::read_request(&mut stream);
-                    let (status, body) = respond(&request);
+                    let (status, extra_headers, body) = respond(&request);
                     log.lock().unwrap().push(request);
                     let reason = match status {
                         200 => "OK",
                         401 => "Unauthorized",
                         404 => "Not Found",
+                        429 => "Too Many Requests",
+                        503 => "Service Unavailable",
                         _ => "Other",
-                    };
-                    let trace = if trace_header {
-                        format!("{TENANT_API_TRACE_HEADER}: mock\r\n")
-                    } else {
-                        String::new()
                     };
                     write!(
                         stream,
-                        "HTTP/1.1 {status} {reason}\r\n{trace}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} {reason}\r\n{extra_headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .unwrap();
@@ -7960,6 +8118,246 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure, RefreshFailure::Failed);
         issuer.finish();
+    }
+
+    thread_local! {
+        /// The waits [`backoff_sleep`] was asked for on this thread, in order.
+        pub(super) static BACKOFF_SLEEPS: std::cell::RefCell<Vec<Duration>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Drain the waits [`backoff_sleep`] recorded on this thread.
+    pub(super) fn take_backoff_sleeps() -> Vec<Duration> {
+        BACKOFF_SLEEPS.with(|sleeps| std::mem::take(&mut *sleeps.borrow_mut()))
+    }
+
+    /// The proxy's busy body, as silo's token proxy sends it.
+    const BUSY_BODY: &str =
+        r#"{"error":"temporarily_unavailable","error_description":"slow down"}"#;
+
+    #[test]
+    fn token_endpoint_retries_wait_as_told_with_jitter_on_top() {
+        use reqwest::StatusCode;
+        let secs = Duration::from_secs;
+        let tmr = StatusCode::TOO_MANY_REQUESTS;
+        // Retry-After is a floor; jitter adds up to half of it, at least 1s.
+        assert_eq!(
+            token_endpoint_retry_delay(tmr, Some(secs(2)), 1, 0.0),
+            Some(secs(2))
+        );
+        assert_eq!(
+            token_endpoint_retry_delay(tmr, Some(secs(10)), 1, 0.5),
+            Some(Duration::from_millis(12_500))
+        );
+        assert_eq!(
+            token_endpoint_retry_delay(tmr, Some(secs(0)), 1, 0.5),
+            Some(Duration::from_millis(500))
+        );
+        // No (or an unusable) Retry-After: 1s doubling per retry.
+        let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+        assert_eq!(
+            token_endpoint_retry_delay(unavailable, None, 1, 0.0),
+            Some(secs(1))
+        );
+        assert_eq!(
+            token_endpoint_retry_delay(unavailable, None, 2, 0.0),
+            Some(secs(2))
+        );
+        assert_eq!(
+            token_endpoint_retry_delay(unavailable, None, 3, 0.0),
+            Some(secs(4))
+        );
+        // Capped, but never by retrying before the server said to.
+        assert_eq!(
+            token_endpoint_retry_delay(tmr, Some(secs(25)), 1, 1.0),
+            Some(TOKEN_ENDPOINT_MAX_WAIT)
+        );
+        assert_eq!(
+            token_endpoint_retry_delay(tmr, Some(secs(31)), 1, 0.0),
+            None
+        );
+        // Bounded tries, and only 429/503.
+        assert_eq!(
+            token_endpoint_retry_delay(tmr, None, TOKEN_ENDPOINT_ATTEMPTS, 0.0),
+            None
+        );
+        for status in [400, 401, 403, 500, 502, 504] {
+            let status = StatusCode::from_u16(status).unwrap();
+            assert_eq!(token_endpoint_retry_delay(status, None, 1, 0.0), None);
+        }
+    }
+
+    #[test]
+    fn retry_after_reads_delta_seconds_only() {
+        let headers = |value: &str| {
+            let mut map = reqwest::header::HeaderMap::new();
+            map.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+            map
+        };
+        assert_eq!(retry_after(&headers("7")), Some(Duration::from_secs(7)));
+        assert_eq!(retry_after(&headers(" 0 ")), Some(Duration::ZERO));
+        assert_eq!(retry_after(&headers("Wed, 21 Oct 2015 07:28:00 GMT")), None);
+        assert_eq!(retry_after(&headers("-1")), None);
+        assert_eq!(retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_rate_limited_refresh_waits_as_told_then_succeeds() {
+        let grants = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let issuer = MockIssuer::start_raw(3, {
+            let grants = grants.clone();
+            move |request| match request.path.as_str() {
+                "/oauth/token" if grants.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 => {
+                    (429, "Retry-After: 2\r\n".into(), BUSY_BODY.into())
+                }
+                _ => {
+                    let (status, body) = respond_to_grant(request, "t1");
+                    (status, String::new(), body)
+                }
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+        take_backoff_sleeps();
+
+        let refreshed = current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        assert_eq!(refreshed.refresh_token, "rotated");
+        let sleeps = take_backoff_sleeps();
+        assert_eq!(sleeps.len(), 1, "{sleeps:?}");
+        assert!(
+            sleeps[0] >= Duration::from_secs(2) && sleeps[0] <= Duration::from_secs(3),
+            "{sleeps:?}"
+        );
+        let requests = issuer.finish();
+        // The same refresh token went both times: a 429 did not consume it.
+        assert!(requests[1].body.contains("refresh_token=refresh-token"));
+        assert_eq!(requests[1].body, requests[2].body);
+    }
+
+    #[test]
+    fn an_unavailable_token_endpoint_is_retried() {
+        let grants = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let issuer = MockIssuer::start_raw(4, {
+            let grants = grants.clone();
+            move |request| match request.path.as_str() {
+                "/oauth/token" if grants.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 => {
+                    (503, String::new(), BUSY_BODY.into())
+                }
+                _ => {
+                    let (status, body) = respond_to_grant(request, "t1");
+                    (status, String::new(), body)
+                }
+            }
+        });
+        let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+        take_backoff_sleeps();
+
+        current_thread_runtime()
+            .block_on(refresh_access_token(&entry))
+            .unwrap();
+        // No Retry-After: the CLI's own backoff, 1s then 2s, plus jitter.
+        let sleeps = take_backoff_sleeps();
+        assert_eq!(sleeps.len(), 2, "{sleeps:?}");
+        assert!(sleeps[0] >= Duration::from_secs(1) && sleeps[0] <= Duration::from_secs(2));
+        assert!(sleeps[1] >= Duration::from_secs(2) && sleeps[1] <= Duration::from_secs(3));
+        assert_eq!(issuer.finish().len(), 4);
+    }
+
+    #[test]
+    fn a_persistently_busy_token_endpoint_keeps_the_session() {
+        for status in [429, 503] {
+            let issuer =
+                MockIssuer::start_raw(1 + TOKEN_ENDPOINT_ATTEMPTS as usize, move |request| {
+                    match request.path.as_str() {
+                        "/oauth/token" => (status, "Retry-After: 1\r\n".into(), BUSY_BODY.into()),
+                        _ => (404, String::new(), String::new()),
+                    }
+                });
+            let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+            take_backoff_sleeps();
+
+            let failure = current_thread_runtime()
+                .block_on(refresh_access_token(&entry))
+                .unwrap_err();
+            assert_eq!(failure, RefreshFailure::Busy(status));
+            let message = failure.message("acme");
+            assert!(!message.contains("session expired"), "{message}");
+            assert!(message.contains(&format!("(HTTP {status})")), "{message}");
+            assert!(
+                message.contains("The stored session is kept; retry shortly."),
+                "{message}"
+            );
+            let sleeps = take_backoff_sleeps();
+            assert_eq!(sleeps.len(), TOKEN_ENDPOINT_ATTEMPTS as usize - 1);
+            let grants = issuer
+                .finish()
+                .iter()
+                .filter(|r| r.path == "/oauth/token")
+                .count();
+            assert_eq!(grants, TOKEN_ENDPOINT_ATTEMPTS as usize);
+        }
+        assert!(
+            RefreshFailure::Busy(429)
+                .message("acme")
+                .contains("is rate-limiting requests")
+        );
+        assert!(
+            RefreshFailure::Busy(503)
+                .message("acme")
+                .contains("is temporarily unavailable")
+        );
+    }
+
+    #[test]
+    fn a_refused_grant_is_not_retried() {
+        for status in [400, 401] {
+            let issuer = MockIssuer::start_raw(2, move |request| match request.path.as_str() {
+                "/oauth/token" => (
+                    status,
+                    "Retry-After: 1\r\n".into(),
+                    r#"{"error":"invalid_grant"}"#.into(),
+                ),
+                _ => (404, String::new(), String::new()),
+            });
+            let entry = stored_entry(&issuer.url(), "t1", IssuerKind::Oidc);
+            take_backoff_sleeps();
+
+            let failure = current_thread_runtime()
+                .block_on(refresh_access_token(&entry))
+                .unwrap_err();
+            assert_eq!(failure, RefreshFailure::Failed);
+            assert!(take_backoff_sleeps().is_empty());
+            assert_eq!(issuer.finish().len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_rate_limited_code_exchange_is_retried_then_hinted() {
+        // The code is resent: a 429 means the server never redeemed it.
+        let issuer = MockIssuer::start_raw(TOKEN_ENDPOINT_ATTEMPTS as usize, |_| {
+            (429, "Retry-After: 0\r\n".into(), BUSY_BODY.into())
+        });
+        take_backoff_sleeps();
+        let err = current_thread_runtime()
+            .block_on(exchange_code(
+                &format!("{}/oauth/token", issuer.url()),
+                "client-id-1",
+                "http://127.0.0.1:1/callback",
+                "the-code",
+                "verifier",
+            ))
+            .err()
+            .expect("a busy endpoint fails the exchange");
+        assert_eq!(
+            take_backoff_sleeps().len(),
+            TOKEN_ENDPOINT_ATTEMPTS as usize - 1
+        );
+        let requests = issuer.finish();
+        assert!(requests.iter().all(|r| r.body.contains("code=the-code")));
+        let hint = busy_login_hint(&err).unwrap();
+        assert!(hint.contains("run the login again"), "{hint}");
+        assert_eq!(busy_login_hint(&anyhow::anyhow!("other")), None);
     }
 
     #[test]
@@ -8416,6 +8814,7 @@ mod tests {
             HttpRefusal {
                 what: "token exchange".to_string(),
                 status: reqwest::StatusCode::BAD_REQUEST,
+                retry_after: None,
                 body: body.to_string(),
             }
             .into()
@@ -8443,6 +8842,7 @@ mod tests {
             HttpRefusal {
                 what: "API token exchange".to_string(),
                 status: reqwest::StatusCode::from_u16(status).unwrap(),
+                retry_after: None,
                 body: String::new(),
             }
             .into()
@@ -8465,6 +8865,7 @@ mod tests {
         let refusal = |body: &str| HttpRefusal {
             what: "token exchange".to_string(),
             status: reqwest::StatusCode::UNAUTHORIZED,
+            retry_after: None,
             body: body.to_string(),
         };
         assert_eq!(
