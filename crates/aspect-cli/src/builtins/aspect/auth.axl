@@ -459,6 +459,9 @@ def _configure_impl(ctx: TaskContext) -> int:
         print("Configured remote cache and BES for Aspect Cloud.")
     else:
         print("Configured deployment '" + info.name + "'.")
+    if recorded != None and recorded.token_endpoint_problem:
+        warn(ctx.std, recorded.token_endpoint_problem)
+        print("`aspect auth login` refuses to log in to it until it advertises a usable one.")
     if not info.can_login:
         print("")
         print("This deployment does not advertise its login config, so the CLI")
