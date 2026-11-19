@@ -1190,8 +1190,14 @@ fn is_advertisable_name(name: &str) -> bool {
 /// document names its origin in `aspect_endpoints.results_url` instead, which is
 /// recorded in its place when there is no BES: that origin is not a viewer
 /// prefix, so it is not paired with an advertised BES as `--bes_results_url`.
-/// ([`keep_build_endpoints`] may still pair it with a BES recorded earlier
-/// without a viewer.)
+///
+/// The origin is a last resort. A silo web UI advertises its `/i/` viewer as
+/// `aspect_bes_results_url` too, and omits it only without public DNS or on a
+/// release that predates the field. Only then can [`keep_build_endpoints`] pair
+/// the bare origin with a BES recorded earlier without a viewer, and the result
+/// links it yields (`--bes_results_url`, the rc sections, the CLI's own links)
+/// point at the origin rather than a viewer. Accepted rather than guarded, as
+/// that case barely occurs; a user's own `--bes_results_url` still wins.
 fn deployment_from_discovery(
     name: String,
     configured_host: &str,
