@@ -186,7 +186,7 @@ def _exec_config(d, name: str, credential_helper: str, has_base: bool) -> RcConf
 
 def deployment_configs(deployments: list, credential_helper: str, bes_groups: list = [GROUP_BES]) -> list:
     """The sections for every deployment in `deployments` (rows of
-    `aspect.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
+    `aspect.auth.DeploymentEndpoints`, or anything with the same `name` / `builtin` /
     `default` / `cache` / `bes` / `exec` / `results_url` / `api_token_env`
     fields), in order. `credential_helper` is the name or path Bazel invokes as
     `<helper> get`. Every section chains the tuning groups its endpoints justify,
