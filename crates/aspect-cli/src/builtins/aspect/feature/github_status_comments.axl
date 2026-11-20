@@ -2500,9 +2500,9 @@ GithubStatusComments = feature(
             default = {},
             description = "Override badge_key -> label mapping merged over defaults " +
                           "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
-                          "passed='✅ passed', aborted='🔥 aborted'). The badge_key is " +
-                          "precomputed in AXL from severity + status + aborted, so the " +
-                          "override is keyed by badge_key not raw lifecycle status.",
+                          "passed='✅ passed', aborted='🔥 aborted'). Keys are badge keys, " +
+                          "not task statuses: a task still running but already failing " +
+                          "takes the `failed` badge.",
         ),
     } | template_presets.args(),
 )
