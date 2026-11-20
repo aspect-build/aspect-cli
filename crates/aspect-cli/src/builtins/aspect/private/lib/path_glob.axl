@@ -21,11 +21,15 @@ Examples:
   match_path("**/foo", "foo")                      → True
   match_path("a/**/b", "a/x/y/b")                  → True
 
+`filter_paths(paths, include, exclude)` applies an include list and an
+exclude list in one pass and reports how many paths each dropped.
+
 Implementation note: this is a pure-Starlark recursive segment matcher.
-Pattern-volume × file-volume is small in practice (≤ ~10 patterns × ≤ ~1k
-files = ≤ 10k matches per task), so the cost is invisible against the
-formatter binary's runtime. If profiling ever shows pressure we can move
-the matcher to Rust and expose via ctx; for now Starlark stays.
+Pattern-volume × file-volume is usually small (≤ ~10 patterns × a changed-
+file set), and even `aspect format --scope=git` over a whole repo stays
+cheap next to the formatter binary's runtime. If profiling ever shows
+pressure we can move the matcher to Rust and expose via ctx; for now
+Starlark stays.
 """
 
 def _match_chars(pat, name):
@@ -45,7 +49,17 @@ def _match_chars(pat, name):
     `len(pat) + len(name) + 8` was undersized: `*?` and `*b` against
     11-character names both ran out of iterations and silently
     false-negative'd before reaching the match.
+
+    The common shapes — no wildcard, `*suffix`, `prefix*` — skip the loop.
     """
+    if "?" not in pat:
+        stars = pat.count("*")
+        if stars == 0:
+            return pat == name
+        if stars == 1 and pat.startswith("*"):
+            return name.endswith(pat[1:])
+        if stars == 1 and pat.endswith("*"):
+            return name.startswith(pat[:-1])
     pi = 0
     ni = 0
     star_pi = -1
@@ -98,6 +112,9 @@ def _match_segments(pat_segs, name_segs):
                 # surprising; keep the "must have child" semantics
                 # documented in the module docstring).
                 return ni < nn
+            if len(tail) == 1:
+                # `**/<seg>` at the end: only the last name segment can match.
+                return ni < nn and _match_chars(tail[0], name_segs[nn - 1])
             for k in range(nn - ni + 1):
                 if _match_segments(tail, name_segs[ni + k:]):
                     return True
@@ -129,3 +146,20 @@ def match_any(patterns, path):
         if match_path(p, path):
             return True
     return False
+
+def filter_paths(paths, include = [], exclude = []):
+    """Keep `paths` that match an `include` pattern (all, when `include` is
+    empty) and match no `exclude` pattern. Order is preserved.
+
+    Returns `struct(kept, not_included, excluded)`; the two counts say how
+    many paths each pattern list dropped, `include` applying first.
+    """
+    kept = [p for p in paths if match_any(include, p)] if include else list(paths)
+    not_included = len(paths) - len(kept)
+    if exclude:
+        before = len(kept)
+        kept = [p for p in kept if not match_any(exclude, p)]
+        excluded = before - len(kept)
+    else:
+        excluded = 0
+    return struct(kept = kept, not_included = not_included, excluded = excluded)

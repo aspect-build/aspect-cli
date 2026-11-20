@@ -1,0 +1,165 @@
+"""Unit tests for `lib/git_files.axl` and `lib/argv.axl`, the file listing
+and batching behind `aspect format --scope=git`.
+
+The parsers run on hand-written `-z` output; `list_git_files` runs once
+against a scratch repository whose index is built with plumbing commands, so
+no commit (and no git identity) is needed.
+
+Run with: aspect dev test-git-files
+"""
+
+load("./argv.axl", "chunk_args")
+load("./git_files.axl", "list_git_files", "ls_files_pathspec", "parse_check_attr", "parse_ls_files", "parse_ls_files_stage", "present_files")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _z(*fields):
+    return "\x00".join(fields) + "\x00"
+
+# ─── chunk_args ──────────────────────────────────────────────────────────────
+
+def _test_chunk_args_empty(_ctx):
+    _eq("no args → no batches", chunk_args([]), [])
+
+def _test_chunk_args_fits_in_one(_ctx):
+    _eq("under budget → one batch", chunk_args(["a", "bb", "ccc"], budget = 100), [["a", "bb", "ccc"]])
+
+def _test_chunk_args_splits_on_budget(_ctx):
+    # Each arg costs len + 1: "aaaa" = 5, so two fit in 10 and the third spills.
+    _eq(
+        "budget reached → next batch",
+        chunk_args(["aaaa", "bbbb", "cccc"], budget = 10),
+        [["aaaa", "bbbb"], ["cccc"]],
+    )
+
+def _test_chunk_args_oversized_arg_gets_own_batch(_ctx):
+    _eq(
+        "an arg over budget is kept, alone",
+        chunk_args(["a", "x" * 50, "b"], budget = 10),
+        [["a"], ["x" * 50], ["b"]],
+    )
+
+# ─── parsers ─────────────────────────────────────────────────────────────────
+
+def _test_parse_ls_files_stage_drops_gitlinks_and_dedupes(_ctx):
+    out = _z(
+        "100644 1111111111111111111111111111111111111111 0\ta.bzl",
+        "160000 2222222222222222222222222222222222222222 0\tthird_party/sub",
+        "100644 3333333333333333333333333333333333333333 1\tconflict.bzl",
+        "100644 4444444444444444444444444444444444444444 2\tconflict.bzl",
+        "120000 5555555555555555555555555555555555555555 0\tlink with space",
+    )
+    _eq("paths", parse_ls_files_stage(out), ["a.bzl", "conflict.bzl", "link with space"])
+
+def _test_parse_ls_files_keeps_unusual_names(_ctx):
+    _eq("verbatim", parse_ls_files(_z("plain", "with space", "new\nline", "ünïcode")), ["plain", "with space", "new\nline", "ünïcode"])
+    _eq("empty output", parse_ls_files(""), [])
+
+def _test_parse_check_attr_flags_set_and_true(_ctx):
+    out = _z(
+        "a.bzl",
+        "linguist-generated",
+        "set",
+        "b.bzl",
+        "linguist-generated",
+        "true",
+        "c.bzl",
+        "linguist-generated",
+        "false",
+        "d.bzl",
+        "linguist-generated",
+        "unset",
+        "e.bzl",
+        "linguist-generated",
+        "unspecified",
+        "f: g.bzl",
+        "gitlab-generated",
+        "set",
+    )
+    _eq("flagged", sorted(parse_check_attr(out).keys()), ["a.bzl", "b.bzl", "f: g.bzl"])
+
+def _test_ls_files_pathspec(_ctx):
+    _eq("at root", ls_files_pathspec("/repo", "/repo"), ".")
+    _eq("below root", ls_files_pathspec("/repo", "/repo/pkg/sub"), ":(literal)pkg/sub")
+    _eq("above root", ls_files_pathspec("/ws/repo", "/ws"), ".")
+    _eq("sibling prefix is not below", ls_files_pathspec("/repo", "/repo2"), ".")
+
+def _test_present_files(_ctx):
+    _eq(
+        "deleted tracked files drop, untracked follow",
+        present_files(["a", "gone", "b"], ["new"], ["gone"]),
+        ["a", "b", "new"],
+    )
+
+# ─── list_git_files against a scratch repository ─────────────────────────────
+
+def _git(ctx, cwd, args):
+    out = ctx.std.process.command("git").args(["-C", cwd] + args) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        fail("git %s: %s" % (" ".join(args), out.stderr))
+    return out.stdout
+
+def _test_list_git_files(ctx):
+    # Keep the developer's git config out of `--exclude-standard`.
+    ctx.std.env.set_var("GIT_CONFIG_GLOBAL", "/dev/null")
+    ctx.std.env.set_var("GIT_CONFIG_NOSYSTEM", "1")
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-git-files")
+    _git(ctx, root, ["init", "-q"])
+    root = _git(ctx, root, ["rev-parse", "--show-toplevel"]).strip()
+
+    ctx.std.fs.create_dir_all(root + "/pkg")
+    files = {
+        ".gitignore": "ignored.bzl\n",
+        ".gitattributes": "gen.bzl linguist-generated\nkept_gen.bzl linguist-generated=false\n",
+        "tracked.bzl": "",
+        "with space.bzl": "",
+        "gen.bzl": "",
+        "kept_gen.bzl": "",
+        "deleted.bzl": "",
+        "untracked.bzl": "",
+        "ignored.bzl": "",
+        "pkg/inner.bzl": "",
+    }
+    for name, content in files.items():
+        ctx.std.fs.write(root + "/" + name, content)
+    _git(ctx, root, ["add", ".gitignore", ".gitattributes", "tracked.bzl", "with space.bzl", "gen.bzl", "kept_gen.bzl", "deleted.bzl", "pkg/inner.bzl"])
+    _git(ctx, root, ["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,submodule"])
+    ctx.std.fs.remove_file(root + "/deleted.bzl")
+
+    _eq(
+        "from the root",
+        sorted(list_git_files(ctx, root, root)),
+        [".gitattributes", ".gitignore", "kept_gen.bzl", "pkg/inner.bzl", "tracked.bzl", "untracked.bzl", "with space.bzl"],
+    )
+    _eq("from a subdirectory", list_git_files(ctx, root, root + "/pkg"), ["pkg/inner.bzl"])
+    _eq("no git root", list_git_files(ctx, None, root), None)
+
+_UNIT_TESTS = [
+    _test_chunk_args_empty,
+    _test_chunk_args_fits_in_one,
+    _test_chunk_args_splits_on_budget,
+    _test_chunk_args_oversized_arg_gets_own_batch,
+    _test_parse_ls_files_stage_drops_gitlinks_and_dedupes,
+    _test_parse_ls_files_keeps_unusual_names,
+    _test_parse_check_attr_flags_set_and_true,
+    _test_ls_files_pathspec,
+    _test_present_files,
+    _test_list_git_files,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("git_files.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+git_files_tests = task(
+    summary = "Run the git file-listing AXL unit tests.",
+    kind = "test-git-files",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

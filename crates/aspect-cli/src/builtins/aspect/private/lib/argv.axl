@@ -1,0 +1,34 @@
+"""Split long argument lists across several process invocations.
+
+A command line has an OS limit (`ARG_MAX`, which also counts the
+environment), so a caller handing a whole repository's file list to one
+process can fail with `E2BIG`. `chunk_args` packs arguments into batches
+under a character budget so each batch is its own invocation.
+"""
+
+# Characters of arguments per invocation. rules_lint's format.sh uses the same
+# cap, comfortably under the smallest common `ARG_MAX` once the environment and
+# the fixed leading argv are added.
+ARGV_BUDGET_CHARS = 128000
+
+def chunk_args(args, budget = ARGV_BUDGET_CHARS):
+    """Split `args` into consecutive batches whose length, counting one
+    separator per argument, stays within `budget`.
+
+    Order is preserved. An argument longer than `budget` gets a batch to
+    itself rather than being dropped. Empty `args` → `[]`.
+    """
+    batches = []
+    current = []
+    used = 0
+    for a in args:
+        size = len(a) + 1
+        if current and used + size > budget:
+            batches.append(current)
+            current = []
+            used = 0
+        current.append(a)
+        used += size
+    if current:
+        batches.append(current)
+    return batches

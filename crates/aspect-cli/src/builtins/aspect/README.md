@@ -11,7 +11,7 @@ Aspect-CLI ships with six built-in tasks that drive Bazel for the most common CI
 | [build](#build) | `bazel build`            | `aspect build [-- //... -//experimental/...]`               | `bazel_results`      |
 | [test](#test)   | `bazel test`             | `aspect test [-- //... -//experimental/...]`                | `bazel_results`      |
 | [lint](#lint)   | `bazel build` + lint aspects | `aspect lint --aspect=//tools/lint:linters.bzl%shellcheck`  | `lint_results`       |
-| [format](#format) | `bazel run` of a `format_multirun` | `aspect format [--scope=changed\|all]`                       | `format_results`     |
+| [format](#format) | `bazel run` of a `format_multirun` | `aspect format [--scope=changed\|git\|all]`                  | `format_results`     |
 | [gazelle](#gazelle) | `bazel run` of a `gazelle()` / `aspect_gazelle()` target | `aspect gazelle [--check]`                                   | `gazelle_results`    |
 | [delivery](#delivery) | Multi-phase delivery flow | `aspect delivery //pkg/foo:release //pkg/bar:release`        | `delivery_results`   |
 
@@ -128,7 +128,8 @@ Renderer: `lint_results`. Body has by-severity counts, by-tool counts, per-sever
 
 ```sh
 aspect format                                                        # changed scope (default)
-aspect format --scope=all                                            # whole tree
+aspect format --scope=git                                            # every file git knows about
+aspect format --scope=all                                            # formatter discovers files itself
 aspect format --formatter-target=@buildifier_prebuilt//buildifier    # buildifier-only
 aspect format --include-pattern='**/*.bzl'                           # only bzl files
 aspect format --exclude-pattern='vendor/**'                          # skip vendor

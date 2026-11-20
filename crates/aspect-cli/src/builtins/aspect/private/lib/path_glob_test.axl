@@ -1,0 +1,105 @@
+"""Unit tests for `lib/path_glob.axl`.
+
+Covers the module docstring's examples, the segment shapes the matcher
+short-circuits (no wildcard, `*suffix`, `prefix*`, trailing `**/<seg>`)
+against the general backtracking path, and `filter_paths`.
+
+Run with: aspect dev test-path-glob
+"""
+
+load("./path_glob.axl", "filter_paths", "match_any", "match_path")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+# (pattern, path, want)
+_CASES = [
+    # Module docstring examples.
+    ("*.lock", "Cargo.lock", True),
+    ("*.lock", "subdir/Cargo.lock", False),
+    ("vendor/*", "vendor/foo", True),
+    ("vendor/*", "vendor/foo/bar", False),
+    ("vendor/**", "vendor/foo/bar/baz", True),
+    ("**/foo", "a/b/foo", True),
+    ("**/foo", "foo", True),
+    ("a/**/b", "a/x/y/b", True),
+    # Literal segments.
+    ("BUILD.bazel", "BUILD.bazel", True),
+    ("BUILD.bazel", "BUILD", False),
+    ("**/BUILD", "pkg/BUILD.bazel", False),
+    # `*suffix` / `prefix*`.
+    ("*", "", True),
+    ("*", "x", True),
+    ("**/*.bzl", "a/b/c.bzl", True),
+    ("**/*.bzl", "a/b/c.bzl.bak", False),
+    ("**/*.MODULE.bazel", "deps.MODULE.bazel", True),
+    ("**/*.MODULE.bazel", "MODULE.bazel", False),
+    ("BUILD*", "BUILD.bazel", True),
+    ("BUILD*", "pkg/BUILD", False),
+    # Shapes that still take the backtracking path.
+    ("*?", "abcdefghijk", True),
+    ("*b", "aaaaaaaaaab", True),
+    ("a*b*c", "axxbyyc", True),
+    ("a*b*c", "axxbyy", False),
+    ("?.bzl", "a.bzl", True),
+    ("?.bzl", "ab.bzl", False),
+    # Trailing `**/<seg>` must match the last segment only.
+    ("**/foo", "foo/bar", False),
+    ("**/foo", "a/foo/b", False),
+    ("pkg/**/foo", "pkg/foo", True),
+    ("pkg/**/foo", "other/foo", False),
+    # Trailing `**` needs a child; trailing slash is trimmed.
+    ("vendor/**", "vendor", False),
+    ("vendor/", "vendor", True),
+    ("", "anything", False),
+]
+
+def _test_match_path(_ctx):
+    for pattern, path, want in _CASES:
+        _eq("match_path(%r, %r)" % (pattern, path), match_path(pattern, path), want)
+
+def _test_match_any(_ctx):
+    _eq("one of several", match_any(["*.md", "**/*.bzl"], "a/b.bzl"), True)
+    _eq("none", match_any(["*.md"], "a/b.bzl"), False)
+    _eq("empty list", match_any([], "a"), False)
+
+_PATHS = ["BUILD.bazel", "pkg/a.bzl", "vendor/b.bzl", "README.md"]
+
+def _test_filter_paths_no_patterns_keeps_all(_ctx):
+    r = filter_paths(_PATHS)
+    _eq("kept", r.kept, _PATHS)
+    _eq("counts", (r.not_included, r.excluded), (0, 0))
+
+def _test_filter_paths_include_then_exclude(_ctx):
+    r = filter_paths(_PATHS, ["**/*.bzl", "**/BUILD.bazel"], ["vendor/**"])
+    _eq("kept", r.kept, ["BUILD.bazel", "pkg/a.bzl"])
+    _eq("not included", r.not_included, 1)
+    _eq("excluded", r.excluded, 1)
+
+def _test_filter_paths_exclude_only(_ctx):
+    r = filter_paths(_PATHS, exclude = ["*.md"])
+    _eq("kept", r.kept, ["BUILD.bazel", "pkg/a.bzl", "vendor/b.bzl"])
+    _eq("counts", (r.not_included, r.excluded), (0, 1))
+
+_UNIT_TESTS = [
+    _test_match_path,
+    _test_match_any,
+    _test_filter_paths_no_patterns_keeps_all,
+    _test_filter_paths_include_then_exclude,
+    _test_filter_paths_exclude_only,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("path_glob.axl: OK (%d tests, %d match cases)" % (len(_UNIT_TESTS), len(_CASES)))
+    return 0
+
+path_glob_tests = task(
+    summary = "Run the path glob AXL unit tests.",
+    kind = "test-path-glob",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

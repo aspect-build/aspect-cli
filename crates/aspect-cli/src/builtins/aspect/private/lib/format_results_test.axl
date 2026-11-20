@@ -21,10 +21,13 @@ Scenarios:
  15. aborted             — bazel aborted mid-build, no recorded affected files
  16. failing-with-drift  — status=failing (mid-stream --severity=fail): drift
                            detected, body must show files list (not placeholder)
+ 17. scope-git-many      — scope=git; Configuration row carries the file count
+ 18. scope-git-no-files  — scope=git, nothing left after filtering
 
 Body-content invariant (asserted in the loop): `progress_phrase`
 placeholder renders IFF status == "running". A regression where `warning` or
-`failing` short-circuits to the placeholder fails the suite.
+`failing` short-circuits to the placeholder fails the suite. Scenarios listed
+in `expected_text` must also render that text.
 """
 
 load("./check_dispatch.axl", "resolve_templates")
@@ -156,9 +159,16 @@ def _make_no_git():
     r["format"]["no_git"] = True
     return r
 
-def _make_no_files_to_format():
+def _make_no_files_to_format(scope = "changed"):
     r = _make_base()
+    r["format"]["scope"] = scope
     r["format"]["no_files_to_format"] = True
+    return r
+
+def _make_scope_git_many():
+    r = _make_scope_all_many()
+    r["format"]["scope"] = "git"
+    r["changed_files_count"] = 1200
     return r
 
 def _make_with_patch_url():
@@ -229,7 +239,19 @@ def _links(ci = "github"):
         "testlogs_label_urls": {},
     }
 
-def _render_all(ctx, templates = None, progress_phrase = "Format task in progress"):
+# Text a scenario's rendered output must contain, keyed by label prefix. The
+# default preset's trimmed layout drops the "no files" notice, so it checks
+# only the Configuration row.
+_FULL_TEMPLATE_TEXT = {
+    "7.": "No changed files found for `--scope=changed`.",
+    "17.": "git — 1,200 files",
+    "18.": "No files found for `--scope=git`.",
+}
+_DEFAULT_PRESET_TEXT = {
+    "17.": "git — 1,200 files",
+}
+
+def _render_all(ctx, templates = None, progress_phrase = "Format task in progress", expected_text = {}):
     scenarios = [
         # (label,                             data,                        status,    ci,          metadata_keys)
         ("1. clean-passed · GH", _make_clean(), "passed", "github", None),
@@ -259,6 +281,8 @@ def _render_all(ctx, templates = None, progress_phrase = "Format task in progres
         # placeholder.
         ("15. aborted · GH", _make_aborted(), "aborted", "github", None),
         ("16. failing-with-drift · GH", _make_failing_with_drift(), "failing", "github", None),
+        ("17. scope-git-many · GH", _make_scope_git_many(), "failed", "github", None),
+        ("18. scope-git-no-files · GH", _make_no_files_to_format(scope = "git"), "passed", "github", None),
     ]
 
     sep = "=" * 70
@@ -288,6 +312,10 @@ def _render_all(ctx, templates = None, progress_phrase = "Format task in progres
             errors.append("%s: status=running but body has no in-progress placeholder" % label)
         if status != "running" and has_placeholder:
             errors.append("%s: status=%s rendered the in-progress placeholder" % (label, status))
+
+        want = expected_text.get(label.split(" ")[0])
+        if want and want not in out["summary"] + out["text"]:
+            errors.append("%s: output is missing %r" % (label, want))
 
     if errors:
         for e in errors:
@@ -320,13 +348,14 @@ def _check_failed_actions_invoke_snippet_macro(ctx):
         fail("failed action label missing — Bazel-targets block did not render: %r" % out["text"][:600])
 
 def _test_impl(ctx):
-    return _render_all(ctx)
+    return _render_all(ctx, expected_text = _FULL_TEMPLATE_TEXT)
 
 def _default_preset_impl(ctx):
     return _render_all(
         ctx,
         templates = template_presets.templates(template_presets.DEFAULT),
         progress_phrase = "In progress…",
+        expected_text = _DEFAULT_PRESET_TEXT,
     )
 
 format_template_snapshot_tests = task(
