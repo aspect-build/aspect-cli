@@ -282,7 +282,7 @@ def _emit_final(ph, exit_code, message = None):
         kind = "format_results",
         status = status,
         final = True,
-        conclusion = bookend or message,
+        conclusion = bookend or ("" if status == "aborted" else message or ""),
         data = data,
         progress = _progress(status, data),
     ))
