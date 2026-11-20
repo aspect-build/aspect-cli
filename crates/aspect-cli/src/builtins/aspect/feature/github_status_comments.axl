@@ -43,11 +43,12 @@ config supplies (which is also how GitHub Enterprise Server works; see
 
 Comment shape is precomputed in AXL; the Jinja2 template is a pure
 renderer. `_prepare_for_render` decorates each entry with:
-  - `_severity`     "error"|"warning"|"info"|"success" \342\200\224 badge + row sort.
+  - `_severity`     "error"|"warning"|"info"|"success" \342\200\224 a status lookup, for templates.
   - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" \342\200\224 keys
                     into `status_badges[...]`.
   - `_links_text`   Multi-link Markdown for the Links cell (omits unset URLs).
-  - `_result_text`  Kind-specific Result cell text + elapsed.
+  - `_elapsed_text` The row's elapsed time.
+  - `_result_text`  Kind-specific Result cell text.
 
 Inline failure snippets: each job extracts its own (it owns the local
 test.log / action-stderr paths; other jobs can't read them) on its terminal
@@ -74,12 +75,12 @@ Body-template variables:
     marker         \342\200\224 HTML comment identifying this comment across PATCHes.
     started_at     \342\200\224 Earliest sibling-task start time, UTC. Not in the
                      built-in body.
-    status_badges  \342\200\224 {badge_key -> label}.
+    status_badges  \342\200\224 {badge_key -> badge}.
     entries        \342\200\224 per-task entry dicts, alphabetical by (job, kind, name).
                      `entry.kind` is the task kind (the command); `entry.name`
                      is the per-invocation name. Rows render as `<name> [<kind>]`.
-    sections       \342\200\224 `entries` bucketed by badge key; count a status with
-                     `sections.failed|length`.
+    sections       \342\200\224 `entries` bucketed by status (see `_bucket_entries`);
+                     count one with `sections.failed|length`.
     build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
     tip_rows       \342\200\224 decorated tips.
     *_overflow_note \342\200\224 "N more not shown" line for each capped section.
@@ -717,7 +718,7 @@ def _dedup_for_display(entries):
 def _bucket_entries(entries):
     """Split entries into five status sections: running, failed, failing,
     flagged (warnings), successful — top-to-bottom by urgency, mirroring
-    GitHub Actions' check-run ordering. Rows stay (job, name, key)-sorted
+    GitHub Actions' check-run ordering. Rows stay (job, kind, name)-sorted
     within each bucket so only bucket membership changes across PATCHes.
     Aborted folds into `failed`. `entries` must be `_prepare_for_render`-d.
     """
@@ -2488,7 +2489,8 @@ GithubStatusComments = feature(
                           "the raw {kind, name, job, run_attempt, status, elapsed_ms, " +
                           "ci_run_url, aspect_url, check_run_url, current_phase, progress, " +
                           "failed_in_phase, repro_commands, fix_commands, …}), sections " +
-                          "(entries bucketed by badge key — count a status with " +
+                          "(entries bucketed by status into running, failed (aborted included), failing, " +
+                          "flagged (warning) and successful — count one with " +
                           "`sections.failed|length`), `repro_rows` / `fix_rows` (deduped across " +
                           "siblings), build_snippets / test_snippets, " +
                           "tip_rows, the *_overflow_note lines, and cli_version / " +

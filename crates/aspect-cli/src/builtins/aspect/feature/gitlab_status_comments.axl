@@ -687,7 +687,9 @@ GitlabStatusComments = feature(
             default = {},
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
                           "Vars available match the GithubStatusComments template contract " +
-                          "(`aspect feature github-status-comments` lists them). Empty dict → the selected `template_preset`.",
+                          "(`aspect feature github-status-comments` lists them), except that `build_snippets`, " +
+                          "`test_snippets`, `last_updated_at` and `api_usage` are always empty here. " +
+                          "Empty dict → the selected `template_preset`.",
         ),
         "status_badges": args.custom(
             dict,

@@ -66,7 +66,9 @@ Console = feature(
                           "names no phase, get `highlight_style` and `highlight_reset`, the ANSI " +
                           "codes around the line's highlight (empty when color is off). They apply to every task that renders with " +
                           "`template_preset` (not one with its own `task_presets` entry); one task's own go in " +
-                          "`task_templates`. An empty template prints nothing. A template that " +
+                          "`task_templates`. An empty template prints nothing, except on Buildkite, " +
+                          "where a line that opens a log section takes the preset's text (or " +
+                          "`full`'s). A template that " +
                           "fails to render falls back to the preset's template for that slot.",
         ),
     } | task_template_args("silent", "verdict"),
