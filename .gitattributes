@@ -1,2 +1,4 @@
 **/*.axl linguist-language=Starlark
 docs/**/*.md linguist-generated=true
+crates/bazel/src/execlog/expanded/testdata/**/*.binpb binary
+crates/bazel/src/execlog/expanded/testdata/**/*.zstd binary
