@@ -438,6 +438,13 @@ impl Console {
         self.color
     }
 
+    /// Replace the resolved color, so a test decides it rather than the
+    /// process's terminal and environment.
+    #[cfg(test)]
+    pub(crate) fn set_color(&mut self, color: bool) {
+        self.color = color;
+    }
+
     /// Render `slot` with `context`, plus the shared `buildkite` and `task`
     /// keys. Returns `""` for a slot the layout leaves blank, except where
     /// Buildkite needs the line to open a section.

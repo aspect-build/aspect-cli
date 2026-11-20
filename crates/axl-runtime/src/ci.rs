@@ -40,7 +40,7 @@ pub fn ci_renders_ansi() -> bool {
 }
 
 /// Pure core of [`ci_renders_ansi`].
-fn renders_ansi_from(set: impl Fn(&str) -> bool) -> bool {
+pub(crate) fn renders_ansi_from(set: impl Fn(&str) -> bool) -> bool {
     ANSI_RENDERING_CI.iter().any(|var| set(var))
 }
 

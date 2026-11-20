@@ -65,6 +65,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         signals: None,
         exporting: false,
         history: None,
+        console_env: None,
     }
 }
 
@@ -78,6 +79,7 @@ pub struct EvalBuilder {
     signals: Option<Arc<Signals>>,
     exporting: bool,
     history: Option<PathBuf>,
+    console_env: Option<(bool, Vec<(String, String)>)>,
 }
 
 impl EvalBuilder {
@@ -125,6 +127,18 @@ impl EvalBuilder {
     /// inspects it, rather than in a directory of the run's own.
     pub fn with_history(mut self, root: PathBuf) -> Self {
         self.history = Some(root);
+        self
+    }
+
+    /// Resolve the console's color in [`EvalBuilder::run_task`] from this
+    /// snapshot (whether stderr is a terminal, and the only environment
+    /// variables set) rather than from the process's own.
+    pub fn with_console_env(mut self, stderr_tty: bool, vars: &[(&str, &str)]) -> Self {
+        let vars = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        self.console_env = Some((stderr_tty, vars));
         self
     }
 
@@ -291,9 +305,17 @@ impl EvalBuilder {
                 mpe.execute_features_with_args(|_f, _h| Arguments::new())
                     .map_err(anyhow::Error::from)?;
             }
-            let console = mpe
+            let mut console = mpe
                 .resolve_console(task_index, "_test", |_f, _h| Arguments::new())
                 .map_err(anyhow::Error::from)?;
+            if let Some((stderr_tty, vars)) = &self.console_env {
+                let color = crate::color::console_color_from(*stderr_tty, |name| {
+                    vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.into())
+                });
+                Arc::get_mut(&mut console)
+                    .expect("the console is not shared before the task runs")
+                    .set_color(color);
+            }
             let exit = mpe
                 .execute_tasks_with_args(
                     task_index,

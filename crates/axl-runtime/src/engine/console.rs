@@ -361,11 +361,23 @@ def _impl(ctx):
 
 check = task(implementation = _impl)
 "#;
-        let color = crate::color::console_supports_color();
+        let color = |stderr_tty, vars: &[(&str, &str)]| {
+            crate::test::eval(code)
+                .with_console_env(stderr_tty, vars)
+                .run_task(0)
+                .unwrap()
+        };
+        assert_eq!(color(true, &[]), Some(1), "a terminal stderr");
         assert_eq!(
-            crate::test::eval(code).run_task(0).unwrap(),
-            Some(u8::from(color)),
-            "ctx.console.color agrees with the runtime's own lines"
+            color(false, &[("GITHUB_ACTIONS", "true")]),
+            Some(1),
+            "an ANSI-rendering CI host"
+        );
+        assert_eq!(color(false, &[]), Some(0), "a piped stderr");
+        assert_eq!(
+            color(false, &[("BUILDKITE", "true"), ("NO_COLOR", "1")]),
+            Some(0),
+            "NO_COLOR on CI"
         );
     }
 
