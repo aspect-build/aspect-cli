@@ -17,7 +17,9 @@
 //! .axl config — there's no env-var special-casing in this binary.
 //!
 //! At exit, `OtelGuard` reports any spans that never reached a collector (see
-//! `trace_buffer::SpanLoss`) and the setting that would have kept them.
+//! `trace_buffer::SpanLoss`) and the setting that would have kept them, and
+//! each signal's first export error: for spans with the loss lines, for logs
+//! and metrics next to their provider's shutdown error.
 
 use axl_runtime::engine::telemetry::{
     ExporterSpec, FileDestination, FileSpec, OtlpProtocol, OtlpSpec,
@@ -50,7 +52,8 @@ use tracing_subscriber::{
 
 use crate::otlp_http::OtlpHttpClient;
 use crate::trace_buffer::{
-    BufferingLogExporter, BufferingSpanExporter, CountingSpanProcessor, SpanLoss, SpanTally,
+    BufferingLogExporter, BufferingSpanExporter, CountingSpanProcessor, FirstError,
+    RecordingMetricExporter, SpanLoss, SpanTally,
 };
 
 use axl_runtime::engine::telemetry::{FileFormat, Signals};
@@ -427,8 +430,9 @@ fn merged_resource(extra: &BTreeMap<String, String>) -> Resource {
 static SPAN_BUFFER: OnceLock<BufferingSpanExporter> = OnceLock::new();
 static LOG_BUFFER: OnceLock<BufferingLogExporter> = OnceLock::new();
 /// Set by `install_late_exporters` when at least one endpoint requested
-/// `metrics`. Read by `OtelGuard::drop` to flush at shutdown.
-static LATE_METER_PROVIDER: Mutex<Option<SdkMeterProvider>> = Mutex::new(None);
+/// `metrics`, with the first error its exporters returned. Read by
+/// `OtelGuard::drop` to flush at shutdown and report that error.
+static LATE_METER_PROVIDER: Mutex<Option<(SdkMeterProvider, Arc<FirstError>)>> = Mutex::new(None);
 
 /// True once `install_late_exporters` has activated at least one exporter
 /// (OTLP, file, or stderr). Drives whether `OtelGuard::drop` emits flush
@@ -549,8 +553,9 @@ fn env_usize(env: impl Fn(&str) -> Option<String>, name: &str, default: usize) -
     env(name).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// One line per way spans were lost, saying which setting keeps them.
-fn span_loss_report(loss: SpanLoss, queue_size: usize) -> Vec<String> {
+/// One line per way spans were lost, saying which setting keeps them, and the
+/// first export error when exports failed.
+fn span_loss_report(loss: SpanLoss, first_error: Option<&str>, queue_size: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if loss.queued > 0 {
         lines.push(format!(
@@ -573,6 +578,9 @@ fn span_loss_report(loss: SpanLoss, queue_size: usize) -> Vec<String> {
              collector's endpoint and credentials.",
             loss.failed
         ));
+        if let Some(err) = first_error {
+            lines.push(format!("first span export error: {err}"));
+        }
     }
     lines
 }
@@ -807,10 +815,14 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
                  different values; metrics carry the first registered exporter's"
             );
         }
+        let export_error = Arc::new(FirstError::default());
         let mut builder =
             MeterProviderBuilder::default().with_resource(merged_resource(&attributes));
         for spec in metric_exporters {
-            let exporter = build_otlp_metric_exporter(&spec)?;
+            let exporter = RecordingMetricExporter::new(
+                build_otlp_metric_exporter(&spec)?,
+                Arc::clone(&export_error),
+            );
             let mut reader = PeriodicReader::builder(exporter);
             if let Some(interval) = metric_export_interval(env_var) {
                 reader = reader.with_interval(interval);
@@ -821,7 +833,7 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
         let provider = builder.build();
         global::set_meter_provider(provider.clone());
         if let Ok(mut slot) = LATE_METER_PROVIDER.lock() {
-            *slot = Some(provider);
+            *slot = Some((provider, export_error));
         }
     }
 
@@ -840,6 +852,26 @@ fn shutdown_timeout() -> std::time::Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(5000);
     std::time::Duration::from_millis(ms)
+}
+
+/// A provider's failed shutdown and its first failed export, each on its own
+/// line: the periodic reader's "Failed to shutdown" does not say why, and an
+/// export that failed mid-run leaves a later shutdown clean. A final export
+/// still in flight when the shutdown times out has not failed yet, so only
+/// the timeout speaks for it.
+fn shutdown_report(
+    signal: &str,
+    shutdown: opentelemetry_sdk::error::OTelSdkResult,
+    export_error: Option<&str>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Err(err) = shutdown {
+        lines.push(format!("{signal}: {err}"));
+    }
+    if let Some(err) = export_error {
+        lines.push(format!("{signal}: first export error: {err}"));
+    }
+    lines
 }
 
 pub(crate) struct OtelGuard {
@@ -867,25 +899,26 @@ impl Drop for OtelGuard {
         }
         let start = std::time::Instant::now();
 
-        let mut errors: Vec<String> = Vec::new();
-        if let Err(err) = self.tracer_provider.shutdown_with_timeout(timeout) {
-            errors.push(format!("tracer: {err:?}"));
-        }
+        let mut errors = shutdown_report(
+            "tracer",
+            self.tracer_provider.shutdown_with_timeout(timeout),
+            None,
+        );
         if let Some(loss) = self.span_buffer.loss() {
-            for line in span_loss_report(loss, self.queue_size) {
+            let tally = self.span_buffer.tally();
+            for line in span_loss_report(loss, tally.first_error(), self.queue_size) {
                 errln!("telemetry: {line}");
             }
         }
         if let Ok(mut slot) = LATE_METER_PROVIDER.lock() {
-            if let Some(mp) = slot.take() {
-                if let Err(err) = mp.shutdown_with_timeout(timeout) {
-                    errors.push(format!("meter: {err:?}"));
-                }
+            if let Some((mp, export_error)) = slot.take() {
+                let shutdown = mp.shutdown_with_timeout(timeout);
+                errors.extend(shutdown_report("meter", shutdown, export_error.get()));
             }
         }
-        if let Err(err) = self.logger_provider.shutdown_with_timeout(timeout) {
-            errors.push(format!("logger: {err:?}"));
-        }
+        let shutdown = self.logger_provider.shutdown_with_timeout(timeout);
+        let log_error = LOG_BUFFER.get().and_then(BufferingLogExporter::first_error);
+        errors.extend(shutdown_report("logger", shutdown, log_error));
 
         if any_otel {
             let elapsed_ms = start.elapsed().as_millis();
@@ -896,7 +929,7 @@ impl Drop for OtelGuard {
             } else {
                 // Always surface errors — visibility gap, not a build failure.
                 errln!(
-                    "telemetry: flush completed with errors after {}ms — \
+                    "telemetry: exporting or flushing failed (flush took {}ms) — \
                      some records may have been dropped (this does not affect \
                      the task exit code)",
                     elapsed_ms
@@ -1008,18 +1041,42 @@ mod tests {
 
     #[test]
     fn span_loss_report_names_the_setting_for_each_loss() {
-        assert!(span_loss_report(SpanLoss::default(), 10).is_empty());
+        assert!(span_loss_report(SpanLoss::default(), None, 10).is_empty());
         let lines = span_loss_report(
             SpanLoss {
                 queued: 3,
                 evicted: 0,
                 failed: 2,
             },
+            Some("Unauthenticated"),
             10,
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("3 span(s)") && lines[0].contains("OTEL_BSP_MAX_QUEUE_SIZE"));
         assert!(lines[1].starts_with("2 span(s) failed"));
+        assert_eq!(lines[2], "first span export error: Unauthenticated");
+    }
+
+    #[test]
+    fn shutdown_report_keeps_the_shutdown_and_export_errors_apart() {
+        use opentelemetry_sdk::error::OTelSdkError;
+        assert!(shutdown_report("meter", Ok(()), None).is_empty());
+        assert_eq!(
+            shutdown_report("meter", Ok(()), Some("Unauthenticated")),
+            ["meter: first export error: Unauthenticated"],
+            "an export that failed mid-run is reported after a clean shutdown"
+        );
+        assert_eq!(
+            shutdown_report(
+                "logger",
+                Err(OTelSdkError::InternalFailure("Failed to shutdown".into())),
+                Some("Unavailable")
+            ),
+            [
+                "logger: Operation failed: Failed to shutdown",
+                "logger: first export error: Unavailable",
+            ]
+        );
     }
 
     #[test]

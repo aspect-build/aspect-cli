@@ -73,6 +73,11 @@ def _impl(ctx: TaskContext) -> int:
     ctx.std.fs.create_dir_all(workspace + "/personal")
     ctx.std.fs.write(workspace + "/MODULE.bazel", "module(name = 'selection_fixture')\n")
     ctx.std.fs.write(workspace + "/WORKSPACE", "")
+
+    # Without a pinned version bazelisk resolves one from GCS on every call.
+    bazelversion = ctx.std.env.bazel_root_dir().rstrip("/") + "/.bazelversion"
+    if ctx.std.fs.exists(bazelversion):
+        ctx.std.fs.write(workspace + "/.bazelversion", ctx.std.fs.read_to_string(bazelversion))
     ctx.std.fs.write(workspace + "/defs.bzl", """
 def _impl(ctx):
     fail("selection must never analyze targets")

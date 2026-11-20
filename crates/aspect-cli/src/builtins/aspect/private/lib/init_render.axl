@@ -13,13 +13,19 @@ It depends only on the AXL stdlib available in a task `ctx`:
   - `json.decode`
 
 Public API:
+  - `CONFIG_FILENAME`: the config file a template keeps at its root
   - `load_config(ctx, repo_dir)` -> config dict (parsed template-config.json)
   - `preset_names(config)` -> sorted list of preset names
   - `preset_flags(config, name)` -> feature-flag dict for a preset
+  - `InitError`: the error type for a failure the user can fix
   - `render(ctx, config, template_dir, out_dir, project_snake, flags)` -> [paths]
 """
 
 load("./path_utils.axl", "path_utils")
+
+# A bad flag, a template that cannot be fetched or read, or a failing command:
+# the user's to fix, so it ends the task with its message and no traceback.
+InitError = error.type(traceback = False)
 
 # --- config ------------------------------------------------------------------
 
@@ -35,7 +41,7 @@ def preset_names(config):
 
 def preset_flags(config, name):
     if name not in config["presets"]:
-        fail("unknown preset {!r}; known presets: {}".format(name, ", ".join(preset_names(config))))
+        fail(InitError("unknown preset {!r}; known presets: {}".format(name, ", ".join(preset_names(config)))))
     return config["presets"][name]
 
 # --- predicate evaluation (data, not code) -----------------------------------
