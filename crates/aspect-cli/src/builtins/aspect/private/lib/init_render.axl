@@ -13,6 +13,7 @@ It depends only on the AXL stdlib available in a task `ctx`:
   - `json.decode`
 
 Public API:
+  - `CONFIG_FILENAME`: the config file a template keeps at its root
   - `load_config(ctx, repo_dir)` -> config dict (parsed template-config.json)
   - `preset_names(config)` -> sorted list of preset names
   - `preset_flags(config, name)` -> feature-flag dict for a preset

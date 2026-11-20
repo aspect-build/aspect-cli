@@ -148,16 +148,15 @@ def _resolve_target(ctx):
 def _download(ctx, url, output, what, hint):
     """Download `url` to `output`, raising `InitError` on failure.
 
-    The message names `what` and every reason in the failure's chain (the
-    HTTP client's own text already carries the URL). `hint` follows only when
-    the server answered with an error status; a network failure is not the
-    ref's fault.
+    The message names `what` and every reason in the failure's chain; a
+    request or status error's own text carries the URL. `hint` follows only a
+    4xx answer: a network failure or a server error is not the ref's fault.
     """
     err, _ = ctx.http().download(url = url, output = output, mode = 0o644).catch().block()
     if err:
         reasons = error_reasons(err)
         message = "could not fetch {}: {}".format(what, reasons)
-        if "HTTP status" in reasons:
+        if "HTTP status client error" in reasons:
             message += "; " + hint
         fail(InitError(message, cause = err))
 
