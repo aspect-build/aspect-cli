@@ -67,7 +67,9 @@ use aspect_telemetry::{
     cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
 use axl_runtime::ci::on_recognized_ci;
-use axl_runtime::eval::{AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::eval::{
+    AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPhaseEval, rc_resolution_error,
+};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use axl_runtime::{SignalKind, SignalOrigin, Signals};
@@ -715,6 +717,13 @@ fn main() -> ExitCode {
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
                 return ExitCode::from(exit.code);
+            }
+            // A broken `.bazelrc` is the user's to fix, so it reads like
+            // Bazel's own error rather than a crash in the AXL that read it.
+            if let Some(rc_err) = rc_resolution_error(&err) {
+                errln!("error: {rc_err}");
+                TaskExit::debug_traceback(&format_args!("{err:?}"));
+                return ExitCode::FAILURE;
             }
             // A config error is reported as the failed config's own error,
             // and as a document on stdout when one was asked for: a caller

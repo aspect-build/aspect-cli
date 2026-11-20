@@ -47,15 +47,22 @@ pub(crate) fn expand_configs(
         command,
         skip_config_if_missing,
     };
+    let written_in: Vec<usize> = base.iter().map(|o| o.source_index).collect();
     let mut result = Vec::new();
-    expander.expand(&base, &mut Vec::new(), &mut result)?;
+    expander.expand(&base, &written_in, &mut Vec::new(), &mut result)?;
 
     if let Some(enabler) = platform_config_enabler(rc, &result)
         && !expander.config_options(PLATFORM_CONFIG).is_empty()
     {
         let requester = result[enabler].clone();
         let mut platform = Vec::new();
-        expander.expand_config(PLATFORM_CONFIG, &requester, &mut Vec::new(), &mut platform)?;
+        expander.expand_config(
+            PLATFORM_CONFIG,
+            &requester,
+            requester.source_index,
+            &mut Vec::new(),
+            &mut platform,
+        )?;
         result.splice(enabler + 1..enabler + 1, platform);
     }
     Ok(result)
@@ -97,6 +104,10 @@ fn config_request(args: &[RcOption], index: usize) -> Option<(&str, usize)> {
 /// requests recursively where they appear — Bazel's in-place expansion
 /// semantics. See <https://bazel.build/versions/9.0.0/run/bazelrc#option-defaults>.
 ///
+/// `written_in[i]` is the source `args[i]` was written in, which an undefined
+/// config names: an expanded option's `source_index` is its requester's, so it
+/// can't tell a nested `--config=` apart from the request that pulled it in.
+///
 /// The invariants of one expansion pass live on [`Expander`]; only the ancestor
 /// chain and the output accumulate as it recurses.
 struct Expander<'a> {
@@ -109,6 +120,7 @@ impl Expander<'_> {
     fn expand(
         &self,
         args: &[RcOption],
+        written_in: &[usize],
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
     ) -> Result<(), BazelrcError> {
@@ -119,7 +131,13 @@ impl Expander<'_> {
                 index += 1;
                 continue;
             };
-            self.expand_config(config_name, &args[index], ancestor_chain, result)?;
+            self.expand_config(
+                config_name,
+                &args[index],
+                written_in[index],
+                ancestor_chain,
+                result,
+            )?;
             index += span;
         }
         Ok(())
@@ -131,11 +149,12 @@ impl Expander<'_> {
     /// Expanded options inherit `requester`'s `version_condition` when they carry
     /// none of their own, so version-gated config sections propagate correctly,
     /// and its section and source unless defined under `common` (see
-    /// [`expand_configs`]).
+    /// [`expand_configs`]). `written_in` is the source holding the request.
     fn expand_config(
         &self,
         config_name: &str,
         requester: &RcOption,
+        written_in: usize,
         ancestor_chain: &mut Vec<String>,
         result: &mut Vec<RcOption>,
     ) -> Result<(), BazelrcError> {
@@ -153,9 +172,11 @@ impl Expander<'_> {
             return Err(BazelrcError::UndefinedConfig {
                 command: self.command.to_owned(),
                 name: config_name.to_owned(),
+                referenced_in: self.rc.sources()[written_in].clone(),
             });
         }
 
+        let defined_in: Vec<usize> = config_opts.iter().map(|o| o.source_index).collect();
         for opt in &mut config_opts {
             if opt.version_condition.is_none() {
                 opt.version_condition = requester.version_condition.clone();
@@ -167,7 +188,7 @@ impl Expander<'_> {
         }
 
         ancestor_chain.push(config_name.to_owned());
-        let expanded = self.expand(&config_opts, ancestor_chain, result);
+        let expanded = self.expand(&config_opts, &defined_in, ancestor_chain, result);
         ancestor_chain.pop();
         expanded
     }

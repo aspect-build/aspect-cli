@@ -1196,7 +1196,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| env.bazel_root_dir.clone());
         let rc = bazel::rc::Bazelrc::new(root, &startup_flags.items, &flags.items)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .map_err(bazel::rc::RcResolutionError::from)?
             .with_skip_config_if_missing(skip_config_if_missing.items);
         let version = resolve_rc_version(&env.signals, version.into_option(), &rc)?;
         Ok(rc.with_version(version))
