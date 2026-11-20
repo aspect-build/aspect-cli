@@ -1,4 +1,6 @@
-"""`GoHighlight`: BuildBuddy's go-highlight CLI plugin as console stages.
+"""`GoHighlight`: an example plugin, ported from BuildBuddy's open-source
+[go-highlight](https://github.com/bduffany/go-highlight) CLI plugin as console
+stages.
 
 A compiler error's `file.go:line:col:` prefix is coloured yellow, and
 TypeScript's `file.ts(line,col):` is rewritten to `file.ts:line:col:` so an

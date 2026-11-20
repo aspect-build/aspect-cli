@@ -1,5 +1,7 @@
-"""`Notify`: BuildBuddy's notify CLI plugin. A desktop notification when a task
-that ran Bazel ends, with how it ended and the time Bazel took.
+"""`Notify`: an example plugin, ported from BuildBuddy's open-source
+[notify](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/notify)
+CLI plugin. A desktop notification when a task that ran Bazel ends, with how
+it ended and the time Bazel took.
 
 Off by default, as the plugin's `--notify` is: `--notify:enabled=true`, or
 `ctx.features[Notify].enabled = True`. The result comes from the build event

@@ -1,4 +1,6 @@
-"""`Theme`: BuildBuddy's theme-modern and theme-mono CLI plugins as console
+"""`Theme`: an example plugin, ported from BuildBuddy's open-source
+[theme-modern](https://github.com/siggisim/theme-modern) and
+[theme-mono](https://github.com/siggisim/theme-mono) CLI plugins as console
 stages: Bazel's highlights recoloured, emoji on its closing lines, and each
 running action's elapsed seconds coloured by how long it has run.
 

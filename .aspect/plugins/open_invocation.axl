@@ -1,5 +1,7 @@
-"""`OpenInvocation`: BuildBuddy's open-invocation CLI plugin. Opens the
-invocation's results page in a browser when the task ends.
+"""`OpenInvocation`: an example plugin, ported from BuildBuddy's open-source
+[open-invocation](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/open-invocation)
+CLI plugin. Opens the invocation's results page in a browser when the task
+ends.
 
 Off by default, as the plugin's `--open` is: `--open-invocation:enabled=true`.
 
