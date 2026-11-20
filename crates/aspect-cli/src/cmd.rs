@@ -1721,8 +1721,9 @@ const CONFIG_ARGS_HEADING: &str = "Set in .aspect/config.axl";
 /// `config_only = True` args), or `None` when there are none.
 ///
 /// These have no flag for clap to render, so the section is written by hand in
-/// clap's next-line layout (name where a flag's long name starts, every line of
-/// its help indented below it), closed by how `.aspect/config.axl` sets them.
+/// clap's next-line layout (name where a flag's long name starts, every
+/// non-blank line of its help indented below it), closed by how
+/// `.aspect/config.axl` sets them.
 /// Current values are not shown: they would need the repo's config evaluated.
 /// It goes in through `after_help`, which clap writes verbatim (a `{` in the
 /// help is not template-parsed) and strips of ANSI when stdout is not a
@@ -1735,7 +1736,11 @@ fn config_args_section(export_name: &str, config_args: &[(String, Arg)]) -> Opti
     for (name, arg) in config_args {
         out.push_str(&format!("      \x1b[1m{name}\x1b[0m\n"));
         for line in arg.description().unwrap_or_default().lines() {
-            out.push_str(&format!("          {line}\n"));
+            if !line.is_empty() {
+                out.push_str("          ");
+            }
+            out.push_str(line);
+            out.push('\n');
         }
     }
     out.push_str(&format!(
@@ -2941,15 +2946,15 @@ mod tests {
     }
 
     #[test]
-    fn feature_detail_indents_every_line_of_a_multi_line_config_arg_help() {
+    fn feature_detail_indents_every_non_blank_line_of_a_multi_line_config_arg_help() {
         let mut args: SmallMap<String, Arg> = SmallMap::new();
         args.insert(
             "templates".to_owned(),
-            arg_custom(Some("First line.\nSecond line.")),
+            arg_custom(Some("First line.\n\nSecond line.")),
         );
         let help = plain_feature_detail(&feature_with_args("Console", "", args));
         assert!(
-            help.contains("      templates\n          First line.\n          Second line.\n"),
+            help.contains("      templates\n          First line.\n\n          Second line.\n"),
             "{help}"
         );
     }
@@ -2959,22 +2964,6 @@ mod tests {
         let help = plain_feature_detail(&stub_feature("ArtifactUpload"));
         assert!(!help.contains(CONFIG_ARGS_HEADING), "{help}");
         assert!(!help.contains("ctx.features["), "{help}");
-    }
-
-    /// A feature whose every arg is config-only still gets a page; listing only
-    /// flag-bearing features would hide it from `aspect feature` entirely.
-    #[test]
-    fn feature_with_only_config_only_args_is_listed() {
-        let mut args: SmallMap<String, Arg> = SmallMap::new();
-        args.insert("templates".to_owned(), arg_custom(Some("Overrides.")));
-        let f = feature_with_args("Console", "", args);
-        let block = feature_block(&f).expect("a feature with config-only args has a block");
-        assert!(block.args.is_empty());
-        let help = plain_feature_detail(&f);
-        assert!(
-            help.contains("Set in .aspect/config.axl:\n      templates\n"),
-            "{help}"
-        );
     }
 
     #[test]

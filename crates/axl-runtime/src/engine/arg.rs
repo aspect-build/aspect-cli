@@ -641,7 +641,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// command-line spelling that does not exist. `args.custom(type, ...)` is
     /// config-only by construction and so has no such parameter; the argv-shaped
     /// kinds (`positional`, `trailing_var_args`, `passthrough`) have none either,
-    /// since their content comes from the command line.
+    /// since their content comes from the command line. On a feature,
+    /// `aspect feature <name>` lists a config-only arg with its `description`.
     ///
     /// `bare = "value"` additionally makes a valueless `--flag_name` legal,
     /// resolving to `value` — for a flag whose common case needs no argument
