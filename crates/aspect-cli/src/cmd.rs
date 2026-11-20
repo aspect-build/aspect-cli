@@ -8,7 +8,8 @@
 //!   does not declare reach its `args.passthrough()` buckets instead of failing
 //!   the parse. `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
-//!   surface for feature flags (which are hidden from each task's `--help`).
+//!   surface for feature flags (which are hidden from each task's `--help`)
+//!   and for the feature args only `.aspect/config.axl` can set.
 //! * [`Dispatch`] — carries `task_id`, `task_name`, `task_friendly_name`, `task_uuid`, and the parsed
 //!   matches. `task_args(...)` and `feature_args(...)` produce the merged
 //!   runtime [`Arguments`] for a given task or feature.
@@ -1720,11 +1721,12 @@ const CONFIG_ARGS_HEADING: &str = "Set in .aspect/config.axl";
 /// `config_only = True` args), or `None` when there are none.
 ///
 /// These have no flag for clap to render, so the section is written by hand in
-/// clap's next-line layout (name where a flag's long name starts, help on the
-/// line below), closed by how `.aspect/config.axl` sets them. Current values
-/// are not shown: they would need the repo's config evaluated. It goes in
-/// through `after_help`, which clap writes verbatim (a `{` in the help is not
-/// template-parsed) and strips of ANSI off a terminal.
+/// clap's next-line layout (name where a flag's long name starts, every line of
+/// its help indented below it), closed by how `.aspect/config.axl` sets them.
+/// Current values are not shown: they would need the repo's config evaluated.
+/// It goes in through `after_help`, which clap writes verbatim (a `{` in the
+/// help is not template-parsed) and strips of ANSI when stdout is not a
+/// terminal or `NO_COLOR` is set.
 fn config_args_section(export_name: &str, config_args: &[(String, Arg)]) -> Option<String> {
     if config_args.is_empty() {
         return None;
@@ -1732,8 +1734,8 @@ fn config_args_section(export_name: &str, config_args: &[(String, Arg)]) -> Opti
     let mut out = format!("\x1b[1;4m{CONFIG_ARGS_HEADING}:\x1b[0m\n");
     for (name, arg) in config_args {
         out.push_str(&format!("      \x1b[1m{name}\x1b[0m\n"));
-        if let Some(help) = arg.description().filter(|d| !d.is_empty()) {
-            out.push_str(&format!("          {help}\n"));
+        for line in arg.description().unwrap_or_default().lines() {
+            out.push_str(&format!("          {line}\n"));
         }
     }
     out.push_str(&format!(
@@ -2935,6 +2937,20 @@ mod tests {
              \n\
              Set these as ctx.features[Console].args.<NAME> in .aspect/config.axl; \
              they have no command-line flag.\n",
+        );
+    }
+
+    #[test]
+    fn feature_detail_indents_every_line_of_a_multi_line_config_arg_help() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert(
+            "templates".to_owned(),
+            arg_custom(Some("First line.\nSecond line.")),
+        );
+        let help = plain_feature_detail(&feature_with_args("Console", "", args));
+        assert!(
+            help.contains("      templates\n          First line.\n          Second line.\n"),
+            "{help}"
         );
     }
 
