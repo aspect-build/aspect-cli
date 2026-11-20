@@ -843,6 +843,8 @@ struct Console {
     /// the console's forwarder has pending,
     /// so it stays in order with the stderr lines above it.
     stdout: Option<Forwarder>,
+    /// The feed `output_feed()` drains, with `bazel::console::Output::Hidden`.
+    feed: Option<Arc<bazel::console::feed::Feed>>,
     observations: Arc<Observations>,
     events: Option<std::sync::mpsc::Receiver<HeldLine>>,
     log: Option<std::path::PathBuf>,
@@ -928,6 +930,7 @@ impl Console {
         }
         let pipeline = config.pipeline();
         let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
+        let feed = pipeline.feed.clone();
         let forwarder = Forwarder::spawn_reported(
             Box::new(reader),
             Box::new(std::io::stderr()),
@@ -948,7 +951,9 @@ impl Console {
                     strip_colour: !config
                         .user_colour
                         .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout())),
-                    lines: None,
+                    // A stdout of its own is the program's output, not the
+                    // console UI: shown as written even when nothing else is.
+                    ..Default::default()
                 };
                 (
                     Some(child),
@@ -969,6 +974,7 @@ impl Console {
             Console {
                 forwarder,
                 stdout,
+                feed,
                 observations: pipeline.observations,
                 events: pipeline.events,
                 log,
@@ -1064,6 +1070,20 @@ pub struct Build {
     /// is called, and before they run, so a hook that waits does not recurse.
     #[allocative(skip)]
     console_ended: std::cell::Cell<bool>,
+
+    /// What is shown, for `output_feed()`, when the console shows nothing
+    /// itself (`display = "none"`).
+    #[allocative(skip)]
+    console_feed: Option<Arc<bazel::console::feed::Feed>>,
+
+    /// When the `output_frame` hooks last ran, for their cadence.
+    #[allocative(skip)]
+    last_frame: std::cell::Cell<Option<std::time::Instant>>,
+
+    /// Whether the task has `output_frame` hooks, once a frame was asked
+    /// for: so a build without them stops reading the trait for frames.
+    #[allocative(skip)]
+    has_frames: std::cell::Cell<Option<bool>>,
 
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
@@ -1623,24 +1643,31 @@ impl Build {
         };
 
         let mut console_gone = None;
-        let (console, console_stdout, console_observations, console_events, console_log) =
-            match console {
-                Some(console) => {
-                    console
-                        .client
-                        .store(child.id(), std::sync::atomic::Ordering::SeqCst);
-                    console.abandon.disarm();
-                    console_gone = Some(console.gone);
-                    (
-                        Some(console.forwarder),
-                        console.stdout,
-                        Some(console.observations),
-                        console.events,
-                        console.log,
-                    )
-                }
-                None => (None, None, None, None, None),
-            };
+        let (
+            console,
+            console_stdout,
+            console_observations,
+            console_events,
+            console_log,
+            console_feed,
+        ) = match console {
+            Some(console) => {
+                console
+                    .client
+                    .store(child.id(), std::sync::atomic::Ordering::SeqCst);
+                console.abandon.disarm();
+                console_gone = Some(console.gone);
+                (
+                    Some(console.forwarder),
+                    console.stdout,
+                    Some(console.observations),
+                    console.events,
+                    console.log,
+                    console.feed,
+                )
+            }
+            None => (None, None, None, None, None, None),
+        };
         let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks);
 
         // Everything that can fail once bazel runs. A failure abandons the
@@ -1855,6 +1882,9 @@ impl Build {
             console_events: RefCell::new(console_events),
             hook_error: RefCell::new(None),
             console_ended: std::cell::Cell::new(false),
+            console_feed,
+            last_frame: std::cell::Cell::new(None),
+            has_frames: std::cell::Cell::new(None),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
@@ -1946,26 +1976,35 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    /// Answer the lines the console's `intercept` stages hold now with the
+    /// Run the `BazelTrait.output_frame` hooks when a frame is due, then
+    /// answer the lines the console's `intercept` stages hold now with the
     /// `BazelTrait.output_intercept` hooks, waiting briefly after each for
     /// the next a burst brings, up to a budget per call. For a task's build
-    /// loop, so held lines are answered while the build runs; `wait()`
-    /// answers the rest. With `until_ended`, answers every line until the
+    /// loop, so held lines are answered and frames drawn while the build
+    /// runs; `wait()` does the rest. With `until_ended`, does both until the
     /// console ends instead, as `wait()` does, for a task about to block on
-    /// something else first. Does nothing for a build that holds no lines.
-    /// A hook's error is raised by `wait()`, once the build is joined.
+    /// something else first. Does nothing for a build with neither. A hook's
+    /// error is raised by `wait()`, once the build is joined.
     fn run_output_hooks<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = false)] until_ended: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
-        if build.console_events.borrow().is_none() {
+        // Called for every build event: when there is nothing to answer and
+        // no frame is due, skip reading the trait.
+        if build.console_events.borrow().is_none() && !until_ended && !build.frame_due() {
             return Ok(NoneType);
         }
         let console = TraitConsole::of(eval);
+        if let Some(console) = &console {
+            build.frame(console, this, eval, false);
+        }
+        if build.console_events.borrow().is_none() && !until_ended {
+            return Ok(NoneType);
+        }
         if until_ended {
-            build.answer_until_the_console_ends(console.as_ref(), eval);
+            build.answer_until_the_console_ends(console.as_ref(), this, eval);
             return Ok(NoneType);
         }
         let Some(console) = console else {
@@ -1990,6 +2029,30 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             wait = HOOK_FOLLOW;
         }
         Ok(NoneType)
+    }
+
+    /// What the console showed since the last call, for a build whose
+    /// processor shows nothing itself (`display = "none"`), as a dict:
+    /// `lines`, the lines the stages passed, escape sequences stripped;
+    /// `dropped`, how many older lines were let go to keep at most 10000
+    /// between calls; and `progress`, the rows of Bazel's progress area as it
+    /// was before its latest redraw (at most one redraw behind), its status
+    /// line (`[n / m] …`) first and then one per running action, empty once
+    /// the console ends. None for any other build.
+    fn output_feed<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let Some(feed) = &build.console_feed else {
+            return Ok(values::Value::new_none());
+        };
+        let got = feed.drain();
+        Ok(heap.alloc(serde_json::json!({
+            "lines": got.lines,
+            "dropped": got.dropped,
+            "progress": got.progress,
+        })))
     }
 
     /// The `(id, line)` hits of the `output` processor's `observe` stages:
@@ -2110,14 +2173,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let console = TraitConsole::of(eval);
-        build.answer_until_the_console_ends(console.as_ref(), eval);
+        build.answer_until_the_console_ends(console.as_ref(), this, eval);
         let status = build.wait_status()?;
         if let Some(console) = &console
             && build.console_observations.is_some()
             && !build.console_ended.replace(true)
-            && let Err(e) = console.ended(this, eval)
         {
-            build.hook_failed(e);
+            build.frame(console, this, eval, true);
+            if let Err(e) = console.ended(this, eval) {
+                build.hook_failed(e);
+            }
         }
         match build.hook_error.take() {
             Some(e) => Err(e),
@@ -2125,6 +2190,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         }
     }
 }
+
+/// How often the `BazelTrait.output_frame` hooks run while a build's console
+/// is open.
+const FRAME_EVERY: Duration = Duration::from_millis(100);
 
 /// Lines [`build_methods`]' `run_output_hooks` answers per call, so a burst
 /// cannot monopolize a task's build loop.
@@ -2144,25 +2213,47 @@ impl Build {
     }
 
     /// Answer every held line with `console`'s hooks until the console ends
-    /// (the client exited and its stderr closed), or the task is cancelled.
-    /// A hook's error lets go of the rest ([`Build::hook_failed`]).
+    /// (the client exited and its stderr closed), or the task is cancelled,
+    /// running its `output_frame` hooks meanwhile. A hook's error lets go of
+    /// the rest ([`Build::hook_failed`]). With frame hooks and no held lines,
+    /// it waits on the client between frames, so the client is reaped here
+    /// rather than in [`Build::wait_status`]: the console's gate learns it
+    /// is gone, and the profile is copied, then.
     fn answer_until_the_console_ends<'v>(
         &self,
         console: Option<&TraitConsole<'v>>,
+        this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) {
         let Some(console) = console else {
             drop(self.console_events.take());
             return;
         };
+        let framed = !console.frame.is_empty() && self.console.borrow().is_some();
+        if framed && self.console_events.borrow().is_none() {
+            while !self.console_done() {
+                self.frame(console, this, eval, false);
+                match self.wait_child(Some(FRAME_EVERY / 4)) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => std::thread::sleep(FRAME_EVERY / 4),
+                    // Cancelled: `wait()` reports it.
+                    Err(_) => return,
+                }
+            }
+            return;
+        }
+        let tick = framed.then_some(FRAME_EVERY);
         loop {
             let next = {
                 let events = self.console_events.borrow();
                 let Some(rx) = events.as_ref() else {
                     return;
                 };
-                children::recv_cancellable(&self.signals, rx, None)
+                children::recv_cancellable(&self.signals, rx, tick)
             };
+            if framed {
+                self.frame(console, this, eval, false);
+            }
             match next {
                 Recv::Item(held) => {
                     if let Err(e) = console.answer(held, eval) {
@@ -2176,6 +2267,47 @@ impl Build {
                     return;
                 }
             }
+        }
+    }
+
+    /// Whether the captured console has ended: its forwarder is done.
+    fn console_done(&self) -> bool {
+        self.console.borrow().as_ref().is_none_or(|f| f.finished())
+    }
+
+    /// Whether a frame is due: the task has frame hooks (as far as is known
+    /// yet), the console is open and none ran within [`FRAME_EVERY`].
+    fn frame_due(&self) -> bool {
+        self.has_frames.get() != Some(false)
+            && self.console.borrow().is_some()
+            && !self.console_ended.get()
+            && self
+                .last_frame
+                .get()
+                .is_none_or(|t| t.elapsed() >= FRAME_EVERY)
+    }
+
+    /// Run the `output_frame` hooks with `this` build when one is due, or
+    /// now with `force` (the last frame, as the console ends). After any
+    /// console hook's error, `output_intercept`'s too, no frame runs: the
+    /// error is kept for `wait()`.
+    fn frame<'v>(
+        &self,
+        console: &TraitConsole<'v>,
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+        force: bool,
+    ) {
+        self.has_frames.set(Some(!console.frame.is_empty()));
+        if console.frame.is_empty() || self.hook_error.borrow().is_some() {
+            return;
+        }
+        if !force && !self.frame_due() {
+            return;
+        }
+        self.last_frame.set(Some(std::time::Instant::now()));
+        if let Err(e) = console.framed(this, eval) {
+            self.hook_error.borrow_mut().get_or_insert(e);
         }
     }
 

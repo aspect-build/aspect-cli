@@ -1,12 +1,13 @@
 """Tests for the console plugins' parsing: ping_remote's `host_port`,
-go_deps' `package_of` and open_invocation's `results_page`.
+go_deps' `package_of` and open_invocation's `results_page` and
+`results_pages`.
 
 Run with:
   aspect dev test-console-plugins
 """
 
 load("./go_deps.axl", "package_of")
-load("./open_invocation.axl", "results_page")
+load("./open_invocation.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 load("./ping_remote.axl", "host_port")
 
 def _eq(label, got, want):
@@ -37,6 +38,16 @@ def _impl(ctx: TaskContext) -> int:
     _eq("bazel-uploaded", results_page("https://bes.example.com/invocation/", "uuid-1", {}), "https://bes.example.com/invocation/uuid-1")
     _eq("sink without a viewer", results_page("https://bes.example.com", "uuid-1", {"sink_invocation_id": "sink-1"}), "https://bes.example.com/uuid-1")
     _eq("nothing", results_page("", "uuid-1", {}), "")
+    _eq("both pages", results_pages("https://bes.example.com/invocation", "uuid-1", sink), [
+        (ASPECT_PAGE, "https://app.example.com/sink-1"),
+        (BES_PAGE, "https://bes.example.com/invocation/uuid-1"),
+    ])
+    parsed = struct(payload = struct(cmd_line = ["--bes_results_url=https://old.example.com", "--keep_going", "--bes_results_url=https://new.example.com"]))
+    _eq("the last --bes_results_url wins", bes_results_url(parsed), "https://new.example.com")
+    _eq("no --bes_results_url", bes_results_url(struct(payload = struct(cmd_line = ["--keep_going"]))), "")
+    _eq("bazel streams to aspect", results_pages("https://app.example.com", "uuid-1", {"bes_streamed_by_bazel": True}), [
+        (ASPECT_PAGE, "https://app.example.com/uuid-1"),
+    ])
     print("plugins_test.axl: OK")
     return 0
 

@@ -93,19 +93,111 @@ pub fn strip(b: &[u8]) -> Cow<'_, [u8]> {
     )
 }
 
-/// The characters of `b`'s text, escape sequences aside: its width on a
-/// terminal for the text bazel writes, though a wide (CJK) character or a
-/// tab takes more than one column.
-pub fn width(b: &[u8]) -> usize {
-    String::from_utf8_lossy(&strip(b)).chars().count()
+/// The terminal columns `c` takes: 2 for a wide character (CJK, fullwidth
+/// forms, and emoji shown as emoji by default), 0 for one that joins or
+/// changes the one before it (combining marks, zero-width joiners and
+/// spaces, variation selectors) and for control characters, else 1. The
+/// common cases, without a full Unicode width table.
+pub fn char_width(c: char) -> usize {
+    let u = c as u32;
+    let zero = [
+        (0x0000, 0x001F),
+        (0x007F, 0x009F),
+        (0x0300, 0x036F),
+        (0x1AB0, 0x1AFF),
+        (0x1DC0, 0x1DFF),
+        (0x200B, 0x200F),
+        (0x20D0, 0x20FF),
+        (0xFE00, 0xFE0F),
+        (0xFE20, 0xFE2F),
+        (0xE0100, 0xE01EF),
+    ];
+    if zero.iter().any(|&(a, b)| (a..=b).contains(&u)) {
+        return 0;
+    }
+    let wide = [
+        // CJK and Hangul.
+        (0x1100, 0x115F),
+        (0x2E80, 0x303E),
+        (0x3041, 0x33FF),
+        (0x3400, 0x4DBF),
+        (0x4E00, 0x9FFF),
+        (0xA000, 0xA4CF),
+        (0xAC00, 0xD7A3),
+        (0xF900, 0xFAFF),
+        (0xFE30, 0xFE4F),
+        (0xFF00, 0xFF60),
+        (0xFFE0, 0xFFE6),
+        (0x20000, 0x3FFFD),
+        // Emoji.
+        (0x1F1E6, 0x1F1FF),
+        (0x1F300, 0x1F64F),
+        (0x1F680, 0x1F6FF),
+        (0x1F900, 0x1F9FF),
+        (0x1FA70, 0x1FAFF),
+        // Symbols shown as emoji by default.
+        (0x231A, 0x231B),
+        (0x23E9, 0x23EC),
+        (0x23F0, 0x23F0),
+        (0x23F3, 0x23F3),
+        (0x25FD, 0x25FE),
+        (0x2614, 0x2615),
+        (0x2648, 0x2653),
+        (0x267F, 0x267F),
+        (0x2693, 0x2693),
+        (0x26A1, 0x26A1),
+        (0x26AA, 0x26AB),
+        (0x26BD, 0x26BE),
+        (0x26C4, 0x26C5),
+        (0x26CE, 0x26CE),
+        (0x26D4, 0x26D4),
+        (0x26EA, 0x26EA),
+        (0x26F2, 0x26F3),
+        (0x26F5, 0x26F5),
+        (0x26FA, 0x26FA),
+        (0x26FD, 0x26FD),
+        (0x2705, 0x2705),
+        (0x270A, 0x270B),
+        (0x2728, 0x2728),
+        (0x274C, 0x274C),
+        (0x274E, 0x274E),
+        (0x2753, 0x2755),
+        (0x2757, 0x2757),
+        (0x2795, 0x2797),
+        (0x27B0, 0x27B0),
+        (0x27BF, 0x27BF),
+        (0x2B1B, 0x2B1C),
+        (0x2B50, 0x2B50),
+        (0x2B55, 0x2B55),
+    ];
+    if wide.iter().any(|&(a, b)| (a..=b).contains(&u)) {
+        2
+    } else {
+        1
+    }
 }
 
-/// `b` with its text cut to `width` characters ([`width`]), every escape
-/// sequence kept (a cursor movement or a colour reset after the cut still
-/// applies) and every byte kept is as it was, valid UTF-8 or not.
+/// The terminal columns `b`'s text takes, escape sequences aside
+/// ([`char_width`]); an invalid UTF-8 sequence counts as one.
+pub fn width(b: &[u8]) -> usize {
+    let text = strip(b);
+    text.utf8_chunks()
+        .map(|chunk| {
+            chunk.valid().chars().map(char_width).sum::<usize>()
+                + usize::from(!chunk.invalid().is_empty())
+        })
+        .sum()
+}
+
+/// `b` with its text cut to `width` columns ([`width`]): a wide character
+/// that would cross the edge is left out, and so is what follows it. Every
+/// escape sequence is kept (a cursor movement or a colour reset after the
+/// cut still applies), and every byte kept is as it was, valid UTF-8 or not.
 pub fn truncate(b: &[u8], width: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut left = width;
+    // Past the cut: no more text, though escape sequences still go out.
+    let mut cut = false;
     for (is_escape, seg) in segments(b) {
         if is_escape {
             out.extend_from_slice(seg);
@@ -113,17 +205,25 @@ pub fn truncate(b: &[u8], width: usize) -> Vec<u8> {
         }
         for chunk in seg.utf8_chunks() {
             for c in chunk.valid().chars() {
-                if left == 0 {
+                // A zero-width character goes with the one before it, so one
+                // right at the edge (an emoji's variation selector) is kept.
+                let w = char_width(c);
+                if cut || w > left {
+                    cut = true;
                     break;
                 }
                 let mut buf = [0; 4];
                 out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                left -= 1;
+                left -= w;
             }
-            // An invalid sequence counts as one character, as in `width`.
-            if left > 0 && !chunk.invalid().is_empty() {
-                out.extend_from_slice(chunk.invalid());
-                left -= 1;
+            // An invalid sequence counts as one column, as in `width`.
+            if !cut && !chunk.invalid().is_empty() {
+                if left == 0 {
+                    cut = true;
+                } else {
+                    out.extend_from_slice(chunk.invalid());
+                    left -= 1;
+                }
             }
         }
     }
@@ -220,10 +320,36 @@ mod tests {
             truncate(row, 18),
             b"\x1b[32m[1 / 2]\x1b[0m Fetching \xff\x1b[0m".to_vec()
         );
+        assert_eq!(truncate("漢字漢字".as_bytes(), 2), "漢".as_bytes().to_vec());
         assert_eq!(
-            truncate("漢字漢字".as_bytes(), 2),
-            "漢字".as_bytes().to_vec()
+            truncate("漢字漢字".as_bytes(), 3),
+            "漢".as_bytes().to_vec(),
+            "a wide character that would cross the edge is left out"
         );
+        assert_eq!(
+            truncate("a⚡\u{FE0F}b".as_bytes(), 3),
+            "a⚡\u{FE0F}".as_bytes().to_vec(),
+            "a variation selector stays with its emoji"
+        );
+    }
+
+    #[test]
+    fn width_counts_terminal_columns() {
+        assert_eq!(width(b"plain"), 5);
+        assert_eq!(width("\x1b[1m🔨\x1b[0m Build".as_bytes()), 8);
+        assert_eq!(width("⚡\u{FE0F} x".as_bytes()), 4);
+        assert_eq!(width("漢字".as_bytes()), 4);
+        assert_eq!(
+            width("─┐…│".as_bytes()),
+            4,
+            "box drawing and the ellipsis are narrow"
+        );
+        assert_eq!(
+            width("e\u{301}".as_bytes()),
+            1,
+            "a combining accent takes no column"
+        );
+        assert_eq!(width(b"a\xffb"), 3);
     }
 
     /// A bazel 9 curses message, as a PTY capture records it.

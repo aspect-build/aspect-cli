@@ -33,10 +33,16 @@
 //! row under it drawn; one left mid-stream (on an interrupt) stays, as a
 //! terminal shows it, since output Bazel coloured the same way cannot be told
 //! from it there.
+//!
+//! With a feed ([`Screen::with_feed`]), each progress area is also handed
+//! over as text as Bazel starts to erase it, for a caller drawing its own
+//! screen.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::ansi;
+use super::feed::Feed;
 use super::line::{self, Line};
 
 /// Pending rows past which the oldest is given back regardless: a stream
@@ -242,6 +248,9 @@ pub struct Screen {
     last_status: Instant,
     /// The first row of the progress area last erased, for `status_every`.
     erased_status: Option<Pending>,
+    /// Where each progress area goes as it is about to be erased
+    /// ([`Screen::with_feed`]).
+    feed: Option<Arc<Feed>>,
 }
 
 impl Screen {
@@ -259,7 +268,41 @@ impl Screen {
             // The first status line comes only once a build has run that long.
             last_status: Instant::now(),
             erased_status: None,
+            feed: None,
         }
+    }
+
+    /// This screen, handing each progress area to `feed` as it is about to
+    /// be erased ([`Screen::snapshot_progress`]).
+    pub fn with_feed(mut self, feed: Arc<Feed>) -> Self {
+        self.feed = Some(feed);
+        self
+    }
+
+    /// The progress area about to be erased, as text, to the feed: on the
+    /// first move up after text was written (curses erases its area a row
+    /// at a time), the rows from its last status line (`[n / m] …`) down.
+    fn snapshot_progress(&self) {
+        let Some(feed) = &self.feed else {
+            return;
+        };
+        if self.moved_up {
+            return;
+        }
+        let end = (self.row + 1).min(self.rows.len());
+        let Some(top) = self.rows[..end]
+            .iter()
+            .rposition(|r| is_status(&self.render(&r.cells)))
+        else {
+            return;
+        };
+        let rows: Vec<String> = self.rows[top..end]
+            .iter()
+            .filter(|r| !r.inserted)
+            .map(|r| String::from_utf8_lossy(&ansi::strip(&self.render(&r.cells))).into_owned())
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        feed.set_progress(rows);
     }
 
     /// Take in `bytes` of the stream, a record and its boundary classified
@@ -394,6 +437,7 @@ impl Screen {
         match last {
             b'A' => {
                 let n = n();
+                self.snapshot_progress();
                 // Above every pending row: rows already given back, which
                 // cannot change. What is written there goes on new rows, and
                 // the rows below keep what they hold.
@@ -658,6 +702,44 @@ mod tests {
         \x1b[32m[2 / 3]\x1b[0m 1 action running\n    Compiling b.cc; 2s\n\
         \r\x1b[1A\x1b[K\r\x1b[1A\x1b[KINFO: Build completed\n\
         \x1b[32m[3 / 3]\x1b[0m no actions running\n";
+
+    /// Bazel erases its progress area a row at a time; the feed gets the
+    /// whole area as drawn, its status line first.
+    #[test]
+    fn the_feed_gets_each_progress_area_whole() {
+        let feed = Arc::new(Feed::default());
+        let mut s = Screen::new(None).with_feed(feed.clone());
+        let area = "\x1b[32m[2 / 9]\x1b[0m 2 actions running\r\n    Compiling a.cc; 3s\r\n    Linking b; 1s\r\n";
+        let erase = "\r\x1b[1A\x1b[K".repeat(3);
+        s.feed(
+            format!("INFO: one\r\n{area}{erase}INFO: two\r\n").as_bytes(),
+            None,
+        );
+        assert_eq!(
+            feed.drain().progress,
+            vec![
+                "[2 / 9] 2 actions running",
+                "    Compiling a.cc; 3s",
+                "    Linking b; 1s"
+            ]
+        );
+    }
+
+    /// An area with no status line (a tool redrawing its own rows) is not
+    /// Bazel's progress; a status row above older rows starts the area.
+    #[test]
+    fn the_feed_takes_the_area_from_its_last_status_row() {
+        let feed = Arc::new(Feed::default());
+        let mut s = Screen::new(None).with_feed(feed.clone());
+        s.feed(b"working 1\r\nworking 2\r\n\r\x1b[1A\x1b[K", None);
+        assert!(feed.drain().progress.is_empty());
+        let area = "\x1b[32m[1 / 3]\x1b[0m 1 action running\r\n    Linking b; 1s\r\n";
+        s.feed(format!("old row\r\n{area}\r\x1b[1A\x1b[K").as_bytes(), None);
+        assert_eq!(
+            feed.drain().progress,
+            vec!["[1 / 3] 1 action running", "    Linking b; 1s"]
+        );
+    }
 
     #[test]
     fn erased_rows_are_gone_and_messages_stay() {

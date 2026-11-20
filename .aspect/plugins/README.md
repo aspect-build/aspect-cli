@@ -26,7 +26,7 @@ Lines of code, not counting blank lines, comments or docstrings. A BuildBuddy pl
 
 ## Differences from the originals
 
-- `Theme`: under a PTY, a rewritten row of Bazel's progress area is cut to the characters Bazel wrote, so the ⚡️ on a remote action's row costs it its last character. theme-mono's `([0-9+])s` typo, which left actions past 9 seconds unstyled, is fixed.
+- `Theme`: under a PTY, a rewritten row of Bazel's progress area is cut to the terminal columns Bazel drew, so a running action's ⚡️ or 🔨 takes the place of three of its indent's spaces. theme-mono's `([0-9+])s` typo, which left actions past 9 seconds unstyled, is fixed.
 - `GoHighlight` also rewrites TypeScript's `file.ts(line,col):` to `file.ts:line:col:`, so an editor's terminal can open it.
 - `PingRemote` checks whatever executor the build uses, including one the CLI sets itself; the original acts only on a `*.buildbuddy.io` executor. It connects to the executor's port instead of sending an ICMP ping, which firewalls often drop. Like the original, it clears `--remote_executor` alone, so an rc that also sets a `remote` strategy fails the build instead.
 - `Notify` reads the build's result from the build event stream, not from Bazel's console lines.

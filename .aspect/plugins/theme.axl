@@ -7,9 +7,11 @@ running action's elapsed seconds coloured by how long it has run.
     aspect build //... --theme:style=mono
 
 Everything is a `rewrite` stage, so where curses is shown it reaches the rows
-of Bazel's live progress area too; in plain lines there are none. A rewritten row stays one row: under a PTY a row made
-longer than Bazel wrote it is cut to that many characters. Colour is added
-only when stderr is a terminal, since nothing strips what a stage adds.
+of Bazel's live progress area too; in plain lines there are none. A
+rewritten row stays one row: under a PTY a row made wider than Bazel drew it
+is cut to that many terminal columns, so a running action's marker takes the
+place of three of its indent's spaces. Colour is added only when stderr is a
+terminal, since nothing strips what a stage adds.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
@@ -21,10 +23,11 @@ _RESET = "\x1b[0m"
 _LEAD = r"(?:\x1b\[[0-9;?]*[A-Za-z])*"
 
 def _running(emoji, tail, bold):
-    """A running-action row (`    Compiling x; 12s remote`): two of its
-    indent's spaces become `emoji` and a space, and the first word is bold."""
+    """A running-action row (`    Compiling x; 12s remote`): three of its
+    indent's spaces become `emoji` (two columns) and a space, so the row
+    stays as wide as Bazel drew it, and the first word is bold."""
     return bazel.output.rewrite(
-        r"^(" + _LEAD + r"\s*)\s\s([^\s⚡🔨]\S*)(" + tail + r")$",
+        r"^(" + _LEAD + r"\s*)\s\s\s([^\s⚡🔨]\S*)(" + tail + r")$",
         "${1}" + emoji + " " + bold + "${2}" + _RESET + "${3}",
     )
 
