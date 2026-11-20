@@ -1,6 +1,7 @@
-"""`GoDeps`: BuildBuddy's go-deps CLI plugin. When a build fails on rules_go's
-strict dependency check, offer to run `aspect gazelle` on the packages that
-failed.
+"""`GoDeps`: an example plugin, ported from BuildBuddy's open-source
+[go-deps](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/go-deps)
+CLI plugin. When a build fails on rules_go's strict dependency check, offer to
+run `aspect gazelle` on the packages that failed.
 
 An `observe` stage records the `<file>.go: import of "<path>"` lines, and an
 `output_end` hook reads them once the console ends. `--go-deps:mode` is

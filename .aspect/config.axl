@@ -252,7 +252,7 @@ def _dogfood_task_hooks(ctx: ConfigContext) -> None:
     ctx.hooks.post_task(_post)
 
 def _console_plugins(ctx: ConfigContext):
-    """The BuildBuddy CLI plugins as console processors (`./plugins/`). On:
+    """The example plugins ported from BuildBuddy's CLI plugins (`./plugins/`). On:
     the theme, Go highlighting, the strict-deps offer and the executor check.
     Off until asked for, as their plugins' flags are: `--notify:enabled=true`
     (with a sound here) and `--open-invocation:enabled=true`."""
