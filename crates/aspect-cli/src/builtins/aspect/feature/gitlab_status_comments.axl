@@ -687,15 +687,14 @@ GitlabStatusComments = feature(
             default = {},
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
                           "Vars available match the GithubStatusComments template contract " +
-                          "(see feature/github_status_comments.axl). Empty dict → the selected `template_preset`. " +
-                          "config.axl only.",
+                          "(see feature/github_status_comments.axl). Empty dict → the selected `template_preset`.",
         ),
         "status_badges": args.custom(
             dict,
             default = {},
             description = "Override badge_key -> label mapping merged over defaults " +
                           "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
-                          "passed='✅ passed', aborted='🔥 aborted'). config.axl only.",
+                          "passed='✅ passed', aborted='🔥 aborted').",
         ),
     } | template_presets.args(),
 )

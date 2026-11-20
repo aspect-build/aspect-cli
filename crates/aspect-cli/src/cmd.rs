@@ -1260,24 +1260,26 @@ fn stringify_value(v: Value<'_>) -> String {
 
 // ── Per-feature help block ─────────────────────────────────────────────────
 //
-// Built once per feature. Each task command registers these args hidden (so
+// Built once per feature. Each task command registers the CLI args hidden (so
 // they parse but don't clutter `--help`); `aspect feature [<name>]` renders
-// them for discovery via `Cmd::print_feature_help`.
+// them, and the config-only args, for discovery via `Cmd::print_feature_help`.
 
 struct FeatureBlock {
+    /// Args exposed as flags, with config.axl overrides baked into their defaults.
     args: Vec<(String, Arg)>,
+    /// Args only config.axl can set, which `aspect feature <name>` lists apart.
+    config_args: Vec<(String, Arg)>,
     heading: String,
     prefix: String,
 }
 
 fn feature_block(feat: &dyn FeatureLike<'_>) -> Option<FeatureBlock> {
-    let mut args: Vec<(String, Arg)> = feat
+    let (mut args, config_args): (Vec<(String, Arg)>, Vec<(String, Arg)>) = feat
         .args()
         .iter()
-        .filter(|(_, v)| v.is_cli_exposed())
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    if args.is_empty() {
+        .partition(|(_, v)| v.is_cli_exposed());
+    if args.is_empty() && config_args.is_empty() {
         return None;
     }
 
@@ -1307,6 +1309,7 @@ fn feature_block(feat: &dyn FeatureLike<'_>) -> Option<FeatureBlock> {
     let heading = format!("{} Options", feat.display_name());
     Some(FeatureBlock {
         args,
+        config_args,
         heading,
         prefix: feat.name(),
     })
@@ -1653,13 +1656,16 @@ fn render_feature_list(
             feat.summary()
         ));
     }
-    out.push_str("\nRun `aspect feature <NAME>` to see a feature's flags.\n");
+    out.push_str(
+        "\nRun `aspect feature <NAME>` to see a feature's flags and the args it takes from config.axl.\n",
+    );
     out
 }
 
 /// Build the `aspect feature <name>` help command: the feature's prose (or its
 /// "defined in" line when it has none) above its flags, rendered with the same
-/// clap formatting the flags used to get inline in each task's `--help`.
+/// clap formatting the flags used to get inline in each task's `--help`, then
+/// the args only `.aspect/config.axl` can set (see [`config_args_section`]).
 fn render_feature_detail(
     version: &str,
     feat: &dyn FeatureLike<'_>,
@@ -1690,9 +1696,14 @@ fn render_feature_detail(
         .disable_help_flag(true)
         .before_help(about)
         .help_template(format!(
-            "{}\n\n{{before-help}}{{all-args}}",
+            "{}\n\n{{before-help}}{{all-args}}{{after-help}}",
             banner::line(version)
         ));
+    if let Some(section) =
+        config_args_section(&feat.export_name().unwrap_or_default(), &block.config_args)
+    {
+        cmd = cmd.after_help(section);
+    }
     for (arg_name, arg) in block.args.iter() {
         cmd = cmd.arg(
             arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg)
@@ -1700,6 +1711,36 @@ fn render_feature_detail(
         );
     }
     cmd
+}
+
+/// Heading over the args a feature takes only from `.aspect/config.axl`.
+const CONFIG_ARGS_HEADING: &str = "Set in .aspect/config.axl";
+
+/// The `aspect feature <name>` section listing `config_args` (`args.custom` and
+/// `config_only = True` args), or `None` when there are none.
+///
+/// These have no flag for clap to render, so the section is written by hand in
+/// clap's next-line layout (name where a flag's long name starts, help on the
+/// line below), closed by how `.aspect/config.axl` sets them. Current values
+/// are not shown: they would need the repo's config evaluated. It goes in
+/// through `after_help`, which clap writes verbatim (a `{` in the help is not
+/// template-parsed) and strips of ANSI off a terminal.
+fn config_args_section(export_name: &str, config_args: &[(String, Arg)]) -> Option<String> {
+    if config_args.is_empty() {
+        return None;
+    }
+    let mut out = format!("\x1b[1;4m{CONFIG_ARGS_HEADING}:\x1b[0m\n");
+    for (name, arg) in config_args {
+        out.push_str(&format!("      \x1b[1m{name}\x1b[0m\n"));
+        if let Some(help) = arg.description().filter(|d| !d.is_empty()) {
+            out.push_str(&format!("          {help}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "\n\x1b[2mSet these as ctx.features[{export_name}].args.<NAME> in .aspect/config.axl; \
+         they have no command-line flag.\x1b[0m"
+    ));
+    Some(out)
 }
 
 // ── Per-task subcommand assembly ───────────────────────────────────────────
@@ -2830,6 +2871,93 @@ mod tests {
         assert_eq!(
             override_as_default(&positional, &["//...".to_owned()]),
             serde_json::json!(["//..."])
+        );
+    }
+
+    fn arg_custom(description: Option<&str>) -> Arg {
+        Arg::Custom {
+            typ_value: None,
+            default: None,
+            description: description.map(str::to_owned),
+        }
+    }
+
+    /// The detail page as a reader sees it off a terminal: clap's styling and
+    /// the hand-written section's raw ANSI both removed.
+    fn plain_feature_detail(f: &StubFeature) -> String {
+        let block = feature_block(f).unwrap();
+        let help = render_feature_detail("1.2.3", f, &block, Path::new("/repo"), &[])
+            .render_help()
+            .ansi()
+            .to_string();
+        let mut plain = String::new();
+        let mut chars = help.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                chars.by_ref().find(|&c| c == 'm');
+            } else {
+                plain.push(c);
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn feature_detail_lists_config_only_args_under_their_own_heading() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("mode".to_owned(), arg_string("auto"));
+        args.insert(
+            "templates".to_owned(),
+            arg_custom(Some(r#"Overrides keyed by slot, e.g. {"verdict": ...}."#)),
+        );
+        let mut value_flags = arg_string("");
+        if let Arg::String { config_only, .. } = &mut value_flags {
+            *config_only = true;
+        }
+        args.insert("value_flags".to_owned(), value_flags);
+        args.insert("bare".to_owned(), arg_custom(None));
+        let f = feature_with_args("Console", "Customize the console.", args);
+
+        let help = plain_feature_detail(&f);
+        let tail = help
+            .split_once("Console Options:\n")
+            .map(|(_, tail)| tail)
+            .unwrap_or_else(|| panic!("no flag heading: {help}"));
+        assert_eq!(
+            tail,
+            "      --console:mode <console:mode>  [default: auto]\n\
+             \n\
+             Set in .aspect/config.axl:\n      \
+                   templates\n          \
+                       Overrides keyed by slot, e.g. {\"verdict\": ...}.\n      \
+                   value_flags\n      \
+                   bare\n\
+             \n\
+             Set these as ctx.features[Console].args.<NAME> in .aspect/config.axl; \
+             they have no command-line flag.\n",
+        );
+    }
+
+    #[test]
+    fn feature_detail_without_config_only_args_has_no_config_heading() {
+        let help = plain_feature_detail(&stub_feature("ArtifactUpload"));
+        assert!(!help.contains(CONFIG_ARGS_HEADING), "{help}");
+        assert!(!help.contains("ctx.features["), "{help}");
+    }
+
+    /// A feature whose every arg is config-only still gets a page; listing only
+    /// flag-bearing features would hide it from `aspect feature` entirely.
+    #[test]
+    fn feature_with_only_config_only_args_is_listed() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("templates".to_owned(), arg_custom(Some("Overrides.")));
+        let f = feature_with_args("Console", "", args);
+        let block = feature_block(&f).expect("a feature with config-only args has a block");
+        assert!(block.args.is_empty());
+        let help = plain_feature_detail(&f);
+        assert!(
+            help.contains("Set in .aspect/config.axl:\n      templates\n"),
+            "{help}"
         );
     }
 

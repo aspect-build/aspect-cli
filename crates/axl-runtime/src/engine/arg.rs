@@ -924,6 +924,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     }
 
     /// Defines a config-only arg — not exposed on the CLI. Set via config.axl only.
+    /// On a feature, `aspect feature <name>` lists it with its `description`.
     ///
     /// The `type` argument must be a built-in or otherwise frozen type (e.g. `str`, `int`,
     /// `bool`, `list[str]`). If provided, `default` must match the declared type.

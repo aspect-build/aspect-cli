@@ -2478,7 +2478,6 @@ GithubStatusComments = feature(
                           "many jobs run in parallel. Without the API, all live jobs together refresh about " +
                           "once per interval. Terminal task verdicts always land immediately.",
         ),
-        # Config-only (set via configure(..., feature_args = {...}) in config.axl).
         "templates": args.custom(
             dict,
             default = {},
@@ -2494,7 +2493,7 @@ GithubStatusComments = feature(
                           "siblings via dedup_and_attribute), build_snippets / test_snippets, " +
                           "tip_rows, the *_overflow_note lines, and cli_version / " +
                           "last_updated_at / api_usage. " +
-                          "Empty dict → the selected `template_preset`. config.axl only.",
+                          "Empty dict → the selected `template_preset`.",
         ),
         "status_badges": args.custom(
             dict,
@@ -2503,8 +2502,7 @@ GithubStatusComments = feature(
                           "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
                           "passed='✅ passed', aborted='🔥 aborted'). The badge_key is " +
                           "precomputed in AXL from severity + status + aborted, so the " +
-                          "override is keyed by badge_key not raw lifecycle status. " +
-                          "config.axl only.",
+                          "override is keyed by badge_key not raw lifecycle status.",
         ),
     } | template_presets.args(),
 )
