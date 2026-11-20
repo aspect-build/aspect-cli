@@ -455,8 +455,8 @@ impl Console {
     /// Fails on an unknown preset or an override that does not compile,
     /// wherever it is scoped. An entry for a task this repo lacks is checked but
     /// otherwise inert, as on the CI surfaces: a user-level `config.axl` applies
-    /// to every repo, and only some of them define that task; see
-    /// [`Overrides::near_miss_warnings`] for the one exception.
+    /// to every repo, and only some of them define that task. A near miss of a
+    /// task here is no error either; [`Overrides::near_miss_warnings`] names it.
     pub fn resolve(
         preset_name: &str,
         overrides: &Overrides,

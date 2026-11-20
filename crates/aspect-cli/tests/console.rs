@@ -344,6 +344,38 @@ ctx.features[BuildkiteAnnotations].args.task_presets = {"fx chekc": "full"}"#,
     }
 }
 
+/// A preset with a blank header still prints the warning, first thing; on
+/// Buildkite it follows the task's section marker, which every preset keeps.
+#[test]
+fn a_near_miss_warning_prints_under_a_blank_header() {
+    for buildkite in [false, true] {
+        let output = run(
+            r#"ctx.features[Console].args.task_presets = {"chek": "silent"}"#,
+            &["check", "--console:template-preset=silent"],
+            buildkite,
+        );
+        assert_task_behaviour(&output, "silent", 0);
+        let err = stderr(&output);
+        let lines: Vec<&str> = err.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| {
+                l.ends_with(
+                    r#"Console task_presets["chek"] names no task here; did you mean "check"?"#,
+                )
+            })
+            .unwrap_or_else(|| panic!("no warning in:\n{err}"));
+        if buildkite {
+            assert!(
+                at == 1 && lines[0].starts_with("--- ") && lines[0].contains("Running"),
+                "{err}"
+            );
+        } else {
+            assert_eq!(at, 0, "{err}");
+        }
+    }
+}
+
 #[test]
 fn a_template_that_fails_to_render_falls_back_to_its_preset_with_one_warning() {
     let output = run(
