@@ -1,0 +1,32 @@
+[32mINFO: [0mInvocation ID: feb26b59-788f-43ae-84e2-4fae53efd433
+[32mComputing main repo mapping:[0m 
+[35mWARNING: [0mStreamed test output requested. All tests will be run without sharding, one at a time
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 0][0m no actions running
+[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 2 targets configured).
+[31m[1mERROR: [0m/ws/BUILD.bazel:15:8: Executing genrule //:bad failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo bad >&2; printf '\''\033[35mWARNING: \033[0mbefore fail\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad
+[35mWARNING: [0mbefore fail
+failing test out
+[35mWARNING: [0mfrom failing test
+[35mWARNING: [0mfrom failing test
+Loading: in test
+  indented
+[31m[1mFAIL: [0m//:t_fail (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)
+[32mINFO: [0mBuild succeeded for only 2 of 3 top-level targets
+[32mINFO: [0mFound 1 target and 2 test targets...
+[32mINFO: [0mElapsed time: 0.496s, Critical Path: 0.22s
+[32mINFO: [0m3 processes: 11 action cache hit, 1 disk cache hit, 2 internal, 1 darwin-sandbox.
+[31m[1mERROR: [0mBuild did NOT complete successfully
+//:t_pass                                                       [0m[32m(cached) PASSED[0m in 0.4s
+//:t_fail                                                                [0m[31m[1mFAILED[0m in 0.1s
+  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+
+Executed 1 out of 2 tests: 1 test passes and [0m[31m[1m1 fails locally[0m.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[0m

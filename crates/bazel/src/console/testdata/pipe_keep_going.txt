@@ -1,0 +1,116 @@
+WARNING: The following rc files are no longer being read, please transfer their contents or import their path into one of the standard rc files:
+/home/user/.bazelrc
+WARNING: Running Bazel server needs to be killed, because the following startup options are different:
+  - Only in old server: --host_jvm_args=-XX:-ShrinkHeapInSteps --host_jvm_args=-XX:MinHeapFreeRatio=10 --host_jvm_args=-XX:+G1PeriodicGCInvokesConcurrent -XX:-ShrinkHeapInSteps -XX:MinHeapFreeRatio=10 -XX:G1PeriodicGCInterval=60000 -XX:MaxHeapFreeRatio=30 --host_jvm_args=-XX:MaxHeapFreeRatio=30 --host_jvm_args=-XX:G1PeriodicGCInterval=60000 -XX:+G1PeriodicGCInvokesConcurrent
+  - Only in new server: 
+Starting local Bazel server (9.3.2) and connecting to it...
+[32mINFO: [0mInvocation ID: 2dca38c5-3af3-4ccd-b30d-ca9514d2cc8b
+[32mINFO: [0mOptions provided by the client:
+  Inherited 'common' options: --isatty=0 --terminal_columns=80
+[32mComputing main repo mapping:[0m 
+[32mComputing main repo mapping:[0m 
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g0' is deprecated: use something else
+[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g1' is deprecated: use something else
+[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g2' is deprecated: use something else
+[32mAnalyzing:[0m 21 targets (5 packages loaded, 6 targets configured)
+[32mAnalyzing:[0m 21 targets (5 packages loaded, 6 targets configured)
+
+[31m[1mERROR: [0mno such package 'nope2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope2
+[31m[1mERROR: [0mno such package 'nope1': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope1
+[31m[1mERROR: [0mno such package 'nope0': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope0
+[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+[31m[1mERROR: [0m/ws/BUILD.bazel:19:9: no such package 'nope0': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope0 and referenced by '//:m0'
+[31m[1mERROR: [0m/ws/BUILD.bazel:19:9: no such package 'nope2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope2 and referenced by '//:m2'
+[31m[1mERROR: [0m/ws/BUILD.bazel:19:9: no such package 'nope1': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope1 and referenced by '//:m1'
+[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e2 failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e1 failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:15:8: Executing genrule //:bad failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e5 failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e3 failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e0 failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e4 failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[32mINFO: [0mFrom Executing genrule //:g1:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mINFO: [0mFrom Executing genrule //:g2:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mINFO: [0mFrom Executing genrule //:g0:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[31m[1mERROR: [0m/ws/BUILD.bazel:11:8: Executing genrule //:top failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[32mINFO: [0mAnalyzed 21 targets (81 packages loaded, 856 targets configured).
+[31m[1mERROR: [0m/ws/BUILD.bazel:14:12: Testing //:t_fail failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:13:12: Testing //:t_pass failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[31m[1mERROR: [0m/ws/BUILD.bazel:16:12: Testing //:t_stream failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[32m[38 / 39][0m Testing //:flaky; 0s local, remote-cache
+[31m[1mERROR: [0m/ws/BUILD.bazel:17:12: Testing //:flaky failed: Failed to query remote execution capabilities: Connection refused: /127.0.0.1:1
+[35mWARNING: [0merrors encountered while analyzing target '//:m1', it will not be built.
+Analysis failed
+[35mWARNING: [0merrors encountered while analyzing target '//:m0', it will not be built.
+Analysis failed
+[35mWARNING: [0merrors encountered while analyzing target '//:m2', it will not be built.
+Analysis failed
+[32mINFO: [0mBuild succeeded for only 6 of 21 top-level targets
+[32mINFO: [0mFound 14 targets and 4 test targets...
+Use --verbose_failures to see the command lines of failed build steps.
+[32mINFO: [0mElapsed time: 5.028s, Critical Path: 0.30s
+[32mINFO: [0m39 processes: 36 internal, 3 darwin-sandbox.
+[31m[1mERROR: [0mBuild did NOT complete successfully
+[0m

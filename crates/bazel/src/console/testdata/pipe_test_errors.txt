@@ -1,0 +1,43 @@
+[32mINFO: [0mInvocation ID: 54fd0be7-2390-4523-831c-3ac676ffc1c4
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[31m[1mERROR: [0m/ws/BUILD.bazel:15:8: Executing genrule //:bad failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo bad >&2; printf '\''\033[35mWARNING: \033[0mbefore fail\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad
+[35mWARNING: [0mbefore fail
+[32mAnalyzing:[0m 3 targets (48 packages loaded, 2 targets configured)
+[32m[2 / 2][0m no actions running
+[32mAnalyzing:[0m 3 targets (53 packages loaded, 2 targets configured)
+[32m[2 / 2][0m no actions running
+[32mAnalyzing:[0m 3 targets (73 packages loaded, 399 targets configured)
+[32m[2 / 2][0m no actions running
+[32mINFO: [0mAnalyzed 3 targets (75 packages loaded, 833 targets configured).
+[32m[12 / 14][0m Testing //:t_pass; 0s darwin-sandbox, disk-cache ... (2 actions running)
+[31m[1mFAIL: [0m//:t_fail (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)
+[32mINFO: [0mFrom Testing //:t_fail:
+==================== Test output for //:t_fail:
+failing test out
+[35mWARNING: [0mfrom failing test
+[35mWARNING: [0mfrom failing test
+Loading: in test
+  indented
+================================================================================
+[32mINFO: [0mBuild succeeded for only 2 of 3 top-level targets
+[32mINFO: [0mFound 1 target and 2 test targets...
+Use --verbose_failures to see the command lines of failed build steps.
+[32mINFO: [0mElapsed time: 5.729s, Critical Path: 0.86s
+[32mINFO: [0m14 processes: 12 internal, 4 darwin-sandbox.
+[31m[1mERROR: [0mBuild did NOT complete successfully
+//:t_pass                                                                [0m[32mPASSED[0m in 0.4s
+//:t_fail                                                                [0m[31m[1mFAILED[0m in 0.6s
+  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+
+Executed 2 out of 2 tests: 1 test passes and [0m[31m[1m1 fails locally[0m.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[0m

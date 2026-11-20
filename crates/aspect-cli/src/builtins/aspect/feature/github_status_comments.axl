@@ -132,7 +132,9 @@ load(
     "TIP_WARNING",
     "collect_tips_sorted",
     "decorate_tip",
+    "merge_aggregates",
     "severity_rank",
+    "tip_render_data",
     "tip_shows_on",
     "tip_to_payload",
 )
@@ -1206,22 +1208,29 @@ def _combine_across(ctx, contributors):
     """Collapse a same-`(id, key)` group into one row, unioning across tasks.
 
     `contributors` is `[(tip, task_name)]`. JINJA2 `accumulate` fields are
-    unioned (first-seen) and re-rendered against `vars` + merged lists;
-    title/body are newest-wins (last contributor); attributed to all."""
+    unioned (first-seen) and `aggregates` merged by kind (`merge_aggregates`:
+    counts sum, lists union), then re-rendered against `vars` + the merged
+    state (`tip_render_data`); title/body are otherwise newest-wins (last
+    contributor); attributed to all."""
     tips_ = [t for t, _ in contributors]
     row = dict(tips_[-1])
     merged = {}
+    aggregates = {}
     for t in tips_:
         for name, values in (t.get("accumulate") or {}).items():
             merged[name] = _ordered_unique(merged.get(name, []) + list(values or []))
-    if row.get("type") == TIP_TEMPLATE_JINJA2 and merged:
+        aggregates = merge_aggregates(aggregates, t.get("aggregates") or {})
+    if row.get("type") == TIP_TEMPLATE_JINJA2 and (merged or aggregates):
         row["accumulate"] = merged
-        data = dict(row.get("vars") or {})
-        data.update(merged)
-        if row.get("_title_src"):
-            row["title"] = ctx.template.jinja2(row["_title_src"], data = data)
-        if row.get("_body_src"):
-            row["body"] = ctx.template.jinja2(row["_body_src"], data = data)
+        row["aggregates"] = aggregates
+        data = tip_render_data(row.get("vars"), merged, aggregates)
+
+        # A template that does not render is shown as written, as each task
+        # showed it.
+        for field, src in [("title", row.get("_title_src")), ("body", row.get("_body_src"))]:
+            if src:
+                ok, text = ctx.template.try_jinja2(src, data = data)
+                row[field] = text if ok else src
     row["_task_names"] = _ordered_unique([n for _, n in contributors])
     return row
 

@@ -210,6 +210,41 @@ fn run_build(args: &[String], verb: &str) {
         let _ = SCRATCH.set(PathBuf::from(dir));
     }
     let s = scenario(&scenario_name);
+    // The last `--color` wins, as it does for bazel.
+    let colour = std::env::args()
+        .filter(|a| a.starts_with("--color="))
+        .last()
+        .is_some_and(|a| a == "--color=yes");
+    // `--curses=yes`, last wins: a progress line is erased before the next
+    // line, as curses erases its progress area to write something new.
+    let curses = std::env::args()
+        .filter(|a| a.starts_with("--curses="))
+        .last()
+        .is_some_and(|a| a == "--curses=yes");
+    let mut drawn = false;
+    for line in s.stderr_lines {
+        if std::mem::take(&mut drawn) {
+            eprint!("\r\x1b[1A\x1b[K");
+        }
+        match line.strip_prefix("stdout:") {
+            Some(out) => {
+                println!("{out}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+            None if colour => eprintln!("{}", coloured(line)),
+            None => eprintln!("{line}"),
+        }
+        drawn = curses && is_progress(line);
+    }
+    if let Some(tail) = s.interrupt_tail {
+        wait_for_interrupt(curses);
+        if curses {
+            eprint!("\r\x1b[1A\x1b[K");
+        }
+        thread::sleep(INTERRUPT_CLEANUP);
+        eprintln!("{tail}");
+        process::exit(8);
+    }
 
     if let Some(path) = flag("--experimental_workspace_rules_log_file") {
         if s.workspace_corrupt {
@@ -283,6 +318,41 @@ fn run_build(args: &[String], verb: &str) {
             // abnormal-looking outcome.
             process::exit(128 + sig);
         }
+    }
+}
+
+/// How long an interrupted basil "cleans up" before its last line: long
+/// enough that a CLI which stopped reading on cancel misses it.
+const INTERRUPT_CLEANUP: Duration = Duration::from_millis(500);
+
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_sigint(_sig: i32) {
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Announce on stderr, then block until SIGINT (at most 60s).
+/// Announce the wait and wait for a SIGINT. Under `curses`, the progress
+/// area Bazel draws under its last message follows, as it would while a
+/// build waits, and is erased before the next line.
+fn wait_for_interrupt(curses: bool) {
+    // Declared directly, like `raise` below: one symbol is not worth the libc
+    // crate. SIGINT is 2 on every Unix.
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    // SAFETY: the handler only stores to an atomic, which is
+    // async-signal-safe.
+    unsafe {
+        signal(2, on_sigint);
+    }
+    eprintln!("basil: waiting for interrupt");
+    if curses {
+        eprintln!("\x1b[32m[0 / 1]\x1b[0m waiting");
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -393,6 +463,53 @@ struct Scenario {
     workspace_events: u32,
     /// Write one event there that does not decode, instead.
     workspace_corrupt: bool,
+    /// Console lines written to stderr before anything else, which is where
+    /// real bazel writes its console. Drives the captured-output tests. A
+    /// line starting `stdout:` goes to stdout instead, as real bazel writes
+    /// action and test output.
+    stderr_lines: &'static [&'static str],
+    /// After `stderr_lines`, announce `basil: waiting for interrupt` and wait
+    /// for a SIGINT, then write this line after a cleanup pause and exit 8 —
+    /// what an interrupted bazel prints on its way out.
+    interrupt_tail: Option<&'static str>,
+}
+
+/// Whether `line` is one of bazel's progress lines: `[1 / 2] …` or a phase.
+fn is_progress(line: &str) -> bool {
+    (line.starts_with('[') && line.contains(" / ") && line.contains(']'))
+        || ["Loading:", "Analyzing:", "Computing main repo mapping:"]
+            .iter()
+            .any(|p| line.starts_with(p))
+}
+
+/// `line` with its leading severity (`WARNING: `), progress count
+/// (`[1 / 2]`) or progress phase (`Loading:`) coloured, as bazel writes them
+/// under `--color=yes`.
+fn coloured(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix('[')
+        && let Some((count, rest)) = rest.split_once(']')
+        && count.contains(" / ")
+    {
+        return format!("\x1b[32m[{count}]\x1b[0m{rest}");
+    }
+    for phase in ["Loading:", "Analyzing:", "Computing main repo mapping:"] {
+        if let Some(rest) = line.strip_prefix(phase) {
+            return format!("\x1b[32m{phase}\x1b[0m{rest}");
+        }
+    }
+    let label = line
+        .split_once(": ")
+        .filter(|(sev, _)| !sev.is_empty() && sev.chars().all(|c| c.is_ascii_uppercase()));
+    let colour = |sev: &str| match sev {
+        "INFO" => "\x1b[32m",
+        "WARNING" => "\x1b[35m",
+        "DEBUG" => "\x1b[33m",
+        _ => "\x1b[31m\x1b[1m",
+    };
+    match label {
+        Some((sev, rest)) => format!("{}{sev}: \x1b[0m{rest}", colour(sev)),
+        None => line.to_string(),
+    }
 }
 
 /// A clean single-attempt run with no pauses and no execution log — so each
@@ -407,6 +524,8 @@ impl Default for Scenario {
             json_bep_tests: &[],
             workspace_events: 0,
             workspace_corrupt: false,
+            stderr_lines: &[],
+            interrupt_tail: None,
         }
     }
 }
@@ -585,6 +704,74 @@ fn scenario(name: &str) -> Scenario {
     match name {
         // Clean run: one attempt, terminates with last_message=true.
         "success" => Scenario::default(),
+
+        // Prints its last line only after the CLI cancels it, for the
+        // captured console's drain on cancellation.
+        "stderr_after_interrupt" => Scenario {
+            interrupt_tail: Some("INFO: cleaned up after the interrupt"),
+            ..Default::default()
+        },
+
+        // `success` with console lines the default stages act on, or leave
+        // alone: similar warnings, a sandbox path, `canonical reproducible
+        // form` advice (shown, since nothing is dropped by default), a
+        // recognized failure, a progress line, and two test
+        // actions' output, which must never collapse.
+        "console_noise" => Scenario {
+            stderr_lines: &[
+                "WARNING: errors encountered while analyzing target '//:g0', it will not be built.",
+                "Analysis failed",
+                "DEBUG: Rule 'repo' indicated that a canonical reproducible form can be obtained by modifying arguments shallow_since = \"1 +0000\"",
+                "DEBUG: Repo '+ext+bar' indicated that a canonical reproducible form can be obtained by modifying arguments integrity = \"sha256-x\"",
+                "DEBUG: Repo +ext+bar defined by rule http_archive in @@bazel_tools//tools/build_defs/repo:http.bzl",
+                "DEBUG: Repository _main~ext~foo instantiated at:",
+                "  <builtin>: in <toplevel>",
+                "Repository rule http_archive defined at:",
+                "  /x/external/bazel_tools/tools/build_defs/repo/http.bzl:400:31: in <toplevel>",
+                "WARNING: errors encountered while analyzing target '//:g1', it will not be built.",
+                "Analysis failed",
+                "WARNING: errors encountered while analyzing target '//:g2', it will not be built.",
+                "Analysis failed",
+                "INFO: From Compiling src/a.ts:",
+                "src/a.ts:3:4 from /tmp/_bazel_u/h/sandbox/linux-sandbox/7/execroot/_main/src/a.ts:3:4",
+                "Server terminated abruptly (error code: 14, error message: 'Socket closed')",
+                "[1 / 2] Compiling src/a.ts; 0s linux-sandbox",
+                "INFO: From Testing //pkg:a_test:",
+                "==== Test output for //pkg:a_test:",
+                "assertion a failed",
+                "INFO: From Testing //pkg:b_test:",
+                "==== Test output for //pkg:b_test:",
+                "assertion b failed",
+                "INFO: Build completed successfully",
+            ],
+            ..Default::default()
+        },
+
+        // A test's output on stdout between the stderr lines around it, as
+        // bazel writes it: merged, they must stay in this order.
+        "merged_console" => Scenario {
+            stderr_lines: &[
+                "INFO: From Testing //pkg:t:",
+                "stdout:==== Test output for //pkg:t:",
+                "stdout:failing output",
+                "FAIL: //pkg:t (see /tmp/test.log)",
+                "INFO: Build completed successfully",
+            ],
+            ..Default::default()
+        },
+
+        // `success` with console chatter on stderr, for the captured-output
+        // pipeline: a warning, a repeated line and a credential to rewrite.
+        "stderr_chatter" => Scenario {
+            stderr_lines: &[
+                "INFO: Analyzed 1 target",
+                "WARNING: deprecated flag used",
+                "WARNING: deprecated flag used",
+                "password=hunter2 leaked",
+                "INFO: Build completed successfully",
+            ],
+            ..Default::default()
+        },
 
         // A single attempt with REMOTE_CACHE_EVICTED (exit code 39) and
         // last_message=true, then basil exits without a retry. After the retry

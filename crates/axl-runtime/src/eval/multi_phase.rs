@@ -1014,6 +1014,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         eval.set_loader(self.loader);
         eval.extra = Some(&self.loader.env);
         arm_cancel_check(&mut eval, &self.loader.env.signals);
+        crate::engine::module_values::set_task_context(&eval, context);
 
         let hooks = self
             .hooks_value

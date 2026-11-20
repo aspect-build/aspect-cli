@@ -1,4 +1,20 @@
-"""Console feature: the lines Aspect prints around a task in the terminal.
+"""`Console`: what a task shows in the terminal. On by default.
+
+It covers two things: the lines Aspect prints around a task, and Bazel's
+console on every `ctx.bazel.build` / `ctx.bazel.test` that leaves stdout and
+stderr to the CLI (`aspect build`, `aspect test`, `aspect lint`, ...).
+
+`--console:enabled=false` (or `ctx.features[Console].enabled = False`) sets
+both aside: Aspect's lines take the `full` layout, whatever the four layout
+args say; Bazel's stderr is left inherited, as `bazel` itself shows it, unless
+another feature adds stages of its own; and the tip rules are off, built-in
+and yours.
+
+On the command line the args are kebab-case: `--console:recap-max=20`,
+`--console:template-preset=compact`.
+
+Aspect's lines
+--------------
 
 The terminal is a status surface like the CI ones and takes the same four
 args. `template_preset` picks a built-in layout and `templates` overrides
@@ -21,7 +37,10 @@ A task with its own preset starts from it alone, without `templates`;
 `template_preset` typed on the command line applies to every task, over
 `task_presets`.
 
-Or for one run: `aspect test --console:template-preset=compact //...`.
+The runtime does the rendering: it reads these args after `config.axl` runs
+and before the header prints. Bazel's own output, warnings and errors, and
+stdout are never templated, and nor is the end of Bazel's console (the
+recap, what was hidden, the tips): it prints under every preset.
 
 Under a coding agent (any of the environment variables `lib/agent.axl` reads,
 such as `CLAUDECODE`, `CODEX_THREAD_ID` or `AI_AGENT`) the default is `agent`
@@ -45,20 +64,133 @@ message (`TaskConclusion(message = ...)`, `ctx.std.process.exit`), the
 `announce_bazel_*` disclosures, which have their own flags, and the
 `aspect worktree` report.
 
-The runtime does the rendering, so this feature's implementation is empty: the
-runtime reads these args after `config.axl` runs and before the header prints.
-Disabling the feature leaves the `full` layout in place. Bazel's own output,
-warnings and errors, and stdout are never templated.
+Bazel's console
+---------------
+
+It puts `default_stages` from `@aspect//bazel/console.axl` on
+`BazelTrait.output_stages`:
+- paths are made relative;
+- the first warning of each kind is shown and the rest are counted at the end;
+- errors that scrolled away are repeated;
+- a tip is given for failures we recognize: the tip rules of
+  `@aspect//bazel/console_tips.axl` and `TipsTrait.rules`.
+
+Nothing is dropped by default.
+
+Bazel's console as it wrote it (its stderr, and its stdout when both go to
+one file) is kept in a raw log, `console.log` in the Bazel invocation's folder
+in the task's history, which the end of the console names (a link on a
+terminal), with how many messages were hidden and, for each kind collapsed, a
+file beside the log holding all of them. They are kept and pruned with the
+rest of the history.
+
+    load("@aspect//feature/console.axl", "Console")
+
+    def config(ctx: ConfigContext):
+        # Collapse your build's own noise, and drop what nobody reads.
+        ctx.features[Console].args.collapse = [r"^WARNING: .* is deprecated"]
+        ctx.features[Console].args.drop = [r"^DEBUG: .*rules_python"]
+        # Leave out a default stage by name.
+        ctx.features[Console].args.disable = ["relativize_paths"]
+        # Repeat up to 20 errors at the end, rather than 10.
+        ctx.features[Console].args.recap_max = 20
+
+Tips of your own are rules next to the built-in ones; `--tips:silence=<id>`
+turns one off and `--tips:surfaces=<id>=<surface>,...` moves it:
+
+    load("@aspect//tips.axl", "TIP_SHOW_FIRST", "TIP_WARNING", "TipsTrait", "on_console_line", "tip_rule")
+
+    ctx.traits[TipsTrait].rules.append(tip_rule(
+        id = "cache_token",
+        when = on_console_line(r"PERMISSION_DENIED.*remote cache"),
+        show = TIP_SHOW_FIRST,
+        severity = TIP_WARNING,
+        title = "Your remote cache token expired",
+        body = "Run `acme login`.",
+    ))
+
+A feature of your own adds a stage by appending a `bazel.output.<stage>(...)`
+to `ctx.traits[BazelTrait].output_stages`; stages run in a fixed order of
+kinds, so it does not matter which feature appends first.
+
+`--console:profile` picks how the console is shown. `auto`, the default, is
+`agent` when a coding agent's environment variables are set and `human`
+otherwise. Bazel is always captured with its curses UI, which tells the
+stages where each action's output ends; a terminal shows it, and anything
+else gets plain lines with Bazel's status line every few seconds. The agent
+profile shows plain lines on a terminal too, and no status line, since an
+agent reads the console rather than watching it. Your own `--curses` (in an
+rc or `--bazel-flag`) decides what is shown, under either profile.
+
+Only messages Bazel colours can be told from the output of the actions it
+runs, so Bazel is always asked for colour too, and what is shown keeps it as
+your own `--color` says, else on a terminal only.
+
+A stage setting that is not valid (an unknown stage name, a pattern that does
+not compile) is left out with a warning rather than failing the task: this
+feature runs for every task, most of which never start Bazel. A tip rule id
+used twice is the exception, and fails: it is always a mistake in a config.
+A template that does not compile, unlike these, fails the run before the
+task starts.
 """
 
+load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "console_tip_rules", "default_stages", "emit_tips", "tip_stages")
+load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//tips.axl", "TipsTrait")
+load("../private/lib/agent.axl", "under_agent")
+load("../private/lib/environment.axl", "warn")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 
 def _console_impl(ctx: FeatureContext):
-    pass
+    profile = ctx.args.profile
+    if profile == "auto":
+        profile = "agent" if under_agent(ctx.std) else "human"
+    got = default_stages(
+        profile = profile,
+        disable = ctx.args.disable,
+        collapse = ctx.args.collapse,
+        drop = ctx.args.drop,
+        recap_max = ctx.args.recap_max,
+        root = lambda: ctx.std.env.bazel_root_dir(),
+        cwd = lambda: ctx.std.env.current_dir(),
+    )
+    for problem in got.problems:
+        warn(ctx.std, "--console: " + problem)
+    trait = ctx.traits[BazelTrait]
+    trait.output_stages.extend(got.stages)
+
+    # The tip rules are read as each build starts and ends, not now: a feature
+    # whose implementation runs after this one may still append some.
+    tips = ctx.traits[TipsTrait]
+    warned = {}
+
+    def _tip_stages(task_ctx):
+        matched = tip_stages(console_tip_rules(tips.rules))
+        for problem in matched.problems:
+            if problem not in warned:
+                warned[problem] = True
+                warn(task_ctx.std, "--console: " + problem)
+        return matched.stages
+
+    trait.output_start.append(_tip_stages)
+
+    # Each build's aggregates count once in the task's tips, however many
+    # tips a rule emits from them.
+    builds = [0]
+
+    def _emit_tips(task_ctx, build):
+        builds[0] += 1
+        emit_tips(task_ctx, build, console_tip_rules(tips.rules), batch = str(builds[0]))
+
+    trait.output_end.append(_emit_tips)
+    if got.tty != None and trait.output_tty == None:
+        trait.output_tty = got.tty
+    if not got.progress:
+        trait.output_progress = False
 
 Console = feature(
     display_name = "Console",
-    summary = "Choose and customize the lines Aspect prints around a task.",
+    summary = "Choose the lines Aspect prints around a task, and make Bazel's console easier to read: relative paths, collapsed warnings, recapped errors, tips for failures it recognizes.",
     implementation = _console_impl,
     args = {
         "template_preset": args.string(
@@ -70,7 +202,7 @@ Console = feature(
                           "on one line with no phase breakdown), 'agent' (compact without " +
                           "emojis; the default under a coding agent unless this is set on the " +
                           "command line or in config.axl), or 'silent' (nothing; the exit " +
-                          "code and the task's own output carry the result). 'compact', " +
+                          "code, the task's own output and Bazel's console carry the result). 'compact', " +
                           "'agent' and 'silent' also hide detail lines; see `verbose`. On Buildkite the " +
                           "header, phase and verdict lines, and sections a task opens itself, " +
                           "start log sections, so they print under every preset. " + TASK_PRESET_PRECEDENCE,
@@ -108,6 +240,24 @@ Console = feature(
                           "may also assign True or False. ASPECT_VERBOSE takes the same values and " +
                           "beats config.axl but not the command line; ASPECT_DEBUG=1 means " +
                           "'debug'. Other INFO lines, and WARNING and ERROR lines, always print.",
+        ),
+        "profile": args.string(
+            default = "auto",
+            values = ["auto"] + PROFILES,
+            description = "How Bazel's console is shown: `human`; `agent`, for a coding agent reading the console, which shows plain lines without Bazel's progress rather than its live UI; or `auto` (the default), `agent` when a coding agent's environment variables are set. Your own `--curses` decides under either.",
+        ),
+        "disable": args.string_list(
+            description = "A default console stage to leave out: " + ", ".join(STAGE_NAMES) + ". Repeat for several.",
+        ),
+        "recap_max": args.int(
+            default = RECAP_MAX,
+            description = "How many of Bazel's errors to repeat at the end of the console, once they have scrolled away.",
+        ),
+        "collapse": args.string_list(
+            description = "A regex; Bazel messages whose first line it matches collapse into the first of them, whatever their severity. Never matches action or test output, nor the `INFO: From …` header above it. Repeat for several.",
+        ),
+        "drop": args.string_list(
+            description = "A regex; Bazel messages whose first line it matches are hidden, with the indented lines under them. Never matches action or test output, nor the `INFO: From …` header above it. Repeat for several.",
         ),
     } | task_template_args("silent", "verdict"),
 )

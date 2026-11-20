@@ -273,6 +273,28 @@ def _generic_kind(std) -> str:
     raw = std.env.var(_GENERIC_KIND_VAR) or ""
     return raw.partition("_")[0] if raw else ""
 
+def under_agent(std) -> bool:
+    """Whether a coding agent appears to be running this, from the environment
+    alone: `ASPECT_AGENT_KIND` / `ASPECT_AGENT_ID`, a known harness's
+    variables, or `AI_AGENT`.
+
+    Cheaper than `detect`, which also walks the process tree, so it suits a
+    check made on every build; an agent only the process tree would reveal
+    reads as none."""
+    if std.env.var("ASPECT_AGENT_KIND") or std.env.var("ASPECT_AGENT_ID"):
+        return True
+    return bool(_env_detector(std)) or bool(_generic_kind(std))
+
+def _env_detector(std):
+    """The first `_ENV_DETECTORS` entry whose variables are set, as
+    `(detector, session id or "")`, or None."""
+    for d in _ENV_DETECTORS:
+        marked = d.marker and std.env.var(d.marker)
+        named = d.id_var and std.env.var(d.id_var)
+        if marked or named:
+            return (d, named or "")
+    return None
+
 def detect(std, explicit_kind: str = "", explicit_id: str = "") -> dict:
     """Who is running this, as a lease-shaped record. Empty dict when nothing
     identifies an agent, which is the ordinary case for a person at a terminal.
@@ -340,11 +362,9 @@ def _overlay(std, found: dict, explicit_kind: str, explicit_id: str, source: str
 
 def _detected(std) -> dict:
     """Who is running this, from the environment and the process tree alone."""
-    for d in _ENV_DETECTORS:
-        marked = d.marker and std.env.var(d.marker)
-        named = d.id_var and std.env.var(d.id_var)
-        if not marked and not named:
-            continue
+    found = _env_detector(std)
+    if found:
+        (d, named) = found
         pid_raw = (std.env.var(d.pid_var) or "") if d.pid_var else ""
         pid = int(pid_raw) if pid_raw.isdigit() else 0
         host = pid if pid and _is_bridge(std, pid) else 0

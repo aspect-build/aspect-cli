@@ -15,9 +15,10 @@ The `type` field selects the engine for `title` / `body`:
   - `TIP_TEMPLATE_RAW`    — no interpolation (default; most bodies are
                             literal markdown with `{}` to keep verbatim).
   - `TIP_TEMPLATE_FORMAT` — `str.format(**vars)`.
-  - `TIP_TEMPLATE_JINJA2` — Jinja2 over `vars` (scalars) + `accumulate`
-                            (each a deduped+sorted list); re-rendered as
-                            `accumulate` grows.
+  - `TIP_TEMPLATE_JINJA2` — Jinja2 over `vars` (scalars), `accumulate`
+                            (each a deduped list, first seen first) and
+                            `aggregates` (by name); re-rendered as they
+                            grow.
 
 # Feature-disabled behavior
 
@@ -30,6 +31,14 @@ need to probe — the data flow just goes quiet.
 `collect_tips_sorted(ctx, surface = ...)` returns tips sorted by severity
 (most urgent first, stable within a bucket), filtered to those allowed on
 `surface`. Renderers pass their own surface id.
+
+# The terminal
+
+A tip prints as `<emoji> SEVERITY[id]: title` with its body indented two
+spaces (`terminal_tip_lines`), when its id's `show` says (see "When a tip
+shows on the terminal"). When the task ends, a line per id counts what was
+not printed, and a last line names the ids shown and how to silence them
+(`tips_hint`, itself silenceable).
 
 # Severity ordering (highest → lowest urgency)
 
@@ -81,6 +90,41 @@ TIP_TEMPLATE_JINJA2 = "jinja2"
 
 _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JINJA2]
 
+# ── When a tip shows on the terminal ─────────────────────────────────
+#
+# Per tip id, as the id's first tip says (`show`, `max_shown`, which a
+# `tip_suggestion` hook can rewrite there; a tip rule emits by its own, so a
+# hook changes how the rule's tips print, not how many it emits); status
+# surfaces always render
+# each tip's final state, whatever these say. What an id did not print is
+# counted in one line at the end of the task, with the title of the last of
+# it when it was emitted (not when it was only counted, like a rule's groups
+# past `max_groups`, each of which counts as one tip; under `TIP_SHOW_EACH`
+# a rule's dropped matches count instead). A hook that rewrites a rule's
+# `show` keeps the rule's own emission, so the line counts what that
+# emitted.
+#
+#   TIP_SHOW_EACH   every emit whose content changed, and every occurrence
+#                   (a rule's match) even when it did not, prints, up to
+#                   `max_shown` (0: no limit, though a rule keeps at most
+#                   10000 of its matches' lines, then each group's last);
+#                   the ones past it are counted.
+#   TIP_SHOW_FIRST  the first emit prints; the id's other tips (other keys)
+#                   are counted, or, when there are none, the line says what
+#                   the printed one became.
+#   TIP_SHOW_END    nothing prints until the end of the task, then each of
+#                   the id's tips in its final state, up to `max_shown`; the
+#                   tips past it are counted.
+#
+# A tip emitted after the end prints at once.
+TIP_SHOW_EACH = "each"
+TIP_SHOW_FIRST = "first"
+TIP_SHOW_END = "end"
+_VALID_SHOW = [TIP_SHOW_EACH, TIP_SHOW_FIRST, TIP_SHOW_END]
+
+# How many of an id's tips print before the rest are counted instead.
+TIP_MAX_SHOWN = 20
+
 # ── Surface allowlist ────────────────────────────────────────────────
 #
 # Each tip's `surfaces` list names the surfaces it may render on; empty
@@ -89,7 +133,7 @@ _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JIN
 # (the CLI path checks `SURFACE_CLI` inside `add_tip`). Names are verbose
 # + host-qualified because they're customer-facing (`.aspect/config.axl`).
 #
-#   SURFACE_CLI                    terminal `TIP:` block printed on emit
+#   SURFACE_CLI                    the terminal, as each tip's `show` says
 #   SURFACE_GITHUB_STATUS_CHECKS   GitHub check-run summary
 #   SURFACE_BUILDKITE_ANNOTATIONS  Buildkite annotation
 #   SURFACE_GITHUB_PR_SUMMARY      cross-task PR summary comment — the only
@@ -139,7 +183,7 @@ def tip_shows_on(tip, surface):
 #         tip per failing target, all silenceable via `flaky-test`.
 #
 # Re-emitting the same `(id, key)` within a task REPLACES the stored tip
-# (last content wins); `accumulate` fields union (deduped+sorted) onto the
+# (last content wins); `accumulate` fields union (deduped, first seen first) onto the
 # prior. Across tasks, they combine per `combine_across_tasks`.
 
 # ── Cross-task accumulation ──────────────────────────────────────────
@@ -148,7 +192,7 @@ def tip_shows_on(tip, surface):
 # different tasks combine in the PR-summary rollup.
 #   False — each task stands alone; latest rendered content wins (one row);
 #           `accumulate` NOT unioned across tasks.
-#   True  — `accumulate` unioned across contributing tasks (deduped+sorted)
+#   True  — `accumulate` unioned across contributing tasks (deduped)
 #           and re-rendered, surfacing the full cross-task set. One row.
 # Rollup eligibility is governed by `surfaces` regardless of this flag — a
 # tip omitting `SURFACE_GITHUB_PR_SUMMARY` never enters the rollup.
@@ -183,6 +227,8 @@ TipInfo = record(
     type = field(str),
     surfaces = field(list[str], default = []),
     combine_across_tasks = field(bool),
+    show = field(str, default = TIP_SHOW_EACH),
+    max_shown = field(int, default = TIP_MAX_SHOWN),
 )
 
 # Verdict from a `tip_suggestion` hook. `action` required; other fields
@@ -195,6 +241,8 @@ TipSuggestion = record(
     body = field(str | None, default = None),
     surfaces = field(list[str] | None, default = None),
     combine_across_tasks = field(bool | None, default = None),
+    show = field(str | None, default = None),
+    max_shown = field(int | None, default = None),
 )
 
 # Shared singletons for the no-argument verdicts (`return TIP_ACCEPT`);
@@ -207,9 +255,13 @@ def tip_replace(
         title: str | None = None,
         body: str | None = None,
         surfaces: list[str] | None = None,
-        combine_across_tasks: bool | None = None) -> TipSuggestion:
+        combine_across_tasks: bool | None = None,
+        show: str | None = None,
+        max_shown: int | None = None) -> TipSuggestion:
     """Build a `replace` `TipSuggestion`. Omitted fields keep the tip's
     current value. See `TipSuggestion` for field semantics."""
+    if show != None and show not in _VALID_SHOW:
+        fail("tip_replace: unknown show %r; valid: %s" % (show, ", ".join(_VALID_SHOW)))
     return TipSuggestion(
         action = TipAction("replace"),
         severity = severity,
@@ -217,16 +269,19 @@ def tip_replace(
         body = body,
         surfaces = surfaces,
         combine_across_tasks = combine_across_tasks,
+        show = show,
+        max_shown = max_shown,
     )
 
 # ── Private trait — owner-feature implementation detail ────────────
 #
 # Every stored tip carries `{id, key, severity, title, body, type,
-# surfaces, combine_across_tasks}`; JINJA2 tips also carry `_title_src`,
-# `_body_src`, `vars`, `accumulate` (dict<name, list>) for re-rendering on
-# accumulation. Same-`(id, key)` re-emit replaces the stored tip
-# (accumulate unions onto the prior); silenced ids are dropped on
-# `add_tip`.
+# surfaces, combine_across_tasks, show, max_shown}`; JINJA2 tips also carry
+# `_title_src`, `_body_src`, `vars`, `accumulate` (dict<name, list>) and
+# `aggregates`, with `_batch` and `_agg_base` (the aggregates of the batches
+# before it) for re-rendering on accumulation. Same-`(id, key)` re-emit
+# replaces the stored tip (accumulate unions and aggregates merge onto the
+# prior); silenced ids are dropped on `add_tip`.
 #
 # When `Tips` isn't loaded the callable defaults are null-objects: `add` a
 # no-op, `collect` []. Emit sites don't probe — disabled propagates as zero
@@ -245,6 +300,8 @@ _TipsTrait = trait(
     _reset = attr(typing.Callable[[], None], default = lambda: None),
     _set_silenced = attr(typing.Callable[[list], None], default = lambda ids: None),
     _set_auto_print = attr(typing.Callable[[bool], None], default = lambda v: None),
+    _set_sink = attr(typing.Callable[[typing.Callable], None], default = lambda fn: None),
+    _finish = attr(typing.Callable[[TaskContext], None], default = lambda ctx: None),
 )
 
 # Public trait carrying the user `tip_suggestion` hook list, separate from
@@ -257,7 +314,318 @@ _TipsTrait = trait(
 # every `add_tip` by `apply_tip_suggestion_hooks`.
 TipsTrait = trait(
     tip_suggestion = attr(list[typing.Callable[[TaskContext, TipInfo], TipSuggestion]], default = []),
+    # Rules of a repository's own: `tip_rule(...)` values, appended from
+    # config.axl or a feature. They join the built-in rules; an id used twice
+    # fails. See "Tip rules" below.
+    rules = attr(list, default = []),
 )
+
+# ── Tip rules ────────────────────────────────────────────────────────
+#
+# A tip rule pairs a tip with the condition that emits it. The tip is an
+# ordinary `add_tip` one (id, severity, title, body, surfaces, show); `when`
+# says what fires it. One kind of condition exists:
+#
+#   on_console_line(pattern)  a line of Bazel's console matches `pattern`
+#                             (a regex, escape sequences stripped), an
+#                             action's or a test's output included; never
+#                             a row of Bazel's progress UI.
+#
+# The build/test handles aggregate each console rule's matches over every
+# line of each Bazel invocation (`bazel.output.aggregate`), then emit the
+# rule's tips once the console ends (`emit_rule_tips`). Matches split into
+# groups by the `group_by` named captures, one tip per group (its `key`);
+# each group's `aggregate` values, its `count`, and its first match's `line`
+# and named captures are Jinja2 variables in the title and body. Under
+# `show = TIP_SHOW_EACH` a tip is emitted per match instead, with that
+# match's line and captures: the first `max_shown` matches, then each group's
+# last; each group stores its last match's tip, which is what status
+# surfaces show. A template that does not render is
+# shown as written, with a warning.
+# Aggregates merge across builds of a task and, with
+# `combine_across_tasks`, across tasks in the PR summary.
+#
+# Silencing (`--tips:silence=<id>`), `--tips:surfaces` and `tip_suggestion`
+# hooks apply as for any tip.
+
+TipTrigger = record(
+    kind = field(str),
+    pattern = field(str, default = ""),
+)
+
+def on_console_line(pattern: str) -> TipTrigger:
+    """Fire when a line of Bazel's console matches `pattern`."""
+    return TipTrigger(kind = "console_line", pattern = pattern)
+
+# How a rule aggregates one capture across a group's matches; made with
+# `agg.*`. `capture` is a named group of the rule's pattern, or `line`.
+TipAggregation = record(
+    kind = field(str),
+    capture = field(str, default = ""),
+    max = field(int, default = 1000),
+)
+
+_AGG_KINDS = ["count", "unique", "all", "count_distinct", "count_by", "first", "last"]
+
+def _agg_count() -> TipAggregation:
+    """The group's matches."""
+    return TipAggregation(kind = "count")
+
+def _agg_unique(capture: str, max: int = 1000) -> TipAggregation:
+    """The capture's distinct values, first seen first, up to `max`."""
+    return TipAggregation(kind = "unique", capture = capture, max = max)
+
+def _agg_all(capture: str, max: int = 1000) -> TipAggregation:
+    """Every value of the capture, repeats included, up to `max`."""
+    return TipAggregation(kind = "all", capture = capture, max = max)
+
+def _agg_count_distinct(capture: str) -> TipAggregation:
+    """How many distinct values the capture took."""
+    return TipAggregation(kind = "count_distinct", capture = capture)
+
+def _agg_count_by(capture: str, max: int = 1000) -> TipAggregation:
+    """`{value: matches}`, most first: the first `max` distinct values seen,
+    each counted exactly."""
+    return TipAggregation(kind = "count_by", capture = capture, max = max)
+
+def _agg_first(capture: str) -> TipAggregation:
+    """The capture's first value."""
+    return TipAggregation(kind = "first", capture = capture)
+
+def _agg_last(capture: str) -> TipAggregation:
+    """The capture's last value."""
+    return TipAggregation(kind = "last", capture = capture)
+
+agg = struct(
+    count = _agg_count,
+    unique = _agg_unique,
+    all = _agg_all,
+    count_distinct = _agg_count_distinct,
+    count_by = _agg_count_by,
+    first = _agg_first,
+    last = _agg_last,
+)
+
+# Variables every rule tip's template has; an aggregate may not reuse them.
+RULE_VARS = ["line", "count", "truncated"]
+
+TipRule = record(
+    id = field(str),
+    when = field(TipTrigger),
+    severity = field(str),
+    title = field(str),
+    body = field(str),
+    # None or empty: the terminal only. A rule is promoted to the status
+    # surfaces by naming them.
+    surfaces = field(list[str] | None, default = None),
+    # A line the rule must fire on; the built-in rules' test checks it.
+    example = field(str, default = ""),
+    group_by = field(list[str], default = []),
+    aggregate = field(dict, default = {}),
+    show = field(str, default = TIP_SHOW_EACH),
+    max_shown = field(int, default = TIP_MAX_SHOWN),
+    emit = field(typing.Callable | None, default = None),
+    only_if = field(typing.Callable | None, default = None),
+    combine_across_tasks = field(bool, default = False),
+)
+
+def tip_rule(
+        id: str,
+        when: TipTrigger,
+        severity: str,
+        title: str,
+        body: str,
+        surfaces: list[str] | None = None,
+        example: str = "",
+        group_by: list[str] = [],
+        aggregate: dict = {},
+        show: str = TIP_SHOW_EACH,
+        max_shown: int = TIP_MAX_SHOWN,
+        emit = None,
+        only_if = None,
+        combine_across_tasks: bool = False) -> TipRule:
+    """A tip and the condition that emits it. `title` and `body` are Jinja2
+    templates over `line`, `count`, `truncated`, the pattern's named groups
+    (the group's first match's, or under `TIP_SHOW_EACH` each match's own)
+    and the `aggregate` values. See "Tip rules" in this file."""
+    if severity not in _SEVERITY_ORDER:
+        fail("tip rule %r: unknown severity %r; valid: %s" % (id, severity, ", ".join(_SEVERITY_ORDER.keys())))
+    for s in surfaces or []:
+        if s not in _VALID_SURFACES:
+            fail("tip rule %r: unknown surface %r; valid: %s" % (id, s, ", ".join(_VALID_SURFACES)))
+    if show not in _VALID_SHOW:
+        fail("tip rule %r: unknown show %r; valid: %s" % (id, show, ", ".join(_VALID_SHOW)))
+    if max_shown < 0:
+        fail("tip rule %r: max_shown must be >= 0 (0: no limit), got %d" % (id, max_shown))
+    for name, a in aggregate.items():
+        if not hasattr(a, "kind") or a.kind not in _AGG_KINDS:
+            fail("tip rule %r: aggregate %r must be an `agg.*(...)` value, got %r" % (id, name, a))
+        if name in RULE_VARS or name in group_by:
+            fail("tip rule %r: aggregate %r reuses a name the template already has (%s, or a group_by capture)" % (id, name, ", ".join(RULE_VARS)))
+        if a.max < 1:
+            fail("tip rule %r: aggregate %r: max must be >= 1, got %d" % (id, name, a.max))
+    return TipRule(
+        id = id,
+        when = when,
+        severity = severity,
+        title = title,
+        body = body,
+        surfaces = surfaces,
+        example = example,
+        group_by = list(group_by),
+        aggregate = dict(aggregate),
+        show = show,
+        max_shown = max_shown,
+        emit = emit,
+        only_if = only_if,
+        combine_across_tasks = combine_across_tasks,
+    )
+
+def all_tip_rules(builtin: list, user: list) -> list:
+    """`builtin` then `user` rules, failing on an id used twice."""
+    seen = {}
+    for r in builtin + user:
+        if not hasattr(r, "when") or not hasattr(r, "id"):
+            fail("TipsTrait.rules takes tip_rule(...) values, got %r" % (r,))
+        if r.id in seen:
+            fail("tip rule id %r is used twice: %r and %r" % (r.id, seen[r.id].title, r.title))
+        seen[r.id] = r
+    return builtin + user
+
+# Most matches a `TIP_SHOW_EACH` rule with `max_shown = 0` keeps lines of.
+_EACH_SAMPLES_UNLIMITED = 10000
+
+def _aggregation_spec(a: TipAggregation) -> list:
+    """`a` as `bazel.output.aggregate` takes it: `[kind, capture, max]`,
+    with only the items its kind takes."""
+    if a.kind == "count":
+        return [a.kind]
+    if a.kind in ["unique", "all", "count_by"]:
+        return [a.kind, a.capture, a.max]
+    return [a.kind, a.capture]
+
+def rule_aggregation(rule: TipRule) -> struct:
+    """What the console aggregates for `rule`: the arguments of its
+    `bazel.output.aggregate` stage."""
+    samples = 0
+    if rule.show == TIP_SHOW_EACH:
+        samples = rule.max_shown or _EACH_SAMPLES_UNLIMITED
+    return struct(
+        id = rule.id,
+        pattern = rule.when.pattern,
+        group_by = list(rule.group_by),
+        aggregations = {name: _aggregation_spec(a) for name, a in rule.aggregate.items()},
+        samples = samples,
+    )
+
+def _group_key(rule, key):
+    """A group's tip `key`: its `group_by` values, in order."""
+    return "\x1f".join([key.get(g, "") for g in rule.group_by])
+
+def _group_aggregates(rule, group):
+    """A group's aggregates for `add_tip`, its `count` included."""
+    out = {"count": {"kind": "count", "value": group["count"], "truncated": False, "max": 0}}
+    truncated = group.get("truncated") or []
+    for name, a in rule.aggregate.items():
+        out[name] = {"kind": a.kind, "value": group["values"].get(name), "truncated": name in truncated, "max": a.max}
+    return out
+
+def emit_rule_tips(ctx, rule: TipRule, report: dict, build, batch: str):
+    """Emit `rule`'s tips from `report`, its `bazel.output.aggregate` stage's
+    entry in `build.output_aggregates()`. `batch`, which must be unique
+    among the task's builds, names the build, so its aggregates count once
+    however many tips it emits. Nothing in a task
+    without the tips traits, which has nowhere to show them, or when
+    `only_if(ctx, build)` says not to.
+
+    `emit(ctx, build, groups)`, when the rule has one, decides the tips
+    instead: it gets each group as `{"key", "line", "count", "values",
+    "truncated"}` and returns dicts of `title`, `body` (Jinja2 over `vars`,
+    by default the first group's `line`), and optionally `severity`, `key`
+    and `vars`."""
+    if _TipsTrait not in ctx.traits or not report or not report.get("count"):
+        return
+    if rule.only_if != None and not rule.only_if(ctx, build):
+        return
+    groups = report.get("groups") or []
+    dropped_groups = report.get("dropped_groups") or 0
+    common = dict(
+        id = rule.id,
+        type = TIP_TEMPLATE_JINJA2,
+        surfaces = rule.surfaces or [SURFACE_CLI],
+        combine_across_tasks = rule.combine_across_tasks,
+        show = rule.show,
+        max_shown = rule.max_shown,
+        batch = batch,
+        occurrence = True,
+    )
+
+    def _vars(group):
+        v = dict(group.get("captures") or {})
+        v.update(group.get("key") or {})
+        v["line"] = group.get("line", "")
+        return v
+
+    if rule.emit != None:
+        made = rule.emit(ctx, build, groups) or []
+        for i, t in enumerate(made):
+            data = dict(t.get("vars") or {})
+            if "line" not in data:
+                data["line"] = groups[0].get("line", "") if groups else ""
+            add_tip(
+                ctx,
+                severity = t.get("severity", rule.severity),
+                title = t.get("title", rule.title),
+                body = t.get("body", rule.body),
+                key = t.get("key", ""),
+                vars = data,
+                unshown_tips = dropped_groups if i == len(made) - 1 else 0,
+                **common
+            )
+        return
+
+    if rule.show == TIP_SHOW_EACH:
+        # The first matches, as kept, then each group's last match when it
+        # was not one of them, in match order: so every group's stored tip
+        # is its last match's, and the last emit is the last match.
+        matches = list(report.get("samples") or [])
+        kept = {s["seq"]: True for s in matches}
+        lasts = [g["last"] for g in groups if g.get("last") and g["last"]["seq"] not in kept]
+        matches += sorted(lasts, key = lambda s: s["seq"])
+
+        # Matches past those kept, a dropped group's included.
+        unshown = report["count"] - len(matches)
+        for i, s in enumerate(matches):
+            group = groups[s["group"]]
+            v = dict(group.get("key") or {})
+            v.update(s.get("captures") or {})
+            v["line"] = s.get("line", "")
+            add_tip(
+                ctx,
+                severity = rule.severity,
+                title = rule.title,
+                body = rule.body,
+                key = _group_key(rule, group.get("key") or {}),
+                vars = v,
+                aggregates = _group_aggregates(rule, group),
+                unshown = unshown if i == len(matches) - 1 else 0,
+                unshown_tips = dropped_groups if i == len(matches) - 1 else 0,
+                **common
+            )
+        return
+
+    for i, group in enumerate(groups):
+        add_tip(
+            ctx,
+            severity = rule.severity,
+            title = rule.title,
+            body = rule.body,
+            key = _group_key(rule, group.get("key") or {}),
+            vars = _vars(group),
+            aggregates = _group_aggregates(rule, group),
+            unshown_tips = dropped_groups if i == len(groups) - 1 else 0,
+            **common
+        )
 
 # ── Built-in tips ────────────────────────────────────────────────────
 #
@@ -365,6 +733,73 @@ def _merge_accumulators(existing, incoming):
         changed = True
     return merged, changed
 
+def merge_aggregate(a: dict, b: dict) -> dict:
+    """`b`, an aggregate (`{"kind", "value", "truncated", "max"}`), merged
+    onto `a` of the same kind: counts sum, `unique` unions, `all`
+    concatenates, `count_by` adds per value, `first` keeps `a`'s, `last`
+    takes `b`'s. A `count_distinct` sums, so a value seen in both counts
+    twice. Lists stop at `max` and say so in `truncated`. Of two kinds
+    (a rule changed between tasks), `b` wins."""
+    kind = b.get("kind", a.get("kind"))
+    if a.get("kind") != kind:
+        return dict(b)
+    mx = b.get("max") or a.get("max") or 1000
+    av, bv = a.get("value"), b.get("value")
+    truncated = bool(a.get("truncated") or b.get("truncated"))
+    if kind == "count" or kind == "count_distinct":
+        value = (av or 0) + (bv or 0)
+    elif kind == "unique":
+        value = list(av or [])
+        for x in bv or []:
+            if x in value:
+                continue
+            if len(value) < mx:
+                value.append(x)
+            else:
+                truncated = True
+    elif kind == "all":
+        value = list(av or []) + list(bv or [])
+        if len(value) > mx:
+            value = value[:mx]
+            truncated = True
+    elif kind == "count_by":
+        counts = dict(av or {})
+        for k, n in (bv or {}).items():
+            counts[k] = counts.get(k, 0) + n
+        items = sorted(counts.items(), key = lambda kv: -kv[1])
+        if len(items) > mx:
+            items = items[:mx]
+            truncated = True
+        value = {k: n for k, n in items}
+    elif kind == "first":
+        value = av if av != None else bv
+    else:
+        value = bv if bv != None else av
+    return {"kind": kind, "value": value, "truncated": truncated, "max": mx}
+
+def merge_aggregates(a: dict, b: dict) -> dict:
+    """`b`'s aggregates merged onto `a`'s, by name (`merge_aggregate`)."""
+    out = dict(a or {})
+    for name, x in (b or {}).items():
+        out[name] = merge_aggregate(out[name], x) if name in out else dict(x)
+    return out
+
+def tip_render_data(vars, accumulate, aggregates) -> dict:
+    """What a JINJA2 tip renders against: `vars`, then `accumulate`'s
+    lists, then each aggregate's value by name, and `truncated`, the names
+    of the aggregates that stopped at their `max`. Any of the three may be
+    None."""
+    data = dict(vars or {})
+    data.update(accumulate or {})
+    truncated = []
+    for name, a in (aggregates or {}).items():
+        data[name] = a.get("value")
+        if a.get("truncated"):
+            truncated.append(name)
+    if aggregates:
+        data["truncated"] = truncated
+    return data
+
 def add_tip(
         ctx,
         id: str,
@@ -376,14 +811,36 @@ def add_tip(
         vars: dict = {},
         accumulate: dict = {},
         surfaces: list = [],
-        combine_across_tasks: bool = False):
+        combine_across_tasks: bool = False,
+        show: str = TIP_SHOW_EACH,
+        max_shown: int = TIP_MAX_SHOWN,
+        aggregates: dict = {},
+        batch: str = "",
+        unshown: int = 0,
+        unshown_tips: int = 0,
+        occurrence: bool = False):
     """Implementation of `add_tip`; `ctx` untyped so internal callers and
     tests can pass a stub context. See the public `@aspect//tips.axl`
-    `add_tip` for the full contract."""
+    `add_tip` for the full contract. For the terminal's end-of-task line:
+    `unshown` counts the occurrences this emit stands for that are never
+    emitted themselves (a rule's matches past what it kept; summed across
+    builds, and counted under `TIP_SHOW_EACH`), `unshown_tips` the tips
+    (a rule's groups past `max_groups`; the most any build reports, counted
+    in every mode), and `occurrence` says the emit is one occurrence even
+    if its content did not change (a rule's match), not a refresh."""
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r%s" % (severity, did_you_mean_then(severity, _SEVERITY_ORDER.keys(), "; ", "valid: " + ", ".join(_SEVERITY_ORDER.keys()))))
     if type not in _VALID_TEMPLATE_TYPES:
         fail("unknown tip template type %r%s" % (type, did_you_mean_then(type, _VALID_TEMPLATE_TYPES, "; ", "valid: " + ", ".join(_VALID_TEMPLATE_TYPES))))
+    if show not in _VALID_SHOW:
+        fail("tip %r: unknown show %r; valid: %s" % (id, show, ", ".join(_VALID_SHOW)))
+    if max_shown < 0:
+        fail("tip %r: max_shown must be >= 0 (0: no limit), got %d" % (id, max_shown))
+    for name, a in (aggregates or {}).items():
+        if not hasattr(a, "get") or a.get("kind") not in _AGG_KINDS:
+            fail("tip %r: aggregate %r must be a dict with a `kind` from %s" % (id, name, ", ".join(_AGG_KINDS)))
+    if aggregates and type != TIP_TEMPLATE_JINJA2:
+        fail("tip %r: aggregates need TIP_TEMPLATE_JINJA2" % id)
     surfaces_list = list(surfaces) if surfaces else []
     for s in surfaces_list:
         if s not in _VALID_SURFACES:
@@ -394,8 +851,8 @@ def add_tip(
     if collision:
         fail("tip %r: %r set in both vars and accumulate" % (id, collision))
     is_jinja2 = type == TIP_TEMPLATE_JINJA2
-    if is_jinja2 and not ([v for v in accumulate.values() if v] or [v for v in vars.values() if v]):
-        fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty `vars` or `accumulate` value" % id)
+    if is_jinja2 and not ([v for v in accumulate.values() if v] or [v for v in vars.values() if v] or aggregates):
+        fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty `vars`, `accumulate` or `aggregates` value" % id)
 
     common = {
         "id": id,
@@ -404,11 +861,24 @@ def add_tip(
         "type": type,
         "surfaces": surfaces_list,
         "combine_across_tasks": combine_across_tasks,
+        "show": show,
+        "max_shown": max_shown,
+        "_unshown": unshown,
+        "_unshown_tips": unshown_tips,
+        "_occurrence": occurrence,
     }
     if is_jinja2:
         # Carry the JINJA2 source; the storage layer renders it into
         # `title` / `body` and keeps the source for later re-render.
-        tip = dict(common, _title_src = title, _body_src = body, vars = vars, accumulate = accumulate)
+        tip = dict(
+            common,
+            _title_src = title,
+            _body_src = body,
+            vars = vars,
+            accumulate = accumulate,
+            aggregates = dict(aggregates or {}),
+            _batch = batch,
+        )
     elif type == TIP_TEMPLATE_FORMAT and vars:
         tip = dict(common, title = title.format(**vars), body = body.format(**vars))
     else:
@@ -456,7 +926,7 @@ def silence_hint_line(id):
 def tip_to_payload(t):
     """Project a stored tip into the render-only subset crossing the per-task
     artifact boundary (PR-comment aggregation). JINJA2 fields (`vars`,
-    `accumulate`, templates) are preserved so `_collect_tip_rows` can
+    `accumulate`, `aggregates`, templates) are preserved so `_collect_tip_rows` can
     re-render against the unioned state. Carries `key` (group by `(id,
     key)`), `combine_across_tasks` (union accumulators across tasks), and
     `surfaces` (defensively re-assert the PR-summary gate)."""
@@ -471,6 +941,7 @@ def tip_to_payload(t):
         "_body_src": t.get("_body_src", ""),
         "vars": dict(t.get("vars") or {}),
         "accumulate": t.get("accumulate", {}) or {},
+        "aggregates": dict(t.get("aggregates") or {}),
         "surfaces": list(t.get("surfaces") or []),
         "combine_across_tasks": t.get("combine_across_tasks", False),
     }
@@ -511,33 +982,48 @@ _TERMINAL_TIP_COLOR = {
     TIP_INFO: "1;36",  # bold cyan — matches `info()` in environment.axl
 }
 
-def _print_tip(std, id, severity, title, body):
-    """Print a tip block to the terminal — called from `add_tip` whenever a
-    tip's stored content changes (first add, replace, or accumulate re-render).
+def _tip_head(id, severity, title, color_on):
+    """`<emoji> SEVERITY[id]: title`: the label coloured by severity (see
+    `_TERMINAL_TIP_COLOR`), the id dim, the title bold. The `[` keeps a tip
+    from reading as one of Bazel's or the CLI's own `WARNING:` lines."""
+    code = _TERMINAL_TIP_COLOR.get(severity, "1;36")
+    label = "%s %s" % (severity_emoji(severity), severity_label(severity).upper())
+    return (
+        ansi.style(label, ansi.seq(code), color_on) +
+        ansi.style("[%s]" % id, ansi.DIM, color_on) + ": " +
+        ansi.style(title, ansi.BOLD, color_on)
+    )
 
-    Header `<emoji> <LABEL>: <title>`, bold throughout; the `<emoji>
-    <LABEL>:` prefix is severity-colored (see `_TERMINAL_TIP_COLOR`), the
-    title bold-default so urgency reads without blending. Body + silence
-    footer are prefixed with a colored `│ ` so the tip boundary is visible in
-    a stream of WARN/INFO lines. Code fences are stripped."""
-    code = _TERMINAL_TIP_COLOR.get(severity, "1;36")  # default to INFO's cyan for unknown severities
-    color_on = std.io.stderr.color
-
-    prefix = "%s %s:" % (severity_emoji(severity), severity_label(severity).upper())
-    if color_on:
-        prefix = ansi.style(prefix, ansi.seq(code))
-
-        # Bold the title (no color) so the whole header reads as one line.
-        title = ansi.style(title, ansi.BOLD)
-    print(prefix + " " + title)
-
-    bar = ansi.style("│", ansi.seq(code), color_on)
+def terminal_tip_lines(id, severity, title, body, color_on = False):
+    """A tip as the terminal shows it: its head (`_tip_head`), then its body
+    indented two spaces, code fences stripped."""
+    lines = [_tip_head(id, severity, title, color_on)]
     cleaned = strip_code_fences(body)
     if cleaned:
-        for line in cleaned.split("\n"):
-            print(bar if line == "" else bar + " " + line)
-    print(bar)
-    print(bar + ' (Silence this tip with `--tips:silence=%s`, or in `.aspect/config.axl` set `ctx.features[Tips].args.silence = ["%s", ...]` after `load("@aspect//feature/tips.axl", "Tips")`.)' % (id, id))
+        for line in cleaned.rstrip("\n").split("\n"):
+            lines.append("  " + line if line else "")
+    return lines
+
+def terminal_more_line(id, severity, title, more, color_on = False):
+    """The end-of-task line for an id's `more` occurrences or tips not
+    printed, and the title of the last of them, when there is one to name."""
+    if title == None:
+        return _tip_head(id, severity, "%d more" % more, color_on)
+    return _tip_head(id, severity, "%d more; the last: %s" % (more, title), color_on)
+
+def terminal_now_line(id, severity, title, color_on = False):
+    """The end-of-task line for a `TIP_SHOW_FIRST` tip that changed after it
+    printed: its title now."""
+    return _tip_head(id, severity, "now: " + title, color_on)
+
+# The id of the end-of-task line saying how to silence the tips shown.
+TIPS_HINT_ID = "tips_hint"
+
+TIPS_DOCS_URL = "https://aspect.build/docs/cli/guides/tips#silencing-tips"
+
+def terminal_hint_line(ids, color_on = False):
+    """The end-of-task line naming the ids shown and how to silence them."""
+    return _tip_head(TIPS_HINT_ID, TIP_INFO, "Silence a tip with `--tips:silence=<id>` (shown: %s)" % ", ".join(ids), color_on) + "; see " + TIPS_DOCS_URL
 
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
@@ -591,6 +1077,8 @@ def apply_tip_suggestion_hooks(ctx, tip: dict) -> dict | None:
             type = out.get("type", ""),
             surfaces = list(out.get("surfaces") or []),
             combine_across_tasks = out.get("combine_across_tasks", False),
+            show = out.get("show", TIP_SHOW_EACH),
+            max_shown = out.get("max_shown", TIP_MAX_SHOWN),
             **info_base
         )
         verdict = handler(ctx, info)
@@ -608,32 +1096,82 @@ def apply_tip_suggestion_hooks(ctx, tip: dict) -> dict | None:
                 out["surfaces"] = list(verdict.surfaces)
             if verdict.combine_across_tasks != None:
                 out["combine_across_tasks"] = verdict.combine_across_tasks
+            if verdict.show != None:
+                out["show"] = verdict.show
+            if verdict.max_shown != None:
+                out["max_shown"] = verdict.max_shown
     return out
 
 # ── Owner feature — co-located with the trait so it can bind closures ─
 
+def _surface_overrides(ctx, entries):
+    """`{id: surfaces}` from `id=surface[,surface]` entries. A malformed
+    entry or an unknown surface is left out with a warning: the feature runs
+    for every task."""
+    out = {}
+    for e in entries:
+        id, eq, names = e.partition("=")
+        wanted = [n.strip() for n in names.split(",") if n.strip()]
+        bad = [n for n in wanted if n not in _VALID_SURFACES]
+        if not eq or not id or not wanted or bad:
+            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s\n" % (e, ", ".join(_VALID_SURFACES)))
+            continue
+        out[id] = wanted
+    return out
+
 def _tips_impl(ctx):
-    """Owner feature impl. Holds the per-task tip + silence lists in closure
-    state; reads `silence` / `auto_print` from feature args at bind time so
-    config / `--tips:*` flags propagate."""
+    """Owner feature impl. Holds the per-task tips, the silence list and
+    what the terminal has shown in closure state; reads `silence` /
+    `auto_print` from feature args at bind time so config / `--tips:*`
+    flags propagate. Registers the end of the task's terminal output (see
+    `_finish`) as a post-task hook, so it runs however the task ended."""
     state = []
 
     # `args.custom(...)` returns None when unset despite `default = []`;
     # coalesce defensively.
     silenced = list(ctx.args.silence or [])
+    surfaces_for = _surface_overrides(ctx, ctx.args.surfaces or [])
     auto_print = [ctx.args.auto_print]  # boxed so test seam can mutate
 
-    def _render_jinja2(call_ctx, tip, accumulate):
-        """Render `tip`'s `_title_src`/`_body_src` against `vars` +
-        `accumulate` and return the stored tip with rendered `title`/`body`
-        and the merged `accumulate`."""
-        data = dict(tip.get("vars") or {})
-        data.update(accumulate)
+    # The terminal, per id: in first-emit order, how it shows (`show`,
+    # `max_shown` of its first tip), how many tips it printed and what (by
+    # key), the occurrences `TIP_SHOW_EACH` did not print, the occurrences or
+    # tips it was told would never be emitted (`unshown`), and its last emit.
+    order = []
+    shows = {}
+    shown = {}
+    printed = {}
+    more = {}
+    dropped = {}
+    dropped_tips = {}
+    last = {}
+    held_last = {}
+    finished = [False]
+    warned = {}
+    sink = [print]  # boxed so the test seam can capture lines
+
+    def _render_jinja2(call_ctx, tip, accumulate, aggregates):
+        """Render `tip`'s `_title_src`/`_body_src` against `vars`,
+        `accumulate` and `aggregates` (`tip_render_data`) and return the
+        stored tip with rendered `title`/`body` and the merged state."""
+        data = tip_render_data(tip.get("vars"), accumulate, aggregates)
         stored = dict(tip)
         stored["accumulate"] = accumulate
-        stored["title"] = call_ctx.template.jinja2(tip["_title_src"], data = data)
-        stored["body"] = call_ctx.template.jinja2(tip["_body_src"], data = data)
+        stored["aggregates"] = aggregates
+        stored["title"] = _jinja2(call_ctx, tip, tip["_title_src"], data)
+        stored["body"] = _jinja2(call_ctx, tip, tip["_body_src"], data)
         return stored
+
+    def _jinja2(call_ctx, tip, src, data):
+        """`src` rendered, or, when it does not render, `src` itself with a
+        warning once per id: a tip's template must not fail the task."""
+        ok, text = call_ctx.template.try_jinja2(src, data = data)
+        if ok:
+            return text
+        if tip["id"] not in warned:
+            warned[tip["id"]] = True
+            call_ctx.std.io.stderr.write("WARNING: tip %r: its template does not render, so it is shown as written: %s\n" % (tip["id"], text))
+        return src
 
     def _store(call_ctx, tip):
         """Materialize a freshly-emitted `tip` into stored form. JINJA2 tips
@@ -641,22 +1179,127 @@ def _tips_impl(ctx):
         pre-rendered tips store as-is."""
         if tip.get("type") == TIP_TEMPLATE_JINJA2:
             seeded = {name: [value] for name, value in tip["accumulate"].items() if value}
-            return _render_jinja2(call_ctx, tip, seeded)
+            stored = _render_jinja2(call_ctx, tip, seeded, dict(tip.get("aggregates") or {}))
+            stored["_agg_base"] = {}
+            return stored
         return dict(tip)
 
-    def _emit_print(call_ctx, stored):
-        """Print the stored tip, gated on auto_print + the SURFACE_CLI allowlist."""
-        if auto_print[0] and tip_shows_on(stored, SURFACE_CLI):
-            _print_tip(call_ctx.std, stored["id"], stored["severity"], stored["title"], stored["body"])
+    def _merged_aggregates(existing, tip):
+        """`(base, merged)`: the aggregates of the builds before this emit's
+        batch, and those merged with this emit's. An emit of the batch the
+        stored tip came from replaces that batch's share instead of adding
+        to it, so a build counts once however many tips it emits."""
+        batch = tip.get("_batch", "")
+        if batch and existing.get("_batch") == batch:
+            base = existing.get("_agg_base") or {}
+        else:
+            base = existing.get("aggregates") or {}
+        return base, merge_aggregates(base, tip.get("aggregates") or {})
+
+    def _print(lines):
+        for line in lines:
+            sink[0](line)
+
+    def _on_emit(call_ctx, stored, changed, occurrence):
+        """Print `stored` on the terminal, or count it for the end, as its
+        id's `show` says. `occurrence`: the emit stands for one occurrence
+        even when its content did not change (a rule's match), so it counts
+        where a refresh would not. After `_finish`, a tip prints at once."""
+        if not auto_print[0] or not tip_shows_on(stored, SURFACE_CLI):
+            return
+        id = stored["id"]
+        if id not in shows:
+            order.append(id)
+            shows[id] = (stored.get("show", TIP_SHOW_EACH), stored.get("max_shown", TIP_MAX_SHOWN))
+            shown[id] = 0
+            printed[id] = {}
+            more[id] = 0
+        show, cap = shows[id]
+        last[id] = stored
+        if finished[0]:
+            show = TIP_SHOW_EACH
+        if show == TIP_SHOW_END or not (changed or occurrence):
+            return
+        key = stored.get("key", "")
+        if show == TIP_SHOW_FIRST:
+            if shown[id] == 0:
+                _print_stored(call_ctx, stored, call_ctx.std.io.stderr.color)
+            return
+        if finished[0] or cap == 0 or shown[id] < cap:
+            _print_stored(call_ctx, stored, call_ctx.std.io.stderr.color)
+        else:
+            more[id] += 1
+            held_last[id] = stored
+
+    def _print_stored(_call_ctx, stored, color_on):
+        id = stored["id"]
+        _print(terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on))
+        shown[id] += 1
+        printed[id][stored.get("key", "")] = (stored["title"], stored["body"])
+
+    def _finish(task_ctx):
+        """The end of the task's terminal output, once: each `TIP_SHOW_END`
+        id's tips in their final state, a line per id with what it did not
+        print (`terminal_more_line`: for `TIP_SHOW_EACH` the occurrences, for
+        the others the tips) or, for `TIP_SHOW_FIRST`, how its printed tip
+        changed (`terminal_now_line`), then, when any tip was printed, how to
+        silence them (`terminal_hint_line`). A tip emitted after it prints at
+        once."""
+        if not auto_print[0] or finished[0]:
+            return
+        finished[0] = True
+        color_on = task_ctx.std.io.stderr.color
+        for id in order:
+            show, cap = shows[id]
+            tips_for = [t for t in state if t["id"] == id and tip_shows_on(t, SURFACE_CLI)]
+            if not tips_for:
+                continue
+            if show == TIP_SHOW_END:
+                for t in (tips_for if cap == 0 else tips_for[:cap]):
+                    _print_stored(task_ctx, t, color_on)
+            unprinted = [t for t in tips_for if t.get("key", "") not in printed[id]]
+            occurrences, lost = dropped.get(id, 0), dropped_tips.get(id, 0)
+            if show == TIP_SHOW_EACH:
+                # Occurrences: a dropped group's matches are among `dropped`
+                # when the rule reported them, so its tips count only when
+                # it did not. The last held back, as it now stands, when it
+                # is still on the terminal.
+                held = more[id] + occurrences + (0 if occurrences else lost)
+                key = held_last[id].get("key", "") if id in held_last else None
+                now = [t for t in tips_for if t.get("key", "") == key]
+                latest = now[0] if now else None
+            else:
+                held = len(unprinted) + lost
+                latest = unprinted[-1] if unprinted else None
+            if held:
+                _print([terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on)])
+            elif show == TIP_SHOW_FIRST:
+                now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])]]
+                if now:
+                    _print([terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on)])
+        names = [id for id in order if shown[id]]
+        if names and TIPS_HINT_ID not in silenced:
+            _print([terminal_hint_line(names, color_on)])
 
     def _add(call_ctx, tip):
         if tip["id"] in silenced:
             return
 
+        # What the emit stands for that is never emitted counts whatever the
+        # hooks do to the emit itself. Each build reports the occurrences it
+        # did not emit; tips past `max_groups` are reported again by every
+        # build that met them.
+        id = tip["id"]
+        dropped[id] = dropped.get(id, 0) + tip.get("_unshown", 0)
+        dropped_tips[id] = max(dropped_tips.get(id, 0), tip.get("_unshown_tips", 0))
+        if tip["id"] in surfaces_for:
+            tip = dict(tip, surfaces = surfaces_for[tip["id"]])
+
         # Run the `tip_suggestion` chain: reject drops, replace rewrites.
         tip = apply_tip_suggestion_hooks(call_ctx, tip)
         if tip == None:
             return
+        occurrence = tip.get("_occurrence", False)
 
         identity = (tip["id"], tip.get("key", ""))
         for i, existing in enumerate(state):
@@ -664,24 +1307,26 @@ def _tips_impl(ctx):
                 continue
 
             # Re-emit of same (id, key): replace the stored tip, unioning
-            # `accumulate` onto the prior so the running total carries across.
+            # `accumulate` and merging `aggregates` onto the prior so the
+            # running total carries across.
             if tip.get("type") == TIP_TEMPLATE_JINJA2:
                 merged, _ = _merge_accumulators(existing.get("accumulate", {}), tip["accumulate"])
-                refreshed = _render_jinja2(call_ctx, tip, merged)
+                base, aggregates = _merged_aggregates(existing, tip)
+                refreshed = _render_jinja2(call_ctx, tip, merged, aggregates)
+                refreshed["_agg_base"] = base
             else:
                 refreshed = _store(call_ctx, tip)
 
-            # Re-print only when rendered content changed, so a no-op re-emit
+            # Print only when rendered content changed, so a no-op re-emit
             # (e.g. a streaming loop) stays quiet.
             changed = (refreshed["title"], refreshed["body"]) != (existing.get("title"), existing.get("body"))
             state[i] = refreshed
-            if changed:
-                _emit_print(call_ctx, refreshed)
+            _on_emit(call_ctx, refreshed, changed, occurrence)
             return
 
         stored = _store(call_ctx, tip)
         state.append(stored)
-        _emit_print(call_ctx, stored)
+        _on_emit(call_ctx, stored, True, occurrence)
 
     def _collect():
         return list(state)
@@ -692,6 +1337,18 @@ def _tips_impl(ctx):
         # auto_print False.
         state.clear()
         silenced.clear()
+        order.clear()
+        shows.clear()
+        shown.clear()
+        printed.clear()
+        more.clear()
+        dropped.clear()
+        dropped_tips.clear()
+        held_last.clear()
+        last.clear()
+        warned.clear()
+        finished[0] = False
+        sink[0] = print
         auto_print[0] = False
 
     def _set_silenced(ids):
@@ -702,11 +1359,17 @@ def _tips_impl(ctx):
     def _set_auto_print(v):
         auto_print[0] = v
 
+    def _set_sink(fn):
+        sink[0] = fn
+
     ctx.traits[_TipsTrait].add = _add
     ctx.traits[_TipsTrait].collect = _collect
     ctx.traits[_TipsTrait]._reset = _reset
     ctx.traits[_TipsTrait]._set_silenced = _set_silenced
     ctx.traits[_TipsTrait]._set_auto_print = _set_auto_print
+    ctx.traits[_TipsTrait]._set_sink = _set_sink
+    ctx.traits[_TipsTrait]._finish = _finish
+    ctx.hooks.post_task(lambda task_ctx, _conclusion: _finish(task_ctx))
 
 Tips = feature(
     display_name = "Tips",
@@ -718,9 +1381,13 @@ Tips = feature(
             default = [],
             description = "Tip ids to suppress for this task. Set from config: `ctx.features[Tips].args.silence = [\"<id>\", ...]` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
         ),
+        "surfaces": args.string_list(
+            default = [],
+            description = "Where a tip shows, by id: `<id>=<surface>[,<surface>]`, overriding the tip's own surfaces. Surfaces: " + ", ".join(_VALID_SURFACES) + ". Repeat for several tips.",
+        ),
         "auto_print": args.boolean(
             default = True,
-            description = "Print tips to the terminal on emit. Set False to suppress the `TIP:` blocks (tips still surface on rendered check-runs / PR comments).",
+            description = "Print tips to the terminal, as each tip's `show` says. Set False to keep them off the terminal (tips still surface on rendered check-runs / PR comments).",
         ),
     },
 )
@@ -738,5 +1405,7 @@ tips = struct(
     _inspect_for_test = lambda ctx: ctx.traits[_TipsTrait].collect(),
     _set_silenced_for_test = lambda ctx, ids: ctx.traits[_TipsTrait]._set_silenced(ids),
     _set_auto_print_for_test = lambda ctx, v: ctx.traits[_TipsTrait]._set_auto_print(v),
+    _set_sink_for_test = lambda ctx, fn: ctx.traits[_TipsTrait]._set_sink(fn),
+    _finish_for_test = lambda ctx: ctx.traits[_TipsTrait]._finish(ctx),
     TRAITS = [_TipsTrait, TipsTrait],
 )

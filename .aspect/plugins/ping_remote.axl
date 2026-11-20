@@ -1,0 +1,60 @@
+"""`PingRemote`: BuildBuddy's ping-remote CLI plugin. Before Bazel starts, check
+the remote executor answers, and turn remote execution off for the build when
+it does not.
+
+The check is a TCP connect to the executor's port, which a firewall that
+drops ICMP still answers, rather than the plugin's `ping`. Each executor is
+checked once per task, so a retry does not wait again.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+def host_port(uri: str):
+    """`host:port` for a `--remote_executor` value over TCP: its own port,
+    else 443 for `grpcs://` or a bare host and 80 for `grpc://`. None for
+    one this cannot check, such as a `unix:` socket."""
+    port = 443
+    lower = uri.lower()
+    if "://" in lower and not (lower.startswith("grpcs://") or lower.startswith("grpc://")):
+        return None
+    if lower.startswith("unix:"):
+        return None
+    for scheme, default in [("grpcs://", 443), ("grpc://", 80)]:
+        if lower.startswith(scheme):
+            uri, port = uri[len(scheme):], default
+    host = uri.rstrip("/").partition("/")[0]
+    if host.startswith("["):
+        # IPv6: `[addr]` or `[addr]:port`.
+        return host if "]:" in host else "%s:%d" % (host, port)
+    return host if ":" in host else "%s:%d" % (host, port)
+
+def _ping_impl(ctx: FeatureContext):
+    reachable = {}
+
+    def _rc(task_ctx, rc, command):
+        uri = rc.flag_value("--remote_executor", command = command)
+        if not uri:
+            return []
+        if uri not in reachable:
+            addr = host_port(uri)
+            if addr == None:
+                reachable[uri] = True
+                return []
+            err, conn = task_ctx.std.net.tcp.try_connect(addr, timeout_ms = ctx.args.timeout_ms)
+            if conn:
+                conn.close()
+            else:
+                task_ctx.std.io.stderr.write("WARNING: %s did not answer (%s); building without remote execution.\n" % (addr, getattr(err, "kind", err)))
+            reachable[uri] = conn != None
+        return [] if reachable[uri] else ["--remote_executor="]
+
+    ctx.traits[BazelTrait].rc_flags.append(_rc)
+
+PingRemote = feature(
+    display_name = "Ping remote",
+    summary = "Build without remote execution when the remote executor does not answer.",
+    implementation = _ping_impl,
+    args = {
+        "timeout_ms": args.int(default = 500, description = "How long the connect may take."),
+    },
+)

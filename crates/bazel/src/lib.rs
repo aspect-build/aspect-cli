@@ -6,6 +6,8 @@
 //!
 //! * [`stream`]: following a stream bazel's processes are still writing, and
 //!   deciding when it is over. Knows nothing about bazel's protocols.
+//! * [`console`]: bazel's stderr captured and forwarded through a processing
+//!   chain instead of inherited, read with a [`stream::fd`].
 //! * [`process`]: the per-OS questions about other processes that sit under
 //!   [`stream::pid_pair`].
 //! * [`delimited`]: the length-delimited framing the protocol readers share.
@@ -21,12 +23,13 @@
 //!   with the feed that reads it and, where there is one, the sinks that
 //!   forward it.
 //!
-//! Dependencies point one way: `bes` uses `delimited` and `stream`, `stream`
-//! uses `process`.
+//! Dependencies point one way: `bes` uses `delimited` and `stream`, `console`
+//! and `stream` use `process`.
 
 pub mod aspect;
 pub mod bes;
 pub mod command;
+pub mod console;
 pub mod delimited;
 pub mod execlog;
 pub mod fanout;

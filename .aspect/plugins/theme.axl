@@ -1,0 +1,87 @@
+"""`Theme`: BuildBuddy's theme-modern and theme-mono CLI plugins as console
+stages: Bazel's highlights recoloured, emoji on its closing lines, and each
+running action's elapsed seconds coloured by how long it has run.
+
+    aspect build //... --theme:style=mono
+
+Everything is a `rewrite` stage, so where curses is shown it reaches the rows
+of Bazel's live progress area too; in plain lines there are none. A rewritten row stays one row: under a PTY a row made
+longer than Bazel wrote it is cut to that many characters. Colour is added
+only when stderr is a terminal, since nothing strips what a stage adds.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+_GREY = "\x1b[90m"
+_RESET = "\x1b[0m"
+
+# The escapes a row starts with; `rewrite` sees them, the other stages do not.
+_LEAD = r"(?:\x1b\[[0-9;?]*[A-Za-z])*"
+
+def _running(emoji, tail, bold):
+    """A running-action row (`    Compiling x; 12s remote`): two of its
+    indent's spaces become `emoji` and a space, and the first word is bold."""
+    return bazel.output.rewrite(
+        r"^(" + _LEAD + r"\s*)\s\s([^\s⚡🔨]\S*)(" + tail + r")$",
+        "${1}" + emoji + " " + bold + "${2}" + _RESET + "${3}",
+    )
+
+def _seconds(digits, sgr):
+    """The `; <n>s` of a row `_running` marked, coloured `sgr` for `digits`."""
+    return bazel.output.rewrite(
+        r"^(.*(?:⚡️|🔨) .*?); (" + digits + r")s(.*)$",
+        "${1}" + _GREY + "; " + _RESET + sgr + "${2}s" + _RESET + _GREY + "${3}" + _RESET,
+    )
+
+def _stages(highlight, buckets):
+    """The stages of a theme: `highlight` for Bazel's green labels, and
+    `(digits regex, sgr)` bands for a running action's seconds, disjoint."""
+    stages = [
+        bazel.output.rewrite(r"(Starting local Bazel server.*connecting to it\.\.\.)", _GREY + "${1}" + _RESET),
+        bazel.output.rewrite(r"\x1b\[32m(INFO|Loading|Analyzing|\[)", highlight + "${1}"),
+        bazel.output.rewrite(r"(Build did NOT complete successfully)", "${1} ❌"),
+        bazel.output.rewrite(r"Build completed successfully, ", "Build completed successfully ✅ "),
+        bazel.output.rewrite(r"Starting clean\.", "Starting clean 🧽"),
+        bazel.output.rewrite(r"(build interrupted)", "${1} 😡"),
+        bazel.output.rewrite(r"(Streaming build results to: )(\S+)", "${1}\x1b[37;1;4m${2}" + _RESET),
+        bazel.output.rewrite(
+            r"(Elapsed time: )([0-9.]+s)(, Critical Path: )([0-9.]+s)",
+            "${1}\x1b[37;1m${2}" + _RESET + " ⏳${3}\x1b[37;1m${4}" + _RESET + " ⏰",
+        ),
+        # Remote first: the 🔨 pattern leaves a row already marked alone.
+        _running("⚡️", r".*; [0-9]+s.* remote.*", "\x1b[37;1m"),
+        _running("🔨", r".*; [0-9]+s.*", "\x1b[37;1m"),
+    ]
+    return stages + [_seconds(d, sgr) for d, sgr in buckets]
+
+STYLES = {
+    "modern": lambda: _stages("\x1b[92;1m", [
+        ("[0-4]", _GREY),
+        ("[5-9]|1[0-9]", "\x1b[93m"),
+        ("[2-5][0-9]", "\x1b[91m"),
+        ("[6-9][0-9]|[1-9][0-9]{2,}", "\x1b[91;1m"),
+    ]),
+    "mono": lambda: _stages("\x1b[37;1m", [
+        ("[0-4]", _GREY),
+        ("[5-9]|[12][0-9]", "\x1b[37;1m"),
+        ("[3-9][0-9]|[1-9][0-9]{2,}", "\x1b[37;1;4m"),
+    ]),
+}
+
+def _theme_impl(ctx: FeatureContext):
+    if not ctx.std.io.stderr.is_tty:
+        return
+    ctx.traits[BazelTrait].output_stages.extend(STYLES[ctx.args.style]())
+
+Theme = feature(
+    display_name = "Console theme",
+    summary = "Recolour Bazel's console, after BuildBuddy's theme-modern and theme-mono plugins.",
+    implementation = _theme_impl,
+    args = {
+        "style": args.string(
+            default = "modern",
+            values = list(STYLES.keys()),
+            description = "`modern`: green highlights, seconds grey to red. `mono`: white highlights, seconds grey to bold underlined.",
+        ),
+    },
+)

@@ -1,0 +1,45 @@
+"""Tests for `bazel/console_tips.axl`: every built-in rule is well formed and
+fires on the line it says it is for; and tip rule ids are checked.
+
+Run with:
+  aspect dev test-bazel-console-tips
+"""
+
+load("@aspect//bazel/console_tips.axl", "CONSOLE_TIP_RULES")
+load("@aspect//tips.axl", "TIP_INFO", "on_console_line", "tip_rule")
+load("../private/lib/tips.axl", "all_tip_rules")
+
+def _test_impl(ctx: TaskContext) -> int:
+    problems = []
+    for r in CONSOLE_TIP_RULES:
+        if r.when.kind != "console_line":
+            continue
+        if not r.example:
+            problems.append("%s has no example" % r.id)
+            continue
+        err = bazel.output.pattern_error(r.when.pattern)
+        if err:
+            problems.append("%s: %s" % (r.id, err))
+        elif not bazel.output.pattern_matches(r.when.pattern, r.example):
+            problems.append("%s: the pattern does not match its example" % r.id)
+    if problems:
+        fail("console_tips.axl:\n  " + "\n  ".join(problems))
+
+    # The built-in ids are unique: this fails if not.
+    all_tip_rules(CONSOLE_TIP_RULES, [])
+    mine = tip_rule(id = "mine", when = on_console_line("x"), severity = TIP_INFO, title = "t", body = "b")
+    if len(all_tip_rules(CONSOLE_TIP_RULES, [mine])) != len(CONSOLE_TIP_RULES) + 1:
+        fail("a user rule joins the built-in ones")
+    if mine.surfaces != None:
+        fail("a rule with no surfaces is the terminal's only")
+
+    print("console_tips_test.axl: OK (%d rules)" % len(CONSOLE_TIP_RULES))
+    return 0
+
+console_tips_tests = task(
+    summary = "Check the built-in console tip rules: unique ids, compiling patterns, matching examples.",
+    kind = "test-bazel-console-tips",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

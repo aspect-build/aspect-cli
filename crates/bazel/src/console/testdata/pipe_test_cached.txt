@@ -1,0 +1,27 @@
+[32mINFO: [0mInvocation ID: 8bfc03a5-93e8-4673-845e-014bac850ef3
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[32mAnalyzing:[0m target //:t_pass (0 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m target //:t_pass (0 packages loaded, 0 targets configured)
+
+[32mINFO: [0mAnalyzed target //:t_pass (0 packages loaded, 0 targets configured).
+[32mINFO: [0mFound 1 test target...
+Target //:t_pass up-to-date:
+  bazel-bin/t_pass.sh
+[32mINFO: [0mElapsed time: 0.119s, Critical Path: 0.00s
+[32mINFO: [0m1 process: 1 action cache hit, 1 internal.
+[32mINFO: [0mBuild completed successfully, 1 total action
+[0m[32mPASSED: [0m//:t_pass (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_pass/test.log)
+[0m[32mINFO: [0mFrom Testing //:t_pass
+==================== Test output for //:t_pass:
+test out
+[35mWARNING: [0mfrom test
+[35mWARNING: [0mfrom test
+  indented test
+================================================================================
+//:t_pass                                                       [0m[32m(cached) PASSED[0m in 0.4s
+
+Executed 0 out of 1 test: 1 test passes.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[0m

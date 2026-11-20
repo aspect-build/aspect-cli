@@ -397,7 +397,28 @@ pub fn basil_bin() -> &'static str {
             .and_then(|p| p.parent())
             .expect("workspace root above crates/axl-runtime")
             .to_path_buf();
-        let status = std::process::Command::new(&cargo)
+        // Cargo sets these for this test binary. Cargo reruns a build script
+        // that watches them (`ring`'s) when they change, so inheriting them
+        // would rebuild basil here, then again on the next `cargo build`.
+        let package_vars = std::env::vars().map(|(k, _)| k).filter(|k| {
+            k.starts_with("CARGO_PKG_")
+                || matches!(
+                    k.as_str(),
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                        | "CARGO_TARGET_TMPDIR"
+                        | "CARGO_RUSTC_CURRENT_DIR"
+                        | "OUT_DIR"
+                )
+        });
+        let mut build = std::process::Command::new(&cargo);
+        for k in package_vars {
+            build.env_remove(k);
+        }
+        let status = build
             .args(["build", "--quiet", "-p", "basil"])
             .current_dir(&workspace_root)
             .status()

@@ -1,0 +1,69 @@
+"""`GoDeps`: BuildBuddy's go-deps CLI plugin. When a build fails on rules_go's
+strict dependency check, offer to run `aspect gazelle` on the packages that
+failed.
+
+An `observe` stage records the `<file>.go: import of "<path>"` lines, and an
+`output_end` hook reads them once the console ends. `--go-deps:mode` is
+`ask` (the default: a prompt, only when stdin and stderr are terminals),
+`always` or `never`.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+_ID = "go-deps:import"
+
+# rules_go's strict-deps error, as Bazel prints it from the action's output.
+_PATTERN = r'\.go: import of "'
+
+def package_of(line: str):
+    """The workspace package of the file a strict-deps line names: the part
+    of its path after the execroot's `<workspace>/`, or after a sandbox's
+    working directory, without the file name. None for a file gazelle does
+    not own: one in an external repository or generated under `bazel-out/`."""
+    path = line.split(": import of ")[0].strip()
+    for marker in ["/execroot/", "/bazel-working-directory/"]:
+        if marker in path:
+            path = path.split(marker)[-1].partition("/")[2]
+    if path.startswith("external/") or path.startswith("bazel-out/"):
+        return None
+    return path.rpartition("/")[0] or "."
+
+def _go_deps_impl(ctx: FeatureContext):
+    mode = ctx.args.mode
+    if mode == "never":
+        return
+    t = ctx.traits[BazelTrait]
+    t.output_stages.append(bazel.output.observe({_ID: _PATTERN}))
+
+    def _end(task_ctx, build):
+        found = [package_of(line) for id, line in build.output_matches() if id == _ID]
+        pkgs = sorted({p: True for p in found if p != None}.keys())
+        if not pkgs:
+            return
+        io = task_ctx.std.io
+        if mode == "ask":
+            if not (io.stdin.is_tty and io.stderr.is_tty):
+                return
+            io.stderr.write("> Run gazelle to fix %s? [y/N] " % " ".join(pkgs))
+            if not str(io.stdin.read(64)).strip().lower().startswith("y"):
+                return
+        io.stderr.write("> aspect gazelle --check-only=false %s\n" % " ".join(pkgs))
+        status = task_ctx.std.process.command(task_ctx.std.env.current_exe()).args(
+            ["gazelle", "--check-only=false"] + pkgs,
+        ).spawn().wait()
+        io.stderr.write("✅ fix applied\n" if status.success else "❌ fix failed\n")
+
+    t.output_end.append(_end)
+
+GoDeps = feature(
+    display_name = "Go deps",
+    summary = "Offer `aspect gazelle` on the packages a rules_go strict-deps failure names.",
+    implementation = _go_deps_impl,
+    args = {
+        "mode": args.string(
+            default = "ask",
+            values = ["ask", "always", "never"],
+            description = "`ask` prompts (on a terminal only), `always` runs gazelle without asking, `never` turns the check off.",
+        ),
+    },
+)

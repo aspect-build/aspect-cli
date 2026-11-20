@@ -475,6 +475,8 @@ fn start<'v>(
         startup_flags,
         build_stdout,
         build_stderr,
+        None,
+        false,
         directory,
         announce,
         env.signals.clone(),
@@ -1040,7 +1042,7 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             execution_log,
             rc.into_option().cloned(),
             directory.into_option(),
-            super::resolve_stdio(stdio, stdout, stderr)?,
+            super::resolve_stdio(stdio, stdout, stderr, false)?,
             super::build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
