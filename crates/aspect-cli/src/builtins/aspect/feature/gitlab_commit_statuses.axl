@@ -85,9 +85,9 @@ slot ("title", "summary", "details") to template for every task;
         }
         ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
 
-The rendered `title` is truncated to GitLab's 255-char `description` cap
-and posted to the commit status; the full summary lives in the
-`GitlabStatusComments` rolling MR note (the sibling feature).
+Only the rendered `title` is posted, truncated to GitLab's 255-char
+`description` cap; the rolling MR note is `GitlabStatusComments`' own,
+rendered from that feature's `templates`.
 """
 
 load(
@@ -500,9 +500,9 @@ GitlabCommitStatuses = feature(
             dict,
             default = {},
             description = template_presets.templates_description("the rendered status output") +
-                          " Note: only the rendered `title` lands on the commit status (in " +
-                          "`description`, truncated to 255 chars) \u2014 the full body is rendered " +
-                          "into the GitlabStatusComments rolling note.",
+                          " Only the rendered `title` lands on the commit status, as its " +
+                          "`description`, truncated to 255 chars; the MR note's body is " +
+                          "GitlabStatusComments' own `templates`.",
         ),
         "metadata_keys": args.string_list(
             default = [],

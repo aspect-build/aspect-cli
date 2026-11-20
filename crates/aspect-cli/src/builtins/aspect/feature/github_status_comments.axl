@@ -312,7 +312,7 @@ _DEFAULT_STATUS_BADGES = {
     "aborted": "🔥",
 }
 
-# Rows sort by (job, name, key) so positions stay stable across PATCHes;
+# Rows sort by (job, kind, name) so positions stay stable across PATCHes;
 # the badge column carries the verdict. Severity-first sort would shuffle
 # rows on every transition.
 
@@ -643,7 +643,7 @@ def _result_cell_text(entry):
 # ─── Pre-render decoration ────────────────────────────────────────────────────
 
 def _prepare_for_render(entries):
-    """Decorate entries for the template, sorted by (job, name, key) so
+    """Decorate entries for the template, sorted by (job, kind, name) so
     positions stay stable across PATCHes. `_severity` is a pure status
     lookup exposed for templates."""
     for e in entries:
@@ -2498,11 +2498,10 @@ GithubStatusComments = feature(
         "status_badges": args.custom(
             dict,
             default = {},
-            description = "Override badge_key -> label mapping merged over defaults " +
-                          "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
-                          "passed='✅ passed', aborted='🔥 aborted'). Keys are badge keys, " +
-                          "not task statuses: a task still running but already failing " +
-                          "takes the `failed` badge.",
+            description = "Override badge_key -> badge mapping merged over defaults " +
+                          "(failed='❌', warning='⚠️', running='🔄', passed='✅', " +
+                          "aborted='🔥'). Keys are badge keys, not task statuses: a task " +
+                          "still running but already failing takes the `failed` badge.",
         ),
     } | template_presets.args(),
 )
