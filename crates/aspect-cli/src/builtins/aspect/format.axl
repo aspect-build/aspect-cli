@@ -589,7 +589,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if not affected:
         if filtered_count > 0:
-            info(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
+            answer(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
         return _emit_final(ph, 0)
 
     n = len(affected)
