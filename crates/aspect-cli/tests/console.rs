@@ -204,7 +204,11 @@ fn silent_prints_nothing_of_aspects_own() {
 
 #[test]
 fn buildkite_sections_print_under_every_preset() {
-    for preset in ["compact", "silent"] {
+    for (preset, verdict) in [
+        ("compact", "+++ :x: "),
+        ("silent", "+++ :x: "),
+        ("agent", "+++ \u{1b}[1;31mFailed"),
+    ] {
         let flag = format!("--console:template-preset={preset}");
         let output = run("", &["check", &flag, "--code", "3"], true);
         assert_task_behaviour(&output, preset, 3);
@@ -216,8 +220,11 @@ fn buildkite_sections_print_under_every_preset() {
         assert_eq!(sections.len(), 5, "{preset}: {err}");
         assert!(sections[0].contains("Running"), "{preset}: {err}");
         assert_eq!(sections[3], "^^^ +++", "{preset}: {err}");
-        assert!(sections[4].starts_with("+++ :x: "), "{preset}: {err}");
+        assert!(sections[4].starts_with(verdict), "{preset}: {err}");
         assert!(!err.contains("heartbeat progress"), "{preset}: {err}");
+        if preset == "agent" {
+            assert!(!err.contains(":aspect:"), "{err}");
+        }
     }
 }
 

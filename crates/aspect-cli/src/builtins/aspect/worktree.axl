@@ -166,7 +166,9 @@ def _info_shown(std, shown: str) -> None:
     """An `INFO:` line whose text is already escaped, and may be styled.
 
     Not `environment.info`, which also colors on CI hosts: this report is
-    styled only as `_color` says."""
+    styled only as `_color` says. Nor is it hidden with `std.io.info_lines`:
+    these lines are the command's answer, such as the path `add` made ready,
+    not asides."""
     print(_styled(std, "INFO", ansi.seq("1;36")) + ": " + shown)
 
 def _warn(std, message: str) -> None:

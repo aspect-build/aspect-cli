@@ -4,13 +4,10 @@
 //! The runtime picks the `agent` Console layout from those variables without
 //! running AXL, so it keeps its own list; this reads the AXL source so a
 //! harness added on one side and not the other fails here instead of drifting.
-//! The source is embedded at compile time, as the CLI embeds it to ship it.
 
 use std::collections::BTreeSet;
 
-use include_dir::{Dir, include_dir};
-
-static ASPECT: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
+const AGENT_AXL: &str = include_str!("aspect/private/lib/agent.axl");
 
 /// The first non-empty `"…"` literal after `prefix` on each line where
 /// `prefix` occurs, at the line's start (after indentation) when `leading`.
@@ -29,10 +26,7 @@ fn quoted_after(source: &str, prefix: &str, leading: bool) -> Vec<String> {
 
 #[test]
 fn the_runtime_reads_the_same_agent_variables_as_agent_axl() {
-    let source = ASPECT
-        .get_file("private/lib/agent.axl")
-        .and_then(|f| f.contents_utf8())
-        .expect("private/lib/agent.axl");
+    let source = AGENT_AXL;
     let mut axl: BTreeSet<String> = BTreeSet::new();
     for prefix in ["marker = ", "id_var = ", "_GENERIC_KIND_VAR = "] {
         axl.extend(quoted_after(source, prefix, true));
