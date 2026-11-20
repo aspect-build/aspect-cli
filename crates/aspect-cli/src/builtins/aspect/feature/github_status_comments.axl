@@ -1,4 +1,4 @@
-"""GitHub Status Comments feature \342\200\224 aggregates per-task status from sibling CI jobs into one PR comment.
+"""GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
 
 Every job contributes its own task status to the Aspect API
 (`github.status_comment_contribute` → `POST /status-comments/contribute`),
@@ -43,8 +43,8 @@ config supplies (which is also how GitHub Enterprise Server works; see
 
 Comment shape is precomputed in AXL; the Jinja2 template is a pure
 renderer. `_prepare_for_render` decorates each entry with:
-  - `_severity`     "error"|"warning"|"info"|"success" \342\200\224 a status lookup, for templates.
-  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" \342\200\224 keys
+  - `_severity`     "error"|"warning"|"info"|"success" — a status lookup, for templates.
+  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" — keys
                     into `status_badges[...]`.
   - `_links_text`   Multi-link Markdown for the Links cell (omits unset URLs).
   - `_elapsed_text` The row's elapsed time.
@@ -54,38 +54,38 @@ Inline failure snippets: each job extracts its own (it owns the local
 test.log / action-stderr paths; other jobs can't read them) on its terminal
 update and ships them in its contribution under `failure_snippets`. The
 renderer picks which to show across all tasks via `_select_snippets`, which
-first DEDUPES by `(label, snippet)` \342\200\224 the same target failing in several jobs
+first DEDUPES by `(label, snippet)` — the same target failing in several jobs
 collapses to one snippet attributed to all of them (`task_names`) rather than
-rendering N identical copies \342\200\224 then sticky-selects (an already-shown snippet is
+rendering N identical copies — then sticky-selects (an already-shown snippet is
 never evicted by a later-arriving one), deterministic fill, hard-capped at
 `_MAX_COMMENT_SNIPPETS`. The chosen keys persist in the state block so selection
-can't flip-flop as sibling jobs report in. Rows render grouped under "\360\237\222\245 Build
-Failures" / "\342\235\214 Test Failures" (by bucket), each with a Repro/Fix-style header
-(`\342\235\214 <kind> (<tasks>) \302\267 \\`<label>\\` <verb>:`) and a fenced block; a `\342\200\246` line
+can't flip-flop as sibling jobs report in. Rows render grouped under "💥 Build
+Failures" / "❌ Test Failures" (by bucket), each with a Repro/Fix-style header
+(`❌ <kind> (<tasks>) · \\`<label>\\` <verb>:`) and a fenced block; a `…` line
 marks a head/tail-truncated log. `_split_snippet_rows` does the grouping +
 decoration.
 
 The repro / fix command sections use the same selection (`_select_sticky` over
 deduped, deterministically-sorted rows, capped at `_MAX_COMMENT_REPROS` /
 `_MAX_COMMENT_FIXES`, persisted as `shown_repros` / `shown_fixes`). Each capped
-section ends in an "N more \342\200\224 not shown (M in `task`, \342\200\246)" note that attributes
+section ends in an "N more — not shown (M in `task`, …)" note that attributes
 the hidden items per contributing task.
 
 Body-template variables:
-    marker         \342\200\224 HTML comment identifying this comment across PATCHes.
-    started_at     \342\200\224 Earliest sibling-task start time, UTC. Not in the
+    marker         — HTML comment identifying this comment across PATCHes.
+    started_at     — Earliest sibling-task start time, UTC. Not in the
                      built-in body.
-    status_badges  \342\200\224 {badge_key -> badge}.
-    entries        \342\200\224 per-task entry dicts, alphabetical by (job, kind, name).
+    status_badges  — {badge_key -> badge}.
+    entries        — per-task entry dicts, alphabetical by (job, kind, name).
                      `entry.kind` is the task kind (the command); `entry.name`
                      is the per-invocation name. Rows render as `<name> [<kind>]`.
-    sections       \342\200\224 `entries` bucketed by status (see `_bucket_entries`);
+    sections       — `entries` bucketed by status (see `_bucket_entries`);
                      count one with `sections.failed|length`.
-    build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
-    tip_rows       \342\200\224 decorated tips.
-    *_overflow_note \342\200\224 "N more not shown" line for each capped section.
-    cli_version    \342\200\224 footer attribution.
-    last_updated_at / api_usage \342\200\224 publish time and GitHub API quota line.
+    build_snippets / test_snippets / repro_rows / fix_rows — selected items per section.
+    tip_rows       — decorated tips.
+    *_overflow_note — "N more not shown" line for each capped section.
+    cli_version    — footer attribution.
+    last_updated_at / api_usage — publish time and GitHub API quota line.
                      Not in the built-in body; there for an overriding one.
 """
 
