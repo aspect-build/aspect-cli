@@ -9,12 +9,15 @@
 //! a file (`bazel/<n>`, counting only those) is made at its spawn.
 //!
 //! A Bazel invocation's folder holds its compact execution log, workspace log,
-//! trace profile and build event stream, each when the build has one, and the
-//! action and test logs the build was asked to keep (`actions/` and
-//! `testlogs/`, listed in `actions.json` and `testlogs.json`; see `ctx.bazel.build` and
-//! `bazel::bes::sink::keep`). The folders are readable by their user alone, since an
-//! execution log holds action command lines and environment variables
-//! unredacted; the build event stream is kept as the CLI redacted it.
+//! trace profile, build event stream and raw console log (`console.log`, with
+//! a `console.collapsed-<n>.log` per kind of message the console folded),
+//! each when the build has one, and the action and test logs the build was
+//! asked to keep (`actions/` and `testlogs/`, listed in `actions.json` and
+//! `testlogs.json`; see `ctx.bazel.build` and `bazel::bes::sink::keep`). The
+//! folders are readable by their user alone, since an execution log holds
+//! action command lines and environment variables unredacted, and the raw
+//! console what a stage redacted; the build event stream is kept as the CLI
+//! redacted it.
 //!
 //! Bazel reads some of these files back after the build — it uploads the
 //! compact execution log as a build tool log, possibly after the client has

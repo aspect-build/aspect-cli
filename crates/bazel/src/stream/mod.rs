@@ -2,20 +2,23 @@
 //! when it is over.
 //!
 //! * [`file::File`]: a regular file that fills while the build runs.
+//! * [`fd::Fd`]: a pipe or PTY handed to a child as one of its stdio fds.
 //! * [`pid_pair::PidPair`]: one bazel command's client and server, and the
 //!   two answers a [`Gate`] needs from them.
 //!
-//! A [`file::File`] is a plain [`std::io::Read`]: bytes, or `Ok(0)` once the
-//! stream is over, with the reason in `done()`. It also fails once with
-//! [`file::StartedOver`] each time its reading starts over. The decision of
-//! when to stop is [`Rules`].
+//! [`file::File`] and [`fd::Fd`] are plain [`std::io::Read`]s: bytes, or
+//! `Ok(0)` once the stream is over, with the reason in `done()`. A
+//! [`file::File`] also fails once with [`file::StartedOver`] each time its
+//! reading starts over. They differ in how a read behaves and share the
+//! decision of when to stop, which is [`Rules`].
 //!
 //! # When a stream is over
 //!
 //! Evaluated whenever a read finds nothing to return. `eof` is a read of zero
-//! bytes: the file's current end. It does not mean *finished* by itself:
+//! bytes at a file's current end. It does not mean *finished* by itself:
 //! before the writer creates the file, and while it pauses between writes, a
-//! read also returns nothing.
+//! read also returns nothing. An [`fd::Fd`] ends itself at its EOF, which is
+//! final, and asks the rules only about a quiet or still-writing fd.
 //!
 //! | rule | condition | result |
 //! |---|---|---|
@@ -24,11 +27,18 @@
 //! | R2′ | EOF, bytes seen, [`Expect::NothingOnceEnded`], and `ended` | [`Done::Drained`] |
 //! | R3 | `ended`, no bytes ever, `held` says nobody holds it | [`Done::Ended`] now |
 //! | R4 | `ended`, and quiet for [`Gate::quiet_empty`] (no bytes ever) or [`Gate::quiet`] | [`Done::Ended`] |
-//! | R5 | anything else | wait |
+//! | R5 | [`Gate::linger`] since a read caught up with an `ended` owner, or (an [`fd::Fd`]) since it ended with more than [`BACKLOG`] read after | [`Done::Cut`] |
+//! | R6 | anything else | wait |
 //!
-//! R1 belongs to the file; [`Rules`] decides R2 to R4. Any bytes reset the
-//! quiet timer, so a writer still flushing after its owner has ended is never
-//! cut off.
+//! R1 belongs to the reader; [`Rules`] decides R2 to R5. Any bytes reset the
+//! quiet timer, so without a `linger` a writer still flushing after its owner
+//! has ended is never cut off. A stream whose writer may be something the
+//! owner left behind, rather than the owner's own server, sets one (R5): that
+//! writer could write forever. The linger runs from the first read that finds
+//! nothing waiting after the owner ended, so what the owner wrote before it
+//! ended is read in full however slowly it is consumed. A writer that never
+//! lets a read catch up is cut once more than [`BACKLOG`], more than any
+//! kernel buffer holds, has been read since the owner ended.
 //!
 //! R2 needs `ended` as well as `held`. A file's EOF says nothing about
 //! writers, so `held` would be the whole answer, and it comes from a server pid
@@ -44,8 +54,11 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub mod fd;
 pub mod file;
 pub mod pid_pair;
 pub(crate) mod tee;
@@ -54,6 +67,109 @@ pub(crate) mod testing;
 
 /// How long one wait for bytes lasts before the rules are evaluated again.
 pub(crate) const TICK: Duration = Duration::from_millis(10);
+
+/// Whether the thread reading a stream is waiting for bytes, busy with what
+/// it read, or done, for whoever watches it from another thread (how long
+/// the stream has been idle; whether what was written to it has been
+/// handled). Shared by clones.
+///
+/// A reader that waits inside its own `read` reports waiting only while it
+/// is blocked on nothing to read ([`fd::Fd::reporting`]), so the state is
+/// busy from before any byte leaves the stream until it has been handled.
+#[derive(Debug, Clone)]
+pub struct Activity {
+    started: Instant,
+    /// Millis after `started` at which waiting began, or [`BUSY`]/[`DONE`].
+    since: Arc<AtomicU64>,
+    /// A read that may take bytes is under way ([`Activity::reading`]):
+    /// busy for [`Activity::is_busy`], though not for the idle time.
+    reading: Arc<std::sync::atomic::AtomicBool>,
+}
+
+const BUSY: u64 = u64::MAX;
+const DONE: u64 = u64::MAX - 1;
+
+impl Default for Activity {
+    /// Busy, until the reader first waits.
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            since: Arc::new(AtomicU64::new(BUSY)),
+            reading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Activity {
+    /// Start waiting now; a reader already waiting keeps the time it began.
+    pub fn waiting(&self) {
+        let now = self.started.elapsed().as_millis() as u64;
+        let _ = self
+            .since
+            .compare_exchange(BUSY, now, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    pub fn busy(&self) {
+        self.since.store(BUSY, Ordering::Release);
+        self.reading.store(false, Ordering::Release);
+    }
+
+    /// A read that may take bytes starts (`true`) or found none (`false`).
+    /// Counts as busy until [`Activity::busy`] takes over, so a watcher never
+    /// sees the reader waiting while bytes leave the stream, without the
+    /// idle time dropping to 0 on every empty read.
+    pub fn reading(&self, yes: bool) {
+        self.reading.store(yes, Ordering::Release);
+    }
+
+    pub fn done(&self) {
+        self.since.store(DONE, Ordering::Release);
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.reading.load(Ordering::Acquire) || self.since.load(Ordering::Acquire) == BUSY
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.since.load(Ordering::Acquire) == DONE
+    }
+
+    /// Millis spent waiting so far, 0 while busy or done.
+    pub fn idle_ms(&self) -> u64 {
+        match self.since.load(Ordering::Acquire) {
+            BUSY | DONE => 0,
+            since => (self.started.elapsed().as_millis() as u64).saturating_sub(since),
+        }
+    }
+}
+
+/// More than a pipe or PTY buffer holds: read after the owner ended, it can
+/// only have been written after it, by something else (R5).
+pub const BACKLOG: u64 = 1024 * 1024;
+
+/// How often a stream that keeps delivering bytes asks whether its owner
+/// ended, for R5.
+const LINGER_POLL: Duration = Duration::from_millis(100);
+
+/// Wait up to one [`TICK`] for `fd` to become readable. An interrupted or
+/// failed poll only shortens the wait; callers re-check their rules anyway.
+/// Whether `fd` became readable (or hung up) rather than the tick running out.
+pub(crate) fn wait_readable(fd: &impl std::os::fd::AsRawFd) -> bool {
+    poll_in(fd, TICK) != 0
+}
+
+/// The events `fd` has for a reader within `timeout`: `POLLIN`, or a hangup
+/// or an error; 0 when none came, or the poll was interrupted or failed.
+pub(crate) fn poll_in(fd: &impl std::os::fd::AsRawFd, timeout: Duration) -> libc::c_short {
+    let mut pollfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pollfd` is a valid pollfd and the count is one.
+    let n = unsafe { libc::poll(&mut pollfd, 1, timeout.as_millis() as libc::c_int) };
+    if n > 0 { pollfd.revents } else { 0 }
+}
 
 /// [`Gate::quiet`] by default: how long a stream must stay quiet after its
 /// owner ended before it is called over. The owner exiting is not the end of
@@ -84,6 +200,10 @@ pub struct Gate {
     pub quiet: Duration,
     /// See [`QUIET_EMPTY`].
     pub quiet_empty: Duration,
+    /// How long the stream is followed, bytes or not, once a read has caught
+    /// up with what was written before `ended` (R5). None follows it until it
+    /// is quiet.
+    pub linger: Option<Duration>,
 }
 
 impl Gate {
@@ -93,6 +213,7 @@ impl Gate {
             held: None,
             quiet: QUIET,
             quiet_empty: QUIET_EMPTY,
+            linger: None,
         }
     }
 
@@ -110,6 +231,9 @@ pub enum Done {
     Drained { bytes: u64 },
     /// The owner ended and the stream then stayed quiet for `quiet`.
     Ended { bytes: u64, quiet: Duration },
+    /// A writer was still writing `after` (the gate's `linger`) since the
+    /// stream caught up with an ended owner.
+    Cut { bytes: u64, after: Duration },
     /// The stream failed: a read error.
     Broken { bytes: u64, error: io::Error },
 }
@@ -118,9 +242,10 @@ impl Done {
     /// How many bytes the stream delivered before it stopped.
     pub fn bytes(&self) -> u64 {
         match self {
-            Done::Drained { bytes } | Done::Ended { bytes, .. } | Done::Broken { bytes, .. } => {
-                *bytes
-            }
+            Done::Drained { bytes }
+            | Done::Ended { bytes, .. }
+            | Done::Cut { bytes, .. }
+            | Done::Broken { bytes, .. } => *bytes,
         }
     }
 }
@@ -135,6 +260,11 @@ impl std::fmt::Display for Done {
                 "the writer ended and nothing more arrived for {}ms after {bytes} bytes",
                 quiet.as_millis()
             ),
+            Done::Cut { bytes, after } => write!(
+                f,
+                "a writer was still writing {}ms after the owner ended, after {bytes} bytes",
+                after.as_millis()
+            ),
             Done::Broken { bytes, error } => {
                 write!(f, "the stream failed after {bytes} bytes: {error}")
             }
@@ -143,7 +273,7 @@ impl std::fmt::Display for Done {
 }
 
 /// What the protocol on top of a stream says about its writer, which neither
-/// the file nor the [`Gate`] can. See R2 and R2′ in the [module docs](self).
+/// the reader nor the [`Gate`] can. See R2 and R2′ in the [module docs](self).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Expect {
     /// Nothing: the rules decide alone.
@@ -157,15 +287,22 @@ pub enum Expect {
     NothingOnceEnded,
 }
 
-/// The decision of when a stream is over (R2 to R4), and the bookkeeping it
-/// needs: bytes seen, the quiet timer, whether more is expected. Held by
-/// [`file::File`].
+/// The decision of when a stream is over (R2 to R5), and the bookkeeping it
+/// needs: bytes seen, the quiet timer, whether more is expected. Shared by
+/// [`file::File`] and [`fd::Fd`].
 pub(crate) struct Rules {
     gate: Gate,
     bytes: u64,
     /// When the stream first went quiet with the owner already ended.
     quiet_since: Option<Instant>,
     expect: Expect,
+    /// When a read first found nothing waiting with the owner ended.
+    caught_up: Option<Instant>,
+    /// When a read that returned bytes first saw the owner ended, and the
+    /// bytes read by then.
+    ended_at: Option<(Instant, u64)>,
+    /// When `ended` was last asked from [`Rules::lingered`].
+    last_asked: Option<Instant>,
 }
 
 impl Rules {
@@ -175,11 +312,48 @@ impl Rules {
             bytes: 0,
             quiet_since: None,
             expect: Expect::Unknown,
+            caught_up: None,
+            ended_at: None,
+            last_asked: None,
+        }
+    }
+
+    /// R5 for a read that did return bytes: whether the linger has run out,
+    /// counted from when a read caught up or, for a writer that never lets
+    /// one, from when the owner was seen ended with [`BACKLOG`] read since.
+    /// Asks `ended` at most once per [`LINGER_POLL`].
+    pub(crate) fn lingered(&mut self) -> Option<Done> {
+        let linger = self.gate.linger?;
+        let cut = |since: Instant| {
+            (since.elapsed() >= linger).then(|| Done::Cut {
+                bytes: self.bytes,
+                after: since.elapsed(),
+            })
+        };
+        if let Some(since) = self.caught_up {
+            return cut(since);
+        }
+        if self.ended_at.is_none() && self.last_asked.is_none_or(|t| t.elapsed() >= LINGER_POLL) {
+            self.last_asked = Some(Instant::now());
+            if (self.gate.ended)() {
+                self.ended_at = Some((Instant::now(), self.bytes));
+            }
+        }
+        let (since, at) = self.ended_at?;
+        if self.bytes - at > BACKLOG {
+            cut(since)
+        } else {
+            None
         }
     }
 
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Whether the owner has ended, asked of the gate now.
+    pub(crate) fn owner_ended(&mut self) -> bool {
+        (self.gate.ended)()
     }
 
     /// `n` bytes were delivered: the stream is not quiet.
@@ -209,10 +383,10 @@ impl Rules {
         }
     }
 
-    /// Apply R2 to R4 to a read that returned nothing. `eof` is whether the
+    /// Apply R2 to R5 to a read that returned nothing. `eof` is whether the
     /// read reached the end of the file, which R2 needs; the file follower
-    /// always passes `true`, and tests pass `false` to exercise R3 and R4 on
-    /// their own. `reading` is the path `held` is asked about.
+    /// always passes `true`, and an [`fd::Fd`], whose own EOF is final,
+    /// `false`. `reading` is the path `held` is asked about.
     pub(crate) fn judge(&mut self, eof: bool, reading: &Path) -> Option<Done> {
         let bytes = self.bytes;
 
@@ -238,6 +412,10 @@ impl Rules {
         if !ended(&mut self.gate) {
             self.quiet_since = None;
             return None;
+        }
+        self.caught_up.get_or_insert_with(Instant::now);
+        if let Some(done) = self.lingered() {
+            return Some(done);
         }
 
         if bytes == 0 && held(&mut self.gate) == Some(false) {

@@ -225,6 +225,28 @@ rust_test(
     ],
 )
 
+# Drives the `build` task's console processing against basil: the `Console`
+# feature's default stages, the `output_event` hooks' `pump` / `close`, and the
+# console drain on cancel.
+rust_test(
+    name = "output_event_test",
+    size = "medium",
+    srcs = ["tests/output_event.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/output_event.rs",
+    data = [
+        ":aspect-cli",
+        "//crates/basil",
+    ],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+        "BASIL_BIN": "$(rootpath //crates/basil)",
+    },
+    deps = [
+        "@crates//:libc",
+        "@crates//:tempfile",
+    ],
+)
+
 rust_test(
     name = "task_exit_test",
     srcs = ["tests/task_exit.rs"] + INTEGRATION_TEST_COMMON_SRCS,

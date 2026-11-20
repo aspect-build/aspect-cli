@@ -1,0 +1,28 @@
+(11:30:59) [32mINFO: [0mInvocation ID: aee4ed3e-4130-48dc-b308-8a83011dceee
+(11:30:59) [32mINFO: [0mCurrent date is 2026-11-15
+(11:30:59) [32mComputing main repo mapping:[0m 
+(11:30:59) [32mLoading:[0m 
+(11:30:59) [32mLoading:[0m 0 packages loaded
+(11:30:59) [35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+(11:30:59) [32mAnalyzing:[0m 9 targets (1 packages loaded, 0 targets configured)
+(11:30:59) [32mAnalyzing:[0m 9 targets (1 packages loaded, 0 targets configured)
+
+(11:30:59) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s4: target '//sub:s4' depends on deprecated target '//:g1': use something else
+(11:30:59) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s5: target '//sub:s5' depends on deprecated target '//:g2': use something else
+(11:30:59) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s1: target '//sub:s1' depends on deprecated target '//:g1': use something else
+(11:30:59) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s3: target '//sub:s3' depends on deprecated target '//:g0': use something else
+(11:30:59) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s0: target '//sub:s0' depends on deprecated target '//:g0': use something else
+(11:30:59) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s2: target '//sub:s2' depends on deprecated target '//:g2': use something else
+(11:30:59) [33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+(11:30:59) [33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+(11:30:59) [33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+(11:30:59) [31m[1mERROR: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s4: Visibility error:
+target '//:g1' is not visible from
+target '//sub:s4'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+(11:30:59) [31m[1mERROR: [0m/ws/sub/BUILD.bazel:1:9: Analysis of target '//sub:s4' (config: b6f9c7f) failed
+(11:30:59) [31m[1mERROR: [0mAnalysis of target '//sub:s4' failed; build aborted
+(11:30:59) [32mINFO: [0mElapsed time: 0.368s, Critical Path: 0.00s
+(11:30:59) [32mINFO: [0m1 process: 1 internal.
+(11:30:59) [31m[1mERROR: [0mBuild did NOT complete successfully
+[0m

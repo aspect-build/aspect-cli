@@ -1,0 +1,46 @@
+"""`OpenInvocation`: BuildBuddy's open-invocation CLI plugin. Opens the
+invocation's results page in a browser when the task ends.
+
+Off by default, as the plugin's `--open` is: `--open-invocation:enabled=true`.
+The page is `--bes_results_url` joined with the invocation id of the build
+event stream's `build_started` event, so this works where Bazel uploads the stream
+itself. The URL is read from Bazel's parsed command line (`options_parsed`),
+which has the rc's and the task's flags in it. Only on a terminal.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+def _open_impl(ctx: FeatureContext):
+    state = {"base": "", "uuid": ""}
+
+    def _rc(task_ctx, rc, command):
+        state["base"] = rc.flag_value("--bes_results_url", command = command) or ""
+        return []
+
+    def _event(task_ctx, event):
+        if event.kind == "build_started" and not state["uuid"]:
+            state["uuid"] = getattr(event.payload, "uuid", "") or ""
+        elif event.kind == "options_parsed":
+            for arg in getattr(event.payload, "cmd_line", None) or []:
+                if arg.startswith("--bes_results_url="):
+                    state["base"] = arg.partition("=")[2]
+
+    def _post(task_ctx, conclusion):
+        if not (state["base"] and state["uuid"] and task_ctx.std.io.stdout.is_tty):
+            return
+        url = state["base"].rstrip("/") + "/" + state["uuid"]
+        task_ctx.std.io.stderr.write("> Opening %s\n" % url)
+        opener = "open" if task_ctx.std.env.os() == "macos" else "xdg-open"
+        task_ctx.std.process.command(opener).args([url]).spawn().wait()
+
+    t = ctx.traits[BazelTrait]
+    t.rc_flags.append(_rc)
+    t.build_event.append(_event)
+    ctx.hooks.post_task(_post)
+
+OpenInvocation = feature(
+    display_name = "Open invocation",
+    summary = "Open the invocation's results page in a browser when the task ends.",
+    implementation = _open_impl,
+    enabled = False,
+)

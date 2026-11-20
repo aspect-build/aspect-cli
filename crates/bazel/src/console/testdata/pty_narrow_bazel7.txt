@@ -1,0 +1,171 @@
+[32mINFO: [0mInvocation ID: 0a9d4906-82de-4e84-a3ee-acb14ba7cce4
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[33mDEBUG: [0m/ws/defs.bzl:2:10: noisy debug for g0
+[32mLoading:[0m 1 packages loaded
+[1A[K[33mDEBUG: [0m/ws/defs.bzl:2:10: noisy debug for g1
+[32mLoading:[0m 1 packages loaded
+[1A[K[33mDEBUG: [0m/ws/defs.bzl:2:10: noisy debug for g2
+[32mLoading:[0m 1 packages loaded
+[1A[K[33mDEBUG: [0m/ws/defs.bzl:2:10: noisy debug for g3
+[32mLoading:[0m 1 packages loaded
+[1A[K[33mDEBUG: [0m/ws/defs.bzl:2:10: noisy debug for g4
+[32mLoading:[0m 1 packages loaded
+[1A[K[33mDEBUG: [0m/ws/defs.bzl:2:10: noisy debug for g5
+[32mLoading:[0m 1 packages loaded
+[1A[K[35mWARNING: [0m/ws/BUILD.bazel:4:8: target '//:dep' is deprecated: use other
+[32mLoading:[0m 1 packages loaded
+[1A[K[32mAnalyzing:[0m 15 targets (1 packages loaded, 0 targets config\
+ured)
+[1A[K[1A[K[32mAnalyzing:[0m 15 targets (1 packages loaded, 0 targets config\
+ured)
+
+[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g5:
+out of g5
+WARNING: tool says warn
+[32mAnalyzing:[0m 15 targets (9 packages loaded, 38 targets confi\
+gured)
+[32m[2 / 10][0m 8 actions, 1 running
+    //:bad; 0s disk-cache, darwin-sandbox
+    Executing genrule //:g3; 0s disk-cache
+    Executing genrule //:g5; 0s disk-cache
+    Executing genrule //:g0; 0s disk-cache
+    Executing genrule //:g1; Downloading...; 0s disk-cache
+    Executing genrule //:g4; Downloading...; 0s disk-cache
+    Executing genrule //:g2; Downloading...; 0s disk-cache
+    Executing genrule //:usesdep; 0s disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g3:
+out of g3
+WARNING: tool says warn
+[32mAnalyzing:[0m 15 targets (9 packages loaded, 38 targets confi\
+gured)
+[32m[3 / 10][0m 7 actions, 1 running
+    //:bad; 0s disk-cache, darwin-sandbox
+    Executing genrule //:g3; 0s disk-cache
+    Executing genrule //:g0; 0s disk-cache
+    Executing genrule //:g1; Downloading...; 0s disk-cache
+    Executing genrule //:g4; Downloading...; 0s disk-cache
+    Executing genrule //:g2; Downloading...; 0s disk-cache
+    Executing genrule //:usesdep; Downlo...; 0s disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g2:
+out of g2
+WARNING: tool says warn
+[32mAnalyzing:[0m 15 targets (9 packages loaded, 42 targets confi\
+gured)
+    currently loading: @@bazel_tools//src/tools/launcher
+[32m[4 / 10][0m 6 actions, 1 running
+    //:bad; 0s disk-cache, darwin-sandbox
+    Executing genrule //:g0; 0s disk-cache
+    Executing genrule //:g1; 0s disk-cache
+    Executing genrule //:g4; 0s disk-cache
+    Executing genrule //:g2; 0s disk-cache
+    Executing genrule //:usesdep; 0s disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g1:
+out of g1
+WARNING: tool says warn
+[32mAnalyzing:[0m 15 targets (9 packages loaded, 42 targets confi\
+gured)
+    currently loading: @@bazel_tools//src/tools/launcher
+[32m[5 / 10][0m 5 actions, 1 running
+    //:bad; 0s disk-cache, darwin-sandbox
+    Executing genrule //:g0; 0s disk-cache
+    Executing genrule //:g1; 0s disk-cache
+    Executing genrule //:g4; 0s disk-cache
+    Executing genrule //:usesdep; 0s disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g0:
+out of g0
+WARNING: tool says warn
+[32mAnalyzing:[0m 15 targets (9 packages loaded, 42 targets confi\
+gured)
+    currently loading: @@bazel_tools//src/tools/launcher
+[32m[6 / 10][0m 4 actions, 1 running
+    //:bad; 0s disk-cache, darwin-sandbox
+    Executing genrule //:g0; 0s disk-cache
+    Executing genrule //:g1; 0s disk-cache
+    Executing genrule //:g4; 0s disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g4:
+out of g4
+WARNING: tool says warn
+[32mAnalyzing:[0m 15 targets (9 packages loaded, 42 targets confi\
+gured)
+    currently loading: @@bazel_tools//src/tools/launcher
+[32m[8 / 10][0m 2 actions, 1 running
+    //:bad; 0s disk-cache, darwin-sandbox
+    Executing genrule //:g4; 0s disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mAnalyzed 15 targets (94 packages loaded, 496 targets configured).
+[32m[24 / 30][0m 6 actions running
+    //:bad; 0s disk-cache, darwin-sandbox
+    //:slow1; 0s local
+    //:t_pass; 0s local
+    //:slow3; 0s local
+    //:t_fail; 0s local
+    //:slow2; 0s local
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[38 / 40][0m 5 / 6 tests;[0m 2 actions running[0m; last test: [32m//:sl\
+ow0[0m
+    //:bad; 0s disk-cache, darwin-sandbox
+    Testing //:t_fail; 0s disk-cache, darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:3:8: Executing genrule //:bad failed: (Exit 1): bash failed: error executing Genrule command (from target //:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo bad output line; echo '\''  indented bad output'\''; sleep 1; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad output line
+  indented bad output
+[32m[38 / 40][0m 5 / 6 tests;[0m 2 actions running[0m; last test: [32m//:sl\
+ow0[0m
+    //:bad; 1s disk-cache, darwin-sandbox
+    Testing //:t_fail; 0s disk-cache, darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32m[39 / 40][0m 5 / 6 tests;[0m  1 action[0m; last test: [32m//:slow0[0m[0m
+    Testing //:t_fail; 1s disk-cache, darwin-sandbox
+[1A[K[1A[K[31m[1mFAIL: [0m//:t_fail (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)
+[32m[39 / 40][0m 5 / 6 tests;[0m  1 action[0m; last test: [32m//:slow0[0m[0m
+    Testing //:t_fail; 1s disk-cache, darwin-sandbox
+[1A[K[1A[K[32mINFO: [0mFrom Testing //:t_fail:
+==================== Test output for //:t_fail:
+test failing output
+ERROR: test prints error
+================================================================================
+[32m[39 / 40][0m 6 / 6 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:\
+t_fail[0m[0m
+    Testing //:t_fail; 1s disk-cache, darwin-sandbox
+[1A[K[1A[K[1A[K[32mINFO: [0mAnalysis succeeded for only 14 of 15 top-level targets
+[32m[40 / 40][0m 6 / 6 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last \
+test: [31m[1m//:t_fail[0m
+[1A[K[1A[K[32mINFO: [0mFound 9 targets and 6 test targets...
+[32m[40 / 40][0m 6 / 6 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last \
+test: [31m[1m//:t_fail[0m
+[1A[K[1A[K[32mINFO: [0mElapsed time: 1.404s, Critical Path: 1.09s
+[32m[40 / 40][0m 6 / 6 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last \
+test: [31m[1m//:t_fail[0m
+[1A[K[1A[K[32mINFO: [0m40 processes: 19 disk cache hit, 20 internal, 1 darwin-sandbox.
+[32m[40 / 40][0m 6 / 6 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last \
+test: [31m[1m//:t_fail[0m
+[1A[K[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K//:slow0                                                        [0m[32m(cached) PASSED[0m in 4.3s
+[31m[1mFAILED:[0m 
+[1A[K//:slow1                                                        [0m[32m(cached) PASSED[0m in 4.2s
+[31m[1mFAILED:[0m 
+[1A[K//:slow2                                                        [0m[32m(cached) PASSED[0m in 4.3s
+[31m[1mFAILED:[0m 
+[1A[K//:slow3                                                        [0m[32m(cached) PASSED[0m in 4.3s
+[31m[1mFAILED:[0m 
+[1A[K//:t_pass                                                       [0m[32m(cached) PASSED[0m in 0.7s
+[31m[1mFAILED:[0m 
+[1A[K//:t_fail                                                                [0m[31m[1mFAILED[0m in 1.1s
+[31m[1mFAILED:[0m 
+[1A[K  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+[31m[1mFAILED:[0m 
+[1A[K
+[31m[1mFAILED:[0m 
+[1A[KExecuted 1 out of 6 tests: 5 tests pass and [0m[31m[1m1 fails locally[0m.
+[31m[1mFAILED:[0m 
+[1A[KThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+Waiting for build events upload: Build Event Service 1s
+[1A[K[1A[K[31m[1mFAILED:[0m 
+Waiting for build events upload: Build Event Service 2s
+[1A[K[1A[K[31m[1mERROR: [0mThe Build Event Protocol upload timed out. com.google.common.util.concurrent.TimeoutFuture$TimeoutFutureException: Timed out: NonCancellationPropagatingFuture@4057fc98[status=PENDING, info=[delegate=[SettableFuture@4e901ae2[status=PENDING]]]]
+[0m

@@ -163,10 +163,10 @@ const DEVIATIONS: &[Wiring] = &[
     },
     Wiring {
         path: "bazel/invocation_test.axl",
-        sites: 1,
+        sites: 2,
         opens: 0,
         pumps: 0,
-        why: "a test fixture driving ctx.bazel.build directly, not a task",
+        why: "test fixtures driving ctx.bazel.build directly, not a task",
     },
 ];
 

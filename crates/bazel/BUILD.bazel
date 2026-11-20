@@ -41,6 +41,7 @@ rust_library(
         "@crates//:prost",
         "@crates//:prost-types",
         "@crates//:rand",
+        "@crates//:regex",
         "@crates//:semver",
         "@crates//:serde",
         "@crates//:serde_json",
@@ -62,6 +63,7 @@ rust_library(
 
 rust_test(
     name = "bazel_test",
+    compile_data = glob(["src/**/testdata/*"]),
     crate = ":bazel",
     deps = [
         "@crates//:opentelemetry_sdk",

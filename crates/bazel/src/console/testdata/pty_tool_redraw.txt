@@ -1,0 +1,30 @@
+^D[32mINFO: [0mInvocation ID: 5f2949ef-9c11-46f4-b451-1833d965be9a
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m target //:bar (0 packages loaded)
+[1A[K[32mAnalyzing:[0m target //:bar (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m target //:bar (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed target //:bar (0 packages loaded, 1 target configured).
+
+[1A[K[32mINFO: [0mFrom Executing genrule //:bar:
+step 1
+[1A[Kstep 2
+[35mWARNING: [0mtool same
+[35mWARNING: [0mtool same
+[35mWARNING: [0mtool same
+[32m[1 / 2][0m Executing genrule //:bar; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[2 / 2][0m no actions running
+[1A[KTarget //:bar up-to-date:
+[32m[2 / 2][0m no actions running
+[1A[K  bazel-bin/bar.out
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.090s, Critical Path: 0.02s
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0m2 processes: 1 internal, 1 darwin-sandbox.
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mBuild completed successfully, 2 total actions
+[0m

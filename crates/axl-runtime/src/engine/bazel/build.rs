@@ -17,6 +17,7 @@ use derive_more::Display;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
+use starlark::eval::Evaluator;
 
 use starlark::StarlarkResultExt;
 use starlark::starlark_module;
@@ -49,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use super::iter::ExecLogIter;
 use super::iter::Handle;
 use super::iter::WorkspaceEventIter;
+use super::output::TraitConsole;
 use super::wrappers::ExecLogSink;
 use bazel::bes::BuildEventEnvelope;
 use bazel::bes::feed::{BuildEventStream, FileSignal};
@@ -56,6 +58,8 @@ use bazel::bes::kind::{self, event_kind_help, event_kind_in};
 use bazel::bes::sink::grpc;
 use bazel::bes::sink::retry::{RetryConfig, SinkStats};
 use bazel::bes::sink::tracing as tracing_sink;
+use bazel::console::forward::Forwarder;
+use bazel::console::processors::{HeldLine, Observations};
 use bazel::execlog::feed::{ExecLogStream, ReaderOutcome};
 use bazel::fanout::SinkOutcome;
 use bazel::fanout::Subscriber;
@@ -830,6 +834,152 @@ fn grey_style() -> (&'static str, &'static str) {
     }
 }
 
+/// A captured console, started before the client so nothing can fail
+/// between the client's spawn and its stderr having a reader.
+struct Console {
+    forwarder: Forwarder,
+    /// The client's stdout when it is a file of its own: captured too, and
+    /// forwarded as written (colour the capture asked for aside) after what
+    /// the console's forwarder has pending,
+    /// so it stays in order with the stderr lines above it.
+    stdout: Option<Forwarder>,
+    observations: Arc<Observations>,
+    events: Option<std::sync::mpsc::Receiver<HeldLine>>,
+    log: Option<std::path::PathBuf>,
+    /// The client's pid once spawned, 0 before. The console's stream ends
+    /// when every writer has closed or, for a writer the client left behind,
+    /// a quiet window after the client exits, and at most
+    /// [`bazel::stream::fd::LINGER`] after the reader has caught up with it.
+    client: Arc<std::sync::atomic::AtomicU32>,
+    /// Set once the client is reaped (any wait that returns its status), or
+    /// was never spawned: gone for the
+    /// console's gate whatever a probe of its pid, which may by then name
+    /// another process, would say.
+    gone: Arc<std::sync::atomic::AtomicBool>,
+    /// Sets `gone` if this console is dropped before the client spawned.
+    abandon: Abandon,
+}
+
+/// Sets its flag when dropped, unless [`Abandon::disarm`]ed first.
+struct Abandon(Option<Arc<std::sync::atomic::AtomicBool>>);
+
+impl Abandon {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        if let Some(gone) = &self.0 {
+            gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl Console {
+    /// The client's stderr and, when it is inherited, its stdout (see
+    /// [`bazel::console::capture`]: the same capture when stdout is stderr's
+    /// file, a pipe of its own otherwise), and the forwarders reading them
+    /// into this process's from their own threads, so a task's own lines
+    /// interleave with them by whole line.
+    fn start(
+        config: &bazel::console::Config,
+        stdout_inherited: bool,
+    ) -> io::Result<(Stdio, Option<Stdio>, Console)> {
+        use bazel::console::capture;
+        let share_stdout = stdout_inherited && capture::stdout_is_stderrs_file();
+        let capture::Capture {
+            stderr: child_stderr,
+            stdout: shared_stdout,
+            reader,
+            hold,
+        } = capture::open_with_stdout(
+            if config.pty {
+                bazel::console::Mode::Pty
+            } else {
+                bazel::console::Mode::Pipe
+            },
+            share_stdout,
+        )?;
+        let probe = reader.try_clone()?;
+        let client = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Armed before anything below can fail and drop this console.
+        let abandon = Abandon(Some(gone.clone()));
+        let gate = || {
+            let (pid, gone) = (client.clone(), gone.clone());
+            let mut gate = bazel::stream::Gate::new(move || {
+                if gone.load(std::sync::atomic::Ordering::SeqCst) {
+                    return true;
+                }
+                let pid = pid.load(std::sync::atomic::Ordering::SeqCst);
+                pid != 0 && !bazel::process::is_pid_alive(pid)
+            });
+            gate.linger = Some(bazel::stream::fd::LINGER);
+            gate
+        };
+        // The reader reports its own waits, so a stdout write ordered after
+        // this forwarder never sees it waiting while a read is taking bytes.
+        let activity = bazel::stream::Activity::default();
+        let mut reader = bazel::stream::fd::Fd::follow(reader, gate())?.reporting(activity.clone());
+        if let Some(hold) = hold {
+            reader = reader.holding(hold);
+        }
+        let pipeline = config.pipeline();
+        let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
+        let forwarder = Forwarder::spawn_reported(
+            Box::new(reader),
+            Box::new(std::io::stderr()),
+            pipeline.chain,
+            pipeline.log,
+            pipeline.shape,
+            Some(activity),
+        )?;
+        let (child_stdout, stdout) = match shared_stdout {
+            Some(shared) => (Some(shared), None),
+            None if stdout_inherited => {
+                let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
+                let out = bazel::stream::fd::Fd::follow(out, gate())?;
+                let after = forwarder.ordered_after(Box::new(std::io::stdout()), probe.into());
+                // Colour asked for the stages' sake is shown as the user
+                // asked, else only on a terminal, as it is for stderr.
+                let shape = bazel::console::forward::Shape {
+                    strip_colour: !config
+                        .user_colour
+                        .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout())),
+                    lines: None,
+                };
+                (
+                    Some(child),
+                    Some(Forwarder::spawn_logged(
+                        Box::new(out),
+                        Box::new(after),
+                        vec![],
+                        None,
+                        shape,
+                    )?),
+                )
+            }
+            None => (None, None),
+        };
+        Ok((
+            child_stderr,
+            child_stdout,
+            Console {
+                forwarder,
+                stdout,
+                observations: pipeline.observations,
+                events: pipeline.events,
+                log,
+                client,
+                abandon,
+                gone,
+            },
+        ))
+    }
+}
+
 /// Which pre-spawn `INFO:` lines to emit. Resolved from task flags in AXL
 /// (`auto` → on under CI) and threaded down through `ctx.bazel.build` / `.test`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -873,6 +1023,47 @@ pub struct Build {
     /// asked for it at, which [`Build::reaped`] copies it to.
     #[allocative(skip)]
     profile_copy: RefCell<Option<(PathBuf, PathBuf)>>,
+
+    /// The captured console's forwarder, when the build was given `output =`.
+    /// `wait()` joins it as soon as the child exits, so bazel's last lines are
+    /// out before anything the task prints next.
+    #[allocative(skip)]
+    console: RefCell<Option<Forwarder>>,
+
+    /// The forwarder of the client's own stdout, when the console took it
+    /// as a file of its own; joined right after `console`.
+    #[allocative(skip)]
+    console_stdout: RefCell<Option<Forwarder>>,
+
+    /// What the console's matchers saw: `output_fatal`, `output_fatal_line`
+    /// and `output_matches()`.
+    #[allocative(skip)]
+    console_observations: Option<Arc<Observations>>,
+
+    /// The raw console log, when the `output` processor changes what is shown.
+    #[allocative(skip)]
+    console_log: Option<std::path::PathBuf>,
+
+    /// Tells the console's gate the client is gone once `wait()` reaps it.
+    #[allocative(skip)]
+    console_gone: Option<Arc<std::sync::atomic::AtomicBool>>,
+
+    /// The lines `intercept` stages hold, for the `BazelTrait.output_intercept`
+    /// hooks: answered by `run_output_hooks()` and by `wait()`, which answers
+    /// the rest until the console ends.
+    #[allocative(skip)]
+    console_events: RefCell<Option<std::sync::mpsc::Receiver<HeldLine>>>,
+
+    /// The first error a console hook raised, for `wait()` to raise once
+    /// the build is joined: raised at once, it would leave the client
+    /// running and the build's streams unjoined.
+    #[allocative(skip)]
+    hook_error: RefCell<Option<anyhow::Error>>,
+
+    /// The `output_end` hooks ran: once per build, however often `wait()`
+    /// is called, and before they run, so a hook that waits does not recurse.
+    #[allocative(skip)]
+    console_ended: std::cell::Cell<bool>,
 
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
@@ -1036,22 +1227,29 @@ fn workspace_of(directory: Option<&str>) -> Option<PathBuf> {
     crate::project_root::find_bazel_root(&dir.canonicalize().ok()?)
 }
 
-/// A fresh path for an execution log there is no history folder for, in a
-/// temp folder readable by this user alone, since the log holds command lines
-/// and environment variables, or directly in the temp dir where no folder can
-/// be made there. It is left in place, as Bazel may upload it after the
-/// client exits.
+/// A fresh temp folder readable by this user alone, for a file there is no
+/// history folder for: an execution log holds command lines and environment
+/// variables, a raw console what a stage redacted. Left in place, as Bazel may
+/// upload an execution log after the client exits.
+fn private_temp_dir(prefix: &str) -> Option<PathBuf> {
+    crate::engine::std::fs::create_temp_dir(&std::env::temp_dir(), prefix).ok()
+}
+
+/// A fresh path for an execution log there is no history folder for
+/// ([`private_temp_dir`]), or directly in the temp dir where no folder can be
+/// made there.
 fn private_temp_path() -> PathBuf {
-    match crate::engine::std::fs::create_temp_dir(&std::env::temp_dir(), "aspect-execlog-") {
-        Ok(dir) => dir.join(bazel::execlog::FILE_NAME),
-        Err(_) => std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4())),
+    match private_temp_dir("aspect-execlog-") {
+        Some(dir) => dir.join(bazel::execlog::FILE_NAME),
+        None => std::env::temp_dir().join(format!("execlog-{}.zstd", uuid::Uuid::new_v4())),
     }
 }
 
 /// This Bazel invocation's folder in the task invocation's history, created,
 /// or `None` when it cannot be, said once per run: a history that cannot be
-/// written never fails a build. Its logs go to the temp dir instead, where
-/// Bazel can still upload a recorded one, and the profile is left to Bazel.
+/// written never fails a build. Its logs go to the temp dir instead: the
+/// execution and workspace logs, where Bazel can still upload a recorded one,
+/// and the console's raw log. The profile is left to Bazel.
 fn history_dir(history: &History) -> Option<PathBuf> {
     history
         .next_bazel_dir()
@@ -1059,8 +1257,8 @@ fn history_dir(history: &History) -> Option<PathBuf> {
             if history.first_failure() {
                 errln!(
                     "WARNING: could not create a history folder under {}: {err}. Builds' \
-                     execution and workspace logs go to the temp dir instead, and the \
-                     profile is left to Bazel.",
+                     execution, workspace and console logs go to the temp dir instead, and \
+                     the profile is left to Bazel.",
                     history.root().display(),
                 )
             }
@@ -1089,14 +1287,19 @@ impl Build {
     }
 
     /// What follows the client's exit, once a reap sees it: the task's
-    /// record notes the exit, and the profile Bazel has finished by then is
-    /// copied to the path the caller asked for. Only the first call copies. A
-    /// copy that fails is a warning, as a profile Bazel cannot write is. A
-    /// build never reaped here (a cancelled wait, a task that does not wait)
-    /// leaves the profile only in the history.
+    /// record notes the exit, the console's gate is told the client is gone,
+    /// so a pid another process may reuse is not probed for it, and the
+    /// profile Bazel has finished by then is copied to the path the caller
+    /// asked for. Only the first call copies. A copy that fails is a warning,
+    /// as a profile Bazel cannot write is. A build never reaped here (a
+    /// cancelled wait, a task that does not wait) leaves the profile only in
+    /// the history.
     fn reaped(&self, status: &std::process::ExitStatus) {
         if let Some(slot) = &self.history_slot {
             slot.exited(status.code(), self.sink_invocation_id());
+        }
+        if let Some(gone) = &self.console_gone {
+            gone.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         if let Some((from, to)) = self.profile_copy.take()
             && let Err(err) = bazel::profile::copy(&from, &to)
@@ -1127,6 +1330,8 @@ impl Build {
         startup_flags: Vec<String>,
         stdout: Stdio,
         stderr: Stdio,
+        console: Option<bazel::console::Config>,
+        stdout_inherited: bool,
         directory: Option<String>,
         announce: AnnounceSpawn,
         signals: Arc<Signals>,
@@ -1199,9 +1404,25 @@ impl Build {
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
         // Every file below that stays goes into this one folder, made only
         // when one will.
-        let history_dir = (profile_kept || build_events || workspace_events || execlog_enabled)
-            .then(|| history_dir(history))
-            .flatten();
+        let console_log = console.as_ref().is_some_and(|c| c.keeps_log());
+        let history_dir =
+            (profile_kept || build_events || workspace_events || execlog_enabled || console_log)
+                .then(|| history_dir(history))
+                .flatten();
+        // The console's raw log stays there too, with the files of what its
+        // stages folded beside it; without a folder, in a private temp one,
+        // and with neither, none: never at a name another user could take.
+        let console = console.map(|mut config| {
+            if config.keeps_log() {
+                config.log = history_dir
+                    .clone()
+                    .or_else(|| private_temp_dir("aspect-console-"))
+                    .map(|dir| {
+                        bazel::console::log::Place::At(dir.join(bazel::console::log::FILE_NAME))
+                    });
+            }
+            config
+        });
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -1361,8 +1582,20 @@ impl Build {
         crate::trace!("exec: {:?}", cmd.get_args());
         announce_spawn(announce, version.as_ref(), &cmd);
 
-        cmd.stdout(stdout);
-        cmd.stderr(stderr);
+        let console = match console {
+            Some(config) => {
+                let (child_stderr, child_stdout, console) =
+                    Console::start(&config, stdout_inherited)?;
+                cmd.stdout(child_stdout.unwrap_or(stdout));
+                cmd.stderr(child_stderr);
+                Some(console)
+            }
+            None => {
+                cmd.stdout(stdout);
+                cmd.stderr(stderr);
+                None
+            }
+        };
         cmd.stdin(Stdio::null());
 
         // Bound to `cancellation` (the root unless the task said otherwise):
@@ -1388,6 +1621,26 @@ impl Build {
             client: child.id(),
             server: Some(pid),
         };
+
+        let mut console_gone = None;
+        let (console, console_stdout, console_observations, console_events, console_log) =
+            match console {
+                Some(console) => {
+                    console
+                        .client
+                        .store(child.id(), std::sync::atomic::Ordering::SeqCst);
+                    console.abandon.disarm();
+                    console_gone = Some(console.gone);
+                    (
+                        Some(console.forwarder),
+                        console.stdout,
+                        Some(console.observations),
+                        console.events,
+                        console.log,
+                    )
+                }
+                None => (None, None, None, None, None),
+            };
         let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks);
 
         // Everything that can fail once bazel runs. A failure abandons the
@@ -1557,6 +1810,9 @@ impl Build {
                     if execlog_bound {
                         execlog_iters.iter().for_each(ExecLogIter::release);
                     }
+                    // Held console lines too: a line the forwarder holds would
+                    // keep Bazel's stderr undrained while it is stopped below.
+                    drop(console_events);
                     build_event_stream.abandon(|| {
                         bound.token().cancel();
                         let waited =
@@ -1569,6 +1825,10 @@ impl Build {
                             bound.mark_exited();
                         }
                     });
+                    // Reaped: the console's reader must not probe its pid again.
+                    if let Some(gone) = &console_gone {
+                        gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     return Err(err);
                 }
             };
@@ -1587,6 +1847,14 @@ impl Build {
             workspace_event_iters,
             execlog_read: asked,
             profile_copy: RefCell::new(profile_copy),
+            console: RefCell::new(console),
+            console_stdout: RefCell::new(console_stdout),
+            console_observations,
+            console_log,
+            console_gone,
+            console_events: RefCell::new(console_events),
+            hook_error: RefCell::new(None),
+            console_ended: std::cell::Cell::new(false),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             bound,
             signals,
@@ -1620,17 +1888,145 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 let id = self.sink_invocation_id.borrow();
                 Some(heap.alloc_str(id.as_deref().unwrap_or("")).to_value())
             }
+            // Whether a `fatal` stage of the `output` processor matched.
+            // False without one.
+            "output_fatal" => Some(Value::new_bool(
+                self.console_observations
+                    .as_ref()
+                    .is_some_and(|o| o.fatal()),
+            )),
+            // The first line a `fatal` stage matched, or None.
+            "output_fatal_line" => Some(
+                match self
+                    .console_observations
+                    .as_ref()
+                    .and_then(|o| o.fatal_line())
+                {
+                    Some(line) => heap.alloc_str(&line).to_value(),
+                    None => Value::new_none(),
+                },
+            ),
+            // Millis the console has been waiting for Bazel to write; 0 while
+            // it processes or holds a line, without `output`, and once
+            // `wait()` has joined it. With the client still running, a
+            // growing value is a stall.
+            "output_idle_ms" => {
+                // The less idle of the console and a stdout of its own: bazel
+                // writing either is not a stall.
+                let idle = [&self.console, &self.console_stdout]
+                    .iter()
+                    .filter_map(|c| c.borrow().as_ref().map(|f| f.idle_ms()))
+                    .min()
+                    .unwrap_or(0);
+                Some(heap.alloc(idle.min(i32::MAX as u64) as i32))
+            }
+            // The raw console log's path: Bazel's stderr (and stdout, when it
+            // is the same file) as it wrote it, kept when the `output`
+            // processor changes what is shown. None otherwise, or when it
+            // could not be created.
+            "output_log" => Some(match &self.console_log {
+                Some(path) => heap.alloc_str(&path.to_string_lossy()).to_value(),
+                None => Value::new_none(),
+            }),
             _ => None,
         }
     }
 
     fn has_attr(&self, attribute: &str, _heap: values::Heap<'v>) -> bool {
-        matches!(attribute, "sink_invocation_id")
+        matches!(
+            attribute,
+            "sink_invocation_id"
+                | "output_fatal"
+                | "output_fatal_line"
+                | "output_idle_ms"
+                | "output_log"
+        )
     }
 }
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
+    /// Answer the lines the console's `intercept` stages hold now with the
+    /// `BazelTrait.output_intercept` hooks, waiting briefly after each for
+    /// the next a burst brings, up to a budget per call. For a task's build
+    /// loop, so held lines are answered while the build runs; `wait()`
+    /// answers the rest. With `until_ended`, answers every line until the
+    /// console ends instead, as `wait()` does, for a task about to block on
+    /// something else first. Does nothing for a build that holds no lines.
+    /// A hook's error is raised by `wait()`, once the build is joined.
+    fn run_output_hooks<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = false)] until_ended: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        if build.console_events.borrow().is_none() {
+            return Ok(NoneType);
+        }
+        let console = TraitConsole::of(eval);
+        if until_ended {
+            build.answer_until_the_console_ends(console.as_ref(), eval);
+            return Ok(NoneType);
+        }
+        let Some(console) = console else {
+            return Ok(NoneType);
+        };
+        let mut wait = Duration::ZERO;
+        for _ in 0..HOOK_BUDGET {
+            let held = {
+                let events = build.console_events.borrow();
+                let Some(rx) = events.as_ref() else {
+                    break;
+                };
+                match rx.recv_timeout(wait) {
+                    Ok(held) => held,
+                    Err(_) => break,
+                }
+            };
+            if let Err(e) = console.answer(held, eval) {
+                build.hook_failed(e);
+                break;
+            }
+            wait = HOOK_FOLLOW;
+        }
+        Ok(NoneType)
+    }
+
+    /// The `(id, line)` hits of the `output` processor's `observe` stages:
+    /// those so far during the build, all of them after `wait()`, in the
+    /// order they came. Empty without a processor. At most 1024 hits are
+    /// kept, besides each id's first, each line cut to 2048 bytes.
+    fn output_matches<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<(String, String)>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        Ok(build
+            .console_observations
+            .as_ref()
+            .map(|o| o.matches())
+            .unwrap_or_default())
+    }
+
+    /// What the `output` processor's `aggregate` stages kept, one dict per
+    /// stage in the order they run: `{"id", "count", "groups", "samples",
+    /// "dropped_groups", "dropped_groups_truncated", "dropped_matches"}`. A
+    /// group is `{"key": {capture: value}, "line" and "captures" (its first
+    /// match's), "last" (its last match), "count", "values": {name: value},
+    /// "truncated": [name]}`; a sample, and a group's `last`, is `{"group":
+    /// index into groups, "seq": which match, from 1, "line", "captures":
+    /// {name: value}}`. So far during the build, all of it after `wait()`.
+    /// Empty without a processor.
+    fn output_aggregates<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let reports = build
+            .console_observations
+            .as_ref()
+            .map(|o| o.aggregates())
+            .unwrap_or_default();
+        Ok(heap.alloc(serde_json::Value::Array(reports)))
+    }
+
     /// The client's cancellation token, a `child()` of the one passed as
     /// `cancellation =` at the spawn (`ctx.cancellation.root` by default).
     /// `build.cancellation.cancel()` sends the client one SIGINT, bazel's
@@ -1699,16 +2095,90 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// thing that lets a build nobody drained end. The drain therefore belongs
     /// before the call, not after.
     ///
+    /// With a captured console, the `BazelTrait.output_intercept` hooks first
+    /// answer every line it holds until it ends, then the console is joined,
+    /// so Bazel's last lines are out before the task prints anything, and the
+    /// `output_end` hooks are called with this build. A hook's error is raised
+    /// once the build is joined.
+    ///
     /// The wait ends the task instead if `ctx.cancellation.root` is
     /// cancelled meanwhile and no `intercept()` is in effect; the client has
     /// its SIGINT by then.
-    fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
+    fn wait<'v>(
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
-        build.wait_status()
+        let console = TraitConsole::of(eval);
+        build.answer_until_the_console_ends(console.as_ref(), eval);
+        let status = build.wait_status()?;
+        if let Some(console) = &console
+            && build.console_observations.is_some()
+            && !build.console_ended.replace(true)
+            && let Err(e) = console.ended(this, eval)
+        {
+            build.hook_failed(e);
+        }
+        match build.hook_error.take() {
+            Some(e) => Err(e),
+            None => Ok(status),
+        }
     }
 }
 
+/// Lines [`build_methods`]' `run_output_hooks` answers per call, so a burst
+/// cannot monopolize a task's build loop.
+const HOOK_BUDGET: usize = 1000;
+
+/// How long `run_output_hooks` waits after an answer for the next held line:
+/// lines are held one at a time, so the next of a burst comes only once the
+/// one before is answered.
+const HOOK_FOLLOW: Duration = Duration::from_millis(20);
+
 impl Build {
+    /// Keep `e`, the first a console hook raised, for `wait()`, and let go
+    /// of the held lines: the rest are shown at once.
+    fn hook_failed(&self, e: anyhow::Error) {
+        drop(self.console_events.take());
+        self.hook_error.borrow_mut().get_or_insert(e);
+    }
+
+    /// Answer every held line with `console`'s hooks until the console ends
+    /// (the client exited and its stderr closed), or the task is cancelled.
+    /// A hook's error lets go of the rest ([`Build::hook_failed`]).
+    fn answer_until_the_console_ends<'v>(
+        &self,
+        console: Option<&TraitConsole<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) {
+        let Some(console) = console else {
+            drop(self.console_events.take());
+            return;
+        };
+        loop {
+            let next = {
+                let events = self.console_events.borrow();
+                let Some(rx) = events.as_ref() else {
+                    return;
+                };
+                children::recv_cancellable(&self.signals, rx, None)
+            };
+            match next {
+                Recv::Item(held) => {
+                    if let Err(e) = console.answer(held, eval) {
+                        self.hook_failed(e);
+                        return;
+                    }
+                }
+                Recv::Tick => {}
+                Recv::Closed | Recv::Cancelled => {
+                    drop(self.console_events.take());
+                    return;
+                }
+            }
+        }
+    }
+
     /// The client's token, the one `handle.cancellation` wraps.
     pub(super) fn cancellation_token(&self) -> &CancellationToken {
         self.bound.token()
@@ -1739,10 +2209,25 @@ impl Build {
         for iter in &build.execlog_iters {
             iter.release();
         }
+        // Held console lines too: `wait()` answered them all, and lines held
+        // from here on are shown at once rather than each waiting out its
+        // timeout.
+        drop(build.console_events.take());
 
         let result = build
             .wait_child(None)?
             .expect("a wait without a timeout reports a status");
+
+        // First, so bazel's own last lines precede every warning below. A
+        // console that failed to read is reported, not raised: the build's
+        // status and its other streams matter more than its last lines.
+        for console in [build.console.take(), build.console_stdout.take()] {
+            if let Some(mut console) = console
+                && let Err(err) = console.join()
+            {
+                errln!("WARNING: reading Bazel's console failed: {err}");
+            }
+        }
 
         // Wait for BES stream to complete.
         let stream_error = match &mut *build.build_event_stream.borrow_mut() {

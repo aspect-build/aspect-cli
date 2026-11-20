@@ -1,0 +1,41 @@
+"""Tests for the console plugins' parsing: ping_remote's `host_port` and
+go_deps' `package_of`.
+
+Run with:
+  aspect dev test-console-plugins
+"""
+
+load("./go_deps.axl", "package_of")
+load("./ping_remote.axl", "host_port")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _impl(ctx: TaskContext) -> int:
+    _eq("grpcs default port", host_port("grpcs://remote.example.com"), "remote.example.com:443")
+    _eq("grpc default port", host_port("grpc://10.0.0.1"), "10.0.0.1:80")
+    _eq("own port", host_port("grpcs://remote.example.com:8980/"), "remote.example.com:8980")
+    _eq("bare host", host_port("remote.example.com"), "remote.example.com:443")
+    _eq("scheme case", host_port("GRPCS://remote.example.com"), "remote.example.com:443")
+    _eq("ipv6", host_port("grpcs://[::1]"), "[::1]:443")
+    _eq("ipv6 with port", host_port("grpc://[::1]:9000"), "[::1]:9000")
+    _eq("unix socket", host_port("unix:///run/executor.sock"), None)
+    _eq("other scheme", host_port("https://remote.example.com"), None)
+
+    execroot = "/home/u/.cache/bazel/_bazel_u/0123/sandbox/darwin-sandbox/7/execroot/_main/"
+    _eq("a package", package_of(execroot + 'svc/api/a.go: import of "x"'), "svc/api")
+    _eq("the root package", package_of(execroot + 'a.go: import of "x"'), ".")
+    _eq("hermetic tmp", package_of('/tmp/bazel-working-directory/_main/lib/b.go: import of "x"'), "lib")
+    _eq("external", package_of(execroot + 'external/gazelle++go_deps+x/c.go: import of "x"'), None)
+    _eq("generated", package_of(execroot + 'bazel-out/darwin-fastbuild/bin/p/d.pb.go: import of "x"'), None)
+    print("plugins_test.axl: OK")
+    return 0
+
+console_plugins_tests = task(
+    summary = "Run the console plugins' parsing tests.",
+    kind = "test-console-plugins",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)

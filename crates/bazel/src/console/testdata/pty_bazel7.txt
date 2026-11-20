@@ -1,0 +1,105 @@
+^D[32mINFO: [0mInvocation ID: 1892110a-3a18-486c-90ad-e32476a943b1
+[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g0' is deprecated: use something else
+[32mLoading:[0m 1 packages loaded
+[1A[K[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g1' is deprecated: use something else
+[32mLoading:[0m 1 packages loaded
+[1A[K[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g2' is deprecated: use something else
+[32mLoading:[0m 1 packages loaded
+[1A[K[32mAnalyzing:[0m 7 targets (1 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 7 targets (1 packages loaded, 0 targets configured)
+    currently loading: @@bazel_tools//tools
+
+[1A[K[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+[32mAnalyzing:[0m 7 targets (6 packages loaded, 12 targets configured)
+
+[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+[32mAnalyzing:[0m 7 targets (6 packages loaded, 13 targets configured)
+
+[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+[32mAnalyzing:[0m 7 targets (6 packages loaded, 14 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 7 targets (6 packages loaded, 16 targets configured).
+[32m[1 / 7][0m 2 actions running
+    Writing file d2.txt; 0s local
+    Writing file d0.txt; 0s local
+[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g1:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32m[4 / 8][0m 3 actions running
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g0:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32m[4 / 8][0m 3 actions running
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g2:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32m[6 / 8][0m Executing genrule //:g2; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 7 targets...
+[32m[8 / 8][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 2.091s, Critical Path: 0.26s
+[32m[8 / 8][0m no actions running
+[1A[K[32mINFO: [0m8 processes: 4 internal, 4 darwin-sandbox.
+[32m[8 / 8][0m no actions running
+[1A[K[32mINFO: [0mBuild completed successfully, 8 total actions
+[0m

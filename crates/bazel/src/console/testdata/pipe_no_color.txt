@@ -1,0 +1,42 @@
+INFO: Invocation ID: 54fd0be7-2390-4523-831c-3ac676ffc1c4
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Build option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+
+ERROR: /ws/BUILD.bazel:15:8: Executing genrule //:bad failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo bad >&2; printf '\''\033[35mWARNING: \033[0mbefore fail\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad
+WARNING: before fail
+Analyzing: 3 targets (48 packages loaded, 2 targets configured)
+[2 / 2] no actions running
+Analyzing: 3 targets (53 packages loaded, 2 targets configured)
+[2 / 2] no actions running
+Analyzing: 3 targets (73 packages loaded, 399 targets configured)
+[2 / 2] no actions running
+INFO: Analyzed 3 targets (75 packages loaded, 833 targets configured).
+[12 / 14] Testing //:t_pass; 0s darwin-sandbox, disk-cache ... (2 actions running)
+FAIL: //:t_fail (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)
+INFO: From Testing //:t_fail:
+==================== Test output for //:t_fail:
+failing test out
+WARNING: from failing test
+WARNING: from failing test
+Loading: in test
+  indented
+================================================================================
+INFO: Build succeeded for only 2 of 3 top-level targets
+INFO: Found 1 target and 2 test targets...
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 5.729s, Critical Path: 0.86s
+INFO: 14 processes: 12 internal, 4 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+//:t_pass                                                                PASSED in 0.4s
+//:t_fail                                                                FAILED in 0.6s
+  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+
+Executed 2 out of 2 tests: 1 test passes and 1 fails locally.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.

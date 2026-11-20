@@ -1,0 +1,30 @@
+[32mINFO: [0mInvocation ID: 8f96ec1a-af75-45e3-9fdd-f8254aa93ea0
+[32mComputing main repo mapping:[0m\
+ 
+[1A[K[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //:g0 (0 p\
+ackages loaded, 0 targets co\
+nfigured)
+[1A[K[1A[K[1A[K[32mINFO: [0mAnalyzed target //:g0 (0 packages loaded, 0 targets configured).
+
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[1 / 1][0m no actions running
+[1A[KTarget //:g0 up-to-date:
+[32m[1 / 1][0m no actions running
+[1A[K  bazel-bin/g0.txt
+[32m[1 / 1][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.079s, Critical Path: 0.00s
+[32m[1 / 1][0m no actions running
+[1A[K[32mINFO: [0m1 process: 1 internal.
+[32m[1 / 1][0m no actions running
+[1A[K[32mINFO: [0mBuild completed successfully, 1 total action
+[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+Waiting for: Build Eve... 1s
+[1A[K[1A[K[32mINFO:[0m 
+Waiting for: Build Eve... 2s
+[1A[K[1A[K[31m[1mERROR: [0mThe Build Event Protocol upload timed out. com.google.common.util.concurrent.TimeoutFuture$TimeoutFutureException: Timed out: NonCancellationPropagatingFuture@180cb0bd[status=PENDING, info=[delegate=[SettableFuture@16cb4dcc[status=PENDING]]]]
+[0m

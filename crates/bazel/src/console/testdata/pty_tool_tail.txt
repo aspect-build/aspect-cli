@@ -1,0 +1,38 @@
+^D[32mINFO: [0mInvocation ID: 808001d0-f6ed-46ac-b79c-7dd3260f6ec0
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 3 targets (0 packages loaded)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 3 targets configured).
+[32m[1 / 3][0m 2 actions, 0 running
+    Executing genrule //:partial2; 0s darwin-sandbox
+    Executing genrule //:partial3; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:partial3:
+tool3 first line
+[32m[1 / 4][0m 3 actions running
+    Executing genrule //:partial2; 0s darwin-sandbox
+    Executing genrule //:partial3; 0s darwin-sandbox
+    Executing genrule //:partial; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[35mWARNING: [0mtool partial warning 2
+[32mINFO: [0mFrom Executing genrule //:partial2:
+tool2 first line
+[32m[2 / 4][0m 2 actions running
+    Executing genrule //:partial2; 0s darwin-sandbox
+    Executing genrule //:partial; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[35mWARNING: [0mtool partial warning 1
+[32mINFO: [0mFrom Executing genrule //:partial:
+tool first line
+[32m[3 / 4][0m Executing genrule //:partial; 0s darwin-sandbox
+[1A[K[35mDEBUG: [0mRule 'y' indicated that a canonical reproducible form can be obtained (tool partial)
+[32mINFO: [0mFound 3 targets...
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.095s, Critical Path: 0.02s
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0m4 processes: 1 internal, 3 darwin-sandbox.
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0mBuild completed successfully, 4 total actions
+[0m

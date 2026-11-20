@@ -26,12 +26,25 @@ pub fn aspect_cli() -> String {
 /// `ASPECT_*` would override a fixture's config, and the CI identity
 /// variables steer the built-in tasks into their CI code paths (status checks,
 /// runner detection) — the same filtering `tools/cache-diff-integration.py`
-/// does for the same reason. `HOME` and `PATH` stay: the CLI resolves its
-/// builtins cache under `HOME`. The task history goes to a temp folder of the
-/// test process's own.
+/// does for the same reason. A coding agent's variables would switch the
+/// console to its `agent` profile, so they go too: the ones `under_agent` in
+/// `private/lib/agent.axl` reads, kept in step with it by hand. `HOME` and
+/// `PATH` stay: the CLI resolves its builtins cache under `HOME`. The task
+/// history goes to a temp folder of the test process's own.
 #[allow(dead_code)]
 pub fn base_env() -> std::collections::HashMap<String, String> {
-    const DROP_NAMES: &[&str] = &["BUILDKITE", "CI"];
+    const DROP_NAMES: &[&str] = &[
+        "BUILDKITE",
+        "CI",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CURSOR_AGENT",
+        "GEMINI_CLI",
+        "GEMINI_SESSION_ID",
+        "GROK_SESSION_ID",
+    ];
     const DROP_PREFIXES: &[&str] = &[
         "ASPECT_",
         "BASIL_",
@@ -62,15 +75,11 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
 /// Bazel sets `BASIL_BIN` from the `rust_test` rule's `env` via
 /// `$(rootpath //crates/basil)`, relative to the runfiles root that is a
 /// Bazel-run test's cwd. Under cargo, `CARGO_BIN_EXE_*` covers only this
-/// crate's own binaries, so basil is built on demand and found next to this
-/// test executable — the same recursive-cargo pattern `axl_runtime::test` uses.
-#[allow(dead_code)]
+/// crate's own binaries, so basil is built with cargo and found next to this
+/// test executable, the same recursive-cargo pattern `axl_runtime::test` uses.
+#[allow(dead_code)] // Not every test crate drives Bazel.
 pub fn basil_bin() -> &'static str {
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::sync::OnceLock;
-
-    static BIN: OnceLock<String> = OnceLock::new();
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BIN.get_or_init(|| {
         if let Ok(p) = std::env::var("BASIL_BIN") {
             return std::fs::canonicalize(&p)
@@ -79,25 +88,47 @@ pub fn basil_bin() -> &'static str {
                 .into_owned();
         }
         let test_exe = std::env::current_exe().expect("current_exe");
-        let mut path: PathBuf = test_exe.parent().expect("test exe parent").to_path_buf();
+        let mut path: std::path::PathBuf =
+            test_exe.parent().expect("test exe parent").to_path_buf();
         if path.ends_with("deps") {
             path.pop();
         }
         path.push("basil");
-        if !path.exists() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .expect("workspace root above crates/aspect-cli")
-                .to_path_buf();
-            let status = Command::new(&cargo)
-                .args(["build", "--quiet", "-p", "basil"])
-                .current_dir(&workspace_root)
-                .status()
-                .expect("invoking cargo to build basil");
-            assert!(status.success(), "cargo build -p basil failed: {status}");
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root above crates/aspect-cli")
+            .to_path_buf();
+        // Cargo decides whether basil is stale, its dependencies included.
+        // The variables cargo sets for this test binary are left out: cargo
+        // reruns a build script that watches them (`ring`'s) when they
+        // change, so inheriting them would rebuild basil here, then again on
+        // the next `cargo build`.
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut build = std::process::Command::new(&cargo);
+        for (k, _) in std::env::vars() {
+            if k.starts_with("CARGO_PKG_")
+                || matches!(
+                    k.as_str(),
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                        | "CARGO_TARGET_TMPDIR"
+                        | "CARGO_RUSTC_CURRENT_DIR"
+                        | "OUT_DIR"
+                )
+            {
+                build.env_remove(k);
+            }
         }
+        let status = build
+            .args(["build", "--quiet", "-p", "basil"])
+            .current_dir(&workspace_root)
+            .status()
+            .expect("invoking cargo to build basil");
+        assert!(status.success(), "cargo build -p basil failed: {status}");
         assert!(path.exists(), "basil not found at {}", path.display());
         path.to_string_lossy().into_owned()
     })
