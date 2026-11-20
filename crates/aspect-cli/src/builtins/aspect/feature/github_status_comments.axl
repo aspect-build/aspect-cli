@@ -2490,7 +2490,7 @@ GithubStatusComments = feature(
                           "failed_in_phase, repro_commands, fix_commands, …}), sections " +
                           "(entries bucketed by badge key — count a status with " +
                           "`sections.failed|length`), `repro_rows` / `fix_rows` (deduped across " +
-                          "siblings via dedup_and_attribute), build_snippets / test_snippets, " +
+                          "siblings), build_snippets / test_snippets, " +
                           "tip_rows, the *_overflow_note lines, and cli_version / " +
                           "last_updated_at / api_usage. " +
                           "Empty dict → the selected `template_preset`.",

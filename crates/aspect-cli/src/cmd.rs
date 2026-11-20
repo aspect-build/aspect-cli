@@ -1658,7 +1658,7 @@ fn render_feature_list(
         ));
     }
     out.push_str(
-        "\nRun `aspect feature <NAME>` to see a feature's flags and the args it takes from config.axl.\n",
+        "\nRun `aspect feature <NAME>` to see a feature's flags and its config.axl-only args.\n",
     );
     out
 }
