@@ -38,7 +38,7 @@ use opentelemetry_sdk::{
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 use tracing_core::Level;
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -429,11 +429,9 @@ fn merged_resource(extra: &BTreeMap<String, String>) -> Resource {
 static SPAN_BUFFER: OnceLock<BufferingSpanExporter> = OnceLock::new();
 static LOG_BUFFER: OnceLock<BufferingLogExporter> = OnceLock::new();
 /// Set by `install_late_exporters` when at least one endpoint requested
-/// `metrics`. Read by `OtelGuard::drop` to flush at shutdown.
-static LATE_METER_PROVIDER: Mutex<Option<SdkMeterProvider>> = Mutex::new(None);
-
-/// The first error a metric export returned, for the exit report.
-static METRIC_EXPORT_ERROR: LazyLock<Arc<FirstError>> = LazyLock::new(Arc::default);
+/// `metrics`, with the first error its exporters returned. Read by
+/// `OtelGuard::drop` to flush at shutdown and report that error.
+static LATE_METER_PROVIDER: Mutex<Option<(SdkMeterProvider, Arc<FirstError>)>> = Mutex::new(None);
 
 /// True once `install_late_exporters` has activated at least one exporter
 /// (OTLP, file, or stderr). Drives whether `OtelGuard::drop` emits flush
@@ -816,12 +814,13 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
                  different values; metrics carry the first registered exporter's"
             );
         }
+        let export_error = Arc::new(FirstError::default());
         let mut builder =
             MeterProviderBuilder::default().with_resource(merged_resource(&attributes));
         for spec in metric_exporters {
             let exporter = RecordingMetricExporter::new(
                 build_otlp_metric_exporter(&spec)?,
-                Arc::clone(&METRIC_EXPORT_ERROR),
+                Arc::clone(&export_error),
             );
             let mut reader = PeriodicReader::builder(exporter);
             if let Some(interval) = metric_export_interval(env_var) {
@@ -833,7 +832,7 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
         let provider = builder.build();
         global::set_meter_provider(provider.clone());
         if let Ok(mut slot) = LATE_METER_PROVIDER.lock() {
-            *slot = Some(provider);
+            *slot = Some((provider, export_error));
         }
     }
 
@@ -856,7 +855,9 @@ fn shutdown_timeout() -> std::time::Duration {
 
 /// A provider's failed shutdown and its first failed export, each on its own
 /// line: the periodic reader's "Failed to shutdown" does not say why, and an
-/// export that failed mid-run leaves a later shutdown clean.
+/// export that failed mid-run leaves a later shutdown clean. A shutdown that
+/// times out while its final export is still in flight reports the timeout
+/// alone, since that export has not failed yet.
 fn shutdown_report(
     signal: &str,
     shutdown: opentelemetry_sdk::error::OTelSdkResult,
@@ -864,7 +865,7 @@ fn shutdown_report(
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if let Err(err) = shutdown {
-        lines.push(format!("{signal}: {err:?}"));
+        lines.push(format!("{signal}: {err}"));
     }
     if let Some(err) = export_error {
         lines.push(format!("{signal}: first export error: {err}"));
@@ -909,13 +910,9 @@ impl Drop for OtelGuard {
             }
         }
         if let Ok(mut slot) = LATE_METER_PROVIDER.lock() {
-            if let Some(mp) = slot.take() {
+            if let Some((mp, export_error)) = slot.take() {
                 let shutdown = mp.shutdown_with_timeout(timeout);
-                errors.extend(shutdown_report(
-                    "meter",
-                    shutdown,
-                    METRIC_EXPORT_ERROR.get(),
-                ));
+                errors.extend(shutdown_report("meter", shutdown, export_error.get()));
             }
         }
         let shutdown = self.logger_provider.shutdown_with_timeout(timeout);
@@ -931,7 +928,7 @@ impl Drop for OtelGuard {
             } else {
                 // Always surface errors — visibility gap, not a build failure.
                 errln!(
-                    "telemetry: flush completed with errors after {}ms — \
+                    "telemetry: exporting or flushing failed (flush took {}ms) — \
                      some records may have been dropped (this does not affect \
                      the task exit code)",
                     elapsed_ms
@@ -1075,7 +1072,7 @@ mod tests {
                 Some("Unavailable")
             ),
             [
-                r#"logger: InternalFailure("Failed to shutdown")"#,
+                "logger: Operation failed: Failed to shutdown",
                 "logger: first export error: Unavailable",
             ]
         );

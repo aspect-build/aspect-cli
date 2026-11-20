@@ -550,6 +550,15 @@ mod tests {
                 ..SpanLoss::default()
             })
         );
+    }
+
+    #[test]
+    fn a_replayed_span_export_error_is_kept() {
+        let buffer: BufferingSpanExporter<Failing> =
+            BufferingSpanExporter::new(Arc::new(SpanTally::default()));
+        let provider = span_provider(&buffer);
+        emit_span(&provider);
+        futures::executor::block_on(buffer.install_late(vec![Failing]));
         assert_eq!(
             buffer.tally().first_error(),
             Some("Operation failed: unreachable collector")
@@ -648,7 +657,6 @@ mod tests {
             .build();
         emit_log(&provider);
         futures::executor::block_on(buffer.install_late(vec![FailingLogs("replayed")]));
-        emit_log(&provider);
         assert_eq!(buffer.first_error(), Some("Operation failed: replayed"));
     }
 
