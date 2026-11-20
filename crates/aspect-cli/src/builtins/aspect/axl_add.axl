@@ -21,7 +21,7 @@ def progress_bar(current: int, total: int, width: int = 30, color: bool = True) 
 
 def show_phase(ctx: TaskContext, phases: list, current: int):
     """Display phases with checkmarks and progress bar, on a terminal stdout
-    only, colored unless `NO_COLOR` is set."""
+    only, colored unless `NO_COLOR` is set non-empty."""
     if not ctx.std.io.stdout.is_tty:
         # Non-TTY: just print current phase
         print(phases[current] + "...")

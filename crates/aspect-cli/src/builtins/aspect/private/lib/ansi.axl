@@ -1,6 +1,7 @@
 """Shared ANSI/SGR sequences and helpers — the single source for terminal styling.
 
-Callers decide whether to emit color (gate on `color_enabled`); this only
+Callers decide whether to emit color (gate on `ctx.console.color`, or
+`environment.color_enabled(std)` where no `TaskContext` is at hand); this only
 builds the sequences.
 """
 

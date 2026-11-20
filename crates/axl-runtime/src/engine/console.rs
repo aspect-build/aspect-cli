@@ -183,9 +183,8 @@ fn console_methods(registry: &mut MethodsBuilder) {
     /// Whether the console lines carry ANSI color: on an interactive stderr, or
     /// on GitHub Actions, Buildkite, CircleCI or GitLab CI, whose logs render
     /// it; never under a non-empty `NO_COLOR`. The runtime's own lines follow
-    /// it; AXL that
-    /// renders a slot gates the `highlight_style` it passes on it, as
-    /// `lib/lifecycle.axl` does.
+    /// it; AXL that renders a slot gates the `highlight_style` it passes on it,
+    /// as `lib/lifecycle.axl` does.
     #[starlark(attribute)]
     fn color<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         Ok(downcast(this)?.0.color())

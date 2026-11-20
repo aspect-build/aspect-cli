@@ -329,8 +329,13 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 }
                 None => {
                     let valid: Vec<String> = blocks.iter().map(|(f, _)| f.name()).collect();
+                    let (red, reset) = if color::console_supports_color() {
+                        ("\x1b[1;31m", "\x1b[0m")
+                    } else {
+                        ("", "")
+                    };
                     errln!(
-                        "\x1b[1;31merror:\x1b[0m unknown feature {name:?}. Valid features: {}",
+                        "{red}error:{reset} unknown feature {name:?}. Valid features: {}",
                         valid.join(", ")
                     );
                     ExitCode::from(2)
