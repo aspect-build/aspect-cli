@@ -1,0 +1,51 @@
+"""Slow genrules, one of them broken, and a failing test, to watch the
+`FullScreen` example plugin (`.aspect/plugins/full_screen.axl`) with actions
+running:
+
+    aspect build //examples/full_screen:demo --keep_going \
+        --action_env=CACHEBUST=$RANDOM --full-screen:enabled=true
+
+Naming the failing test as well runs it, for a test's log in the Failures
+list beside the broken genrule's (a test, `testonly`, cannot be in `demo`):
+
+    aspect test //examples/full_screen:demo //examples/full_screen:failing \
+        --keep_going --action_env=CACHEBUST=$RANDOM --full-screen:enabled=true
+
+Every target is `manual`, so `//...` leaves them out.
+"""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+[genrule(
+    name = "step%d" % i,
+    outs = ["step%d.txt" % i],
+    cmd = "for n in 1 2 3; do echo working $$n; sleep 1; done; echo WARNING: step %d is slow >&2; echo $$CACHEBUST > $@" % i,
+    tags = [
+        "manual",
+        "no-cache",
+        "no-remote",
+    ],
+) for i in range(12)]
+
+genrule(
+    name = "broken",
+    outs = ["broken.txt"],
+    cmd = "sleep 2; echo 'ERROR: this step is broken on purpose' >&2; exit 1",
+    tags = [
+        "manual",
+        "no-cache",
+        "no-remote",
+    ],
+)
+
+sh_test(
+    name = "failing",
+    srcs = ["fails.sh"],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "demo",
+    srcs = [":broken"] + [":step%d" % i for i in range(12)],
+    tags = ["manual"],
+)

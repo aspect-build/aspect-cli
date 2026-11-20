@@ -950,7 +950,7 @@ impl Console {
                 // for stderr.
                 let shape = bazel::console::forward::Shape {
                     strip_colour: !config.user_colour.unwrap_or_else(|| {
-                        std::io::IsTerminal::is_terminal(&std::io::stdout())
+                        crate::engine::stdout_is_terminal()
                             && crate::color::stdout_supports_color()
                     }),
                     // A stdout of its own is the program's output, not the
@@ -2176,7 +2176,9 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let console = TraitConsole::of(eval);
         build.answer_until_the_console_ends(console.as_ref(), this, eval);
-        let status = build.wait_status()?;
+        let status = build
+            .wait_status()
+            .inspect_err(|_| build.release_frames_screen())?;
         if let Some(console) = &console
             && build.console_observations.is_some()
             && !build.console_ended.replace(true)
@@ -2208,8 +2210,11 @@ const HOOK_FOLLOW: Duration = Duration::from_millis(20);
 
 impl Build {
     /// Keep `e`, the first a console hook raised, for `wait()`, and let go
-    /// of the held lines: the rest are shown at once.
+    /// of the held lines: the rest are shown at once. No frame runs after it,
+    /// so a screen the build's frame hooks took is given back
+    /// ([`Build::release_frames_screen`]).
     fn hook_failed(&self, e: anyhow::Error) {
+        self.release_frames_screen();
         drop(self.console_events.take());
         self.hook_error.borrow_mut().get_or_insert(e);
     }
@@ -2292,7 +2297,8 @@ impl Build {
     /// Run the `output_frame` hooks with `this` build when one is due, or
     /// now with `force` (the last frame, as the console ends). After any
     /// console hook's error, `output_intercept`'s too, no frame runs: the
-    /// error is kept for `wait()`.
+    /// error is kept for `wait()`, and the screen is given back at once
+    /// ([`Build::release_frames_screen`]).
     fn frame<'v>(
         &self,
         console: &TraitConsole<'v>,
@@ -2310,6 +2316,16 @@ impl Build {
         self.last_frame.set(Some(std::time::Instant::now()));
         if let Err(e) = console.framed(this, eval) {
             self.hook_error.borrow_mut().get_or_insert(e);
+            self.release_frames_screen();
+        }
+    }
+
+    /// No frame will run for this build any more (a hook failed, or the wait
+    /// did): with frame hooks, give back the terminal a screen holds, which
+    /// is process-wide, rather than leave it frozen until the CLI exits.
+    fn release_frames_screen(&self) {
+        if self.has_frames.get() == Some(true) {
+            crate::engine::release_terminal();
         }
     }
 
