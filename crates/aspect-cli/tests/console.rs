@@ -2,8 +2,8 @@
 //! prints around a task: task output, diagnostics, exit codes and the lifecycle
 //! events CI surfaces consume are the same under every layout.
 //!
-//! The one exception is `INFO:` lines, which the preset (or `info_lines`)
-//! shows or hides.
+//! The one exception is `info()` lines, which the preset (or `info_lines`)
+//! shows or hides; `answer()` lines print under every layout.
 //!
 //! Spawns the real CLI so the feature's args, `config.axl` overrides, the
 //! runtime-rendered header and verdict, and the AXL-rendered phase and progress
@@ -16,13 +16,14 @@ use common::{aspect_cli, base_env};
 use std::process::{Command, Output};
 
 const TASKS: &str = r#"
-load("@aspect//private/lib/environment.axl", "buildkite_section", "info", "warn")
+load("@aspect//private/lib/environment.axl", "answer", "buildkite_section", "info", "warn")
 load("@aspect//private/lib/lifecycle.axl", "Phase", "Phases", "phases")
 
 def _impl(ctx):
     ctx.std.io.stdout.write("preset=%s\n" % ctx.console.template_preset)
     warn(ctx.std, "task warning")
     info(ctx.std, "task info")
+    answer(ctx.std, "task answer")
     ph = phases.new(ctx, {})
     ph.update("running", "phase progress", phase = Phase(name = "work"))
     ph.update("running", "heartbeat progress")
@@ -126,8 +127,9 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// The task's own output and the lifecycle events, which no layout touches,
-/// and the `INFO:` line, which only the layouts that show them print.
+/// The task's own output, its `answer` line and the lifecycle events, which no
+/// layout touches, and its `info` line, which only the layouts that show
+/// `INFO:` lines print.
 fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
     let err = stderr(output);
     assert_eq!(output.status.code(), Some(code), "{err}");
@@ -138,6 +140,7 @@ fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
         "{err}"
     );
     assert!(err.contains("task warning"), "{err}");
+    assert!(err.contains(": task answer"), "{preset}: {err}");
     assert_eq!(
         err.contains(": task info"),
         matches!(preset, "full" | "plain"),
@@ -204,7 +207,11 @@ fn silent_prints_nothing_of_aspects_own() {
         false,
     );
     let err = stderr(&output);
-    assert_eq!(err.trim(), "WARNING: task warning", "{err}");
+    assert_eq!(
+        err.trim(),
+        "WARNING: task warning\nINFO: task answer",
+        "{err}"
+    );
 }
 
 #[test]
@@ -255,6 +262,7 @@ ctx.features[Console].args.task_templates = {
         [
             "start check",
             "WARNING: task warning",
+            "INFO: task answer",
             "· heartbeat progress",
             "failed 3 init,work,finish"
         ],
@@ -489,7 +497,7 @@ ctx.features[Console].args.task_presets = {"check": "silent", "fx check": "compa
     assert_task_behaviour(&top, "silent", 0);
     assert_eq!(
         stderr(&top).trim(),
-        "WARNING: task warning",
+        "WARNING: task warning\nINFO: task answer",
         "{}",
         stderr(&top)
     );

@@ -101,6 +101,8 @@ def bazel_misdetects_color(std) -> bool:
 #   print(msg)      — narrative beats every run produces (banners, tables, outcomes).
 #   info(std, msg)  — cyan `INFO:`; conditional aside (a branch fired). The
 #                     Console feature can hide these; never warn/error.
+#   answer(std, msg) — the same `INFO:` line when it is the task's result (what
+#                     it did, or why it did nothing), which no preset hides.
 #   warn(std, msg)  — yellow `WARNING:`; subsystem problem, task continues.
 #   error(std, msg) — red `ERROR:`; recoverable error, usually precedes non-zero exit.
 #   fail(msg)       — unrecoverable; aborts immediately.
@@ -136,8 +138,13 @@ def bazel_misdetects_color(std) -> bool:
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state, unless the
     Console feature hides INFO lines (`std.io.info_lines`)."""
-    if not std.io.info_lines:
-        return
+    if std.io.info_lines:
+        answer(std, msg)
+
+def answer(std, msg):
+    """Print `info`'s `INFO:` line whatever `std.io.info_lines` says, for a
+    line that is the task's result rather than an aside: the only report of
+    what it did, or of why it did nothing (`No files to format`)."""
     print(ansi.style("INFO", ansi.seq("1;36"), std.io.stderr.color) + ": " + msg)
 
 def warn(std, msg):

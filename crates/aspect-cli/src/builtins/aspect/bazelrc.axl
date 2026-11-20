@@ -167,7 +167,7 @@ load(
 )
 load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "no_bazel_endpoint_message", "parse_remote", "serves_bazel_endpoint")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
-load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
+load("./private/lib/environment.axl", "answer", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups")
 
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
@@ -533,20 +533,20 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     shown = lambda path: _relative(path, base, home_mode)
     if chain_to_repo:
-        info(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on — nothing here restates them." %
-                      (verb, shown(paths.output), ", ".join(enabled), "%workspace%/" + GENERATED_RC))
+        answer(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on — nothing here restates them." %
+                        (verb, shown(paths.output), ", ".join(enabled), "%workspace%/" + GENERATED_RC))
         return 0
     if env_deployment:
         optional = [c.name for c in configs if c.name not in enabled]
         summary = "%s %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (verb, shown(paths.output), ", ".join(enabled), ", ".join(optional) or "none")
         if import_result != None:
             summary += "; " + _IMPORT_VERBS[import_result.action] % shown(paths.importer)
-        info(ctx.std, summary + ".")
+        answer(ctx.std, summary + ".")
         return 0
 
     group_names = [g.name for g in groups]
     resolved_sections = [c for c in configs if c.name not in group_names]
-    info(ctx.std, "Generating %s: Bazel flags that point plain `bazel` calls at Aspect Cloud and, when configured, Aspect single-tenant deployments." % shown(paths.output))
+    answer(ctx.std, "Generating %s: Bazel flags that point plain `bazel` calls at Aspect Cloud and, when configured, Aspect single-tenant deployments." % shown(paths.output))
     for line in _report(written, import_result, paths, shown, resolved_sections, enabled, home_mode, verb):
         print(line)
     return 0

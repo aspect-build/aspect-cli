@@ -22,16 +22,16 @@ there is no runner to check, so it prints an informational line and exits 0.
 load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_flags", "bazel_rc")
 load(
     "./private/lib/environment.axl",
+    "answer",
     "error",
     "get_workflows_environment",
-    "info",
 )
 load("./private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
 
 def _impl(ctx: TaskContext) -> int:
     environment = get_workflows_environment(ctx.std)
     if environment.runner == None:
-        info(ctx.std, "Not on an Aspect Workflows runner; no runner health check to run.")
+        answer(ctx.std, "Not on an Aspect Workflows runner; no runner health check to run.")
 
         # Nothing spawns Bazel here, so nothing forwards the routed flags.
         bazel_flags.disclaim_passthrough(ctx)
