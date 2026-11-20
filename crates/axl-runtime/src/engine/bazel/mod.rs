@@ -78,7 +78,7 @@ fn console_for<'v>(
                 None
             } else {
                 let config = output::processor_config(output::ProcessorSettings {
-                    tty: output::user_choice(flags, "curses").or(t.tty),
+                    display: output::DisplayMode::parse(&t.display)?.unless_user_chose(flags),
                     stages,
                     colour: None,
                     show_colour: output::user_choice(flags, "color"),

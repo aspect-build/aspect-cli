@@ -141,9 +141,10 @@ def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = 
                   is `root`.
 
     Returns:
-        `struct(stages, tty, progress, problems)`: the `bazel.output` stages,
-        the `BazelTrait.output_tty` and `output_progress` the profile asks for
-        (`tty` None for no preference), and messages about what was left out.
+        `struct(stages, display, progress, problems)`: the `bazel.output`
+        stages, the `BazelTrait.output_display` and `output_progress` the
+        profile asks for (`display` `auto` for no preference), and messages
+        about what was left out.
     """
     problems = []
     for n in disable:
@@ -185,7 +186,7 @@ def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = 
         else:
             problems.append("console recap_max %r is not a positive number; using %d" % (recap_max, RECAP_MAX))
             stages.append(o.recap_errors(max = RECAP_MAX))
-    return struct(stages = stages, tty = False if agent else None, progress = not agent, problems = problems)
+    return struct(stages = stages, display = "lines" if agent else "auto", progress = not agent, problems = problems)
 
 def start_stages(ctx, trait) -> list:
     """The stages `trait`'s `output_start` hooks return for `ctx`, now."""
@@ -200,23 +201,25 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     Bazel's stderr inherited, when there are no stages.
 
     What is shown is Bazel's curses UI as `curses`, the user's own
-    `--curses`, says; else as `trait.output_tty` does; else when the task's
-    stdout and stderr are both terminals, since Bazel decides colour and its
-    live UI for both. Otherwise plain lines, with Bazel's status line every
-    few seconds unless `trait.output_progress` is False. Colour shows as
+    `--curses`, says; else as `trait.output_display` does (`curses` or
+    `lines`); else, for `auto`, when the task's stdout and stderr are both
+    terminals, since Bazel decides colour and its live UI for both. Plain
+    lines carry Bazel's status line every few seconds unless
+    `trait.output_progress` is False. Colour shows as
     `colour`, the user's own `--color`, says; else on a terminal. Bazel itself
     is asked for curses and colour either way: see `bazel.output.processor`."""
     stages = list(trait.output_stages) + list(extra)
     if not stages:
         return None
-    tty = curses
-    if tty == None:
-        tty = trait.output_tty
-    if tty == None:
-        tty = stdout_is_tty and stderr_is_tty
+    if curses != None:
+        display = "curses" if curses else "lines"
+    elif trait.output_display != "auto":
+        display = trait.output_display
+    else:
+        display = "curses" if stdout_is_tty and stderr_is_tty else "lines"
     return bazel.output.processor(
         stages = stages,
-        tty = tty,
+        display = display,
         show_colour = colour,
         progress = trait.output_progress,
     )

@@ -204,7 +204,7 @@ def _test_captured_console_sees_bazel_reject_a_flag(ctx: TaskContext) -> None:
     reaches the observer patterns, and `wait()` returns once the client is
     gone."""
     processor = bazel.output.processor(
-        tty = False,
+        display = "lines",
         stages = [bazel.output.observe({"unrecognized": "Unrecognized option"})],
     )
     build = ctx.bazel.build(
