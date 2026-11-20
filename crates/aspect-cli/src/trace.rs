@@ -18,7 +18,7 @@
 //!
 //! At exit, `OtelGuard` reports any spans that never reached a collector (see
 //! `trace_buffer::SpanLoss`) and the setting that would have kept them, and
-//! the first error a span, log or metric export returned.
+//! each signal's first export error next to its provider's shutdown error.
 
 use axl_runtime::engine::telemetry::{
     ExporterSpec, FileDestination, FileSpec, OtlpProtocol, OtlpSpec,

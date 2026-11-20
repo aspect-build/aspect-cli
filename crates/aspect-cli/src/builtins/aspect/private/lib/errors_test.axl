@@ -1,0 +1,28 @@
+"""Unit tests for lib/errors.axl.
+
+Run with:
+  aspect dev test-errors
+"""
+
+load("./errors.axl", "error_reasons")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_impl(ctx):
+    _eq("a lone error", error_reasons(error("refused")), "refused")
+    chained = error("error sending request", cause = error("dns error", cause = error("no such host")))
+    _eq("each cause in order", error_reasons(chained), "error sending request: dns error: no such host")
+    repeated = error("connect failed: refused", cause = error("refused"))
+    _eq("a cause the message already names", error_reasons(repeated), "connect failed: refused")
+    print("errors: all tests passed")
+    return 0
+
+errors_tests = task(
+    summary = "Run the error rendering AXL unit tests.",
+    kind = "test-errors",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

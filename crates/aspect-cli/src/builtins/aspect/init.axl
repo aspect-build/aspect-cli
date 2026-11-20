@@ -26,18 +26,15 @@ After rendering, `tools/repin` regenerates the language lockfiles the template
 ships as placeholders (unless `--skip-repin`).
 """
 
+load("./private/lib/errors.axl", "error_reasons")
 load("./private/lib/exit_status.axl", "exit_code_of")
-load("./private/lib/init_render.axl", "CONFIG_FILENAME", "load_config", "preset_flags", "preset_names", "render")
+load("./private/lib/init_render.axl", "CONFIG_FILENAME", "InitError", "load_config", "preset_flags", "preset_names", "render")
 load("./private/lib/prompt.axl", "prompt_choice")
 
 # Default template source: the latest published release of this GitHub repo.
 # `--template-ref` overrides the ref (branch, tag, or commit), e.g.
 # `--template=github:aspect-build/aspect-workflows-template --template-ref=main`.
 _DEFAULT_TEMPLATE = "github:aspect-build/aspect-workflows-template"
-
-# A bad flag, a template that cannot be fetched or read, or a failing command:
-# the user's to fix, so it ends the task with its message and no traceback.
-InitError = error.type(traceback = False)
 
 _BAZEL_WORKSPACE_MARKERS = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "WORKSPACE.bzlmod"]
 
@@ -148,28 +145,37 @@ def _resolve_target(ctx):
     print("No project name given; pass a name (e.g. 'aspect init my-project') or '.' to scaffold into the current directory.")
     return None
 
-def _download(ctx, url, output, hint):
-    """Download `url` to `output`, raising `InitError` that ends with `hint` on failure."""
+def _download(ctx, url, output, what, hint):
+    """Download `url` to `output`, raising `InitError` on failure.
+
+    The message names `what` and every reason in the failure's chain (the
+    HTTP client's own text already carries the URL). `hint` follows only when
+    the server answered with an error status; a network failure is not the
+    ref's fault.
+    """
     err, _ = ctx.http().download(url = url, output = output, mode = 0o644).catch().block()
     if err:
-        fail(InitError("could not fetch {}: {}; {}".format(url, err, hint), cause = err))
+        reasons = error_reasons(err)
+        message = "could not fetch {}: {}".format(what, reasons)
+        if "HTTP status" in reasons:
+            message += "; " + hint
+        fail(InitError(message, cause = err))
 
 _TEMPLATE_REF_HINT = "pass --template-ref=<branch|tag|commit> (e.g. --template-ref=main)"
 
 def _latest_release_ref(ctx, repo):
     """Return the tag of `repo`'s latest GitHub release.
 
-    Queries the releases/latest API. Raises `InitError` with a hint to pass an
-    explicit `--template-ref` when the repo has no releases yet, or the API is
-    unreachable or rate-limited.
+    Queries the releases/latest API. Raises `InitError`, with a hint to pass
+    an explicit `--template-ref` when the API answers with an error status (no
+    releases yet, a rate limit) or with no usable tag.
     """
     work = ctx.std.fs.mkdtemp(prefix = "aspect-init-rel-")
     meta = work + "/release.json"
     api_url = "https://api.github.com/repos/{}/releases/latest".format(repo)
-    _download(ctx, api_url, meta, _TEMPLATE_REF_HINT)
+    _download(ctx, api_url, meta, "the latest release of {}".format(repo), _TEMPLATE_REF_HINT)
 
-    # try_decode (not decode): the API can return non-JSON on a rate-limit or
-    # error, which should surface as the hint below, not a parse traceback.
+    # A 2xx body that is not JSON surfaces as the hint below, not a parse traceback.
     parsed = json.try_decode(ctx.std.fs.read_to_string(meta), None)
     tag = parsed.get("tag_name") if parsed else None
     if not tag:
@@ -189,7 +195,7 @@ def _fetch_template(ctx, repo, ref):
     work = ctx.std.fs.mkdtemp(prefix = "aspect-init-")
     archive = work + "/template.tar.gz"
     ctx.std.io.stdout.write("Fetching template from {}\n".format(url))
-    _download(ctx, url, archive, "check that --template-ref {!r} names a branch, tag or commit of {}".format(ref, repo))
+    _download(ctx, url, archive, "the {} template at {!r}".format(repo, ref), "{!r} must be a branch, tag or commit of {}".format(ref, repo))
     _run(ctx, ["tar", "-xzf", archive, "-C", work])
     for entry in ctx.std.fs.read_dir(work):
         if entry.is_dir:
@@ -214,11 +220,13 @@ def _impl(ctx):
     source = parse_template(ctx.args.template)
     if source.scheme == _TEMPLATE_SCHEME("file"):
         repo_dir = source.value
+        where = repo_dir
     else:
         ref = ctx.args.template_ref or _latest_release_ref(ctx, source.value)
         repo_dir = _fetch_template(ctx, source.value, ref)
+        where = "{} at {!r}".format(source.value, ref)
     if not ctx.std.fs.exists(repo_dir + "/" + CONFIG_FILENAME):
-        fail(InitError("{} has no {}; --template must name a template checkout".format(repo_dir, CONFIG_FILENAME)))
+        fail(InitError("{} has no {}, so it is not a project template".format(where, CONFIG_FILENAME)))
     config = load_config(ctx, repo_dir)
     template_dir = repo_dir + "/template"
 
@@ -226,8 +234,6 @@ def _impl(ctx):
     preset = ctx.args.preset or _prompt_preset(ctx, preset_names(config))
     if not preset:
         return 1
-    if preset not in preset_names(config):
-        fail(InitError("unknown preset {!r}; known presets: {}".format(preset, ", ".join(preset_names(config)))))
     flags = dict(preset_flags(config, preset))
 
     # License defaults to "none" so users add their own; `--license=Apache-2.0`
@@ -253,7 +259,7 @@ def _impl(ctx):
     return 0
 
 # NB: --preset has no static `values=` list — valid presets are read at runtime
-# from the template's template-config.json (preset_flags fails on an unknown name).
+# from the template's template-config.json (preset_flags raises InitError on an unknown name).
 init = task(
     kind = "init",
     summary = "Scaffold a new Bazel project from the Aspect Workflows template.",

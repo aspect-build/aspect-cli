@@ -11,9 +11,10 @@ Run with:
   aspect dev test-init
 """
 
-load("@aspect//init.axl", "InitError", "parse_template", "project_name")
+load("@aspect//init.axl", "parse_template", "project_name")
 load(
     "./init_render.axl",
+    "InitError",
     "glob_match",
     "is_executable",
     "is_included",
@@ -110,6 +111,9 @@ def _test_parse_template():
 def _test_presets():
     _eq("preset_names sorted", preset_names(_CONFIG), ["minimal", "py", "rust"])
     _eq("preset_flags py", preset_flags(_CONFIG, "py")["python"], True)
+    err, _ = catch(preset_flags, _CONFIG, "nope")
+    _eq("unknown preset is an InitError", isinstance(err, InitError), True)
+    _eq("unknown preset names the known ones", "known presets: minimal, py, rust" in str(err), True)
 
 def _test_inclusion():
     py = preset_flags(_CONFIG, "py")

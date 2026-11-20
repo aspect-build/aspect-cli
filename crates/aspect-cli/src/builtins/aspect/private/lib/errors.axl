@@ -1,0 +1,22 @@
+"""Rendering an error for a one-line message.
+
+A failure caught from a future arrives as a plain `error` whose `message` is
+only the outermost reason; the underlying ones (DNS, refused connection, TLS)
+hang off `cause` one link at a time, and a `traceback = False` exit prints the
+message alone. `error_reasons` joins the chain so that message keeps them.
+"""
+
+# Longest cause chain followed; a chain is a handful of links in practice.
+_MAX_CAUSES = 16
+
+def error_reasons(err):
+    """`err`'s message and each cause's after it, joined with ": ", skipping a
+    cause whose message the previous one already contains."""
+    parts = []
+    for _ in range(_MAX_CAUSES):
+        if err == None:
+            break
+        if not parts or err.message not in parts[-1]:
+            parts.append(err.message)
+        err = err.cause
+    return ": ".join(parts)

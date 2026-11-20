@@ -40,6 +40,7 @@ load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/deployment_rc_test.axl", "deployment_rc_tests")
 load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
+load("@aspect//private/lib/errors_test.axl", "errors_tests")
 load("@aspect//private/lib/execlog_test.axl", "execlog_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
@@ -523,6 +524,10 @@ def config(ctx: ConfigContext):
     # Durations in the coarsest unit that still distinguishes.
     # Run with: aspect dev test-duration
     ctx.tasks.add(duration_tests)
+
+    # error_reasons: an error and its cause chain on one line.
+    # Run with: aspect dev test-errors
+    ctx.tasks.add(errors_tests)
 
     # timestamp.axl: RFC 3339 formatting across leap years and day ends.
     # Run with: aspect dev test-timestamp

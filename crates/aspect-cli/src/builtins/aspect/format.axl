@@ -244,8 +244,9 @@ def _append_fix_commands(ctx, data):
 def _emit_final(ph, exit_code, message = None):
     """Emit the terminal task_update for status-check consumers.
 
-    Returns the task's conclusion; `message`, when given, ends the task with
-    that line and no traceback.
+    Returns the task's conclusion. `message`, when given, ends the task as an
+    `ERROR:` line with no traceback, and stands in for an empty bookend as the
+    surface's conclusion unless the run was aborted.
     """
     ctx = ph.ctx
     data = ph.data
