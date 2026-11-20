@@ -16,6 +16,8 @@ Currently:
     `escaped_char(ch)` / `utf8_bytes_escaped(ch)` — the characters that
     rewrite what a terminal shows, text with them escaped, and the escape a
     shell reads back.
+  - `edit_distance(a, b)` — Levenshtein distance, for "did you mean"
+    suggestions.
 
 All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
@@ -272,3 +274,14 @@ def escaped_char(ch: str) -> str:
     if len(digits) > 4:
         return "\\U" + "0" * (8 - len(digits)) + digits
     return "\\u" + "0" * (4 - len(digits)) + digits
+
+def edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance between `a` and `b`, one row at a time."""
+    previous = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        current = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+        previous = current
+    return previous[len(b)]

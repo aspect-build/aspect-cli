@@ -7,6 +7,7 @@ Run with:
 load(
     "./text.axl",
     "display_width",
+    "edit_distance",
     "format_bytes_iec",
     "format_int_comma",
     "has_unsafe_chars",
@@ -62,6 +63,12 @@ def _test_strings(ctx):
     _eq("join adds a slash", join_url("https://x", "y"), "https://x/y")
     _eq("join keeps one slash", join_url("https://x/", "y"), "https://x/y")
 
+def _test_edit_distance(ctx):
+    _eq("same", edit_distance("test", "test"), 0)
+    _eq("one dropped", edit_distance("lnt", "lint"), 1)
+    _eq("transposed costs two", edit_distance("tset", "test"), 2)
+    _eq("from empty", edit_distance("", "add"), 3)
+
 def _test_unsafe_characters(ctx):
     """What a terminal acts on or hides is caught, and shown escaped."""
     _eq("plain text is safe", has_unsafe_chars("sess-1 é ﾃｽﾄ"), False)
@@ -85,6 +92,7 @@ _UNIT_TESTS = [
     _test_utf8_len,
     _test_format_numbers,
     _test_strings,
+    _test_edit_distance,
 ]
 
 def _impl(ctx):

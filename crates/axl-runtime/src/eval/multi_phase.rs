@@ -559,6 +559,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .collect()
     }
 
+    /// The command path of every task in [`Self::tasks`], sorted: what a
+    /// `task_presets` or `task_templates` key is checked against.
+    pub fn task_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .tasks()
+            .into_iter()
+            .map(|t| task_command_path(t.group(), &t.kind()))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     /// Snapshot of all features discovered in Phase 1, borrowed as `&dyn FeatureLike`.
     pub fn features(&self) -> Vec<&'v dyn FeatureLike<'v>> {
         self.features
@@ -742,6 +755,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 &args_builder(feature, self.heap()),
                 identity,
                 host,
+                &self.task_paths(),
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };
@@ -802,6 +816,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 "execute_configs() must be called before execute_features_with_args()"
             ))
         })?;
+        let task_paths = Arc::new(self.task_paths());
 
         for feature in self.features() {
             let args = args_builder(feature, heap);
@@ -822,6 +837,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 self.hooks_value,
                 self.loader.env.signals.clone(),
                 self.loader.env.stream_color,
+                task_paths.clone(),
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);

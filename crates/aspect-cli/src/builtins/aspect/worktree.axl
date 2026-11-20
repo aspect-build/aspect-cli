@@ -77,7 +77,7 @@ load("./private/lib/duration.axl", "compact_ms", "phrase_ms")
 load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/table.axl", "Column", "render", "tilde")
-load("./private/lib/text.axl", "display_width", "has_unsafe_chars", "pad_right", "pluralize", "printable", "utf8_len")
+load("./private/lib/text.axl", "display_width", "edit_distance", "has_unsafe_chars", "pad_right", "pluralize", "printable", "utf8_len")
 load(
     "./private/lib/worktree.axl",
     "FORCE_REMOVE",
@@ -1127,24 +1127,13 @@ def _closest(asked: str, names: list[str]) -> str:
         # quadratic, which tells on a clone with thousands of remote branches.
         if len(name) - len(asked) > reach or len(asked) - len(name) > reach:
             continue
-        distance = _edit_distance(asked, name)
+        distance = edit_distance(asked, name)
         if distance > reach:
             continue
         if not best or distance < best_distance:
             best = name
             best_distance = distance
     return best
-
-def _edit_distance(a: str, b: str) -> int:
-    """Levenshtein distance, one row at a time."""
-    previous = list(range(len(b) + 1))
-    for i in range(1, len(a) + 1):
-        current = [i] + [0] * len(b)
-        for j in range(1, len(b) + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
-        previous = current
-    return previous[len(b)]
 
 def _free_slot_phrase(registry: dict, slot_id: str) -> str:
     """That a slot is free, and what it last held — the part of the answer both

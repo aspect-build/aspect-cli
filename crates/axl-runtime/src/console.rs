@@ -22,6 +22,10 @@
 //!   <  task_templates[<task kind>]  <  task_templates[<command path>]
 //! ```
 //!
+//! A key that names no task here is inert, so a user-level `config.axl` can
+//! name tasks only some repos have; one that is a near miss of a task here
+//! (`tset`) gets a warning naming the task it likely meant.
+//!
 //! Two rules keep a template from costing the reader the task's outcome or the
 //! log's structure:
 //!
@@ -40,7 +44,7 @@
 //! Buildkite sections come from the [`Host`] it is built with, which a run
 //! takes from its [`Env`] ([`Host::of`]) and a test spells out.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
 
 use minijinja::{Environment, Value as JinjaValue};
@@ -334,6 +338,38 @@ impl Overrides {
         (preset, resolved)
     }
 
+    /// A warning for each `task_presets` / `task_templates` key that names no
+    /// task here but is a near miss of one that does (see
+    /// [`closest_task_key`]), naming every arg the key appears in. A key far
+    /// from every task stays silent: a user-level `config.axl` applies to
+    /// every repo, and only some of them define the task.
+    pub fn near_miss_warnings(&self, task_paths: &[String]) -> Vec<String> {
+        let keys: BTreeSet<&str> = self
+            .task_presets
+            .keys()
+            .chain(self.task_templates.keys())
+            .map(String::as_str)
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| {
+                let closest = closest_task_key(key, task_paths)?;
+                let args: Vec<String> = [
+                    ("task_presets", self.task_presets.contains_key(key)),
+                    ("task_templates", self.task_templates.contains_key(key)),
+                ]
+                .into_iter()
+                .filter(|(_, has)| *has)
+                .map(|(arg, _)| format!("{arg}[{key:?}]"))
+                .collect();
+                let verb = if args.len() == 1 { "names" } else { "name" };
+                Some(format!(
+                    "Console {} {verb} no task here; did you mean {closest:?}?",
+                    args.join(" and ")
+                ))
+            })
+            .collect()
+    }
+
     /// `task`'s `task_presets` entry, the command path's over the kind's.
     fn preset_for(&self, task: &TaskIdentity) -> Option<&str> {
         if self.preset_from_cli {
@@ -417,7 +453,8 @@ impl Console {
     /// Fails on an unknown preset or an override that does not compile,
     /// wherever it is scoped. An entry for a task this repo lacks is checked but
     /// otherwise inert, as on the CI surfaces: a user-level `config.axl` applies
-    /// to every repo, and only some of them define that task.
+    /// to every repo, and only some of them define that task. A near miss of a
+    /// task here is warned about by [`Overrides::near_miss_warnings`].
     pub fn resolve(
         preset_name: &str,
         overrides: &Overrides,
@@ -550,6 +587,51 @@ fn task_key(key: &str, label: &str) -> Result<(), String> {
         )),
         None => Ok(()),
     }
+}
+
+/// The task key `key` is most likely a typo of, given the command path of
+/// every task here (`worktree add`), or `None`.
+///
+/// A task key is a kind (a path's last word) or a command path. `key` is a
+/// near miss when it is no task key itself, is at least three characters (so
+/// a short key isn't a couple of edits from everything), and is within two
+/// edits of a task key while changing at most half of it. The fewest edits
+/// win, then the first key in sorted order. `template_presets.axl` applies
+/// the same rule on the CI surfaces.
+fn closest_task_key(key: &str, task_paths: &[String]) -> Option<String> {
+    let known: BTreeSet<&str> = task_paths
+        .iter()
+        .flat_map(|path| [path.as_str(), path.rsplit(' ').next().unwrap_or(path)])
+        .collect();
+    if known.contains(key) || key.chars().count() < 3 {
+        return None;
+    }
+    known
+        .into_iter()
+        .filter_map(|candidate| {
+            let distance = edit_distance(key, candidate);
+            (distance <= 2 && 2 * distance <= candidate.chars().count())
+                .then_some((distance, candidate))
+        })
+        .min()
+        .map(|(_, candidate)| candidate.to_owned())
+}
+
+/// Levenshtein distance between `a` and `b`, in characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut current = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
+        }
+        previous = current;
+    }
+    previous[b.len()]
 }
 
 /// The built-in preset `name`, or an error naming where it was asked for.
@@ -1032,5 +1114,70 @@ mod tests {
             }
         }
         assert!(PRESETS.iter().any(|p| p.name == DEFAULT_PRESET));
+    }
+
+    /// The command paths of a repo with built-in, grouped, alias and custom
+    /// tasks. `buildkite_annotations_test.axl` checks the CI surfaces against the
+    /// same table.
+    fn task_paths() -> Vec<String> {
+        [
+            "build",
+            "test",
+            "lint",
+            "format",
+            "buildifier",
+            "deploy",
+            "worktree add",
+            "worktree release",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn a_near_miss_names_the_closest_task() {
+        for (key, expected) in [
+            ("tset", Some("test")),
+            ("bulid", Some("build")),
+            ("lnt", Some("lint")),
+            ("worktree ad", Some("worktree add")),
+            ("relase", Some("release")),
+            ("buildifer", Some("buildifier")),
+            ("deplyo", Some("deploy")),
+            ("test", None),
+            ("add", None),
+            ("worktree add", None),
+            ("release-notes", None),
+            ("fmt", None),
+            ("abc", None),
+            ("ad", None),
+            ("tt", None),
+        ] {
+            assert_eq!(
+                closest_task_key(key, &task_paths()).as_deref(),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_near_miss_is_warned_about_once_per_key() {
+        let mut o = Overrides::default();
+        o.set_preset_for_task("tset", "silent".into()).unwrap();
+        o.set_for_task("tset", "header", "a".into()).unwrap();
+        o.set_for_task("tset", "verdict", "b".into()).unwrap();
+        o.set_for_task("worktree ad", "header", "c".into()).unwrap();
+        o.set_for_task("release-notes", "header", "d".into())
+            .unwrap();
+        o.set_preset_for_task("test", "plain".into()).unwrap();
+        assert_eq!(
+            o.near_miss_warnings(&task_paths()),
+            [
+                r#"Console task_presets["tset"] and task_templates["tset"] name no task here; did you mean "test"?"#,
+                r#"Console task_templates["worktree ad"] names no task here; did you mean "worktree add"?"#,
+            ]
+        );
+        assert!(o.near_miss_warnings(&[]).is_empty());
     }
 }

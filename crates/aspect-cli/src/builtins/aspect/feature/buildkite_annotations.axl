@@ -322,7 +322,7 @@ def _remove_annotation(ctx, context_id):
 def _buildkite_annotations(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
 
-    template_config = template_presets.config("BuildkiteAnnotations", ctx.args)
+    template_config = template_presets.config("BuildkiteAnnotations", ctx)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     mode = ctx.args.mode

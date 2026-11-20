@@ -212,7 +212,7 @@ def _collect_ci_links(ctx, host, results_base_url):
 def _github_status_checks(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
 
-    template_config = template_presets.config("GithubStatusChecks", ctx.args)
+    template_config = template_presets.config("GithubStatusChecks", ctx)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     # Check-run URL is published below via `checkrun.set_url`; siblings

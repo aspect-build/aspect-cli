@@ -24,11 +24,14 @@ use super::template::json_to_minijinja;
 ///
 /// A disabled feature gives the `full` layout. Fails on a malformed
 /// `templates`, `task_presets` or `task_templates` value and on everything
-/// [`Surface::resolve`] refuses.
+/// [`Surface::resolve`] refuses. Warns about each `task_presets` /
+/// `task_templates` key that is a near miss of one of `task_paths`, the
+/// command paths of the repo's tasks.
 pub fn from_feature_args(
     args: &Arguments<'_>,
     task: TaskIdentity,
     host: Host,
+    task_paths: &[String],
 ) -> Result<Surface, String> {
     if !args
         .get("enabled")
@@ -75,7 +78,11 @@ pub fn from_feature_args(
             overrides.set_for_task(task_key, slot, template)?;
         }
     }
-    Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)
+    let surface = Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)?;
+    for warning in overrides.near_miss_warnings(task_paths) {
+        crate::diag::warn(&warning);
+    }
+    Ok(surface)
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -241,7 +248,7 @@ args = {{"templates": templates, "task_presets": task_presets, "task_templates":
             for (name, value) in DictRef::from_value(bound).unwrap().iter() {
                 args.insert(name.unpack_str().unwrap().into(), value);
             }
-            let surface = from_feature_args(&args, task(), Host::default())?;
+            let surface = from_feature_args(&args, task(), Host::default(), &[])?;
             Ok(surface.render(slot, minijinja::context! { text => "x" }))
         })
     }
@@ -336,10 +343,10 @@ task_templates = {"check": {"progress": "mine"}}"#;
         crate::test::eval("enabled = False").with_value("enabled", |enabled| {
             let args = Arguments::new();
             args.insert("enabled".into(), enabled);
-            let surface = from_feature_args(&args, task(), Host::default()).unwrap();
+            let surface = from_feature_args(&args, task(), Host::default(), &[]).unwrap();
             assert_eq!(surface.preset(), "full");
         });
-        let surface = from_feature_args(&Arguments::new(), task(), Host::default()).unwrap();
+        let surface = from_feature_args(&Arguments::new(), task(), Host::default(), &[]).unwrap();
         assert_eq!(surface.preset(), DEFAULT_PRESET);
     }
 
