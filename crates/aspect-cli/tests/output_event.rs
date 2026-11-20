@@ -504,7 +504,7 @@ def config(ctx: ConfigContext):
 fn a_cancelled_build_forwards_what_bazel_prints_while_it_winds_down() {
     let dir = workspace("fixture.axl", |_| {
         r#"def _impl(ctx):
-    processor = bazel.output.processor(tty = False)
+    processor = bazel.output.processor(display = "lines")
     build = ctx.bazel.build(
         flags = ["--scenario=stderr_after_interrupt"] + processor.flags,
         output = processor,

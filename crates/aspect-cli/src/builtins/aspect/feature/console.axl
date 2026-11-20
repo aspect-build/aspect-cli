@@ -183,8 +183,8 @@ def _console_impl(ctx: FeatureContext):
         emit_tips(task_ctx, build, console_tip_rules(tips.rules), batch = str(builds[0]))
 
     trait.output_end.append(_emit_tips)
-    if got.tty != None and trait.output_tty == None:
-        trait.output_tty = got.tty
+    if got.display != "auto" and trait.output_display == "auto":
+        trait.output_display = got.display
     if not got.progress:
         trait.output_progress = False
 

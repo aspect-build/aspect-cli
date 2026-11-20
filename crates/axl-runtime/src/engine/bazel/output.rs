@@ -163,8 +163,11 @@ impl<'v> UnpackValue<'v> for OutputProcessor {
 impl<'v> values::StarlarkValue<'v> for OutputProcessor {
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         match attribute {
-            // Whether bazel's curses UI is kept in what is shown.
-            "tty" => Some(Value::new_bool(self.config.output == Output::AsWritten)),
+            // What is shown: `curses`, Bazel's UI as it drew it, or `lines`.
+            "display" => Some(
+                heap.alloc_str(DisplayMode::of(&self.config).name())
+                    .to_value(),
+            ),
             // The `--isatty` / `--curses` (and, see `processor`, `--color`)
             // flags the capture needs.
             "flags" => Some(heap.alloc(self.config.bazel_flags())),
@@ -190,7 +193,7 @@ impl<'v> values::StarlarkValue<'v> for OutputProcessor {
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         matches!(
             attribute,
-            "tty" | "flags" | "intercepts" | "stages" | "colour"
+            "display" | "flags" | "intercepts" | "stages" | "colour"
         )
     }
 }
@@ -300,7 +303,8 @@ fn intercepted_line_methods(registry: &mut MethodsBuilder) {
 pub(crate) struct TraitConsole<'v> {
     pub ctx: Value<'v>,
     pub stages: Vec<Stage>,
-    pub tty: Option<bool>,
+    /// `output_display`, as set: [`DisplayMode::parse`] it.
+    pub display: String,
     /// `output_progress`: rendered lines show Bazel's status line.
     pub progress: bool,
     /// `output_intercept`: `fn(ctx, line)`, answering held lines.
@@ -316,7 +320,7 @@ pub(crate) struct TraitConsole<'v> {
 /// reads (`output_progress`) are optional, so a trait need not declare them.
 const CONSOLE_FIELDS: [&str; 5] = [
     "output_stages",
-    "output_tty",
+    "output_display",
     "output_intercept",
     "output_end",
     "output_start",
@@ -344,7 +348,9 @@ impl<'v> TraitConsole<'v> {
                 .into_iter()
                 .filter_map(|v| v.downcast_ref::<OutputStage>().map(|s| s.stage.clone()))
                 .collect(),
-            tty: field("output_tty").and_then(|v| v.unpack_bool()),
+            display: field("output_display")
+                .and_then(|v| v.unpack_str().map(str::to_string))
+                .unwrap_or_else(|| "auto".to_string()),
             progress: field("output_progress")
                 .and_then(|v| v.unpack_bool())
                 .unwrap_or(true),
@@ -431,9 +437,7 @@ const STATUS_EVERY: Duration = Duration::from_secs(5);
 /// what a build without `output =` or a redirect takes from the trait and
 /// the user's flags.
 pub(crate) struct ProcessorSettings {
-    /// Keep Bazel's curses UI in the output; None: whether this process's
-    /// stdout and stderr are both terminals.
-    pub tty: Option<bool>,
+    pub display: DisplayMode,
     pub stages: Vec<Stage>,
     /// Ask Bazel for colour; None asks.
     pub colour: Option<bool>,
@@ -446,9 +450,11 @@ pub(crate) struct ProcessorSettings {
 /// The console processor `processor(...)` makes; see its docs.
 pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     let stderr_tty = std::io::stderr().is_terminal();
-    let curses_out = s
-        .tty
-        .unwrap_or_else(|| std::io::stdout().is_terminal() && stderr_tty);
+    let curses_out = match s.display {
+        DisplayMode::Curses => true,
+        DisplayMode::Lines => false,
+        DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
+    };
     let style = if crate::color::console_supports_color() {
         Style::dim()
     } else {
@@ -473,6 +479,60 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     config.strip_colour = !s.show_colour.unwrap_or(stderr_tty);
     config.links = stderr_tty;
     config
+}
+
+/// What a console processor shows. `Auto` is resolved when the processor is
+/// made, so a processor's own is `Curses` or `Lines`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisplayMode {
+    /// `curses` when this process's stdout and stderr are both terminals,
+    /// else `lines`.
+    Auto,
+    /// Bazel's curses UI, as it drew it.
+    Curses,
+    /// Plain lines rendered from it.
+    Lines,
+}
+
+impl DisplayMode {
+    pub(crate) const NAMES: &str = "auto, curses, lines";
+
+    pub(crate) fn parse(name: &str) -> anyhow::Result<DisplayMode> {
+        Ok(match name {
+            "auto" => DisplayMode::Auto,
+            "curses" => DisplayMode::Curses,
+            "lines" => DisplayMode::Lines,
+            other => anyhow::bail!(
+                "unknown console display {other:?}; expected one of {}",
+                DisplayMode::NAMES
+            ),
+        })
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            DisplayMode::Auto => "auto",
+            DisplayMode::Curses => "curses",
+            DisplayMode::Lines => "lines",
+        }
+    }
+
+    /// What `config` shows.
+    fn of(config: &Config) -> DisplayMode {
+        match config.output {
+            Output::AsWritten => DisplayMode::Curses,
+            Output::Lines { .. } => DisplayMode::Lines,
+        }
+    }
+
+    /// The user's own `--curses`, when `flags` give one, else `self`.
+    pub(crate) fn unless_user_chose(self, flags: &[String]) -> DisplayMode {
+        match user_choice(flags, "curses") {
+            Some(true) => DisplayMode::Curses,
+            Some(false) => DisplayMode::Lines,
+            None => self,
+        }
+    }
 }
 
 /// The user's own choice of a tri-state flag such as `--curses` or `--color`
@@ -518,14 +578,14 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// its redraw after every message is what ends an action's output, and
     /// its colour is what tells its messages from the output, so the stages
     /// can tell them apart in any build. What is shown then follows the
-    /// destination: the curses UI as Bazel drew it (`tty`), or plain lines,
+    /// destination: the curses UI as Bazel drew it, or plain lines,
     /// the progress area it drew and erased left out (with `progress`, its
     /// status line every few seconds). Colour shows as `show_colour` says.
     /// The build must carry `processor.flags` after the user's own, so they
     /// win (`--isatty`, `--curses=yes`, `--color=yes` unless `colour =
     /// False`; they assume the
     /// build's stdout is inherited); the user's `--curses` and `--color` are
-    /// what `tty` and `show_colour` are for. The `bazel_invocation` handles
+    /// what `display` and `show_colour` are for. The `bazel_invocation` handles
     /// and a build without `output =` or a redirect do this themselves.
     ///
     /// Stages run in a fixed order of kinds, whatever order they are listed
@@ -550,15 +610,17 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// files are readable by their owner only.
     ///
     /// # Arguments
-    /// * `tty` - Show Bazel's curses UI as it drew it, rather than plain
-    ///   lines. Defaults to whether this process's stdout and stderr are both
-    ///   terminals. Pass the user's `--curses` when they gave one: it is
-    ///   their choice of what they see. Captured through a PTY when shown on
-    ///   a terminal, otherwise a pipe.
+    /// * `display` - What is shown: `curses`, Bazel's curses UI as it drew
+    ///   it; `lines`, plain lines rendered from it; or `auto` (the default),
+    ///   `curses` when this process's stdout and stderr are both terminals.
+    ///   Pass `curses` or `lines` for the user's `--curses` when they gave
+    ///   one: it is their choice of what they see. Captured through a PTY
+    ///   when curses is shown on a terminal, otherwise a pipe. The
+    ///   processor's own `display` is the resolved `curses` or `lines`.
     /// * `stages` - `bazel.output.<stage>(...)` values.
     /// * `colour` - Ask Bazel for colour (`--color=yes` in `flags`). Default
     ///   True; for a build whose stdout is not inherited, pass False and
-    ///   `tty = False`: nothing strips colour from that stdout, and a PTY
+    ///   `display = "lines"`: nothing strips colour from that stdout, and a PTY
     ///   would have Bazel colour it too.
     /// * `show_colour` - Whether what is shown keeps colour: the user's own
     ///   `--color`, when they gave one. Defaults to whether stderr (and, for
@@ -580,7 +642,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///     print("bazel server died: " + build.output_fatal_line)
     /// ```
     fn processor(
-        #[starlark(require = named, default = NoneOr::None)] tty: NoneOr<bool>,
+        #[starlark(require = named, default = "auto")] display: &str,
         #[starlark(require = named, default = UnpackList::default())] stages: UnpackList<
             OutputStage,
         >,
@@ -589,7 +651,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = true)] progress: bool,
     ) -> anyhow::Result<OutputProcessor> {
         let config = processor_config(ProcessorSettings {
-            tty: tty.into_option(),
+            display: DisplayMode::parse(display)?,
             stages: stages.items.into_iter().map(|s| s.stage).collect(),
             colour: colour.into_option(),
             show_colour: show_colour.into_option(),
@@ -867,7 +929,7 @@ mod tests {
     const TRAIT: &str = r#"
 BazelTrait = trait(
     output_stages = attr(list, default = []),
-    output_tty = attr(bool | None, default = None),
+    output_display = attr(str, default = "auto"),
     output_intercept = attr(list, default = []),
     output_end = attr(list, default = []),
     output_start = attr(list, default = []),
@@ -896,10 +958,10 @@ BazelTrait = trait(
     #[test]
     fn a_processor_states_its_mode_and_the_flags_it_needs() {
         let exit = run(r#"
-    shown = bazel.output.processor(tty = True)
-    lines = bazel.output.processor(tty = False)
-    if not shown.tty or "--curses=yes" not in shown.flags: fail("shown %r %r" % (shown.tty, shown.flags))
-    if lines.tty or lines.flags != ["--isatty=0", "--curses=yes", "--color=yes"]: fail("flags %r" % (lines.flags,))
+    shown = bazel.output.processor(display = "curses")
+    lines = bazel.output.processor(display = "lines")
+    if shown.display != "curses" or "--curses=yes" not in shown.flags: fail("shown %r %r" % (shown.display, shown.flags))
+    if lines.display != "lines" or lines.flags != ["--isatty=0", "--curses=yes", "--color=yes"]: fail("flags %r" % (lines.flags,))
     if "--color=yes" in bazel.output.processor(colour = False).flags: return 5
     if lines.intercepts: return 3
     if not bazel.output.processor(stages = [bazel.output.intercept({"s": "x"})]).intercepts: return 4
@@ -908,12 +970,24 @@ BazelTrait = trait(
         assert_eq!(exit, Some(0));
     }
 
+    #[test]
+    fn an_unknown_display_is_an_error() {
+        let err = run(r#"
+    bazel.output.processor(display = "fancy")
+    return 0"#)
+        .expect_err("an unknown display");
+        assert!(
+            format!("{err:#}").contains("unknown console display"),
+            "{err:#}"
+        );
+    }
+
     /// Listed in any order, stages run by kind.
     #[test]
     fn a_processor_runs_its_stages_in_phase_order() {
         let exit = run(r#"
     o = bazel.output
-    processor = o.processor(tty = False, stages = [
+    processor = o.processor(display = "lines", stages = [
         o.collapse_similar(), o.drop(["d"]), o.relativize_paths(),
         o.intercept({"r": "r"}), o.fatal(["f"]), o.rewrite("a", "b"), o.observe({"m": "m"}),
         o.recap_errors(),
@@ -931,7 +1005,7 @@ BazelTrait = trait(
     #[test]
     fn a_build_without_console_output_reports_nothing() {
         let exit = run(r#"
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.collapse_repeats(),
         bazel.output.observe({"warn": "WARNING:"}),
         bazel.output.fatal(["Server terminated abruptly"]),
@@ -952,7 +1026,7 @@ BazelTrait = trait(
     #[test]
     fn matches_and_fatal_lines_are_recorded_from_the_console() {
         let exit = run(r#"
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.observe({"warn": "^WARNING:"}),
         bazel.output.fatal(["completed", "Build"]),
     ])
@@ -975,7 +1049,7 @@ BazelTrait = trait(
     #[test]
     fn a_changing_processor_keeps_a_raw_log_in_the_history() {
         let exit = run(r#"
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.collapse_similar(),
         bazel.output.rewrite("hunter2", "***"),
     ])
@@ -1030,7 +1104,7 @@ Test = task(implementation = _impl, traits = [Lookalike])
         std::fs::write(&root, "").unwrap();
         let script = r#"
 def _impl(ctx):
-    processor = bazel.output.processor(tty = False, stages = [bazel.output.rewrite("hunter2", "***")])
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.rewrite("hunter2", "***")])
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
     if not build.wait().success: return 1
     log = build.output_log
@@ -1070,7 +1144,7 @@ Test = task(implementation = _impl)
         seen.append("end:%d" % len(build.output_matches()))
     t.output_intercept.extend([_note, _answer])
     t.output_end.append(_end)
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.intercept({"secret": "password", "info": "^INFO:"}),
         bazel.output.observe({"warn": "^WARNING:"}),
     ])
@@ -1095,7 +1169,7 @@ Test = task(implementation = _impl)
         seen.append(line.id)
         line.keep()
     t.output_intercept.append(_keep)
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.intercept({"secret": "password"}),
     ])
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
@@ -1117,7 +1191,7 @@ Test = task(implementation = _impl)
             "",
             r#"
     t.output_stages.append(bazel.output.observe({"warn": "^WARNING:"}))
-    t.output_tty = False
+    t.output_display = "lines"
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
     if not build.wait().success: return 1
     if build.output_matches()[:1] != [("warn", "WARNING: deprecated flag used")]: return 2
@@ -1151,7 +1225,7 @@ Test = task(implementation = _impl)
     if not build.wait().success: return 1
     if build.output_matches()[:1] != [("warn", "WARNING: deprecated flag used")]: return 2
     out = ctx.std.fs.create("HISTORY/out.txt")
-    t.output_tty = True
+    t.output_display = "curses"
     redirected = ctx.bazel.build(flags = ["--scenario=stderr_chatter", "--define=probe=redirected-stdout"], stdout = out)
     if not redirected.wait().success: return 3
     if len(calls) != 1: return 4
@@ -1185,7 +1259,7 @@ Test = task(implementation = _impl)
         ends.append(1)
         build.wait()
     t.output_end.append(_end)
-    processor = bazel.output.processor(tty = False, stages = [bazel.output.observe({"x": "x"})])
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.observe({"x": "x"})])
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
     build.wait()
     build.wait()
@@ -1211,7 +1285,7 @@ Test = task(implementation = _impl)
         aggregations = {"whats": ["unique", "what"], "n": ["count"], "first": ["first", "line"]},
         samples = 1,
     )
-    processor = bazel.output.processor(tty = False, stages = [stage])
+    processor = bazel.output.processor(display = "lines", stages = [stage])
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
     if not build.wait().success: return 1
     got = build.output_aggregates()
@@ -1258,7 +1332,7 @@ Test = task(implementation = _impl)
     def _boom(ctx, line):
         fail("hook kaboom")
     t.output_intercept.append(_boom)
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.intercept({"m": "^WARNING:|^INFO:|password"}, timeout_ms = 120000),
     ])
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
@@ -1279,11 +1353,11 @@ Test = task(implementation = _impl)
         for script in [
             (
                 false,
-                "bazel.output.processor(tty = False, stages = [bazel.output.intercept({\"s\": \"x\"})])",
+                "bazel.output.processor(display = \"lines\", stages = [bazel.output.intercept({\"s\": \"x\"})])",
             ),
             (
                 true,
-                "bazel.output.processor(tty = False, stages = [bazel.output.intercept({\"s\": \"x\"})])",
+                "bazel.output.processor(display = \"lines\", stages = [bazel.output.intercept({\"s\": \"x\"})])",
             ),
         ] {
             let body = format!(
@@ -1312,7 +1386,7 @@ def _boom(ctx, line):
 "#,
             r#"
     t.output_intercept.append(_boom)
-    processor = bazel.output.processor(tty = False, stages = [
+    processor = bazel.output.processor(display = "lines", stages = [
         bazel.output.intercept({"m": "^WARNING:|^INFO:|password"}, timeout_ms = 120000),
     ])
     build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
@@ -1334,7 +1408,7 @@ def _twice(ctx, line):
 "#,
             r#"
     t.output_intercept.append(_twice)
-    processor = bazel.output.processor(tty = False, stages = [bazel.output.intercept({"secret": "password"})])
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.intercept({"secret": "password"})])
     ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor).wait()
     return 0"#,
         )
@@ -1348,7 +1422,7 @@ def _twice(ctx, line):
         for arg in ["stderr = None", "stdio = ctx.std.io"] {
             let err = run(&format!(
                 r#"
-    ctx.bazel.build(output = bazel.output.processor(tty = False), {arg})
+    ctx.bazel.build(output = bazel.output.processor(display = "lines"), {arg})
     return 0"#
             ))
             .expect_err("the combination must be refused")
