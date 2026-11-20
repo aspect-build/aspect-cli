@@ -35,6 +35,10 @@ load("./private/lib/prompt.axl", "prompt_choice")
 # `--template=github:aspect-build/aspect-workflows-template --template-ref=main`.
 _DEFAULT_TEMPLATE = "github:aspect-build/aspect-workflows-template"
 
+# A bad flag, an unreachable template or a failing command: the user's to fix,
+# so it ends the task with its message and no traceback.
+InitError = error.type(traceback = False)
+
 _BAZEL_WORKSPACE_MARKERS = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "WORKSPACE.bzlmod"]
 
 def _is_bazel_workspace(ctx, dir):
@@ -44,17 +48,13 @@ def _is_bazel_workspace(ctx, dir):
     return False
 
 def _run(ctx, argv, current_dir = None):
-    """Run a subprocess, ending the task with its argv + exit code on a non-zero status.
-
-    A failing command is the environment's problem, not a bug in init, so it
-    ends the task with code 1 and the message alone, without a traceback.
-    """
+    """Run a subprocess, raising `InitError` with its argv + exit code on a non-zero status."""
     cmd = ctx.std.process.command(argv[0]).args(argv[1:])
     if current_dir:
         cmd = cmd.current_dir(current_dir)
     status = cmd.spawn().wait()
     if not status.success:
-        ctx.std.process.exit(1, "command failed ({}): {}".format(exit_code_of(status), " ".join(argv)))
+        fail(InitError("command failed ({}): {}".format(exit_code_of(status), " ".join(argv))))
 
 _TEMPLATE_SCHEME = enum("github", "file")
 
@@ -78,15 +78,15 @@ def parse_template(spec):
     """
     scheme, sep, value = spec.partition(":")
     if not sep or not value:
-        fail("invalid --template {!r}: expected '<scheme>:<value>', e.g. {!r}".format(spec, _DEFAULT_TEMPLATE))
+        fail(InitError("invalid --template {!r}: expected '<scheme>:<value>', e.g. {!r}".format(spec, _DEFAULT_TEMPLATE)))
     if scheme == "github":
         return TemplateSource(scheme = _TEMPLATE_SCHEME("github"), value = value)
     if scheme == "file":
         path = value[2:] if value.startswith("//") else value
         if not path:
-            fail("invalid --template {!r}: file: needs a directory, e.g. 'file:/path/to/checkout'".format(spec))
+            fail(InitError("invalid --template {!r}: file: needs a directory, e.g. 'file:/path/to/checkout'".format(spec)))
         return TemplateSource(scheme = _TEMPLATE_SCHEME("file"), value = path)
-    fail("unknown --template scheme {!r} in {!r}; supported: github:, file:".format(scheme, spec))
+    fail(InitError("unknown --template scheme {!r} in {!r}; supported: github:, file:".format(scheme, spec)))
 
 def _prompt_preset(ctx, names):
     """Prompt the user to choose a preset by name, printing an off-TTY hint.
@@ -165,7 +165,7 @@ def _latest_release_ref(ctx, repo):
     parsed = json.try_decode(ctx.std.fs.read_to_string(meta), None)
     tag = parsed.get("tag_name") if parsed else None
     if not tag:
-        fail("could not determine the latest {} release; pass --template-ref=<branch|tag|commit> (e.g. --template-ref=main)".format(repo))
+        fail(InitError("could not determine the latest {} release; pass --template-ref=<branch|tag|commit> (e.g. --template-ref=main)".format(repo)))
     return tag
 
 def _fetch_template(ctx, repo, ref):
@@ -186,7 +186,7 @@ def _fetch_template(ctx, repo, ref):
     for entry in ctx.std.fs.read_dir(work):
         if entry.is_dir:
             return work + "/" + entry.path
-    fail("template archive for ref {!r} contained no directory".format(ref))
+    fail(InitError("template archive for ref {!r} contained no directory".format(ref)))
 
 def _impl(ctx):
     out_dir = _resolve_target(ctx)

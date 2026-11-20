@@ -855,9 +855,9 @@ fn shutdown_timeout() -> std::time::Duration {
 
 /// A provider's failed shutdown and its first failed export, each on its own
 /// line: the periodic reader's "Failed to shutdown" does not say why, and an
-/// export that failed mid-run leaves a later shutdown clean. A shutdown that
-/// times out while its final export is still in flight reports the timeout
-/// alone, since that export has not failed yet.
+/// export that failed mid-run leaves a later shutdown clean. A final export
+/// still in flight when the shutdown times out has not failed yet, so only
+/// the timeout speaks for it.
 fn shutdown_report(
     signal: &str,
     shutdown: opentelemetry_sdk::error::OTelSdkResult,

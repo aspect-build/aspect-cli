@@ -11,7 +11,7 @@ Run with:
   aspect dev test-init
 """
 
-load("@aspect//init.axl", "parse_template", "project_name")
+load("@aspect//init.axl", "InitError", "parse_template", "project_name")
 load(
     "./init_render.axl",
     "glob_match",
@@ -94,6 +94,18 @@ def _test_parse_template():
     # file:// URI form — the leading `//` is stripped to the path.
     _eq("file:// uri abs", parse_template("file:///abs/checkout").value, "/abs/checkout")
     _eq("file:// lenient host", parse_template("file://abs/checkout").value, "abs/checkout")
+
+    # A malformed --template is the user's to fix: InitError, which ends the
+    # task without a traceback.
+    for spec, want in [
+        ("aspect-build/repo", "expected '<scheme>:<value>'"),
+        ("file:", "expected '<scheme>:<value>'"),
+        ("file://", "file: needs a directory"),
+        ("svn:repo", "unknown --template scheme"),
+    ]:
+        err, _ = catch(parse_template, spec)
+        _eq("bad template %s is an InitError" % spec, isinstance(err, InitError), True)
+        _eq("bad template %s message" % spec, want in str(err), True)
 
 def _test_presets():
     _eq("preset_names sorted", preset_names(_CONFIG), ["minimal", "py", "rust"])
