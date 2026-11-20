@@ -75,7 +75,10 @@ fn console_for<'v>(
         (None, Some(t)) if stderr_free && stdout_inherited => {
             let mut stages = t.stages.clone();
             stages.extend(t.started(eval)?);
-            if stages.is_empty() {
+            // Captured even with no stages when hidden (inherited, it would
+            // be shown) or framed (frames run only while a captured console
+            // is open).
+            if stages.is_empty() && t.display != "none" && t.frame.is_empty() {
                 None
             } else {
                 let config = output::processor_config(output::ProcessorSettings {

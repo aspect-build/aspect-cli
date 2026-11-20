@@ -917,6 +917,30 @@ mod tests {
         assert!(!ansi::text(&out).contains("u:t@"), "{}", ansi::text(&out));
     }
 
+    /// A marker of two columns and a space in place of three indent spaces
+    /// (the Theme plugin's) keeps a progress row whole under a PTY; one in
+    /// place of two would cost the row its last column.
+    #[test]
+    fn a_wide_marker_in_place_of_three_spaces_keeps_the_row() {
+        let row = b"    Compiling a.cc; 12s remote";
+        let marked = |spaces: &str| {
+            let mut p = Rewrite::new(
+                BytesRegex::new(&format!(r"^(\s*)\s{spaces}(Compiling)")).unwrap(),
+                "${1}🔨 ${2}".into(),
+            )
+            .under_pty(true);
+            let mut line = Classifier::default().classify(row);
+            line.drawn = true;
+            p.see(&line);
+            p.process(row).unwrap()
+        };
+        let three = marked("{3}");
+        assert_eq!(ansi::text(&three), " 🔨 Compiling a.cc; 12s remote");
+        assert_eq!(ansi::width(&three), ansi::width(row));
+        let two = marked("{2}");
+        assert!(ansi::text(&two).ends_with("remot"), "{}", ansi::text(&two));
+    }
+
     #[test]
     fn rewriting_leaves_bytes_that_are_not_utf8_alone() {
         let mut p = RelativizePaths::new(Some("/ws".into()), None);

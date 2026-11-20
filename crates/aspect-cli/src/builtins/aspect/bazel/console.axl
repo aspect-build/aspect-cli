@@ -40,13 +40,14 @@ feature appends after the `Console` feature's own implementation has run are
 matched too. `--tips:silence` turns a rule off, so it is not a stage
 `disable` names.
 
-## Held lines
+## Held lines and frames
 
 Lines an `intercept` stage holds are answered by the `BazelTrait.output_intercept`
-hooks, which the runtime calls: from `build.run_output_hooks()`, which the
-invocation handles call for every build event and, with `until_ended`, before
-they close the execution log (whose close blocks until the client exits, and
-would leave a held line stalling Bazel), and inside `build.wait()`.
+hooks, and the `BazelTrait.output_frame` hooks draw a feature's own screen. The
+runtime calls both: from `build.run_output_hooks()`, which the invocation
+handles call for every build event and quiet tick and, with `until_ended`,
+before they close the execution log (whose close blocks until the client
+exits, and would leave a held line stalling Bazel), and inside `build.wait()`.
 """
 
 load("@aspect//bazel/console_tips.axl", "CONSOLE_TIP_RULES")
@@ -198,20 +199,24 @@ def start_stages(ctx, trait) -> list:
 def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], curses = None, colour = None):
     """The `bazel.output.processor` for `trait.output_stages` and `extra`
     (the `output_start` hooks' stages, `start_stages`), or None, leaving
-    Bazel's stderr inherited, when there are no stages.
+    Bazel's stderr inherited, when there are no stages and the trait neither
+    hides the console nor draws frames over it.
 
-    What is shown is Bazel's curses UI as `curses`, the user's own
-    `--curses`, says; else as `trait.output_display` does (`curses` or
-    `lines`); else, for `auto`, when the task's stdout and stderr are both
-    terminals, since Bazel decides colour and its live UI for both. Plain
-    lines carry Bazel's status line every few seconds unless
-    `trait.output_progress` is False. Colour shows as
-    `colour`, the user's own `--color`, says; else on a terminal. Bazel itself
-    is asked for curses and colour either way: see `bazel.output.processor`."""
+    Nothing is shown for a `trait.output_display` of `none`: a feature draws
+    the screen itself. Otherwise what is shown is Bazel's curses UI as
+    `curses`, the user's own `--curses`, says; else as `trait.output_display`
+    does (`curses` or `lines`); else, for `auto`, when the task's stdout and
+    stderr are both terminals, since Bazel decides colour and its live UI for
+    both. Plain lines carry Bazel's status line every few seconds unless
+    `trait.output_progress` is False. Colour shows as `colour`, the user's own
+    `--color`, says; else on a terminal. Bazel itself is asked for curses and
+    colour either way: see `bazel.output.processor`."""
     stages = list(trait.output_stages) + list(extra)
-    if not stages:
+    if not stages and trait.output_display != "none" and not trait.output_frame:
         return None
-    if curses != None:
+    if trait.output_display == "none":
+        display = "none"
+    elif curses != None:
         display = "curses" if curses else "lines"
     elif trait.output_display != "auto":
         display = trait.output_display

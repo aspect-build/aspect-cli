@@ -53,10 +53,12 @@
 //! kills with `SIGPIPE`, and turn a console nobody reads into a failed build.
 
 use std::io::{ErrorKind, Read, Write};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::ansi;
+use super::feed::Feed;
 use super::line::{Classifier, Line};
 use super::log::RawLog;
 use super::render::{Row, Screen};
@@ -154,10 +156,15 @@ impl Forwarder {
         let handle = thread::Builder::new()
             .name("bazel-console".into())
             .spawn(move || {
+                let screen = shape.lines.map(|every| match &shape.feed {
+                    Some(feed) => Screen::new(every).with_feed(feed.clone()),
+                    None => Screen::new(every),
+                });
                 let mut splitter = Splitter::new(
                     processors,
-                    Destination::new(forward, shape.strip_colour),
-                    shape.lines.map(Screen::new),
+                    Destination::new(forward, shape.strip_colour)
+                        .feeding(shape.feed.clone(), shape.hidden),
+                    screen,
                 );
                 let mut buf = [0u8; READ_BUF_SIZE];
                 let result = loop {
@@ -180,6 +187,9 @@ impl Forwarder {
                     splitter.feed(&buf[..n]);
                 };
                 splitter.finish();
+                if let Some(feed) = &shape.feed {
+                    feed.finish();
+                }
                 state.done();
                 result
             })?;
@@ -187,6 +197,12 @@ impl Forwarder {
             handle: Some(handle),
             activity,
         })
+    }
+
+    /// Whether the thread is done: the console has ended and everything it
+    /// held is written.
+    pub fn finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(|h| h.is_finished())
     }
 
     /// Millis the thread has been waiting for bazel to write, 0 while it is
@@ -477,7 +493,7 @@ impl Splitter {
 }
 
 /// What the forwarder does to what the stages pass, before it is written.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Shape {
     /// Leave colour out: for a destination that renders none, or a user who
     /// asked for none.
@@ -485,6 +501,11 @@ pub struct Shape {
     /// Render Bazel's curses output as plain lines ([`Screen`]), with its
     /// status line at most every so often when `Some(Some(_))`.
     pub lines: Option<Option<std::time::Duration>>,
+    /// Also hand what is written, and each progress area the rendering
+    /// erases, to this [`Feed`].
+    pub feed: Option<Arc<Feed>>,
+    /// Write nothing to the destination: what is shown goes to `feed` only.
+    pub hidden: bool,
 }
 
 /// The destination. A write that would block (stderr left nonblocking by
@@ -493,6 +514,8 @@ pub struct Shape {
 struct Destination {
     inner: Box<dyn Write + Send>,
     strip_colour: bool,
+    feed: Option<Arc<Feed>>,
+    hidden: bool,
     /// Whether the last text written (escapes aside) ended a line.
     at_line_start: bool,
     failed: bool,
@@ -503,14 +526,29 @@ impl Destination {
         Self {
             inner,
             strip_colour,
+            feed: None,
+            hidden: false,
             at_line_start: true,
             failed: false,
         }
     }
 
+    /// Also write to `feed`, and with `hidden` only there.
+    fn feeding(mut self, feed: Option<Arc<Feed>>, hidden: bool) -> Self {
+        self.feed = feed;
+        self.hidden = hidden;
+        self
+    }
+
     fn write(&mut self, bytes: &[u8]) {
         if let Some(&last) = ansi::strip(bytes).last() {
             self.at_line_start = last == b'\n' || last == b'\r';
+        }
+        if let Some(feed) = &self.feed {
+            feed.write(bytes);
+        }
+        if self.hidden {
+            return;
         }
         let stripped = ansi::without(bytes, self.strip_colour, false);
         let mut bytes = &stripped[..];
@@ -707,12 +745,37 @@ mod tests {
             None,
             Shape {
                 strip_colour: true,
-                lines: None,
+                ..Shape::default()
             },
         )
         .unwrap();
         forwarder.join().unwrap();
         assert_eq!(sink.bytes(), b"WARNING: x\ny\n");
+    }
+
+    /// Hidden, nothing reaches the destination and the feed gets the lines.
+    #[test]
+    fn a_hidden_destination_gets_nothing_and_the_feed_every_line() {
+        let sink = SharedSink::default();
+        let feed = Arc::new(Feed::default());
+        let mut forwarder = Forwarder::spawn_logged(
+            Box::new(std::io::Cursor::new(
+                b"\x1b[35mWARNING: \x1b[0mx\ny\n".to_vec(),
+            )),
+            Box::new(sink.clone()),
+            vec![],
+            None,
+            Shape {
+                lines: Some(None),
+                feed: Some(feed.clone()),
+                hidden: true,
+                ..Shape::default()
+            },
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        assert_eq!(sink.bytes(), b"");
+        assert_eq!(feed.drain().lines, vec!["WARNING: x", "y"]);
     }
 
     /// A PTY's `\r\n` goes out with its record in one write, so a line

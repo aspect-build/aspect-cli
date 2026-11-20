@@ -163,7 +163,8 @@ impl<'v> UnpackValue<'v> for OutputProcessor {
 impl<'v> values::StarlarkValue<'v> for OutputProcessor {
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         match attribute {
-            // What is shown: `curses`, Bazel's UI as it drew it, or `lines`.
+            // What is shown: `curses`, Bazel's UI as it drew it, `lines`, or
+            // `none`.
             "display" => Some(
                 heap.alloc_str(DisplayMode::of(&self.config).name())
                     .to_value(),
@@ -314,6 +315,9 @@ pub(crate) struct TraitConsole<'v> {
     /// `output_start`: `fn(ctx)` returning more stages for a build about
     /// to start ([`TraitConsole::started`]).
     pub start: Vec<Value<'v>>,
+    /// `output_frame`: `fn(ctx, build)`, every so often while a build's
+    /// console is open ([`TraitConsole::framed`]).
+    pub frame: Vec<Value<'v>>,
 }
 
 /// The fields that make a trait the console's: `BazelTrait`'s. Others it
@@ -357,6 +361,7 @@ impl<'v> TraitConsole<'v> {
             intercept: list("output_intercept"),
             end: list("output_end"),
             start: list("output_start"),
+            frame: list("output_frame"),
         })
     }
 
@@ -416,6 +421,19 @@ impl<'v> TraitConsole<'v> {
         Ok(())
     }
 
+    /// Call the `frame` hooks with `build`.
+    pub(crate) fn framed(
+        &self,
+        build: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<()> {
+        for hook in &self.frame {
+            eval.eval_function(*hook, &[self.ctx, build], &[])
+                .map_err(starlark::Error::into_anyhow)?;
+        }
+        Ok(())
+    }
+
     /// Call the `end` hooks with `build`.
     pub(crate) fn ended(
         &self,
@@ -437,6 +455,8 @@ const STATUS_EVERY: Duration = Duration::from_secs(5);
 /// what a build without `output =` or a redirect takes from the trait and
 /// the user's flags.
 pub(crate) struct ProcessorSettings {
+    /// What is shown; the user's `--curses` already applied
+    /// ([`DisplayMode::unless_user_chose`]).
     pub display: DisplayMode,
     pub stages: Vec<Stage>,
     /// Ask Bazel for colour; None asks.
@@ -452,7 +472,7 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     let stderr_tty = std::io::stderr().is_terminal();
     let curses_out = match s.display {
         DisplayMode::Curses => true,
-        DisplayMode::Lines => false,
+        DisplayMode::Lines | DisplayMode::None => false,
         DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
     };
     let style = if crate::color::console_supports_color() {
@@ -464,8 +484,13 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     // output for the stages. The output then follows the destination.
     // Where its raw log goes is the build's to say, at its spawn.
     let mut config = Config::new(Mode::Pty, s.stages, style);
-    config.pty = curses_out && stderr_tty;
-    config.output = if curses_out {
+    // Through a PTY wherever stderr is a terminal and curses is shown, or
+    // nothing is: Bazel lists its running actions only on a terminal, and a
+    // feature drawing its own screen wants them.
+    config.pty = (curses_out || s.display == DisplayMode::None) && stderr_tty;
+    config.output = if s.display == DisplayMode::None {
+        Output::Hidden
+    } else if curses_out {
         Output::AsWritten
     } else {
         Output::Lines {
@@ -482,7 +507,7 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
 }
 
 /// What a console processor shows. `Auto` is resolved when the processor is
-/// made, so a processor's own is `Curses` or `Lines`.
+/// made, so a processor's own is `Curses`, `Lines` or `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
     /// `curses` when this process's stdout and stderr are both terminals,
@@ -492,16 +517,19 @@ pub(crate) enum DisplayMode {
     Curses,
     /// Plain lines rendered from it.
     Lines,
+    /// Nothing: a feature draws the screen itself, from `build.output_feed()`.
+    None,
 }
 
 impl DisplayMode {
-    pub(crate) const NAMES: &str = "auto, curses, lines";
+    pub(crate) const NAMES: &str = "auto, curses, lines, none";
 
     pub(crate) fn parse(name: &str) -> anyhow::Result<DisplayMode> {
         Ok(match name {
             "auto" => DisplayMode::Auto,
             "curses" => DisplayMode::Curses,
             "lines" => DisplayMode::Lines,
+            "none" => DisplayMode::None,
             other => anyhow::bail!(
                 "unknown console display {other:?}; expected one of {}",
                 DisplayMode::NAMES
@@ -514,6 +542,7 @@ impl DisplayMode {
             DisplayMode::Auto => "auto",
             DisplayMode::Curses => "curses",
             DisplayMode::Lines => "lines",
+            DisplayMode::None => "none",
         }
     }
 
@@ -522,11 +551,16 @@ impl DisplayMode {
         match config.output {
             Output::AsWritten => DisplayMode::Curses,
             Output::Lines { .. } => DisplayMode::Lines,
+            Output::Hidden => DisplayMode::None,
         }
     }
 
-    /// The user's own `--curses`, when `flags` give one, else `self`.
+    /// The user's own `--curses`, when `flags` give one, else `self`. Not
+    /// for `None`: a feature drawing the screen itself has it.
     pub(crate) fn unless_user_chose(self, flags: &[String]) -> DisplayMode {
+        if self == DisplayMode::None {
+            return self;
+        }
         match user_choice(flags, "curses") {
             Some(true) => DisplayMode::Curses,
             Some(false) => DisplayMode::Lines,
@@ -611,12 +645,15 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///
     /// # Arguments
     /// * `display` - What is shown: `curses`, Bazel's curses UI as it drew
-    ///   it; `lines`, plain lines rendered from it; or `auto` (the default),
-    ///   `curses` when this process's stdout and stderr are both terminals.
-    ///   Pass `curses` or `lines` for the user's `--curses` when they gave
-    ///   one: it is their choice of what they see. Captured through a PTY
-    ///   when curses is shown on a terminal, otherwise a pipe. The
-    ///   processor's own `display` is the resolved `curses` or `lines`.
+    ///   it; `lines`, plain lines rendered from it; `none`, nothing, for a
+    ///   feature that draws the screen itself from `build.output_feed()` (Bazel's
+    ///   stdout, when it shares stderr's terminal, goes only to the feed too); or
+    ///   `auto` (the default), `curses` when this process's stdout and stderr
+    ///   are both terminals. Pass `curses` or `lines` for the user's
+    ///   `--curses` when they gave one: it is their choice of what they see.
+    ///   Captured through a PTY when stderr is a terminal and curses or
+    ///   nothing is shown, otherwise a pipe. The processor's own `display` is
+    ///   the resolved `curses`, `lines` or `none`.
     /// * `stages` - `bazel.output.<stage>(...)` values.
     /// * `colour` - Ask Bazel for colour (`--color=yes` in `flags`). Default
     ///   True; for a build whose stdout is not inherited, pass False and
@@ -933,6 +970,7 @@ BazelTrait = trait(
     output_intercept = attr(list, default = []),
     output_end = attr(list, default = []),
     output_start = attr(list, default = []),
+    output_frame = attr(list, default = []),
 )
 "#;
 
@@ -968,6 +1006,164 @@ BazelTrait = trait(
     return 0"#)
         .expect("run_task");
         assert_eq!(exit, Some(0));
+    }
+
+    /// `display = "none"` shows nothing; the frame hooks see what would have
+    /// been shown through `output_feed()`, and run once more as it ends.
+    #[test]
+    fn a_hidden_console_feeds_its_frame_hooks() {
+        let exit = run_with_trait(
+            "",
+            r#"
+    if bazel.output.processor(display = "none").display != "none": return 1
+    t.output_display = "none"
+    t.output_stages.append(bazel.output.observe({"warn": "^WARNING:"}))
+    seen = {"frames": 0, "lines": [], "ended_after_frames": False}
+    def _frame(ctx, build):
+        seen["frames"] += 1
+        got = build.output_feed()
+        seen["lines"].extend(got["lines"])
+    def _end(ctx, build):
+        seen["ended_after_frames"] = seen["frames"] > 0
+    t.output_frame.append(_frame)
+    t.output_end.append(_end)
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
+    if not build.wait().success: return 2
+    if not seen["ended_after_frames"]: return 3
+    if "WARNING: deprecated flag used" not in seen["lines"]: fail("lines %r" % seen["lines"])
+    if build.output_matches()[:1] != [("warn", "WARNING: deprecated flag used")]: return 5
+    plain = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], stderr = None)
+    if not plain.wait().success: return 6
+    if plain.output_feed() != None: return 7
+    return 0"#,
+        )
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// Frames run alongside an `intercept` stage's held lines, from
+    /// `run_output_hooks` and from `wait()`.
+    #[test]
+    fn frames_run_while_lines_are_held() {
+        let exit = run_with_trait(
+            "",
+            r#"
+    frames = []
+    seen = []
+    def _keep(ctx, line):
+        seen.append(line.id)
+        line.keep()
+    t.output_intercept.append(_keep)
+    t.output_frame.append(lambda ctx, build: frames.append(1))
+    processor = bazel.output.processor(display = "none", stages = [
+        bazel.output.intercept({"secret": "password"}),
+    ])
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
+    build.run_output_hooks()
+    if not frames: return 1
+    if not build.wait().success: return 2
+    if seen != ["secret"]: return 3
+    if len(frames) < 2: return 4
+    return 0"#,
+        )
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// A hidden console is captured even with no stages, so the frame hooks
+    /// still get its feed.
+    #[test]
+    fn a_hidden_console_needs_no_stages() {
+        let exit = run_with_trait(
+            "",
+            r#"
+    lines = []
+    t.output_display = "none"
+    t.output_frame.append(lambda ctx, build: lines.extend(build.output_feed()["lines"]))
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
+    if not build.wait().success: return 1
+    if "WARNING: deprecated flag used" not in lines: fail("lines %r" % lines)
+    return 0"#,
+        )
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// Frames run only while the console is open: none from a call to
+    /// `run_output_hooks` after `wait()`.
+    #[test]
+    fn no_frame_runs_once_the_console_has_ended() {
+        let exit = run_with_trait(
+            "",
+            r#"
+    frames = []
+    t.output_display = "none"
+    t.output_stages.append(bazel.output.observe({"x": "x"}))
+    t.output_frame.append(lambda ctx, build: frames.append(1))
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
+    build.run_output_hooks(until_ended = True)
+    if not build.wait().success: return 1
+    after = len(frames)
+    if after == 0: return 2
+    build.run_output_hooks()
+    build.run_output_hooks(until_ended = True)
+    if len(frames) != after: return 3
+    return 0"#,
+        )
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// A frame hook's error is raised by `wait()`, and no frame runs after it.
+    #[test]
+    fn a_frame_hooks_error_is_raised_by_wait() {
+        let err = run_with_trait(
+            "",
+            r#"
+    calls = []
+    def _boom(ctx, build):
+        calls.append(1)
+        if len(calls) > 1:
+            fail("a frame ran after the first failed")
+        fail("frame boom")
+    t.output_display = "none"
+    t.output_stages.append(bazel.output.observe({"x": "x"}))
+    t.output_frame.append(_boom)
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
+    build.run_output_hooks()
+    build.run_output_hooks()
+    build.wait()
+    return 0"#,
+        )
+        .expect_err("the hook's error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("frame boom") && !msg.contains("after the first"),
+            "{msg}"
+        );
+    }
+
+    /// The user's `--curses` picks what is shown, but not over `none`.
+    #[test]
+    fn the_users_curses_wins_over_all_but_none() {
+        let flags = |f: &str| vec![f.to_string()];
+        use crate::engine::bazel::output::DisplayMode;
+        assert_eq!(
+            DisplayMode::Auto.unless_user_chose(&flags("--curses=yes")),
+            DisplayMode::Curses
+        );
+        assert_eq!(
+            DisplayMode::Curses.unless_user_chose(&flags("--nocurses")),
+            DisplayMode::Lines
+        );
+        assert_eq!(
+            DisplayMode::Lines.unless_user_chose(&[]),
+            DisplayMode::Lines
+        );
+        assert_eq!(
+            DisplayMode::None.unless_user_chose(&flags("--curses=yes")),
+            DisplayMode::None
+        );
     }
 
     #[test]

@@ -9,6 +9,8 @@
 //!   [`Stage`], and [`line`], what they know of a record.
 //! * [`log`]: the raw log a pipeline that changes the console keeps.
 //! * [`render`]: curses output turned into plain lines.
+//! * [`feed`]: what a hidden console would have shown, for a caller drawing
+//!   its own screen.
 //! * [`ansi`]: the escape sequences in a record.
 //!
 //! A caller configures a [`Config`] once and builds a fresh [`Pipeline`] from
@@ -34,7 +36,10 @@
 //! user who asked for it), the stages run on Bazel's records as it wrote
 //! them and leave the rows curses redraws alone. Otherwise the forwarder
 //! renders the console to plain lines first ([`render::Screen`]) and the
-//! stages run on those, with no progress area to step around.
+//! stages run on those, with no progress area to step around. Hidden
+//! ([`Output::Hidden`]), it renders the same way but shows nothing: what
+//! would be shown, and each progress area as Bazel erases it, go to the
+//! pipeline's [`feed::Feed`].
 //!
 //! Inheriting stderr into a file or reading the BEP's progress events would
 //! give a copy of the console. Neither sits between bazel and the terminal,
@@ -49,6 +54,7 @@ use regex::Regex;
 pub mod aggregate;
 pub mod ansi;
 pub mod capture;
+pub mod feed;
 pub mod filters;
 pub mod forward;
 pub mod line;
@@ -87,6 +93,13 @@ pub enum Output {
     /// erased is left out, and so is cursor movement; with `status_every`,
     /// Bazel's status line comes through at most that often.
     Lines { status_every: Option<Duration> },
+    /// Nothing: for a caller that draws the screen itself. A [`Mode::Pty`]
+    /// console is rendered to plain lines as for [`Output::Lines`], and what
+    /// would be shown, with each progress area as Bazel erases it to redraw,
+    /// goes to the pipeline's [`feed::Feed`] instead. The client's stdout,
+    /// when it is a file of its own, is still shown: it is the program's
+    /// output, not the console UI.
+    Hidden,
 }
 
 impl Mode {
@@ -345,9 +358,9 @@ impl Config {
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
-    /// stage can change what is shown.
+    /// stage can change what is shown, or nothing is ([`Output::Hidden`]).
     pub fn keeps_log(&self) -> bool {
-        self.stages().iter().any(|s| s.alters())
+        self.output == Output::Hidden || self.stages().iter().any(|s| s.alters())
     }
 
     /// The bazel flags the capture needs, to go after the user's: whether it
@@ -372,8 +385,11 @@ impl Config {
             strip_colour: self.strip_colour,
             lines: match (self.mode, self.output) {
                 (Mode::Pty, Output::Lines { status_every }) => Some(status_every),
+                (Mode::Pty, Output::Hidden) => Some(None),
                 _ => None,
             },
+            feed: None,
+            hidden: self.output == Output::Hidden,
         }
     }
 
@@ -487,12 +503,16 @@ impl Config {
                 self.links,
             )));
         }
+        let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
+        let mut shape = self.shape();
+        shape.feed = feed.clone();
         Pipeline {
             chain,
             observations,
             events,
             log,
-            shape: self.shape(),
+            shape,
+            feed,
         }
     }
 }
@@ -507,6 +527,9 @@ pub struct Pipeline {
     pub log: Option<log::RawLog>,
     /// [`Config::shape`], for the forwarder.
     pub shape: forward::Shape,
+    /// What is shown, for a caller drawing its own screen: with
+    /// [`Output::Hidden`].
+    pub feed: Option<Arc<feed::Feed>>,
 }
 
 #[cfg(test)]
@@ -549,7 +572,7 @@ mod tests {
             Box::new(sink.clone()),
             chain,
             pipeline.log.take(),
-            pipeline.shape,
+            pipeline.shape.clone(),
         )
         .unwrap();
         forwarder.join().unwrap();
@@ -1335,6 +1358,56 @@ mod tests {
         );
     }
 
+    /// Hidden, a curses console shows nothing, and its feed gets the lines
+    /// and each progress area, through the pipeline and the forwarder.
+    #[test]
+    fn a_hidden_console_feeds_lines_and_progress() {
+        let mut config = Config::new(Mode::Pty, vec![], Style::default());
+        config.output = Output::Hidden;
+        let pipeline = config.pipeline();
+        let feed = pipeline.feed.clone().expect("a hidden console has a feed");
+        let first = "\x1b[32mINFO: \x1b[0mone\r\n\x1b[32m[1 / 3]\x1b[0m 2 actions running\r\n    a.cc; 1s\r\n    b.cc; 2s\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K";
+        let (read, write) = nix::unistd::pipe().unwrap();
+        let mut write = std::fs::File::from(write);
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn_logged(
+            Box::new(std::fs::File::from(read)),
+            Box::new(sink.clone()),
+            pipeline.chain,
+            None,
+            pipeline.shape,
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut write, first.as_bytes()).unwrap();
+        // The area is in the feed while the console is open.
+        let mut lines = vec![];
+        let progress = (0..400)
+            .find_map(|_| {
+                let got = feed.drain();
+                lines.extend(got.lines);
+                if got.progress.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    None
+                } else {
+                    Some(got.progress)
+                }
+            })
+            .unwrap_or_default();
+        std::io::Write::write_all(&mut write, b"\x1b[32mINFO: \x1b[0mtwo\r\n").unwrap();
+        drop(write);
+        forwarder.join().unwrap();
+        assert_eq!(sink.bytes(), b"", "nothing shown");
+        assert_eq!(
+            progress,
+            vec!["[1 / 3] 2 actions running", "    a.cc; 1s", "    b.cc; 2s"]
+        );
+        lines.extend(feed.drain().lines);
+        assert!(
+            lines.contains(&"INFO: one".to_string()) && lines.contains(&"INFO: two".to_string()),
+            "{lines:?}"
+        );
+    }
+
     /// A log is kept only when a stage can change what is shown; one that
     /// cannot be made is said to have failed, and the console still runs.
     #[test]
@@ -1345,6 +1418,12 @@ mod tests {
             Style::default(),
         );
         assert!(!observe.keeps_log());
+        let mut hidden = observe.clone();
+        hidden.output = Output::Hidden;
+        assert!(
+            hidden.keeps_log(),
+            "nothing shown: the log is the only copy"
+        );
         let dir = tempfile::tempdir().unwrap();
         let taken = dir.path().join("console.log");
         std::fs::write(&taken, "an earlier one").unwrap();

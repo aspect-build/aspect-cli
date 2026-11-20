@@ -53,6 +53,11 @@ load("../private/lib/text.axl", "join_url")
 # results heartbeat without a separate sleep loop.
 _TICK_MS = 250
 
+# The cadence instead when the trait has `output_frame` hooks: half the
+# runtime's frame interval (`FRAME_EVERY` in `engine/bazel/build.rs`), so a
+# frame is never more than one tick late.
+_FRAME_TICK_MS = 50
+
 # Immutable, resolved-once config for one high-level bazel run: nothing here is
 # reassigned, and the live invocation + attempt index are threaded as values
 # rather than stored. `ctx` is carried so the `_do_*` verbs need neither a
@@ -258,13 +263,15 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     # One iterator per invocation, fanned out in AXL — an extra runtime iterator
     # would deep-clone the whole stream. `events`: False → none; True → all kinds;
     # a list → those kinds (send-side filtered). A trait build_event hook may want
-    # any kind, so its presence forces all kinds.
+    # any kind, so its presence forces all kinds. `output_frame` hooks need no
+    # iterator: without one, `_do_wait` draws them until the console ends.
+    framed = bool(inv.trait.output_frame) and inv.output_processor != None
     trait_wants = bool(inv.trait.build_event)
     if events == False and not trait_wants:
         iterator = None
     else:
         kinds = None if (trait_wants or events == True) else events
-        iterator = build_events_iterator(kinds = kinds, tick_ms = _TICK_MS)
+        iterator = build_events_iterator(kinds = kinds, tick_ms = _FRAME_TICK_MS if framed else _TICK_MS)
 
     # `[]` would ENABLE BES with no consumer (the runtime treats an empty list as
     # "stream on"); collapse to False so a local build with no sinks/iterator runs
@@ -311,8 +318,9 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     if index == 0:
         announce_bes_results_url(inv.ctx, inv.results_url, handle.sink_invocation_id)
 
-    # Whether the console holds lines for the `output_intercept` hooks.
-    console = bool(inv.output_processor and inv.output_processor.intercepts)
+    # Whether the console has hooks to run while it is open: lines held for
+    # the `output_intercept` hooks, or `output_frame` hooks.
+    console = bool(inv.output_processor and (inv.output_processor.intercepts or framed))
 
     # The run's record in the task history keeps each attempt's page.
     if inv.results_url and handle.sink_invocation_id:
@@ -330,7 +338,8 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     )
 
 def _do_wait(inv: _Invocation, handle, xl: struct, console: bool):
-    """Answer the console's remaining held lines, drain the execution log, block on
+    """Answer the console's remaining held lines (drawing `output_frame` frames
+    meanwhile), drain the execution log, block on
     the attempt (whose `output_end` hooks emit the console's tips), flush BES
     sinks (rebinding a still-Live gRPC sink on the next spawn errors; wait()
     resets it to Idle), then fire `bazel_attempt_end` before the retry decision.
@@ -353,8 +362,9 @@ def _do_wait(inv: _Invocation, handle, xl: struct, console: bool):
 
 def _do_on_event(inv: _Invocation, handle, xl: struct, console: bool, event) -> None:
     """Dispatch one BES event to the trait's `build_event` hooks, and have the
-    runtime run the `output_intercept` hooks on held console lines and the
-    `exec_log_event` hooks on whatever the execution log has written so far.
+    runtime run the `output_intercept` hooks on held console lines, the
+    `output_frame` hooks when a frame is due, and the `exec_log_event` hooks on
+    whatever the execution log has written so far.
 
     All three live here so a task's drain loop stays one call per event. The
     console and the log are pumped before the `event == None` early return,
