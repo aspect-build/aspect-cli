@@ -51,8 +51,8 @@ how the pool is bounded.
 
 The text reports go to stderr, and are styled only when stderr is a terminal
 and `NO_COLOR` is unset or empty (`_color`): headings bold, labels, column
-headers, comments and hints dimmed. Text from outside is escaped before any style is
-added (`_styled`), and the layout reads the same without color.
+headers, comments and hints dimmed. Text from outside is escaped before any
+style is added (`_styled`), and the layout reads the same without color.
 """
 
 load("@std//time.axl", "time")

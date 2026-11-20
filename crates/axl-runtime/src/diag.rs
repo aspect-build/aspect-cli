@@ -10,13 +10,10 @@
 //! a fallback fired). It is **not** the structured/debug channel — that is
 //! `tracing` (and the `ASPECT_DEBUG`-gated ad-hoc logging some subsystems keep).
 //!
-//! Two deliberate differences from the AXL helpers:
-//!   - **Writes to stderr, not stdout.** These are diagnostics about a task's
-//!     machinery; keeping them off stdout avoids interleaving with piped build
-//!     output. Color therefore keys off *stderr's* TTY, matching `banner`.
-//!   - **No `std` handle.** Rust callers have no Starlark `ctx`, so the color
-//!     predicate reads the ambient environment directly (via [`crate::ci`] and
-//!     `IsTerminal`) instead of `std.io.stdout.is_tty`.
+//! Both write to stderr and color by the same rule,
+//! [`crate::color::console_supports_color`], which AXL's `color_enabled`
+//! mirrors. Rust callers have no Starlark `std` handle, so the predicate here
+//! reads the process environment and stderr's TTY directly.
 
 use crate::errln;
 
