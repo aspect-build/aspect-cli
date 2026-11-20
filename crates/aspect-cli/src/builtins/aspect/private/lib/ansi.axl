@@ -25,8 +25,9 @@ _DEFAULT_HIGHLIGHT_COLOR = "1;36"
 def _highlight_style(std, enabled: bool = True) -> str:
     """SGR prefix for a styled highlight label (phase headers, …), or "" when
     color is off. Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR params); unset →
-    bold cyan, empty → no color. Like `style`, the caller gates `enabled` on
-    `color_enabled(std)` (kept out of `ansi` to avoid an env import cycle)."""
+    bold cyan, empty → no color. Like `style`, the caller gates `enabled`:
+    `ctx.console.color` for a console line, else `color_enabled(std)` (kept out
+    of `ansi` to avoid an env import cycle)."""
     if not enabled:
         return ""
     color_arg = std.env.var("ASPECT_CLI_HIGHLIGHT_COLOR")

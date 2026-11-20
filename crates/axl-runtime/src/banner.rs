@@ -36,8 +36,9 @@ pub fn line(version: &str) -> String {
 /// [`line`], with the grey wrapper applied only when `color` is set.
 ///
 /// Call sites that print the banner themselves (rather than handing it to clap,
-/// which strips escapes off a non-terminal) pass the result of
-/// [`crate::color::stdout_supports_color`] so a piped run stays plain text.
+/// which strips escapes off a non-terminal) pass whether their stream takes
+/// color — [`crate::color::stdout_supports_color`] for stdout, the console's
+/// color for the runtime banner — so a piped run stays plain text.
 pub fn line_colored(version: &str, color: bool) -> String {
     let debug = if is_debug_build() {
         " (debug build)"
@@ -52,22 +53,19 @@ pub fn line_colored(version: &str, color: bool) -> String {
     }
 }
 
-/// [`line`] resolving the version from workspace crate metadata. For call
-/// sites that don't have the resolved version handy.
-pub fn line_from_pkg() -> String {
-    line(&cargo_pkg_short_version())
-}
-
-/// The console's `banner` slot context: the built-in [`line_from_pkg`] whole,
-/// and its pieces for a template that lays the line out itself.
-pub fn console_context() -> minijinja::Value {
+/// The console's `banner` slot context: the built-in line whole, and its pieces
+/// for a template that lays the line out itself. `color` is the console's, as
+/// for the header and verdict, so the grey is left out wherever they print
+/// plain.
+pub fn console_context(color: bool) -> minijinja::Value {
+    let (highlight_style, highlight_reset) = if color { (GREY, RESET) } else { ("", "") };
     minijinja::context! {
-        line => line_from_pkg(),
+        line => line_colored(&cargo_pkg_short_version(), color),
         version => cargo_pkg_short_version(),
         debug_build => is_debug_build(),
         docs_url => DOCS_URL,
-        highlight_style => GREY,
-        highlight_reset => RESET,
+        highlight_style => highlight_style,
+        highlight_reset => highlight_reset,
     }
 }
 
@@ -96,6 +94,17 @@ fn show_runtime_banner_from(stderr_is_tty: bool, on_ci: bool, no_banner_set: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_console_context_follows_color() {
+        let plain = console_context(false);
+        assert_eq!(plain.get_attr("highlight_style").unwrap().to_string(), "");
+        assert_eq!(plain.get_attr("highlight_reset").unwrap().to_string(), "");
+        assert!(!plain.get_attr("line").unwrap().to_string().contains('\x1b'));
+        let grey = console_context(true);
+        assert_eq!(grey.get_attr("highlight_style").unwrap().to_string(), GREY);
+        assert!(grey.get_attr("line").unwrap().to_string().starts_with(GREY));
+    }
 
     #[test]
     fn line_renders_grey_version_and_docs_url() {

@@ -38,6 +38,16 @@ check = task(
     args = {"code": args.int(default = 0), "flag": args.boolean(default = False)},
 )
 
+# The same kind in a group, so only the command path tells the two apart.
+grouped_check = task(
+    implementation = _impl,
+    summary = "Exercise the console surface in a group.",
+    group = ["fx"],
+    kind = "check",
+    traits = [Phases],
+    args = {"code": args.int(default = 0), "flag": args.boolean(default = False)},
+)
+
 def _section(ctx):
     buildkite_section(ctx, ":rocket:", "Runner metadata")
     return 0
@@ -192,12 +202,14 @@ fn buildkite_sections_print_under_every_preset() {
 }
 
 #[test]
-fn config_templates_override_the_preset_flat_then_per_task() {
+fn config_templates_override_the_preset_then_task_templates() {
     let output = run(
         r#"ctx.features[Console].args.template_preset = "silent"
 ctx.features[Console].args.templates = {
     "header": "start {{ task.path }}",
     "progress": "· {{ text }}",
+}
+ctx.features[Console].args.task_templates = {
     "check": {"verdict": "{{ verdict }} {{ exit_code }} {{ phases | map(attribute='name') | join(',') }}"},
 }"#,
         &["check", "--code", "3"],
@@ -233,17 +245,34 @@ fn a_cli_preset_beats_the_config_preset() {
     );
 }
 
+/// A preset typed for one run is what the user asked to see, so it beats a
+/// task's `task_presets` entry too.
+#[test]
+fn a_cli_preset_beats_task_presets() {
+    let output = run(
+        r#"ctx.features[Console].args.task_presets = {"check": "silent"}"#,
+        &["check", "--console:template-preset=full"],
+        false,
+    );
+    assert_task_behaviour(&output, "full", 0);
+    assert!(
+        stderr(&output).contains("→ heartbeat progress"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn a_template_that_cannot_compile_fails_before_the_task_runs() {
     let output = run(
-        r#"ctx.features[Console].args.templates = {"check": {"verdict": "{% if %}"}}"#,
+        r#"ctx.features[Console].args.task_templates = {"check": {"verdict": "{% if %}"}}"#,
         &["check"],
         false,
     );
     let err = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(
-        err.contains(r#"templates["check"]["verdict"] does not compile"#),
+        err.contains(r#"task_templates["check"]["verdict"] does not compile"#),
         "{err}"
     );
     assert!(
@@ -255,14 +284,14 @@ fn a_template_that_cannot_compile_fails_before_the_task_runs() {
 #[test]
 fn a_misnamed_slot_is_refused() {
     let output = run(
-        r#"ctx.features[Console].args.templates = {"check": {"verdcit": "x"}}"#,
+        r#"ctx.features[Console].args.task_templates = {"check": {"verdcit": "x"}}"#,
         &["check"],
         false,
     );
     let err = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(
-        err.contains(r#"templates["check"]: "verdcit" is not a slot"#),
+        err.contains(r#"task_templates["check"]: "verdcit" is not a slot"#),
         "{err}"
     );
 }
@@ -270,9 +299,10 @@ fn a_misnamed_slot_is_refused() {
 /// A user-level `config.axl` reaches every repo, so naming a task only some of
 /// them define must not break the others.
 #[test]
-fn a_block_for_a_task_this_repo_lacks_is_ignored() {
+fn an_entry_for_a_task_this_repo_lacks_is_ignored() {
     let output = run(
-        r#"ctx.features[Console].args.templates = {"deploy": {"verdict": "deployed"}}"#,
+        r#"ctx.features[Console].args.task_templates = {"deploy": {"verdict": "deployed"}}
+ctx.features[Console].args.task_presets = {"deploy": "silent"}"#,
         &["check"],
         false,
     );
@@ -353,4 +383,26 @@ fn a_task_owned_buildkite_section_follows_the_preset() {
         assert_eq!(output.status.code(), Some(0), "{err}");
         assert!(err.lines().any(|l| l == title), "{preset}: {err}");
     }
+}
+
+/// `task_presets` picks one task's preset, and a command-path entry tells a
+/// grouped task from a top-level one of the same kind.
+#[test]
+fn task_presets_pick_a_preset_by_kind_or_command_path() {
+    let config = r#"ctx.features[Console].args.templates = {"progress": "everyone"}
+ctx.features[Console].args.task_presets = {"check": "silent", "fx check": "compact"}"#;
+    let top = run(config, &["check"], false);
+    assert_task_behaviour(&top, "silent", 0);
+    assert_eq!(
+        stderr(&top).trim(),
+        "WARNING: task warning",
+        "{}",
+        stderr(&top)
+    );
+
+    let grouped = run(config, &["fx", "check"], false);
+    assert_task_behaviour(&grouped, "compact", 0);
+    let err = stderr(&grouped);
+    assert!(err.contains("→ ✅ Passed fx check task in "), "{err}");
+    assert!(!err.contains("Running"), "{err}");
 }

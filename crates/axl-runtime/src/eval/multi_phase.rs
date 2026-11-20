@@ -1,5 +1,4 @@
 use crate::errln;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -58,11 +57,9 @@ const HIGHLIGHT_COLOR_ENV: &str = "ASPECT_CLI_HIGHLIGHT_COLOR";
 
 /// Return `(verb_color_prefix, reset)` for the "Running" verb on the
 /// task-starting line. `verb_color_prefix` is empty when color is
-/// disabled or `ASPECT_CLI_HIGHLIGHT_COLOR=""`; `reset` is empty when
-/// color is disabled. Color is enabled when stderr is a TTY or we're on
-/// a recognized CI host.
-fn running_verb_color() -> (String, &'static str) {
-    let color = std::io::stderr().is_terminal() || on_recognized_ci();
+/// disabled or `ASPECT_CLI_HIGHLIGHT_COLOR=""`, and `reset` with it, as
+/// for the phase lines. `color` is [`crate::console::Console::color`].
+fn running_verb_color(color: bool) -> (String, &'static str) {
     let highlight = std::env::var(HIGHLIGHT_COLOR_ENV)
         .ok()
         .unwrap_or_else(|| DEFAULT_HIGHLIGHT_COLOR.to_string());
@@ -71,7 +68,7 @@ fn running_verb_color() -> (String, &'static str) {
     } else {
         String::new()
     };
-    let reset = if color { SGR_RESET } else { "" };
+    let reset = if verb_seq.is_empty() { "" } else { SGR_RESET };
     (verb_seq, reset)
 }
 
@@ -763,11 +760,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
-        let (verb_seq, reset) = running_verb_color();
+        let color = console.color();
+        let (verb_seq, reset) = running_verb_color(color);
         let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
-            console.emit(Slot::Banner, banner::console_context());
+            console.emit(Slot::Banner, banner::console_context(color));
         }
         console.emit(
             Slot::Header,
@@ -916,7 +914,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         // The header printed before the features ran; only the verdict is
         // rendered here, in colors matching the header's.
-        let color = std::io::stderr().is_terminal() || on_recognized_ci();
+        let color = console.color();
         let sgr = |params: &str| {
             if color {
                 format!("\x1b[{}m", params)
@@ -1160,8 +1158,8 @@ struct Verdict<'a> {
     /// The space keeps the line aligned across verdicts.
     glyph: &'a str,
     verb: &'a str,
-    /// ANSI color prefix (e.g. `bold_green`). Empty when `color` is
-    /// off (`!is_terminal() && !on_ci`). Paired with `reset` at the
+    /// ANSI color prefix (e.g. `bold_green`). Empty when the console's
+    /// [`crate::console::Console::color`] is off. Paired with `reset` at the
     /// call site.
     color: &'a str,
 }

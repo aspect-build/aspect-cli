@@ -22,7 +22,8 @@ use super::template::json_to_minijinja;
 /// Resolve the surface for `task` from the `Console` feature's merged `args`.
 ///
 /// A disabled feature gives the `full` layout. Fails on a malformed
-/// `templates` value and on everything [`Surface::resolve`] refuses.
+/// `templates`, `task_presets` or `task_templates` value and on everything
+/// [`Surface::resolve`] refuses.
 pub fn from_feature_args(args: &Arguments<'_>, task: TaskIdentity) -> Result<Surface, String> {
     if !args
         .get("enabled")
@@ -32,52 +33,125 @@ pub fn from_feature_args(args: &Arguments<'_>, task: TaskIdentity) -> Result<Sur
         return Ok(Surface::builtin(task));
     }
     let preset = args.get("template_preset").and_then(|v| v.unpack_str());
-    // `args.custom` reaches the runtime as `None` until a config sets it.
-    let overrides = match args.get("templates") {
-        Some(v) if !v.is_none() => overrides_from_value(v)?,
-        _ => Overrides::default(),
-    };
+    let mut overrides = Overrides::default();
+    if args.is_explicit_key("template_preset") {
+        overrides.preset_from_cli();
+    }
+    let templates = string_dict(args, "templates")?;
+    blocks_error(&templates)?;
+    for (slot, template) in templates {
+        overrides.set(
+            slot,
+            string_value(template, || format!("templates[{slot:?}]"))?,
+        )?;
+    }
+    for (task_key, name) in string_dict(args, "task_presets")? {
+        overrides.set_preset_for_task(
+            task_key,
+            string_value(name, || format!("task_presets[{task_key:?}]"))?,
+        )?;
+    }
+    for (task_key, block) in string_dict(args, "task_templates")? {
+        let label = format!("task_templates[{task_key:?}]");
+        let block = DictRef::from_value(block).ok_or_else(|| {
+            format!(
+                "Console {label} must be a dict of slot → template, got {}",
+                block.get_type()
+            )
+        })?;
+        for (slot, template) in block.iter() {
+            let slot = slot.unpack_str().ok_or_else(|| {
+                format!(
+                    "Console {label} keys must be slot names, got {}",
+                    slot.get_type()
+                )
+            })?;
+            let template = string_value(template, || format!("{label}[{slot:?}]"))?;
+            overrides.set_for_task(task_key, slot, template)?;
+        }
+    }
     Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task)
 }
 
-/// Narrow a `templates` dict to [`Overrides`]: a string value is a slot's
-/// template, a dict value a task kind's block of them.
-fn overrides_from_value(value: Value<'_>) -> Result<Overrides, String> {
-    let dict = DictRef::from_value(value)
-        .ok_or_else(|| format!("Console templates must be a dict, got {}", value.get_type()))?;
-    let mut overrides = Overrides::default();
-    for (key, entry) in dict.iter() {
-        let key = key.unpack_str().ok_or_else(|| {
-            format!(
-                "Console templates keys must be strings, got {}",
-                key.get_type()
-            )
-        })?;
-        if let Some(template) = entry.unpack_str() {
-            overrides.set(key, template.to_owned())?;
-        } else if Slot::from_name(key).is_some() {
-            return Err(format!(
-                "Console templates[{key:?}] must be a template string, got {}",
-                entry.get_type()
-            ));
-        } else if let Some(block) = DictRef::from_value(entry) {
-            for (slot, template) in block.iter() {
-                let (Some(slot), Some(template)) = (slot.unpack_str(), template.unpack_str())
-                else {
-                    return Err(format!(
-                        "Console templates[{key:?}] must map slot names to template strings"
-                    ));
-                };
-                overrides.set_for_kind(key, slot, template.to_owned())?;
-            }
-        } else {
-            return Err(format!(
-                "Console templates[{key:?}] must be a template string or a dict of them, got {}",
-                entry.get_type()
-            ));
-        }
+/// Refuse the blocks in `templates` (dict values keyed by a task rather than a
+/// slot) with one error spelling out the `task_templates` that replaces them.
+/// Values are elided, and entries sorted by key, as on the CI surfaces.
+fn blocks_error(templates: &[(&str, Value<'_>)]) -> Result<(), String> {
+    let is_block = |(key, value): &&(&str, Value<'_>)| {
+        Slot::from_name(key).is_none() && DictRef::from_value(*value).is_some()
+    };
+    let mut blocks: Vec<_> = templates.iter().filter(is_block).collect();
+    blocks.sort_by_key(|(key, _)| *key);
+    if blocks.is_empty() {
+        return Ok(());
     }
-    Ok(overrides)
+    let elided = |keys: Vec<String>| {
+        keys.iter()
+            .map(|k| format!("{k:?}: ..."))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let slots = Slot::ALL.map(Slot::name).join(", ");
+    let mut lines = vec![format!(
+        "Console templates takes slot keys only ({slots}); a block keyed by a task goes in \
+         `task_templates`, keyed by task. For this config:"
+    )];
+    let mut flat: Vec<String> = templates
+        .iter()
+        .filter(|entry| !is_block(entry))
+        .map(|(key, _)| (*key).to_owned())
+        .collect();
+    flat.sort();
+    if !flat.is_empty() {
+        lines.push(format!("    templates = {{{}}}", elided(flat)));
+    }
+    lines.push("    task_templates = {".to_owned());
+    for (task, block) in blocks {
+        let block = DictRef::from_value(*block).expect("a block is a dict");
+        let mut slots: Vec<String> = block
+            .keys()
+            .map(|slot| {
+                slot.unpack_str()
+                    .map_or_else(|| slot.to_repr(), str::to_owned)
+            })
+            .collect();
+        slots.sort();
+        lines.push(format!("        {task:?}: {{{}}},", elided(slots)));
+    }
+    lines.push("    }".to_owned());
+    Err(lines.join("\n"))
+}
+
+/// The string-keyed entries of the dict arg `name`; none while it is unset,
+/// since `args.custom` reaches the runtime as `None` until a config sets it.
+fn string_dict<'v>(args: &Arguments<'v>, name: &str) -> Result<Vec<(&'v str, Value<'v>)>, String> {
+    let Some(value) = args.get(name).filter(|v| !v.is_none()) else {
+        return Ok(Vec::new());
+    };
+    let dict = DictRef::from_value(value)
+        .ok_or_else(|| format!("Console {name} must be a dict, got {}", value.get_type()))?;
+    dict.iter()
+        .map(|(key, entry)| {
+            let key = key.unpack_str().ok_or_else(|| {
+                format!(
+                    "Console {name} keys must be strings, got {}",
+                    key.get_type()
+                )
+            })?;
+            Ok((key, entry))
+        })
+        .collect()
+}
+
+/// `value` as a string, or an error naming it by `label`.
+fn string_value(value: Value<'_>, label: impl FnOnce() -> String) -> Result<String, String> {
+    value.unpack_str().map(str::to_owned).ok_or_else(|| {
+        format!(
+            "Console {} must be a string, got {}",
+            label(),
+            value.get_type()
+        )
+    })
 }
 
 /// `ctx.console`: the surface resolved for this run.
@@ -97,11 +171,23 @@ starlark_simple_value!(Console);
 
 #[starlark_module]
 fn console_methods(registry: &mut MethodsBuilder) {
-    /// The `Console` feature's selected preset (`full`, `plain`, `compact` or
-    /// `silent`), for task output that should follow it.
+    /// The preset this task renders with (`full`, `plain`, `compact` or
+    /// `silent`): its `task_presets` entry, else the `Console` feature's
+    /// `template_preset`, which wins outright when typed on the command line.
+    /// For task output that should follow it.
     #[starlark(attribute)]
     fn template_preset<'v>(this: Value<'v>) -> anyhow::Result<&'static str> {
         Ok(downcast(this)?.0.preset())
+    }
+
+    /// Whether the console lines carry ANSI color: on an interactive stderr, or
+    /// on GitHub Actions, Buildkite, CircleCI or GitLab CI, whose logs render
+    /// it. The runtime's own lines follow it; AXL that
+    /// renders a slot gates the `highlight_style` it passes on it, as
+    /// `lib/lifecycle.axl` does.
+    #[starlark(attribute)]
+    fn color<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(downcast(this)?.0.color())
     }
 
     /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict` or
@@ -144,54 +230,105 @@ mod tests {
         }
     }
 
-    /// Resolve a surface whose `templates` arg is the snippet's `templates`
-    /// binding, then render `slot` with `text = "x"`.
+    /// Resolve a surface from the snippet's `templates`, `task_presets` and
+    /// `task_templates` bindings (each `None` when unset), then render `slot`
+    /// with `text = "x"`.
     fn render(code: &str, slot: Slot) -> Result<String, String> {
-        crate::test::eval(code).with_value("templates", |templates| {
+        let code = format!(
+            r#"templates = None
+task_presets = None
+task_templates = None
+{code}
+args = {{"templates": templates, "task_presets": task_presets, "task_templates": task_templates}}"#
+        );
+        crate::test::eval(&code).with_value("args", |bound| {
             let args = Arguments::new();
-            args.insert("templates".into(), templates);
+            for (name, value) in DictRef::from_value(bound).unwrap().iter() {
+                args.insert(name.unpack_str().unwrap().into(), value);
+            }
             let surface = from_feature_args(&args, task())?;
             Ok(surface.render(slot, minijinja::context! { text => "x" }))
         })
     }
 
     #[test]
-    fn a_templates_dict_layers_flat_then_per_kind() {
-        let code = r#"templates = {"progress": "flat {{ text }}", "check": {"progress": "check {{ text }}"}}"#;
+    fn templates_then_task_templates() {
+        let code = r#"templates = {"progress": "flat {{ text }}"}
+task_templates = {"check": {"progress": "check {{ text }}"}}"#;
         assert_eq!(render(code, Slot::Progress).unwrap(), "check x");
         let code = r#"templates = {"progress": "flat {{ text }}"}"#;
         assert_eq!(render(code, Slot::Progress).unwrap(), "flat x");
     }
 
     #[test]
-    fn unset_templates_keep_the_preset() {
-        assert_eq!(render("templates = None", Slot::Progress).unwrap(), "→ x");
+    fn a_task_preset_leaves_out_templates() {
+        let code = r#"templates = {"progress": "flat"}
+task_presets = {"check": "silent"}"#;
+        assert_eq!(render(code, Slot::Progress).unwrap(), "");
+        let code = r#"task_presets = {"check": "silent"}
+task_templates = {"check": {"progress": "mine"}}"#;
+        assert_eq!(render(code, Slot::Progress).unwrap(), "mine");
     }
 
     #[test]
-    fn a_malformed_templates_value_is_refused() {
+    fn unset_templates_keep_the_preset() {
+        assert_eq!(render("", Slot::Progress).unwrap(), "→ x");
+    }
+
+    #[test]
+    fn a_malformed_value_is_refused() {
         for (code, expected) in [
             ("templates = [1]", "templates must be a dict, got list"),
-            ("templates = {1: \"x\"}", "keys must be strings, got int"),
+            (
+                "task_presets = [1]",
+                "task_presets must be a dict, got list",
+            ),
+            (
+                "templates = {1: \"x\"}",
+                "templates keys must be strings, got int",
+            ),
             (
                 r#"templates = {"progress": 1}"#,
-                r#"templates["progress"] must be a template string, got int"#,
+                r#"templates["progress"] must be a string, got int"#,
             ),
             (
-                r#"templates = {"verdict": {"check": "x"}}"#,
-                r#"templates["verdict"] must be a template string, got dict"#,
+                r#"templates = {"lint": {"verdict": "v", "header": "h"}, "verdict": "V", "check": {"progress": "x"}}"#,
+                "Console templates takes slot keys only (banner, header, phase, progress, verdict, section); \
+                 a block keyed by a task goes in `task_templates`, keyed by task. For this config:\n    \
+                 templates = {\"verdict\": ...}\n    task_templates = {\n        \
+                 \"check\": {\"progress\": ...},\n        \"lint\": {\"header\": ..., \"verdict\": ...},\n    }",
             ),
             (
-                r#"templates = {"check": 1}"#,
-                r#"templates["check"] must be a template string or a dict of them, got int"#,
+                r#"templates = {"verdict": {"x": "y"}}"#,
+                r#"templates["verdict"] must be a string, got dict"#,
             ),
             (
-                r#"templates = {"check": {"progress": 1}}"#,
-                r#"templates["check"] must map slot names to template strings"#,
+                r#"task_presets = {"verdict": "silent"}"#,
+                r#"task_presets["verdict"] names a slot"#,
             ),
             (
-                r#"templates = {"check": {"verdcit": "x"}}"#,
-                r#"templates["check"]: "verdcit" is not a slot"#,
+                r#"templates = {"verdcit": "x"}"#,
+                r#"templates: "verdcit" is not a slot"#,
+            ),
+            (
+                r#"task_presets = {"check": "loud"}"#,
+                r#"task_presets["check"]: unknown template preset "loud""#,
+            ),
+            (
+                r#"task_presets = {"check": 1}"#,
+                r#"task_presets["check"] must be a string, got int"#,
+            ),
+            (
+                r#"task_templates = {"check": 1}"#,
+                r#"task_templates["check"] must be a dict of slot → template, got int"#,
+            ),
+            (
+                r#"task_templates = {"check": {"progress": 1}}"#,
+                r#"task_templates["check"]["progress"] must be a string, got int"#,
+            ),
+            (
+                r#"task_templates = {"check": {"verdcit": "x"}}"#,
+                r#"task_templates["check"]: "verdcit" is not a slot"#,
             ),
         ] {
             let err = render(code, Slot::Progress).unwrap_err();
@@ -220,11 +357,16 @@ def _impl(ctx):
     line = ctx.console.render("progress", text = "x", title = "Build", emoji = "", highlight_style = "", highlight_reset = "")
     if line != "→ Build · x":
         fail("rendered: " + repr(line))
-    return 0
+    return 1 if ctx.console.color else 0
 
 check = task(implementation = _impl)
 "#;
-        assert_eq!(crate::test::eval(code).run_task(0).unwrap(), Some(0));
+        let color = crate::color::console_supports_color();
+        assert_eq!(
+            crate::test::eval(code).run_task(0).unwrap(),
+            Some(u8::from(color)),
+            "ctx.console.color agrees with the runtime's own lines"
+        );
     }
 
     #[test]

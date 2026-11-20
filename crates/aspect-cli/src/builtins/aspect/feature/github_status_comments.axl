@@ -1561,6 +1561,7 @@ def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, o
     return _merge_state(existing_state, head_sha, run_id, workflow_name, my_entries, {})
 
 def _github_status_comments(ctx: FeatureContext):
+    body_template = template_presets.comment_body("GithubStatusComments", ctx.args, _DEFAULT_BODY_TEMPLATE)
     lifecycle = ctx.traits[Phases]
 
     # GHSC publishes the check-run URL via `checkrun.set_url`;
@@ -1611,11 +1612,6 @@ def _github_status_comments(ctx: FeatureContext):
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
     coordinate = ctx.args.coordinate
 
-    # args.custom(dict, ...) hands None at runtime, not the declared default.
-    templates = ctx.args.templates or {}
-    body_template = (templates.get("body") or
-                     template_presets.templates(ctx.args.template_preset).get("body") or
-                     _DEFAULT_BODY_TEMPLATE)
     status_badges = dict(_DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 

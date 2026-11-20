@@ -19,9 +19,6 @@
 //!     `IsTerminal`) instead of `std.io.stdout.is_tty`.
 
 use crate::errln;
-use std::io::IsTerminal;
-
-use crate::ci::on_recognized_ci;
 
 /// Severity of a diagnostic line, carrying its label and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,11 +69,10 @@ fn format_line(sev: Severity, colorize: bool, msg: &str) -> String {
     }
 }
 
-/// Whether to emit ANSI color, using the same predicate as the rest of the CLI:
-/// an interactive stderr, or a recognized CI host (whose log viewers render
-/// ANSI despite a non-TTY pipe).
+/// Whether to emit ANSI color: [`crate::color::console_supports_color`], the
+/// check every line the runtime prints to stderr uses.
 fn colorize() -> bool {
-    std::io::stderr().is_terminal() || on_recognized_ci()
+    crate::color::console_supports_color()
 }
 
 /// Print one severity-prefixed line to stderr, colorized per [`colorize`].

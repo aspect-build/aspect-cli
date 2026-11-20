@@ -8,13 +8,18 @@
 //! and stdout never pass through here.
 //!
 //! The `Console` feature (`feature/console.axl`) selects the templates the same
-//! way the CI status surfaces do: a `template_preset` names a built-in
-//! [`Preset`] and `templates` overrides single slots on top of it, either flat
-//! or inside a per-task-kind block. Layers resolve in order, so a preset never
-//! outranks the config that selected it:
+//! way the CI status surfaces do, through four args: `template_preset` names a
+//! built-in [`Preset`], `templates` overrides single slots on top of it for
+//! every task, and `task_presets` and `task_templates` do the same for one
+//! task, keyed by task kind (`lint`) or command path (`worktree add`), the
+//! command path winning. A task with its own preset starts from it alone,
+//! without `templates`, unless `template_preset` was typed on the command
+//! line, which applies it to every task. Layers resolve in order, so a preset
+//! never outranks the config that selected it:
 //!
 //! ```text
-//! preset  <  templates flat  <  templates[<task kind>]
+//! task_presets[<task>], else template_preset + templates
+//!   <  task_templates[<task kind>]  <  task_templates[<command path>]
 //! ```
 //!
 //! Two rules keep a template from costing the reader the task's outcome or the
@@ -240,42 +245,65 @@ pub const PRESETS: [&Preset; 4] = [&FULL, &PLAIN, &COMPACT, &SILENT];
 /// The preset a run uses when nothing selects another.
 pub const DEFAULT_PRESET: &str = FULL.name;
 
-/// A `templates` value as the `Console` feature receives it, before it is
-/// narrowed to one task kind.
+/// The `Console` feature's `templates`, `task_presets` and `task_templates`,
+/// before they are narrowed to one task.
 #[derive(Debug, Default, Clone)]
 pub struct Overrides {
-    flat: BTreeMap<Slot, String>,
-    per_kind: BTreeMap<String, BTreeMap<Slot, String>>,
+    templates: BTreeMap<Slot, String>,
+    /// Keyed by a task kind or command path, as is `task_presets`.
+    task_templates: BTreeMap<String, BTreeMap<Slot, String>>,
+    task_presets: BTreeMap<String, String>,
+    /// The feature's preset came from the command line, so it beats
+    /// `task_presets`.
+    preset_from_cli: bool,
 }
 
 impl Overrides {
     /// Override `slot` (a slot name) for every task.
     pub fn set(&mut self, slot: &str, template: String) -> Result<(), String> {
         let slot = Slot::parse(slot, "templates")?;
-        self.flat.insert(slot, template);
+        self.templates.insert(slot, template);
         Ok(())
     }
 
-    /// Override `slot` (a slot name) for tasks of `kind` only.
-    pub fn set_for_kind(&mut self, kind: &str, slot: &str, template: String) -> Result<(), String> {
-        let slot = Slot::parse(slot, &format!("templates[{kind:?}]"))?;
-        self.per_kind
-            .entry(kind.to_owned())
+    /// Override `slot` (a slot name) for the tasks `task` names: a task kind
+    /// (`lint`) or a command path (`worktree add`).
+    pub fn set_for_task(&mut self, task: &str, slot: &str, template: String) -> Result<(), String> {
+        let label = format!("task_templates[{task:?}]");
+        task_key(task, &label)?;
+        let slot = Slot::parse(slot, &label)?;
+        self.task_templates
+            .entry(task.to_owned())
             .or_default()
             .insert(slot, template);
         Ok(())
     }
 
-    /// Every override with the `templates[…]` path naming it.
+    /// Start the tasks `task` names from the preset `name`, in place of the
+    /// feature's preset and `templates`. The name is checked when the console
+    /// is resolved.
+    pub fn set_preset_for_task(&mut self, task: &str, name: String) -> Result<(), String> {
+        task_key(task, &format!("task_presets[{task:?}]"))?;
+        self.task_presets.insert(task.to_owned(), name);
+        Ok(())
+    }
+
+    /// Apply the feature's preset to every task, over `task_presets`: it was
+    /// typed on the command line.
+    pub fn preset_from_cli(&mut self) {
+        self.preset_from_cli = true;
+    }
+
+    /// Every override with the arg path naming it.
     fn iter(&self) -> impl Iterator<Item = (String, &str)> {
         let flat = self
-            .flat
+            .templates
             .iter()
             .map(|(slot, t)| (format!("templates[{:?}]", slot.name()), t.as_str()));
-        let scoped = self.per_kind.iter().flat_map(|(kind, block)| {
+        let scoped = self.task_templates.iter().flat_map(|(task, block)| {
             block.iter().map(move |(slot, t)| {
                 (
-                    format!("templates[{kind:?}][{:?}]", slot.name()),
+                    format!("task_templates[{task:?}][{:?}]", slot.name()),
                     t.as_str(),
                 )
             })
@@ -283,13 +311,32 @@ impl Overrides {
         flat.chain(scoped)
     }
 
-    /// The flat overrides with `kind`'s block layered over them.
-    fn for_kind(&self, kind: &str) -> BTreeMap<Slot, String> {
-        let mut resolved = self.flat.clone();
-        if let Some(block) = self.per_kind.get(kind) {
-            resolved.extend(block.iter().map(|(slot, t)| (*slot, t.clone())));
+    /// `task`'s own preset, if any, and the overrides it renders with:
+    /// `templates` unless it has its own preset, then its kind's
+    /// `task_templates`, then its command path's.
+    fn for_task(&self, task: &TaskIdentity) -> (Option<&str>, BTreeMap<Slot, String>) {
+        let preset = self.preset_for(task);
+        let mut resolved = match preset {
+            Some(_) => BTreeMap::new(),
+            None => self.templates.clone(),
+        };
+        for key in task.scope_keys() {
+            if let Some(block) = self.task_templates.get(key) {
+                resolved.extend(block.iter().map(|(slot, t)| (*slot, t.clone())));
+            }
         }
-        resolved
+        (preset, resolved)
+    }
+
+    /// `task`'s `task_presets` entry, the command path's over the kind's.
+    fn preset_for(&self, task: &TaskIdentity) -> Option<&str> {
+        if self.preset_from_cli {
+            return None;
+        }
+        task.scope_keys()
+            .rev()
+            .find_map(|key| self.task_presets.get(key))
+            .map(String::as_str)
     }
 }
 
@@ -303,12 +350,24 @@ pub struct TaskIdentity {
     pub path: String,
 }
 
+impl TaskIdentity {
+    /// The keys `task_presets` and `task_templates` name this task by, least
+    /// specific first: its kind, then its command path when that differs.
+    fn scope_keys(&self) -> impl DoubleEndedIterator<Item = &str> {
+        let path = (self.path != self.kind).then_some(self.path.as_str());
+        std::iter::once(self.kind.as_str()).chain(path)
+    }
+}
+
 /// The resolved surface for one task run.
 #[derive(Debug)]
 pub struct Console {
     preset: &'static Preset,
     overrides: BTreeMap<Slot, String>,
     buildkite: bool,
+    /// [`crate::color::console_supports_color`], resolved once so every slot,
+    /// whether the runtime or AXL renders it, agrees on color.
+    color: bool,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
 }
@@ -329,7 +388,7 @@ impl Console {
     /// Resolve `preset_name` plus `overrides` for `task`.
     ///
     /// Fails on an unknown preset or an override that does not compile,
-    /// wherever it is scoped. A block for a kind no task has is compiled but
+    /// wherever it is scoped. An entry for a task this repo lacks is checked but
     /// otherwise inert, as on the CI surfaces: a user-level `config.axl` applies
     /// to every repo, and only some of them define that task.
     pub fn resolve(
@@ -337,21 +396,17 @@ impl Console {
         overrides: &Overrides,
         task: TaskIdentity,
     ) -> Result<Console, String> {
-        let preset = PRESETS
-            .into_iter()
-            .find(|p| p.name == preset_name)
-            .ok_or_else(|| {
-                format!(
-                    "Console template_preset: unknown preset {preset_name:?}; expected one of {}",
-                    PRESETS.map(|p| p.name).join(", ")
-                )
-            })?;
+        for (key, name) in &overrides.task_presets {
+            preset_named(name, &format!("task_presets[{key:?}]"))?;
+        }
+        let (own_preset, resolved) = overrides.for_task(&task);
+        let preset = preset_named(own_preset.unwrap_or(preset_name), "template_preset")?;
         let env = Environment::new();
         for (at, template) in overrides.iter() {
             env.template_from_str(template)
                 .map_err(|e| format!("Console {at} does not compile: {e}"))?;
         }
-        Ok(Console::new(preset, overrides.for_kind(&task.kind), task))
+        Ok(Console::new(preset, resolved, task))
     }
 
     fn new(
@@ -363,6 +418,7 @@ impl Console {
             preset,
             overrides,
             buildkite: std::env::var_os("BUILDKITE").is_some_and(|v| !v.is_empty()),
+            color: crate::color::console_supports_color(),
             task,
             warned: Mutex::new(HashSet::new()),
         }
@@ -375,6 +431,11 @@ impl Console {
 
     pub fn buildkite(&self) -> bool {
         self.buildkite
+    }
+
+    /// Whether the console lines carry ANSI color.
+    pub fn color(&self) -> bool {
+        self.color
     }
 
     /// Render `slot` with `context`, plus the shared `buildkite` and `task`
@@ -449,6 +510,27 @@ impl Console {
         let text = self.render(slot, context);
         crate::errln!("{marker} {text}");
     }
+}
+
+/// Refuse a `task_presets` / `task_templates` key that is a slot name: it would
+/// name no task, so the entry would silently do nothing.
+fn task_key(key: &str, label: &str) -> Result<(), String> {
+    match Slot::from_name(key) {
+        Some(_) => Err(format!(
+            "Console {label} names a slot, not a task; key by task kind or command path"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The built-in preset `name`, or an error naming where it was asked for.
+fn preset_named(name: &str, at: &str) -> Result<&'static Preset, String> {
+    PRESETS.into_iter().find(|p| p.name == name).ok_or_else(|| {
+        format!(
+            "Console {at}: unknown template preset {name:?}; expected one of {}",
+            PRESETS.map(|p| p.name).join(", ")
+        )
+    })
 }
 
 fn render_str(template: &str, context: &JinjaValue) -> Result<String, minijinja::Error> {
@@ -601,15 +683,21 @@ mod tests {
         )
         .unwrap();
         let line =
-            console("full", &o, false).render(Slot::Banner, crate::banner::console_context());
+            console("full", &o, false).render(Slot::Banner, crate::banner::console_context(true));
         assert!(line.starts_with("\x1b[38;5;244maspect "), "{line:?}");
         assert!(
             line.ends_with(" · https://aspect.build/docs/cli\x1b[0m"),
             "{line:?}"
         );
         let full = console("full", &Overrides::default(), false)
-            .render(Slot::Banner, crate::banner::console_context());
-        assert_eq!(full, format!("{}\n", crate::banner::line_from_pkg()));
+            .render(Slot::Banner, crate::banner::console_context(true));
+        assert_eq!(
+            full,
+            format!(
+                "{}\n",
+                crate::banner::line(&aspect_telemetry::cargo_pkg_short_version())
+            )
+        );
     }
 
     #[test]
@@ -716,9 +804,9 @@ mod tests {
         let mut o = Overrides::default();
         o.set("progress", "flat {{ text }}".into()).unwrap();
         o.set("header", "flat {{ task.path }}".into()).unwrap();
-        o.set_for_kind("test", "progress", "test {{ text }}".into())
+        o.set_for_task("test", "progress", "test {{ text }}".into())
             .unwrap();
-        o.set_for_kind("lint", "header", "lint".into()).unwrap();
+        o.set_for_task("lint", "header", "lint".into()).unwrap();
         let c = console("silent", &o, false);
         assert_eq!(c.render(Slot::Progress, text("x")), "test x");
         assert_eq!(c.render(Slot::Header, header()), "flat test");
@@ -726,6 +814,110 @@ mod tests {
             c.render(Slot::Verdict, verdict(true)),
             "",
             "the preset fills the rest"
+        );
+    }
+
+    fn grouped(kind: &str, path: &str) -> TaskIdentity {
+        TaskIdentity {
+            kind: kind.into(),
+            name: kind.into(),
+            path: path.into(),
+            ..Default::default()
+        }
+    }
+
+    fn resolved(preset: &str, o: &Overrides, task: TaskIdentity) -> Console {
+        let mut c = Console::resolve(preset, o, task).unwrap();
+        c.buildkite = false;
+        c
+    }
+
+    #[test]
+    fn a_command_path_entry_beats_its_kind_entry() {
+        let mut o = Overrides::default();
+        o.set_for_task("add", "progress", "kind".into()).unwrap();
+        o.set_for_task("worktree add", "progress", "path".into())
+            .unwrap();
+        let progress = |task| resolved("full", &o, task).render(Slot::Progress, text("x"));
+        assert_eq!(progress(grouped("add", "worktree add")), "path");
+        assert_eq!(progress(grouped("add", "auth add")), "kind");
+        assert_eq!(progress(task()), "→ x");
+    }
+
+    #[test]
+    fn a_task_can_pick_its_own_preset() {
+        let mut o = Overrides::default();
+        o.set_preset_for_task("add", "silent".into()).unwrap();
+        o.set_preset_for_task("worktree add", "compact".into())
+            .unwrap();
+        o.set("progress", "everyone".into()).unwrap();
+        o.set_for_task("add", "header", "mine".into()).unwrap();
+
+        let c = resolved("full", &o, grouped("add", "worktree add"));
+        assert_eq!(
+            c.preset(),
+            "compact",
+            "the command path's preset beats the kind's"
+        );
+        assert_eq!(
+            c.render(Slot::Progress, text("x")),
+            "",
+            "the task's preset leaves out templates"
+        );
+        assert_eq!(
+            c.render(Slot::Header, header()),
+            "mine",
+            "task_templates beat the task's preset"
+        );
+
+        assert_eq!(
+            resolved("full", &o, grouped("add", "auth add")).preset(),
+            "silent"
+        );
+        let other = resolved("full", &o, task());
+        assert_eq!(other.preset(), "full");
+        assert_eq!(other.render(Slot::Progress, text("x")), "everyone");
+    }
+
+    #[test]
+    fn a_command_line_preset_beats_task_presets() {
+        let mut o = Overrides::default();
+        o.set_preset_for_task("check", "silent".into()).unwrap();
+        o.set("progress", "everyone".into()).unwrap();
+        o.preset_from_cli();
+        let c = resolved("full", &o, task());
+        assert_eq!(c.preset(), "full");
+        assert_eq!(c.render(Slot::Progress, text("x")), "everyone");
+    }
+
+    #[test]
+    fn a_slot_name_is_no_task_key() {
+        let err = Overrides::default()
+            .set_preset_for_task("verdict", "silent".into())
+            .unwrap_err();
+        assert!(
+            err.contains(r#"task_presets["verdict"] names a slot"#),
+            "{err}"
+        );
+        let err = Overrides::default()
+            .set_for_task("header", "verdict", "x".into())
+            .unwrap_err();
+        assert!(
+            err.contains(r#"task_templates["header"] names a slot"#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_task_preset_is_refused_for_every_task() {
+        let mut o = Overrides::default();
+        o.set_preset_for_task("lint", "loud".into()).unwrap();
+        let err = Console::resolve("full", &o, task())
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.contains(r#"task_presets["lint"]: unknown template preset "loud""#),
+            "{err}"
         );
     }
 
@@ -762,20 +954,24 @@ mod tests {
         let resolve = |preset: &str, o: &Overrides| {
             Console::resolve(preset, o, task()).map(|_| ()).unwrap_err()
         };
-        assert!(resolve("loud", &Overrides::default()).contains("unknown preset \"loud\""));
+        assert!(
+            resolve("loud", &Overrides::default()).contains("unknown template preset \"loud\"")
+        );
 
         let mut o = Overrides::default();
-        o.set_for_kind("other", "verdict", "{% if %}".into())
+        o.set_for_task("other", "verdict", "{% if %}".into())
             .unwrap();
         assert!(
-            resolve("full", &o).contains(r#"templates["other"]["verdict"] does not compile"#),
+            resolve("full", &o).contains(r#"task_templates["other"]["verdict"] does not compile"#),
             "a block for another task is still checked"
         );
 
         let mut o = Overrides::default();
-        o.set_for_kind("test", "verdict", "{% if %}".into())
+        o.set_for_task("test", "verdict", "{% if %}".into())
             .unwrap();
-        assert!(resolve("full", &o).contains(r#"templates["test"]["verdict"] does not compile"#));
+        assert!(
+            resolve("full", &o).contains(r#"task_templates["test"]["verdict"] does not compile"#)
+        );
 
         let mut o = Overrides::default();
         o.set("phase", "{{ unclosed".into()).unwrap();
@@ -787,10 +983,10 @@ mod tests {
             "{err}"
         );
         let err = Overrides::default()
-            .set_for_kind("lint", "verdcit", "x".into())
+            .set_for_task("lint", "verdcit", "x".into())
             .unwrap_err();
         assert!(
-            err.contains(r#"templates["lint"]: "verdcit" is not a slot"#),
+            err.contains(r#"task_templates["lint"]: "verdcit" is not a slot"#),
             "{err}"
         );
     }

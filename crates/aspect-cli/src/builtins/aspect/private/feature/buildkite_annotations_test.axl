@@ -14,10 +14,11 @@ for each scenario, so a rendering regression shows up as a visible diff:
 
 `aspect dev test-bk-annotation-templates` asserts the two customization
 contracts a config writes against:
-  - `args.templates` — overrides reach the rendered body, "title"/"summary"/
-    "details" are independent, per-task-kind blocks overlay the flat keys,
-    every renderer module exports the templates a config patches, and a broken
-    template degrades to a fallback.
+  - The template args — overrides reach the rendered body, "title"/"summary"/
+    "details" are independent, `template_preset` / `templates` /
+    `task_presets` / `task_templates` layer per task and are validated at
+    load, every renderer module exports the templates a config patches, and a
+    broken template degrades to a fallback.
   - `Phases.status_surface_update` — verdicts resolve, chain, and
     compose across surfaces, and a `remove` no surface can honor downgrades to
     a publish.
@@ -100,6 +101,7 @@ load(
     lint_render_check_output = "render_check_output",
 )
 load("../lib/result_text.axl", "severity_for_status")
+load("../lib/template_presets.axl", "template_presets")
 load(
     "../lib/warming_results.axl",
     WARMING_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
@@ -691,12 +693,12 @@ def _assert_title_overrides(ctx, data, rc):
         fail("title not truncated: %d chars" % len(long_title))
 
 def _assert_resolve_templates():
-    """`resolve_templates` narrows a feature's `args.templates` to the flat
-    dict the renderers take, honoring per-task-kind scoping."""
+    """`resolve_templates` narrows a layer in a preset's scoped shape to the
+    flat dict the renderers take."""
     _eq("empty stays None", resolve_templates({}, "build"), None)
     _eq("None stays None", resolve_templates(None, "build"), None)
 
-    # Flat keys are the pre-scoping shape and must keep applying to every kind.
+    # Flat keys apply to every kind.
     flat = {"summary": "S", "details": "D"}
     for kind in ["build", "test", "lint", "format", "gazelle", "delivery", "warming"]:
         _eq("flat applies to %s" % kind, resolve_templates(flat, kind), {"summary": "S", "details": "D"})
@@ -724,6 +726,169 @@ def _assert_resolve_templates():
     for kind in TEMPLATE_SCOPE_KEYS:
         if renderer_for_kind(kind_for_task(kind)) == None:
             fail("scope key %r has no renderer" % kind)
+
+    _assert_task_args()
+
+def _fake_task(kind, group = []):
+    return struct(kind = kind, group = group)
+
+def _args(template_preset = "default", templates = None, task_presets = None, task_templates = None, preset_from_cli = False):
+    """A per-task surface's template args as `ctx.args` carries them;
+    `preset_from_cli` is what `is_explicit("template_preset")` reports."""
+    return struct(
+        template_preset = template_preset,
+        templates = templates,
+        task_presets = task_presets,
+        task_templates = task_templates,
+        is_explicit = lambda name: preset_from_cli and name == "template_preset",
+    )
+
+def _resolve(task, renderer_kind, **kwargs):
+    return template_presets.resolve(template_presets.config("F", _args(**kwargs)), task, renderer_kind)
+
+def _assert_task_args():
+    """`template_presets.resolve` layers `template_preset`, `templates`,
+    `task_presets` and `task_templates` for one task, and `config_errors`
+    refuses the shapes they don't take."""
+    default = template_presets.templates("default")
+    lint, build = _fake_task("lint"), _fake_task("build")
+    added = _fake_task("add", ["worktree"])
+
+    _eq(
+        "no config is the feature's preset",
+        _resolve(build, "bazel_results"),
+        resolve_templates(None, "build", base = default, renderer_kind = "bazel_results"),
+    )
+    _eq("templates reach every task", _resolve(build, "bazel_results", templates = {"summary": "S"})["summary"], "S")
+
+    # A task's own preset replaces the feature's and leaves `templates` out.
+    _eq("a task's preset alone", _resolve(lint, "lint_results", task_presets = {"lint": "full"}, templates = {"summary": "S"}), None)
+    _eq(
+        "other tasks keep the feature's preset and templates",
+        _resolve(build, "bazel_results", task_presets = {"lint": "full"}, templates = {"summary": "S"}),
+        resolve_templates({"summary": "S"}, "build", base = default, renderer_kind = "bazel_results"),
+    )
+
+    # `task_templates` beat `templates` and any preset; a path beats its kind.
+    _eq(
+        "task templates beat templates",
+        _resolve(lint, "lint_results", template_preset = "full", templates = {"summary": "S", "title": "T"}, task_templates = {"lint": {"summary": "L"}}),
+        {"summary": "L", "title": "T"},
+    )
+    _eq(
+        "task templates beat the task's preset",
+        _resolve(lint, "lint_results", task_presets = {"lint": "full"}, task_templates = {"lint": {"details": "L"}}),
+        {"details": "L"},
+    )
+    by_path = {"add": {"summary": "KIND", "title": "K"}, "worktree add": {"summary": "PATH"}}
+    _eq("a path entry beats its kind's", _resolve(added, "", template_preset = "full", task_templates = by_path), {"summary": "PATH", "title": "K"})
+    _eq("a kind entry alone", _resolve(_fake_task("add", ["other"]), "", template_preset = "full", task_templates = by_path), {"summary": "KIND", "title": "K"})
+    _eq(
+        "a path's preset beats its kind's",
+        _resolve(added, "", task_presets = {"add": "default", "worktree add": "full"}),
+        None,
+    )
+
+    # A preset typed on the command line applies to every task, task_presets included.
+    _eq(
+        "a command-line preset beats task_presets",
+        _resolve(lint, "lint_results", template_preset = "full", preset_from_cli = True, task_presets = {"lint": "default"}, templates = {"summary": "S"}),
+        {"summary": "S"},
+    )
+
+    _eq("valid args pass", template_presets.config_errors("F", _args(
+        templates = {"summary": "S"},
+        task_presets = {"lint": "full", "worktree add": "default"},
+        task_templates = {"lint": {"details": "D"}},
+    )), [])
+    errors = template_presets.config_errors("F", _args(
+        templates = {"sumary": "S", "title": 3, "details": "", "summary": {"x": "y"}},
+        task_presets = {"lint": "loud", "test": 3, "lint_results": "full", "title": "full"},
+        task_templates = {"lint": "D", "build": {"detail": "D"}, "format_results": {"details": "D"}, "test": {"summary": ""}},
+    ))
+    for want in [
+        """F templates["details"] is empty, which yields the built-in it meant to replace. Use a comment-only template such as `{# blank #}`.""",
+        """F templates["summary"] must be a Jinja2 string, got {"x": "y"}""",
+        """F task_presets["title"] names a slot, not a task""",
+        """F task_templates["test"]["summary"] is empty""",
+        """F templates: "sumary" is not a slot""",
+        """F templates["title"] must be a Jinja2 string, got 3""",
+        'F task_presets["lint"]: unknown template preset "loud"',
+        """F task_presets["lint_results"] names a renderer""",
+        """F task_presets["test"]: unknown template preset 3""",
+        """F task_templates["build"]: "detail" is not a slot""",
+        """F task_templates["format_results"] names a renderer""",
+        'F task_templates["lint"] must be a dict of slot → template, got "D"',
+    ]:
+        if not [e for e in errors if want in e]:
+            fail("no error contains %r in:\n  %s" % (want, "\n  ".join(errors)))
+    _eq("twelve problems", len(errors), 12)
+
+    # Blocks in `templates` get one error spelling out their `task_templates`:
+    # a renderer block reaches each built-in kind it draws, and a task's own
+    # block overlays it.
+    errors = template_presets.config_errors("F", _args(templates = {
+        "summary": "S",
+        "bazel_results": {"details": "D"},
+        "test": {"title": "T"},
+        "worktree add": {"summary": "W"},
+    }))
+    _eq("one error for every block", len(errors), 1)
+    for want in [
+        "F templates takes slot keys only (details, summary, title)",
+        '    templates = {"summary": ...}',
+        '        "build": {"details": ...},  # details from templates["bazel_results"]',
+        '        "test": {"details": ..., "title": ...},  # details from templates["bazel_results"]',
+        '        "worktree add": {"summary": ...},\n',
+        "A renderer block also reached aliases and custom tasks",
+    ]:
+        _contains("rewrite " + repr(want), errors[0], want)
+
+    # A title can't be blanked, so its empty-value error doesn't offer `{# blank #}`.
+    errors = template_presets.config_errors("F", _args(templates = {"title": ""}))
+    _eq("blank title", errors, ['F templates["title"] is empty; a title can\'t be blank, so leave the key out to keep the built-in'])
+
+    # A config can assign any value to an `args.custom(dict)` arg.
+    errors = template_presets.config_errors("F", _args(templates = "", task_presets = ["check"], task_templates = "x"))
+    _eq("non-dict dict args", errors, [
+        'F templates must be a dict, got ""',
+        'F task_presets must be a dict, got ["check"]',
+        'F task_templates must be a dict, got "x"',
+    ])
+    _contains("a falsy comment templates", template_presets.comment_errors("C", [])[0], "C templates must be a dict, got []")
+
+    # Rewrite entries sort as Console sorts them: plain string order.
+    rewrite = template_presets.config_errors("F", _args(templates = {"lint fix": {"title": "T"}, "lint": {"title": "T"}}))[0]
+    _eq("plain key order", rewrite.index('"lint": ') < rewrite.index('"lint fix": '), True)
+
+    # A block with a non-string key still gets its rewrite.
+    _contains("mixed-type block", template_presets.config_errors("F", _args(templates = {"lint": {1: "x", "details": "y"}}))[0], '"lint": {"details": ..., 1: ...},')
+
+    # A dict under `body` is a bad slot, not a task to rewrite.
+    _eq("body is no block", [e for e in template_presets.config_errors("F", _args(templates = {"body": {"details": "D"}})) if "task_templates" in e], [])
+
+    # A renderer key's hint names that renderer's kinds; `body` is a slot too.
+    errors = template_presets.config_errors("F", _args(task_templates = {"lint_results": {"details": "D"}, "body": {"title": "T"}}))
+    _eq("renderer and body keys", errors, [
+        'F task_templates["body"] names a slot, not a task; key by task kind or command path',
+        'F task_templates["lint_results"] names a renderer; key by task kind or command path, e.g. "lint" for "lint_results"',
+    ])
+
+    # The comment surfaces take a non-empty `body` and nothing else.
+    _eq("a body passes", template_presets.comment_errors("C", {"body": "B"}), [])
+    errors = template_presets.comment_errors("C", {"body": "", "summary": "S", "lint": {"body": "B"}})
+    _eq("three comment problems", len(errors), 3)
+    _contains("empty body", errors[0], 'C templates["body"] is empty')
+    _contains("per-task block", errors[1], 'C templates: "lint" is not a slot; the only one is "body", and one comment covers every task')
+    _contains("other slot", errors[2], 'C templates: "summary" is not a slot; the only one is "body"')
+    _eq(
+        "the body falls back to the preset's, then the built-in",
+        template_presets.comment_body("C", struct(templates = None, template_preset = "full"), "BUILT-IN"),
+        "BUILT-IN",
+    )
+
+    _eq("a dict under a slot name is no block", [e for e in template_presets.config_errors("F", _args(templates = {"summary": {"x": "y"}})) if "task_templates" in e], [])
+    _eq("a task block alone needs no renderer caveat", "renderer block" in template_presets.config_errors("F", _args(templates = {"lint": {"details": "D"}}))[0], False)
 
 bk_annotation_template_tests = task(
     summary = "Run the bk annotation template customization AXL unit tests.",
