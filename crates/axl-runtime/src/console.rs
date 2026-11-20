@@ -433,6 +433,8 @@ pub struct Console {
     host: Host,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
+    /// Config warnings, printed under the header; see [`Console::warnings`].
+    warnings: Vec<String>,
 }
 
 impl std::fmt::Debug for Preset {
@@ -453,8 +455,8 @@ impl Console {
     /// Fails on an unknown preset or an override that does not compile,
     /// wherever it is scoped. An entry for a task this repo lacks is checked but
     /// otherwise inert, as on the CI surfaces: a user-level `config.axl` applies
-    /// to every repo, and only some of them define that task. A near miss of a
-    /// task here is warned about by [`Overrides::near_miss_warnings`].
+    /// to every repo, and only some of them define that task; see
+    /// [`Overrides::near_miss_warnings`] for the one exception.
     pub fn resolve(
         preset_name: &str,
         overrides: &Overrides,
@@ -486,7 +488,23 @@ impl Console {
             host,
             task,
             warned: Mutex::new(HashSet::new()),
+            warnings: Vec::new(),
         }
+    }
+
+    /// This console with `warnings` about its config, such as
+    /// [`Overrides::near_miss_warnings`], to print under the header.
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Console {
+        self.warnings = warnings;
+        self
+    }
+
+    /// Warnings about the config this console was resolved from. They print
+    /// under the header rather than when the console resolves, so on
+    /// Buildkite they land in the task's log section with the feature
+    /// warnings rather than in whatever section came before it.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Name of the selected preset.

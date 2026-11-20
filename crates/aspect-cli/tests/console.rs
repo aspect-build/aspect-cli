@@ -48,6 +48,8 @@ grouped_check = task(
     args = {"code": args.int(default = 0), "flag": args.boolean(default = False)},
 )
 
+strict_check = check.alias(defaults = {"flag": True}, summary = "Check, warning on a flag.")
+
 def _section(ctx):
     buildkite_section(ctx, ":rocket:", "Runner metadata")
     return 0
@@ -314,12 +316,13 @@ ctx.features[Console].args.task_presets = {"deploy": "silent"}"#,
 }
 
 /// A key a slip away from a task here is most likely a typo, so it is named
-/// once, whichever args carry it, on `Console` and on a CI surface alike.
+/// once, whichever args carry it, on `Console` and on a CI surface alike, and
+/// under the header, so on Buildkite it lands in the task's section.
 #[test]
 fn a_near_miss_task_key_is_warned_about_once() {
     let output = run(
         r#"ctx.features[Console].args.task_templates = {"chek": {"verdict": "x"}, "fx chek": {"verdict": "y"}}
-ctx.features[Console].args.task_presets = {"chek": "silent"}
+ctx.features[Console].args.task_presets = {"chek": "silent", "strict-chek": "silent"}
 ctx.features[BuildkiteAnnotations].args.enabled = True
 ctx.features[BuildkiteAnnotations].args.task_presets = {"fx chekc": "full"}"#,
         &["check"],
@@ -327,12 +330,17 @@ ctx.features[BuildkiteAnnotations].args.task_presets = {"fx chekc": "full"}"#,
     );
     assert_task_behaviour(&output, "full", 0);
     let err = stderr(&output);
+    let header = err
+        .find("Running check")
+        .unwrap_or_else(|| panic!("no header in:\n{err}"));
     for warning in [
         r#"Console task_presets["chek"] and task_templates["chek"] name no task here; did you mean "check"?"#,
         r#"Console task_templates["fx chek"] names no task here; did you mean "fx check"?"#,
+        r#"Console task_presets["strict-chek"] names no task here; did you mean "strict-check"?"#,
         r#"BuildkiteAnnotations task_presets["fx chekc"] names no task here; did you mean "fx check"?"#,
     ] {
         assert_eq!(err.matches(warning).count(), 1, "{warning}\n{err}");
+        assert!(err.find(warning) > Some(header), "{warning}\n{err}");
     }
 }
 

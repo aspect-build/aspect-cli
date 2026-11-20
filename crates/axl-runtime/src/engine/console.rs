@@ -24,9 +24,9 @@ use super::template::json_to_minijinja;
 ///
 /// A disabled feature gives the `full` layout. Fails on a malformed
 /// `templates`, `task_presets` or `task_templates` value and on everything
-/// [`Surface::resolve`] refuses. Warns about each `task_presets` /
-/// `task_templates` key that is a near miss of one of `task_paths`, the
-/// command paths of the repo's tasks.
+/// [`Surface::resolve`] refuses. The surface carries a warning for each
+/// `task_presets` / `task_templates` key that is a near miss of one of
+/// `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
     args: &Arguments<'_>,
     task: TaskIdentity,
@@ -78,11 +78,10 @@ pub fn from_feature_args(
             overrides.set_for_task(task_key, slot, template)?;
         }
     }
-    let surface = Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)?;
-    for warning in overrides.near_miss_warnings(task_paths) {
-        crate::diag::warn(&warning);
-    }
-    Ok(surface)
+    Ok(
+        Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)?
+            .with_warnings(overrides.near_miss_warnings(task_paths)),
+    )
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -348,6 +347,27 @@ task_templates = {"check": {"progress": "mine"}}"#;
         });
         let surface = from_feature_args(&Arguments::new(), task(), Host::default(), &[]).unwrap();
         assert_eq!(surface.preset(), DEFAULT_PRESET);
+    }
+
+    #[test]
+    fn the_surface_carries_near_miss_warnings() {
+        crate::test::eval(r#"task_presets = {"chek": "silent", "release-notes": "silent"}"#)
+            .with_value("task_presets", |task_presets| {
+                let args = Arguments::new();
+                args.insert("task_presets".into(), task_presets);
+                let paths = ["check".to_owned()];
+                let surface = from_feature_args(&args, task(), Host::default(), &paths).unwrap();
+                assert_eq!(
+                    surface.warnings(),
+                    [r#"Console task_presets["chek"] names no task here; did you mean "check"?"#]
+                );
+                assert!(
+                    from_feature_args(&args, task(), Host::default(), &[])
+                        .unwrap()
+                        .warnings()
+                        .is_empty()
+                );
+            });
     }
 
     #[test]

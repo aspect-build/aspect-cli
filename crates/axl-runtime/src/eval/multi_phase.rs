@@ -763,7 +763,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     }
 
     /// Print the banner and the task's opening `header` slot through
-    /// `console`, for the task at `task_index` in `self.tasks()`.
+    /// `console`, for the task at `task_index` in `self.tasks()`, then the
+    /// console's own config warnings ([`Console::warnings`]).
     ///
     /// Called from the CLI before `execute_features_with_args` so that any
     /// diagnostic output emitted during feature initialization (auth WARNINGs,
@@ -791,6 +792,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             Slot::Header,
             minijinja::context! { label => label, highlight_style => verb_seq, highlight_reset => reset },
         );
+        for warning in console.warnings() {
+            crate::diag::warn(warning);
+        }
         Ok(())
     }
 
