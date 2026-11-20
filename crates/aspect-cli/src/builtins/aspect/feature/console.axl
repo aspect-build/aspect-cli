@@ -26,13 +26,14 @@ Or for one run: `aspect test --console:template-preset=compact //...`.
 Under a coding agent (any of the environment variables `lib/agent.axl` reads,
 such as `CLAUDECODE`, `CODEX_THREAD_ID` or `AI_AGENT`) the default is `agent`
 rather than `full`. Setting `template_preset` on the command line or in any
-`config.axl`, even to `full`, keeps that default out of it.
+`config.axl`, even to `full`, turns that off.
 
 The preset also decides whether `INFO:` lines print: `full` and `plain` show
 them, `compact`, `agent` and `silent` hide them. `info_lines` forces them on
 or off whatever the preset. `WARNING:` and `ERROR:` lines always print, as
-do the `announce_bazel_*` disclosures, which have their own flags, and the
-`aspect worktree` report.
+do a task's own exit message (`TaskConclusion(message = ...)`,
+`ctx.std.process.exit`), the `announce_bazel_*` disclosures, which have their
+own flags, and the `aspect worktree` report.
 
 The runtime does the rendering, so this feature's implementation is empty: the
 runtime reads these args after `config.axl` runs and before the header prints.

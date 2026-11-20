@@ -59,6 +59,11 @@ def _section(ctx):
     return 0
 
 section = task(implementation = _section, summary = "Open a task-owned Buildkite section.")
+
+def _conclude(ctx):
+    return TaskConclusion(exit_code = 0, message = "nothing to do")
+
+conclude = task(implementation = _conclude, summary = "End with an exit message.")
 "#;
 
 /// Writes every lifecycle event to stdout, so a layout that hid one would show.
@@ -539,6 +544,28 @@ fn a_coding_agent_gets_the_agent_layout_unless_a_preset_is_chosen() {
     assert_task_behaviour(&per_task, "compact", 0);
 }
 
+/// A user-level `~/.aspect/config.axl` that sets `template_preset` keeps
+/// detection out as a repository's does.
+#[test]
+fn a_user_level_preset_beats_coding_agent_detection() {
+    let home = tempfile::tempdir().expect("temp home");
+    let aspect = home.path().join(".aspect");
+    std::fs::create_dir(&aspect).expect("~/.aspect");
+    std::fs::write(
+        aspect.join("config.axl"),
+        "load(\"@aspect//feature/console.axl\", \"Console\")\n\ndef config(ctx):\n    ctx.features[Console].args.template_preset = \"full\"\n",
+    )
+    .expect("~/.aspect/config.axl");
+    let home = home.path().to_str().expect("utf-8 home");
+    let output = run_with_env(
+        "",
+        &["check"],
+        false,
+        &[("CLAUDECODE", "1"), ("HOME", home)],
+    );
+    assert_task_behaviour(&output, "full", 0);
+}
+
 #[test]
 fn info_lines_overrides_the_preset() {
     let shown = |config: &str, args: &[&str]| {
@@ -558,4 +585,16 @@ fn info_lines_overrides_the_preset() {
     let hidden = "ctx.features[Console].args.info_lines = False";
     assert!(!shown(hidden, &["check"]));
     assert!(shown(hidden, &["check", "--console:info-lines=true"]));
+}
+
+/// A task's exit message is its answer, so no preset hides it.
+#[test]
+fn an_exit_message_prints_under_every_preset() {
+    for preset in ["full", "compact", "agent", "silent"] {
+        let flag = format!("--console:template-preset={preset}");
+        let output = run("", &["conclude", &flag], false);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(0), "{preset}: {err}");
+        assert!(err.contains("INFO: nothing to do"), "{preset}: {err}");
+    }
 }

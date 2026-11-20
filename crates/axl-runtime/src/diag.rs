@@ -16,10 +16,11 @@
 //! `stream_color`, which the console ([`crate::console::Host`]) and AXL's
 //! `std.io.stderr.color` read.
 //!
-//! `INFO:` lines from both sides follow [`info_lines`], which the `Console`
-//! feature sets for the running task when the console resolves; lines printed
-//! before that, early in start-up, always show. `WARNING:` and `ERROR:` lines
-//! always print.
+//! [`info`] and the AXL `info` helper follow [`info_lines`], which the
+//! `Console` feature sets for the running task when the console resolves; lines
+//! printed before that, early in start-up, always show. [`emit`] does not: a
+//! task's own exit message is its answer, not an aside, so it prints under
+//! every preset. `WARNING:` and `ERROR:` lines always print.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -95,19 +96,18 @@ fn colorize() -> bool {
 }
 
 /// Print one severity-prefixed line to stderr, colorized per [`colorize`],
-/// unless it is an `INFO:` line and [`info_lines`] hides them. The named
-/// helpers below cover the fixed severities; call this when the severity is
-/// computed.
+/// whatever [`info_lines`] says. The named helpers below cover the fixed
+/// severities; call this when the severity is computed.
 pub(crate) fn emit(sev: Severity, msg: &str) {
-    if sev == Severity::Info && !info_lines() {
-        return;
-    }
     errln!("{}", format_line(sev, colorize(), msg));
 }
 
-/// Print a cyan `INFO:` line for a notable runtime branch.
+/// Print a cyan `INFO:` line for a notable runtime branch, unless
+/// [`info_lines`] hides them.
 pub fn info(msg: &str) {
-    emit(Severity::Info, msg);
+    if info_lines() {
+        emit(Severity::Info, msg);
+    }
 }
 
 /// Print a yellow `WARNING:` line for a non-fatal subsystem failure.
