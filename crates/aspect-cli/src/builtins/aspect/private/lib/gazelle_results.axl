@@ -6,6 +6,7 @@ updating and gives a copy-paste repro command.
 
 Public API:
 
+  DEFAULT_SCOPE                                — the `--scope` default
   init_data()                                  → dict
   render_check_output(ctx, data, status, …)    → {title, summary, text}
   extract_changed_dirs(changed_files)          → [str, ...]
@@ -39,6 +40,9 @@ SUMMARY_TEMPLATE = _SUMMARY_TEMPLATE
 
 _DETAILS_LIMIT = 65000
 _FILES_LIMIT = 200
+
+# The `--scope` default; `gazelle.axl` declares its arg with it.
+DEFAULT_SCOPE = "all"
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -297,12 +301,12 @@ def _config_items(data):
     """Build the Configuration row for the gazelle summary.
 
     Surfaces the run-shape knobs directly above "Last update":
-      - Scope: always shown. When `scope == "changed"` and the task
-        recorded a non-zero post-intersection effective-dir count,
-        append it as ` — N changed dirs` so reviewers can tell at a
-        glance how many subtrees gazelle was asked to update.
-      - Soft-fail: only shown when True. Default is False; rendering
-        `Soft-fail: false` on every clean run would be noise.
+      - Scope: omitted when it would read only `DEFAULT_SCOPE`. When
+        `scope == "changed"` and the task recorded a non-zero
+        post-intersection effective-dir count, append it as
+        ` — N changed dirs` so reviewers can tell at a glance how many
+        subtrees gazelle was asked to update.
+      - Severity: only shown when it resolved to `warn`.
       - Scope-all-on-change: only when `scope == "changed"` and the
         flag is non-empty. The flag has a non-empty default
         (`BUILD.bazel`, `MODULE.bazel`) so this row appears on every
@@ -315,12 +319,12 @@ def _config_items(data):
     items = []
     g = data["gazelle"]
     scope = g.get("scope", "") or ""
-    if scope:
-        value = scope
-        if scope == "changed":
-            dirs_count = len(g.get("dirs", []) or [])
-            if dirs_count > 0:
-                value = "%s — %s" % (scope, pluralize(dirs_count, "changed dir"))
+    value = scope
+    if scope == "changed":
+        dirs_count = len(g.get("dirs", []) or [])
+        if dirs_count > 0:
+            value = "%s — %s" % (scope, pluralize(dirs_count, "changed dir"))
+    if value and value != DEFAULT_SCOPE:
         items.append({"key": "Scope", "value": value})
     if g.get("severity_resolved") == "warn":
         items.append({"key": "Severity", "value": "warn"})

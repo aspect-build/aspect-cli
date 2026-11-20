@@ -22,7 +22,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
-load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
+load("./private/lib/format_results.axl", "DEFAULT_SCOPE", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
 load("./private/lib/git_diff.axl", "git_diff_args")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -651,7 +651,7 @@ format = task(
     summary = "Format source files with the configured formatter target. Formats changed files by default; `--scope=all` for the whole tree.",
     args = {
         "scope": args.string(
-            default = "changed",
+            default = DEFAULT_SCOPE,
             values = ["changed", "all"],
             description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). Useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
         ),

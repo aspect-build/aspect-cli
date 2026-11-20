@@ -7,6 +7,7 @@ one terminal state: clean (passed) or files-need-formatting (failed).
 
 Public API:
 
+  DEFAULT_SCOPE                                — the `--scope` default
   init_data()                                  → dict
   render_check_output(ctx, data, status, …)    → {title, summary, text}
 
@@ -40,6 +41,9 @@ SUMMARY_TEMPLATE = _SUMMARY_TEMPLATE
 
 _DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit
 _FILES_LIMIT = 200  # max files listed in the details body before truncating
+
+# The `--scope` default; `format.axl` declares its arg with it.
+DEFAULT_SCOPE = "changed"
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -238,30 +242,21 @@ def _config_items(data):
     """Build the Configuration row for the format summary.
 
     Surfaces the run-shape knobs directly above "Last update":
-      - Scope: always shown (`changed` is the default; `all` is the
-        whole-tree variant — the choice meaningfully changes what the
-        formatter touches and the changed-files preamble in the body
-        only signals the changed-scope path, so make the actual scope
-        explicit at-a-glance). When `scope == "changed"` and the task
-        recorded the post-filter file count, append it as
-        " — filtered to N changed files" — analogous to lint's
-        "Strategy: hold-the-line — filtered to N changed files".
-        ("changed files" is OK here because the "filtered to" prefix
-        makes it clear these are files in the change set, not files
-        we modified.)
-      - Soft-fail: only shown when True. The default is False and
-        showing `Soft-fail: false` on every clean run would be noise;
-        the flag's whole purpose is to flag CI-bypass mode, so it
-        should stand out when set.
+      - Scope: omitted when it would read only `DEFAULT_SCOPE`. With
+        `scope == "changed"` and a recorded post-filter file count it
+        reads "changed — filtered to N changed files" (like lint's
+        "Strategy: hold-the-line — filtered to N changed files") and is
+        kept: on a dirty run nothing else in the body carries that count.
+      - Severity: only shown when it resolved to `warn`.
     """
     items = []
     scope = data["format"].get("scope", "") or ""
-    if scope:
-        value = scope
-        if scope == "changed":
-            count = data.get("changed_files_count", 0) or 0
-            if count > 0:
-                value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
+    value = scope
+    if scope == "changed":
+        count = data.get("changed_files_count", 0) or 0
+        if count > 0:
+            value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
+    if value and value != DEFAULT_SCOPE:
         items.append({"key": "Scope", "value": value})
     if data["format"].get("severity_resolved") == "warn":
         items.append({"key": "Severity", "value": "warn"})

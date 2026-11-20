@@ -25,10 +25,14 @@ Scenarios:
 Body-content invariant (asserted in the loop): `progress_phrase`
 placeholder renders IFF status == "running". A regression where `warning` or
 `failing` short-circuits to the placeholder fails the suite.
+
+Scope row (asserted after the loop): omitted when it would read only
+`DEFAULT_SCOPE`, shown with the changed-file count or a non-default scope.
 """
 
 load("./check_dispatch.axl", "resolve_templates")
-load("./format_results.axl", "init_data", "render_check_output")
+load("./config_row_testing.axl", "has_config_entry")
+load("./format_results.axl", "DEFAULT_SCOPE", "init_data", "render_check_output")
 load("./template_presets.axl", "template_presets")
 
 # ─── Fake-data builders ───────────────────────────────────────────────────────
@@ -295,6 +299,7 @@ def _render_all(ctx, templates = None, progress_phrase = "Format task in progres
         fail("Body-content invariant violations: %d" % len(errors))
 
     _check_failed_actions_invoke_snippet_macro(ctx)
+    _check_scope_row(ctx, templates)
 
     print(sep)
     print("All " + str(len(scenarios)) + " format scenarios rendered without error.")
@@ -318,6 +323,23 @@ def _check_failed_actions_invoke_snippet_macro(ctx):
     out = render_check_output(ctx, data, "failed", _render_ctx(), _links())
     if "//pkg:target" not in out["text"]:
         fail("failed action label missing — Bazel-targets block did not render: %r" % out["text"][:600])
+
+def _check_scope_row(ctx, templates):
+    t = resolve_templates(templates, "format", renderer_kind = "format_results") if templates else None
+
+    def _text(data):
+        out = render_check_output(ctx, data, "failed", _render_ctx(), _links(), templates = t)
+        return out["summary"] + out["text"]
+
+    bare = _make_base()
+    if bare["format"]["scope"] != DEFAULT_SCOPE:
+        fail("_make_base must use the default scope")
+    if has_config_entry(_text(bare), "Scope"):
+        fail("a bare default scope rendered a Scope row")
+    if not has_config_entry(_text(_make_files_need_format()), "Scope", "changed — filtered to 42 changed files"):
+        fail("the default scope's changed-file count was not rendered")
+    if not has_config_entry(_text(_make_scope_all_many()), "Scope", "all"):
+        fail("a non-default scope was not rendered")
 
 def _test_impl(ctx):
     return _render_all(ctx)

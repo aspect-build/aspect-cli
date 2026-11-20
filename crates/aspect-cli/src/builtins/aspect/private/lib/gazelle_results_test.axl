@@ -29,10 +29,14 @@ Scenarios:
 Body-content invariant (asserted in the loop): `progress_phrase`
 placeholder renders IFF status == "running". A regression where `warning` or
 `failing` short-circuits to the placeholder fails the suite.
+
+Scope row (asserted after the loop): omitted for `DEFAULT_SCOPE`, shown for
+`changed` with or without the changed-dir count.
 """
 
 load("./check_dispatch.axl", "resolve_templates")
-load("./gazelle_results.axl", "init_data", "render_check_output")
+load("./config_row_testing.axl", "has_config_entry")
+load("./gazelle_results.axl", "DEFAULT_SCOPE", "init_data", "render_check_output")
 load("./template_presets.axl", "template_presets")
 
 # ─── Fake-data builders ───────────────────────────────────────────────────────
@@ -310,10 +314,28 @@ def _render_all(ctx, templates = None, progress_phrase = "Gazelle task in progre
         fail("Body-content invariant violations: %d" % len(errors))
 
     _check_failed_actions_invoke_snippet_macro(ctx)
+    _check_scope_row(ctx, templates)
 
     print(sep)
     print("All " + str(len(scenarios)) + " gazelle scenarios rendered without error.")
     return 0
+
+def _check_scope_row(ctx, templates):
+    t = resolve_templates(templates, "gazelle", renderer_kind = "gazelle_results") if templates else None
+
+    def _text(data):
+        out = render_check_output(ctx, data, "failed", _render_ctx(), _links(), templates = t)
+        return out["summary"] + out["text"]
+
+    base = _make_base()
+    if base["gazelle"]["scope"] != DEFAULT_SCOPE:
+        fail("_make_base must use the default scope")
+    if has_config_entry(_text(base), "Scope"):
+        fail("the default scope rendered a Scope row")
+    if not has_config_entry(_text(_make_scope_changed()), "Scope", "changed — 2 changed dirs"):
+        fail("scope=changed with dirs did not render its count")
+    if not has_config_entry(_text(_make_scope_changed_empty()), "Scope", "changed"):
+        fail("scope=changed with no dirs was not rendered")
 
 def _check_failed_actions_invoke_snippet_macro(ctx):
     """A failed Bazel action drives the embedded Bazel-targets block to call the
