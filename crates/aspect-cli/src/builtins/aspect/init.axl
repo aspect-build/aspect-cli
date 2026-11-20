@@ -44,13 +44,17 @@ def _is_bazel_workspace(ctx, dir):
     return False
 
 def _run(ctx, argv, current_dir = None):
-    """Run a subprocess, failing with its argv + exit code on a non-zero status."""
+    """Run a subprocess, ending the task with its argv + exit code on a non-zero status.
+
+    A failing command is the environment's problem, not a bug in init, so it
+    ends the task with code 1 and the message alone, without a traceback.
+    """
     cmd = ctx.std.process.command(argv[0]).args(argv[1:])
     if current_dir:
         cmd = cmd.current_dir(current_dir)
     status = cmd.spawn().wait()
     if not status.success:
-        fail("command failed ({}): {}".format(exit_code_of(status), " ".join(argv)))
+        ctx.std.process.exit(1, "command failed ({}): {}".format(exit_code_of(status), " ".join(argv)))
 
 _TEMPLATE_SCHEME = enum("github", "file")
 

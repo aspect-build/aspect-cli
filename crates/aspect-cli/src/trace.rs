@@ -17,7 +17,8 @@
 //! .axl config — there's no env-var special-casing in this binary.
 //!
 //! At exit, `OtelGuard` reports any spans that never reached a collector (see
-//! `trace_buffer::SpanLoss`) and the setting that would have kept them.
+//! `trace_buffer::SpanLoss`) and the setting that would have kept them, and
+//! the first error a span, log or metric export returned.
 
 use axl_runtime::engine::telemetry::{
     ExporterSpec, FileDestination, FileSpec, OtlpProtocol, OtlpSpec,
@@ -50,7 +51,8 @@ use tracing_subscriber::{
 
 use crate::otlp_http::OtlpHttpClient;
 use crate::trace_buffer::{
-    BufferingLogExporter, BufferingSpanExporter, CountingSpanProcessor, SpanLoss, SpanTally,
+    BufferingLogExporter, BufferingSpanExporter, CountingSpanProcessor, RecordingMetricExporter,
+    SpanLoss, SpanTally,
 };
 
 use axl_runtime::engine::telemetry::{FileFormat, Signals};
@@ -430,6 +432,9 @@ static LOG_BUFFER: OnceLock<BufferingLogExporter> = OnceLock::new();
 /// `metrics`. Read by `OtelGuard::drop` to flush at shutdown.
 static LATE_METER_PROVIDER: Mutex<Option<SdkMeterProvider>> = Mutex::new(None);
 
+/// The first error a metric export returned, for the exit report.
+static METRIC_EXPORT_ERROR: OnceLock<String> = OnceLock::new();
+
 /// True once `install_late_exporters` has activated at least one exporter
 /// (OTLP, file, or stderr). Drives whether `OtelGuard::drop` emits flush
 /// progress to stderr — for fast no-telemetry paths (`--help`, `version`,
@@ -549,8 +554,9 @@ fn env_usize(env: impl Fn(&str) -> Option<String>, name: &str, default: usize) -
     env(name).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// One line per way spans were lost, saying which setting keeps them.
-fn span_loss_report(loss: SpanLoss, queue_size: usize) -> Vec<String> {
+/// One line per way spans were lost, saying which setting keeps them, and the
+/// first export error when exports failed.
+fn span_loss_report(loss: SpanLoss, first_error: Option<&str>, queue_size: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if loss.queued > 0 {
         lines.push(format!(
@@ -573,6 +579,9 @@ fn span_loss_report(loss: SpanLoss, queue_size: usize) -> Vec<String> {
              collector's endpoint and credentials.",
             loss.failed
         ));
+        if let Some(err) = first_error {
+            lines.push(format!("first span export error: {err}"));
+        }
     }
     lines
 }
@@ -810,7 +819,10 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
         let mut builder =
             MeterProviderBuilder::default().with_resource(merged_resource(&attributes));
         for spec in metric_exporters {
-            let exporter = build_otlp_metric_exporter(&spec)?;
+            let exporter = RecordingMetricExporter::new(
+                build_otlp_metric_exporter(&spec)?,
+                &METRIC_EXPORT_ERROR,
+            );
             let mut reader = PeriodicReader::builder(exporter);
             if let Some(interval) = metric_export_interval(env_var) {
                 reader = reader.with_interval(interval);
@@ -872,19 +884,25 @@ impl Drop for OtelGuard {
             errors.push(format!("tracer: {err:?}"));
         }
         if let Some(loss) = self.span_buffer.loss() {
-            for line in span_loss_report(loss, self.queue_size) {
+            let tally = self.span_buffer.tally();
+            for line in span_loss_report(loss, tally.first_error(), self.queue_size) {
                 errln!("telemetry: {line}");
             }
         }
         if let Ok(mut slot) = LATE_METER_PROVIDER.lock() {
             if let Some(mp) = slot.take() {
                 if let Err(err) = mp.shutdown_with_timeout(timeout) {
-                    errors.push(format!("meter: {err:?}"));
+                    errors.push(match METRIC_EXPORT_ERROR.get() {
+                        Some(export) => format!("meter: export failed: {export}"),
+                        None => format!("meter: {err:?}"),
+                    });
                 }
             }
         }
         if let Err(err) = self.logger_provider.shutdown_with_timeout(timeout) {
             errors.push(format!("logger: {err:?}"));
+        } else if let Some(err) = LOG_BUFFER.get().and_then(BufferingLogExporter::first_error) {
+            errors.push(format!("logger: export failed: {err}"));
         }
 
         if any_otel {
@@ -1008,18 +1026,20 @@ mod tests {
 
     #[test]
     fn span_loss_report_names_the_setting_for_each_loss() {
-        assert!(span_loss_report(SpanLoss::default(), 10).is_empty());
+        assert!(span_loss_report(SpanLoss::default(), None, 10).is_empty());
         let lines = span_loss_report(
             SpanLoss {
                 queued: 3,
                 evicted: 0,
                 failed: 2,
             },
+            Some("Unauthenticated"),
             10,
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("3 span(s)") && lines[0].contains("OTEL_BSP_MAX_QUEUE_SIZE"));
         assert!(lines[1].starts_with("2 span(s) failed"));
+        assert_eq!(lines[2], "first span export error: Unauthenticated");
     }
 
     #[test]

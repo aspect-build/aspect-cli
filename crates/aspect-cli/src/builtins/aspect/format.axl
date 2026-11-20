@@ -413,12 +413,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if not build_status.success:
         _emit_final(ph, exit_code_of(build_status))
-        fail("Building the formatter has failed.")
+        ctx.std.process.exit(exit_code_of(build_status), "Building the formatter has failed.")
 
     err, ep = runs.get(ctx.args.formatter_target).catch(bazel.run.BuildError, bazel.run.NotBuilt, bazel.run.NotRunnable).block()
     if err:
         _emit_final(ph, 1)
-        fail("Failed to determine the formatter entrypoint: %s" % err.message)
+        ctx.std.process.exit(1, "Failed to determine the formatter entrypoint: %s" % err.message)
 
     exclude_patterns = list(ctx.args.exclude_patterns)
     include_patterns = list(ctx.args.include_patterns)

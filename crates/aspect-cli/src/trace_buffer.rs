@@ -15,17 +15,24 @@
 //! [`SpanTally`] counts each, shared by the exporter and the
 //! [`CountingSpanProcessor`] in front of the batch processor, so the CLI can
 //! say how many never arrived.
+//!
+//! A failed export's error otherwise goes only to the SDK's internal log, so
+//! the tally, [`BufferingLogExporter`] and [`RecordingMetricExporter`] keep
+//! the first one for the exit report: it is what says whether the endpoint, the credentials or the
+//! network is at fault.
 
 use std::fmt;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use opentelemetry::{Context, InstrumentationScope};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{LogBatch, LogExporter, SdkLogRecord};
+use opentelemetry_sdk::metrics::Temporality;
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::trace::{Span, SpanData, SpanExporter, SpanProcessor};
 
 const BUFFER_CAP: usize = 50_000;
@@ -42,6 +49,8 @@ pub struct SpanTally {
     evicted: AtomicU64,
     /// Spans in batches an exporter failed to send, summed over exporters.
     failed: AtomicU64,
+    /// The error of the first export that failed.
+    first_error: OnceLock<String>,
 }
 
 /// Spans that never reached a collector, by where they were lost.
@@ -66,8 +75,49 @@ impl SpanTally {
         }
     }
 
+    /// The error of the first export that failed, if any did.
+    pub fn first_error(&self) -> Option<&str> {
+        self.first_error.get().map(String::as_str)
+    }
+
     fn add(counter: &AtomicU64, n: usize) {
         counter.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+/// Passes metrics through to `inner`, keeping the first export error in
+/// `first_error`. The periodic reader reports a failed final export only as
+/// "Failed to shutdown".
+pub struct RecordingMetricExporter<E> {
+    inner: E,
+    first_error: &'static OnceLock<String>,
+}
+
+impl<E> RecordingMetricExporter<E> {
+    pub fn new(inner: E, first_error: &'static OnceLock<String>) -> Self {
+        Self { inner, first_error }
+    }
+}
+
+impl<E: PushMetricExporter> PushMetricExporter for RecordingMetricExporter<E> {
+    async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
+        let result = self.inner.export(metrics).await;
+        if let Err(err) = &result {
+            let _ = self.first_error.set(err.to_string());
+        }
+        result
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn temporality(&self) -> Temporality {
+        self.inner.temporality()
     }
 }
 
@@ -204,8 +254,9 @@ impl<E: SpanExporter> BufferingSpanExporter<E> {
 
     async fn fan_out(&self, exporters: &[Arc<E>], batch: Vec<SpanData>) {
         for ex in exporters {
-            if ex.export(batch.clone()).await.is_err() {
+            if let Err(err) = ex.export(batch.clone()).await {
                 SpanTally::add(&self.tally.failed, batch.len());
+                let _ = self.tally.first_error.set(err.to_string());
             }
         }
     }
@@ -257,6 +308,7 @@ impl<E: SpanExporter> SpanExporter for BufferingSpanExporter<E> {
 #[derive(Clone)]
 pub struct BufferingLogExporter {
     inner: Arc<Mutex<LogState>>,
+    first_error: Arc<OnceLock<String>>,
 }
 
 impl fmt::Debug for BufferingLogExporter {
@@ -279,6 +331,7 @@ impl BufferingLogExporter {
                 late: Vec::new(),
                 replayed: false,
             })),
+            first_error: Arc::new(OnceLock::new()),
         }
     }
 
@@ -304,8 +357,23 @@ impl BufferingLogExporter {
         // LogBatch from references into the still-owned buffer.
         let pairs: Vec<(&SdkLogRecord, &InstrumentationScope)> =
             buffer.iter().map(|(r, s)| (r, s)).collect();
-        for ex in arc_exporters {
-            let _ = ex.export(LogBatch::new(&pairs)).await;
+        self.fan_out(&arc_exporters, &pairs).await;
+    }
+
+    /// The error of the first export that failed, if any did.
+    pub fn first_error(&self) -> Option<&str> {
+        self.first_error.get().map(String::as_str)
+    }
+
+    async fn fan_out(
+        &self,
+        exporters: &[Arc<opentelemetry_otlp::LogExporter>],
+        pairs: &[(&SdkLogRecord, &InstrumentationScope)],
+    ) {
+        for ex in exporters {
+            if let Err(err) = ex.export(LogBatch::new(pairs)).await {
+                let _ = self.first_error.set(err.to_string());
+            }
         }
     }
 }
@@ -332,9 +400,7 @@ impl LogExporter for BufferingLogExporter {
             st.late.iter().map(Arc::clone).collect()
         };
         let pairs: Vec<(&SdkLogRecord, &InstrumentationScope)> = batch.iter().collect();
-        for ex in exporters {
-            let _ = ex.export(LogBatch::new(&pairs)).await;
-        }
+        self.fan_out(&exporters, &pairs).await;
         Ok(())
     }
 
@@ -461,6 +527,10 @@ mod tests {
                 failed: 2,
                 ..SpanLoss::default()
             })
+        );
+        assert_eq!(
+            buffer.tally().first_error(),
+            Some("Operation failed: unreachable collector")
         );
     }
 
