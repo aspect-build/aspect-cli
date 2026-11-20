@@ -23,6 +23,15 @@ A task with its own preset starts from it alone, without `templates`;
 
 Or for one run: `aspect test --console:template-preset=compact //...`.
 
+Under a coding agent (any of the environment variables `lib/agent.axl` reads,
+such as `CLAUDECODE`, `CODEX_THREAD_ID` or `AI_AGENT`) the default is `agent`
+rather than `full`. Setting `template_preset` on the command line or in any
+`config.axl`, even to `full`, keeps that default out of it.
+
+The preset also decides whether `INFO:` lines print: `full` and `plain` show
+them, `compact`, `agent` and `silent` hide them. `info_lines` forces them on
+or off whatever the preset. `WARNING:` and `ERROR:` lines always print.
+
 The runtime does the rendering, so this feature's implementation is empty: the
 runtime reads these args after `config.axl` runs and before the header prints.
 Disabling the feature leaves the `full` layout in place. Bazel's own output,
@@ -41,12 +50,15 @@ Console = feature(
     args = {
         "template_preset": args.string(
             default = "full",
-            values = ["full", "plain", "compact", "silent"],
+            values = ["full", "plain", "compact", "agent", "silent"],
             description = "Built-in terminal layout: 'full' (the banner, the header, every phase and " +
                           "progress line, and the verdict with its phase breakdown; default), " +
                           "'plain' (the same lines without emojis), 'compact' (the verdict alone, " +
-                          "on one line with no phase breakdown), or 'silent' (nothing; the exit " +
-                          "code and the task's own output carry the result). On Buildkite the " +
+                          "on one line with no phase breakdown), 'agent' (compact without " +
+                          "emojis; the default under a coding agent unless this is set on the " +
+                          "command line or in config.axl), or 'silent' (nothing; the exit " +
+                          "code and the task's own output carry the result). 'compact', " +
+                          "'agent' and 'silent' also hide INFO lines; see `info_lines`. On Buildkite the " +
                           "header, phase and verdict lines, and sections a task opens itself, " +
                           "start log sections, so they print under every preset. " + TASK_PRESET_PRECEDENCE,
         ),
@@ -70,6 +82,16 @@ Console = feature(
                           "where a line that opens a log section takes the preset's text (or " +
                           "`full`'s). A template that " +
                           "fails to render falls back to the preset's template for that slot.",
+        ),
+        "info_lines": args.string(
+            default = "auto",
+            values = ["auto", "true", "false"],
+            bare = "true",
+            description = "Whether INFO lines print. 'auto' (default) leaves it to the task's preset: " +
+                          "shown under 'full' and 'plain', hidden under 'compact', 'agent' and " +
+                          "'silent'. 'true' (or a bare --console:info-lines) and 'false' force them " +
+                          "on or off; config.axl may also assign True or False. WARNING and ERROR " +
+                          "lines always print.",
         ),
     } | task_template_args("silent", "verdict"),
 )

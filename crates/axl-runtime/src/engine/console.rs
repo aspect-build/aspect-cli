@@ -14,7 +14,9 @@ use starlark::values::{
 };
 use starlark::{starlark_module, starlark_simple_value};
 
-use crate::console::{Console as Surface, DEFAULT_PRESET, Host, Overrides, Slot, TaskIdentity};
+use crate::console::{
+    AGENT_PRESET, Console as Surface, DEFAULT_PRESET, Host, Overrides, Slot, TaskIdentity,
+};
 
 use super::arguments::Arguments;
 use super::template::json_to_minijinja;
@@ -22,11 +24,13 @@ use super::template::json_to_minijinja;
 /// Resolve the surface for `task` on `host` from the `Console` feature's
 /// merged `args`.
 ///
-/// A disabled feature gives the `full` layout. Fails on a malformed
-/// `templates`, `task_presets` or `task_templates` value and on everything
-/// [`Surface::resolve`] refuses. The surface carries a warning for each
-/// `task_presets` / `task_templates` key that is a near miss of one of
-/// `task_paths`, the command paths of the repo's tasks.
+/// `template_preset` counts only when the command line or a `config.axl` set
+/// it; otherwise the base preset is `agent` when [`Host::coding_agent`] and
+/// `full` when not. A disabled feature gives the `full` layout. Fails on a
+/// malformed `templates`, `task_presets`, `task_templates` or `info_lines`
+/// value and on everything [`Surface::resolve`] refuses. The surface carries a
+/// warning for each `task_presets` / `task_templates` key that is a near miss
+/// of one of `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
     args: &Arguments<'_>,
     task: TaskIdentity,
@@ -40,10 +44,19 @@ pub fn from_feature_args(
     {
         return Ok(Surface::builtin(task, host));
     }
-    let preset = args.get("template_preset").and_then(|v| v.unpack_str());
+    let chosen =
+        args.is_explicit_key("template_preset") || args.is_configured_key("template_preset");
+    let preset = match args.get("template_preset").and_then(|v| v.unpack_str()) {
+        Some(name) if chosen => name,
+        _ if host.coding_agent => AGENT_PRESET,
+        _ => DEFAULT_PRESET,
+    };
     let mut overrides = Overrides::default();
     if args.is_explicit_key("template_preset") {
         overrides.preset_from_cli();
+    }
+    if let Some(show) = info_lines(args)? {
+        overrides.set_info_lines(show);
     }
     let templates = string_dict(args, "templates")?;
     blocks_error(&templates)?;
@@ -78,10 +91,28 @@ pub fn from_feature_args(
             overrides.set_for_task(task_key, slot, template)?;
         }
     }
-    Ok(
-        Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)?
-            .with_warnings(overrides.near_miss_warnings(task_paths)),
-    )
+    Ok(Surface::resolve(preset, &overrides, task, host)?
+        .with_warnings(overrides.near_miss_warnings(task_paths)))
+}
+
+/// The `info_lines` arg: `None` for `auto` or unset, so the preset decides.
+/// The CLI gives a string; a `config.axl` may assign a bool too.
+fn info_lines(args: &Arguments<'_>) -> Result<Option<bool>, String> {
+    let Some(value) = args.get("info_lines").filter(|v| !v.is_none()) else {
+        return Ok(None);
+    };
+    if let Some(show) = value.unpack_bool() {
+        return Ok(Some(show));
+    }
+    match value.unpack_str() {
+        Some("auto") => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        _ => Err(format!(
+            "Console info_lines must be \"auto\", \"true\", \"false\" or a bool, got {}",
+            value.to_repr()
+        )),
+    }
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -182,10 +213,11 @@ starlark_simple_value!(Console);
 
 #[starlark_module]
 fn console_methods(registry: &mut MethodsBuilder) {
-    /// The preset this task renders with (`full`, `plain`, `compact` or
-    /// `silent`): its `task_presets` entry, else the `Console` feature's
-    /// `template_preset`, which wins outright when typed on the command line.
-    /// For task output that should follow it.
+    /// The preset this task renders with (`full`, `plain`, `compact`,
+    /// `agent` or `silent`): its `task_presets` entry, else the `Console`
+    /// feature's `template_preset`, which wins outright when typed on the
+    /// command line. With neither set, `agent` under a coding agent and `full`
+    /// otherwise. For task output that should follow it.
     #[starlark(attribute)]
     fn template_preset<'v>(this: Value<'v>) -> anyhow::Result<&'static str> {
         Ok(downcast(this)?.0.preset())
@@ -351,6 +383,72 @@ task_templates = {"check": {"progress": "mine"}}"#;
         });
         let surface = from_feature_args(&Arguments::new(), task(), Host::default(), &[]).unwrap();
         assert_eq!(surface.preset(), DEFAULT_PRESET);
+    }
+
+    /// Resolve with `template_preset` bound to `preset`, marked as `source`
+    /// set it (`"cli"`, `"config"`, or `""` for the schema default), plus
+    /// `extra` bindings.
+    fn resolve_with(
+        preset: &str,
+        source: &str,
+        extra: &str,
+        coding_agent: bool,
+    ) -> Result<Surface, String> {
+        let code = format!(
+            "info_lines = None\n{extra}\nargs = {{\"template_preset\": {preset:?}, \"info_lines\": info_lines}}"
+        );
+        crate::test::eval(&code).with_value("args", |bound| {
+            let args = Arguments::new();
+            for (name, value) in DictRef::from_value(bound).unwrap().iter() {
+                args.insert(name.unpack_str().unwrap().into(), value);
+            }
+            match source {
+                "cli" => args.mark_explicit("template_preset".into()),
+                "config" => args.mark_configured("template_preset".into()),
+                _ => {}
+            }
+            let host = Host {
+                coding_agent,
+                ..Host::default()
+            };
+            from_feature_args(&args, task(), host, &[])
+        })
+    }
+
+    #[test]
+    fn a_coding_agent_gets_agent_unless_a_preset_was_chosen() {
+        let preset = |name, source, agent| resolve_with(name, source, "", agent).unwrap().preset();
+        assert_eq!(preset("full", "", true), "agent");
+        assert_eq!(preset("full", "", false), "full");
+        assert_eq!(
+            preset("full", "config", true),
+            "full",
+            "config beats detection"
+        );
+        assert_eq!(
+            preset("plain", "cli", true),
+            "plain",
+            "the CLI beats detection"
+        );
+        assert_eq!(preset("compact", "config", false), "compact");
+    }
+
+    #[test]
+    fn info_lines_overrides_the_preset() {
+        let shown = |extra, preset| {
+            resolve_with(preset, "cli", extra, false)
+                .unwrap()
+                .info_lines()
+        };
+        assert!(shown("", "full"));
+        assert!(!shown("", "agent"));
+        assert!(!shown(r#"info_lines = "auto""#, "compact"));
+        assert!(shown(r#"info_lines = "true""#, "compact"));
+        assert!(shown("info_lines = True", "silent"));
+        assert!(!shown(r#"info_lines = "false""#, "full"));
+        assert!(!shown("info_lines = False", "plain"));
+        let err = resolve_with("full", "cli", "info_lines = 1", false).unwrap_err();
+        assert!(err.contains("info_lines must be"), "{err}");
     }
 
     #[test]

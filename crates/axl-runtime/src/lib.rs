@@ -4,6 +4,7 @@
 // `::axl_runtime::...` paths) resolves when invoked from this crate.
 extern crate self as axl_runtime;
 
+pub mod agent;
 pub mod banner;
 pub mod builtins;
 pub mod ci;

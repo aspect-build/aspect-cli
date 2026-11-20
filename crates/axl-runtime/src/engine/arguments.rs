@@ -38,6 +38,12 @@ use starlark::values::starlark_value;
 /// config-time override store role — nothing is "explicit on the CLI"
 /// there.
 ///
+/// `configured_keys` is the same kind of side-set for the keys a `config.axl`
+/// assigned, recorded during the merge whether or not the CLI then beat them.
+/// Rust-only ([`Arguments::is_configured_key`]): the runtime reads it where a
+/// default depends on whether config chose a value, such as the `Console`
+/// feature's base preset.
+///
 /// `claimed_keys` is the parallel side-set for [`Arguments::claim`], recording
 /// the args a task took responsibility for. It exists so the runtime can fail an
 /// invocation that collected flags into an `args.passthrough()` bucket nobody
@@ -61,6 +67,8 @@ pub struct Arguments<'v> {
     #[allocative(skip)]
     explicit_cli_keys: RefCell<SmallMap<String, ()>>,
     #[allocative(skip)]
+    configured_keys: RefCell<SmallMap<String, ()>>,
+    #[allocative(skip)]
     claimed_keys: RefCell<SmallMap<String, ()>>,
     #[allocative(skip)]
     valid_keys: Option<SmallMap<String, ()>>,
@@ -72,6 +80,7 @@ impl<'v> Arguments<'v> {
         Self {
             args: RefCell::new(SmallMap::new()),
             explicit_cli_keys: RefCell::new(SmallMap::new()),
+            configured_keys: RefCell::new(SmallMap::new()),
             claimed_keys: RefCell::new(SmallMap::new()),
             valid_keys: None,
         }
@@ -84,6 +93,7 @@ impl<'v> Arguments<'v> {
         Self {
             args: RefCell::new(SmallMap::new()),
             explicit_cli_keys: RefCell::new(SmallMap::new()),
+            configured_keys: RefCell::new(SmallMap::new()),
             claimed_keys: RefCell::new(SmallMap::new()),
             valid_keys: Some(valid_keys.into_iter().map(|k| (k, ())).collect()),
         }
@@ -120,6 +130,18 @@ impl<'v> Arguments<'v> {
     /// merge (i.e. clap saw it as `ValueSource::CommandLine`).
     pub fn is_explicit_key(&self, key: &str) -> bool {
         self.explicit_cli_keys.borrow().contains_key(key)
+    }
+
+    /// Mark `key` as assigned by a `config.axl` for the current invocation.
+    /// Idempotent. See `is_configured_key`.
+    pub fn mark_configured(&self, key: String) {
+        self.configured_keys.borrow_mut().insert(key, ());
+    }
+
+    /// Return `true` iff `key` was marked configured during the runtime merge
+    /// (a `config.axl` assigned it), whatever the CLI did with it.
+    pub fn is_configured_key(&self, key: &str) -> bool {
+        self.configured_keys.borrow().contains_key(key)
     }
 
     /// Take responsibility for `key`, returning its value.
@@ -220,9 +242,9 @@ impl<'v> values::Freeze for Arguments<'v> {
             args: frozen,
             explicit_cli_keys: self.explicit_cli_keys.into_inner(),
         })
-        // `claimed_keys` is deliberately not carried over: claims are a
-        // per-invocation record the runtime reads back off the live store
-        // before it freezes anything.
+        // `claimed_keys` and `configured_keys` are deliberately not carried
+        // over: both are per-invocation records the runtime reads back off the
+        // live store before it freezes anything.
     }
 }
 
@@ -351,6 +373,16 @@ mod tests {
         assert!(args.is_explicit_key("scope"));
         assert!(args.is_explicit_key("formatter_target"));
         assert!(!args.is_explicit_key("ignore_patterns"));
+    }
+
+    #[test]
+    fn configured_keys_are_apart_from_explicit_ones() {
+        let args = Arguments::new();
+        args.mark_configured("template_preset".to_string());
+        assert!(args.is_configured_key("template_preset"));
+        assert!(!args.is_explicit_key("template_preset"));
+        args.mark_explicit("templates".to_string());
+        assert!(!args.is_configured_key("templates"));
     }
 
     #[test]

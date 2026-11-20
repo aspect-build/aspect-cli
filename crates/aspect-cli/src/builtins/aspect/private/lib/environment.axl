@@ -99,7 +99,8 @@ def bazel_misdetects_color(std) -> bool:
 # Severity-prefixed output. Channels (increasing alarm):
 #   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
 #   print(msg)      — narrative beats every run produces (banners, tables, outcomes).
-#   info(std, msg)  — cyan `INFO:`; conditional aside (a branch fired).
+#   info(std, msg)  — cyan `INFO:`; conditional aside (a branch fired). The
+#                     Console feature can hide these; never warn/error.
 #   warn(std, msg)  — yellow `WARNING:`; subsystem problem, task continues.
 #   error(std, msg) — red `ERROR:`; recoverable error, usually precedes non-zero exit.
 #   fail(msg)       — unrecoverable; aborts immediately.
@@ -133,7 +134,10 @@ def bazel_misdetects_color(std) -> bool:
 # log.
 
 def info(std, msg):
-    """Print a bold cyan `INFO:` line for notable runtime state."""
+    """Print a bold cyan `INFO:` line for notable runtime state, unless the
+    Console feature hides INFO lines (`std.io.info_lines`)."""
+    if not std.io.info_lines:
+        return
     print(ansi.style("INFO", ansi.seq("1;36"), std.io.stderr.color) + ": " + msg)
 
 def warn(std, msg):

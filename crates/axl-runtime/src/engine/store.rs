@@ -57,6 +57,10 @@ pub struct Env {
     /// once when the `Env` is built. The process's own unless a test harness
     /// sets a snapshot.
     pub buildkite: bool,
+    /// Whether a coding agent runs the process ([`crate::agent::detected`]),
+    /// read once when the `Env` is built. The process's own unless a test
+    /// harness sets a snapshot.
+    pub coding_agent: bool,
 }
 
 impl Env {
@@ -80,6 +84,7 @@ impl Env {
             history: Arc::new(History::at(History::default_root(), Retention::default())),
             stream_color: StreamColor::of_process(),
             buildkite: crate::ci::buildkite_from(|name| std::env::var_os(name)),
+            coding_agent: crate::agent::detected(|name| std::env::var_os(name)),
         }
     }
 

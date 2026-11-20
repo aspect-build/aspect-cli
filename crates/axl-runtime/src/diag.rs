@@ -15,8 +15,28 @@
 //! [`crate::color::StreamColor`], the one value a run's `Env` carries as
 //! `stream_color`, which the console ([`crate::console::Host`]) and AXL's
 //! `std.io.stderr.color` read.
+//!
+//! `INFO:` lines from both sides follow [`info_lines`], which the `Console`
+//! feature sets for the running task when the console resolves; lines printed
+//! before that, early in start-up, always show. `WARNING:` and `ERROR:` lines
+//! always print.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errln;
+
+/// Whether `INFO:` lines print. True until the console resolves.
+static INFO_LINES: AtomicBool = AtomicBool::new(true);
+
+/// Show or hide `INFO:` lines for the rest of the run, from Rust and AXL alike.
+pub fn set_info_lines(show: bool) {
+    INFO_LINES.store(show, Ordering::Relaxed);
+}
+
+/// Whether `INFO:` lines print; see [`set_info_lines`].
+pub fn info_lines() -> bool {
+    INFO_LINES.load(Ordering::Relaxed)
+}
 
 /// Severity of a diagnostic line, carrying its label and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,10 +94,14 @@ fn colorize() -> bool {
     crate::color::console_supports_color()
 }
 
-/// Print one severity-prefixed line to stderr, colorized per [`colorize`].
-/// The named helpers below cover the fixed severities; call this when the
-/// severity is computed.
+/// Print one severity-prefixed line to stderr, colorized per [`colorize`],
+/// unless it is an `INFO:` line and [`info_lines`] hides them. The named
+/// helpers below cover the fixed severities; call this when the severity is
+/// computed.
 pub(crate) fn emit(sev: Severity, msg: &str) {
+    if sev == Severity::Info && !info_lines() {
+        return;
+    }
     errln!("{}", format_line(sev, colorize(), msg));
 }
 

@@ -2,6 +2,9 @@
 //! prints around a task: task output, diagnostics, exit codes and the lifecycle
 //! events CI surfaces consume are the same under every layout.
 //!
+//! The one exception is `INFO:` lines, which the preset (or `info_lines`)
+//! shows or hides.
+//!
 //! Spawns the real CLI so the feature's args, `config.axl` overrides, the
 //! runtime-rendered header and verdict, and the AXL-rendered phase and progress
 //! lines are exercised together.
@@ -13,12 +16,13 @@ use common::{aspect_cli, base_env};
 use std::process::{Command, Output};
 
 const TASKS: &str = r#"
-load("@aspect//private/lib/environment.axl", "buildkite_section", "warn")
+load("@aspect//private/lib/environment.axl", "buildkite_section", "info", "warn")
 load("@aspect//private/lib/lifecycle.axl", "Phase", "Phases", "phases")
 
 def _impl(ctx):
     ctx.std.io.stdout.write("preset=%s\n" % ctx.console.template_preset)
     warn(ctx.std, "task warning")
+    info(ctx.std, "task info")
     ph = phases.new(ctx, {})
     ph.update("running", "phase progress", phase = Phase(name = "work"))
     ph.update("running", "heartbeat progress")
@@ -77,6 +81,11 @@ const EVENTS: &str = "event:running:False\nevent:running:False\n";
 /// `config(ctx)`), under an empty `$HOME` so no user-level `config.axl`
 /// applies.
 fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
+    run_with_env(config_body, args, buildkite, &[])
+}
+
+/// [`run`] with `env` added to the CLI's environment.
+fn run_with_env(config_body: &str, args: &[&str], buildkite: bool, env: &[(&str, &str)]) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     let aspect = dir.path().join(".aspect");
@@ -100,6 +109,7 @@ fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
     if buildkite {
         cmd.env("BUILDKITE", "true");
     }
+    cmd.envs(env.iter().copied());
     let output = cmd
         .output()
         .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
@@ -111,7 +121,8 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// The task's own output and the lifecycle events, which no layout touches.
+/// The task's own output and the lifecycle events, which no layout touches,
+/// and the `INFO:` line, which only the layouts that show them print.
 fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
     let err = stderr(output);
     assert_eq!(output.status.code(), Some(code), "{err}");
@@ -122,6 +133,11 @@ fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
         "{err}"
     );
     assert!(err.contains("task warning"), "{err}");
+    assert_eq!(
+        err.contains(": task info"),
+        matches!(preset, "full" | "plain"),
+        "{preset}: {err}"
+    );
 }
 
 #[test]
@@ -471,4 +487,68 @@ ctx.features[Console].args.task_presets = {"check": "silent", "fx check": "compa
     let err = stderr(&grouped);
     assert!(err.contains("→ ✅ Passed fx check task in "), "{err}");
     assert!(!err.contains("Running"), "{err}");
+}
+
+/// Under a coding agent the default layout is `agent`; a preset chosen on the
+/// command line or in `config.axl`, even `full`, keeps detection out.
+#[test]
+fn a_coding_agent_gets_the_agent_layout_unless_a_preset_is_chosen() {
+    let agent = [("CLAUDECODE", "1")];
+    let output = run_with_env("", &["check", "--code", "3"], false, &agent);
+    assert_task_behaviour(&output, "agent", 3);
+    let err = stderr(&output);
+    for gone in ["Running", "phase progress", "❌", "🎬"] {
+        assert!(!err.contains(gone), "{gone}: {err}");
+    }
+    let verdict: Vec<&str> = err.lines().filter(|l| l.contains("Failed")).collect();
+    assert_eq!(verdict.len(), 1, "{err}");
+    assert!(
+        verdict[0].starts_with("→ Failed check task (exit code 3) in "),
+        "{err}"
+    );
+
+    let configured = run_with_env(
+        r#"ctx.features[Console].args.template_preset = "full""#,
+        &["check"],
+        false,
+        &agent,
+    );
+    assert_task_behaviour(&configured, "full", 0);
+
+    let typed = run_with_env(
+        "",
+        &["check", "--console:template-preset=plain"],
+        false,
+        &agent,
+    );
+    assert_task_behaviour(&typed, "plain", 0);
+
+    let per_task = run_with_env(
+        r#"ctx.features[Console].args.task_presets = {"check": "compact"}"#,
+        &["check"],
+        false,
+        &agent,
+    );
+    assert_task_behaviour(&per_task, "compact", 0);
+}
+
+#[test]
+fn info_lines_overrides_the_preset() {
+    let shown = |config: &str, args: &[&str]| {
+        let output = run(config, args, false);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stderr(&output).contains("INFO: task info")
+    };
+    assert!(shown(
+        "",
+        &[
+            "check",
+            "--console:template-preset=silent",
+            "--console:info-lines"
+        ]
+    ));
+    assert!(!shown("", &["check", "--console:info-lines=false"]));
+    let hidden = "ctx.features[Console].args.info_lines = False";
+    assert!(!shown(hidden, &["check"]));
+    assert!(shown(hidden, &["check", "--console:info-lines=true"]));
 }
