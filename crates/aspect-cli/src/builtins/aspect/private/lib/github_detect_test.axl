@@ -875,7 +875,7 @@ def _stub_ctx(ctx, env_vars, http_client):
                 var = _var,
                 temp_dir = ctx.std.env.temp_dir,
             ),
-            io = struct(stdout = struct(is_tty = False)),
+            io = struct(stdout = struct(is_tty = False), stderr = struct(is_tty = False)),
             # Real fs so the rate-limit `_load`/`_save` cycle that fires
             # from inside the github HTTP wrapper actually round-trips.
             fs = ctx.std.fs,

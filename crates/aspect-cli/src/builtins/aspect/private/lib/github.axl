@@ -32,7 +32,7 @@ load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
-load("./environment.axl", "color_enabled", "info", "warn")
+load("./environment.axl", "info", "warn")
 load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load("./http_headers.axl", "retryable_status")
@@ -1798,7 +1798,7 @@ def print_changed_files_listing(ctx, detect_result):
         print("Scope detection unavailable: %s" % detect_result["source"])
         return
     print("Detecting changed files via %s" % detect_result["source"])
-    color = color_enabled(ctx.std)
+    color = ctx.console.color
     green = ansi.GREEN if color else ""
     red = ansi.RED if color else ""
     reset = ansi.RESET if color else ""

@@ -1222,7 +1222,7 @@ def _fake_auth_ctx(access_token = "", owned_hosts = [], bazel_version = "8.4.2")
     owned = {h: h for h in owned_hosts}
     return struct(
         std = struct(
-            io = struct(stdout = struct(is_tty = False)),
+            io = struct(stdout = struct(is_tty = False), stderr = struct(is_tty = False)),
             env = struct(var = lambda name: None, current_exe = lambda: _EXE),
         ),
         bazel = struct(version = lambda: bazel_version),

@@ -2,8 +2,9 @@
 (`endpoint_flags`), the `env_flags` / `runner_flags` /
 `runner_diagnostics_flags` compositions and the runner pieces the rc groups are
 assembled from, `apply_output_base_suffix`, the opt-out (`omit_flags`,
-`protected_omissions`), and how a task takes them (`add_task_flags`,
-`unset_flags`).
+`protected_omissions`), how a task takes them (`add_task_flags`,
+`unset_flags`), and the color rules beside them in `environment.axl`
+(`bazel_misdetects_color`, `color_enabled`, `no_color`).
 
 Version-gating of `(flag, constraint)` tuples is the bazelrc runtime's job; these
 assert the tuples carry the right constraints. Run with: aspect dev test-aspect-flags
@@ -40,7 +41,7 @@ load(
     "unset_flags",
     "workflows_cache_flags",
 )
-load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color")
+load("./environment.axl", "BuildEvents", "CI", "RemoteCache", "RemoteExecutor", "Runner", "WorkflowsEnvironment", "bazel_misdetects_color", "color_enabled", "no_color")
 
 def _eq(label, got, want):
     if got != want:
@@ -314,6 +315,31 @@ def _test_color_flags(_ctx):
     _eq("buildkite", bazel_misdetects_color(env(BUILDKITE = "true")), False)
     _eq("plain CI", bazel_misdetects_color(env(CI = "1")), False)
 
+    # NO_COLOR leaves Bazel's own choice alone; an empty one does not count.
+    _eq("no_color", bazel_misdetects_color(env(GITHUB_ACTIONS = "true", NO_COLOR = "1")), False)
+    _eq("empty no_color", bazel_misdetects_color(env(GITHUB_ACTIONS = "true", NO_COLOR = "")), True)
+
+def _test_color_enabled(_ctx):
+    # The stderr rule `console_supports_color` applies in Rust: stderr is a
+    # terminal or the CI host renders ANSI, and no non-empty NO_COLOR.
+    def std(stdout_tty = False, stderr_tty = False, **vars):
+        return struct(
+            io = struct(stdout = struct(is_tty = stdout_tty), stderr = struct(is_tty = stderr_tty)),
+            env = struct(var = lambda k: vars.get(k)),
+        )
+
+    _eq("stderr tty", color_enabled(std(stderr_tty = True)), True)
+    _eq("stdout tty alone", color_enabled(std(stdout_tty = True)), False)
+    _eq("piped", color_enabled(std()), False)
+    _eq("ansi-rendering CI", color_enabled(std(GITHUB_ACTIONS = "true")), True)
+    _eq("plain CI", color_enabled(std(CI = "1")), False)
+    _eq("no_color on a tty", color_enabled(std(stderr_tty = True, NO_COLOR = "1")), False)
+    _eq("no_color on CI", color_enabled(std(BUILDKITE = "true", NO_COLOR = "1")), False)
+    _eq("empty no_color", color_enabled(std(stderr_tty = True, NO_COLOR = "")), True)
+    _eq("no_color unset", no_color(std().env), False)
+    _eq("no_color empty", no_color(std(NO_COLOR = "").env), False)
+    _eq("no_color set", no_color(std(NO_COLOR = "0").env), True)
+
 def _test_exec_log_flags(_ctx):
     # Shared by the runner diagnostics, the rc's exec-log group, and `--remote`.
     _eq("exec log, build-scoped", exec_log_flags("/x/e.zstd"), [("--execution_log_compact_file=/x/e.zstd", ">=7.4.0", "build")])
@@ -376,6 +402,7 @@ _UNIT_TESTS = [
     _test_add_task_flags_defers_the_keepalive,
     _test_unset_flags,
     _test_color_flags,
+    _test_color_enabled,
     _test_exec_log_flags,
     _test_history_exec_log_flags,
     _test_omit_flags,

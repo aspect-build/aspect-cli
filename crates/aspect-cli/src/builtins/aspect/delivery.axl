@@ -302,7 +302,7 @@ load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_mani
 load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
-load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "warn")
+load("./private/lib/environment.axl", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -1588,7 +1588,7 @@ def _delivery_impl(ctx):
     data["delivery"]["dry_run_build"] = dry_run_build
     data["delivery"]["track_state"] = bool(ctx.args.track_state)
 
-    color = color_enabled(ctx.std)
+    color = ctx.console.color
 
     # Requested targets feed phases.setup's `subject` (rendered in the status
     # check's "Explicit command line"). Often empty for query-based delivery —

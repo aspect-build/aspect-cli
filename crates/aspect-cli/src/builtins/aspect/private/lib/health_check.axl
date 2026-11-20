@@ -127,20 +127,20 @@ def _wait_for_warming(std, environment):
 # that comes out of `_display_runner_health` — blue `•` bullet + label,
 # colored ✓ / ✗ status markers.
 
-def _section_heading(label):
-    """Sub-section heading: blank line + blue `• <label>`."""
-    return "\n" + ansi.style("• " + label, ansi.BLUE)
+def _section_heading(label, color):
+    """Sub-section heading: blank line + `• <label>`, blue when `color`."""
+    return "\n" + ansi.style("• " + label, ansi.BLUE, color)
 
-def _status_marker(kind):
-    """Status glyph: ✓ green, ✗ red, ? yellow. Used as the
-    leading char on a status line under a sub-section heading."""
+def _status_marker(kind, color):
+    """Status glyph: ✓ green, ✗ red, ? yellow (colored when `color`). Used
+    as the leading char on a status line under a sub-section heading."""
     if kind == "ok":
-        return ansi.style("✓", ansi.GREEN)
+        return ansi.style("✓", ansi.GREEN, color)
     if kind == "fail":
-        return ansi.style("✗", ansi.RED)
-    return ansi.style("?", ansi.YELLOW)
+        return ansi.style("✗", ansi.RED, color)
+    return ansi.style("?", ansi.YELLOW, color)
 
-def _display_warming(environment):
+def _display_warming(environment, color):
     """
     Render the Warming sub-section under Runner Health.
 
@@ -151,9 +151,9 @@ def _display_warming(environment):
     if not environment.runner.warming_enabled:
         return
 
-    print(_section_heading("Warming"))
+    print(_section_heading("Warming", color))
     if environment.runner.warming_current_cache:
-        print("\t" + _status_marker("ok") +
+        print("\t" + _status_marker("ok", color) +
               " runner warmed from cache version: " +
               environment.runner.warming_current_cache)
         return
@@ -161,7 +161,7 @@ def _display_warming(environment):
         # First job on the runner and warming didn't produce a cache. On
         # subsequent jobs the runner has already done real work, so a
         # missing cache isn't a warning.
-        print("\t" + _status_marker("fail") +
+        print("\t" + _status_marker("fail", color) +
               " warming was unsuccessful — this first build will be cold")
         url = _bootstrap_log_url(environment.runner)
         if url:
@@ -171,24 +171,24 @@ def _display_warming(environment):
 
     # Warming enabled, no fresh cache, but we've been running jobs — quiet
     # informational line so the section still renders.
-    print("\t" + _status_marker("ok") + " warmed by previous jobs on this runner")
+    print("\t" + _status_marker("ok", color) + " warmed by previous jobs on this runner")
 
 def _log_bazel_health_step(line):
     """`log` callback for `ctx.bazel.health_check`: indent each recovery step
     under the Bazel Health heading, level with the status line."""
     print("\t" + line)
 
-def _display_bazel_health(health):
+def _display_bazel_health(health, color):
     """Render the Bazel Health status line. The section heading is printed
     before the probe runs (see `agent_health_check`) so the recovery steps
     the probe logs while it waits land under it."""
     if health.outcome == "healthy":
-        print("\t" + _status_marker("ok") + " bazel health check passed")
+        print("\t" + _status_marker("ok", color) + " bazel health check passed")
     elif health.outcome == "unhealthy":
-        print("\t" + _status_marker("fail") +
+        print("\t" + _status_marker("fail", color) +
               " bazel health check failed: " + (health.message or "unknown error"))
     elif health.outcome == "inconclusive":
-        print("\t" + _status_marker("warn") +
+        print("\t" + _status_marker("warn", color) +
               " bazel health check inconclusive: " + (health.message or "unknown"))
 
 def _bullet_header_label(line):
@@ -268,7 +268,7 @@ def rewrite_runner_health_output(output, history):
         i += 1
     return "\n".join(out)
 
-def _display_runner_health(environment, job_history):
+def _display_runner_health(environment, job_history, color):
     """Display the last runner health check results.
 
     Reads the JSON snapshot the fleet service writes between jobs. The
@@ -279,9 +279,10 @@ def _display_runner_health(environment, job_history):
 
     `job_history` must correspond to the same point in time as Vigor's
     saved report (i.e. before this task's `append_runner_job_history`
-    call). The caller is responsible for snapshotting it.
+    call). The caller is responsible for snapshotting it. Without `color`
+    the saved report is printed with its ANSI stripped.
     """
-    print(ansi.style("Runner Health", ansi.seq("1;4;34")))
+    print(ansi.style("Runner Health", ansi.seq("1;4;34"), color))
 
     if not environment.runner.last_health_check:
         print("Health check has not yet been run on this runner")
@@ -293,7 +294,8 @@ def _display_runner_health(environment, job_history):
         return
 
     print("Last run on " + str(data["timestamp"]) + "\n")
-    print(rewrite_runner_health_output(data["output"], job_history))
+    report = rewrite_runner_health_output(data["output"], job_history)
+    print(report if color else ansi.strip(report))
 
 HealthCheckTrait = trait(
     health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks run during the task's setup phase to validate system health. Return a non-None error message to fail the task (e.g. an unhealthy Bazel server); return None when healthy."),
@@ -386,12 +388,13 @@ def agent_health_check(ctx, environment):
     job_history = environment.runner.runner_job_history
 
     environment = _wait_for_warming(ctx.std, environment)
-    _display_runner_health(environment, job_history)
-    _display_warming(environment)
+    color = ctx.console.color
+    _display_runner_health(environment, job_history, color)
+    _display_warming(environment, color)
     assert_ctx_bazel_ready_for_health_check(ctx, environment)
-    print(_section_heading("Bazel Health"))
+    print(_section_heading("Bazel Health", color))
     health = ctx.bazel.health_check(log = _log_bazel_health_step)
-    _display_bazel_health(health)
+    _display_bazel_health(health, color)
 
     if health.outcome == "unhealthy":
         signal_bin = environment.runner.bin_dir + "/signal_instance_unhealthy"

@@ -96,16 +96,27 @@ def ci_renders_ansi(env) -> bool:
         env.var("GITLAB_CI"),
     )
 
+def no_color(env) -> bool:
+    """Whether `NO_COLOR` asks for no color (https://no-color.org): set to a
+    non-empty value. It wins over every other signal, CI hosts included."""
+    return bool(env.var("NO_COLOR"))
+
 def color_enabled(std):
-    """Should ANSI color be emitted to stdout? True on a real TTY, or on a CI
-    host that renders ANSI (`ci_renders_ansi`)."""
-    return std.io.stdout.is_tty or ci_renders_ansi(std.env)
+    """Whether the CLI's own stderr lines (`print`, the `INFO:`/`WARNING:`/
+    `ERROR:` prefixes) may carry ANSI color: stderr is a terminal or the CI host
+    renders ANSI (`ci_renders_ansi`), and `no_color` is false. The same rule as
+    the runtime's `console_supports_color`, which a task reads as
+    `ctx.console.color`; use that where a `TaskContext` is at hand."""
+    return (std.io.stderr.is_tty or ci_renders_ansi(std.env)) and not no_color(std.env)
 
 def bazel_misdetects_color(env) -> bool:
     """Whether Bazel's `--color=auto` would wrongly decide against color here: a
     CI host whose log viewer renders ANSI but which runs the job with no TTY for
     Bazel to see — GitHub Actions, CircleCI, GitLab. Buildkite renders ANSI too
-    but gives the job a PTY, so Bazel gets it right unaided and is left out."""
+    but gives the job a PTY, so Bazel gets it right unaided and is left out.
+    Never under `no_color`: Bazel's own choice stands then, unforced."""
+    if no_color(env):
+        return False
     return bool(env.var("GITHUB_ACTIONS") or env.var("CIRCLECI") or env.var("GITLAB_CI"))
 
 # Severity-prefixed output. Channels (increasing alarm):
@@ -503,7 +514,7 @@ def print_environment_info(ctx: TaskContext, env: WorkflowsEnvironment) -> None:
         buildkite_section(ctx, ":rocket:", "Workflows runner metadata")
 
     std = ctx.std
-    color = color_enabled(std)
+    color = ctx.console.color
 
     # Bold+underline+blue title mirrors `_display_runner_health` in
     # health_check.axl so the two setup-phase sections match.
