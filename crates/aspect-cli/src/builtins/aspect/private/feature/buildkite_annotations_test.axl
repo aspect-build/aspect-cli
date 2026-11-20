@@ -17,8 +17,9 @@ contracts a config writes against:
   - The template args — overrides reach the rendered body, "title"/"summary"/
     "details" are independent, `template_preset` / `templates` /
     `task_presets` / `task_templates` layer per task and are validated at
-    load (a near-miss task key warned about), every renderer module exports the templates a config patches, and a
-    broken template degrades to a fallback.
+    load, a near-miss task key is warned about, every renderer module exports
+    the templates a config patches, and a broken template degrades to a
+    fallback.
   - `Phases.status_surface_update` — verdicts resolve, chain, and
     compose across surfaces, and a `remove` no surface can honor downgrades to
     a publish.

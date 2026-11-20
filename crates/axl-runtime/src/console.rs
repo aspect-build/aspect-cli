@@ -1134,6 +1134,20 @@ mod tests {
         .to_vec()
     }
 
+    /// The cases `text_test.axl` checks AXL's `edit_distance` on.
+    #[test]
+    fn edit_distance_counts_characters() {
+        for (a, b, expected) in [
+            ("test", "test", 0),
+            ("lnt", "lint", 1),
+            ("tset", "test", 2),
+            ("", "add", 3),
+            ("tést", "test", 1),
+        ] {
+            assert_eq!(edit_distance(a, b), expected, "{a} → {b}");
+        }
+    }
+
     #[test]
     fn a_near_miss_names_the_closest_task() {
         for (key, expected) in [

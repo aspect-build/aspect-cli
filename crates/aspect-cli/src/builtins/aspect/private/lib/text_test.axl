@@ -68,6 +68,7 @@ def _test_edit_distance(ctx):
     _eq("one dropped", edit_distance("lnt", "lint"), 1)
     _eq("transposed costs two", edit_distance("tset", "test"), 2)
     _eq("from empty", edit_distance("", "add"), 3)
+    _eq("counts characters", edit_distance("tést", "test"), 1)
 
 def _test_unsafe_characters(ctx):
     """What a terminal acts on or hides is caught, and shown escaped."""
