@@ -14,7 +14,7 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
-    """Stand-in for `ctx`. `info(ctx.std, …)` reads `std.io.stderr.color`,
+    """Stand-in for `ctx`. `detail(ctx.std, …)` reads `std.io.stderr.color`,
     and the collect helpers read `std.env.var` and the `--bes-backend` /
     `--bes-header` args.
 

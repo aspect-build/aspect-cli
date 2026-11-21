@@ -1604,7 +1604,7 @@ def _github_status_comments(ctx: FeatureContext):
     run_attempt = identity["run_attempt"]
     workflow_name = identity["workflow_name"]
     if not run_id:
-        _LOG.info(ctx.std, "Missing CI run id (%s); skipping." % host["marker"])
+        _LOG.detail(ctx.std, "Missing CI run id (%s); skipping." % host["marker"])
         return
 
     # GHA assembles a run-level URL from env here as a fallback; other hosts
@@ -2017,7 +2017,7 @@ def _github_status_comments(ctx: FeatureContext):
         result, sel = _contribute(ctx, own_entry, final)
         if sel == None and contribute_rejected(result):
             _state["_coordinator"] = False
-            _LOG.info(ctx.std, coordination_declined_message(result, "comment"))
+            _LOG.detail(ctx.std, coordination_declined_message(result, "comment"))
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
             return (TERMINAL_DONE, 0)
         if sel == None:

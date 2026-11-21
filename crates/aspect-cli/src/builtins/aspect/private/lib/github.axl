@@ -32,7 +32,7 @@ load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
-load("./environment.axl", "info", "warn")
+load("./environment.axl", "detail", "warn")
 load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load("./http_headers.axl", "retryable_status")
@@ -152,7 +152,7 @@ def _info_http_failure(ctx, label, attempts, status, error):
     (e.g. a `DeleteArtifact` 404 in the eventual-consistency window).
     Same one-line shape so log grep matches both."""
     suffix = " after %d attempts" % attempts if attempts > 1 else ""
-    info(ctx.std, "%s failed%s (benign): %s" % (label, suffix, _format_http_failure_detail(status, error)))
+    detail(ctx.std, "%s failed%s (benign): %s" % (label, suffix, _format_http_failure_detail(status, error)))
 
 def _do_request_once(ctx, method, url, token, payload = None, token_class = BUCKET_APP):
     """Single HTTP attempt (failure contract: see file docstring).
@@ -1978,9 +1978,9 @@ def _bail_if_not_public_github(std, log, skip_label):
         if _resolve_api_base(env) == DEFAULT_GITHUB_API:
             missing.append(_API_URL_ENV)
     if missing:
-        log.info(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
-                       "for that host in %s and its API base (e.g. %s) in %s; " +
-                       "missing %s. %s") % (
+        log.detail(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
+                         "for that host in %s and its API base (e.g. %s) in %s; " +
+                         "missing %s. %s") % (
             var,
             host,
             _EXPLICIT_TOKEN_ENV,
@@ -1992,7 +1992,7 @@ def _bail_if_not_public_github(std, log, skip_label):
         return True
     mismatch = _api_host_mismatch(std)
     if mismatch:
-        log.info(std, "%s; not sending a GitHub token there. %s" % (mismatch, skip_label))
+        log.detail(std, "%s; not sending a GitHub token there. %s" % (mismatch, skip_label))
         return True
     return False
 

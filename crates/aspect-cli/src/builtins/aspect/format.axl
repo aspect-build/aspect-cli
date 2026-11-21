@@ -21,7 +21,7 @@ load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./private/lib/environment.axl", "answer", "error", "info", "warn")
+load("./private/lib/environment.axl", "detail", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
 load("./private/lib/git_diff.axl", "git_diff_args")
@@ -474,17 +474,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 kept = [f for f in changed_files if match_any(include_patterns, f)]
                 skipped_count = len(changed_files) - len(kept)
                 if skipped_count > 0:
-                    info(ctx.std, "Skipped %d file(s) not matching --include-pattern." % skipped_count)
+                    detail(ctx.std, "Skipped %d file(s) not matching --include-pattern." % skipped_count)
                 changed_files = kept
             if exclude_patterns:
                 kept = [f for f in changed_files if not match_any(exclude_patterns, f)]
                 n_excluded = len(changed_files) - len(kept)
                 if n_excluded > 0:
-                    info(ctx.std, "Filtered %d file(s) via --exclude-pattern." % n_excluded)
+                    detail(ctx.std, "Filtered %d file(s) via --exclude-pattern." % n_excluded)
                 changed_files = kept
             changed_files = _normalize_files_for_formatter(ctx, changed_files)
             if not changed_files:
-                answer(ctx.std, "No files to format")
+                info(ctx.std, "No files to format")
                 data["format"]["no_files_to_format"] = True
                 return _emit_final(ph, 0)
 
@@ -589,7 +589,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if not affected:
         if filtered_count > 0:
-            answer(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
+            info(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
         return _emit_final(ph, 0)
 
     n = len(affected)
@@ -640,7 +640,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         error(ctx.std, "Formatting required.")
         return _emit_final(ph, 1)
     if severity_resolved == "warn":
-        answer(ctx.std, "Formatter modified %d file(s). --severity=warn → exiting 0 with a warning signal." % len(affected))
+        info(ctx.std, "Formatter modified %d file(s). --severity=warn → exiting 0 with a warning signal." % len(affected))
     else:
         print("Formatted %d file(s). Review and commit the changes." % len(affected))
     return _emit_final(ph, 0)

@@ -87,7 +87,7 @@ load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./private/lib/environment.axl", "answer", "detect_ci", "error", "info", "warn")
+load("./private/lib/environment.axl", "detail", "detect_ci", "error", "info", "warn")
 load("./private/lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -303,7 +303,7 @@ def _resolve_effective_dirs(ph):
     # Positionals given but none survived: refuse to widen to whole-repo. A
     # typo/stale path shouldn't rewrite unrelated BUILD files.
     if raw_user_dirs and not user_dirs:
-        answer(ctx.std, "All supplied directories were missing - skipping gazelle to avoid widening to a whole-repo run.")
+        info(ctx.std, "All supplied directories were missing - skipping gazelle to avoid widening to a whole-repo run.")
         return [], True
 
     if ctx.args.scope == "all":
@@ -340,7 +340,7 @@ def _resolve_effective_dirs(ph):
     if escalate:
         for f in detect_result["files"]:
             if match_any(escalate, f):
-                info(ctx.std, "Changed file %r matches --scope-all-on-change pattern — escalating to a whole-repo update." % f)
+                detail(ctx.std, "Changed file %r matches --scope-all-on-change pattern - escalating to a whole-repo update." % f)
                 return dedupe_subtrees(user_dirs), False
 
     # Filter by --changed-file-pattern; empty = keep all (gazelle decides per-dir).
@@ -349,7 +349,7 @@ def _resolve_effective_dirs(ph):
         matching_files = [f for f in detect_result["files"] if match_any(file_patterns, f)]
         dropped = len(detect_result["files"]) - len(matching_files)
         if dropped > 0:
-            info(ctx.std, "--changed-file-pattern filtered out %d non-matching changed file(s)." % dropped)
+            detail(ctx.std, "--changed-file-pattern filtered out %d non-matching changed file(s)." % dropped)
     else:
         matching_files = detect_result["files"]
 
@@ -364,7 +364,7 @@ def _resolve_effective_dirs(ph):
     effective = dedupe_subtrees(effective)
 
     if not effective:
-        answer(ctx.std, "No changed directories - skipping gazelle.")
+        info(ctx.std, "No changed directories - skipping gazelle.")
         return [], True
 
     return effective, False
@@ -600,7 +600,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         if not f.startswith("-mode") and not f.startswith("--mode"):
             diff_args.append(f)
         else:
-            info(ctx.std, "--gazelle-flag=%s ignored in diff phase (task controls -mode internally)." % f)
+            detail(ctx.std, "--gazelle-flag=%s ignored in diff phase (task controls -mode internally)." % f)
     diff_args.append("-mode=diff")
     diff_args.extend(effective_dirs)
     status = _pick_status(data, had_failure = False, terminal = False)
@@ -700,7 +700,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         error(ctx.std, "BUILD files are out of date.")
         return 1
     if severity_resolved == "warn":
-        answer(ctx.std, "BUILD files are out of date. --severity=warn → exiting 0 with a warning signal.")
+        info(ctx.std, "BUILD files are out of date. --severity=warn → exiting 0 with a warning signal.")
     elif not check_only:
         # Local apply: tree already updated, don't tell them to re-run.
         print("Gazelle updated %d file(s). Review and commit the changes." % len(affected))

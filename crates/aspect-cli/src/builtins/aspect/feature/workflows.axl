@@ -14,8 +14,8 @@ load(
 load(
     "../private/lib/environment.axl",
     "bazel_misdetects_color",
+    "detail",
     "get_workflows_environment",
-    "info",
     "print_environment_info",
     "sanitize_filename",
 )
@@ -35,7 +35,7 @@ def _workflows_impl(ctx: FeatureContext):
         if executor_flags:
             add_task_flags(bazel_trait, executor_flags)
         else:
-            info(ctx.std, "Remote execution was requested (--workflows:remote-exec) but ASPECT_WORKFLOWS_REMOTE_EXECUTOR is unset, so none is wired.")
+            detail(ctx.std, "Remote execution was requested (--workflows:remote-exec) but ASPECT_WORKFLOWS_REMOTE_EXECUTOR is unset, so none is wired.")
 
     if environment.runner != None:
         # On a Workflows runner, register the runner-environment table and the

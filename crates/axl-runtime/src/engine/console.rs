@@ -27,7 +27,7 @@ use super::template::json_to_minijinja;
 /// `template_preset` counts only when the command line or a `config.axl` set
 /// it; otherwise the base preset is `agent` when [`Host::coding_agent`] and
 /// `full` when not. A disabled feature gives the `full` layout. Fails on a
-/// malformed `templates`, `task_presets`, `task_templates` or `info_lines`
+/// malformed `templates`, `task_presets`, `task_templates` or `verbose`
 /// value and on everything [`Surface::resolve`] refuses. The surface carries a
 /// warning for each `task_presets` / `task_templates` key that is a near miss
 /// of one of `task_paths`, the command paths of the repo's tasks.
@@ -55,8 +55,8 @@ pub fn from_feature_args(
     if args.is_explicit_key("template_preset") {
         overrides.preset_from_cli();
     }
-    if let Some(show) = info_lines(args)? {
-        overrides.set_info_lines(show);
+    if let Some(show) = verbose(args)? {
+        overrides.set_verbose(show);
     }
     let templates = string_dict(args, "templates")?;
     blocks_error(&templates)?;
@@ -95,10 +95,10 @@ pub fn from_feature_args(
         .with_warnings(overrides.near_miss_warnings(task_paths)))
 }
 
-/// The `info_lines` arg: `None` for `auto` or unset, so the preset decides.
+/// The `verbose` arg: `None` for `auto` or unset, so the preset decides.
 /// The CLI gives a string; a `config.axl` may assign a bool too.
-fn info_lines(args: &Arguments<'_>) -> Result<Option<bool>, String> {
-    let Some(value) = args.get("info_lines").filter(|v| !v.is_none()) else {
+fn verbose(args: &Arguments<'_>) -> Result<Option<bool>, String> {
+    let Some(value) = args.get("verbose").filter(|v| !v.is_none()) else {
         return Ok(None);
     };
     if let Some(show) = value.unpack_bool() {
@@ -108,9 +108,12 @@ fn info_lines(args: &Arguments<'_>) -> Result<Option<bool>, String> {
         Some("auto") => Ok(None),
         Some("true") => Ok(Some(true)),
         Some("false") => Ok(Some(false)),
-        _ => Err(format!(
-            "Console info_lines must be \"auto\", \"true\", \"false\" or a bool, got {}",
-            value.to_repr()
+        given => Err(format!(
+            "Console verbose must be \"auto\", \"true\", \"false\" or a bool, got {}{}",
+            value.to_repr(),
+            given
+                .map(|g| crate::suggest::did_you_mean(g, ["auto", "true", "false"]))
+                .unwrap_or_default()
         )),
     }
 }
@@ -395,7 +398,7 @@ task_templates = {"check": {"progress": "mine"}}"#;
         coding_agent: bool,
     ) -> Result<Surface, String> {
         let code = format!(
-            "info_lines = None\n{extra}\nargs = {{\"template_preset\": {preset:?}, \"info_lines\": info_lines}}"
+            "verbose = None\n{extra}\nargs = {{\"template_preset\": {preset:?}, \"verbose\": verbose}}"
         );
         crate::test::eval(&code).with_value("args", |bound| {
             let args = Arguments::new();
@@ -434,21 +437,22 @@ task_templates = {"check": {"progress": "mine"}}"#;
     }
 
     #[test]
-    fn info_lines_overrides_the_preset() {
-        let shown = |extra, preset| {
-            resolve_with(preset, "cli", extra, false)
-                .unwrap()
-                .info_lines()
-        };
+    fn verbose_overrides_the_preset() {
+        let shown = |extra, preset| resolve_with(preset, "cli", extra, false).unwrap().verbose();
         assert!(shown("", "full"));
         assert!(!shown("", "agent"));
-        assert!(!shown(r#"info_lines = "auto""#, "compact"));
-        assert!(shown(r#"info_lines = "true""#, "compact"));
-        assert!(shown("info_lines = True", "silent"));
-        assert!(!shown(r#"info_lines = "false""#, "full"));
-        assert!(!shown("info_lines = False", "plain"));
-        let err = resolve_with("full", "cli", "info_lines = 1", false).unwrap_err();
-        assert!(err.contains("info_lines must be"), "{err}");
+        assert!(!shown(r#"verbose = "auto""#, "compact"));
+        assert!(shown(r#"verbose = "true""#, "compact"));
+        assert!(shown("verbose = True", "silent"));
+        assert!(!shown(r#"verbose = "false""#, "full"));
+        assert!(!shown("verbose = False", "plain"));
+        let err = resolve_with("full", "cli", "verbose = 1", false).unwrap_err();
+        assert!(err.contains("verbose must be"), "{err}");
+        let err = resolve_with("full", "cli", r#"verbose = "ture""#, false).unwrap_err();
+        assert!(
+            err.ends_with(r#"got "ture"; did you mean "true"?"#),
+            "{err}"
+        );
     }
 
     #[test]

@@ -302,7 +302,7 @@ load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_mani
 load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
-load("./private/lib/environment.axl", "answer", "error", "info", "sanitize_filename", "warn")
+load("./private/lib/environment.axl", "detail", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -1001,7 +1001,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
 
     if not status.success:
         return {}, {}, [], exit_code_of(status)
-    info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
+    detail(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2. Parse the gRPC log regardless of exit code — non-zero usually
     # just means DeliveryHash wasn't cached yet, normal on first delivery.
@@ -1216,9 +1216,9 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     ctx.std.fs.remove_file(log_path)
 
     if _unresolved == 0:
-        info(ctx.std, "Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
+        detail(ctx.std, "Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
-        answer(ctx.std, "Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
+        info(ctx.std, "Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
             len(targets),
             fmt_elapsed(time.monotonic() - _t_phase2),
@@ -1228,10 +1228,10 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         if should_surface_phase2_stderr(_unexplained_unresolved, getactionresult_count):
             # Frame the stderr so its expected cache-miss errors don't read as the failure.
             _surface_phase_stderr(ctx, 2, phase2_log_path)
-            answer(ctx.std, "The Bazel errors above are from the checksum phase" +
-                            " (it reads delivery digests from the remote cache without building); the" +
-                            " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
-                            " only because a digest could not be resolved for an unexpected reason.")
+            info(ctx.std, "The Bazel errors above are from the checksum phase" +
+                          " (it reads delivery digests from the remote cache without building); the" +
+                          " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
+                          " only because a digest could not be resolved for an unexpected reason.")
 
     return output_shas, non_hermetic_misses, uncacheable_actions, 0
 
@@ -1552,7 +1552,7 @@ def _publish_manifest(ctx, data):
     if manifest_file:
         rendered = _resolve_render_manifest_file(delivery_trait.render_manifest_file, manifest)
         ctx.std.fs.write(manifest_file, rendered)
-        answer(ctx.std, "Delivery manifest written to {}".format(manifest_file))
+        info(ctx.std, "Delivery manifest written to {}".format(manifest_file))
 
     # Every upload registers under the `delivery_manifest` kind; the renderer
     # reads the full list via `artifacts.list_kind` and emits one labeled link
@@ -1713,8 +1713,8 @@ def _delivery_impl(ctx):
         # --mode=always --dry-run --track-state=false degrades gracefully (skip
         # phase 1/2, no digests); other combinations need digests and hard-error.
         if mode == "always" and dry_run and not track_state:
-            info(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
-                          " Configure --remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
+            detail(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
+                            " Configure --remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
             phase_1_2_runs = False
         else:
             error(ctx.std, "Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
@@ -1744,7 +1744,7 @@ def _delivery_impl(ctx):
 
     if query_expr:
         # Echo the query so the resolved set (or failure) is attributable to it.
-        info(ctx.std, "Running bazel query: {}".format(query_expr))
+        detail(ctx.std, "Running bazel query: {}".format(query_expr))
 
         # The query runs under the rc set by use_rc, self-expanded for the
         # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
@@ -1796,7 +1796,7 @@ def _delivery_impl(ctx):
     ))
 
     if not targets:
-        answer(ctx.std, "No targets to deliver")
+        info(ctx.std, "No targets to deliver")
         return _emit_final(ph, exit_code = 0)
 
     # Hard-fail on forced labels not in the resolved set: force-target only
@@ -1820,7 +1820,7 @@ def _delivery_impl(ctx):
     if phase_1_2_runs:
         _t_build = time.monotonic()
         output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri or "", color)
-        info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
+        detail(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
             handler(ctx, build_code)
@@ -1956,10 +1956,10 @@ def _delivery_impl(ctx):
     )
 
     if delivery_targets and skip_delivery_build:
-        info(ctx.std, "Skipping the delivery build: --dry-run dispatches nothing, so its outputs would go unused." +
-                      " Pass --dry-run=build to build the pending targets anyway — it fills each manifest entry's" +
-                      " on-disk paths and runs the per-target 'never built' / 'not runnable' checks, at the cost of a" +
-                      " full release build.")
+        detail(ctx.std, "Skipping the delivery build: --dry-run dispatches nothing, so its outputs would go unused." +
+                        " Pass --dry-run=build to build the pending targets anyway - it fills each manifest entry's" +
+                        " on-disk paths and runs the per-target 'never built' / 'not runnable' checks, at the cost of a" +
+                        " full release build.")
 
     rows = []
     skipped_count = 0
@@ -1987,12 +1987,12 @@ def _delivery_impl(ctx):
             mnemonics = non_hermetic_misses.get(normalize_label(label), [])
             blocked = bool(blocking_culprits)
             if mnemonics:
-                detail = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
+                reason = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
             elif blocked:
-                detail = "an uncacheable action blocked hashing — see the ERROR/WARNING above for the culprit target(s) and the fix"
+                reason = "an uncacheable action blocked hashing - see the ERROR/WARNING above for the culprit target(s) and the fix"
             else:
-                detail = "not in grpc log; target may be an alias — use the actual target label"
-            msg = "no digest: {}. Phase-2 raw log: {}".format(detail, _PHASE2_LOG_PATH.format(ctx.task.name))
+                reason = "not in grpc log; target may be an alias - use the actual target label"
+            msg = "no digest: {}. Phase-2 raw log: {}".format(reason, _PHASE2_LOG_PATH.format(ctx.task.name))
 
             # An uncacheable action is a hard error; a non-resolution with no
             # uncacheable action present stays a warning as it always has.
@@ -2194,13 +2194,13 @@ def _delivery_impl(ctx):
                     if not phase_1_2_runs:
                         dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(status))
                     if not status.success and release_build["cancelled"]:
-                        info(ctx.std, "Delivery build cancelled: a DeliveryTrait.delivery_target hook raised.")
+                        detail(ctx.std, "Delivery build cancelled: a DeliveryTrait.delivery_target hook raised.")
                     elif not status.success:
                         build_exit_code = exit_code_of(status)
                         error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(build_exit_code, phase3_log_path))
                         _surface_phase_stderr(ctx, 3, phase3_log_path)
                     else:
-                        info(ctx.std, "Delivery build took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
+                        detail(ctx.std, "Delivery build took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
                     build_done = True
 
             # Pull every target that settled since the last tick: its `Runnable`

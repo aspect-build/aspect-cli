@@ -45,9 +45,10 @@
 //! [`DEFAULT_PRESET`]. An agent that wants another layout sets
 //! `template_preset` either way; even `full` set in config keeps detection out.
 //!
-//! The preset a task renders with also decides whether `INFO:` lines print
-//! (see [`crate::diag::info_lines`]), unless the feature's `info_lines` arg
-//! says otherwise. `WARNING:` and `ERROR:` lines always print.
+//! The preset a task renders with also decides whether detail lines (the
+//! `INFO:` asides AXL's `detail()` prints) show (see [`crate::diag::verbose`]),
+//! unless the feature's `verbose` arg says otherwise. Other `INFO:` lines and
+//! `WARNING:` and `ERROR:` lines always print.
 //!
 //! Overrides are compiled when the console is resolved, so a syntax error fails
 //! the run before the task starts rather than mid-task.
@@ -155,8 +156,8 @@ pub struct Preset {
     /// Its lines carry emojis and Buildkite emoji shortcodes, so a blank
     /// Buildkite section falls back to `full`'s text rather than `plain`'s.
     emoji: bool,
-    /// `INFO:` lines print under it unless the `info_lines` arg says otherwise.
-    info_lines: bool,
+    /// Detail lines print under it unless the `verbose` arg says otherwise.
+    verbose: bool,
     banner: &'static str,
     header: &'static str,
     phase: &'static str,
@@ -213,7 +214,7 @@ macro_rules! verdict_icon {
 const FULL: Preset = Preset {
     name: "full",
     emoji: true,
-    info_lines: true,
+    verbose: true,
     // Jinja drops one trailing newline, so two keep the blank line under it.
     banner: "{{ line }}\n\n",
     header: concat!("{{ ':aspect:' if buildkite else '→ 🎬' }} ", header_text!()),
@@ -237,7 +238,7 @@ const FULL: Preset = Preset {
 const PLAIN: Preset = Preset {
     name: "plain",
     emoji: false,
-    info_lines: true,
+    verbose: true,
     banner: FULL.banner,
     header: concat!("{% if not buildkite %}→ {% endif %}", header_text!()),
     phase: concat!(
@@ -256,7 +257,7 @@ const PLAIN: Preset = Preset {
 const COMPACT: Preset = Preset {
     name: "compact",
     emoji: true,
-    info_lines: false,
+    verbose: false,
     banner: "",
     header: "",
     phase: "",
@@ -275,7 +276,7 @@ const COMPACT: Preset = Preset {
 const AGENT: Preset = Preset {
     name: "agent",
     emoji: false,
-    info_lines: false,
+    verbose: false,
     banner: "",
     header: "",
     phase: "",
@@ -287,7 +288,7 @@ const AGENT: Preset = Preset {
 const SILENT: Preset = Preset {
     name: "silent",
     emoji: true,
-    info_lines: false,
+    verbose: false,
     banner: "",
     header: "",
     phase: "",
@@ -317,8 +318,8 @@ pub struct Overrides {
     /// The feature's preset came from the command line, so it beats
     /// `task_presets`.
     preset_from_cli: bool,
-    /// The `info_lines` arg, when it overrides the preset.
-    info_lines: Option<bool>,
+    /// The `verbose` arg, when it overrides the preset.
+    verbose: Option<bool>,
 }
 
 impl Overrides {
@@ -357,9 +358,9 @@ impl Overrides {
         self.preset_from_cli = true;
     }
 
-    /// Show (`true`) or hide `INFO:` lines whatever the preset.
-    pub fn set_info_lines(&mut self, show: bool) {
-        self.info_lines = Some(show);
+    /// Show (`true`) or hide detail lines whatever the preset.
+    pub fn set_verbose(&mut self, show: bool) {
+        self.verbose = Some(show);
     }
 
     /// Every override with the arg path naming it.
@@ -493,8 +494,8 @@ pub struct Console {
     preset: &'static Preset,
     overrides: BTreeMap<Slot, String>,
     host: Host,
-    /// Whether `INFO:` lines print: the `info_lines` arg, else the preset's.
-    info_lines: bool,
+    /// Whether detail lines print: the `verbose` arg, else the preset's.
+    verbose: bool,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
     /// Config warnings, printed under the header; see [`Console::warnings`].
@@ -540,7 +541,7 @@ impl Console {
         Ok(Console::new(
             preset,
             resolved,
-            overrides.info_lines,
+            overrides.verbose,
             task,
             host,
         ))
@@ -549,7 +550,7 @@ impl Console {
     fn new(
         preset: &'static Preset,
         overrides: BTreeMap<Slot, String>,
-        info_lines: Option<bool>,
+        verbose: Option<bool>,
         task: TaskIdentity,
         host: Host,
     ) -> Console {
@@ -557,7 +558,7 @@ impl Console {
             preset,
             overrides,
             host,
-            info_lines: info_lines.unwrap_or(preset.info_lines),
+            verbose: verbose.unwrap_or(preset.verbose),
             task,
             warned: Mutex::new(HashSet::new()),
             warnings: Vec::new(),
@@ -594,9 +595,9 @@ impl Console {
         self.host.color
     }
 
-    /// Whether `INFO:` lines print for this task.
-    pub fn info_lines(&self) -> bool {
-        self.info_lines
+    /// Whether detail lines print for this task.
+    pub fn verbose(&self) -> bool {
+        self.verbose
     }
 
     /// Render `slot` with `context`, plus the shared `buildkite` and `task`
@@ -956,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn the_preset_decides_info_lines_unless_overridden() {
+    fn the_preset_decides_verbose_unless_overridden() {
         for (preset, shown) in [
             ("full", true),
             ("plain", true),
@@ -965,20 +966,20 @@ mod tests {
             ("silent", false),
         ] {
             let c = console(preset, &Overrides::default(), false);
-            assert_eq!(c.info_lines(), shown, "{preset}");
+            assert_eq!(c.verbose(), shown, "{preset}");
             for show in [true, false] {
                 let mut o = Overrides::default();
-                o.set_info_lines(show);
-                assert_eq!(console(preset, &o, false).info_lines(), show, "{preset}");
+                o.set_verbose(show);
+                assert_eq!(console(preset, &o, false).verbose(), show, "{preset}");
             }
         }
         let mut o = Overrides::default();
         o.set_preset_for_task("test", "compact".into()).unwrap();
         assert!(
-            !console("full", &o, false).info_lines(),
+            !console("full", &o, false).verbose(),
             "the task's own preset decides"
         );
-        assert!(Console::builtin(task(), Host::default()).info_lines());
+        assert!(Console::builtin(task(), Host::default()).verbose());
     }
 
     #[test]

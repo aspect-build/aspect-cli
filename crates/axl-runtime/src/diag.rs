@@ -1,7 +1,7 @@
 //! Severity-prefixed user-facing diagnostics for the Rust side of the CLI.
 //!
-//! The Rust counterpart of the `info` / `warn` / `error` std helpers in
-//! `lib/environment.axl`: the same `INFO:` / `WARNING:` / `ERROR:` prefix
+//! The Rust counterpart of the `info` / `detail` / `warn` / `error` std helpers
+//! in `lib/environment.axl`: the same `INFO:` / `WARNING:` / `ERROR:` prefix
 //! style (mirroring Bazel's uppercase severity labels), the same ANSI colors,
 //! and the same "degrade to plain text when color is off" behavior — so a line
 //! printed from Rust is indistinguishable from one printed by an AXL task.
@@ -16,27 +16,27 @@
 //! `stream_color`, which the console ([`crate::console::Host`]) and AXL's
 //! `std.io.stderr.color` read.
 //!
-//! [`info`] and the AXL `info` helper follow [`info_lines`], which the
+//! [`detail`] and the AXL `detail` helper follow [`verbose`], which the
 //! `Console` feature sets for the running task when the console resolves; lines
-//! printed before that, early in start-up, always show. [`emit`] does not: a
-//! task's own exit message is its answer, not an aside, so it prints under
-//! every preset. `WARNING:` and `ERROR:` lines always print.
+//! printed before that, early in start-up, always show. Everything else prints
+//! under every preset: [`info`], `WARNING:` and `ERROR:` lines, and [`emit`],
+//! which carries a task's own exit message.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errln;
 
-/// Whether `INFO:` lines print. True until the console resolves.
-static INFO_LINES: AtomicBool = AtomicBool::new(true);
+/// Whether detail lines print. True until the console resolves.
+static VERBOSE: AtomicBool = AtomicBool::new(true);
 
-/// Show or hide `INFO:` lines for the rest of the run, from Rust and AXL alike.
-pub fn set_info_lines(show: bool) {
-    INFO_LINES.store(show, Ordering::Relaxed);
+/// Show or hide detail lines for the rest of the run, from Rust and AXL alike.
+pub fn set_verbose(show: bool) {
+    VERBOSE.store(show, Ordering::Relaxed);
 }
 
-/// Whether `INFO:` lines print; see [`set_info_lines`].
-pub fn info_lines() -> bool {
-    INFO_LINES.load(Ordering::Relaxed)
+/// Whether detail lines print; see [`set_verbose`].
+pub fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
 }
 
 /// Severity of a diagnostic line, carrying its label and color.
@@ -95,18 +95,23 @@ fn colorize() -> bool {
     crate::color::console_supports_color()
 }
 
-/// Print one severity-prefixed line to stderr, colorized per [`colorize`],
-/// whatever [`info_lines`] says. The named helpers below cover the fixed
-/// severities; call this when the severity is computed.
+/// Print one severity-prefixed line to stderr, colorized per [`colorize`].
+/// The named helpers below cover the fixed severities; call this when the
+/// severity is computed.
 pub(crate) fn emit(sev: Severity, msg: &str) {
     errln!("{}", format_line(sev, colorize(), msg));
 }
 
-/// Print a cyan `INFO:` line for a notable runtime branch, unless
-/// [`info_lines`] hides them.
+/// Print a cyan `INFO:` line for a notable runtime branch.
 pub fn info(msg: &str) {
-    if info_lines() {
-        emit(Severity::Info, msg);
+    emit(Severity::Info, msg);
+}
+
+/// Print [`info`]'s line for an aside a reader can do without, unless
+/// [`verbose`] hides detail lines.
+pub fn detail(msg: &str) {
+    if verbose() {
+        info(msg);
     }
 }
 

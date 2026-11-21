@@ -92,14 +92,15 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
         Ok(this.stdin.dupe())
     }
 
-    /// Whether `INFO:` lines print. The `Console` feature decides for the
-    /// running task: its preset (shown under `full` and `plain`, hidden under
-    /// `compact`, `agent` and `silent`) unless its `info_lines` arg overrides
-    /// it. True before the console resolves. `info()` in
-    /// `lib/environment.axl` follows it, as the runtime's own `INFO:` lines do.
+    /// Whether detail lines print: the `INFO:` asides a reader can do
+    /// without. The `Console` feature decides for the running task: its preset
+    /// (shown under `full` and `plain`, hidden under `compact`, `agent` and
+    /// `silent`) unless its `verbose` arg overrides it. True before the console
+    /// resolves. `detail()` in `lib/environment.axl` follows it; `info()`
+    /// always prints.
     #[starlark(attribute)]
-    fn info_lines<'v>(this: values::Value) -> anyhow::Result<bool> {
+    fn verbose<'v>(this: values::Value) -> anyhow::Result<bool> {
         this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
-        Ok(crate::diag::info_lines())
+        Ok(crate::diag::verbose())
     }
 }

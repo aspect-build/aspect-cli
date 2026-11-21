@@ -99,10 +99,10 @@ def bazel_misdetects_color(std) -> bool:
 # Severity-prefixed output. Channels (increasing alarm):
 #   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
 #   print(msg)      — narrative beats every run produces (banners, tables, outcomes).
-#   info(std, msg)  - cyan `INFO:`; conditional aside (a branch fired). The
-#                     Console feature can hide these; never warn/error.
-#   answer(std, msg) - the same `INFO:` line when it is the task's result (what
-#                     it did, or why it did nothing), which no preset hides.
+#   info(std, msg)  - cyan `INFO:`; conditional state a reader needs (a result,
+#                     a skip reason). Every preset prints it.
+#   detail(std, msg) - the same `INFO:` line for an aside a reader can do
+#                     without; the Console feature can hide these (`verbose`).
 #   warn(std, msg)  — yellow `WARNING:`; subsystem problem, task continues.
 #   error(std, msg) — red `ERROR:`; recoverable error, usually precedes non-zero exit.
 #   fail(msg)       — unrecoverable; aborts immediately.
@@ -111,10 +111,12 @@ def bazel_misdetects_color(std) -> bool:
 #   branch fires (env/flag/fallback) → info.
 # info vs warn: deliberate/expected outcome or auto-recovery → info; a subsystem
 #   we expected to work failed or returned degraded data we can't recover → warn.
+# info vs detail: what the task did or why it did nothing → info; an aside a
+#   reader can do without (a timing, a filter count, an upload note) → detail.
 # Don't stack consecutive prefixed lines — collapse into one info()/warn().
 #
-# Message style (info/warn/error + non-table print; NOT trace.log, which is
-# terse lowercase): capitalize first word; end with terminal punctuation only
+# Message style (info/detail/warn/error + non-table print; NOT trace.log, which
+# is terse lowercase): capitalize first word; end with terminal punctuation only
 # for full sentences (short noun-phrase status lines omit it); prefer a single
 # scannable sentence. Don't prefix with the task name (already `aspect <task>`).
 #   Exception: lead with a flag/path/feature identifier in its native case,
@@ -122,12 +124,13 @@ def bazel_misdetects_color(std) -> bool:
 #   Feature prefixes use the human-readable prose label, not the CamelCase
 #   symbol, and still capitalize the body after the namespace colon. Declare the
 #   namespace once via `feature_logger(...)` rather than hand-spelling it.
-#   feature_logger wraps info/warn/error only — features have no inline print()
-#   in event-driven bodies (a bare print there reads as a task narrative beat);
-#   reach for info() instead. Narrow exception: features register display hooks
-#   firing at deterministic phases that render multi-line blocks where per-line
-#   prefixes look wrong — factor those into a named lib/ helper (e.g.
-#   print_environment_info) that the feature just registers.
+#   feature_logger wraps info/detail/warn/error only - features have no inline
+#   print() in event-driven bodies (a bare print there reads as a task narrative
+#   beat); reach for info() or detail() instead. Narrow exception: features
+#   register display hooks firing at deterministic phases that render
+#   multi-line blocks where per-line prefixes look wrong - factor those into a
+#   named lib/ helper (e.g. print_environment_info) that the feature just
+#   registers.
 #
 # Prefix style mirrors Bazel's uppercase ERROR:/WARNING:
 # (https://bazel.build/run/scripts#parsing-output); punctuation follows
@@ -136,16 +139,17 @@ def bazel_misdetects_color(std) -> bool:
 # log.
 
 def info(std, msg):
-    """Print a bold cyan `INFO:` line for notable runtime state, unless the
-    Console feature hides INFO lines (`std.io.info_lines`)."""
-    if std.io.info_lines:
-        answer(std, msg)
-
-def answer(std, msg):
-    """Print `info`'s `INFO:` line whatever `std.io.info_lines` says, for a
-    line that is the task's result rather than an aside: the only report of
-    what it did, or of why it did nothing (`No files to format`)."""
+    """Print a bold cyan `INFO:` line for notable runtime state. Every preset
+    prints it; use `detail` for an aside a reader can do without."""
     print(ansi.style("INFO", ansi.seq("1;36"), std.io.stderr.color) + ": " + msg)
+
+def detail(std, msg):
+    """Print `info`'s `INFO:` line for an aside a reader can do without
+    (timings, filter counts, uploaded-artifact notes), unless the Console
+    feature hides them (`std.io.verbose`). Results and skip reasons use
+    `info`."""
+    if std.io.verbose:
+        info(std, msg)
 
 def warn(std, msg):
     """Print a yellow `WARNING:` line for non-fatal subsystem failures."""
@@ -161,18 +165,19 @@ def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
     print("--- " + ctx.console.render("section", icon = icon, title = title))
 
 def feature_logger(feature):
-    """(info, warn, error, trace) bundle prepending `<feature>: ` to each message.
+    """(info, detail, warn, error, trace) bundle prepending `<feature>: ` to each message.
 
         _LOG = feature_logger("GitHub status comments")
-        _LOG.info(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
+        _LOG.detail(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
 
-    info/warn/error take `std` first (no std handle at module-load time).
+    info/detail/warn/error take `std` first (no std handle at module-load time).
     trace is ASPECT_DEBUG-gated; for multi-line debug blocks use bare trace.log
     to avoid the prefix. print() lines stay unwrapped.
     """
     prefix = feature + ": "
     return struct(
         info = lambda std, msg: info(std, prefix + msg),
+        detail = lambda std, msg: detail(std, prefix + msg),
         warn = lambda std, msg: warn(std, prefix + msg),
         error = lambda std, msg: error(std, prefix + msg),
         trace = lambda msg: trace.log(prefix + msg),

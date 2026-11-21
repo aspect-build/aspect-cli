@@ -457,7 +457,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
         result = github.status_comment_contribute(ctx, request)
         if not result.get("success") and contribute_rejected(result):
             _state["_coordinator"] = False
-            _LOG.info(ctx.std, coordination_declined_message(result, "note"))
+            _LOG.detail(ctx.std, coordination_declined_message(result, "note"))
             _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
             return
         if not result.get("success"):

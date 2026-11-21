@@ -730,8 +730,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// `full` layout; see [`console_value::from_feature_args`] for the rest,
     /// including the `agent` layout a coding agent gets. Color, Buildkite and
     /// coding-agent detection come from the run's `Env` ([`Host::of`]), the
-    /// console's only view of its host. Also shows or hides `INFO:` lines for
-    /// the rest of the run ([`diag::set_info_lines`]) as the resolved console
+    /// console's only view of its host. Also shows or hides detail lines for
+    /// the rest of the run ([`diag::set_verbose`]) as the resolved console
     /// says.
     pub fn resolve_console(
         &self,
@@ -763,7 +763,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };
-        diag::set_info_lines(console.info_lines());
+        diag::set_verbose(console.verbose());
         Ok(Arc::new(console))
     }
 

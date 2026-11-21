@@ -167,7 +167,7 @@ load(
 )
 load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "no_bazel_endpoint_message", "parse_remote", "serves_bazel_endpoint")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
-load("./private/lib/environment.axl", "answer", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
+load("./private/lib/environment.axl", "bazel_misdetects_color", "detail", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups")
 
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
@@ -234,8 +234,8 @@ def _reused_sections(ctx: TaskContext, default, spec, repo_defines: list) -> lis
     if all([w in repo_defines for w in (wanted or [config_name(default)])]):
         return wanted
     if wanted:
-        info(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
-                      ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))
+        detail(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
+                        ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))
     return None
 
 def _create_generated_dir(ctx: TaskContext, dir: str, gitignore: bool) -> list:
@@ -317,9 +317,9 @@ def _announce_home_mode(ctx: TaskContext, value: str, home_mode: bool, reason: s
     if value not in ["", AUTO]:
         return
     if home_mode:
-        info(ctx.std, "--home=auto: %s, so this machine's rc under ~/.aspect is written rather than the checkout's. `--home=false` writes the checkout's pair instead." % reason)
+        detail(ctx.std, "--home=auto: %s, so this machine's rc under ~/.aspect is written rather than the checkout's. `--home=false` writes the checkout's pair instead." % reason)
     else:
-        info(ctx.std, "--home=auto: not CI, so the checkout's %s pair is written rather than this machine's. `--home=true` writes ~/.aspect/bazelrc instead." % GENERATED_RC)
+        detail(ctx.std, "--home=auto: not CI, so the checkout's %s pair is written rather than this machine's. `--home=true` writes ~/.aspect/bazelrc instead." % GENERATED_RC)
 
 def _announce_remote_spec(ctx: TaskContext, value: str, spec, reason: str, machine_rc: bool):
     """Say what `--remote=auto` turned on and on what evidence. The endpoints are
@@ -328,15 +328,15 @@ def _announce_remote_spec(ctx: TaskContext, value: str, spec, reason: str, machi
     if value not in ["", AUTO]:
         return
     if not machine_rc:
-        info(ctx.std, "--remote=auto: a checkout's rc enables nothing — it is shared by every host that builds here, so its sections stay behind a --config. `--home=true` writes this machine's rc, where --remote decides what is on.")
+        detail(ctx.std, "--remote=auto: a checkout's rc enables nothing - it is shared by every host that builds here, so its sections stay behind a --config. `--home=true` writes this machine's rc, where --remote decides what is on.")
         return
     wanted = [capability_label(name) for name in REMOTE_CAPABILITIES if spec.on[name]]
     if wanted:
-        info(ctx.std, "--remote=auto: %s, so the deployment's %s %s enabled for every `bazel` build here. `--remote=none` leaves them defined but off." %
-                      (reason, join_and(wanted), "is" if len(wanted) == 1 else "are"))
+        detail(ctx.std, "--remote=auto: %s, so the deployment's %s %s enabled for every `bazel` build here. `--remote=none` leaves them defined but off." %
+                        (reason, join_and(wanted), "is" if len(wanted) == 1 else "are"))
     elif not reason:
         # On CI with nothing enabled, the decline said why in its own words.
-        info(ctx.std, "--remote=auto: not CI, so no endpoint is enabled — a developer's rc stays inert until a --config names one. `--remote` enables the remote cache and BES backend here.")
+        detail(ctx.std, "--remote=auto: not CI, so no endpoint is enabled - a developer's rc stays inert until a --config names one. `--remote` enables the remote cache and BES backend here.")
 
 def _sections_to_enable(default, spec) -> list:
     """The deployment sections a machine's rc would turn on for `spec`: the
@@ -458,8 +458,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     # so the same helper.
     if default != None and ctx.args.remote in ["", AUTO] and not can_authenticate(ctx, default):
         spec = parse_remote("none")
-        info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
-                      (default.name, login_hint(default), config_name(default)))
+        detail(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
+                        (default.name, login_hint(default), config_name(default)))
 
     # A runner's endpoints are its own and meant to win, so never reuse there.
     reused = None
@@ -533,20 +533,20 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     shown = lambda path: _relative(path, base, home_mode)
     if chain_to_repo:
-        answer(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on - nothing here restates them." %
-                        (verb, shown(paths.output), ", ".join(enabled), "%workspace%/" + GENERATED_RC))
+        info(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on - nothing here restates them." %
+                      (verb, shown(paths.output), ", ".join(enabled), "%workspace%/" + GENERATED_RC))
         return 0
     if env_deployment:
         optional = [c.name for c in configs if c.name not in enabled]
         summary = "%s %s: enabled --config groups %s; opt-in %s (the ASPECT_WORKFLOWS_* environment names this machine's deployment, so no deployment sections)" % (verb, shown(paths.output), ", ".join(enabled), ", ".join(optional) or "none")
         if import_result != None:
             summary += "; " + _IMPORT_VERBS[import_result.action] % shown(paths.importer)
-        answer(ctx.std, summary + ".")
+        info(ctx.std, summary + ".")
         return 0
 
     group_names = [g.name for g in groups]
     resolved_sections = [c for c in configs if c.name not in group_names]
-    answer(ctx.std, "Generating %s: Bazel flags that point plain `bazel` calls at Aspect Cloud and, when configured, Aspect single-tenant deployments." % shown(paths.output))
+    info(ctx.std, "Generating %s: Bazel flags that point plain `bazel` calls at Aspect Cloud and, when configured, Aspect single-tenant deployments." % shown(paths.output))
     for line in _report(written, import_result, paths, shown, resolved_sections, enabled, home_mode, verb):
         print(line)
     return 0

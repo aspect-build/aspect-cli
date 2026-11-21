@@ -4,7 +4,7 @@ aspect-build/aspect-cli; `--uninstall` removes it again. See the task
 description below for the flags and tools/bazel.md for what the wrapper does.
 """
 
-load("./private/lib/environment.axl", "answer", "error", "info")
+load("./private/lib/environment.axl", "detail", "error", "info")
 load(
     "./private/lib/wrapper.axl",
     "ALL_SHELLS",
@@ -63,7 +63,7 @@ def _print_shell_instructions(ctx: TaskContext) -> None:
     else:
         detected = detect_shell(ctx.std.env.var("SHELL"))
         if detected == None:
-            info(ctx.std, "Could not detect your shell from $SHELL; printing every snippet (use --all-shells to silence this note).")
+            detail(ctx.std, "Could not detect your shell from $SHELL; printing every snippet (use --all-shells to silence this note).")
             shells = ALL_SHELLS
         else:
             shells = [detected]
@@ -197,7 +197,7 @@ def _uninstall_impl(ctx: TaskContext) -> int:
     doc_path = root + "/" + WRAPPER_DOC_PATH
 
     if not ctx.std.fs.exists(script_path):
-        answer(ctx.std, "No %s to remove." % WRAPPER_SCRIPT_PATH)
+        info(ctx.std, "No %s to remove." % WRAPPER_SCRIPT_PATH)
         return 0
 
     content = ctx.std.fs.read_to_string(script_path)

@@ -1124,7 +1124,7 @@ def _test_explicit_token_and_api_base(ctx):
     _eq("repo detection: unconfigured host rejected", github.extract_owner_repo(vcs), ("", ""))
 
     logged = []
-    log = struct(info = lambda std, msg: logged.append(msg))
+    log = struct(detail = lambda std, msg: logged.append(msg))
 
     def _bails(vars):
         return github.bail_if_not_public_github(_fake_std(_github_checkout(vars)), log, "Skipping.")
