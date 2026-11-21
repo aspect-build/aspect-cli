@@ -369,17 +369,14 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 match select_task(&full, name).or_else(|| select_feature(&full, name)) {
                     Some(t) => t,
                     None => {
-                        let commands = describe_commands(&full);
                         let want = name.trim().trim_start_matches("aspect ").trim();
-                        errln!(
-                            "error: no task or feature {name:?}{}",
-                            suggest::did_you_mean_then(
-                                want,
-                                commands.iter().map(String::as_str),
-                                ". ",
-                                "Run `aspect describe` for the list of commands and features."
-                            )
-                        );
+                        let rest = "Run `aspect describe` for the list of commands and features.";
+                        match describe_suggestion(&full, want) {
+                            Some(c) => errln!(
+                                "error: no task or feature {name:?}; did you mean {c:?}? {rest}"
+                            ),
+                            None => errln!("error: no task or feature {name:?}. {rest}"),
+                        }
                         return ExitCode::FAILURE;
                     }
                 }
@@ -1664,6 +1661,27 @@ fn describe_commands(full: &serde_json::Value) -> Vec<String> {
         .flatten()
         .filter_map(|f| Some(format!("{FEATURE_COMMAND} {}", f["name"].as_str()?)));
     tasks.chain(features).collect()
+}
+
+/// What to suggest for `want`, a name `aspect describe <name>` doesn't accept:
+/// the [`suggest::closest`] of [`describe_commands`], or else, for a feature
+/// named (or nearly named) without the leading `feature `, `feature <name>`.
+fn describe_suggestion(full: &serde_json::Value, want: &str) -> Option<String> {
+    let commands = describe_commands(full);
+    if let Some(c) = suggest::closest(want, commands.iter().map(String::as_str)) {
+        return Some(c.to_owned());
+    }
+    let slugs: Vec<&str> = full["features"]
+        .as_array()?
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    slugs
+        .iter()
+        .copied()
+        .find(|s| *s == want)
+        .or_else(|| suggest::closest(want, slugs.iter().copied()))
+        .map(|s| format!("{FEATURE_COMMAND} {s}"))
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,

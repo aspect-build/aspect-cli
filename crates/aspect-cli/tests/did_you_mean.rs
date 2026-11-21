@@ -128,6 +128,14 @@ fn a_described_task_or_feature_near_miss_is_suggested() {
         &run("", &["describe", "feature consle"]),
         r#"no task or feature "feature consle"; did you mean "feature console"? Run `aspect describe`"#,
     );
+    for bare in ["console", "consle"] {
+        assert_fails_with(
+            &run("", &["describe", bare]),
+            &format!(
+                r#"no task or feature "{bare}"; did you mean "feature console"? Run `aspect describe`"#
+            ),
+        );
+    }
     assert_fails_with(
         &run("", &["describe", "nonesuch"]),
         r#"no task or feature "nonesuch". Run `aspect describe`"#,
