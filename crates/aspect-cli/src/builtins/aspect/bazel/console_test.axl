@@ -43,6 +43,8 @@ def _test_a_bad_setting_is_reported_not_raised(_):
     _eq("one problem each", len(got.problems), 4)
     _eq("names the stages", "relativize_paths" in got.problems[0], True)
     _eq("drop has no default to leave out", len(default_stages("human", disable = ["drop"]).problems), 1)
+    near = default_stages("humn", disable = ["recap_error"]).problems
+    _eq("a near miss is named", ('did you mean "recap_errors"?' in near[0], 'did you mean "human"?' in near[1]), (True, True))
 
 def _test_tip_rules_and_recap_are_configurable(_):
     """Each console tip rule becomes an `aggregate` stage; a rule whose
