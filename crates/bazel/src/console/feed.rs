@@ -1,11 +1,13 @@
 //! What a console shows, as data, for a caller drawing its own screen: the
 //! lines the stages pass, and Bazel's progress area as it last drew it.
 //!
-//! The forwarder thread writes a [`Feed`]; the caller drains it whenever it
-//! redraws. Lines are kept as plain text, escape sequences stripped, up to
-//! [`MAX_LINES`] between drains; older ones are counted in
-//! [`Drained::dropped`] instead. The progress area is replaced on every
-//! redraw, so only the latest is kept.
+//! Writers each write as their own [`Source`], so a line one leaves unended
+//! is not joined to the other's: the console's forwarder as stderr, and
+//! `std.term`'s capture of the process's stdout and stderr as both. The
+//! caller drains it whenever it redraws. Lines are kept as plain text,
+//! escape sequences stripped, up to [`MAX_LINES`] between drains; older ones
+//! are counted in [`Drained::dropped`] instead. The progress area is replaced
+//! on every redraw, so only the latest is kept.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -23,11 +25,19 @@ pub struct Feed {
     state: Mutex<State>,
 }
 
+/// Which writer a line comes from: each keeps its own unended line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Source {
+    #[default]
+    Stderr,
+    Stdout,
+}
+
 #[derive(Debug, Default)]
 struct State {
     lines: VecDeque<String>,
-    /// The text of the line being written, not yet ended.
-    partial: Vec<u8>,
+    /// The text of the line each source is writing, not yet ended.
+    partial: [Vec<u8>; 2],
     dropped: u64,
     progress: Vec<String>,
 }
@@ -47,19 +57,21 @@ pub struct Drained {
 }
 
 impl Feed {
-    /// Take in bytes the forwarder would have written: whole lines are kept,
-    /// a trailing partial one waits for its end.
-    pub fn write(&self, bytes: &[u8]) {
+    /// Take in bytes `source` would have written: whole lines are kept, a
+    /// trailing partial one waits for its end.
+    pub fn write(&self, source: Source, bytes: &[u8]) {
         let text = ansi::strip(bytes);
         let mut s = self.state.lock().unwrap();
         for &b in text.iter() {
             match b {
                 b'\n' => {
-                    let line = std::mem::take(&mut s.partial);
+                    let line = std::mem::take(&mut s.partial[source as usize]);
                     s.push(String::from_utf8_lossy(&line).into_owned());
                 }
                 b'\r' => {}
-                _ if s.partial.len() < MAX_LINE_BYTES => s.partial.push(b),
+                _ if s.partial[source as usize].len() < MAX_LINE_BYTES => {
+                    s.partial[source as usize].push(b)
+                }
                 _ => {}
             }
         }
@@ -70,15 +82,17 @@ impl Feed {
         self.state.lock().unwrap().progress = rows;
     }
 
-    /// The console ended: a partial line is kept, and there is no progress
-    /// area any more.
-    pub fn finish(&self) {
+    /// `source` ended: its partial line is kept, and with stderr, the
+    /// console's, there is no progress area any more.
+    pub fn finish(&self, source: Source) {
         let mut s = self.state.lock().unwrap();
-        let line = std::mem::take(&mut s.partial);
+        let line = std::mem::take(&mut s.partial[source as usize]);
         if !line.is_empty() {
             s.push(String::from_utf8_lossy(&line).into_owned());
         }
-        s.progress.clear();
+        if source == Source::Stderr {
+            s.progress.clear();
+        }
     }
 
     /// The lines since the last drain, and the progress area now.
@@ -109,9 +123,9 @@ mod tests {
     #[test]
     fn whole_lines_are_kept_plain_and_a_partial_one_waits() {
         let feed = Feed::default();
-        feed.write(b"\x1b[32mINFO:\x1b[0m one\r\ntw");
+        feed.write(Source::Stderr, b"\x1b[32mINFO:\x1b[0m one\r\ntw");
         assert_eq!(feed.drain().lines, vec!["INFO: one"]);
-        feed.write(b"o\n");
+        feed.write(Source::Stderr, b"o\n");
         assert_eq!(feed.drain().lines, vec!["two"]);
         assert_eq!(feed.drain().lines, Vec::<String>::new());
     }
@@ -119,16 +133,25 @@ mod tests {
     #[test]
     fn a_long_line_is_cut() {
         let feed = Feed::default();
-        feed.write(&vec![b'x'; MAX_LINE_BYTES + 10]);
-        feed.write(b"\n");
+        feed.write(Source::Stderr, &vec![b'x'; MAX_LINE_BYTES + 10]);
+        feed.write(Source::Stderr, b"\n");
         assert_eq!(feed.drain().lines[0].len(), MAX_LINE_BYTES);
+    }
+
+    #[test]
+    fn each_source_keeps_its_own_unended_line() {
+        let feed = Feed::default();
+        feed.write(Source::Stdout, b"a");
+        feed.write(Source::Stderr, b"INFO: x\n");
+        feed.write(Source::Stdout, b"b\n");
+        assert_eq!(feed.drain().lines, vec!["INFO: x", "ab"]);
     }
 
     #[test]
     fn past_the_cap_the_oldest_lines_are_counted_instead() {
         let feed = Feed::default();
         for i in 0..MAX_LINES + 3 {
-            feed.write(format!("{i}\n").as_bytes());
+            feed.write(Source::Stderr, format!("{i}\n").as_bytes());
         }
         let got = feed.drain();
         assert_eq!(got.lines.len(), MAX_LINES);
@@ -146,8 +169,8 @@ mod tests {
         ]);
         assert_eq!(feed.drain().progress.len(), 2);
         assert_eq!(feed.drain().progress.len(), 2, "kept across drains");
-        feed.write(b"last");
-        feed.finish();
+        feed.write(Source::Stderr, b"last");
+        feed.finish(Source::Stderr);
         let got = feed.drain();
         assert_eq!(
             (got.lines, got.progress),

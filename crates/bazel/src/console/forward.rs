@@ -58,7 +58,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::ansi;
-use super::feed::Feed;
+use super::feed::{Feed, Source};
 use super::line::{Classifier, Line};
 use super::log::RawLog;
 use super::render::{Row, Screen};
@@ -188,7 +188,7 @@ impl Forwarder {
                 };
                 splitter.finish();
                 if let Some(feed) = &shape.feed {
-                    feed.finish();
+                    feed.finish(Source::Stderr);
                 }
                 state.done();
                 result
@@ -545,7 +545,7 @@ impl Destination {
             self.at_line_start = last == b'\n' || last == b'\r';
         }
         if let Some(feed) = &self.feed {
-            feed.write(bytes);
+            feed.write(Source::Stderr, bytes);
         }
         if self.hidden {
             return;

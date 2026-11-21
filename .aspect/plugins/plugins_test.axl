@@ -1,11 +1,12 @@
 """Tests for the console plugins' parsing: ping_remote's `host_port`,
-go_deps' `package_of` and open_invocation's `results_page` and
-`results_pages`.
+go_deps' `package_of`, open_invocation's `results_page` and
+`results_pages`, and full_screen's layout helpers and `render`.
 
 Run with:
   aspect dev test-console-plugins
 """
 
+load("./full_screen.axl", "ANSI", "CONTROLS", "action_counts", "action_rows", "action_seconds", "add_lines", "bar", "bounded_log", "cache_hits", "console_height", "console_lines", "count_aborted", "count_event", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "has_capital", "keys_row", "link", "links_row", "local_test_logs", "log_view", "new_counts", "new_search", "note_event", "on_key", "output_of", "paste_text", "progress_counts", "render", "reset_attempt", "running_actions", "severity", "shown_by", "step_match")
 load("./go_deps.axl", "package_of")
 load("./open_invocation.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 load("./ping_remote.axl", "host_port")
@@ -13,6 +14,52 @@ load("./ping_remote.axl", "host_port")
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _screen(ctx, log, **kw):
+    """A dashboard's whole state, as the feature keeps it, over `log`."""
+    state = {
+        "task": "build",
+        "phase": "",
+        "start_ms": 0,
+        "now_ms": 0,
+        "frames": 0,
+        "progress": [],
+        "log": log,
+        "errors": [],
+        "error_count": 0,
+        "scroll": 0,
+        "filter": "all",
+        "search": new_search(),
+        "fails": [],
+        "outputs": [],
+        "list": "failures",
+        "selected": 0,
+        "picked": 0,
+        "focus": "console",
+        "view": None,
+        "help": False,
+        "zoom": False,
+        "mouse": False,
+        "unseen": 0,
+        "cache": None,
+        "countdown_ms": None,
+        "re": ctx.std.re,
+        "cancelling": False,
+        "ended": False,
+        "counts": new_counts(),
+        "pages": [],
+        "test_counts": {},
+        "spread": {},
+        "logged_index": None,
+    }
+    state.update(kw)
+    return state
+
+def _visible(row):
+    """A drawn row without its escape sequences."""
+    for code in ["\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m", "\x1b[27m", "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[36m", "\x1b[K", "\x1b[J", "\x1b[H"]:
+        row = row.replace(code, "")
+    return row
 
 def _impl(ctx: TaskContext) -> int:
     _eq("grpcs default port", host_port("grpcs://remote.example.com"), "remote.example.com:443")
@@ -48,6 +95,782 @@ def _impl(ctx: TaskContext) -> int:
     _eq("bazel streams to aspect", results_pages("https://app.example.com", "uuid-1", {"bes_streamed_by_bazel": True}), [
         (ASPECT_PAGE, "https://app.example.com/uuid-1"),
     ])
+
+    _eq("rows under the status", running_actions(["[1 / 9] 2 actions running", "    a.cc; 1s", "    b.cc; 2s"]), ["a.cc; 1s", "b.cc; 2s"])
+    _eq("one action in the status", running_actions(["[18,401 / 18,434] Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"]), ["Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"])
+    _eq("a count, no rows", running_actions(["[5 / 9] 3 actions, 1 running"]), [])
+    _eq("none running", running_actions(["[9 / 9] no actions running"]), [])
+    _eq("analysis", running_actions(["Analyzing: 3 targets"]), [])
+    _eq("nothing", running_actions([]), [])
+    _eq("fit pads", fit("ab", 4), "ab  ")
+    _eq("fit cuts", fit("abcdef", 4), "abc…")
+    _eq("fit nothing", fit("ab", 0), "")
+    _eq("fit tabs", fit("a\tb", 5), "a  b ")
+    _eq("status counts", progress_counts("[5,619 / 13,381] 15 actions running"), (5619, 13381))
+    _eq("no status", progress_counts("Analyzing: 3 targets"), None)
+    _eq("bar", bar(1, 4, 8), "██░░░░░░")
+    _eq("bar of nothing", bar(1, 0, 8), "")
+    _eq("error", severity("ERROR: x failed"), "error")
+    _eq("warning", severity("WARNING: y"), "warning")
+    _eq("plain", severity("INFO: z"), "")
+    _eq("seconds", elapsed(12500), "12s")
+    _eq("minutes", elapsed(62000), "1m02s")
+    state = {
+        "task": "build",
+        "phase": "",
+        "start_ms": 0,
+        "now_ms": 3000,
+        "frames": 1,
+        "progress": ["[1 / 2] 1 action running", "    Compiling a.cc; 1s"],
+        "log": ["INFO: one", "ERROR: two"],
+        "errors": [],
+        "scroll": 0,
+        "filter": "all",
+        "search": new_search(),
+        "fails": [],
+        "selected": 0,
+        "focus": "console",
+        "view": None,
+        "re": ctx.std.re,
+        "cancelling": False,
+        "ended": False,
+        "counts": new_counts(),
+        "pages": [],
+    }
+    screen = render(state, 100, 30)
+    _eq("drawn from home", screen.startswith("\x1b[H\x1b[K"), True)
+    _eq("no row is cleared after it is written", "\x1b[K\r\n" in screen, False)
+    _eq("one row per terminal row", screen.count("\r\n"), 29)
+    for want in ["aspect build", "Compiling a.cc", "Running (1)", "ERROR: two", "q cancel"]:
+        if want not in screen:
+            fail("render: %r missing" % want)
+    state["filter"] = "errors"
+    if "INFO: one" in render(state, 100, 30) or "errors only" not in render(state, 100, 30):
+        fail("render: errors only still shows INFO, or its title is missing")
+    for filter, want in [("all", [True, True, True]), ("warnings", [False, True, True]), ("errors", [False, False, True])]:
+        _eq("shown_by " + filter, [shown_by(filter, l) for l in ["INFO: x", "WARNING: y", "ERROR: z"]], want)
+    aspect_url = "https://app.example.com/i/sink-1"
+    bes_url = "https://bes.example.com/invocation/uuid-1"
+    state["pages"] = [(ASPECT_PAGE, aspect_url), (BES_PAGE, bes_url)]
+    linked = render(state, 100, 30)
+    for url in [aspect_url, bes_url]:
+        if link(url, "").replace("\x1b]8;;\x1b\\", "") not in linked:
+            fail("render: no link to %s" % url)
+    _eq("links row", links_row([], 80), "")
+    if link(bes_url, "").replace("\x1b]8;;\x1b\\", "") not in links_row(state["pages"], 40):
+        fail("links_row: a shortened url still links whole")
+    _eq("a tiny terminal still renders", render(state, 20, 8).count("\r\n") <= 7, True)
+    state["scroll"] = 0
+    state["progress"] = ["[18,401 / 18,434] 3 actions running"]
+    for cols in [16, 24, 30, 40, 60]:
+        for row in render(state, cols, 20)[len("\x1b[H"):].split("\r\n"):
+            visible = row
+            for url in [aspect_url, bes_url]:
+                visible = visible.replace("\x1b]8;;" + url + "\x1b\\", "")
+            visible = visible.replace("\x1b]8;;\x1b\\", "")
+            for code in ["\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m", "\x1b[27m", "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[36m", "\x1b[K", "\x1b[J"]:
+                visible = visible.replace(code, "")
+            if len(visible) > cols:
+                fail("render at %d columns: a row is %d wide: %r" % (cols, len(visible), visible))
+    state["filter"] = "all"
+    state["scroll"] = 1000
+    render(state, 100, 30)
+    _eq("scrolling stops at the top", state["scroll"], 0)
+    state["log"] = ["line %d" % i for i in range(200)]
+    render(state, 100, 30)
+    page = console_height(state, 100, 30)
+    shown = [l for l in render(state, 100, 30).split("\r\n") if l.find("line ") >= 0]
+    _eq("a page is the lines the console shows", page, len(shown))
+    state["scroll"] = 0
+    state["search"] = new_search()
+    on_key(state, "b", page)
+    _eq("b scrolls up one console height", state["scroll"], page)
+    _eq("a smaller terminal, a smaller page", console_height(state, 100, 20) < page, True)
+    state["progress"] = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]
+    crowded = render(state, 100, 12)
+    if "Running (8)" not in crowded or "more" not in crowded:
+        fail("render: a crowded pane should count every action and say how many more")
+
+    for status, want in [
+        ("[1 / 9] 300 actions running", (300, 300)),
+        ("[1,204 / 9,000] 400 actions, 300 running", (300, 400)),
+        ("[1 / 9] 16 actions, 8 running", (8, 16)),
+        ("[10,797 / 18,453] 14 / 39 tests; 16 actions, 15 running; last test: //a:b", (15, 16)),
+        ("[5 / 9] 3 / 9 tests; 4 actions running; last test: //a:b", (4, 4)),
+        ("[1 / 9,000] 2,400 actions, 1,200 running", (1200, 2400)),
+        ("[5 / 9] 1 action running", (1, 1)),
+        ("[5 / 9] Compiling a.cc; 3s remote", (-1, -1)),
+        ("[9 / 9] no actions running", (-1, -1)),
+    ]:
+        _eq("action_counts %r" % status, action_counts([status]), want)
+    state["progress"] = ["[1,204 / 9,000] 400 actions, 300 running"] + ["    a%d; 1s remote" % i for i in range(8)]
+    remote = render(state, 100, 30)
+    if "Running (300 of 400 started)" not in remote or "and 292 more" not in remote:
+        fail("render: a remote build's pane should count all 300, the 400 started, and the 292 Bazel did not list")
+
+    counts = new_counts()
+    target = struct(label = "//a:a")
+    count_event(counts, "target_configured", target, struct())
+    count_event(counts, "target_configured", struct(label = "//a:a", aspect = "//x:x.bzl%y"), struct())
+    count_event(counts, "target_completed", target, struct(success = True))
+    count_event(counts, "target_completed", struct(label = "//b:b"), struct(success = False))
+    count_aborted(counts, "//c:c", "skipped")
+    count_aborted(counts, "//d:d", "analysis_failure")
+    count_aborted(counts, "//d:d", "analysis_failure")
+    count_aborted(counts, "", "loading_failure")
+    count_event(counts, "target_completed", struct(label = "//a:a", aspect = "//x:x.bzl%y"), struct(success = False))
+    count_event(counts, "test_summary", struct(label = "//t:pass"), struct(overall_status = "passed"))
+    count_event(counts, "test_summary", struct(label = "//t:flaky"), struct(overall_status = "flaky"))
+    count_event(counts, "test_summary", struct(label = "//t:fail"), struct(overall_status = "failed"))
+    count_event(counts, "test_summary", struct(label = "//t:none"), struct(overall_status = "no_status"))
+    count_event(counts, "progress", None, None)
+    _eq("counts", (counts["configured"], counts["built"], counts["failed"], counts["skipped"], counts["tests_passed"], counts["tests_failed"]), (1, 1, 2, 1, 2, 1))
+    _eq("failures", counts["failures"], ["//b:b", "//d:d", "//t:fail"])
+    count_event(counts, "target_completed", struct(label = "//t:fail"), struct(success = False))
+    _eq("a label is listed once", len([l for l in counts["failures"] if l == "//t:fail"]), 1)
+    interrupted = []
+    keys = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "screen": struct(interrupt = lambda: interrupted.append(1))}
+    steps = [("up", 1), ("shift-up", 6), ("ctrl-u", 11), ("b", 21), ("down", 20), ("ctrl-d", 15), (" ", 5), ("shift-down", 0), ("j", 0), ("k", 1), ("G", 0), ("g", 1 << 30), ("G", 0), ("pageup", 0), ("end", 0)]
+    for key, want in steps:
+        on_key(keys, key, 10)
+        _eq("scroll after %r" % key, keys["scroll"], want)
+    keys["scroll"] = 3
+    for want in ["warnings", "errors", "all"]:
+        on_key(keys, "e", 10)
+        _eq("e: the next filter, at the newest", (keys["filter"], keys["scroll"]), (want, 0))
+    on_key(keys, "q", 10)
+    on_key(keys, "q", 10)
+    _eq("q interrupts once", (keys["cancelling"], len(interrupted)), (True, 1))
+    keys["cancelling"] = False
+    keys["ended"] = True
+    on_key(keys, "q", 10)
+    _eq("q after the end does nothing", len(interrupted), 1)
+
+    # The search bar: typed into live, a regex, toggles, Enter keeps, Esc clears.
+    find = {"scroll": 4, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": [
+        "INFO: Build ok",
+        "ERROR: //a:b failed",
+        "WARNING: //a:c deprecated",
+        "ERROR: //a:d FAILED to build",
+    ]}
+    on_key(find, "ctrl-f", 10)
+    _eq("ctrl-f opens the bar, finding", (find["search"]["open"], find["search"]["mode"]), (True, "jump"))
+    on_key(find, "tab", 10)
+    _eq("tab in the bar filters instead", find["search"]["mode"], "filter")
+    for c in "fail".elems():
+        on_key(find, c, 10)
+    _eq("typed live, any case", console_lines(find, find["log"]), ["ERROR: //a:b failed", "ERROR: //a:d FAILED to build"])
+    _eq("typing goes back to the newest line", find["scroll"], 0)
+    on_key(find, "q", 10)
+    _eq("q types while the bar is open", (find["search"]["query"], find["cancelling"]), ("failq", False))
+    on_key(find, "backspace", 10)
+    on_key(find, "ctrl-t", 10)
+    _eq("case-sensitive", console_lines(find, find["log"]), ["ERROR: //a:b failed"])
+    on_key(find, "alt-c", 10)
+    on_key(find, "ctrl-w", 10)
+    _eq("whole words: 'fail' is not 'failed'", console_lines(find, find["log"]), [])
+    on_key(find, "alt-w", 10)
+    on_key(find, "ctrl-u", 10)
+    for c in "a:(b|c".elems():
+        on_key(find, c, 10)
+    _eq("an unclosed group: the error, the last good pattern kept", (find["search"]["error"] != "", find["search"]["pattern"].pattern), (True, "a:"))
+    on_key(find, ")", 10)
+    _eq("a regex", console_lines(find, find["log"]), ["ERROR: //a:b failed", "WARNING: //a:c deprecated"])
+    find["filter"] = "errors"
+    _eq("with the e filter too", console_lines(find, find["log"]), ["ERROR: //a:b failed"])
+    find["filter"] = "all"
+    on_key(find, "up", 10)
+    _eq("the arrows still scroll", (find["scroll"], find["search"]["query"]), (1, "a:(b|c)"))
+    on_key(find, "enter", 10)
+    _eq("enter closes the bar and keeps the filter", (find["search"]["open"], len(console_lines(find, find["log"]))), (False, 2))
+    on_key(find, "/", 10)
+    on_key(find, "esc", 10)
+    _eq("esc clears it", (find["search"]["open"], console_lines(find, find["log"])), (False, find["log"]))
+
+    # Drawn: matches highlighted, the bar fits, at any width.
+    state["log"] = find["log"]
+    state["search"] = new_search()
+    state["search"]["open"] = True
+    state["search"]["query"] = "fail"
+    state["search"]["pattern"] = ctx.std.re.compile("fail", case_sensitive = False)
+    drawn = render(state, 100, 30)
+    if "\x1b[7mfail\x1b[27m" not in drawn or "/fail/ 2" not in drawn or "2 matches" not in drawn:
+        fail("render: search matches, title or bar missing")
+    state["search"]["query"] = "fail(x"
+    if "/fail/ 2" not in render(state, 100, 30):
+        fail("render: the title shows a query that does not compile, not the pattern filtering")
+    state["search"]["query"] = "a very long query that will not fit in a narrow terminal at all"
+    for cols in [12, 20, 40, 80]:
+        last = render(state, cols, 20).split("\r\n")[-1]
+        for code in ["\x1b[K", "\x1b[0m", "\x1b[2m", "\x1b[7m", "\x1b[31m"]:
+            last = last.replace(code, "")
+        if len(last) > cols:
+            fail("search bar at %d columns is %d wide: %r" % (cols, len(last), last))
+    _eq("re.check", (ctx.std.re.check("ok"), ctx.std.re.check("(") != None), (None, True))
+    _eq("re.check takes compile's options", ctx.std.re.check("(?x)a # c", whole_word = True) != None, True)
+
+    # Esc then a key, read together as Alt: the two keys. A paste types into
+    # the bar on one line, never as Enter or commands.
+    keyed = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": []}
+    on_key(keyed, "/", 10)
+    on_key(keyed, "alt-j", 10)
+    _eq("esc+j: the bar closed, then j scrolls", (keyed["search"]["open"], keyed["scroll"]), (False, 0))
+    on_key(keyed, "/", 10)
+    on_key(keyed, "alt-c", 10)
+    _eq("alt-c in the bar toggles case", (keyed["search"]["open"], keyed["search"]["case"]), (True, True))
+    on_key(keyed, "paste:a\nq", 10)
+    _eq("a paste on one line", (keyed["search"]["query"], keyed["search"]["open"], keyed["cancelling"]), ("a q", True, False))
+    _eq("a paste's control characters are dropped", paste_text("paste:a\x1b[2J\x08b\r\nc"), "a[2Jb  c")
+    _eq("and C1 controls, but not other text", paste_text("paste:x\u009by\u0085é"), "xyé")
+    closed = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": []}
+    on_key(closed, "paste:q", 10)
+    _eq("a paste with the bar closed does nothing", (closed["cancelling"], closed["search"]["query"]), (False, ""))
+
+    # The finished screen: q, Enter or Esc leave; with the bar open they are
+    # its keys, and an Esc read with q (Alt) closes the bar, then q leaves.
+    done = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": True, "log": []}
+    for key, want in [("q", True), ("enter", True), ("esc", True), ("alt-j", True), ("j", False)]:
+        _eq("finished, bar closed: %s" % key, on_key(done, key, 10), want)
+    for key, want in [("q", False), ("enter", False), ("esc", False), ("alt-c", False)]:
+        done["search"] = new_search()
+        done["search"]["open"] = True
+        _eq("finished, bar open: %s" % key, on_key(done, key, 10), want)
+    done["search"] = new_search()
+    done["search"]["open"] = True
+    _eq("finished, bar open: alt-q", on_key(done, "alt-q", 10), True)
+    done["search"] = new_search()
+    done["search"]["open"] = True
+    _eq("finished, bar open: alt-j closes the bar, stays", (on_key(done, "alt-j", 10), done["search"]["open"]), (False, False))
+
+    # The bar shows a query that fits whole, and highlighting never lights
+    # the padding.
+    state["search"] = new_search()
+    state["search"]["open"] = True
+    state["search"]["query"] = "abcdefghijklmnop"
+    if "abcdefghijklmnop" not in render(state, 60, 20).split("\r\n")[-1]:
+        fail("search bar: a query that fits was cut")
+    state["search"] = new_search()
+    state["search"]["query"] = " "
+    state["search"]["pattern"] = ctx.std.re.compile(" ")
+    state["log"] = ["a b"]
+    if "\x1b[7m \x1b[27m\x1b[7m \x1b[27m" in render(state, 60, 20):
+        fail("render: a highlight lit a row's padding")
+    _eq("re.highlight", ctx.std.re.compile("b+").highlight("abbcb", "<", ">"), "a<bb>c<b>")
+
+    # Failures: records from events, their logs found and shown.
+    _eq("a passing action is no failure", failure_of("action_completed", struct(label = "//a:a"), struct(success = True)), None)
+    act = failure_of("action_completed", struct(label = "//pkg:broken"), struct(
+        success = False,
+        type = "Genrule",
+        stderr = struct(file = "file:///tmp/err"),
+        stdout = struct(file = "file:///tmp/out"),
+    ))
+    _eq("a failed action", (act["label"], act["detail"], [n for n, _ in act["files"]]), ("//pkg:broken", "Genrule", ["stderr", "stdout"]))
+    for status in ["passed", "incomplete", "no_status"]:
+        _eq("a %s attempt is no failure" % status, failure_of("test_result", struct(label = "//t:t"), struct(status = status)), None)
+    for status in ["failed", "timeout", "tool_halted_before_testing"]:
+        _eq("a %s attempt is a failure" % status, failure_of("test_result", struct(label = "//t:t"), struct(status = status)) != None, True)
+    cfg = struct(id = "c1")
+    flaky = failure_of("test_result", struct(label = "//t:t", run = 1, shard = 2, attempt = 1, configuration = cfg), struct(
+        status = "failed",
+        test_action_output = [struct(name = "test.xml", file = "x"), struct(name = "test.log", file = "bytestream://cache/blobs/abc/1")],
+    ))
+    _eq("a failed attempt keeps its test.log", (flaky["detail"], flaky["shard"], [n for n, _ in flaky["files"]]), ("attempt 1", 2, ["test.log"]))
+
+    fs = {
+        "spread": {},
+        "exec_root": "/x",
+        "output_dirs": {"c1": "k8-opt"},
+        "test_counts": {("//t:t", "c1"): (1, 2)},
+        "last_attempts": {("//t:t", "c1", 1, 2): 2},
+    }
+    _eq("an earlier attempt's log", local_test_logs(fs, flaky), ["/x/bazel-out/k8-opt/testlogs/t/t/shard_2_of_2/test_attempts/attempt_1.log"])
+    fs["last_attempts"] = {}
+    _eq("the last attempt's, once summarised", local_test_logs(fs, flaky), ["/x/bazel-out/k8-opt/testlogs/t/t/shard_2_of_2/test.log"])
+    fs["test_counts"] = {}
+    shard_state = {"test_counts": {("//t:t", "c1"): (1, 4)}, "spread": {}}
+    _eq("a sharded test's attempt names its shard", failure_detail(shard_state, flaky), "shard 2 · attempt 1")
+    _eq("an unsharded one, its attempt alone", failure_detail({"test_counts": {("//t:t", "c1"): (1, 0)}, "spread": {}}, dict(flaky, shard = 1)), "attempt 1")
+    before = {"test_counts": {}, "spread": {("//t:t", "c1"): (3, 2)}}
+    _eq("before the summary, from what was seen: shard and run", failure_detail(before, dict(flaky, shard = 1, run = 3)), "shard 1 · run 3 · attempt 1")
+    _eq("runs alone", failure_detail({"test_counts": {}, "spread": {("//t:t", "c1"): (2, 1)}}, dict(flaky, shard = 1, run = 2)), "run 2 · attempt 1")
+    _eq("an action, its mnemonic", failure_detail(shard_state, act), "Genrule")
+    _eq("before the summary, no guess", (local_test_logs(fs, flaky), local_test_logs(fs, dict(flaky, shard = 1))), ([], []))
+    early = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env), flaky)
+    _eq("and the view says when it will be", early["lines"], ["(test.log is found once the test has finished: a remote cache names it)"])
+
+    # The bookkeeping: an aborted summary has no counts; a real one shows an
+    # open log anew.
+    noted = dict(fs, read = lambda p, c: ("attempt one\n", 0) if p.endswith("test_attempts/attempt_1.log") else None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env, fails = [], outputs = [], view = None, search = new_search(), scroll = 0)
+    noted["test_counts"] = {}
+    noted["last_attempts"] = {}
+    noted["spread"] = {}
+    tid = struct(label = "//t:t", run = 1, shard = 1, attempt = 1, configuration = cfg)
+    remote_log = [struct(name = "test.log", file = "bytestream://cache/blobs/abc/1")]
+    note_event(noted, "test_result", tid, struct(status = "failed", test_action_output = remote_log), False)
+    note_event(noted, "test_result", struct(label = "//t:t", run = 1, shard = 1, attempt = 2, configuration = cfg), struct(status = "passed"), False)
+    noted["view"] = log_view(noted, noted["fails"][0])
+    note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(), True)
+    _eq("an aborted summary counts nothing", noted["test_counts"], {})
+    noted["scroll"] = 5
+    noted["search"]["back"] = 0
+    note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
+    _eq("a real one shows the open log anew", noted["view"]["lines"], ["attempt one"])
+    _eq("from its end, no current match", (noted["scroll"], noted["search"]["back"]), (0, -1))
+    note_event(noted, "test_result", struct(label = "//t:t", run = 3, shard = 2, attempt = 1, configuration = cfg), struct(status = "passed"), False)
+    _eq("note_event keeps the most runs and shards seen", noted["spread"][("//t:t", "c1")], (3, 2))
+    retried = dict(noted, fresh = True, scroll = 7, focus = "failures", log = ["x"], errors = ["y"], error_count = 1, search = new_search())
+    reset_attempt(retried, 42)
+    retried["selected"] = 3
+    retried["bazel_uuid"] = "old"
+    retried["search"] = dict(new_search(), query = "kept")
+    retried["filter"] = "errors"
+    reset_attempt(retried, 42)
+    _eq("a retry starts afresh", (retried["fails"], retried["view"], retried["focus"], retried["scroll"], retried["log"], retried["test_counts"], retried["start_ms"], retried["fresh"]), ([], None, "console", 0, [], {}, 42, False))
+    _eq("its counts and the rest too", (retried["counts"], retried["errors"], retried["error_count"], retried["last_attempts"], retried["selected"], retried["bazel_uuid"], retried["spread"]), (new_counts(), [], 0, {}, 0, "", {}))
+    _eq("the logged index is cleared", retried["logged_index"], None)
+    _eq("but not what is the run's", (retried["exec_root"], retried["output_dirs"], retried["search"]["query"], retried["filter"], retried["read"] != None), ("/x", {"c1": "k8-opt"}, "kept", "errors", True))
+    other = log_view(noted, act)
+    noted["view"] = other
+    note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
+    _eq("another failure's open view is left alone", noted["view"] == other, True)
+    fails_before = len(noted["fails"])
+    note_event(noted, "test_result", struct(label = "//t:t", run = 1, shard = 1, attempt = 9, configuration = cfg), struct(), True)
+    _eq("an aborted attempt adds nothing", (len(noted["fails"]), noted["last_attempts"].get(("//t:t", "c1", 1, 1))), (fails_before, 2))
+    _eq("two-byte escapes go whole", ctx.std.re.compile(ANSI).replace("a\x1b7b\x1b8c\x1b=d", ""), "abcd")
+    _eq("and C1 controls", ctx.std.re.compile(CONTROLS).replace("a\u009bb\u0085c", ""), "abc")
+    _eq("a lone ESC before other text, as the view cleans a line", ctx.std.re.compile(CONTROLS).replace(ctx.std.re.compile(ANSI).replace("\x1bé", ""), ""), "é")
+    _eq("printable Latin-1 stays", ctx.std.re.compile(CONTROLS).replace(" é ñ", ""), " é ñ")
+
+    files = {
+        "/x/bazel-out/k8-opt/testlogs/t/t/test.log": ("\x1b[31mFAIL\x1b(B\x1b[m: boom\r\n10%\r50%\r100%\x07\nlast line\n", 0),
+        "/tmp/err": ("ERROR: broken\n", 2048),
+        "/tmp/out": ("some out\n", 0),
+    }
+    view_state = dict(fs, read = lambda path, cap: files.get(path), ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env)
+    view_state["test_counts"] = {("//t:t", "c1"): (1, 1)}
+    one_shard = dict(flaky, shard = 1)
+    _eq(
+        "a remote cache's test.log, from the output tree; escapes, CRs and controls gone",
+        log_view(view_state, one_shard)["lines"],
+        ["FAIL: boom", "100%", "last line"],
+    )
+    _eq("a cut log from its next line", cut_text("xtail of one\nnext\nlast\n"), "next\nlast\n")
+    _eq("a cut at a line's start keeps that line", cut_text("\nnext\nlast\n"), "next\nlast\n")
+    _eq("its only newline its end: from a character", cut_text("x\ufffdone long line\n"), "one long line\n")
+    _eq("no newline at all", cut_text("x\ufffdabc"), "abc")
+
+    # Inline contents: bounded at once, shown from a line's start.
+    big = bounded_log(bytes("first\nsecond\nthird\n"), cap = 9)
+    _eq("inline bytes over the cap: the end and the byte before", (str(big[0]), big[1]), ("ond\nthird\n", True))
+    _eq("under it, whole", str(bounded_log(bytes("ok\n"), cap = 9)[0]), "ok\n")
+    inline_rec = {"kind": "action", "label": "//i:i", "detail": "Genrule", "files": [("stderr", big)]}
+    v_inline = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env), inline_rec)
+    _eq("an inline log in the view", (v_inline["lines"], v_inline["cut"]), (["third"], True))
+    _eq("an action's mnemonic defaults", failure_of("action_completed", struct(label = "//a:a"), struct(success = False))["detail"], "Action")
+    v = log_view(view_state, act)
+    _eq("an action's stderr and stdout, divided; a cut file says so", (v["lines"], v["cut"]), (["── stderr ──", "ERROR: broken", "── stdout ──", "some out"], True))
+    _eq("logs that fit are whole", fit_logs([["a"] * 3, ["b"] * 2], 10), [3, 2])
+    _eq("a short log's share goes to a long one", fit_logs([["a"] * 6000, ["b"]], 5000), [4999, 1])
+    _eq("no logs", fit_logs([], 5000), [])
+    _eq("ties, an odd remainder, in order", fit_logs([["a"] * 3000, ["b"] * 3000, ["c"] * 3000], 5000), [1666, 1667, 1667])
+    _eq("two long ones split it", fit_logs([["a"] * 4000, ["b"] * 4000], 5000), [2500, 2500])
+    _eq("one, over", fit_logs([["a"] * 6000], 5000), [5000])
+    files["/tmp/big"] = ("\n".join(["e%d" % i for i in range(6000)]) + "\n", 0)
+    big_view = log_view(view_state, dict(act, files = [("stderr", "file:///tmp/big"), ("stdout", "file:///tmp/out")]))
+    _eq("a long stderr keeps its divider and its end", (big_view["lines"][0], big_view["lines"][1], big_view["lines"][-3:], big_view["cut"]), ("── stderr ──", "e1001", ["e5999", "── stdout ──", "some out"], True))
+    gone = dict(act, files = [("stderr", "file:///nowhere")])
+    _eq("a log not on this machine", log_view(view_state, gone)["lines"], ["(stderr is not on this machine: only in the remote cache)"])
+
+    # Keys: Tab to the list, ↑↓ choose, Enter shows; ] and [ step; Esc closes
+    # the innermost thing open.
+    browse = dict(view_state, scroll = 0, filter = "all", search = new_search(), fails = [act, one_shard], selected = 0, focus = "console", view = None, re = ctx.std.re, cancelling = False, ended = True, log = ["console line"], counts = new_counts())
+    on_key(browse, "tab", 10)
+    on_key(browse, "down", 10)
+    _eq("tab focuses the list, down chooses", (browse["focus"], browse["selected"]), ("failures", 1))
+    _eq("enter shows its log", (on_key(browse, "enter", 10), browse["view"]["title"], browse["focus"]), (False, "//t:t · attempt 1", "console"))
+    _eq("the log is what the console shows", console_lines(browse, browse["view"]["lines"]), ["FAIL: boom", "100%", "last line"])
+    _eq("enter in a log stays", (on_key(browse, "enter", 10), browse["view"] != None), (False, True))
+    on_key(browse, "]", 10)
+    _eq("] steps on, around", browse["selected"], 0)
+    browse["view"] = None
+    on_key(browse, "[", 10)
+    _eq("[ with no log open shows the chosen one", (browse["selected"], browse["view"] != None), (0, True))
+    on_key(browse, "[", 10)
+    _eq("[ then steps back, around", browse["selected"], 1)
+    on_key(browse, "]", 10)
+    on_key(browse, "]", 10)
+    _eq("] once more", browse["selected"], 1)
+    browse["focus"] = "failures"
+    on_key(browse, "up", 10)
+    browse["focus"] = "console"
+    on_key(browse, "]", 10)
+    _eq("] after choosing another shows the chosen one", (browse["selected"], browse["view"]["record"]["label"]), (0, "//pkg:broken"))
+    on_key(browse, "]", 10)
+    _eq("] on the one shown steps", browse["selected"], 1)
+    browse["scroll"] = 3
+    browse["search"]["open"] = True
+    _eq("esc closes the bar first", (on_key(browse, "esc", 10), browse["search"]["open"], browse["view"] != None), (False, False, True))
+    on_key(browse, "tab", 10)
+    _eq("then the list's focus, the log still open", (on_key(browse, "esc", 10), browse["focus"], browse["view"] != None), (False, "console", True))
+    _eq("then the log", (on_key(browse, "esc", 10), browse["view"], browse["scroll"]), (False, None, 0))
+    _eq("then leaves the finished screen", on_key(browse, "esc", 10), True)
+    _eq("shift-up pages half the console", (on_key(browse, "shift-up", 10), browse["scroll"]), (False, 5))
+
+    # Drawn: the rows fit the pane, the chosen one lit while focused, the
+    # failed targets without a log after them, and the log view's title.
+    browse["counts"]["failures"] = ["//t:t", "//pkg:lost"]
+    browse["counts"]["failed_labels"] = {"//t:t": True, "//pkg:lost": True}
+    browse["focus"] = "failures"
+    rows = failure_rows(browse, 10, 30)
+    _eq("rows: both logs, then the target without one", len(rows), 3)
+    _eq("the chosen one is lit", "\x1b[7m" in rows[browse["selected"]], True)
+    for row in rows:
+        for code in ["\x1b[7m", "\x1b[27m", "\x1b[31m", "\x1b[2m", "\x1b[0m"]:
+            row = row.replace(code, "")
+        _eq("a row fits: %r" % row, len(row) <= 30, True)
+    many = dict(browse, fails = [dict(act, label = "//m:%d" % i) for i in range(10)], counts = new_counts(), logged_index = None)
+    plain_rows = lambda st, room: [r.replace("\x1b[2m", "").replace("\x1b[0m", "").replace("\x1b[7m", "").replace("\x1b[27m", "").replace("\x1b[31m", "") for r in failure_rows(st, room, 30)]
+    many["selected"] = 0
+    _eq("the first chosen: the rest below", plain_rows(many, 4)[-1], "… 7 more")
+    many["selected"] = 9
+    shown_last = plain_rows(many, 4)
+    _eq("the last chosen: what is above, nothing below", (shown_last[0], shown_last[-1].startswith("✗ //m:9")), ("… 7 earlier", True))
+    tiny = dict(many, logged_index = None, selected = 0, task = "t", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [], ended = False)
+    if "✗ //m:0" not in render(tiny, 80, 12):
+        fail("render: a short terminal still shows a failure in the list")
+    mixed = dict(many, selected = 9)
+    mixed["counts"] = new_counts()
+    for label in ["//m:9", "//x:1", "//x:2", "//x:3"]:
+        mixed["counts"]["failed_labels"][label] = True
+        mixed["counts"]["failures"].append(label)
+    mixed["logged_index"] = None
+    mixed_rows = plain_rows(mixed, 5)
+    _eq(
+        "unlogged rows follow the logged ones in the window, counted",
+        (mixed_rows[0], mixed_rows[2].startswith("✗ //m:9"), mixed_rows[3], mixed_rows[4], len(mixed_rows)),
+        ("… 8 earlier", True, "✗ //x:1", "… 2 more", 5),
+    )
+    doubled = dict(mixed, fails = many["fails"] + [dict(act, label = "//m:9")], logged_index = None, selected = 10)
+    doubled_rows = plain_rows(doubled, 5)
+    _eq("a label failing twice counts once against the unlogged", (len(doubled_rows), doubled_rows[-1]), (5, "… 2 more"))
+    grown = dict(mixed, logged_index = None)
+    plain_rows(grown, 5)
+    grown["counts"]["failed_labels"]["//x:4"] = True
+    grown["counts"]["failures"].append("//x:4")
+    _eq("the index catches up with what is new", plain_rows(grown, 5)[-1], "… 3 more")
+    grown["fails"] = grown["fails"] + [dict(act, label = "//x:1")]
+    _eq("a log arriving for a listed label leaves the unlogged", plain_rows(grown, 5)[-1], "… 3 more")
+    _eq("and is counted in both", grown["logged_index"]["both"], 2)
+
+    # Compaction: dropped labels go once half the list is them, or once a
+    # walk for the first few skips more than a few.
+    small = {"logged": {"//v:%d" % i: True for i in range(30)}, "unlogged": ["//v:%d" % i for i in range(200)], "dropped": 30}
+    _eq("a short leading skip moves the head", (first_unlogged(small, 1), small["head"]), (["//v:30"], 30))
+    small["logged"]["//v:30"] = True
+    _eq("and on from there, never back", (first_unlogged(small, 1), small["head"]), (["//v:31"], 31))
+    middle = {"logged": {"//w:%d" % i: True for i in range(1, 100)}, "unlogged": ["//w:%d" % i for i in range(200)], "dropped": 99}
+    _eq("a long skip past the head compacts", (first_unlogged(middle, 2), len(middle["unlogged"]), middle["head"]), (["//w:0", "//w:100"], 101, 0))
+    idx = {"logged": {}, "unlogged": ["//u:%d" % i for i in range(200)], "dropped": 0}
+    for i in range(100):
+        idx["logged"]["//u:%d" % i] = True
+    _eq("the first unlogged, past the dropped", first_unlogged(idx, 2), ["//u:100", "//u:101"])
+    _eq("a leading run moves the head, no compaction needed", (len(idx["unlogged"]), idx["head"]), (200, 100))
+    _eq("and the walk after is short", first_unlogged(idx, 1), ["//u:100"])
+    halved = dict(grown, logged_index = None)
+    for i in range(4):
+        halved["fails"] = halved["fails"] + [dict(act, label = "//x:%d" % (i + 1))]
+    plain_rows(halved, 5)
+    _eq("more than half dropped compacts in the index", (halved["logged_index"]["unlogged"], halved["logged_index"]["dropped"]), ([], 0))
+    moved = dict(mixed, logged_index = None, selected = 9)
+    moved["counts"] = new_counts()
+    for i in range(6):
+        moved["counts"]["failed_labels"]["//y:%d" % i] = True
+        moved["counts"]["failures"].append("//y:%d" % i)
+    moved["fails"] = many["fails"]
+    plain_rows(moved, 6)
+    moved["fails"] = moved["fails"] + [dict(act, label = "//y:0")]
+    moved["selected"] = len(moved["fails"]) - 1
+    plain_rows(moved, 6)
+    _eq("the head moved past a lead that gained a log", moved["logged_index"]["head"], 1)
+    moved["fails"] = moved["fails"] + [dict(act, label = "//y:%d" % i) for i in [2, 3, 4]]
+    moved["selected"] = len(moved["fails"]) - 1
+    after = plain_rows(moved, 6)
+    _eq(
+        "a half-full compaction resets the head, the rest still drawn",
+        (moved["logged_index"]["head"], len(moved["logged_index"]["unlogged"]), [r for r in after if r.startswith("✗ //y:") and "  " not in r], after[-1]),
+        (0, 2, ["✗ //y:1"], "… 1 more"),
+    )
+    for room in [1, 2, 3]:
+        for sel in [0, 5, 9]:
+            many["selected"] = sel
+            got = plain_rows(many, room)
+            _eq("room %d, row %d: fits" % (room, sel), len(got), room)
+            _eq("room %d, row %d: in sight" % (room, sel), len([r for r in got if r.startswith("✗ //m:%d " % sel)]), 1)
+    many["selected"] = 5
+    middle = plain_rows(many, 4)
+    _eq("in the middle: both", (middle[0], middle[-1], len(middle)), ("… 4 earlier", "… 4 more", 4))
+    browse.update(task = "test", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [], errors = [])
+    _open_view = on_key(browse, "enter", 10)
+    drawn = render(browse, 100, 30)
+    for want in ["Log //t:t · attempt 1", "Esc back", "FAIL: boom"]:
+        if want not in drawn:
+            fail("render: %r missing from the log view:\n%s" % (want, drawn))
+
+    # Smart case: a capital of the query's own matches case.
+    for query, want in [("fail", False), ("Fail", True), ("a\\Wb", False), ("\\pL", False), ("\\p{Lu}x", False), ("(?P<Name>a)", False), ("(?<N>a)", False), ("\\w C", True), ("é", False), ("É", True), ("\\x4A", False), ("\\x{1F}", False), ("\\u{00C9}x", False), ("\\U0001F600", False), ("(?U)a", False), ("(?iR:a)", False), ("\\x4AB", True), ("(?i)A", True), ("\\(?User", True)]:
+        _eq("has_capital %r" % query, has_capital(query), want)
+    smart = _screen(ctx, ["ERROR: a FAILED", "ERROR: b failed"])
+    on_key(smart, "/", 10)
+    on_key(smart, "tab", 10)
+    for c in "FAILED".elems():
+        on_key(smart, c, 10)
+    _eq("a capital matches case", console_lines(smart, smart["log"]), ["ERROR: a FAILED"])
+    if "\x1b[7mAa" not in render(smart, 100, 30):
+        fail("render: the case toggle should be lit while a capital matches case")
+
+    # Finding: the newest match at or above where the bar opened, centred;
+    # n older, N newer, nothing past either end; Esc goes back.
+    lines = ["line %d%s" % (i, " hit" if i in (5, 40, 90) else "") for i in range(100)]
+    jump = _screen(ctx, lines, scroll = 30)
+    on_key(jump, "/", 10)
+    for c in "hit".elems():
+        on_key(jump, c, 10)
+    _eq("typing finds the newest match above the view", (jump["search"]["back"], jump["scroll"]), (99 - 40, 100 - 40 - 1 - 4))
+    _eq("every line still shown", len(console_lines(jump, lines)), 100)
+    drawn = render(jump, 100, 30)
+    if "/hit/ 2 of 3" not in drawn or "›" + "line 40 hit" not in _visible(drawn).replace("│", ""):
+        fail("render: the current match should be counted and marked:\n%s" % _visible(drawn))
+    on_key(jump, "enter", 10)
+    on_key(jump, "n", 10)
+    _eq("n: the older match", jump["search"]["back"], 99 - 5)
+    on_key(jump, "n", 10)
+    _eq("n past the oldest stays", jump["search"]["back"], 99 - 5)
+    on_key(jump, "N", 10)
+    on_key(jump, "N", 10)
+    _eq("N: newer, twice", jump["search"]["back"], 99 - 90)
+    on_key(jump, "/", 10)
+    origin = jump["scroll"]
+    on_key(jump, "x", 10)
+    _eq("no match: back where the bar opened", (jump["search"]["back"], jump["scroll"]), (-1, origin))
+    on_key(jump, "backspace", 10)
+    on_key(jump, "esc", 10)
+    _eq("esc: cleared, back where the bar opened", (jump["search"]["pattern"], jump["scroll"]), (None, origin))
+    wrap = _screen(ctx, lines, scroll = 0)
+    wrap["log"] = lines[:95]
+    wrap["scroll"] = 60
+    on_key(wrap, "/", 10)
+    on_key(wrap, "9", 10)
+    on_key(wrap, "0", 10)
+    _eq("none above the view: the newest of all", wrap["search"]["back"], 94 - 90)
+
+    # New lines: the current match and the scroll stay on their lines, and
+    # are counted while scrolled up.
+    add_lines(jump, ["new 1", "new 2"])
+    _eq("scrolled up, new lines are counted", (jump["unseen"], jump["scroll"]), (2, origin + 2))
+    if "2 new, G to follow" not in render(jump, 100, 30):
+        fail("render: scrolled up, the new lines should be counted")
+    on_key(jump, "G", 10)
+    render(jump, 100, 30)
+    _eq("following again forgets them", jump["unseen"], 0)
+    kept = _screen(ctx, list(lines))
+    on_key(kept, "/", 10)
+    for c in "hit".elems():
+        on_key(kept, c, 10)
+    before = kept["log"][len(kept["log"]) - 1 - kept["search"]["back"]]
+    add_lines(kept, ["more"] * 3)
+    _eq("the current match is the same line", kept["log"][len(kept["log"]) - 1 - kept["search"]["back"]], before)
+    add_lines(kept, ["INFO: 1,204 processes: 1,000 remote cache hit, 3 disk cache hit, 200 internal, 1 darwin-sandbox."])
+    _eq("the cache tally is read", kept["cache"], (1003, 1004))
+    if "Cache    99% of 1004 hit" not in render(kept, 100, 30):
+        fail("render: the cache ratio should be in the Results pane")
+    for line, want in [
+        ("INFO: 1 process: 1 internal.", (0, 0)),
+        ("INFO: 7 processes: 4 action cache hit, 3 linux-sandbox.", (4, 7)),
+        ("INFO: Build completed successfully, 7 total actions", None),
+        ("INFO: 3 processes: lots.", None),
+    ]:
+        _eq("cache_hits %r" % line, cache_hits(line), want)
+
+    # The keys overlay: any key but the wheel closes it, doing nothing else;
+    # the console's scroll is left alone.
+    helped = _screen(ctx, lines, scroll = 12)
+    on_key(helped, "?", 10)
+    drawn = render(helped, 100, 30)
+    if "Keys · ↑↓ scroll · any other key closes" not in drawn or "these keys" not in drawn:
+        fail("render: ? should show the keys")
+    on_key(helped, "wheel-up", 10)
+    _eq("the wheel keeps the keys shown", (helped["help"], helped["scroll"]), (True, 12))
+    small = _visible(render(dict(helped, progress = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]), 80, 16))
+    if "Running" in small or "… 8 more: ↓" not in small:
+        fail("render: the keys take the screen, counting what does not fit:\n%s" % small)
+    for _ in range(30):
+        on_key(helped, "down", 10)
+    if "these keys" not in render(helped, 80, 16):
+        fail("render: ↓ should reach the last key")
+    on_key(helped, "q", 10)
+    _eq("a key closes them and does nothing else", (helped["help"], helped["scroll"], helped["cancelling"]), (False, 12, False))
+    on_key(helped, "?", 10)
+    _eq("reopened from the top", helped["help_top"], 0)
+    on_key(helped, "esc", 10)
+
+    # The keys row fits, ending with `? keys` where it can.
+    for focus, ended in [("console", False), ("console", True), ("failures", False)]:
+        for cols in [10, 40, 80, 200]:
+            row = keys_row(_screen(ctx, [], focus = focus, ended = ended, fails = [act]), cols)
+            if len(row) > cols:
+                fail("keys_row at %d columns is %d wide: %r" % (cols, len(row), row))
+            if cols >= 40 and "? keys" not in row:
+                fail("keys_row at %d: no ? keys: %r" % (cols, row))
+    near = _screen(ctx, ["a hit", "b", "c"])
+    on_key(near, "/", 10)
+    for c in "hit".elems():
+        on_key(near, c, 10)
+    on_key(near, "enter", 10)
+    add_lines(near, ["d"] * 20)
+    held = _visible(render(near, 100, 30))
+    if "›a hit" not in held.replace("│", ""):
+        fail("render: a match near the newest line should stay in view:\n%s" % held)
+    near["scroll"] = 0
+    if "on the match, G to follow" not in render(near, 100, 30):
+        fail("render: a view held on a match should not say following")
+    on_key(near, "G", 10)
+    add_lines(near, ["e"])
+    _eq("G follows again", (near["scroll"], near["search"]["back"]), (0, -1))
+    held_bar = _screen(ctx, ["x hit", "y"])
+    on_key(held_bar, "/", 10)
+    for c in "hit".elems():
+        on_key(held_bar, c, 10)
+    on_key(held_bar, "enter", 10)
+    on_key(held_bar, "/", 10)
+    add_lines(held_bar, ["z"] * 5)
+    on_key(held_bar, "esc", 10)
+    _eq("a bar opened on a held view goes back to it", held_bar["scroll"], 5)
+    following = _screen(ctx, ["x hit", "y"])
+    on_key(following, "/", 10)
+    for c in "hit".elems():
+        on_key(following, c, 10)
+    add_lines(following, ["z"] * 50)
+    on_key(following, "esc", 10)
+    _eq("opened following, esc follows again", following["scroll"], 0)
+    top = _screen(ctx, lines[:100])
+    on_key(top, "g", 10)
+    on_key(top, "/", 10)
+    _eq("g then /: from the top page", top["search"]["origin"], 90)
+    for c in "hit".elems():
+        on_key(top, c, 10)
+    _eq("finds the match on it", top["search"]["back"], 99 - 5)
+    top2 = _screen(ctx, lines[:100], search = dict(new_search(), query = "hit", pattern = ctx.std.re.compile("hit")))
+    on_key(top2, "g", 10)
+    on_key(top2, "n", 10)
+    _eq("g then n: the match above the top page's bottom", top2["search"]["back"], 99 - 5)
+    tabbed = _screen(ctx, lines, scroll = 30)
+    on_key(tabbed, "/", 10)
+    on_key(tabbed, "tab", 10)
+    _eq("tab with no query keeps the view", tabbed["scroll"], 30)
+    empty = _screen(ctx, ["a", "b"])
+    on_key(empty, "/", 10)
+    if "matches" in render(empty, 100, 30).split("\r\n")[-1]:
+        fail("render: an empty query counts no matches")
+    _eq("the countdown", keys_row(_screen(ctx, [], ended = True, countdown_ms = 2100), 80).rstrip(), " Done ✔ · leaving in 3s · any key stays")
+
+    # Scrolling by the wheel and plain keys; z and m.
+    wheel = _screen(ctx, lines)
+    for key, want in [("wheel-up", 3), ("u", 8), ("d", 3), ("wheel-down", 0)]:
+        on_key(wheel, key, 10)
+        _eq("scroll after %s" % key, wheel["scroll"], want)
+    on_key(wheel, "/", 10)
+    on_key(wheel, "wheel-up", 10)
+    _eq("the wheel scrolls with the bar open", (wheel["scroll"], wheel["search"]["query"]), (3, ""))
+    on_key(wheel, "esc", 10)
+    tall = console_height(wheel, 100, 30)
+    on_key(wheel, "z", 10)
+    _eq("z gives the console the screen", console_height(wheel, 100, 30) > tall, True)
+    if "Running" in render(wheel, 100, 30):
+        fail("render: zoomed, the panes should be gone")
+    mice = []
+    wheel["screen"] = struct(mouse = lambda on: mice.append(on))
+    on_key(wheel, "m", 10)
+    on_key(wheel, "m", 10)
+    _eq("m turns the mouse on and off", mice, [True, False])
+
+    # Running actions: oldest first, coloured by age.
+    for row, want in [("Compiling a.cc; 12s remote", 12), ("GoLink x; 1m 30s local", 90), ("T //a; 2.5s", 2), ("T //a; 500ms", 0), ("Analyzing", 0), ("x; 1h darwin-sandbox", 3600)]:
+        _eq("action_seconds %r" % row, action_seconds(row), want)
+    aged = _screen(ctx, [], progress = ["[1 / 9] 3 actions running", "    young; 2s", "    stuck; 400s", "    slow; 70s"])
+    drawn = render(aged, 100, 30)
+    if not (drawn.find("stuck; 400s") < drawn.find("slow; 70s") and drawn.find("slow; 70s") < drawn.find("young; 2s")):
+        fail("render: running actions should be oldest first")
+    if "\x1b[31mstuck; 400s" not in drawn or "\x1b[33mslow; 70s" not in drawn:
+        fail("render: old actions should be coloured")
+
+    # The actions that wrote output: their own list, under `a`.
+    wrote = output_of("action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")))
+    _eq("an action that wrote output", (wrote["label"], wrote["detail"], wrote["files"]), ("//w:w", "Javac", [("stderr", "file:///tmp/err")]))
+    _eq("one that wrote nothing", output_of("action_completed", struct(label = "//w:q"), struct(success = True)), None)
+    _eq("a failed one is a failure", output_of("action_completed", struct(label = "//w:f"), struct(success = False, stderr = struct(file = "file:///tmp/err"))), None)
+    listed = dict(view_state, **_screen(ctx, ["console"], fails = [act]))
+    listed["read"] = view_state["read"]
+    note_event(listed, "action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")), False)
+    note_event(listed, "action_completed", struct(label = "//w:v"), struct(success = True, type = "Genrule", stdout = struct(file = "file:///tmp/out")), False)
+    _eq("note_event lists them", [r["label"] for r in listed["outputs"]], ["//w:w", "//w:v"])
+    on_key(listed, "a", 10)
+    on_key(listed, "tab", 10)
+    on_key(listed, "down", 10)
+    _eq("a: the actions list, its own choice", (listed["list"], listed["picked"], listed["selected"]), ("actions", 1, 0))
+    rows = [_visible(r).rstrip(" ") for r in action_rows(listed, 5, 30)]
+    _eq("its rows", rows, ["• //w:w  Javac", "• //w:v  Genrule"])
+    on_key(listed, "enter", 10)
+    _eq("enter shows the action's log", (listed["view"]["title"], listed["view"]["lines"]), ("//w:v · Genrule", ["some out"]))
+    on_key(listed, "]", 10)
+    _eq("] steps through the actions", listed["view"]["title"], "//w:w · Javac")
+    if "Actions · ↑↓" in render(listed, 100, 30) or "Results · actions" not in render(listed, 100, 30):
+        fail("render: the Results pane should name the actions list")
+    on_key(listed, "a", 10)
+    _eq("a again: the failures", (listed["list"], listed["selected"]), ("failures", 0))
+
+    # Filtering, the bar's origin still counts every line the `e` filter
+    # shows, so Esc goes back to the same line.
+    drift = _screen(ctx, ["l%d" % i for i in range(300)], scroll = 100)
+    on_key(drift, "/", 10)
+    on_key(drift, "f", 10)
+    on_key(drift, "tab", 10)
+    add_lines(drift, ["x%d%s" % (i, " f" if i % 100 == 0 else "") for i in range(250)])
+    on_key(drift, "esc", 10)
+    _eq("esc after filtering: where the bar opened", drift["scroll"], 350)
+    kept_filter = _screen(ctx, ["a", "b f", "c"], scroll = 1)
+    kept_filter["search"].update(mode = "filter", query = "f", pattern = ctx.std.re.compile("f"))
+    on_key(kept_filter, "/", 10)
+    _eq("reopened over a kept filter: the newest", kept_filter["search"]["origin"], 0)
+
+    # Tab shows the list it focuses: zoomed, it unzooms.
+    zoomed = _screen(ctx, [], fails = [act], zoom = True)
+    on_key(zoomed, "tab", 10)
+    _eq("tab unzooms", (zoomed["focus"], zoomed["zoom"]), ("failures", False))
+
+    # A short terminal keeps a row of the list with the cache's tally in.
+    short = _screen(ctx, [], fails = [act], cache = (1, 2))
+    if "//pkg:broken" not in render(short, 100, 14):
+        fail("render: a 14-row terminal should still show a failure")
+
+    # z with the list focused gives the focus back; the countdown shows over
+    # an open bar; a retry forgets where the bar opened.
+    zfocus = _screen(ctx, [], fails = [act], focus = "failures")
+    on_key(zfocus, "z", 10)
+    _eq("z leaves the list", (zfocus["zoom"], zfocus["focus"]), (True, "console"))
+    counting = _screen(ctx, ["a"], ended = True, countdown_ms = 2000)
+    counting["search"]["open"] = True
+    if "leaving in 2s" not in render(counting, 100, 30):
+        fail("render: the countdown should show over an open bar")
+    opened = _screen(ctx, [], fresh = True, last_attempts = {})
+    opened["search"].update(origin = 200, anchored = True)
+    reset_attempt(opened, 0)
+    _eq("a retry forgets where the bar opened", opened["search"]["origin"], 0)
+    opened.update(view = None, errors = [], error_count = 0)
+    opened["search"].update(open = True)
+    add_lines(opened, ["new"] * 4)
+    _eq("and follows after it", (opened["search"]["origin"], opened["scroll"]), (0, 0))
+
     print("plugins_test.axl: OK")
     return 0
 

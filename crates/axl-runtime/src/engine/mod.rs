@@ -12,6 +12,9 @@ mod std;
 mod template;
 mod wasm;
 
+pub use self::std::term::{release_all as release_terminal, restore_terminal_after_crash};
+pub use axl_types::stream::{stderr_is_terminal, stdout_is_terminal};
+
 /// Re-exported for the credential helper: resolve the effective credentials
 /// profile, and resolve the current Aspect access token (JWT) for a profile,
 /// auto-refreshing if needed.

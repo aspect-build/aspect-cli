@@ -11,6 +11,8 @@ These are example plugins, ported from [BuildBuddy's open-source CLI plugins](ht
 | `Notify` ([notify.axl](notify.axl)) | [notify](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/notify) | `build_event` hooks and a `post_task` hook | `--notify:enabled=true` |
 | `OpenInvocation` ([open_invocation.axl](open_invocation.axl)) | [open-invocation](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/open-invocation) | `build_event` and `Phases.task_update` hooks and a `post_task` hook | `--open-invocation:enabled=true` |
 
+`FullScreen` ([full_screen.axl](full_screen.axl)) is not a port: it replaces Bazel's terminal UI with a full-screen dashboard of running actions, results and a scrollable console. It sets `output_display = "none"`, draws from `build.output_feed()` in an `output_frame` hook, and owns the terminal through `ctx.std.term.take()`. Off by default: try it with `aspect build //examples/full_screen:demo --keep_going --action_env=CACHEBUST=$RANDOM --full-screen:enabled=true`.
+
 ## Size
 
 Lines of code, not counting blank lines, comments or docstrings. A BuildBuddy plugin is a shell script, often handing off to a Python script, that reads Bazel's flags or output from a file. The AXL port is a single file that runs inside the CLI and includes its feature declaration and flags.
