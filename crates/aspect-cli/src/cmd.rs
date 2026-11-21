@@ -1268,7 +1268,7 @@ fn stringify_value(v: Value<'_>) -> String {
 struct FeatureBlock {
     /// Args exposed as flags, with config.axl overrides baked into their defaults.
     args: Vec<(String, Arg)>,
-    /// Args only config.axl can set, which `aspect feature <name>` lists apart.
+    /// Args only config.axl can set.
     config_args: Vec<(String, Arg)>,
     heading: String,
     prefix: String,
@@ -1700,9 +1700,13 @@ fn render_feature_detail(
             "{}\n\n{{before-help}}{{all-args}}{{after-help}}",
             banner::line(version)
         ));
-    if let Some(section) =
-        config_args_section(&feat.export_name().unwrap_or_default(), &block.config_args)
-    {
+    if let Some(section) = config_args_section(
+        &feature_config_setter(feat),
+        block
+            .config_args
+            .iter()
+            .map(|(name, arg)| (name.as_str(), arg)),
+    ) {
         cmd = cmd.after_help(section);
     }
     for (arg_name, arg) in block.args.iter() {
@@ -1714,11 +1718,23 @@ fn render_feature_detail(
     cmd
 }
 
-/// Heading over the args a feature takes only from `.aspect/config.axl`.
+// ── Config-only args ───────────────────────────────────────────────────────
+
+/// Heading over the args only `.aspect/config.axl` can set.
 const CONFIG_ARGS_HEADING: &str = "Set in .aspect/config.axl";
 
-/// The `aspect feature <name>` section listing `config_args` (`args.custom` and
-/// `config_only = True` args), or `None` when there are none.
+/// The config.axl store a feature's args are set through: `ctx.features[<Export>].args`.
+fn feature_config_setter(feat: &dyn FeatureLike<'_>) -> String {
+    format!(
+        "ctx.features[{}].args",
+        feat.export_name().unwrap_or_default()
+    )
+}
+
+/// The help section listing `config_args` (`args.custom` and
+/// `config_only = True` args), or `None` when there are none. `setter` is the
+/// config.axl args store they are set through, such as
+/// `ctx.tasks["build"].args` or `ctx.features[Console].args`.
 ///
 /// These have no flag for clap to render, so the section is written by hand in
 /// clap's next-line layout (name where a flag's long name starts, every
@@ -1728,12 +1744,14 @@ const CONFIG_ARGS_HEADING: &str = "Set in .aspect/config.axl";
 /// It goes in through `after_help`, which clap writes verbatim (a `{` in the
 /// help is not template-parsed) and strips of ANSI when stdout is not a
 /// terminal or `NO_COLOR` is set.
-fn config_args_section(export_name: &str, config_args: &[(String, Arg)]) -> Option<String> {
-    if config_args.is_empty() {
-        return None;
-    }
+fn config_args_section<'a>(
+    setter: &str,
+    config_args: impl IntoIterator<Item = (&'a str, &'a Arg)>,
+) -> Option<String> {
     let mut out = format!("\x1b[1;4m{CONFIG_ARGS_HEADING}:\x1b[0m\n");
+    let mut any = false;
     for (name, arg) in config_args {
+        any = true;
         out.push_str(&format!("      \x1b[1m{name}\x1b[0m\n"));
         for line in arg.description().unwrap_or_default().lines() {
             if !line.is_empty() {
@@ -1743,8 +1761,11 @@ fn config_args_section(export_name: &str, config_args: &[(String, Arg)]) -> Opti
             out.push('\n');
         }
     }
+    if !any {
+        return None;
+    }
     out.push_str(&format!(
-        "\n\x1b[2mSet these as ctx.features[{export_name}].args.<NAME> in .aspect/config.axl; \
+        "\n\x1b[2mSet these as {setter}.<NAME> in .aspect/config.axl; \
          they have no command-line flag.\x1b[0m"
     ));
     Some(out)
@@ -2889,16 +2910,11 @@ mod tests {
         }
     }
 
-    /// The detail page as a reader sees it off a terminal: clap's styling and
-    /// the hand-written section's raw ANSI both removed.
-    fn plain_feature_detail(f: &StubFeature) -> String {
-        let block = feature_block(f).unwrap();
-        let help = render_feature_detail("1.2.3", f, &block, Path::new("/repo"), &[])
-            .render_help()
-            .ansi()
-            .to_string();
+    /// `text` as a reader sees it off a terminal: clap's styling and the raw
+    /// ANSI of the hand-written sections both removed.
+    fn strip_ansi(text: &str) -> String {
         let mut plain = String::new();
-        let mut chars = help.chars();
+        let mut chars = text.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
                 chars.by_ref().find(|&c| c == 'm');
@@ -2907,6 +2923,17 @@ mod tests {
             }
         }
         plain
+    }
+
+    /// The detail page as a reader sees it off a terminal: clap's styling and
+    /// the hand-written section's raw ANSI both removed.
+    fn plain_feature_detail(f: &StubFeature) -> String {
+        let block = feature_block(f).unwrap();
+        let help = render_feature_detail("1.2.3", f, &block, Path::new("/repo"), &[])
+            .render_help()
+            .ansi()
+            .to_string();
+        strip_ansi(&help)
     }
 
     #[test]
