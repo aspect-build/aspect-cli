@@ -23,12 +23,12 @@
 //! args list, so there's no ordering dependency on BuildMetadata arrival.
 //! Glob patterns (`*`, `?`) are supported, matching the AXL semantics.
 //!
-//! Limitation: redaction matches only the single-token `--name=value` form. A
-//! space-separated `--remote_header Authorization: Bearer <token>` (two argv
-//! tokens) is not scrubbed. BEP canonicalizes flags to the `=`-joined form, so
-//! the BES path is covered; the per-spawn command line (`render_command`) and
-//! the `.bazelrc` disclosure (`bazelrc::announce`) reuse these helpers and
-//! inherit the same assumption — a space-separated secret there would leak.
+//! A single flag ([`redact_flag`], [`redactor`]) is redacted in its
+//! `--name=value` form, which is how BEP spells every flag. A whole argument
+//! list ([`redact_command_args`]) also takes a header or env-passthrough flag
+//! given as two arguments (`--remote_header` `Authorization: Bearer <token>`),
+//! as a command line typed at a shell can be; and a flag carried in another's
+//! value (`--bazel-flag=--remote_header=…`) is redacted as itself.
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -442,11 +442,25 @@ fn redact_option(opt: &mut CmdOption, allow_env: &[&str]) -> bool {
 /// Use when echoing a bazel command to a log (e.g. `--announce-bazel-command`)
 /// — it applies the same header / env-var / URL-credential rules the BES sink
 /// redaction uses, from one source of truth.
+///
+/// A header or env-passthrough flag with no `=` takes the next argument as
+/// its value, which is redacted as that flag's would be.
 pub fn redact_command_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) -> Vec<String> {
     let user_patterns = collect_allow_env(args.clone());
     let allow_env = effective_allow_env(&user_patterns);
+    let mut takes_value: Option<&str> = None;
     args.into_iter()
-        .map(|a| redact_flag(a, &allow_env).into_owned())
+        .map(|a| {
+            if let Some(name) = takes_value.take() {
+                return redact_option_value(name, a, &allow_env).into_owned();
+            }
+            if let Some(name) = a.strip_prefix("--")
+                && (HEADER_OPTION_NAMES.contains(&name) || ENV_VAR_OPTION_NAMES.contains(&name))
+            {
+                takes_value = Some(name);
+            }
+            redact_flag(a, &allow_env).into_owned()
+        })
         .collect()
 }
 
@@ -471,7 +485,8 @@ pub fn redactor<'a>(flags: impl IntoIterator<Item = &'a str>) -> impl Fn(&str) -
 /// - `--header-like=VALUE`: redact entire VALUE.
 /// - `--env-like=KEY=VALUE`: redact VALUE unless KEY is on `allow_env` or
 ///   is a known-safe literal; strip URL creds when KEY is a known git URL var.
-/// - Other `--name=value`: strip URL creds from VALUE.
+/// - Other `--name=value`: strip URL creds from VALUE, or, when VALUE is a
+///   flag itself (`--bazel-flag=--remote_header=…`), redact it as one.
 /// - `--default_override=N:section=<option>`: `<option>` by the rules above,
 ///   since that is how the CLI restates rc-file entries.
 pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
@@ -499,6 +514,13 @@ pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
     if ENV_VAR_OPTION_NAMES.contains(&name) {
         let new_value = redact_env_value(value, allow_env);
         return match new_value {
+            Cow::Owned(v) => Cow::Owned(format!("--{}={}", name, v)),
+            Cow::Borrowed(_) => Cow::Borrowed(arg),
+        };
+    }
+    // A flag carried as another's value is redacted as itself.
+    if value.starts_with("--") {
+        return match redact_flag(value, allow_env) {
             Cow::Owned(v) => Cow::Owned(format!("--{}={}", name, v)),
             Cow::Borrowed(_) => Cow::Borrowed(arg),
         };
@@ -1036,6 +1058,44 @@ mod tests {
                 format!("--remote_header=Authorization:{REDACTED}"),
                 "//foo:bar".to_string(),
             ]
+        );
+    }
+
+    /// A header or env flag given as two arguments, as typed at a shell, and
+    /// a flag carried in another's value.
+    #[test]
+    fn redact_command_args_takes_a_flag_and_its_value_as_two_args() {
+        let args = [
+            "--remote_header",
+            "Authorization: Bearer t0ken",
+            "--action_env",
+            "DB_PASSWORD=hunter2",
+            "--action_env",
+            "USER=alice",
+            "--bazel-flag=--remote_header=x-api-key=abc",
+            "--bazel-flag=--action_env=TOKEN=abc",
+            "--keep_going",
+            "//foo:bar",
+        ];
+        assert_eq!(
+            redact_command_args(args.iter().copied()),
+            vec![
+                "--remote_header".to_string(),
+                format!("Authorization:{REDACTED}"),
+                "--action_env".to_string(),
+                format!("DB_PASSWORD={REDACTED}"),
+                "--action_env".to_string(),
+                "USER=alice".to_string(),
+                format!("--bazel-flag=--remote_header=x-api-key={REDACTED}"),
+                format!("--bazel-flag=--action_env=TOKEN={REDACTED}"),
+                "--keep_going".to_string(),
+                "//foo:bar".to_string(),
+            ]
+        );
+        assert_eq!(
+            redact_command_args(["build", "--remote_header"]),
+            vec!["build", "--remote_header"],
+            "a flag at the end, its value missing"
         );
     }
 

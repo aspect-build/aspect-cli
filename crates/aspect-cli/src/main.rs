@@ -375,6 +375,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             report_startup(root_span, &dispatch.task_kind);
 
             // Phase 4: execute the selected task.
+            mpe.set_task_command_line(
+                std::env::args_os()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+                cmd.secret_flags(dispatch.task_id),
+            );
             let task_start = std::time::Instant::now();
             let exit = mpe.execute_tasks_with_args(
                 dispatch.task_id,

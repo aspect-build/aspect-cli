@@ -1,12 +1,12 @@
 //! Each task invocation's files, kept for later: one directory per invocation
 //! under the history root, named `<start>-<task-id>` where `<start>` is the UTC
 //! start time as `YYYYMMDDTHHMMSSmmmZ`, so the names alone list the history in
-//! order. A subfolder per Bazel invocation it makes that keeps a file
-//! (`bazel/<n>`, counting only those). A task ID
-//! names one run, so an explicit one already here is refused (see
-//! [`History::earlier_run`]). An entry is made only for a Bazel invocation that
-//! will keep a file in it, at its spawn, so a run that keeps nothing leaves no
-//! trace; one that fails before writing its files leaves an empty folder.
+//! order. A task ID names one run, so an explicit one already here is
+//! refused (see [`History::earlier_run`]). Every task's entry is made when it
+//! starts, holding its record, `task.json` (see [`task_record`]): what ran,
+//! where, how it ended, and each of its Bazel invocations, with a summary of
+//! each one's build event stream. A subfolder per Bazel invocation that keeps
+//! a file (`bazel/<n>`, counting only those) is made at its spawn.
 //!
 //! A Bazel invocation's folder holds its compact execution log, workspace log,
 //! trace profile and build event stream, each when the build has one, and the
@@ -19,26 +19,35 @@
 //! Bazel reads some of these files back after the build — it uploads the
 //! compact execution log as a build tool log, possibly after the client has
 //! exited — so nothing here is moved or deleted by the invocation that wrote
-//! it. A [`prune`] removes old invocations instead, started in the background
-//! by an invocation's first Bazel build that keeps a file, unless another task
+//! it. A [`prune`] removes old invocations' files instead, keeping each one's
+//! record with its command line redacted, started in the background by an
+//! invocation's first Bazel build that keeps a file, unless another task
 //! pruned within
 //! [`Retention::every`]: the oldest started first while the history is over
 //! [`Retention::budget`], never below [`Retention::keep`] invocations, and
 //! never one written to within [`Retention::guard`], which may be a build or an
 //! upload still running in another workspace. Liveness is read from those times
 //! alone, so a run elsewhere that has gone longer than the guard without
-//! writing, and is not among the newest kept, can lose its entry. Dotfiles at
-//! the root serve it: `.pruned`, whose time is the last prune's, and `.sizes`,
-//! the sizes of invocations that have settled (and, briefly, its temp file).
+//! writing, and is not among the newest kept, can lose its files. Entries with
+//! only a record (a task that never built, one evicted) count toward neither
+//! the budget nor `keep`; they are capped apart, by [`Retention::records`] and
+//! [`Retention::record_age`] ([`prune_records`]). Dotfiles at the root serve
+//! the prune: `.pruned`, whose time is the last prune's, and `.sizes`, the
+//! sizes of invocations that have settled (and, briefly, its temp file).
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::task_record::{
+    self, BazelRecord, BazelSlot, Link, RecordFile, TaskIdentity, TaskRecord,
+};
 
 /// The variable that moves the history root (see [`History::default_root`]).
 pub const ROOT_ENV: &str = "ASPECT_HISTORY_DIR";
@@ -80,6 +89,12 @@ pub struct Retention {
     /// measured again. Far longer than `guard`, so a build that went quiet and
     /// wrote again is still measured.
     pub settle: Duration,
+    /// The most records kept of runs with no files besides their `task.json`
+    /// (ones that never built, and ones whose files a prune removed), the
+    /// most recently started first.
+    pub records: usize,
+    /// Such a record older than this goes, by its start.
+    pub record_age: Duration,
 }
 
 impl Default for Retention {
@@ -90,6 +105,8 @@ impl Default for Retention {
             guard: Duration::from_secs(60 * 60),
             every: Duration::from_secs(10 * 60),
             settle: Duration::from_secs(24 * 60 * 60),
+            records: 5000,
+            record_age: Duration::from_secs(90 * 24 * 60 * 60),
         }
     }
 }
@@ -107,6 +124,26 @@ pub struct History {
     /// The prune started by the first Bazel invocation, left to run beside
     /// the build; see [`prune`].
     pruning: Mutex<Option<JoinHandle<()>>>,
+    /// The command line the task was run with; see
+    /// [`set_command_line`](Self::set_command_line).
+    command_line: Mutex<(Vec<String>, Vec<String>)>,
+    /// The task invocation's `task.json`, once [`begin_task`](Self::begin_task)
+    /// has written it.
+    task_record: Mutex<Option<Arc<RecordFile>>>,
+    /// Its Bazel invocations' places in the record.
+    slots: Mutex<Vec<Arc<BazelSlot>>>,
+}
+
+/// What a task's record starts with, beside its command line.
+#[derive(Debug, Clone, Default)]
+pub struct TaskStart {
+    pub name: String,
+    pub kind: String,
+    pub group: Vec<String>,
+    pub cli_version: String,
+    pub workspace: Option<PathBuf>,
+    /// The repository whose commit, branch and state are noted.
+    pub git_root: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -125,6 +162,156 @@ impl History {
             record: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             pruning: Mutex::new(None),
+            command_line: Mutex::new((vec![], vec![])),
+            task_record: Mutex::new(None),
+            slots: Mutex::new(vec![]),
+        }
+    }
+
+    /// The command line the task runs with, `argv` as typed (the program
+    /// first), and the spellings of the flags whose values are secrets, for
+    /// its record (see [`task_record`]).
+    pub fn set_command_line(&self, argv: Vec<String>, secret_flags: Vec<String>) {
+        *self.command_line.lock().unwrap() = (argv, secret_flags);
+    }
+
+    /// [`begin`](Self::begin) the task invocation `task_id`, and make its
+    /// entry with its record, `task.json`, in it. An entry that cannot be made
+    /// leaves the task without one, quietly: a history is a convenience, and
+    /// a task with no build to keep files for should not warn about it.
+    pub fn begin_task(&self, task_id: &str, start: TaskStart) {
+        self.begin(task_id);
+        let dir = match self.current.lock().unwrap().as_ref() {
+            Some(invocation) => invocation.dir.clone(),
+            None => return,
+        };
+        let (argv, secret_flags) = self.command_line.lock().unwrap().clone();
+        let record = TaskRecord {
+            schema: task_record::SCHEMA,
+            status: "running".into(),
+            cli_version: start.cli_version,
+            task: TaskIdentity {
+                id: task_id.to_owned(),
+                name: start.name,
+                kind: start.kind,
+                group: start.group,
+            },
+            pid: std::process::id(),
+            argv,
+            secret_flags,
+            cwd: std::env::current_dir()
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            workspace: start.workspace.map(|w| w.to_string_lossy().into_owned()),
+            started: task_record::timestamp(SystemTime::now()),
+            ..Default::default()
+        };
+        let made =
+            create_private_dir(&dir).and_then(|()| RecordFile::begin(&dir, record, start.git_root));
+        match made {
+            Ok(file) => *self.task_record.lock().unwrap() = Some(file),
+            Err(e) => tracing::debug!("no history record for this task in {}: {e}", dir.display()),
+        }
+    }
+
+    /// Note a Bazel invocation of the task: its command, patterns and flags
+    /// (redacted here), and its history `folder` when it keeps files. None
+    /// without a record.
+    pub fn bazel_started(
+        &self,
+        command: &str,
+        patterns: &[String],
+        flags: &[String],
+        folder: Option<&Path>,
+    ) -> Option<Arc<BazelSlot>> {
+        let file = self.task_record.lock().unwrap().clone()?;
+        let entry = file.path().parent()?.to_path_buf();
+        let record = BazelRecord {
+            command: command.to_owned(),
+            patterns: patterns.to_vec(),
+            flags: bazel::bes::redact::redact_command_args(flags.iter().map(String::as_str)),
+            folder: folder
+                .and_then(|f| f.strip_prefix(&entry).ok())
+                .map(|f| f.to_string_lossy().into_owned()),
+            started: task_record::timestamp(SystemTime::now()),
+            ..Default::default()
+        };
+        let slot = BazelSlot::new(file, record, folder.map(Path::to_path_buf));
+        self.slots.lock().unwrap().push(slot.clone());
+        Some(slot)
+    }
+
+    /// Up to `limit` records that `keep` takes, the most recently started
+    /// first, with their entries' folders; unreadable ones skipped.
+    pub fn records(
+        &self,
+        limit: usize,
+        keep: impl Fn(&TaskRecord) -> bool,
+    ) -> Vec<(PathBuf, TaskRecord)> {
+        let Ok(read) = fs::read_dir(&self.root) else {
+            return vec![];
+        };
+        let mut dirs: Vec<PathBuf> = read
+            .filter_map(|e| e.ok())
+            .filter(|e| is_invocation_name(&e.file_name()))
+            .map(|e| e.path())
+            .collect();
+        dirs.sort();
+        dirs.into_iter()
+            .rev()
+            .filter_map(|dir| {
+                let record = task_record::read(&dir.join(task_record::FILE_NAME))?;
+                Some((dir, record))
+            })
+            .filter(|(_, r)| keep(r))
+            .take(limit)
+            .collect()
+    }
+
+    /// The record of the run with task ID `id`, compared ignoring ASCII
+    /// case, or the only one whose ID starts with it, or whose entry's
+    /// folder is named `id`.
+    pub fn record(&self, id: &str) -> Option<(PathBuf, TaskRecord)> {
+        let dir = self
+            .earlier_run(id)
+            .or_else(|| {
+                let dir = self.root.join(id);
+                is_invocation_name(id.as_ref()).then_some(dir)
+            })
+            .or_else(|| self.only_run_starting(id))?;
+        let record = task_record::read(&dir.join(task_record::FILE_NAME))?;
+        Some((dir, record))
+    }
+
+    /// Add a link (a results page) to the task's record.
+    pub fn link(&self, label: &str, url: &str) {
+        if let Some(file) = self.task_record.lock().unwrap().as_ref() {
+            file.update(|r| {
+                let link = Link {
+                    label: label.to_owned(),
+                    url: url.to_owned(),
+                };
+                if !r.links.contains(&link) {
+                    r.links.push(link);
+                }
+            });
+        }
+    }
+
+    /// The task has ended: its record says how, with the summaries of its
+    /// builds whose streams are over (one never waited for may not be).
+    pub fn end_task(
+        &self,
+        exit_code: Option<u8>,
+        conclusion: String,
+        error: String,
+        cancelled: bool,
+    ) {
+        for slot in self.slots.lock().unwrap().drain(..) {
+            slot.summarize(true);
+        }
+        if let Some(file) = self.task_record.lock().unwrap().take() {
+            file.end(exit_code, conclusion, error, cancelled);
         }
     }
 
@@ -179,8 +366,31 @@ impl History {
             .map(|e| e.path())
     }
 
+    /// The one entry whose task ID starts with `prefix`, ignoring ASCII
+    /// case; None for none or several.
+    fn only_run_starting(&self, prefix: &str) -> Option<PathBuf> {
+        if prefix.is_empty() {
+            return None;
+        }
+        let prefix = prefix.to_ascii_lowercase();
+        let mut found = fs::read_dir(&self.root)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                is_invocation_name(&name)
+                    && name.to_str().is_some_and(|n| {
+                        n[STAMP_LEN + 1..].to_ascii_lowercase().starts_with(&prefix)
+                    })
+            })
+            .map(|e| e.path());
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
     /// Start the task invocation `task_id`, now. Nothing is created on disk
-    /// until its first Bazel invocation asks for a directory.
+    /// until its first Bazel invocation asks for a directory, unless
+    /// [`begin_task`](Self::begin_task) makes its record.
     pub fn begin(&self, task_id: &str) {
         let dir = self
             .root
@@ -262,8 +472,10 @@ struct Settled {
     newest: u64,
 }
 
-/// Remove old invocations under `root` as `retention` says, leaving `current`
-/// alone. Best effort: an entry that cannot be read or removed is skipped.
+/// Remove old invocations' files under `root` as `retention` says, leaving
+/// `current` alone; each one's record stays ([`evict`]), and the records are
+/// then capped ([`prune_records`]). Only entries holding files count here.
+/// Best effort: an entry that cannot be read or removed is skipped.
 ///
 /// It runs beside the build and is not waited for: the CLI may exit midway,
 /// which leaves only a valid history: part of an entry it was removing, which
@@ -292,7 +504,7 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter(|e| is_invocation_name(&e.file_name()))
         .map(|e| e.path())
-        .filter(|p| p != current)
+        .filter(|p| p != current && holds_files(p))
         .collect();
     // Names start with the start time, so this is the most recent first.
     entries.sort();
@@ -357,7 +569,7 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
             continue;
         }
         // Gone either way, a concurrent prune having got there first.
-        match fs::remove_dir_all(entry) {
+        match evict(entry) {
             // Part of it may be gone, so it is measured again next time.
             Err(e) if e.kind() != io::ErrorKind::NotFound => {}
             _ => total -= size,
@@ -366,6 +578,83 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
     if settled != index {
         write_index(&index_path, &settled);
     }
+    prune_records(root, retention, current);
+}
+
+/// Whether the entry at `dir` holds a build's files, or only its record (a
+/// task that never built, or one evicted).
+fn holds_files(dir: &Path) -> bool {
+    dir.join(BAZEL_DIR).is_dir()
+}
+
+/// Remove an entry's files but its record, which is kept, its command line
+/// redacted ([`TaskRecord::evict`]); an entry with no record goes whole.
+fn evict(entry: &Path) -> io::Result<()> {
+    let record_path = entry.join(task_record::FILE_NAME);
+    let Some(mut record) = task_record::read(&record_path) else {
+        return fs::remove_dir_all(entry);
+    };
+    for e in fs::read_dir(entry)?.filter_map(|e| e.ok()) {
+        if e.file_name() == task_record::FILE_NAME {
+            continue;
+        }
+        let path = e.path();
+        let removed = if e.file_type().is_ok_and(|t| t.is_dir()) {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match removed {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => {}
+        }
+    }
+    record.evict(SystemTime::now());
+    let bytes = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
+    task_record::write_private(&record_path, &bytes)
+}
+
+/// Remove the records of runs with no files past [`Retention::records`] of
+/// them, the most recently started first, or started over
+/// [`Retention::record_age`] ago; never `current`, nor one written to within
+/// [`Retention::guard`] (a task still running). They count toward neither the
+/// budget nor [`Retention::keep`], which are for files.
+fn prune_records(root: &Path, retention: Retention, current: &Path) {
+    let Ok(read) = fs::read_dir(root) else {
+        return;
+    };
+    let mut records: Vec<PathBuf> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| is_invocation_name(&e.file_name()))
+        .map(|e| e.path())
+        .filter(|p| p != current && !holds_files(p))
+        .collect();
+    records.sort();
+    records.reverse();
+    let oldest = SystemTime::now().checked_sub(retention.record_age);
+    for (i, record) in records.iter().enumerate() {
+        let name = record.file_name().unwrap().to_string_lossy().into_owned();
+        let too_old = match (started(&name), oldest) {
+            (Some(started), Some(oldest)) => started < oldest,
+            _ => false,
+        };
+        if i < retention.records && !too_old {
+            continue;
+        }
+        let (_, newest) = tree_size_and_newest(record);
+        if newest.is_none_or(|t| !idle_for(t, retention.guard)) {
+            continue;
+        }
+        let _ = fs::remove_dir_all(record);
+    }
+}
+
+/// When the entry named `name` started, from its [`stamp`].
+fn started(name: &str) -> Option<SystemTime> {
+    let stamp = name.get(..STAMP_LEN)?;
+    let at = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S%3fZ").ok()?;
+    Some(SystemTime::from(at.and_utc()))
 }
 
 /// Whether `time` is at least `long` ago. A time ahead of the clock is not.
@@ -518,8 +807,28 @@ mod tests {
                 guard: Duration::from_secs(60 * 60),
                 every: Duration::ZERO,
                 settle: Duration::from_secs(60 * 60),
+                records: 5000,
+                record_age: Duration::from_secs(90 * 24 * 60 * 60),
             },
         )
+    }
+
+    /// Give the entry at `dir` a record with a secret on its command line,
+    /// last written `age` ago.
+    fn with_record(dir: &Path, age: Duration) {
+        let record = TaskRecord {
+            schema: task_record::SCHEMA,
+            status: "ended".into(),
+            argv: vec!["aspect".into(), "deploy".into(), "--token=s3cret".into()],
+            secret_flags: vec!["--token".into()],
+            ..Default::default()
+        };
+        let path = dir.join(task_record::FILE_NAME);
+        fs::create_dir_all(dir).unwrap();
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let when = SystemTime::now() - age;
+        fs::File::open(&path).unwrap().set_modified(when).unwrap();
+        fs::File::open(dir).unwrap().set_modified(when).unwrap();
     }
 
     /// The next Bazel invocation's folder, once the prune it started is done.
@@ -527,6 +836,90 @@ mod tests {
         let dir = h.next_bazel_dir().unwrap();
         h.wait_for_prune();
         dir
+    }
+
+    /// A prune over budget removes an entry's files but keeps its record,
+    /// its command line redacted.
+    #[test]
+    fn an_evicted_entry_keeps_its_record_redacted() {
+        let root = tempfile::tempdir().unwrap();
+        let old = entry(root.path(), 1, 1000, OLD);
+        with_record(&old, OLD);
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(!old.join(BAZEL_DIR).exists(), "its files are gone");
+        let record = task_record::read(&old.join(task_record::FILE_NAME)).unwrap();
+        assert!(record.evicted.is_some() && record.argv_redacted);
+        assert_eq!(record.argv[2], "--token=<REDACTED>");
+        let names: Vec<_> = fs::read_dir(&old)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(task_record::FILE_NAME)]);
+    }
+
+    /// Records without files count toward neither the budget nor `keep`.
+    #[test]
+    fn records_alone_take_no_place_from_files() {
+        let root = tempfile::tempdir().unwrap();
+        let files = entry(root.path(), 1, 100, OLD);
+        for n in 2..=4 {
+            with_record(&root.path().join(name(n)), OLD);
+        }
+        // `keep` 1 protects the newest entry with files, not a newer record.
+        // Started at the epoch: no record is too old for this test.
+        let mut h = history(root.path(), 1, 1);
+        h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
+        h.begin(&id(99));
+        next(&h);
+        assert!(files.join(BAZEL_DIR).exists());
+        for n in 2..=4 {
+            assert!(
+                root.path()
+                    .join(name(n))
+                    .join(task_record::FILE_NAME)
+                    .exists()
+            );
+        }
+    }
+
+    /// Records past the count, or started too long ago, go; one written
+    /// within the guard stays.
+    #[test]
+    fn records_are_capped_by_count_and_age() {
+        let root = tempfile::tempdir().unwrap();
+        // Started at the epoch onwards: past any age but the test's.
+        for n in 1..=5 {
+            with_record(&root.path().join(name(n)), OLD);
+        }
+        let live = root.path().join(name(6));
+        with_record(&live, Duration::from_secs(60));
+        let mut h = history(root.path(), 1 << 30, 0);
+        h.retention.records = 2;
+        h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
+        h.begin(&id(99));
+        next(&h);
+        let kept: Vec<bool> = (1..=6)
+            .map(|n| root.path().join(name(n)).exists())
+            .collect();
+        assert_eq!(
+            kept,
+            [false, false, false, false, true, true],
+            "the newest two by start"
+        );
+        h.retention.record_age = Duration::from_secs(60 * 60);
+        let other = History::at(root.path().to_path_buf(), h.retention);
+        other.begin(&id(98));
+        next(&other);
+        assert!(!root.path().join(name(5)).exists(), "started too long ago");
+        assert!(live.exists(), "written within the guard");
+    }
+
+    #[test]
+    fn an_entrys_start_is_read_from_its_name() {
+        assert_eq!(started(&name(7)), Some(UNIX_EPOCH + Duration::from_secs(7)));
+        assert_eq!(started("logs"), None);
     }
 
     #[test]

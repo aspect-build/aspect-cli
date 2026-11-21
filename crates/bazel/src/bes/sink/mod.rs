@@ -7,6 +7,7 @@ pub mod grpc;
 pub mod keep;
 mod metrics;
 pub mod retry;
+pub mod summary;
 pub mod tracing;
 
 static WARN: OnceLock<fn(&str)> = OnceLock::new();

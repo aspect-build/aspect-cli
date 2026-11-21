@@ -74,6 +74,9 @@ pub enum Arg {
         /// Keep this arg off the CLI: settable from `config.axl` only. See
         /// [`Arg::config_only`].
         config_only: bool,
+        /// Its value is a secret (`args.string(secret = True)`): redacted
+        /// wherever the CLI shows or keeps a command line. See [`Arg::secret`].
+        secret: bool,
     },
     Boolean {
         required: bool,
@@ -246,6 +249,13 @@ impl Arg {
             | Self::Passthrough { .. }
             | Self::Custom { .. } => false,
         }
+    }
+
+    /// Whether this arg's value is a secret (`args.string(secret = True)`), to
+    /// redact from a command line the CLI shows or keeps, such as the task
+    /// history's record of the run.
+    pub fn secret(&self) -> bool {
+        matches!(self, Self::String { secret: true, .. })
     }
 
     /// Returns `true` if this arg is exposed on the CLI (flags, positional, or
@@ -648,6 +658,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// (`--remote` meaning "the usual capabilities"). Without it, omitting the
     /// value is an error. `bare` and `default` are independent, so a flag can
     /// distinguish "absent" from "passed with no value".
+    ///
+    /// `secret = True` marks the value as a secret (a token, a password): the
+    /// CLI redacts it from any command line it shows or keeps, such as the
+    /// task history's record of the run. Prefer an environment variable or a
+    /// file for a secret; this is for one that has to be a flag.
     fn string<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<String>,
@@ -657,6 +672,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] bare: NoneOr<String>,
         #[starlark(require = named, default = false)] config_only: bool,
+        #[starlark(require = named, default = false)] secret: bool,
     ) -> starlark::Result<Arg> {
         if required && default.is_some() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -688,6 +704,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             description: description.into_option(),
             bare,
             config_only,
+            secret,
         })
     }
 

@@ -1,0 +1,189 @@
+"""`aspect history`: the tasks run on this machine, from the task history's
+records (`ctx.std.history`), newest first.
+
+    aspect history list [--kind=build] [--limit=20] [--output=json]
+    aspect history show <task-id> [--output=json]
+
+`list` gives a run a line: the start of its task ID (enough for `show`),
+when it started (UTC), how it ended (`ok`, `exit
+<n>`, `error`, `cancelled`, `running`, or `abandoned` for one whose process
+is gone without writing its end), how long it took, the task, and its
+command line, redacted. `show` gives one run whole: its command line, where
+it ran (the directory, and the git branch and commit), each Bazel
+invocation with its counts and its failures, each with the logs the history
+kept for it, and the folder holding the run's files, or when a prune
+removed them. `--output=json` prints the records as `task.json` has them,
+redacted, for a script.
+
+This run is left out of `list`: it is not over.
+"""
+
+_MAX_FAILURES_SHOWN = 20
+
+def outcome(record) -> str:
+    """How a run ended, in a word or two."""
+    status = record.get("status", "")
+    if status in ("running", "abandoned"):
+        return status
+    if record.get("error"):
+        return "error"
+    if record.get("cancelled"):
+        return "cancelled"
+    code = record.get("exit_code", 0)
+    return "ok" if code == 0 else "exit %d" % code
+
+def when(stamp: str) -> str:
+    """An RFC 3339 time as `YYYY-MM-DD HH:MM:SSZ`."""
+    if len(stamp) < 19:
+        return stamp
+    return stamp[:10] + " " + stamp[11:19] + "Z"
+
+def took(record) -> str:
+    """A run's duration, `850ms`, `12.3s` or `4m05s`; empty while it runs."""
+    ms = record.get("duration_ms")
+    if ms == None:
+        return ""
+    if ms < 1000:
+        return "%dms" % ms
+    if ms < 60000:
+        return "%d.%ds" % (ms // 1000, ms % 1000 // 100)
+    s = ms // 1000
+    sec = s % 60
+    return "%dm%s%ds" % (s // 60, "0" if sec < 10 else "", sec)
+
+def command(record) -> str:
+    """A run's command line, redacted, without the program."""
+    argv = record.get("argv", [])
+    return " ".join(["aspect"] + argv[1:]) if argv else ""
+
+def task_name(record) -> str:
+    """`<group> <kind>`, as typed."""
+    task = record.get("task", {})
+    return " ".join(task.get("group", []) + [task.get("kind", "")])
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - len(text))
+
+def list_lines(records: list) -> list:
+    """One line per record, in columns."""
+    rows = [(r.get("task", {}).get("id", "")[:8], when(r.get("started", "")), outcome(r), took(r), task_name(r), command(r)) for r in records]
+    widths = [0, 0, 0, 0, 0]
+    for row in rows:
+        for i in range(5):
+            widths[i] = max(widths[i], len(row[i]))
+    return ["  ".join([_pad(row[i], widths[i]) for i in range(5)] + [row[5]]).rstrip() for row in rows]
+
+def show_lines(record) -> list:
+    """One run, whole."""
+    task = record.get("task", {})
+    lines = [
+        "Task      %s (%s)" % (task_name(record), task.get("name", "")),
+        "ID        %s" % task.get("id", ""),
+        "Command   %s" % command(record),
+    ]
+    ended = [outcome(record)]
+    if took(record):
+        ended.append(took(record))
+    if record.get("conclusion"):
+        ended.append(record["conclusion"])
+    if record.get("error"):
+        ended.append(record["error"])
+    lines.append("Started   %s · %s" % (when(record.get("started", "")), " · ".join(ended)))
+    where = record.get("cwd", "")
+    git = record.get("git")
+    if git:
+        where += " · %s%s%s" % (git.get("branch", "") + "@" if git.get("branch") else "", git.get("commit", "")[:12], " (dirty)" if git.get("dirty") else "")
+    lines.append("Where     %s" % where)
+    for link in record.get("links", []):
+        lines.append("Link      %s: %s" % (link.get("label", ""), link.get("url", "")))
+    dir = record.get("dir", "")
+    for n, build in enumerate(record.get("bazel", [])):
+        head = "%s %s" % (build.get("command", ""), " ".join(build.get("patterns", [])))
+        code = build.get("exit_code")
+        head += " · " + ("running" if code == None and not build.get("ended") else "exit %s" % code)
+        lines.append("Bazel %d   %s" % (n + 1, head.strip()))
+        summary = build.get("summary")
+        if not summary:
+            continue
+        lines.append("          targets %d built, %d failed, %d skipped · tests %d passed, %d failed" % (
+            summary.get("targets_built", 0),
+            summary.get("targets_failed", 0),
+            summary.get("targets_skipped", 0),
+            summary.get("tests_passed", 0),
+            summary.get("tests_failed", 0),
+        ))
+        failures = summary.get("failures", [])
+        for f in failures[:_MAX_FAILURES_SHOWN]:
+            lines.append("          ✗ %s%s" % (f.get("label", ""), ("  " + f["detail"]) if f.get("detail") else ""))
+            for log in f.get("logs", []):
+                lines.append("              %s/%s" % (dir, log))
+        more = len(failures) - _MAX_FAILURES_SHOWN + summary.get("failures_not_listed", 0)
+        if more > 0:
+            lines.append("          … %d more" % more)
+    if record.get("evicted"):
+        lines.append("Files     removed %s; only this record is kept" % when(record["evicted"]))
+    else:
+        lines.append("Files     %s" % dir)
+    return lines
+
+def _list_impl(ctx: TaskContext) -> int:
+    records = [
+        r
+        for r in ctx.std.history.list(limit = ctx.args.limit + 1, kind = ctx.args.kind or None)
+        if r.get("task", {}).get("id") != ctx.task.id
+    ][:ctx.args.limit]
+    out = ctx.std.io.stdout
+    if ctx.args.output == "json":
+        out.write(json.encode(records, indent = 2) + "\n")
+        return 0
+    if not records:
+        out.write("No runs in the history at %s.\n" % ctx.std.history.root())
+        return 0
+    for line in list_lines(records):
+        out.write(line + "\n")
+    return 0
+
+def _show_impl(ctx: TaskContext) -> int:
+    id = ctx.args.id[0]
+    record = ctx.std.history.get(id)
+    if record == None:
+        print("error: no run %s in the history at %s." % (id, ctx.std.history.root()))
+        return 1
+    out = ctx.std.io.stdout
+    if ctx.args.output == "json":
+        out.write(json.encode(record, indent = 2) + "\n")
+        return 0
+    for line in show_lines(record):
+        out.write(line + "\n")
+    return 0
+
+_OUTPUT = args.string(
+    default = "text",
+    values = ["text", "json"],
+    description = "`text` for people, or `json`: the records as task.json has them, redacted.",
+)
+
+history_list = task(
+    kind = "list",
+    group = ["history"],
+    summary = "List the tasks run on this machine, newest first.",
+    description = "List the task runs the history keeps, newest first: when each started (UTC), how it ended, how long it took, the task and its command line, redacted. Runs whose files a prune removed are still listed, from the record kept of them.",
+    implementation = _list_impl,
+    args = {
+        "kind": args.string(default = "", description = "Only runs of this task kind (`build`, `test`)."),
+        "limit": args.uint(default = 20, description = "The most runs listed."),
+        "output": _OUTPUT,
+    },
+)
+
+history_show = task(
+    kind = "show",
+    group = ["history"],
+    summary = "Show one task run from the history: its command, builds, failures and logs.",
+    description = "Show one task run the history keeps, by its task ID or the start of one (as `aspect history list` shows it): its command line, redacted, where it ran, each Bazel invocation with its counts and failures, the logs kept for each failure, and where the run's files are.",
+    implementation = _show_impl,
+    args = {
+        "id": args.positional(minimum = 1, maximum = 1, description = "The run's task ID, or enough of its start to name only it."),
+        "output": _OUTPUT,
+    },
+)

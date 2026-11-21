@@ -209,6 +209,40 @@ impl<'a, 'v> Cmd<'a, 'v> {
     }
 
     /// Walk the parsed matches to the deepest subcommand and extract task ids + uuids.
+    /// The flag spellings whose values are secrets (`args.string(secret =
+    /// True)`) on task `task_id`'s command line: its own args' and every
+    /// feature's, long and short, as the parser takes them, for redacting a
+    /// command line the CLI keeps.
+    pub fn secret_flags(&self, task_id: usize) -> Vec<String> {
+        let mut flags = vec![];
+        let mut add = |scope: Scope<'_>, name: &str, arg: &Arg| {
+            if !arg.secret() || !arg.is_cli_exposed() {
+                return;
+            }
+            flags.push(format!("--{}", long_flag(scope, name, arg)));
+            if let Arg::String {
+                short: Some(short), ..
+            } = arg
+            {
+                flags.push(format!("-{short}"));
+            }
+        };
+        if let Some(task) = self.tasks.get(task_id) {
+            for (name, arg) in task.args().iter() {
+                add(Scope::Task, name, arg);
+            }
+        }
+        for feat in &self.features {
+            let prefix = feat.name();
+            for (name, arg) in feat.args().iter() {
+                add(Scope::Feature(&prefix), name, arg);
+            }
+        }
+        flags.sort();
+        flags.dedup();
+        flags
+    }
+
     pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
         let leaf = deepest_subcommand(&matches).ok_or(CmdError::NoTaskSelected)?;
         let task_id = *leaf
@@ -2258,6 +2292,7 @@ mod tests {
             description: None,
             bare: None,
             config_only: false,
+            secret: false,
         }
     }
 
@@ -2271,6 +2306,7 @@ mod tests {
             description: None,
             bare: None,
             config_only: false,
+            secret: false,
         }
     }
 
@@ -3280,6 +3316,7 @@ mod tests {
             description: None,
             bare: None,
             config_only: false,
+            secret: false,
         };
         assert_eq!(
             clap_id(Scope::Feature("artifact-upload"), "mode", &arg),
@@ -3386,6 +3423,7 @@ mod tests {
             description: None,
             bare: Some("default".to_owned()),
             config_only: false,
+            secret: false,
         };
         let cmd = || {
             Command::new("t")
@@ -3477,6 +3515,7 @@ mod tests {
                     description: None,
                     bare: None,
                     config_only: true,
+                    secret: false,
                 },
                 "\"hi\"",
             ),

@@ -275,6 +275,12 @@ The session can then run `aspect worktree release` itself. Without the `SessionS
 
 ---
 
+## history
+
+[`history.axl`](history.axl) · `aspect history list` and `aspect history show <id>`: the tasks run on this machine, from the record each run keeps in the task history (`task.json`), read through `ctx.std.history`. Every task gets a record when it starts: its command line, where it ran (directory, git branch and commit), how it ended, and each Bazel invocation with the counts and failures from its build event stream, each failure pointing at the logs `History` kept for it. Command lines are shown redacted: the header and env-passthrough rules of the build event stream, and any flag declared `args.string(secret = True)`. When the history's size budget removes a run's files, its record stays, its command line redacted on disk; records alone are kept for 90 days, 5,000 at most.
+
+---
+
 ## Cross-cutting features
 
 | Feature                  | File                                                                       | Activation                                              | What it does |
