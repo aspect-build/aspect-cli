@@ -1115,7 +1115,7 @@ def _surface_overrides(ctx, entries):
         bad = [n for n in wanted if n not in _VALID_SURFACES]
         if not eq or not id or not wanted or bad:
             hint = did_you_mean_then(bad[0], _VALID_SURFACES, "", "") if bad else ""
-            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored%s: expected <id>=<surface>[,<surface>] with surfaces from %s\n" % (e, hint, ", ".join(_VALID_SURFACES)))
+            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s%s\n" % (e, ", ".join(_VALID_SURFACES), hint))
             continue
         out[id] = wanted
     return out
