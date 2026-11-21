@@ -44,16 +44,17 @@ impl<'v> StarlarkValue<'v> for History {
 
 starlark_simple_value!(History);
 
-/// A record as handed out: redacted, with its folder, and a `running` one
-/// of another process no longer running (`still_running`) marked
-/// `abandoned`.
-fn shown(dir: &std::path::Path, record: &TaskRecord) -> serde_json::Value {
+/// A record as handed out: redacted, with its folder (`dir`), how it ended
+/// (`outcome`, from `abandoned`, which the caller reads once per record so
+/// the two agree), a `running` one whose process is gone marked `abandoned`,
+/// and each build's kept stream (`build_events`) where its folder has one.
+fn shown(dir: &std::path::Path, record: &TaskRecord, abandoned: bool) -> serde_json::Value {
     let mut value = serde_json::to_value(record.redacted()).unwrap_or_default();
     value["dir"] = dir.to_string_lossy().into_owned().into();
-    if abandoned(dir, record) {
+    if abandoned {
         value["status"] = "abandoned".into();
     }
-    value["outcome"] = outcome_of(dir, record).into();
+    value["outcome"] = outcome_of(record, abandoned).into();
     // Each build's stream, where its folder kept one, for
     // `bazel.build_events.read`.
     if let Some(builds) = value.get_mut("bazel").and_then(|b| b.as_array_mut()) {
@@ -82,14 +83,11 @@ fn abandoned(dir: &std::path::Path, record: &TaskRecord) -> bool {
 }
 
 /// How a run ended, in a word: `ok`, `failed` (a non-zero exit), `error` (an
-/// error ended it), `cancelled`, `running` or `abandoned`.
-fn outcome_of(dir: &std::path::Path, record: &TaskRecord) -> &'static str {
+/// error ended it), `cancelled`, `running` or `abandoned` (`abandoned`, read
+/// by the caller).
+fn outcome_of(record: &TaskRecord, abandoned: bool) -> &'static str {
     if record.status == "running" {
-        return if abandoned(dir, record) {
-            "abandoned"
-        } else {
-            "running"
-        };
+        return if abandoned { "abandoned" } else { "running" };
     }
     if !record.error.is_empty() {
         "error"
@@ -122,9 +120,11 @@ fn history_methods(registry: &mut MethodsBuilder) {
     /// The records of past runs, newest first: at most `limit` of them, only
     /// those of task `kind`, those that ended `outcome` (`ok`, `failed`,
     /// `error`, `cancelled`, `running`, `abandoned`), and those run on git
-    /// `branch`, when given. Each is a dict, as
-    /// `task.json` has it, its command line redacted, with `dir`, the
-    /// entry's folder. This run's own record is among them, `running`.
+    /// `branch`, when given. Each is a dict, as `task.json` has it, its
+    /// command line redacted, with `dir` (the entry's folder), `outcome`, and
+    /// each build's `build_events` (its kept stream, for
+    /// `bazel.build_events.read`) where its folder has one. This run's own
+    /// record is among them, `running`.
     fn list<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = 50)] limit: u32,
@@ -147,16 +147,26 @@ fn history_methods(registry: &mut MethodsBuilder) {
                 OUTCOMES.join(", ")
             );
         }
+        // Whether each record kept is abandoned, read once, so its filter,
+        // `status` and `outcome` agree.
+        let seen = std::cell::RefCell::new(std::collections::HashMap::new());
         let records = history.records(limit as usize, |dir, r| {
-            kind.as_ref().is_none_or(|k| &r.task.kind == k)
-                && wanted.as_ref().is_none_or(|o| outcome_of(dir, r) == o)
+            let gone = abandoned(dir, r);
+            let keep = kind.as_ref().is_none_or(|k| &r.task.kind == k)
+                && wanted.as_ref().is_none_or(|o| outcome_of(r, gone) == o)
                 && branch
                     .as_ref()
-                    .is_none_or(|b| r.git.as_ref().and_then(|g| g.branch.as_ref()) == Some(b))
+                    .is_none_or(|b| r.git.as_ref().and_then(|g| g.branch.as_ref()) == Some(b));
+            seen.borrow_mut().insert(dir.to_path_buf(), gone);
+            keep
         });
+        let seen = seen.into_inner();
         Ok(records
             .iter()
-            .map(|(dir, record)| eval.heap().alloc(shown(dir, record)))
+            .map(|(dir, record)| {
+                let gone = seen.get(dir).copied().unwrap_or(false);
+                eval.heap().alloc(shown(dir, record, gone))
+            })
             .collect())
     }
 
@@ -169,7 +179,10 @@ fn history_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneOr<Value<'v>>> {
         let history = RuntimeEnv::from_eval(eval)?.history.clone();
         Ok(NoneOr::from_option(history.record(id).map(
-            |(dir, record)| eval.heap().alloc(shown(&dir, &record)),
+            |(dir, record)| {
+                let gone = abandoned(&dir, &record);
+                eval.heap().alloc(shown(&dir, &record, gone))
+            },
         )))
     }
 

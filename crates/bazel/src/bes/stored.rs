@@ -4,8 +4,8 @@
 //!
 //! Unlike [`super::binary_file::Reader`], which follows a file Bazel is still
 //! writing, this reads one that is finished: it ends at the end of the file.
-//! A stream that ends cleanly at a message boundary after Bazel's final event
-//! (`last_message`) is [`Stored::complete`]. One cut short (a build killed
+//! A stream that ends cleanly at a message boundary with Bazel's final event
+//! (`last_message`) last is [`Stored::complete`]. One cut short (a build killed
 //! mid-write), or holding a message that does not decode, stops at the last
 //! whole event, with [`Stored::error`] saying why.
 
@@ -47,8 +47,9 @@ impl<R: Read> Stored<R> {
         }
     }
 
-    /// Whether the stream was read to its end and Bazel's final event was
-    /// among it: false until it has been, and for a stream cut short.
+    /// Whether the stream was read to its end and the last event in it was
+    /// Bazel's final one: false until it has been read, for a stream cut
+    /// short, and for one whose retried attempt stopped before its own end.
     pub fn complete(&self) -> bool {
         self.done && self.error.is_none() && self.last_message
     }
@@ -105,7 +106,9 @@ impl<R: Read> Iterator for Stored<R> {
         }
         match BuildEvent::decode(payload.as_slice()) {
             Ok(event) => {
-                self.last_message |= event.last_message;
+                // The last event read decides: a retry in the stream starts
+                // over after an attempt's own final event.
+                self.last_message = event.last_message;
                 Some(event)
             }
             Err(e) => self.stop(format!("a message that does not decode: {e}")),
@@ -147,6 +150,15 @@ mod tests {
         let read: Vec<BuildEvent> = stored.by_ref().collect();
         assert_eq!(read, events);
         assert!(stored.complete() && stored.error().is_none());
+    }
+
+    /// A retry in the stream starts over after an attempt's final event: an
+    /// attempt that then stopped at a message boundary leaves it incomplete.
+    #[test]
+    fn only_a_final_last_event_completes_it() {
+        let mut stored = Stored::new(Cursor::new(file(&[event(1, true), event(2, false)])));
+        assert_eq!(stored.by_ref().count(), 2);
+        assert!(!stored.complete() && stored.error().is_none());
     }
 
     #[test]
