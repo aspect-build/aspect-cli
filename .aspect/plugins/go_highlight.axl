@@ -5,7 +5,8 @@ stages.
 A compiler error's `file.go:line:col:` prefix is coloured yellow, and
 TypeScript's `file.ts(line,col):` is rewritten to `file.ts:line:col:` so an
 editor's terminal can open it at that spot. Compiler errors are action
-output, which every `rewrite` reaches. Colour only goes to a terminal.
+output, which every `rewrite` reaches. Colour only goes where stderr takes
+it (`std.io.stderr.color`: a terminal, without `NO_COLOR`).
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
@@ -18,9 +19,9 @@ def _go_highlight_impl(ctx: FeatureContext):
     if ctx.args.typescript:
         t.output_stages.append(bazel.output.rewrite(
             r"^(\S*?\.tsx?)\((\d+),(\d+)\):",
-            (_YELLOW + "${1}:${2}:${3}:" + _RESET) if ctx.std.io.stderr.is_tty else "${1}:${2}:${3}:",
+            (_YELLOW + "${1}:${2}:${3}:" + _RESET) if ctx.std.io.stderr.color else "${1}:${2}:${3}:",
         ))
-    if ctx.std.io.stderr.is_tty:
+    if ctx.std.io.stderr.color:
         t.output_stages.append(bazel.output.rewrite(r"^(\S*?\.go:\d+:\d+:)", _YELLOW + "${1}" + _RESET))
 
 GoHighlight = feature(
