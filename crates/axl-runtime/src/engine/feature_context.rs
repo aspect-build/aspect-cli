@@ -24,7 +24,7 @@ use crate::color::StreamColor;
 /// - `ctx.std` — standard library
 /// - `ctx.http` — HTTP client
 /// - `ctx.hooks` — pre-task and post-task hooks around the task body
-/// - `ctx.task_paths` — the command path of every task the repo defines
+/// - `ctx.task_paths` - the command path of every task the repo defines
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<FeatureContext>")]
 pub struct FeatureContext<'v> {

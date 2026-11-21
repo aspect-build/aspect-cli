@@ -16,7 +16,7 @@ Currently:
     `escaped_char(ch)` / `utf8_bytes_escaped(ch)` — the characters that
     rewrite what a terminal shows, text with them escaped, and the escape a
     shell reads back.
-  - `edit_distance(a, b)` — Levenshtein distance, for "did you mean"
+  - `edit_distance(a, b)` - Levenshtein distance, for "did you mean"
     suggestions.
 
 All are stateless, pure-string helpers. Add a new function here when
