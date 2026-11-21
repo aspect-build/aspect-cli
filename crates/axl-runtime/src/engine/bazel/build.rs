@@ -1214,7 +1214,8 @@ impl Build {
         let _enter = span.enter();
 
         let targets: Vec<String> = targets.into_iter().collect();
-        let history_slot = history.bazel_started(verb, &targets, &flags, history_dir.as_deref());
+        // Noted in the task's record once the client has been spawned.
+        let (recorded_targets, recorded_flags) = (targets.clone(), flags.clone());
 
         // Read before `flags` moves into the command. When the CLI streams the
         // compact log or the BEP, its own flag below outranks the caller's, and
@@ -1375,6 +1376,12 @@ impl Build {
             children::Kind::Bazel,
         )
         .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+        let history_slot = history.bazel_started(
+            verb,
+            &recorded_targets,
+            &recorded_flags,
+            history_dir.as_deref(),
+        );
 
         // The client pid ends the streams: the server outlives the invocation
         // and cannot say a build is over (see `PidPair`).
@@ -1543,6 +1550,9 @@ impl Build {
             match parts {
                 Ok(parts) => parts,
                 Err(err) => {
+                    if let Some(slot) = &history_slot {
+                        slot.failed(&err.to_string());
+                    }
                     // A handle bound before the failure is a subscriber its reader
                     // would wait for forever; nothing else will release it.
                     if execlog_bound {

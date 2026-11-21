@@ -147,6 +147,9 @@ pub struct BazelRecord {
     pub ended: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Why its client never got going (a stream that could not be bound).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
     /// The id every gRPC BES sink indexed it under.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sink_invocation_id: String,
@@ -334,10 +337,14 @@ fn split_secrets(
                     });
                     Some((at, c))
                 })
+                // The first secret one that takes a value here: one that may
+                // be bare takes none without `=`, and the letters after it
+                // are other flags, a secret one among them maybe.
                 .find_map(|(at, c)| {
+                    let after = &cluster[at + c.len_utf8()..];
                     short
                         .iter()
-                        .find(|(s, _)| *s == c)
+                        .find(|(s, next)| *s == c && (*next || after.starts_with('=')))
                         .map(|(_, next)| (cluster, at, c, *next))
                 })
         });
@@ -346,9 +353,6 @@ fn split_secrets(
             let rest = &cluster[at + c.len_utf8()..];
             if rest.is_empty() {
                 takes_value = next;
-                out.push(arg.clone());
-            } else if !next && !rest.starts_with('=') {
-                // One that may be bare: the letters after it are other flags.
                 out.push(arg.clone());
             } else {
                 let (eq, value) = match rest.strip_prefix('=') {
@@ -641,6 +645,17 @@ impl BazelSlot {
         });
     }
 
+    /// It failed to get going, for `reason`, and its client was stopped.
+    pub fn failed(&self, reason: &str) {
+        let now = timestamp(SystemTime::now());
+        self.file.update(|r| {
+            if let Some(b) = r.bazel.get_mut(self.index) {
+                b.ended = Some(now);
+                b.error = reason.to_owned();
+            }
+        });
+    }
+
     /// Its stream is over: the keep sink joined, then the summary, its
     /// failures given the logs the history kept. With `only_if_done`, a
     /// summary or a keep sink still at work is left (the task is ending
@@ -880,6 +895,20 @@ mod tests {
                 "-o=xtyz".into()
             ],
             "one that may be bare takes a value only after `=`"
+        );
+        assert_eq!(
+            redact_argv(
+                &s(&["deploy", "-kt", "S3CRET", "-ktOTHER9"]),
+                &s(&["-k=", "-t"]),
+                &[]
+            ),
+            vec![
+                "deploy".to_string(),
+                "-kt".into(),
+                r.into(),
+                format!("-kt{r}")
+            ],
+            "a bare secret before another: the other takes the value"
         );
         let failed = TaskRecord {
             argv: s(&["aspect", "--token=S3CRET"]),

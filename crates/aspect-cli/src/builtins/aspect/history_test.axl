@@ -68,6 +68,7 @@ def _test_show_lines(_ctx):
             },
             {"command": "test", "patterns": [], "ended": "y"},
             {"command": "test", "patterns": []},
+            {"command": "build", "patterns": [], "ended": "z", "error": "could not bind a stream"},
         ],
     )
     text = "\n".join(show_lines(record))
@@ -80,6 +81,7 @@ def _test_show_lines(_ctx):
         "/h/20261121T153939143Z-0123/bazel/1/actions/a/b/Genrule-1.stderr",
         "Bazel 2   test · ended by a signal",
         "Bazel 3   test · not waited for",
+        "Bazel 4   build · could not bind a stream",
         "Files     /h/20261121T153939143Z-0123",
     ]:
         if want not in text:

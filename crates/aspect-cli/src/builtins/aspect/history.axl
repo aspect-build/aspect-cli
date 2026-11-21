@@ -102,6 +102,8 @@ def show_lines(record) -> list:
         code = build.get("exit_code")
         if code != None:
             head += " · exit %d" % code
+        elif build.get("error"):
+            head += " · " + build["error"]
         elif build.get("ended"):
             head += " · ended by a signal"
         elif record.get("status") in ("running", "abandoned"):
