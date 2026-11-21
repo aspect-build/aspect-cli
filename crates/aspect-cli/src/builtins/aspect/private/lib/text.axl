@@ -301,9 +301,9 @@ def closest(key: str, candidates) -> str:
     A closed set, where every valid name is known (slots, presets,
     `status_badges` keys), fails on a wrong name and names the near miss
     right after it: `did_you_mean` when nothing follows, `did_you_mean_then`
-    ahead of a list of the valid names. The task keys of `task_presets` / `task_templates` are an
-    open set: a user-level config may name tasks only some repos define, so a
-    near miss there warns instead.
+    ahead of a list of the valid names. The task keys of `task_presets` /
+    `task_templates` are an open set: a user-level config may name tasks only
+    some repos define, so a near miss there warns instead.
     """
     if len(key) < 3:
         return ""

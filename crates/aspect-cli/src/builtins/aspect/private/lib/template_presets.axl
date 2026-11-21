@@ -55,12 +55,12 @@ without `templates`; `task_templates` beat both. A `template_preset` typed on
 the command line applies to every task, over `task_presets`. `config`
 validates the four when the feature loads and `resolve` applies them per
 task. An unknown slot or preset fails, naming the near miss when there is
-one (`did_you_mean_then` in `text.axl`). A key that names no task here is inert,
-so a user-level config can name tasks only some repos have; `config` warns
-about one that is a near miss of a task here (`"tset"`), by the rule the
-`Console` feature applies. The comment
-surfaces aggregate every task, so they take only `template_preset` and
-`templates`, which `comment_body` validates.
+one (`did_you_mean_then` in `text.axl`). A key that names no task here is
+inert, so a user-level config can name tasks only some repos have; `config`
+warns about one that is a near miss of a task here (`"tset"`), by the rule
+the `Console` feature applies. The comment surfaces aggregate every task, so
+they take only `template_preset` and `templates`, which `comment_body`
+validates.
 
 Presets themselves keep the scoped shape `resolve_templates` documents,
 because a `details` template is written against one renderer's data.
@@ -384,15 +384,15 @@ def _near_miss_warnings(feature: str, args, task_paths: list[str]) -> list[str]:
     keys = {key: True for _, value in by_arg for key in value}
     warnings = []
     for key in sorted(keys.keys()):
-        closest = _closest_task_key(key, task_paths)
-        if not closest:
+        near = _closest_task_key(key, task_paths)
+        if not near:
             continue
         named = ["%s[%r]" % (arg, key) for arg, value in by_arg if key in value]
         warnings.append("{} {} {} no task here; did you mean {!r}?".format(
             feature,
             " and ".join(named),
             "names" if len(named) == 1 else "name",
-            closest,
+            near,
         ))
     return warnings
 
