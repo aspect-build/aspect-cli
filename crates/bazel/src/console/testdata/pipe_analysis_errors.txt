@@ -1,0 +1,32 @@
+Starting local Bazel server (9.3.2) and connecting to it...
+[32mINFO: [0mInvocation ID: 8b68b11c-567d-48ef-bb1c-19bc09929ab7
+[32mComputing main repo mapping:[0m 
+[32mComputing main repo mapping:[0m 
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[35mWARNING: [0m/ws/BUILD.bazel:1:9: target '//:dep0' is deprecated: old
+[35mWARNING: [0m/ws/BUILD.bazel:1:9: target '//:dep1' is deprecated: old
+[35mWARNING: [0m/ws/BUILD.bazel:1:9: target '//:dep2' is deprecated: old
+[35mWARNING: [0m/ws/BUILD.bazel:1:9: target '//:dep3' is deprecated: old
+[35mWARNING: [0m/ws/BUILD.bazel:1:9: target '//:dep4' is deprecated: old
+[32mAnalyzing:[0m 11 targets (5 packages loaded, 6 targets configured)
+[32mAnalyzing:[0m 11 targets (5 packages loaded, 6 targets configured)
+
+[31m[1mERROR: [0m/ws/BUILD.bazel:2:9: in cmd attribute of genrule rule //:bad0: label '//:nonexistent0' in $(location) expression is not a declared prerequisite of this rule
+[31m[1mERROR: [0m/ws/BUILD.bazel:2:9: in cmd attribute of genrule rule //:bad1: label '//:nonexistent1' in $(location) expression is not a declared prerequisite of this rule
+[31m[1mERROR: [0m/ws/BUILD.bazel:2:9: in cmd attribute of genrule rule //:bad2: label '//:nonexistent2' in $(location) expression is not a declared prerequisite of this rule
+[31m[1mERROR: [0m/ws/BUILD.bazel:2:9: Analysis of target '//:bad0' (config: 2d89340) failed
+[31m[1mERROR: [0m/ws/BUILD.bazel:2:9: Analysis of target '//:bad1' (config: 2d89340) failed
+[31m[1mERROR: [0m/ws/BUILD.bazel:2:9: Analysis of target '//:bad2' (config: 2d89340) failed
+[32mINFO: [0mAnalyzed 11 targets (6 packages loaded, 15 targets configured).
+[35mWARNING: [0merrors encountered while analyzing target '//:bad0', it will not be built.
+[35mWARNING: [0merrors encountered while analyzing target '//:bad2', it will not be built.
+[35mWARNING: [0merrors encountered while analyzing target '//:bad1', it will not be built.
+[32mINFO: [0mBuild succeeded for only 8 of 11 top-level targets
+[32mINFO: [0mFound 8 targets...
+[31m[1mERROR: [0mcommand succeeded, but not all targets were analyzed
+[32mINFO: [0mElapsed time: 3.746s, Critical Path: 0.08s
+[32mINFO: [0m9 processes: 1 internal, 8 darwin-sandbox.
+[31m[1mERROR: [0mBuild did NOT complete successfully
+[0m

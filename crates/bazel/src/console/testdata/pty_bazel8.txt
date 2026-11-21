@@ -1,0 +1,222 @@
+^DStarting local Bazel server (8.5.1) and connecting to it...
+[32mINFO: [0mInvocation ID: edf0fb8c-7b7e-4596-bb64-ede610b6cddb
+[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/stardoc/0.7.1/MODULE.bazel
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/rules_python/0.23.1/MODULE.bazel
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/re2/2023-09-01/MODULE.bazel
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/bazel_skylib/metadata.json
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/jsoncpp/1.9.5/source.json
+[1A[K[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mLoading:[0m 0 packages loaded
+    Fetching repository @@protobuf+; starting
+    Fetching repository @@rules_python+; starting
+    Fetching .../external/rules_python+; Extracting rules_python-0.40.0.tar.gz
+    Fetching ...b51d1bb79faf1/external/protobuf+; Extracting protobuf-29.0.zip
+    Fetching repository @@bazel_skylib+; starting
+    Fetching repository @@rules_cc+; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mLoading:[0m 0 packages loaded
+    Fetching repository @@protobuf+; starting
+    Fetching ...b51d1bb79faf1/external/protobuf+; Extracting protobuf-29.0.zip
+[1A[K[1A[K[1A[K[32mLoading:[0m 0 packages loaded
+    Fetching repository @@protobuf+; starting
+    Fetching https://bcr.bazel.build/...ODULE.bazel; Checking in SHA-256 cache
+[1A[K[1A[K[1A[K[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g0' is deprecated: use something else
+[32mLoading:[0m 1 packages loaded
+[1A[K[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g1' is deprecated: use something else
+[32mLoading:[0m 1 packages loaded
+[1A[K[35mWARNING: [0m/ws/BUILD.bazel:3:9: target '//:g2' is deprecated: use something else
+[32mLoading:[0m 1 packages loaded
+[1A[K[32mAnalyzing:[0m 11 targets (1 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 11 targets (1 packages loaded, 0 targets configured)
+    currently loading: @@bazel_tools//tools
+
+[1A[K[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+[32mAnalyzing:[0m 11 targets (6 packages loaded, 8 targets configured)
+    currently loading: @@bazel_tools//tools/test
+
+[1A[K[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+[32mAnalyzing:[0m 11 targets (6 packages loaded, 9 targets configured)
+    currently loading: @@bazel_tools//tools/test
+
+[1A[K[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+[32mAnalyzing:[0m 11 targets (6 packages loaded, 10 targets configured)
+    currently loading: @@bazel_tools//tools/test
+
+[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g0:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mAnalyzing:[0m 11 targets (47 packages loaded, 29 targets configured)
+[32m[4 / 9][0m 4 actions running
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox, disk-cache
+    Fetching repository @@rules_kotlin+; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching .../external/rules_kotlin+; Extracting rules_kotlin-v1.9.6.tar.gz
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g1:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mAnalyzing:[0m 11 targets (47 packages loaded, 29 targets configured)
+[32m[4 / 9][0m 4 actions running
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox, disk-cache
+    Fetching repository @@rules_kotlin+; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching .../external/rules_kotlin+; Extracting rules_kotlin-v1.9.6.tar.gz
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g2:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mAnalyzing:[0m 11 targets (47 packages loaded, 29 targets configured)
+[32m[5 / 9][0m 3 actions running
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox, disk-cache
+    Fetching repository @@rules_kotlin+; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching .../external/rules_kotlin+; Extracting rules_kotlin-v1.9.6.tar.gz
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:15:8: Executing genrule //:bad failed: (Exit 1): bash failed: error executing Genrule command (from target //:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo bad >&2; printf '\''\033[35mWARNING: \033[0mbefore fail\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad
+[35mWARNING: [0mbefore fail
+[32mAnalyzing:[0m 11 targets (47 packages loaded, 29 targets configured)
+[32m[7 / 9][0m 2 actions running
+    Executing genrule //:bad; 0s darwin-sandbox, disk-cache
+    Executing genrule //:top; 0s darwin-sandbox, disk-cache
+    Fetching repository @@rules_kotlin+; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching .../external/rules_kotlin+; Extracting rules_kotlin-v1.9.6.tar.gz
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mAnalyzed 11 targets (62 packages loaded, 466 targets configured).
+[32m[9 / 17][0m 2 actions, 0 running
+    Writing script t_fail.sh; 0s local
+    Writing script t_stream.sh; 0s local
+    Writing repo mapping manifest for //:t_stream; 0s local
+    [Prepa] Writing repo mapping manifest for //:t_fail
+    [Prepa] Creating source manifest for //:t_stream
+    [Prepa] Creating source manifest for //:t_fail
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[21 / 24][0m 3 actions running
+    Testing //:t_stream; 0s darwin-sandbox, disk-cache
+    Testing //:t_fail; 0s darwin-sandbox, disk-cache
+    Testing //:t_pass; 0s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[32m[21 / 24][0m 3 actions running
+    Testing //:t_stream; 0s darwin-sandbox, disk-cache
+    Testing //:t_fail; 0s darwin-sandbox, disk-cache
+    Testing //:t_pass; 0s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[32m[21 / 24][0m 3 actions running
+    Testing //:t_stream; 0s darwin-sandbox, disk-cache
+    Testing //:t_fail; 0s darwin-sandbox, disk-cache
+    Testing //:t_pass; 0s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[32m[21 / 24][0m 3 actions running
+    Testing //:t_stream; 1s darwin-sandbox, disk-cache
+    Testing //:t_fail; 1s darwin-sandbox, disk-cache
+    Testing //:t_pass; 1s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//:t_fail (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)
+[32m[21 / 24][0m 3 actions running
+    Testing //:t_stream; 1s darwin-sandbox, disk-cache
+    Testing //:t_fail; 1s darwin-sandbox, disk-cache
+    Testing //:t_pass; 1s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Testing //:t_fail:
+==================== Test output for //:t_fail:
+failing test out
+[35mWARNING: [0mfrom failing test
+[35mWARNING: [0mfrom failing test
+Loading: in test
+  indented
+================================================================================
+[32m[21 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m 3 actions running[0m; last test: [31m[1m//:t_fail[0m
+    Testing //:t_stream; 1s darwin-sandbox, disk-cache
+    Testing //:t_fail; 1s darwin-sandbox, disk-cache
+    Testing //:t_pass; 1s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 1s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 2s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 3s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 4s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 5s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 6s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 7s darwin-sandbox, disk-cache
+[1A[K[1A[K[32m[23 / 24][0m 2 / 3 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 8s darwin-sandbox, disk-cache
+[1A[K[1A[K[32mINFO: [0mBuild succeeded for only 10 of 11 top-level targets
+[32m[24 / 24][0m 3 / 3 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0mFound 8 targets and 3 test targets...
+[32m[24 / 24][0m 3 / 3 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[24 / 24][0m 3 / 3 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0mElapsed time: 14.099s, Critical Path: 8.78s
+[32m[24 / 24][0m 3 / 3 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0m24 processes: 14 internal, 10 darwin-sandbox.
+[32m[24 / 24][0m 3 / 3 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+//:t_pass                                                                [0m[32mPASSED[0m in 0.5s
+//:t_stream                                                              [0m[32mPASSED[0m in 8.7s
+//:t_fail                                                                [0m[31m[1mFAILED[0m in 0.9s
+  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+
+Executed 3 out of 3 tests: 2 tests pass and [0m[31m[1m1 fails locally[0m.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[0m

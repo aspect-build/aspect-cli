@@ -1300,13 +1300,15 @@ pub fn bool_token<'a>(token: &'a str, name: &str) -> Option<Result<bool, &'a str
 
 /// Tri-state of a boolean `--name` option: `Some(true)` for `--name` or a true
 /// value, `Some(false)` for `--noname` or a false value (as [`parse_bool`]
-/// reads one), `None` if unset. Last occurrence wins; a value that is not a
-/// boolean is passed over.
+/// reads one), `None` if unset. Last occurrence wins, as Bazel takes it: a
+/// last value that is not a boolean (a tri-state's `auto`) is `None`, an
+/// earlier `yes` or `no` cancelled.
 #[cfg(any(test, feature = "starlark"))]
 fn last_bool_flag(opts: &[RcOption], name: &str) -> Option<bool> {
     opts.iter()
-        .filter_map(|opt| bool_token(&opt.value, name).and_then(Result::ok))
+        .filter_map(|opt| bool_token(&opt.value, name))
         .last()
+        .and_then(Result::ok)
 }
 
 /// `RcOption` unpacks from a plain `str` or a `(flag, version_constraint)` tuple,
@@ -1391,9 +1393,10 @@ fn runcommand_methods(registry: &mut starlark::environment::MethodsBuilder) {
     }
 
     /// The tri-state of boolean `--name` for `command`: `True` for `--name` /
-    /// `--name=true`, `False` for `--noname` / `--name=false`, `None` if unset.
-    /// A value is read as Bazel reads one, ignoring case: `true`, `t`, `yes`,
-    /// `y`, `1` and their `false` counterparts.
+    /// `--name=true`, `False` for `--noname` / `--name=false`, `None` if unset
+    /// or last given a value that is neither (`--color=auto`). A value is read
+    /// as Bazel reads one, ignoring case: `true`, `t`, `yes`, `y`, `1` and
+    /// their `false` counterparts.
     /// The caller owns the default when `None` (e.g. `--enable_bzlmod` defaults
     /// on for Bazel 7+).
     fn bool_flag<'v>(
@@ -1957,6 +1960,10 @@ mod runcommand_tests {
     fn bool_flag_last_occurrence_wins() {
         let o = opts(&["--enable_bzlmod", "--noenable_bzlmod"]);
         assert_eq!(last_bool_flag(&o, "--enable_bzlmod"), Some(false));
+        let o = opts(&["--color=yes", "--color=auto"]);
+        assert_eq!(last_bool_flag(&o, "--color"), None, "a later auto cancels");
+        let o = opts(&["--color=auto", "--color=no"]);
+        assert_eq!(last_bool_flag(&o, "--color"), Some(false));
     }
 
     #[test]

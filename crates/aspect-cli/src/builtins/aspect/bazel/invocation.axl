@@ -5,24 +5,26 @@ patterns and flags for a spawn, for tasks such as `lint` that drive
 `ctx.bazel.build` without a handle.
 
 The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
-(`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
-and the retry budget (with the flag that leaves cache eviction retries to it) —
-into one immutable `_Invocation` record. The returned handle exposes the flow
-as verbs the task drives in a visible loop (see `build.axl`):
-the verbs are thin forwarders over that single record, and the top-level `_do_*`
-functions thread it — no closure tower, no mutable state dict. The live
-invocation and the attempt index are threaded as values (the `_spawned` struct
-and the callsite's loop counter), never stored. A task drives every attempt
-through `attempts` and `should_retry`: a handle that leaves cache eviction
-retries to its loop turns Bazel's own off, so a task that spawns once gets no
-eviction retries at all.
+(`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags,
+the console processor and the retry budget (with the flag that leaves cache
+eviction retries to it) — into one immutable `_Invocation` record. The returned
+handle exposes the flow as verbs the task drives in a visible loop (see
+`build.axl`): the verbs are thin forwarders over that single record, and the
+top-level `_do_*` functions thread it — no closure tower, no mutable state
+dict. The live invocation and the attempt index are threaded as values (the
+`_spawned` struct and the callsite's loop counter), never stored. A task drives
+every attempt through `attempts` and `should_retry`: a handle that leaves cache
+eviction retries to its loop turns Bazel's own off, so a task that spawns once
+gets no eviction retries at all.
 
-The one thing the constructor cannot resolve is the execution-log wiring: an
+The one thing the constructor cannot resolve is per-build wiring: an
 `exec_log_event` handle binds to a single build, so each attempt opens its own
 (`@aspect//bazel/exec_log.axl`) and threads it through the `_spawned` struct the
-same way. `on_event` hangs off that struct rather than the handle for the same
-reason — it dispatches both BES events and execution log entries, and only the
-attempt knows which log it is reading."""
+same way; its `on_event` and `wait` answer the attempt's own held console
+lines, while one processor, resolved once, serves every attempt. `on_event`
+hangs off that struct rather than the handle for the same reason — it
+dispatches both BES events and execution log entries, and only the attempt
+knows which log it is reading."""
 
 load("@aspect//bazel/announce.axl", "bazel_announce")
 load(
@@ -39,6 +41,7 @@ load(
     "dropped_bes_backends",
     "summarize_bes_upload",
 )
+load("@aspect//bazel/console.axl", "bazel_console")
 load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
 load("@aspect//bazel/flags.axl", "bazel_flags")
 load("@aspect//bazel/rc.axl", "bazel_rc")
@@ -49,6 +52,11 @@ load("../private/lib/text.axl", "join_url")
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a
 # results heartbeat without a separate sleep loop.
 _TICK_MS = 250
+
+# The cadence instead when the trait has `output_frame` hooks: half the
+# runtime's frame interval (`FRAME_EVERY` in `engine/bazel/build.rs`), so a
+# frame is never more than one tick late.
+_FRAME_TICK_MS = 50
 
 # Immutable, resolved-once config for one high-level bazel run: nothing here is
 # reassigned, and the live invocation + attempt index are threaded as values
@@ -69,6 +77,7 @@ _Invocation = record(
     bazel_streams_bes = field(bool),
     announce_version = field(bool),
     announce_command = field(bool),
+    output_processor = field(typing.Any),
     max_attempts = field(int),
 )
 
@@ -141,20 +150,43 @@ def resolve_targets(ctx, rc, command: str) -> tuple:
     )
     return patterns, flags
 
+def tty_flags(capturing: bool, stdout_is_tty: bool) -> list[str]:
+    """The base flags telling Bazel whether it writes to a terminal.
+
+    A captured console carries its own (`_capture_flags`), which go on the
+    spawn instead, after the user's, so they win. Without one, Bazel inherits
+    the task's streams and is told whether stdout is a terminal."""
+    if capturing:
+        return []
+    return ["--isatty=" + str(int(stdout_is_tty))]
+
 def _resolve(ctx, command: str) -> _Invocation:
     """Shared constructor for `build` / `test`. Reads everything a feature injected
     on the trait (BES backends, the `rc_flags` hooks); the bazel core knows
     nothing about deployments or Aspect auth."""
     trait = ctx.traits[BazelTrait]
 
-    # Base (default) flags, prepended so user --bazel-flag overrides win: the
-    # TTY signal. Feature-injected `trait.base_flags` (e.g. a deployment's
-    # --remote_cache) are prepended by `bazel_rc.setup` itself.
-    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    # Base (default) flags, prepended so user --bazel-flag overrides win.
+    # Feature-injected `trait.base_flags` (e.g. a deployment's --remote_cache)
+    # are prepended by `bazel_rc.setup` itself.
+    extra = bazel_console.start_stages(ctx, trait)
+    capturing = bool(trait.output_stages or extra)
+    base_flags = tty_flags(capturing, ctx.std.io.stdout.is_tty)
 
     # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The rc set by
     # use_rc drives the health check (in results.setup) and every spawn below.
     rc = bazel_rc.setup(ctx, command, base_flags = base_flags)
+
+    # The capture asks Bazel for curses and colour, after the user's flags;
+    # the user's own `--curses` and `--color` decide what is shown.
+    processor = bazel_console.processor_for(
+        trait,
+        ctx.std.io.stdout.is_tty,
+        ctx.std.io.stderr.is_tty,
+        extra = extra,
+        curses = rc.bool_flag("--curses", command = command),
+        colour = rc.bool_flag("--color", command = command),
+    )
 
     (announce_version, announce_command) = bazel_announce.resolve(ctx)
 
@@ -194,8 +226,16 @@ def _resolve(ctx, command: str) -> _Invocation:
         bazel_streams_bes = bes_streamed_by_bazel(trait.bes_results_sources, rc, command),
         announce_version = announce_version,
         announce_command = announce_command,
+        output_processor = processor,
         max_attempts = max_attempts,
     )
+
+def _capture_flags(processor) -> list[str]:
+    """The flags a capture asks for (`--isatty`, `--curses=yes`,
+    `--color=yes`); spawn flags, so they follow the rc and win."""
+    if not processor:
+        return []
+    return list(processor.flags)
 
 def _do_start(inv: _Invocation) -> None:
     """`--cancel`. Once, before the loop; the spawn-time disclosures ride the first
@@ -223,13 +263,15 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     # One iterator per invocation, fanned out in AXL — an extra runtime iterator
     # would deep-clone the whole stream. `events`: False → none; True → all kinds;
     # a list → those kinds (send-side filtered). A trait build_event hook may want
-    # any kind, so its presence forces all kinds.
+    # any kind, so its presence forces all kinds. `output_frame` hooks need no
+    # iterator: without one, `_do_wait` draws them until the console ends.
+    framed = bool(inv.trait.output_frame) and inv.output_processor != None
     trait_wants = bool(inv.trait.build_event)
     if events == False and not trait_wants:
         iterator = None
     else:
         kinds = None if (trait_wants or events == True) else events
-        iterator = build_events_iterator(kinds = kinds, tick_ms = _TICK_MS)
+        iterator = build_events_iterator(kinds = kinds, tick_ms = _FRAME_TICK_MS if framed else _TICK_MS)
 
     # `[]` would ENABLE BES with no consumer (the runtime treats an empty list as
     # "stream on"); collapse to False so a local build with no sinks/iterator runs
@@ -250,7 +292,8 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
             keep_test_logs = inv.trait.keep_test_logs,
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
-            flags = inv.rc_flags + extra_flags,
+            output = inv.output_processor,
+            flags = inv.rc_flags + _capture_flags(inv.output_processor) + extra_flags,
             *inv.patterns
         )
     else:
@@ -261,7 +304,8 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
             keep_test_logs = inv.trait.keep_test_logs,
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
-            flags = inv.rc_flags + extra_flags,
+            output = inv.output_processor,
+            flags = inv.rc_flags + _capture_flags(inv.output_processor) + extra_flags,
             aspects = aspects,
             *inv.patterns
         )
@@ -271,6 +315,10 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     # matching the other spawn-time disclosures above.
     if index == 0:
         announce_bes_results_url(inv.ctx, inv.results_url, handle.sink_invocation_id)
+
+    # Whether the console has hooks to run while it is open: lines held for
+    # the `output_intercept` hooks, or `output_frame` hooks.
+    console = bool(inv.output_processor and (inv.output_processor.intercepts or framed))
 
     # The run's record in the task history keeps each attempt's page.
     if inv.results_url and handle.sink_invocation_id:
@@ -283,19 +331,25 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
         index = index,
         events = iterator if iterator else [],
         sink_invocation_id = handle.sink_invocation_id,
-        on_event = lambda event: _do_on_event(inv, xl, event),
-        wait = lambda: _do_wait(inv, handle, xl),
+        on_event = lambda event: _do_on_event(inv, handle, xl, console, event),
+        wait = lambda: _do_wait(inv, handle, xl, console),
     )
 
-def _do_wait(inv: _Invocation, handle, xl: struct):
-    """Drain the execution log, block on the attempt, flush BES sinks (rebinding a
-    still-Live gRPC sink on the next spawn errors; wait() resets it to Idle), then
-    fire `bazel_attempt_end` before the retry decision.
+def _do_wait(inv: _Invocation, handle, xl: struct, console: bool):
+    """Answer the console's remaining held lines (drawing `output_frame` frames
+    meanwhile), drain the execution log, block on
+    the attempt (whose `output_end` hooks emit the console's tips), flush BES
+    sinks (rebinding a still-Live gRPC sink on the next spawn errors; wait()
+    resets it to Idle), then fire `bazel_attempt_end` before the retry decision.
 
-    The execution log is drained first, and that order is load-bearing: a bound
+    Both drains precede the wait, and that order is load-bearing: a bound
     `exec_log_event` handle is a subscriber the log reader blocks for, and
     `handle.wait()` joins that reader. Waiting first would join a thread that is
-    waiting on us."""
+    waiting on us. The console goes first of the two: the execution log's close
+    blocks until the client exits, and a line held meanwhile would stall Bazel
+    behind it."""
+    if console:
+        handle.run_output_hooks(until_ended = True)
     bazel_exec_log.close(inv.ctx, xl)
     status = handle.wait()
     for sink in inv.sinks:
@@ -304,19 +358,24 @@ def _do_wait(inv: _Invocation, handle, xl: struct):
         handler(inv.ctx, exit_code_of(status))
     return status
 
-def _do_on_event(inv: _Invocation, xl: struct, event) -> None:
-    """Dispatch one BES event to the trait's `build_event` hooks, and fire any
-    `exec_log_event` hooks on whatever the execution log has written so far.
+def _do_on_event(inv: _Invocation, handle, xl: struct, console: bool, event) -> None:
+    """Dispatch one BES event to the trait's `build_event` hooks, and have the
+    runtime run the `output_intercept` hooks on held console lines, the
+    `output_frame` hooks when a frame is due, and the `exec_log_event` hooks on
+    whatever the execution log has written so far.
 
-    Both live here so a task's drain loop stays one call per event. The log is
-    pumped before the `event == None` early return, because a quiet BES tick says
-    nothing about the log: Bazel can be busy writing actions while the event
-    stream has nothing to report.
+    All three live here so a task's drain loop stays one call per event. The
+    console and the log are pumped before the `event == None` early return,
+    because a quiet BES tick says nothing about either: Bazel can be busy
+    writing actions or console lines while the event stream has nothing to
+    report.
 
-    The `xl.entries` guard is what keeps that free for a run with no
-    `exec_log_event` hook — a field read, not a call into the dispatcher, on a
-    path that runs once per BES event.
+    The `console` and `xl.entries` guards keep that free for a run with no
+    hook — a field read, not a dispatch, on a path that runs once per BES
+    event.
     """
+    if console:
+        handle.run_output_hooks()
     if xl.entries != None:
         bazel_exec_log.pump(inv.ctx, xl)
     if event == None:

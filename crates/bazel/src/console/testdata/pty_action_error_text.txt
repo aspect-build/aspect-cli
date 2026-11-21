@@ -1,0 +1,28 @@
+^D[32mINFO: [0mInvocation ID: 0b0b46a5-c3f8-48df-bf87-a6ef2248068e
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //:lint (1 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m target //:lint (1 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed target //:lint (1 packages loaded, 2 targets configured).
+
+[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:1:8: Executing genrule //:lint failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:lint) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''lint: Build failed'\'' >&2; ./lint.sh'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+lint: Build failed
+lint report
+[35mWARNING: [0msrc/a.py:3: unused import "os"
+[35mWARNING: [0msrc/b.py:7: unused import "sys"
+  b.py:7 import sys
+[32m[1 / 2][0m Executing genrule //:lint; 0s darwin-sandbox
+[1A[KTarget //:lint failed to build
+[32m[2 / 2][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.085s, Critical Path: 0.03s
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0m2 processes: 2 internal.
+[32m[2 / 2][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[0m

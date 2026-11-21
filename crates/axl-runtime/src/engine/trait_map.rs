@@ -119,6 +119,26 @@ impl<'v> TraitMap<'v> {
             .collect()
     }
 
+    /// The instance of the first trait type with every field in `fields`,
+    /// created now if it was not yet; None when no type has them all. For
+    /// the runtime, which knows a builtin trait only by its shape: a type's
+    /// name is not always recorded.
+    pub fn with_fields(&self, fields: &[&str], heap: Heap<'v>) -> Option<Value<'v>> {
+        let type_value = self.entries.borrow().values().find_map(|(tv, _)| {
+            let has = |f: &&str| {
+                tv.downcast_ref::<TraitType>()
+                    .map(|t| t.fields.contains_key(*f))
+                    .or_else(|| {
+                        tv.downcast_ref::<FrozenTraitType>()
+                            .map(|t| t.fields.contains_key(*f))
+                    })
+                    .unwrap_or(false)
+            };
+            fields.iter().all(has).then_some(*tv)
+        })?;
+        self.at(type_value, heap).ok()
+    }
+
     /// Create a new TraitMap containing only the given type IDs.
     /// Both instantiated and uninstantiated entries are copied so that the
     /// scoped map can still lazily construct instances on first access.

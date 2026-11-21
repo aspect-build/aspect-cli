@@ -1,0 +1,71 @@
+[32mINFO: [0mInvocation ID: 9afabb7b-fa65-4ff7-ba91-8cfe61872fe3
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+[32mINFO: [0mAnalyzed 4 targets (1 packages loaded, 9 targets configured).
+[32mINFO: [0mFrom Executing genrule //:g2:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mINFO: [0mFrom Executing genrule //:g1:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mINFO: [0mFrom Executing genrule //:g0:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mINFO: [0mFound 4 targets...
+[32mINFO: [0mElapsed time: 0.205s, Critical Path: 0.06s
+[32mINFO: [0m5 processes: 3 action cache hit, 1 internal, 4 darwin-sandbox.
+[32mINFO: [0mBuild completed successfully, 5 total actions
+[0m

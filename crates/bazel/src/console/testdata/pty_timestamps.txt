@@ -1,0 +1,118 @@
+^D(11:31:13) [32mINFO: [0mInvocation ID: 80d89936-def7-47ef-8b95-ee1415df2f44
+(11:31:13) [32mINFO: [0mCurrent date is 2026-11-15
+(11:31:13) 
+[1A[K(11:31:13) [32mComputing main repo mapping:[0m 
+[1A[K(11:31:13) [32mLoading:[0m 
+[1A[K(11:31:13) [32mLoading:[0m 0 packages loaded
+[1A[K(11:31:13) [35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded)
+[1A[K(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 0 targets configured)
+[1A[K(11:31:13) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s0: target '//sub:s0' depends on deprecated target '//:g0': use something else
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 4 targets configured)
+
+[1A[K[1A[K(11:31:13) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s2: target '//sub:s2' depends on deprecated target '//:g2': use something else
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 5 targets configured)
+
+[1A[K[1A[K(11:31:13) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s1: target '//sub:s1' depends on deprecated target '//:g1': use something else
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 6 targets configured)
+
+[1A[K[1A[K(11:31:13) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s3: target '//sub:s3' depends on deprecated target '//:g0': use something else
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 7 targets configured)
+
+[1A[K[1A[K(11:31:13) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s4: target '//sub:s4' depends on deprecated target '//:g1': use something else
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 8 targets configured)
+
+[1A[K[1A[K(11:31:13) [33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 9 targets configured)
+
+[1A[K[1A[K(11:31:13) [33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 10 targets configured)
+
+[1A[K[1A[K(11:31:13) [33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 11 targets configured)
+
+[1A[K[1A[K(11:31:13) [35mWARNING: [0m/ws/sub/BUILD.bazel:1:9: in genrule rule //sub:s5: target '//sub:s5' depends on deprecated target '//:g2': use something else
+(11:31:13) [32mAnalyzing:[0m 9 targets (1 packages loaded, 12 targets configured)
+
+[1A[K[1A[K(11:31:13) [32mINFO: [0mAnalyzed 9 targets (1 packages loaded, 13 targets configured).
+(11:31:13) [32m[1 / 12][0m 3 actions, 0 running
+    [Prepa] Executing genrule //:g1
+    [Prepa] Executing genrule //:g0
+    [Prepa] Executing genrule //:g2
+[1A[K[1A[K[1A[K[1A[K(11:31:13) [32mINFO: [0mFrom Executing genrule //:g2:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+(11:31:13) [32m[4 / 13][0m 3 actions running
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K(11:31:13) [32mINFO: [0mFrom Executing genrule //:g0:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+(11:31:13) [32m[5 / 13][0m 4 actions, 3 running
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //sub:s2; 0s darwin-sandbox, disk-cache
+    [Sched] Executing genrule //sub:s5
+[1A[K[1A[K[1A[K[1A[K[1A[K(11:31:13) [32mINFO: [0mFrom Executing genrule //:g1:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+(11:31:13) [32m[6 / 13][0m 5 actions running
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //sub:s2; 0s darwin-sandbox, disk-cache
+    Executing genrule //sub:s5; 0s darwin-sandbox, disk-cache
+    Executing genrule //sub:s0; 0s darwin-sandbox, disk-cache
+    Executing genrule //sub:s3; 0s darwin-sandbox, disk-cache
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K(11:31:14) [32mINFO: [0mFound 9 targets...
+(11:31:14) [32m[13 / 13][0m no actions running
+[1A[K(11:31:14) [32mINFO: [0mElapsed time: 0.787s, Critical Path: 0.21s
+(11:31:14) [32m[13 / 13][0m no actions running
+[1A[K(11:31:14) [32mINFO: [0m10 processes: 3 action cache hit, 1 internal, 9 darwin-sandbox.
+(11:31:14) [32m[13 / 13][0m no actions running
+[1A[K(11:31:14) [32mINFO: [0mBuild completed successfully, 10 total actions
+[0m

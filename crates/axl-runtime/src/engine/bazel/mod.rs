@@ -40,6 +40,7 @@ mod bazel_version;
 mod build;
 mod cancel;
 mod iter;
+mod output;
 mod query;
 mod retry;
 mod run;
@@ -48,17 +49,82 @@ mod wrappers;
 
 use wrappers::ExecLogSink;
 
+/// The console processor a build or test runs with: `output`, or, when the
+/// call gives none and leaves both stdout and stderr to the runtime, one from
+/// the task's `BazelTrait.output_stages` and the stages its `output_start`
+/// hooks return, whose capture flags go after `flags`, so they win. A call
+/// that redirects either stream gets no processing and no flags: Bazel's
+/// output as it wired it. What is shown follows the user's own `--curses`
+/// and `--color` in `flags` (the call's, or an active rc's; with no rc
+/// active, Bazel's own rc files are not read for them), when they gave one.
+/// An `output` the call gives is used as it is: its flags, which the call
+/// passes, were made from it.
+/// A processor with an `intercept` stage needs `BazelTrait.output_intercept`
+/// hooks to answer its lines.
+fn console_for<'v>(
+    output: Option<bazel::console::Config>,
+    stderr_free: bool,
+    stdout_inherited: bool,
+    flags: &mut Vec<String>,
+    eval: &mut Evaluator<'v, '_, '_>,
+) -> anyhow::Result<Option<bazel::console::Config>> {
+    let from_trait = output::TraitConsole::of(eval);
+    let config = match (output, &from_trait) {
+        (Some(config), _) => Some(config),
+        (None, Some(t)) if stderr_free && stdout_inherited => {
+            let mut stages = t.stages.clone();
+            stages.extend(t.started(eval)?);
+            // Captured even with no stages when hidden (inherited, it would
+            // be shown) or framed (frames run only while a captured console
+            // is open).
+            if stages.is_empty() && t.display != "none" && t.frame.is_empty() {
+                None
+            } else {
+                let config = output::processor_config(output::ProcessorSettings {
+                    display: output::DisplayMode::parse(&t.display)?.unless_user_chose(flags),
+                    stages,
+                    colour: None,
+                    show_colour: output::user_choice(flags, "color"),
+                    progress: t.progress,
+                });
+                flags.extend(config.bazel_flags().into_iter().map(str::to_string));
+                Some(config)
+            }
+        }
+        (None, _) => None,
+    };
+    if let Some(config) = &config
+        && config.intercepts()
+        && from_trait.as_ref().is_none_or(|t| t.intercept.is_empty())
+    {
+        anyhow::bail!(
+            "an `intercept` stage holds lines for the `BazelTrait.output_intercept` hooks to \
+             answer, and this task has none: add a hook, or leave the stage out"
+        );
+    }
+    Ok(config)
+}
+
 /// Resolve the `(stdout, stderr)` `Stdio` slots from the Starlark args.
 ///
 /// Tri-state for each per-fd arg: not passed → inherit, Starlark `None` →
 /// `/dev/null`, `Writable` → fd-dup that handle into the child. The `stdio`
 /// shorthand sets both slots from a single `Stdio` bundle; combining it with
 /// per-fd `stdout`/`stderr` is an error so the resolution stays unambiguous.
+/// So is giving `stderr` or `stdio` alongside an `output` processor, which
+/// owns the child's stderr (`capturing`).
 fn resolve_stdio(
     stdio: NoneOr<StdStdio>,
     stdout: Option<NoneOr<Writable>>,
     stderr: Option<NoneOr<Writable>>,
+    capturing: bool,
 ) -> anyhow::Result<(Stdio, Stdio)> {
+    if capturing && (stderr.is_some() || !stdio.is_none()) {
+        anyhow::bail!(
+            "output captures the child's stderr itself, so it cannot be combined with \
+             stderr or stdio — pass stdout for the other stream"
+        );
+    }
     if let NoneOr::Other(s) = stdio {
         if stdout.is_some() || stderr.is_some() {
             anyhow::bail!("stdio cannot be combined with stdout/stderr — pass one or the other");
@@ -541,10 +607,22 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
     ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
     ///   → redirect the child's stdout into that handle (the fd is duplicated).
+    ///   Redirecting it, `stderr` or `stdio` turns off the task's
+    ///   `BazelTrait` console for this call: no stages, hooks or added flags.
     /// * `stderr` - Per-fd config for the child's stderr. Same shape as `stdout`.
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
+    /// * `output` - A `bazel.output.processor(...)`: capture the child's
+    ///   stderr, run it through the processor and forward it to this
+    ///   process's stderr. An inherited stdout is captured too, to keep it in
+    ///   order with stderr: through the processor when it is the same file as
+    ///   stderr (a terminal, `2>&1`), forwarded to stdout as it is otherwise,
+    ///   except that the colour the capture asked for is stripped from a
+    ///   stdout that is not a terminal.
+    ///   Cannot be combined with `stderr`/`stdio`. Pass the processor's
+    ///   `flags` too. Read the results from the returned build's `output_*`
+    ///   attributes and methods.
     /// * `directory` - Working directory for the Bazel invocation; selects
     ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
@@ -613,6 +691,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
+        #[starlark(require = named, default = NoneOr::None)] output: NoneOr<
+            output::OutputProcessor,
+        >,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -631,15 +712,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
         let workspace_events = partition_workspace_events(workspace_events)?;
-        let env = Env::from_eval(eval)?;
+        let signals = Env::from_eval(eval)?.signals.clone();
         let (mut resolved_flags, resolved_startup_flags) =
-            resolve_invocation_flags(&env.signals, this, "build", rc, &flags.items)?;
+            resolve_invocation_flags(&signals, this, "build", rc, &flags.items)?;
         resolved_flags.extend(wrappers::materialize_aspects(
-            &env.signals,
+            &signals,
             &aspects.items,
             &resolved_startup_flags,
         )?);
-        let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
+        let stdout_inherited = stdout.is_none() && stdio.is_none();
+        let console = console_for(
+            output.into_option().map(|p| p.config().clone()),
+            stderr.is_none() && stdio.is_none(),
+            stdout_inherited,
+            &mut resolved_flags,
+            eval,
+        )?;
+        let env = Env::from_eval(eval)?;
+        let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr, console.is_some())?;
         let build = build::Build::spawn(
             "build",
             targets.items.iter().map(|f| f.as_str().to_string()),
@@ -650,6 +740,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
+            console,
+            stdout_inherited,
             directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
@@ -710,10 +802,22 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
     ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
     ///   → redirect the child's stdout into that handle (the fd is duplicated).
+    ///   Redirecting it, `stderr` or `stdio` turns off the task's
+    ///   `BazelTrait` console for this call: no stages, hooks or added flags.
     /// * `stderr` - Per-fd config for the child's stderr. Same shape as `stdout`.
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
+    /// * `output` - A `bazel.output.processor(...)`: capture the child's
+    ///   stderr, run it through the processor and forward it to this
+    ///   process's stderr. An inherited stdout is captured too, to keep it in
+    ///   order with stderr: through the processor when it is the same file as
+    ///   stderr (a terminal, `2>&1`), forwarded to stdout as it is otherwise,
+    ///   except that the colour the capture asked for is stripped from a
+    ///   stdout that is not a terminal.
+    ///   Cannot be combined with `stderr`/`stdio`. Pass the processor's
+    ///   `flags` too. Read the results from the returned build's `output_*`
+    ///   attributes and methods.
     /// * `directory` - Working directory for the Bazel invocation; selects
     ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
@@ -780,6 +884,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
+        #[starlark(require = named, default = NoneOr::None)] output: NoneOr<
+            output::OutputProcessor,
+        >,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -798,16 +905,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
         let workspace_events = partition_workspace_events(workspace_events)?;
-        let env = Env::from_eval(eval)?;
+        let signals = Env::from_eval(eval)?.signals.clone();
         let (mut resolved_flags, resolved_startup_flags) =
-            resolve_invocation_flags(&env.signals, this, "test", rc, &flags.items)?;
+            resolve_invocation_flags(&signals, this, "test", rc, &flags.items)?;
         resolved_flags.extend(wrappers::materialize_aspects(
-            &env.signals,
+            &signals,
             &aspects.items,
             &resolved_startup_flags,
         )?);
-
-        let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
+        let stdout_inherited = stdout.is_none() && stdio.is_none();
+        let console = console_for(
+            output.into_option().map(|p| p.config().clone()),
+            stderr.is_none() && stdio.is_none(),
+            stdout_inherited,
+            &mut resolved_flags,
+            eval,
+        )?;
+        let env = Env::from_eval(eval)?;
+        let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr, console.is_some())?;
         let test = build::Build::spawn(
             "test",
             targets.items.iter().map(|f| f.as_str().to_string()),
@@ -818,6 +933,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
+            console,
+            stdout_inherited,
             directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
@@ -1654,6 +1771,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("workspace_events", |globals| {
         register_workspace_events(globals);
     });
+
+    globals.namespace("output", output::register_output);
 
     globals.namespace("execution_log", |globals| {
         register_execlog_types(globals);

@@ -1,0 +1,21 @@
+[32mINFO: [0mInvocation ID: 94501802-9108-42e1-9f29-5385dfd72063
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[32mAnalyzing:[0m target //:lint (0 packages loaded, 0 targets configured)
+[32mINFO: [0mAnalyzed target //:lint (0 packages loaded, 0 targets configured).
+
+[31m[1mERROR: [0m/ws/BUILD.bazel:1:8: Executing genrule //:lint failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:lint) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''lint: Build failed'\'' >&2; ./lint.sh'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+lint: Build failed
+lint report
+[35mWARNING: [0msrc/a.py:3: unused import "os"
+[35mWARNING: [0msrc/b.py:7: unused import "sys"
+  b.py:7 import sys
+Target //:lint failed to build
+Use --verbose_failures to see the command lines of failed build steps.
+[32mINFO: [0mElapsed time: 0.306s, Critical Path: 0.26s
+[32mINFO: [0m2 processes: 2 internal.
+[31m[1mERROR: [0mBuild did NOT complete successfully
+[0m

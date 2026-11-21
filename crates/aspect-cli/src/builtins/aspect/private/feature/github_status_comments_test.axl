@@ -563,6 +563,38 @@ def _check_collect_tip_rows(ctx):
     if "a" not in rows[0]["body_quoted"] or "b" not in rows[0]["body_quoted"]:
         fail("combine-any: scopes not unioned across tasks: %r" % rows[0]["body_quoted"])
 
+    # A rule's aggregates merge by kind across tasks: counts sum, lists
+    # union, and the row re-renders from the merged values.
+    agg_tip = lambda n, targets: {
+        "id": "deps",
+        "key": "//old",
+        "severity": "suggestion",
+        "title": "",
+        "body": "",
+        "type": "jinja2",
+        "combine_across_tasks": True,
+        "_title_src": "{{ count }} on //old",
+        "_body_src": "{{ targets | join(', ') }}",
+        "vars": {"line": "l"},
+        "aggregates": {
+            "count": {"kind": "count", "value": n, "max": 0},
+            "targets": {"kind": "unique", "value": targets, "max": 10},
+        },
+    }
+    rows = collect_tip_rows(ctx, [
+        {"name": "build-task", "tips": [agg_tip(2, ["//a", "//b"])]},
+        {"name": "test-task", "tips": [agg_tip(3, ["//b", "//c"])]},
+    ])
+    if len(rows) != 1 or rows[0]["title"] != "5 on //old" or "//a, //b, //c" not in rows[0]["body_quoted"]:
+        fail("combine-aggregates: counts must sum and lists union across tasks, got %r" % rows)
+    broken = dict(agg_tip(1, ["//a"]), _title_src = "{{ count")
+    rows = collect_tip_rows(ctx, [
+        {"name": "build-task", "tips": [broken]},
+        {"name": "test-task", "tips": [broken]},
+    ])
+    if rows[0]["title"] != "{{ count":
+        fail("combine-aggregates: a template that does not render is shown as written, got %r" % rows[0]["title"])
+
 def _check_format_http_failure_detail():
     """Functional assertions for `github.format_http_failure_detail` —
     one-line failure-detail formatting shared by the WARN and INFO

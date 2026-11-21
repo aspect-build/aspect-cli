@@ -37,6 +37,7 @@ pub mod console;
 pub mod feature_context;
 pub mod feature_map;
 pub mod history;
+pub(crate) mod module_values;
 pub mod store;
 pub mod task;
 pub mod task_context;

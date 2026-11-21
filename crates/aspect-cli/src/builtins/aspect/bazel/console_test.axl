@@ -1,0 +1,131 @@
+"""Tests for `bazel/console.axl`: the default stages, their tip rules, and
+the processor the trait asks for.
+
+The live half — a real capture, hooks rewriting what Bazel prints — runs the
+`build` task against basil in `crates/aspect-cli/tests/output_event.rs`.
+
+Run with:
+  aspect dev test-bazel-console
+"""
+
+load("@aspect//bazel/console.axl", "RECAP_MAX", "STAGE_NAMES", "bazel_console", "default_stages")
+load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//tips.axl", "TIP_INFO", "agg", "on_console_line", "tip_rule")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _names(stages):
+    return [s.name for s in stages]
+
+def _test_default_stages_per_profile(_):
+    human = default_stages("human")
+    _eq("human drops nothing", _names(human.stages), STAGE_NAMES)
+    _eq("human keeps the terminal", (human.display, human.progress), ("auto", True))
+    agent = default_stages("agent")
+    _eq("agent has the same stages", _names(agent.stages), _names(human.stages))
+    _eq("agent asks for plain lines, no status", (agent.display, agent.progress), ("lines", False))
+    _eq("no problems", human.problems + agent.problems, [])
+
+def _test_default_stages_can_be_left_out(_):
+    _eq("all left out", default_stages("human", disable = STAGE_NAMES).stages, [])
+    _eq(
+        "a caller's patterns outlive their stage's defaults",
+        _names(default_stages("human", disable = STAGE_NAMES, collapse = ["x"], drop = ["y"]).stages),
+        ["drop", "collapse_similar"],
+    )
+
+def _test_a_bad_setting_is_reported_not_raised(_):
+    """The feature runs for every task, so a typo must not fail them all."""
+    got = default_stages("humane", disable = ["relativize_path"], collapse = ["("], drop = ["[", "ok"])
+    _eq("valid stages kept", _names(got.stages), ["relativize_paths", "drop", "collapse_similar", "recap_errors"])
+    _eq("one problem each", len(got.problems), 4)
+    _eq("names the stages", "the stages are relativize_paths" in default_stages("human", disable = ["bogus"]).problems[0], True)
+    _eq("drop has no default to leave out", len(default_stages("human", disable = ["drop"]).problems), 1)
+    near = default_stages("humn", disable = ["recap_error"]).problems
+    _eq("a near miss is named", ('did you mean "recap_errors"?' in near[0], 'did you mean "human"?' in near[1]), (True, True))
+
+def _test_tip_rules_and_recap_are_configurable(_):
+    """Each console tip rule becomes an `aggregate` stage; a rule whose
+    pattern does not compile, or names a capture it lacks, is left out and
+    reported; recap_max is the recap's max whatever the profile."""
+    rule = lambda id, p, **kw: tip_rule(id = id, when = on_console_line(p), severity = TIP_INFO, title = "t", body = "b", **kw)
+    _eq("no rules, no aggregate", "aggregate" in _names(default_stages("human").stages), False)
+    _eq("no rules, no stage", bazel_console.tip_stages([]).stages, [])
+    got = bazel_console.tip_stages([
+        rule("a", "x"),
+        rule("grouped", "(?P<t>x)", group_by = ["t"], aggregate = {"ts": agg.unique("t")}),
+        rule("bad", "("),
+        rule("missing", "(?P<t>x)", group_by = ["pkg"]),
+        rule("missing_agg", "x", aggregate = {"n": agg.first("file")}),
+        rule("whole_line", "x", aggregate = {"l": agg.last("line")}),
+        rule("line_group", r"(?P<line>\d+)"),
+        rule("shadowed", "(?P<t>x)", aggregate = {"t": agg.unique("t")}),
+    ])
+    _eq("a stage per valid rule", _names(got.stages), ["aggregate", "aggregate", "aggregate"])
+    _eq("the bad rules are reported", len(got.problems), 5)
+    _eq("a group named like a variable", "rename it" in got.problems[3] and "rename it" in got.problems[4], True)
+    _eq("named", "'bad'" in got.problems[0] or "\"bad\"" in got.problems[0], True)
+    _eq("the missing capture is named", "pkg" in got.problems[1] and "it has: t" in got.problems[1], True)
+    got = default_stages("human", recap_max = 0)
+    _eq("a bad max is reported", len(got.problems), 1)
+    _eq("the max a bad one falls back to", RECAP_MAX, 10)
+    _eq("agent takes recap_max too", default_stages("agent", recap_max = 3).problems, [])
+
+def _test_root_is_read_only_when_relativizing(_):
+    def _boom():
+        fail("root read with relativize_paths disabled")
+
+    default_stages("human", disable = ["relativize_paths"], root = _boom)
+    _eq("read when on", _names(default_stages("human", root = lambda: "/ws").stages)[0], "relativize_paths")
+
+def _test_processor_follows_the_trait(ctx):
+    _eq("no stages, no capture", bazel_console.processor_for(BazelTrait(), True, True), None)
+    trait = BazelTrait(output_stages = default_stages("human", root = "/ws").stages)
+    processor = bazel_console.processor_for(trait, False, False)
+    _eq("in phase order", processor.stages, ["relativize_paths", "recap_errors", "collapse_similar"])
+    _eq("nothing held", processor.intercepts, False)
+    trait = BazelTrait(output_start = [lambda _ctx: [bazel.output.observe({"x": "x"})]])
+    _eq("output_start alone adds nothing", bazel_console.processor_for(trait, False, False), None)
+    extra = bazel_console.start_stages(ctx, trait)
+    _eq("output_start's stages", bazel_console.processor_for(trait, False, False, extra = extra).stages, ["observe"])
+    trait = BazelTrait(output_stages = [bazel.output.collapse_repeats()], output_display = "lines")
+    _eq("output_display", bazel_console.processor_for(trait, True, True).display, "lines")
+    _eq("the user's --curses wins", bazel_console.processor_for(trait, True, True, curses = True).display, "curses")
+    trait = BazelTrait(output_stages = [bazel.output.collapse_repeats()], output_display = "curses")
+    _eq("curses shown leaves repeats alone", bazel_console.processor_for(trait, False, False).stages, [])
+    _eq("--curses=no shows lines", bazel_console.processor_for(trait, False, False, curses = False).display, "lines")
+    trait = BazelTrait(output_stages = [bazel.output.collapse_repeats()], output_display = "none")
+    _eq("none shows nothing", bazel_console.processor_for(trait, True, True).display, "none")
+    bare = BazelTrait(output_display = "none")
+    _eq("none needs no stages", bazel_console.processor_for(bare, True, True).display, "none")
+    framed = BazelTrait(output_frame = [lambda ctx, build: None])
+    _eq("frames need no stages", bazel_console.processor_for(framed, False, False).stages, [])
+    _eq("the user's --curses does not win over none", bazel_console.processor_for(trait, True, True, curses = True).display, "none")
+    trait = BazelTrait(output_stages = [bazel.output.collapse_repeats()])
+    _eq("both terminals", bazel_console.processor_for(trait, True, True).display, "curses")
+    _eq("a redirected stdout gets lines", bazel_console.processor_for(trait, False, True).display, "lines")
+    _eq("a redirected stderr gets lines", bazel_console.processor_for(trait, True, False).display, "lines")
+    lines = bazel_console.processor_for(trait, False, False)
+    _eq("lines run repeats", lines.stages, ["collapse_repeats"])
+    _eq("always curses and colour", ("--curses=yes" in lines.flags, lines.colour, lines.flags[-1]), (True, True, "--color=yes"))
+    _eq("the user's --color is what shows", "--color=yes" in bazel_console.processor_for(trait, False, False, colour = False).flags, True)
+
+def _test_impl(ctx: TaskContext) -> int:
+    _test_default_stages_per_profile(ctx)
+    _test_default_stages_can_be_left_out(ctx)
+    _test_a_bad_setting_is_reported_not_raised(ctx)
+    _test_root_is_read_only_when_relativizing(ctx)
+    _test_tip_rules_and_recap_are_configurable(ctx)
+    _test_processor_follows_the_trait(ctx)
+    print("console_test.axl: OK (6 sections)")
+    return 0
+
+console_tests = task(
+    summary = "Run the bazel console-dispatch AXL unit tests.",
+    kind = "test-bazel-console",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

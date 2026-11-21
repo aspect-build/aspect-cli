@@ -1,0 +1,38 @@
+"""`GoHighlight`: an example plugin, ported from BuildBuddy's open-source
+[go-highlight](https://github.com/bduffany/go-highlight) CLI plugin as console
+stages.
+
+A compiler error's `file.go:line:col:` prefix is coloured yellow, and
+TypeScript's `file.ts(line,col):` is rewritten to `file.ts:line:col:` so an
+editor's terminal can open it at that spot. Compiler errors are action
+output, which every `rewrite` reaches. Colour only goes where stderr takes
+it (`std.io.stderr.color`: a terminal or a CI log that renders it,
+without `NO_COLOR`).
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+_YELLOW = "\x1b[33m"
+_RESET = "\x1b[0m"
+
+def _go_highlight_impl(ctx: FeatureContext):
+    t = ctx.traits[BazelTrait]
+    if ctx.args.typescript:
+        t.output_stages.append(bazel.output.rewrite(
+            r"^(\S*?\.tsx?)\((\d+),(\d+)\):",
+            (_YELLOW + "${1}:${2}:${3}:" + _RESET) if ctx.std.io.stderr.color else "${1}:${2}:${3}:",
+        ))
+    if ctx.std.io.stderr.color:
+        t.output_stages.append(bazel.output.rewrite(r"^(\S*?\.go:\d+:\d+:)", _YELLOW + "${1}" + _RESET))
+
+GoHighlight = feature(
+    display_name = "Go highlight",
+    summary = "Highlight the file:line:col of Go compiler errors, and make TypeScript's clickable.",
+    implementation = _go_highlight_impl,
+    args = {
+        "typescript": args.boolean(
+            default = True,
+            description = "Also rewrite TypeScript's `file.ts(line,col):` to `file.ts:line:col:`.",
+        ),
+    },
+)

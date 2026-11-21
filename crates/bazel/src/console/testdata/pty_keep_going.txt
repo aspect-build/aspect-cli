@@ -1,0 +1,354 @@
+^DWARNING: The following rc files are no longer being read, please transfer their contents or import their path into one of the standard rc files:
+/home/user/.bazelrc
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 21 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 21 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d2
+[32mAnalyzing:[0m 21 targets (1 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d1
+[32mAnalyzing:[0m 21 targets (1 packages loaded, 1 target configured)
+
+[1A[K[1A[K[33mDEBUG: [0m/ws/defs.bzl:9:10: noisy debug from @@//:d0
+[32mAnalyzing:[0m 21 targets (1 packages loaded, 2 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0mno such package 'nope1': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope1
+[32mAnalyzing:[0m 21 targets (2 packages loaded, 9 targets configured)
+    currently loading: @@bazel_tools//tools/launcher
+
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:19:9: no such package 'nope1': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope1 and referenced by '//:m1'
+[32mAnalyzing:[0m 21 targets (2 packages loaded, 13 targets configured)
+    currently loading: @@bazel_tools//tools/launcher
+
+[1A[K[1A[K[1A[K[31m[1mERROR: [0mno such package 'nope2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope2
+[32mAnalyzing:[0m 21 targets (2 packages loaded, 15 targets configured)
+    currently loading: @@bazel_tools//tools/launcher
+
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:19:9: no such package 'nope2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope2 and referenced by '//:m2'
+[32mAnalyzing:[0m 21 targets (2 packages loaded, 16 targets configured)
+    currently loading: @@bazel_tools//tools/launcher ... (2 packages)
+
+[1A[K[1A[K[1A[K[31m[1mERROR: [0mno such package 'nope0': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope0
+[32mAnalyzing:[0m 21 targets (3 packages loaded, 16 targets configured)
+    currently loading: @@bazel_tools//tools/res
+
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:19:9: no such package 'nope0': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nope0 and referenced by '//:m0'
+[32mAnalyzing:[0m 21 targets (3 packages loaded, 17 targets configured)
+    currently loading: @@bazel_tools//tools/res
+[32m[1 / 2][0m checking cached actions
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e3 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:e3) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo err3 >&2; printf '\''\033[35mWARNING: \033[0mnested 3\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+err3
+[35mWARNING: [0mnested 3
+[32mAnalyzing:[0m 21 targets (16 packages loaded, 17 targets configured)
+    currently loading: @@rules_java+//toolchains ... (3 packages)
+[32m[4 / 15][0m 10 actions running
+    Executing genrule //:e3; 0s darwin-sandbox
+    Executing genrule //:e4; 0s darwin-sandbox
+    Executing genrule //:e0; 0s darwin-sandbox
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:e1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox ...
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching ...ains+remotejdk11_macos_aarch64_toolchain_config_repo; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e4 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:e4) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo err4 >&2; printf '\''\033[35mWARNING: \033[0mnested 4\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+err4
+[35mWARNING: [0mnested 4
+[32mAnalyzing:[0m 21 targets (20 packages loaded, 17 targets configured)
+    currently loading: @@rules_java+//toolchains ... (3 packages)
+[32m[5 / 15][0m 9 actions running
+    Executing genrule //:e4; 0s darwin-sandbox
+    Executing genrule //:e0; 0s darwin-sandbox
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:e1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:e2; 0s darwin-sandbox ...
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching ...va++toolchains+remotejdk11_win_toolchain_config_repo; starting
+    Fetching ...ains+remotejdk25_macos_aarch64_toolchain_config_repo; starting
+    Fetching ...olchains+remotejdk11_win_arm64_toolchain_config_repo; starting
+    Fetching ...++toolchains+remotejdk17_linux_toolchain_config_repo; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e0 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:e0) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo err0 >&2; printf '\''\033[35mWARNING: \033[0mnested 0\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+err0
+[35mWARNING: [0mnested 0
+[32mAnalyzing:[0m 21 targets (29 packages loaded, 17 targets configured)
+    currently loading: @@rules_java+//toolchains ... (2 packages)
+[32m[6 / 15][0m 8 actions running
+    Executing genrule //:e0; 0s darwin-sandbox
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:e1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:e2; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+    Fetching ...ains+remotejdk17_linux_ppc64le_toolchain_config_repo; starting
+    Fetching ...ains+remotejdk21_linux_aarch64_toolchain_config_repo; starting
+    Fetching ...++toolchains+remotejdk21_linux_toolchain_config_repo; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g1:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mAnalyzing:[0m 21 targets (51 packages loaded, 17 targets configured)
+    currently loading: @@rules_java+//toolchains ... (2 packages)
+[32m[7 / 15][0m 7 actions running
+    Executing genrule //:g1; 0s darwin-sandbox
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:e1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:e2; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e1 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:e1) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo err1 >&2; printf '\''\033[35mWARNING: \033[0mnested 1\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+err1
+[35mWARNING: [0mnested 1
+[32mAnalyzing:[0m 21 targets (52 packages loaded, 17 targets configured)
+    currently loading: @@rules_java+//toolchains
+[32m[8 / 15][0m 6 actions running
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:e1; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:e2; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g2:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mAnalyzing:[0m 21 targets (53 packages loaded, 17 targets configured)
+[32m[9 / 15][0m 5 actions running
+    Executing genrule //:g2; 0s darwin-sandbox
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:e2; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:e2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo err2 >&2; printf '\''\033[35mWARNING: \033[0mnested 2\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+err2
+[35mWARNING: [0mnested 2
+[32mAnalyzing:[0m 21 targets (53 packages loaded, 17 targets configured)
+[32m[10 / 15][0m 4 actions running
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:e2; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:g0:
+tool line A
+WARNING: tool plain warning
+[35mWARNING: [0mtool coloured warning
+[35mWARNING: [0mtool coloured warning
+[31mERROR: [0mtool coloured error
+Loading: model weights
+  indented tool line
+
+[32mLoading:[0m coloured progress-shaped
+    indented after coloured loading
+[1 / 2] fake progress
+    indented after fake progress
+[35mDEBUG: [0mRule 'x' indicated that a canonical reproducible form can be obtained
+  indented after coloured debug
+stdout line one
+[33mWARNING: [0mstdout coloured warning
+tool tail
+[32mAnalyzing:[0m 21 targets (53 packages loaded, 17 targets configured)
+[32m[11 / 15][0m 3 actions running
+    Executing genrule //:g0; 0s darwin-sandbox
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:18:9: Executing genrule //:e5 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:e5) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo err5 >&2; printf '\''\033[35mWARNING: \033[0mnested 5\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+err5
+[35mWARNING: [0mnested 5
+[32mAnalyzing:[0m 21 targets (53 packages loaded, 17 targets configured)
+[32m[12 / 15][0m 3 actions running
+    Executing genrule //:e5; 0s darwin-sandbox
+    Executing genrule //:bad; 0s darwin-sandbox
+    Executing genrule //:top; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m/ws/BUILD.bazel:15:8: Executing genrule //:bad failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo bad >&2; printf '\''\033[35mWARNING: \033[0mbefore fail\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad
+[35mWARNING: [0mbefore fail
+[32mAnalyzing:[0m 21 targets (53 packages loaded, 17 targets configured)
+[32m[13 / 15][0m 2 actions running
+    Executing genrule //:bad; 0s darwin-sandbox
+    Executing genrule //:top; 0s darwin-sandbox
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+    Fetching repository @@rules_java++toolchains+local_jdk; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mAnalyzing:[0m 21 targets (54 packages loaded, 17 targets configured)
+[32m[15 / 15][0m no actions running
+    Fetching ...non_module_deps+build_bazel_rules_swift_local_config; starting
+[1A[K[1A[K[1A[K[32mAnalyzing:[0m 21 targets (54 packages loaded, 17 targets configured)
+    currently loading: @@rules_swift++non_module_deps+build_bazel_rules_swift_\
+local_config//
+[32m[15 / 15][0m no actions running
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mAnalyzed 21 targets (76 packages loaded, 850 targets configured).
+[32m[30 / 30][0m no actions running
+[1A[K[32m[35 / 39][0m 4 actions running
+    Testing //:t_pass; 0s darwin-sandbox
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:flaky; 0s local
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//:flaky (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log)
+[32m[35 / 39][0m 4 actions running
+    Testing //:t_pass; 0s darwin-sandbox
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:flaky; 0s local
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K
+[35mFLAKY: [0m//:flaky (Summary)
+      /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+[32m[35 / 39][0m 1 / 4 tests;[0m 4 actions running[0m; last test: [31m[1m//:flaky[0m
+    Testing //:t_pass; 0s darwin-sandbox
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:flaky; 0s local
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[32m[37 / 39][0m 2 / 4 tests;[0m 2 actions running[0m; last test: [32m//:t_pass[0m
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//:t_fail (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test_attempts/attempt_1.log)
+[32m[37 / 39][0m 2 / 4 tests;[0m 2 actions running[0m; last test: [32m//:t_pass[0m
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//:t_fail (Exit 1) (see /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)
+[32m[37 / 39][0m 2 / 4 tests;[0m 2 actions running[0m; last test: [32m//:t_pass[0m
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K
+[31m[1mFAILED: [0m//:t_fail (Summary)
+      /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+      /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test_attempts/attempt_1.log
+[32m[37 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m 2 actions running[0m; last test: [31m[1m//:t_fail[0m
+    Testing //:t_fail; 0s darwin-sandbox
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 0s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 1s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 2s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 3s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 5s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 6s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 7s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 8s darwin-sandbox
+[1A[K[1A[K[32m[38 / 39][0m 3 / 4 tests, [31m[1m1 failed[0m;[0m  1 action[0m; last test: [31m[1m//:t_fail[0m[0m
+    Testing //:t_stream; 8s darwin-sandbox
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//:m1', it will not be built.
+Analysis failed
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//:m0', it will not be built.
+Analysis failed
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//:m2', it will not be built.
+Analysis failed
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0mBuild succeeded for only 11 of 21 top-level targets
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0mFound 14 targets and 4 test targets...
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0mElapsed time: 9.648s, Critical Path: 8.88s
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[32mINFO: [0m39 processes: 31 internal, 12 darwin-sandbox, 4 local.
+[32m[39 / 39][0m 4 / 4 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [32m//:t_stream[0m
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K//:t_pass                                                                [0m[32mPASSED[0m in 0.4s
+[31m[1mFAILED:[0m 
+[1A[K//:t_stream                                                              [0m[32mPASSED[0m in 8.8s
+[31m[1mFAILED:[0m 
+[1A[K//:flaky                                                                  [0m[35mFLAKY[0m, failed in 1 out of 2 in 0.2s
+  Stats over 2 runs: max = 0.2s, min = 0.0s, avg = 0.1s, dev = 0.1s
+[31m[1mFAILED:[0m 
+[1A[K  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+[31m[1mFAILED:[0m 
+[1A[K//:t_fail                                                                [0m[31m[1mFAILED[0m in 2 out of 2 in 0.6s
+  Stats over 2 runs: max = 0.6s, min = 0.0s, avg = 0.3s, dev = 0.3s
+[31m[1mFAILED:[0m 
+[1A[K  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log
+[31m[1mFAILED:[0m 
+[1A[K  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test_attempts/attempt_1.log
+[31m[1mFAILED:[0m 
+[1A[K
+[31m[1mFAILED:[0m 
+[1A[KExecuted 4 out of 4 tests: 3 tests pass and [0m[31m[1m1 fails locally[0m.
+[31m[1mFAILED:[0m 
+[1A[KThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+Waiting for build events upload: Build Event Service 1s
+[1A[K[1A[K[31m[1mERROR: [0mThe Build Event Protocol upload timed out. com.google.common.util.concurrent.TimeoutFuture$TimeoutFutureException: Timed out: NonCancellationPropagatingFuture@d01c485[status=PENDING, info=[delegate=[SettableFuture@3c62b55[status=PENDING]]]]
+[0m
