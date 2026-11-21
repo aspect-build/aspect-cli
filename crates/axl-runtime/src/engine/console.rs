@@ -30,11 +30,12 @@ use super::template::json_to_minijinja;
 /// it; otherwise the base preset is `agent` when [`Host::coding_agent`] and
 /// `full` when not. The verbose level is the `verbose` arg when the command
 /// line set it, else [`Host::verbose`] (`ASPECT_DEBUG` / `ASPECT_VERBOSE`),
-/// else the arg from a `config.axl`, else the preset's; `auto` at any of these
-/// leaves it to the next. A disabled feature gives the `full` layout and the
-/// environment's level. Fails on a
-/// malformed `templates`, `task_presets`, `task_templates` or `verbose`
-/// value and on everything [`Surface::resolve`] refuses. The surface carries a
+/// else the arg from a `config.axl`, else the preset's. `auto` leaves it to
+/// the next, except that `auto` on the command line replaces the arg a
+/// `config.axl` set, so it skips to the preset when the environment sets
+/// none. A disabled feature gives the `full` layout and the environment's
+/// level. Fails on a malformed `templates`, `task_presets`, `task_templates`
+/// or `verbose` value and on everything [`Surface::resolve`] refuses. The surface carries a
 /// warning for each `task_presets` / `task_templates` key that is a near miss
 /// of one of `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
@@ -524,6 +525,11 @@ task_templates = {"check": {"progress": "mine"}}"#;
             level(r#"verbose = "auto""#, "cli", Some(Verbose::Off)),
             Verbose::Off,
             "auto on the CLI leaves it to the environment"
+        );
+        assert_eq!(
+            level(r#"verbose = "auto""#, "cli", None),
+            Verbose::On,
+            "auto on the CLI, which replaced config's arg, leaves it to the preset"
         );
     }
 

@@ -654,6 +654,26 @@ fn a_console_log_exporter_prints_debug_records_at_any_level() {
     assert!(!err.contains("DEBUG:"), "{err}");
 }
 
+/// Asking for console log records at the `debug` level prints each `debug()`
+/// line twice, on purpose: once as a `DEBUG:` line and once as the raw record.
+#[test]
+fn a_console_log_exporter_at_the_debug_level_prints_both() {
+    let output = run_with_env(
+        "",
+        &["check"],
+        false,
+        &[("ASPECT_DEBUG", "1"), ("OTEL_LOGS_EXPORTER", "console")],
+    );
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert_eq!(err.matches("DEBUG: task debug").count(), 1, "{err}");
+    assert_eq!(
+        err.lines().filter(|l| *l == "task debug").count(),
+        1,
+        "{err}"
+    );
+}
+
 #[test]
 fn an_invalid_aspect_verbose_names_the_closest_value() {
     let output = run_with_env("", &["check"], false, &[("ASPECT_VERBOSE", "debgu")]);

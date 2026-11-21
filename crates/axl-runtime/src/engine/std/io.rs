@@ -112,6 +112,6 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn debug<'v>(this: values::Value) -> anyhow::Result<bool> {
         this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
-        Ok(crate::diag::verbosity() == crate::diag::Verbose::Debug)
+        Ok(crate::diag::debugging())
     }
 }

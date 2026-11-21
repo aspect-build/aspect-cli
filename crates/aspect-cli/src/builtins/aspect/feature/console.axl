@@ -40,9 +40,10 @@ the same values), `verbose` set in a `config.axl`, the preset.
 
 Levels, quietest first: `debug`, `detail`, `info`, `warn`, `error`. `info`
 lines, which carry a task's result or why it did nothing (`No files to
-format`), always print, as do `WARNING:` and `ERROR:` lines, a task's own exit message (`TaskConclusion(message = ...)`,
-`ctx.std.process.exit`), the `announce_bazel_*` disclosures, which have their
-own flags, and the `aspect worktree` report.
+format`), always print, as do `WARNING:` and `ERROR:` lines, a task's own exit
+message (`TaskConclusion(message = ...)`, `ctx.std.process.exit`), the
+`announce_bazel_*` disclosures, which have their own flags, and the
+`aspect worktree` report.
 
 The runtime does the rendering, so this feature's implementation is empty: the
 runtime reads these args after `config.axl` runs and before the header prints.
