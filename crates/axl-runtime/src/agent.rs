@@ -1,10 +1,11 @@
 //! Whether a coding agent is running this process, from its environment alone.
 //!
 //! A run reads it once into its `Env` (`coding_agent`), and the `Console`
-//! feature uses it to pick the `agent` layout when nothing else picks one. `lib/agent.axl` answers the fuller question (which harness, which
-//! session) with more layers, including a process-tree walk that is too slow
-//! for every start-up; this is only its environment layers, and choosing a
-//! default layout needs no more than one signal. [`ENV_VARS`] lists the same
+//! feature uses it to pick the `agent` layout when nothing else picks one.
+//! `lib/agent.axl` answers the fuller question (which harness, which session)
+//! with more layers, including a process-tree walk that is too slow for every
+//! start-up; this is only its environment layers, and choosing a default
+//! layout needs no more than one signal. [`ENV_VARS`] lists the same
 //! variables `lib/agent.axl` reads, and a test in the `aspect-cli` crate keeps
 //! the two in step.
 
