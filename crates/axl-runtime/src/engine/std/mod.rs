@@ -26,6 +26,7 @@ use starlark::values::ValueLike;
 
 mod env;
 pub(crate) mod fs;
+mod history;
 pub mod io;
 mod net;
 pub(crate) mod process;
@@ -86,6 +87,12 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     fn net<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<net::Net> {
         Ok(net::Net::new())
     }
+
+    /// The task history's records of past runs; see `std.History`.
+    #[starlark(attribute)]
+    fn history<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<history::History> {
+        Ok(history::History::new())
+    }
 }
 
 #[starlark_module]
@@ -93,6 +100,7 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const Env: StarlarkValueAsType<env::Env> = StarlarkValueAsType::new();
     const FileSystem: StarlarkValueAsType<fs::Filesystem> = StarlarkValueAsType::new();
     const Net: StarlarkValueAsType<net::Net> = StarlarkValueAsType::new();
+    const History: StarlarkValueAsType<history::History> = StarlarkValueAsType::new();
     const Std: StarlarkValueAsType<Std> = StarlarkValueAsType::new();
 }
 

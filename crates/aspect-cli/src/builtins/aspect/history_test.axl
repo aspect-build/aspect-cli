@@ -1,0 +1,112 @@
+"""Unit tests for history.axl: how `aspect history` words and lays out a
+record. Reading the records is `ctx.std.history`'s, covered by the
+runtime's tests.
+
+Run with:
+  aspect dev test-history
+"""
+
+load("@aspect//history.axl", "command", "list_lines", "outcome", "show_lines", "took", "when")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _record(**kw):
+    record = {
+        "status": "ended",
+        "task": {"id": "0123456789abcdef", "name": "build-a-b", "kind": "build", "group": []},
+        "argv": ["/usr/local/bin/aspect", "build", "//..."],
+        "cwd": "/repo",
+        "started": "2026-11-21T15:39:39.143Z",
+        "duration_ms": 6300,
+        "exit_code": 0,
+        "dir": "/h/20261121T153939143Z-0123",
+    }
+    record.update(kw)
+    return record
+
+def _test_outcome(_ctx):
+    for want, record in [
+        ("ok", _record()),
+        ("exit 3", _record(exit_code = 3)),
+        ("error", _record(error = "boom", exit_code = None)),
+        ("cancelled", _record(cancelled = True, exit_code = 8)),
+        ("running", _record(status = "running")),
+        ("abandoned", _record(status = "abandoned")),
+    ]:
+        _eq("outcome " + want, outcome(record), want)
+
+def _test_formats(_ctx):
+    _eq("when", when("2026-11-21T15:39:39.143Z"), "2026-11-21 15:39:39Z")
+    for ms, want in [(850, "850ms"), (12345, "12.3s"), (245000, "4m05s"), (None, "")]:
+        _eq("took %r" % ms, took({"duration_ms": ms} if ms != None else {}), want)
+    _eq("the program is aspect", command(_record()), "aspect build //...")
+
+def _test_list_lines(_ctx):
+    lines = list_lines([_record(), _record(task = {"id": "fedcba98", "kind": "list", "group": ["worktree"]}, argv = ["aspect", "worktree", "list"], exit_code = 1)])
+    _eq("columns line up", lines[0].index("ok"), lines[1].index("exit 1"))
+    _eq("the id's start", lines[1][:8], "fedcba98")
+    _eq("the task, as typed", "worktree list" in lines[1], True)
+
+def _test_show_lines(_ctx):
+    record = _record(
+        git = {"commit": "a01a395e90ed3685", "branch": "main", "dirty": True},
+        links = [{"label": "Build Results", "url": "https://app.example.com/i/1"}],
+        bazel = [
+            {
+                "command": "build",
+                "patterns": ["//..."],
+                "exit_code": 1,
+                "ended": "x",
+                "summary": {
+                    "targets_built": 3,
+                    "targets_failed": 1,
+                    "failures": [{"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": ["bazel/1/actions/a/b/Genrule-1.stderr"]}],
+                    "failures_not_listed": 0,
+                },
+            },
+            {"command": "test", "patterns": [], "ended": "y"},
+            {"command": "test", "patterns": []},
+            {"command": "build", "patterns": [], "ended": "z", "error": "could not bind a stream"},
+        ],
+    )
+    text = "\n".join(show_lines(record))
+    for want in [
+        "main@a01a395e90ed (dirty)",
+        "Link      Build Results: https://app.example.com/i/1",
+        "Bazel 1   build //... · exit 1",
+        "targets 3 built, 1 failed",
+        "✗ //a:b  Genrule",
+        "/h/20261121T153939143Z-0123/bazel/1/actions/a/b/Genrule-1.stderr",
+        "Bazel 2   test · ended by a signal",
+        "Bazel 3   test · not waited for",
+        "Bazel 4   build · could not bind a stream",
+        "Files     /h/20261121T153939143Z-0123",
+    ]:
+        if want not in text:
+            fail("show_lines: %r missing from:\n%s" % (want, text))
+    evicted = "\n".join(show_lines(_record(evicted = "2026-11-22T00:00:00.000Z")))
+    if "Files     removed 2026-11-22 00:00:00Z" not in evicted:
+        fail("show_lines: an evicted run should say its files are gone:\n" + evicted)
+
+_UNIT_TESTS = [
+    _test_outcome,
+    _test_formats,
+    _test_list_lines,
+    _test_show_lines,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("history.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+history_tests = task(
+    summary = "Run the history unit tests.",
+    kind = "test-history",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

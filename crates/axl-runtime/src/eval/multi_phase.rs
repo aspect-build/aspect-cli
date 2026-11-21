@@ -1,3 +1,4 @@
+use crate::engine::history::TaskStart as HistoryTaskStart;
 use crate::errln;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -894,7 +895,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             )));
         }
         let task_id = task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        self.loader.env.history.begin(&task_id);
+        let env = &self.loader.env;
+        env.history.begin_task(
+            &task_id,
+            HistoryTaskStart {
+                name: task_name.clone(),
+                kind: task.kind(),
+                group: task.group().clone(),
+                cli_version: env.cli_version.clone(),
+                workspace: Some(env.bazel_root_dir.clone()),
+                git_root: env.git_root_dir.clone(),
+            },
+        );
         let task_args = args_builder(task, heap);
 
         let span = tracing::Span::current();
@@ -1008,9 +1020,23 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let conclusion = heap.alloc(outcome.to_conclusion());
         hooks.run_post(context, conclusion, &mut eval);
         run_deferred(context, &mut eval);
+        let cancelled = self.loader.env.signals.root().is_cancelled();
         if let Ending::Failed(e) = ending {
+            let error = e.to_string();
+            self.loader.env.history.end_task(
+                None,
+                String::new(),
+                crate::engine::task_record::error_line(&error),
+                cancelled,
+            );
             return Err(e.into());
         }
+        self.loader.env.history.end_task(
+            Some(outcome.exit_code.unwrap_or(0)),
+            outcome.text.clone(),
+            String::new(),
+            cancelled,
+        );
         let Outcome {
             exit_code,
             flagged,
@@ -1084,6 +1110,21 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
 
         Ok(exit_code)
+    }
+
+    /// The command line the task runs with, as typed, the spellings of its
+    /// flags whose values are secrets, and its other short flags that take a
+    /// value, for its history record.
+    pub fn set_task_command_line(
+        &self,
+        argv: Vec<String>,
+        secret_flags: Vec<String>,
+        value_shorts: Vec<String>,
+    ) {
+        self.loader
+            .env
+            .history
+            .set_command_line(argv, secret_flags, value_shorts);
     }
 
     pub fn finish(self) -> FinishedEval {

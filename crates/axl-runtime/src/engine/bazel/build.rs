@@ -34,6 +34,7 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
 use crate::engine::history::History;
+use crate::engine::task_record::BazelSlot;
 use axl_proto::build_event_stream::BuildEvent;
 use bazel::stream::Gate;
 use bazel::stream::file::Reservation;
@@ -899,9 +900,16 @@ pub struct Build {
     trace_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
 
     /// The sink keeping action and test logs in the history, joined by
-    /// `wait()` once the stream ends, so its index is written by then.
+    /// `wait()` once the stream ends, so its index is written by then; held
+    /// by `history_slot` instead when there is one.
     #[allocative(skip)]
     keep_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
+
+    /// Its place in the task's record (`task.json`): its exit noted at the
+    /// reap, its summary once `wait()` has joined the stream and the keep
+    /// sink, whose indexes it reads.
+    #[allocative(skip)]
+    history_slot: Option<Arc<BazelSlot>>,
 
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
@@ -1074,18 +1082,22 @@ impl Build {
         }
         let status =
             children::wait_with(&self.bound, timeout, || self.child.borrow_mut().try_wait())?;
-        if status.is_some() {
-            self.reaped();
+        if let Some(status) = &status {
+            self.reaped(status);
         }
         Ok(status)
     }
 
-    /// What follows the client's exit, once a reap sees it: the profile Bazel
-    /// has finished by then is copied to the path the caller asked for. Only
-    /// the first call copies. A copy that fails is a warning, as a profile
-    /// Bazel cannot write is. A build never reaped here (a cancelled wait, a
-    /// task that does not wait) leaves the profile only in the history.
-    fn reaped(&self) {
+    /// What follows the client's exit, once a reap sees it: the task's
+    /// record notes the exit, and the profile Bazel has finished by then is
+    /// copied to the path the caller asked for. Only the first call copies. A
+    /// copy that fails is a warning, as a profile Bazel cannot write is. A
+    /// build never reaped here (a cancelled wait, a task that does not wait)
+    /// leaves the profile only in the history.
+    fn reaped(&self, status: &std::process::ExitStatus) {
+        if let Some(slot) = &self.history_slot {
+            slot.exited(status.code(), self.sink_invocation_id());
+        }
         if let Some((from, to)) = self.profile_copy.take()
             && let Err(err) = bazel::profile::copy(&from, &to)
         {
@@ -1201,6 +1213,8 @@ impl Build {
         let _enter = span.enter();
 
         let targets: Vec<String> = targets.into_iter().collect();
+        // Noted in the task's record once the client has been spawned.
+        let (recorded_targets, recorded_flags) = (targets.clone(), flags.clone());
 
         // Read before `flags` moves into the command. When the CLI streams the
         // compact log or the BEP, its own flag below outranks the caller's, and
@@ -1361,6 +1375,12 @@ impl Build {
             children::Kind::Bazel,
         )
         .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+        let history_slot = history.bazel_started(
+            verb,
+            &recorded_targets,
+            &recorded_flags,
+            history_dir.as_deref(),
+        );
 
         // The client pid ends the streams: the server outlives the invocation
         // and cannot say a build is over (see `PidPair`).
@@ -1503,6 +1523,20 @@ impl Build {
                 )),
                 _ => None,
             };
+            // With a record, the record's slot joins the keep sink, first,
+            // so its failures are matched with the indexes the sink writes.
+            let keep_sink = match (&history_slot, keep_sink) {
+                (Some(slot), Some(keep)) => {
+                    slot.keep_with(keep);
+                    None
+                }
+                (_, keep) => keep,
+            };
+            if let (Some(slot), Some(stream)) = (&history_slot, build_event_stream.stream()) {
+                slot.summarize_from(bazel::bes::sink::summary::spawn(
+                    stream.subscribe_filtered(Some(bazel::bes::sink::summary::filter())),
+                ));
+            }
             Ok((
                 workspace_event_stream,
                 execlog_stream,
@@ -1515,6 +1549,9 @@ impl Build {
             match parts {
                 Ok(parts) => parts,
                 Err(err) => {
+                    if let Some(slot) = &history_slot {
+                        slot.failed(&err.to_string());
+                    }
                     // A handle bound before the failure is a subscriber its reader
                     // would wait for forever; nothing else will release it.
                     if execlog_bound {
@@ -1555,6 +1592,7 @@ impl Build {
             signals,
             trace_sink: RefCell::new(trace_sink),
             keep_sink: RefCell::new(keep_sink),
+            history_slot,
             span: RefCell::new(span),
         })
     }
@@ -1635,8 +1673,8 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         }
         let status = if timeout_ms == 0 {
             let status = children::try_wait(&mut build.child.borrow_mut(), &build.bound)?;
-            if status.is_some() {
-                build.reaped();
+            if let Some(status) = &status {
+                build.reaped(status);
             }
             status
         } else {
@@ -1731,6 +1769,10 @@ impl Build {
         }
         if let Some(keep_sink) = build.keep_sink.take() {
             let _ = keep_sink.join();
+        }
+        // Joins the keep sink itself when it holds it.
+        if let Some(slot) = &build.history_slot {
+            slot.summarize(false);
         }
         if let Some(err) = stream_error {
             anyhow::bail!("build event stream thread error: {}", err);
@@ -2471,6 +2513,77 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// The task's record notes each build: its command, its exit, and the
+    /// summary of its stream, whose failures point at the logs kept for them.
+    #[cfg(unix)]
+    #[test]
+    fn the_task_record_notes_each_build_and_its_failures() {
+        let history = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        "//pkg:all",
+        flags = ["--scenario=action_and_test_logs", "--basil-scratch=SCRATCH", "--remote_header=x-api-key=secret"],
+        keep_action_logs = "failed",
+        keep_test_logs = "failed",
+        stderr = None,
+    )
+    build.wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#
+        .replace("SCRATCH", scratch.path().to_str().unwrap());
+        run_task_with_history(&script, history.path());
+        let entry = only_invocation(history.path());
+        let record = crate::engine::task_record::read(&entry.join("task.json")).unwrap();
+        assert_eq!(
+            (record.status.as_str(), record.exit_code),
+            ("ended", Some(0))
+        );
+        let build = &record.bazel[0];
+        assert_eq!(
+            (
+                build.command.as_str(),
+                build.patterns.as_slice(),
+                build.folder.as_deref()
+            ),
+            ("build", &["//pkg:all".to_string()][..], Some("bazel/1"))
+        );
+        assert!(
+            build.ended.is_some() && build.exit_code.is_some(),
+            "{build:?}"
+        );
+        assert!(
+            build
+                .flags
+                .iter()
+                .any(|f| f == "--remote_header=x-api-key=<REDACTED>"),
+            "{:?}",
+            build.flags
+        );
+        let summary = build.summary.as_ref().expect("a summary");
+        let action = summary
+            .failures
+            .iter()
+            .find(|f| f.kind == "action" && f.label == "//pkg:broken")
+            .unwrap_or_else(|| panic!("{summary:?}"));
+        assert_eq!(action.logs, ["bazel/1/actions/pkg/broken/Genrule-1.stderr"]);
+        let test = summary
+            .failures
+            .iter()
+            .find(|f| f.kind == "test" && f.label == "//pkg:fails")
+            .unwrap_or_else(|| panic!("{summary:?}"));
+        assert_eq!(
+            test.logs.first().map(String::as_str),
+            Some("bazel/1/testlogs/pkg/fails/run_1/shard_1/attempt_1/test.log")
+        );
+        for log in action.logs.iter().chain(&test.logs) {
+            assert!(entry.join(log).exists(), "{log}");
+        }
+    }
+
     /// Keeping every action's logs runs the build with
     /// `--build_event_publish_all_actions`, and keeps a successful action's.
     #[cfg(unix)]
@@ -2671,10 +2784,9 @@ Test = task(implementation = _impl)
         );
         run_task_with_history(&script, history.path());
         assert!(asked.exists(), "Bazel writes the caller's profile itself");
-        assert_eq!(
-            std::fs::read_dir(history.path()).unwrap().count(),
-            0,
-            "a build with nothing to keep makes no history entry"
+        assert_only_records(
+            history.path(),
+            "a build with nothing to keep keeps no files",
         );
     }
 
@@ -2699,7 +2811,7 @@ Test = task(implementation = _impl)
 "#,
             history.path(),
         );
-        assert_eq!(std::fs::read_dir(history.path()).unwrap().count(), 0);
+        assert_only_records(history.path(), "nothing recorded");
     }
 
     /// Bazel refuses a second log format, so a caller's JSON or binary log
@@ -2727,11 +2839,7 @@ Test = task(implementation = _impl)
                 log = dir.path().join("exec.log").display(),
             );
             run_task_with_history(&script, history.path());
-            assert_eq!(
-                std::fs::read_dir(history.path()).unwrap().count(),
-                0,
-                "{flag}"
-            );
+            assert_only_records(history.path(), flag);
         }
     }
 
@@ -2756,7 +2864,7 @@ Test = task(implementation = _impl)
 "#,
             history.path(),
         );
-        assert_eq!(std::fs::read_dir(history.path()).unwrap().count(), 0);
+        assert_only_records(history.path(), "the profile left to Bazel");
     }
 
     /// The workspace handle's AXL surface: `done` before binding and after
@@ -3156,6 +3264,30 @@ Test = task(implementation = _impl)
             move |eval| eval.with_history(history),
         );
         assert_eq!(exit.expect("run_task"), Some(0));
+    }
+
+    /// Every task invocation entry under `history` holds its record and no
+    /// build's files.
+    #[cfg(unix)]
+    fn assert_only_records(history: &std::path::Path, why: &str) {
+        for entry in std::fs::read_dir(history)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+        {
+            if entry
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with('.')
+            {
+                continue;
+            }
+            let names: Vec<String> = std::fs::read_dir(&entry)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["task.json"], "{why}: {}", entry.display());
+        }
     }
 
     /// The one task invocation entry under `history`, past the prune's own

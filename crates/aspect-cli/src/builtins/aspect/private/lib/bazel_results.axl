@@ -2412,62 +2412,74 @@ def strip_url_creds(s):
     `scheme://token@host` has no user/password split, so the single component is
     itself the secret and the whole userinfo goes: → `scheme://<REDACTED>@host`.
 
-    Scheme must start with a letter then scheme-legal chars (alnum, `+-.`).
-    Handles ~10 URLs per string.
+    Where a login ends is `_login_end`'s: a raw `@`, `/`, `?` or `#` in a
+    password is part of it, an `@` in a path or a query is not. Every `://`
+    in `s` starts a URL, whatever comes before it, as in the Rust copy
+    (`bazel::bes::redact::strip_url_creds`).
     """
     if "://" not in s:
         return s
     result = s
     cursor = 0
-    for _ in range(10):
+
+    # Every URL in it, as the Rust copy: each pass moves past one.
+    for _ in range(len(s)):
         idx = result.find("://", cursor)
         if idx < 0:
             break
 
-        # Walk back to scheme start; require ≥1 alpha char.
-        scheme_start = idx
-        i = idx - 1
-        for _ in range(64):
-            if i < 0:
+        # The `@` closing the userinfo (`_login_end`), within the URL's text
+        # up to whitespace, and the user/password `:` before it.
+        start = idx + 3
+        end = len(result)
+        for j in range(start, len(result)):
+            if result[j] in " \t\r\n":
+                end = j
                 break
-            c = result[i]
-            is_alpha = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
-            is_digit = c >= "0" and c <= "9"
-            if is_alpha or is_digit or c == "+" or c == "-" or c == ".":
-                scheme_start = i
-                i -= 1
-            else:
-                break
-
-        # Scheme must start with a letter.
-        first = result[scheme_start]
-        is_first_alpha = (first >= "a" and first <= "z") or (first >= "A" and first <= "Z")
-        if not is_first_alpha or scheme_start == idx:
-            cursor = idx + 3
+        login = _login_end(result[start:end])
+        if login < 0:
+            cursor = start
             continue
-
-        # The `@` closing the userinfo, and the user/password `:` within it.
-        # Scanning for the `@` first matters: a userinfo with no colon is a bare
-        # secret, and searching for the colon first would skip the URL entirely.
-        at = -1
-        colon = -1
-        for j in range(idx + 3, len(result)):
-            c = result[j]
-            if c == "@":
-                at = j
-                break
-            if c == " " or c == "\t" or c == "\r" or c == "\n":
-                break
-            if c == ":" and colon < 0:
-                colon = j
-        if at < 0:
-            cursor = idx + 3
-            continue
-
+        at = start + login
+        colon = result.find(":", start, at)
         keep_to = colon + 1 if colon >= 0 else idx + 3
         result = result[:keep_to] + _REDACTED + result[at:]
         cursor = keep_to + len(_REDACTED) + 1
     return result
+
+def _first_of(s, chars, start = 0):
+    """The index of the first of `chars` in `s` from `start`, else `len(s)`."""
+    for i in range(start, len(s)):
+        if s[i] in chars:
+            return i
+    return len(s)
+
+def _login_end(url):
+    """Where the login of the URL whose text after `://` is `url` ends: the
+    index of its closing `@`, or -1 for a URL with none. As
+    `bazel::bes::redact::login_end` reads it: up to the last `@` before the
+    first `/`, `?` or `#`; else a later `@` after a `user:password` with a raw
+    `/`, `?` or `#` in the password (a `:` before the first of those, not a
+    port's nor an IPv6 host's, and no `=` or `&`), the last before the next
+    of those."""
+    authority = _first_of(url, "/?#")
+    at = url.rfind("@", 0, authority)
+    if at >= 0:
+        return at
+
+    # A bracketed IPv6 host (`[::1]:8080`) has no login before it.
+    if url.startswith("["):
+        return -1
+    colon = url.find(":", 0, authority)
+    if colon < 0:
+        return -1
+    port = url[colon + 1:authority]
+    if port and port.isdigit():
+        return -1
+    first = url.find("@", authority)
+    if first < 0 or "=" in url[:first] or "&" in url[:first]:
+        return -1
+    return url.rfind("@", 0, _first_of(url, "/?#", first + 1))
 
 def _split_combined_form(arg):
     """Split `--flag=value` into (`--flag`, `value`) on the first `=`; empty

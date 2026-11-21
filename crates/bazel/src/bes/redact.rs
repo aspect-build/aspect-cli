@@ -23,12 +23,12 @@
 //! args list, so there's no ordering dependency on BuildMetadata arrival.
 //! Glob patterns (`*`, `?`) are supported, matching the AXL semantics.
 //!
-//! Limitation: redaction matches only the single-token `--name=value` form. A
-//! space-separated `--remote_header Authorization: Bearer <token>` (two argv
-//! tokens) is not scrubbed. BEP canonicalizes flags to the `=`-joined form, so
-//! the BES path is covered; the per-spawn command line (`render_command`) and
-//! the `.bazelrc` disclosure (`bazelrc::announce`) reuse these helpers and
-//! inherit the same assumption — a space-separated secret there would leak.
+//! A single flag ([`redact_flag`], [`redactor`]) is redacted in its
+//! `--name=value` form, which is how BEP spells every flag. A whole argument
+//! list ([`redact_command_args`]) also takes a header or env-passthrough flag
+//! given as two arguments (`--remote_header` `Authorization: Bearer <token>`),
+//! as a command line typed at a shell can be; and a flag carried in another's
+//! value (`--bazel-flag=--remote_header=…`) is redacted as itself.
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -442,11 +442,25 @@ fn redact_option(opt: &mut CmdOption, allow_env: &[&str]) -> bool {
 /// Use when echoing a bazel command to a log (e.g. `--announce-bazel-command`)
 /// — it applies the same header / env-var / URL-credential rules the BES sink
 /// redaction uses, from one source of truth.
+///
+/// A header or env-passthrough flag with no `=` takes the next argument as
+/// its value, which is redacted as that flag's would be.
 pub fn redact_command_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) -> Vec<String> {
     let user_patterns = collect_allow_env(args.clone());
     let allow_env = effective_allow_env(&user_patterns);
+    let mut takes_value: Option<&str> = None;
     args.into_iter()
-        .map(|a| redact_flag(a, &allow_env).into_owned())
+        .map(|a| {
+            if let Some(name) = takes_value.take() {
+                return redact_option_value(name, a, &allow_env).into_owned();
+            }
+            if let Some(name) = a.strip_prefix("--")
+                && (HEADER_OPTION_NAMES.contains(&name) || ENV_VAR_OPTION_NAMES.contains(&name))
+            {
+                takes_value = Some(name);
+            }
+            redact_flag(a, &allow_env).into_owned()
+        })
         .collect()
 }
 
@@ -471,7 +485,8 @@ pub fn redactor<'a>(flags: impl IntoIterator<Item = &'a str>) -> impl Fn(&str) -
 /// - `--header-like=VALUE`: redact entire VALUE.
 /// - `--env-like=KEY=VALUE`: redact VALUE unless KEY is on `allow_env` or
 ///   is a known-safe literal; strip URL creds when KEY is a known git URL var.
-/// - Other `--name=value`: strip URL creds from VALUE.
+/// - Other `--name=value`: strip URL creds from VALUE, or, when VALUE is a
+///   flag itself (`--bazel-flag=--remote_header=…`), redact it as one.
 /// - `--default_override=N:section=<option>`: `<option>` by the rules above,
 ///   since that is how the CLI restates rc-file entries.
 pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
@@ -499,6 +514,13 @@ pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
     if ENV_VAR_OPTION_NAMES.contains(&name) {
         let new_value = redact_env_value(value, allow_env);
         return match new_value {
+            Cow::Owned(v) => Cow::Owned(format!("--{}={}", name, v)),
+            Cow::Borrowed(_) => Cow::Borrowed(arg),
+        };
+    }
+    // A flag carried as another's value is redacted as itself.
+    if value.starts_with("--") {
+        return match redact_flag(value, allow_env) {
             Cow::Owned(v) => Cow::Owned(format!("--{}={}", name, v)),
             Cow::Borrowed(_) => Cow::Borrowed(arg),
         };
@@ -578,26 +600,68 @@ fn redact_header_value(value: &str) -> String {
     }
 }
 
-/// Replace `scheme://user:password@host/...` with `scheme://<REDACTED>@host/...`.
-/// No-op when the input doesn't contain `://` or the authority has no `@`.
+/// Replace the login of every URL in `s`, `scheme://user:password@host/...`,
+/// with `scheme://<REDACTED>@host/...` (see [`login_end`] for where a login
+/// ends). No-op when no URL in it has one.
 pub fn strip_url_creds(s: &str) -> Cow<'_, str> {
-    let Some(scheme_end) = s.find("://") else {
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(found) = s[search..].find("://") {
+        let start = search + found + 3;
+        let end = s[start..]
+            .find(char::is_whitespace)
+            .map_or(s.len(), |i| start + i);
+        // A `://` within a login already redacted is none of its own.
+        search = start;
+        if let Some(at) = login_end(&s[start..end]) {
+            out.push_str(&s[copied..start]);
+            out.push_str(REDACTED);
+            copied = start + at;
+            search = copied;
+        }
+    }
+    if copied == 0 {
         return Cow::Borrowed(s);
-    };
-    // Look for `user[:pass]@` between `scheme://` and the next `/` (authority section).
-    let authority_start = scheme_end + 3;
-    let rest = &s[authority_start..];
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let Some(at) = authority.find('@') else {
-        return Cow::Borrowed(s);
-    };
-    // Reconstruct with creds replaced.
-    let mut out = String::with_capacity(s.len());
-    out.push_str(&s[..authority_start]);
-    out.push_str(REDACTED);
-    out.push_str(&rest[at..]); // includes the `@` and everything after
+    }
+    out.push_str(&s[copied..]);
     Cow::Owned(out)
+}
+
+/// Where the login of the URL whose text after `://` is `url` ends: the
+/// offset of its closing `@`, or None for a URL with none.
+///
+/// The login is up to the last `@` before the first `/`, `?` or `#`, so a
+/// raw `@` in a password is part of it. With no `@` there, a later one still
+/// closes a login when what comes before it reads as `user:password` with a
+/// raw `/`, `?` or `#` in the password: a `:` before the first of those, not
+/// starting a port (`host:8080/path@x` is a path), and no `=` or `&` (a
+/// query's `?user=me@corp.com`; a bracketed IPv6 host, `[::1]:8080`, is
+/// none); then the last `@` before the next `/`, `?` or `#` closes it.
+/// Mirrored in `bazel_results.axl`'s `strip_url_creds`.
+pub fn login_end(url: &str) -> Option<usize> {
+    let breaks = ['/', '?', '#'];
+    let authority = url.find(breaks).unwrap_or(url.len());
+    if let Some(at) = url[..authority].rfind('@') {
+        return Some(at);
+    }
+    // A bracketed IPv6 host (`[::1]:8080`) has no login before it.
+    if url.starts_with('[') {
+        return None;
+    }
+    let colon = url[..authority].find(':')?;
+    let port = &url[colon + 1..authority];
+    if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let first = authority + url[authority..].find('@')?;
+    if url[..first].contains(['=', '&']) {
+        return None;
+    }
+    let next = url[first + 1..]
+        .find(breaks)
+        .map_or(url.len(), |i| first + 1 + i);
+    url[..next].rfind('@')
 }
 
 #[cfg(test)]
@@ -1036,6 +1100,112 @@ mod tests {
                 format!("--remote_header=Authorization:{REDACTED}"),
                 "//foo:bar".to_string(),
             ]
+        );
+    }
+
+    /// A header or env flag given as two arguments, as typed at a shell, and
+    /// a flag carried in another's value.
+    #[test]
+    fn redact_command_args_takes_a_flag_and_its_value_as_two_args() {
+        let args = [
+            "--remote_header",
+            "Authorization: Bearer t0ken",
+            "--action_env",
+            "DB_PASSWORD=hunter2",
+            "--action_env",
+            "USER=alice",
+            "--bazel-flag=--remote_header=x-api-key=abc",
+            "--bazel-flag=--action_env=TOKEN=abc",
+            "--keep_going",
+            "//foo:bar",
+        ];
+        assert_eq!(
+            redact_command_args(args.iter().copied()),
+            vec![
+                "--remote_header".to_string(),
+                format!("Authorization:{REDACTED}"),
+                "--action_env".to_string(),
+                format!("DB_PASSWORD={REDACTED}"),
+                "--action_env".to_string(),
+                "USER=alice".to_string(),
+                format!("--bazel-flag=--remote_header=x-api-key={REDACTED}"),
+                format!("--bazel-flag=--action_env=TOKEN={REDACTED}"),
+                "--keep_going".to_string(),
+                "//foo:bar".to_string(),
+            ]
+        );
+        assert_eq!(
+            redact_command_args(["build", "--remote_header"]),
+            vec!["build", "--remote_header"],
+            "a flag at the end, its value missing"
+        );
+    }
+
+    /// The authority ends at the path, query or fragment: an `@` past it is
+    /// no login.
+    #[test]
+    fn a_login_may_hold_raw_specials_and_every_url_is_checked() {
+        let r = REDACTED;
+        for (url, want) in [
+            (
+                "grpcs://alice:p@ssw0rd@bes.example.com",
+                format!("grpcs://{r}@bes.example.com"),
+            ),
+            (
+                "https://ci:pa/ss@github.com/x",
+                format!("https://{r}@github.com/x"),
+            ),
+            ("https://u:p?ss@h", format!("https://{r}@h")),
+            ("https://u:p#ss@h/x", format!("https://{r}@h/x")),
+            ("https://h:8080/path@x", "https://h:8080/path@x".to_string()),
+            ("https://h.example/a@b", "https://h.example/a@b".to_string()),
+            (
+                "http://[::1]:8080/~me@x",
+                "http://[::1]:8080/~me@x".to_string(),
+            ),
+            ("https://host:abc/https://u:p@x", format!("https://{r}@x")),
+            ("https://a:b://c@host", format!("https://{r}@host")),
+            (
+                "a=https://h.example b=https://u:pw@h2.example",
+                format!("a=https://h.example b=https://{r}@h2.example"),
+            ),
+        ] {
+            assert_eq!(strip_url_creds(url), want, "{url}");
+        }
+    }
+
+    /// No text panics it, however its URLs nest: every string of up to five
+    /// of the pieces a URL is parsed by, and the redaction changes only what
+    /// it found a login in.
+    #[test]
+    fn no_text_panics_the_url_redaction() {
+        let pieces = ["://", "@", ":", "/", "?", "#", "a", "1", "[", "]", " ", "é"];
+        let mut texts = vec![String::new()];
+        for _ in 0..5 {
+            texts = texts
+                .iter()
+                .flat_map(|t| pieces.iter().map(move |p| format!("{t}{p}")))
+                .collect();
+            for t in &texts {
+                let out = strip_url_creds(t);
+                assert!(t.contains('@') || out == t.as_str(), "{t:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn url_creds_are_only_in_the_authority() {
+        assert_eq!(
+            strip_url_creds("https://ci.example.com?user=me@corp.com"),
+            "https://ci.example.com?user=me@corp.com"
+        );
+        assert_eq!(
+            strip_url_creds("https://h.example#a@b"),
+            "https://h.example#a@b"
+        );
+        assert_eq!(
+            strip_url_creds("https://u:p@h.example?x=1"),
+            format!("https://{REDACTED}@h.example?x=1")
         );
     }
 

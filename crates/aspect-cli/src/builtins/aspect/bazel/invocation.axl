@@ -43,6 +43,7 @@ load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
 load("@aspect//bazel/flags.axl", "bazel_flags")
 load("@aspect//bazel/rc.axl", "bazel_rc")
 load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "exit_code_of", "may_retry", "retry_attempts")
+load("../private/lib/text.axl", "join_url")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a
@@ -270,6 +271,13 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     # matching the other spawn-time disclosures above.
     if index == 0:
         announce_bes_results_url(inv.ctx, inv.results_url, handle.sink_invocation_id)
+
+    # The run's record in the task history keeps each attempt's page.
+    if inv.results_url and handle.sink_invocation_id:
+        inv.ctx.std.history.link(
+            "Build Results" + (" (attempt %d)" % (index + 1) if index else ""),
+            join_url(inv.results_url, handle.sink_invocation_id),
+        )
 
     return struct(
         index = index,

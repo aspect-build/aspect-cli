@@ -27,7 +27,8 @@ pub fn aspect_cli() -> String {
 /// variables steer the built-in tasks into their CI code paths (status checks,
 /// runner detection) — the same filtering `tools/cache-diff-integration.py`
 /// does for the same reason. `HOME` and `PATH` stay: the CLI resolves its
-/// builtins cache under `HOME`.
+/// builtins cache under `HOME`. The task history goes to a temp folder of the
+/// test process's own.
 #[allow(dead_code)]
 pub fn base_env() -> std::collections::HashMap<String, String> {
     const DROP_NAMES: &[&str] = &["BUILDKITE", "CI"];
@@ -39,11 +40,21 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
         "GITHUB_",
         "GITLAB_",
     ];
-    std::env::vars()
+    let mut env: std::collections::HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| {
             !DROP_NAMES.contains(&k.as_str()) && !DROP_PREFIXES.iter().any(|p| k.starts_with(p))
         })
-        .collect()
+        .collect();
+    // Every task keeps a record in the task history: the test's own, not the
+    // user's. A test that reads the history names its own after this.
+    env.insert(
+        "ASPECT_HISTORY_DIR".into(),
+        std::env::temp_dir()
+            .join(format!("aspect-test-history-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned(),
+    );
+    env
 }
 
 /// Locate basil, the fake `bazel` the CLI is pointed at.

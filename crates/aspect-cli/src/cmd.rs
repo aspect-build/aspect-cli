@@ -210,6 +210,89 @@ impl<'a, 'v> Cmd<'a, 'v> {
     }
 
     /// Walk the parsed matches to the deepest subcommand and extract task ids + uuids.
+    /// The flag spellings whose values are secrets (`args.string(secret =
+    /// True)`) on task `task_id`'s command line: its own args' and every
+    /// feature's, long and short, as the parser takes them, for redacting a
+    /// command line the CLI keeps. One that may be given bare ends in `=`: it
+    /// takes a value only so.
+    pub fn secret_flags(&self, task_id: usize) -> Vec<String> {
+        let mut flags = vec![];
+        let mut add = |scope: Scope<'_>, name: &str, arg: &Arg| {
+            if !arg.secret() || !arg.is_cli_exposed() {
+                return;
+            }
+            // A flag that may go bare takes a value only with `=`: so
+            // spelled, it never takes the next argument as its value.
+            let eq = if matches!(arg, Arg::String { bare: Some(_), .. }) {
+                "="
+            } else {
+                ""
+            };
+            flags.push(format!("--{}{eq}", long_flag(scope, name, arg)));
+            if let Arg::String {
+                short: Some(short), ..
+            } = arg
+            {
+                flags.push(format!("-{short}{eq}"));
+            }
+        };
+        if let Some(task) = self.tasks.get(task_id) {
+            for (name, arg) in task.args().iter() {
+                add(Scope::Task, name, arg);
+            }
+        }
+        for feat in &self.features {
+            let prefix = feat.name();
+            for (name, arg) in feat.args().iter() {
+                add(Scope::Feature(&prefix), name, arg);
+            }
+        }
+        flags.sort();
+        flags.dedup();
+        flags
+    }
+
+    /// The short flags on task `task_id`'s command line that take a value
+    /// and are not secrets (`-m`, or `-m=` for one that may go bare, which
+    /// takes one only after `=`): its own args' and every feature's. In a
+    /// cluster one takes the rest of it, which [`Cmd::secret_flags`]'s
+    /// redaction needs to know.
+    pub fn value_short_flags(&self, task_id: usize) -> Vec<String> {
+        let mut flags = vec![];
+        let mut add = |arg: &Arg| {
+            if arg.secret() || !arg.is_cli_exposed() {
+                return;
+            }
+            let short = match arg {
+                Arg::String { short, .. }
+                | Arg::Int { short, .. }
+                | Arg::UInt { short, .. }
+                | Arg::StringList { short, .. }
+                | Arg::IntList { short, .. }
+                | Arg::UIntList { short, .. } => short,
+                _ => return,
+            };
+            // One that may go bare takes a value only after `=`.
+            let eq = if matches!(arg, Arg::String { bare: Some(_), .. }) {
+                "="
+            } else {
+                ""
+            };
+            if let Some(short) = short {
+                flags.push(format!("-{short}{eq}"));
+            }
+        };
+        if let Some(task) = self.tasks.get(task_id) {
+            task.args().values().for_each(&mut add);
+        }
+        for feat in &self.features {
+            feat.args().values().for_each(&mut add);
+        }
+        flags.sort();
+        flags.dedup();
+        flags
+    }
+
     pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
         let leaf = deepest_subcommand(&matches).ok_or(CmdError::NoTaskSelected)?;
         let task_id = *leaf
@@ -2332,6 +2415,7 @@ mod tests {
             description: None,
             bare: None,
             config_only: false,
+            secret: false,
         }
     }
 
@@ -2345,6 +2429,7 @@ mod tests {
             description: None,
             bare: None,
             config_only: false,
+            secret: false,
         }
     }
 
@@ -3392,6 +3477,37 @@ mod tests {
 
     // ── Override merge (no heap path: no overrides applied) ────────────────
 
+    /// The secret flags in each spelling the parser takes, a bare-capable
+    /// one's with `=`, and the other value-taking shorts.
+    #[test]
+    fn secret_and_value_short_flags() {
+        let with = |short: Option<&str>, bare: Option<&str>, secret: bool| Arg::String {
+            required: false,
+            default: String::new(),
+            short: short.map(str::to_owned),
+            long: None,
+            values: None,
+            description: None,
+            bare: bare.map(str::to_owned),
+            config_only: false,
+            secret,
+        };
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("api_token".to_owned(), with(Some("t"), None, true));
+        args.insert("key".to_owned(), with(None, Some("default"), true));
+        args.insert("message".to_owned(), with(Some("m"), None, false));
+        args.insert("mode".to_owned(), with(Some("o"), Some("x"), false));
+        let t = stub_task("deploy", &[], args);
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        assert_eq!(cmd.secret_flags(0), ["--api-token", "--key=", "-t"]);
+        assert_eq!(cmd.value_short_flags(0), ["-m", "-o="]);
+    }
+
     #[test]
     fn task_args_merges_cli_value() {
         let mut args: SmallMap<String, Arg> = SmallMap::new();
@@ -3445,6 +3561,7 @@ mod tests {
             description: None,
             bare: None,
             config_only: false,
+            secret: false,
         };
         assert_eq!(
             clap_id(Scope::Feature("artifact-upload"), "mode", &arg),
@@ -3551,6 +3668,7 @@ mod tests {
             description: None,
             bare: Some("default".to_owned()),
             config_only: false,
+            secret: false,
         };
         let cmd = || {
             Command::new("t")
@@ -3642,6 +3760,7 @@ mod tests {
                     description: None,
                     bare: None,
                     config_only: true,
+                    secret: false,
                 },
                 "\"hi\"",
             ),
