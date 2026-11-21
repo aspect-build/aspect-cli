@@ -340,7 +340,7 @@ def _resolve_effective_dirs(ph):
     if escalate:
         for f in detect_result["files"]:
             if match_any(escalate, f):
-                detail(ctx.std, "Changed file %r matches --scope-all-on-change pattern - escalating to a whole-repo update." % f)
+                info(ctx.std, "Changed file %r matches --scope-all-on-change pattern - escalating to a whole-repo update." % f)
                 return dedupe_subtrees(user_dirs), False
 
     # Filter by --changed-file-pattern; empty = keep all (gazelle decides per-dir).
@@ -600,7 +600,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         if not f.startswith("-mode") and not f.startswith("--mode"):
             diff_args.append(f)
         else:
-            detail(ctx.std, "--gazelle-flag=%s ignored in diff phase (task controls -mode internally)." % f)
+            info(ctx.std, "--gazelle-flag=%s ignored in diff phase (task controls -mode internally)." % f)
     diff_args.append("-mode=diff")
     diff_args.extend(effective_dirs)
     status = _pick_status(data, had_failure = False, terminal = False)

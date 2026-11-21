@@ -234,8 +234,8 @@ def _reused_sections(ctx: TaskContext, default, spec, repo_defines: list) -> lis
     if all([w in repo_defines for w in (wanted or [config_name(default)])]):
         return wanted
     if wanted:
-        detail(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
-                        ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))
+        info(ctx.std, "This checkout's %s does not define %s, so this machine's rc carries its own copy of those endpoints. `aspect setup bazelrc --force` in the checkout regenerates it." %
+                      ("%workspace%/" + GENERATED_RC, ", ".join([w for w in wanted if w not in repo_defines])))
     return None
 
 def _create_generated_dir(ctx: TaskContext, dir: str, gitignore: bool) -> list:
@@ -458,8 +458,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
     # so the same helper.
     if default != None and ctx.args.remote in ["", AUTO] and not can_authenticate(ctx, default):
         spec = parse_remote("none")
-        detail(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
-                        (default.name, login_hint(default), config_name(default)))
+        info(ctx.std, "Not enabling %s's remote cache or BES: nothing here can authenticate it (%s). The rc still defines --config=%s, which works once there is a credential." %
+                      (default.name, login_hint(default), config_name(default)))
 
     # A runner's endpoints are its own and meant to win, so never reuse there.
     reused = None

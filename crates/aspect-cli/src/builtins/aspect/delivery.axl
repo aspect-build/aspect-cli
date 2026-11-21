@@ -1713,8 +1713,8 @@ def _delivery_impl(ctx):
         # --mode=always --dry-run --track-state=false degrades gracefully (skip
         # phase 1/2, no digests); other combinations need digests and hard-error.
         if mode == "always" and dry_run and not track_state:
-            detail(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
-                            " Configure --remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
+            info(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
+                          " Configure --remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
             phase_1_2_runs = False
         else:
             error(ctx.std, "Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
@@ -1956,10 +1956,10 @@ def _delivery_impl(ctx):
     )
 
     if delivery_targets and skip_delivery_build:
-        detail(ctx.std, "Skipping the delivery build: --dry-run dispatches nothing, so its outputs would go unused." +
-                        " Pass --dry-run=build to build the pending targets anyway - it fills each manifest entry's" +
-                        " on-disk paths and runs the per-target 'never built' / 'not runnable' checks, at the cost of a" +
-                        " full release build.")
+        info(ctx.std, "Skipping the delivery build: --dry-run dispatches nothing, so its outputs would go unused." +
+                      " Pass --dry-run=build to build the pending targets anyway - it fills each manifest entry's" +
+                      " on-disk paths and runs the per-target 'never built' / 'not runnable' checks, at the cost of a" +
+                      " full release build.")
 
     rows = []
     skipped_count = 0
@@ -2194,7 +2194,7 @@ def _delivery_impl(ctx):
                     if not phase_1_2_runs:
                         dispatch_bazel_build_end(ctx, bazel_trait, exit_code_of(status))
                     if not status.success and release_build["cancelled"]:
-                        detail(ctx.std, "Delivery build cancelled: a DeliveryTrait.delivery_target hook raised.")
+                        info(ctx.std, "Delivery build cancelled: a DeliveryTrait.delivery_target hook raised.")
                     elif not status.success:
                         build_exit_code = exit_code_of(status)
                         error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(build_exit_code, phase3_log_path))

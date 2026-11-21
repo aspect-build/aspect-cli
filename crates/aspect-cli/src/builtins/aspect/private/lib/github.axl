@@ -32,7 +32,7 @@ load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
-load("./environment.axl", "detail", "warn")
+load("./environment.axl", "detail", "info", "warn")
 load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load("./http_headers.axl", "retryable_status")
@@ -130,7 +130,7 @@ def _format_http_failure_detail(status, error):
     message; shared by `_warn_http_failure` and the quiet-log path."""
     if status == 0:
         return error if error else "transport error"
-    detail = "HTTP %d" % status
+    text = "HTTP %d" % status
     if error:
         extra = error if type(error) == "string" else str(error)
 
@@ -138,8 +138,8 @@ def _format_http_failure_detail(status, error):
         extra = extra.replace("\n", " ")
         if len(extra) > 200:
             extra = extra[:200] + "..."
-        detail = detail + ": " + extra
-    return detail
+        text = text + ": " + extra
+    return text
 
 def _warn_http_failure(ctx, label, attempts, status, error):
     """Emit one WARNING line for a terminal HTTP failure. `label` is a
@@ -1978,9 +1978,9 @@ def _bail_if_not_public_github(std, log, skip_label):
         if _resolve_api_base(env) == DEFAULT_GITHUB_API:
             missing.append(_API_URL_ENV)
     if missing:
-        log.detail(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
-                         "for that host in %s and its API base (e.g. %s) in %s; " +
-                         "missing %s. %s") % (
+        log.info(std, ("%s points at '%s', not github.com. GitHub Enterprise needs a token " +
+                       "for that host in %s and its API base (e.g. %s) in %s; " +
+                       "missing %s. %s") % (
             var,
             host,
             _EXPLICIT_TOKEN_ENV,
@@ -1992,7 +1992,7 @@ def _bail_if_not_public_github(std, log, skip_label):
         return True
     mismatch = _api_host_mismatch(std)
     if mismatch:
-        log.detail(std, "%s; not sending a GitHub token there. %s" % (mismatch, skip_label))
+        log.info(std, "%s; not sending a GitHub token there. %s" % (mismatch, skip_label))
         return True
     return False
 

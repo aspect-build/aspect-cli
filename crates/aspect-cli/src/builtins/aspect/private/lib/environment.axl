@@ -168,7 +168,7 @@ def feature_logger(feature):
     """(info, detail, warn, error, trace) bundle prepending `<feature>: ` to each message.
 
         _LOG = feature_logger("GitHub status comments")
-        _LOG.detail(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
+        _LOG.info(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
 
     info/detail/warn/error take `std` first (no std handle at module-load time).
     trace is ASPECT_DEBUG-gated; for multi-line debug blocks use bare trace.log

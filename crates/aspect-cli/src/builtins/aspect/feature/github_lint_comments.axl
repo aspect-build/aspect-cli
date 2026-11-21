@@ -919,7 +919,7 @@ def _github_lint_impl(ctx: FeatureContext):
                     if other > 0:
                         parts.append("%d other" % other)
                     breakdown = " (" + ", ".join(parts) + ")" if parts else ""
-                    _LOG.detail(ctx.std, "Capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
+                    _LOG.info(ctx.std, "Capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
                         max_pr_comments,
                         state["dropped_due_to_cap"],
                         breakdown,

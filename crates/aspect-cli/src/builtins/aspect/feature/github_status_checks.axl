@@ -663,8 +663,8 @@ def _github_status_checks(ctx: FeatureContext):
                 output["annotations"] = batches[0]
                 extra_batches = batches[1:]
                 if total_eligible > len(annotations):
-                    _LOG.detail(ctx.std, "Capping lint annotations at %d (of %d eligible)" %
-                                         (len(annotations), total_eligible))
+                    _LOG.info(ctx.std, "Capping lint annotations at %d (of %d eligible)" %
+                                       (len(annotations), total_eligible))
 
         (output, conclusion) = _decide(ctx, status, final, output, desired_conclusion)
         _push_status(ctx, status, final, conclusion, output = output)

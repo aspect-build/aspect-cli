@@ -43,7 +43,7 @@ load("./bazel_results.axl", "bes_get", "file_uri_to_path", "test_result_cached",
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
-load("./environment.axl", "detail", "detect_ci", "warn")
+load("./environment.axl", "detail", "detect_ci", "info", "warn")
 load("./exit_status.axl", "exit_code_of")
 load("./github.axl", "github")
 load("./report.axl", "REPORT_ARTIFACT_KIND", "REPORT_ARTIFACT_NAME", "build_report")
@@ -443,7 +443,7 @@ def _info_skip_no_ci_host(ctx, name):
     env = ctx.std.env
     on_ci = bool(env.var("CI")) or detect_ci_host(env) != None
     if on_ci:
-        detail(ctx.std, "Skipping artifact upload (%s): not on a recognized CI host." % name)
+        info(ctx.std, "Skipping artifact upload (%s): not on a recognized CI host." % name)
 
 def _create_uploader(env):
     """Per-CI uploader struct, or None off a recognized CI host. Each
@@ -1078,7 +1078,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
         if not is_local:
             reason = uploader.check(ctx)
             if reason:
-                detail(ctx.std, "Artifact upload skipped: " + reason)
+                info(ctx.std, "Artifact upload skipped: " + reason)
             else:
                 for channel in channels:
                     _flush(ctx, channel, final = True)

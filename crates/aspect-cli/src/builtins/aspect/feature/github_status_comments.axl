@@ -1604,7 +1604,7 @@ def _github_status_comments(ctx: FeatureContext):
     run_attempt = identity["run_attempt"]
     workflow_name = identity["workflow_name"]
     if not run_id:
-        _LOG.detail(ctx.std, "Missing CI run id (%s); skipping." % host["marker"])
+        _LOG.info(ctx.std, "Missing CI run id (%s); skipping." % host["marker"])
         return
 
     # GHA assembles a run-level URL from env here as a fallback; other hosts
