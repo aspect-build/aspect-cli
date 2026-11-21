@@ -1408,11 +1408,14 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// it for the same `BuildEvent` values a live build's `iterator()`
     /// yields, so code written for a build's events reads an earlier one's.
     /// `kinds=` filters as `iterator()`'s does. Read lazily as iterated, it
-    /// ends at the end of the file: once it has, `complete` says whether
-    /// Bazel's final event was in it (a build cut short has none), and
-    /// `error` why reading stopped early (a stream cut partway through a
-    /// message, or one that does not decode), else None. A file that cannot
-    /// be opened is an error.
+    /// is one pass, as a live iterator is: a second loop, or one after a
+    /// `break`, goes on from where the last stopped; call `read` again to
+    /// start over. It ends at the end of the file: once it has, `complete`
+    /// says whether the last event in it was Bazel's final one (a build cut
+    /// short, or a retried attempt that stopped, has none last), and `error`
+    /// why reading stopped early (a stream cut partway through a message, or
+    /// one that does not decode), else None. A file that cannot be opened is
+    /// an error.
     #[starlark(as_type = stored_events::StoredBuildEvents)]
     fn read<'v>(
         #[starlark(require = pos)] path: &str,

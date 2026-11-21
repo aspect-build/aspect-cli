@@ -14,7 +14,8 @@ use starlark::values::{
     AllocValue, Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Value, starlark_value,
 };
 
-/// The events of a stream kept on disk, read as they are iterated.
+/// The events of a stream kept on disk, read as they are iterated: one pass,
+/// every loop over it going on from where the last stopped.
 #[derive(Clone, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.StoredBuildEvents>")]
 pub struct StoredBuildEvents {
