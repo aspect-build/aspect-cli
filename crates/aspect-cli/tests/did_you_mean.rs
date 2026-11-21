@@ -119,14 +119,18 @@ fn a_feature_near_miss_is_suggested() {
 }
 
 #[test]
-fn a_described_task_near_miss_is_suggested() {
+fn a_described_task_or_feature_near_miss_is_suggested() {
     assert_fails_with(
         &run("", &["describe", "chekc"]),
-        r#"no task "chekc"; did you mean "check"? Run `aspect describe`"#,
+        r#"no task or feature "chekc"; did you mean "check"? Run `aspect describe`"#,
+    );
+    assert_fails_with(
+        &run("", &["describe", "feature consle"]),
+        r#"no task or feature "feature consle"; did you mean "feature console"? Run `aspect describe`"#,
     );
     assert_fails_with(
         &run("", &["describe", "nonesuch"]),
-        r#"no task "nonesuch". Run `aspect describe`"#,
+        r#"no task or feature "nonesuch". Run `aspect describe`"#,
     );
 }
 
