@@ -513,8 +513,8 @@ impl RecordFile {
     /// One a prune evicted meanwhile (a run silent past [`RUNNING_IDLE`],
     /// taken for a crash's) stays evicted: the eviction is taken in first,
     /// and whatever is written after it (an error, the line the task ended
-    /// on, log paths) is scrubbed of the secrets and of the files it no
-    /// longer has.
+    /// on) is scrubbed of the secrets, its log paths kept only for files
+    /// still there.
     fn save(&self) -> io::Result<()> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         with_entry_lock(dir, || {
@@ -531,9 +531,13 @@ impl RecordFile {
                     &self.secrets,
                 );
                 (record.error, record.conclusion) = (text[0].clone(), text[1].clone());
+                // Only the paths the eviction took the files of: a build
+                // after it has logs of its own.
                 for b in &mut record.bazel {
                     if let Some(s) = b.summary.as_mut() {
-                        s.failures.iter_mut().for_each(|f| f.logs.clear());
+                        for f in &mut s.failures {
+                            f.logs.retain(|log| dir.join(log).exists());
+                        }
                     }
                 }
             }
@@ -1073,6 +1077,27 @@ mod tests {
         let mut evicted = read(file.path()).unwrap();
         evicted.evict(SystemTime::UNIX_EPOCH);
         fs::write(file.path(), serde_json::to_vec(&evicted).unwrap()).unwrap();
+        // A write takes the eviction in, so the command line it would scrub
+        // the end's text with is already redacted.
+        file.update(|_| {});
+        let kept = dir.path().join("bazel/2/actions/a.stderr");
+        fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        fs::write(&kept, b"").unwrap();
+        file.update(|r| {
+            r.bazel.push(BazelRecord {
+                summary: Some(Summary {
+                    failures: vec![bazel::bes::sink::summary::Failure {
+                        kind: "action".into(),
+                        label: "//a".into(),
+                        detail: "Genrule".into(),
+                        attempt: None,
+                        logs: s(&["bazel/2/actions/a.stderr", "bazel/1/gone.stderr"]),
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        });
         file.end(
             Some(1),
             "Rejected S3CRET".into(),
@@ -1086,6 +1111,11 @@ mod tests {
         assert!(
             !after.error.contains("S3CRET") && !after.conclusion.contains("S3CRET"),
             "written after the eviction, scrubbed: {after:?}"
+        );
+        assert_eq!(
+            after.bazel[0].summary.as_ref().unwrap().failures[0].logs,
+            ["bazel/2/actions/a.stderr"],
+            "a later build's logs kept, the evicted one's dropped"
         );
     }
 
