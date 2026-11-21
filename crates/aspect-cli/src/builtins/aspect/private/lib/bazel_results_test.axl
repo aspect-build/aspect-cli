@@ -2036,6 +2036,8 @@ def _test_strip_url_creds_stops_at_the_authority(ctx):
         ("https://ci:pa/ss@github.com/x", "https://ci:<REDACTED>@github.com/x"),
         ("https://u:p?ss@h", "https://u:<REDACTED>@h"),
         ("https://h:8080/path@x", "https://h:8080/path@x"),
+        ("http://[::1]:8080/~me@x", "http://[::1]:8080/~me@x"),
+        ("https://host:abc/https://u:p@x", "https://host:<REDACTED>@x"),
     ]:
         _eq("raw specials: " + url, strip_url_creds(url), want)
 

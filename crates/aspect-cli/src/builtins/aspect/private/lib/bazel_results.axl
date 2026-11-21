@@ -2481,11 +2481,16 @@ def _login_end(url):
     `bazel::bes::redact::login_end` reads it: up to the last `@` before the
     first `/`, `?` or `#`; else a later `@` after a `user:password` with a raw
     `/`, `?` or `#` in the password (a `:` before the first of those, not a
-    port's, and no `=` or `&`), the last before the next of those."""
+    port's nor an IPv6 host's, and no `=` or `&`), the last before the next
+    of those."""
     authority = _first_of(url, "/?#")
     at = url.rfind("@", 0, authority)
     if at >= 0:
         return at
+
+    # A bracketed IPv6 host (`[::1]:8080`) has no login before it.
+    if url.startswith("["):
+        return -1
     colon = url.find(":", 0, authority)
     if colon < 0:
         return -1

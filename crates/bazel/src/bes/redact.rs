@@ -612,12 +612,14 @@ pub fn strip_url_creds(s: &str) -> Cow<'_, str> {
         let end = s[start..]
             .find(char::is_whitespace)
             .map_or(s.len(), |i| start + i);
+        // A `://` within a login already redacted is none of its own.
+        search = start;
         if let Some(at) = login_end(&s[start..end]) {
             out.push_str(&s[copied..start]);
             out.push_str(REDACTED);
             copied = start + at;
+            search = copied;
         }
-        search = start;
     }
     if copied == 0 {
         return Cow::Borrowed(s);
@@ -634,13 +636,18 @@ pub fn strip_url_creds(s: &str) -> Cow<'_, str> {
 /// closes a login when what comes before it reads as `user:password` with a
 /// raw `/`, `?` or `#` in the password: a `:` before the first of those, not
 /// starting a port (`host:8080/path@x` is a path), and no `=` or `&` (a
-/// query's `?user=me@corp.com`); then the last `@` before the next `/`, `?`
-/// or `#` closes it. Mirrored in `bazel_results.axl`'s `strip_url_creds`.
+/// query's `?user=me@corp.com`; a bracketed IPv6 host, `[::1]:8080`, is
+/// none); then the last `@` before the next `/`, `?` or `#` closes it.
+/// Mirrored in `bazel_results.axl`'s `strip_url_creds`.
 pub fn login_end(url: &str) -> Option<usize> {
     let breaks = ['/', '?', '#'];
     let authority = url.find(breaks).unwrap_or(url.len());
     if let Some(at) = url[..authority].rfind('@') {
         return Some(at);
+    }
+    // A bracketed IPv6 host (`[::1]:8080`) has no login before it.
+    if url.starts_with('[') {
+        return None;
     }
     let colon = url[..authority].find(':')?;
     let port = &url[colon + 1..authority];
@@ -1153,11 +1160,36 @@ mod tests {
             ("https://h:8080/path@x", "https://h:8080/path@x".to_string()),
             ("https://h.example/a@b", "https://h.example/a@b".to_string()),
             (
+                "http://[::1]:8080/~me@x",
+                "http://[::1]:8080/~me@x".to_string(),
+            ),
+            ("https://host:abc/https://u:p@x", format!("https://{r}@x")),
+            ("https://a:b://c@host", format!("https://{r}@host")),
+            (
                 "a=https://h.example b=https://u:pw@h2.example",
                 format!("a=https://h.example b=https://{r}@h2.example"),
             ),
         ] {
             assert_eq!(strip_url_creds(url), want, "{url}");
+        }
+    }
+
+    /// No text panics it, however its URLs nest: every string of up to five
+    /// of the pieces a URL is parsed by, and the redaction changes only what
+    /// it found a login in.
+    #[test]
+    fn no_text_panics_the_url_redaction() {
+        let pieces = ["://", "@", ":", "/", "?", "#", "a", "1", "[", "]", " ", "é"];
+        let mut texts = vec![String::new()];
+        for _ in 0..5 {
+            texts = texts
+                .iter()
+                .flat_map(|t| pieces.iter().map(move |p| format!("{t}{p}")))
+                .collect();
+            for t in &texts {
+                let out = strip_url_creds(t);
+                assert!(t.contains('@') || out == t.as_str(), "{t:?} -> {out:?}");
+            }
         }
     }
 
