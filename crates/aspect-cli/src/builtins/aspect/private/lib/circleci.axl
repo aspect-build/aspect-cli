@@ -433,9 +433,10 @@ def _run_s3_put(ctx, curl_args, url):
     with a clean exit; `body` is the S3 response (the trailing `%{http_code}`
     line stripped) for error diagnosis. When `trace.enabled` or
     `std.io.debug`, runs curl `-v` so the sent request headers - which reveal
-    anything curl added beyond what was signed - show in the debug line; `curl_err` is redacted before being
-    returned so a transport-error detail built from it can't leak the SigV4
-    `Authorization` / `x-amz-security-token` that `-v` echoes.
+    anything curl added beyond what was signed - show in the debug line;
+    `curl_err` is redacted before being returned so a transport-error detail
+    built from it can't leak the SigV4 `Authorization` /
+    `x-amz-security-token` that `-v` echoes.
     """
     verbose = trace.enabled or ctx.std.io.debug
     args = curl_args + (["-v"] if verbose else [])

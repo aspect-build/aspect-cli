@@ -135,8 +135,9 @@ fn emit_event(
 ///   console exporter of `logs` (`OTEL_LOGS_EXPORTER=console`) prints it,
 ///   and with OTLP active (any endpoint registered via
 ///   `ctx.telemetry.exporters.add(...)`) it emits as a `Severity::Trace`
-///   LogRecord. `debug()` in `lib/environment.axl` adds a `DEBUG:` line. Keyword arguments are not accepted on the log path; route
-///   structured data through `trace.event`.
+///   LogRecord. `debug()` in `lib/environment.axl` adds a `DEBUG:` line.
+///   Keyword arguments are not accepted on the log path; route structured
+///   data through `trace.event`.
 /// * `trace.event(name, *, message=None, category=None, error=None, fields=None)`
 ///   — structured event. Top-level slots and `fields` live in separate
 ///   namespaces. A file or console exporter of `traces` (`ASPECT_DEBUG=1`,
