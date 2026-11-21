@@ -83,7 +83,9 @@ can do here you can do directly via option 4.
 Future versions of this feature may layer additional default behaviors on
 top (detected CI-host endpoints, sampling defaults, etc.).
 
-Exporter names this CLI lacks (`zipkin`, `prometheus`) are ignored.
+`OTEL_<SIGNAL>_EXPORTER` takes `otlp`, `console` and `none`; any other name
+(`zipkin`, `prometheus`) is ignored with a warning, as the spec asks of an
+unrecognized value.
 
 Environment variables read when `discover_endpoints = True`:
   OTEL_EXPORTER_OTLP_ENDPOINT          — single endpoint for all signals
@@ -94,6 +96,10 @@ Environment variables read when `discover_endpoints = True`:
   OTEL_EXPORTER_OTLP_HEADERS           — comma-separated key=value list
                                          applied to every endpoint registered
                                          by this feature
+  OTEL_TRACES_EXPORTER / OTEL_LOGS_EXPORTER / OTEL_METRICS_EXPORTER
+                                       — which signals the endpoints carry
+                                         (read whatever `discover_endpoints`
+                                         says, for the console exporters)
 
 Per-signal endpoint overrides take precedence over the catch-all. If only the
 catch-all is set, one endpoint is registered for all signals; if a per-signal
@@ -101,9 +107,13 @@ endpoint is set, it is registered for just that signal (and the catch-all,
 where present, covers any remaining signals).
 """
 
-load("../private/lib/environment.axl", "debug")
+load("../private/lib/environment.axl", "debug", "feature_logger")
+
+_LOG = feature_logger("Telemetry")
 
 _SIGNALS = ("traces", "logs", "metrics")
+
+_EXPORTER_NAMES = ("otlp", "console", "none")
 
 # ASPECT_DEBUG's console signals. Its logs already print as DEBUG: lines.
 _ASPECT_DEBUG_SIGNALS = ("traces", "metrics")
@@ -142,6 +152,16 @@ def _exporter_names(env, signal):
     """The exporter names `OTEL_<SIGNAL>_EXPORTER` lists, lowercased."""
     raw = env.var("OTEL_%s_EXPORTER" % signal.upper()) or ""
     return [n.strip().lower() for n in raw.split(",") if n.strip()]
+
+def unsupported_exporters(env):
+    """`(variable, name)` for each name an `OTEL_<SIGNAL>_EXPORTER` lists
+    that is none of `otlp`, `console` and `none`."""
+    return [
+        ("OTEL_%s_EXPORTER" % s.upper(), n)
+        for s in _SIGNALS
+        for n in _exporter_names(env, s)
+        if n not in _EXPORTER_NAMES
+    ]
 
 def console_signals(env):
     """The signals that get a console exporter: each one whose
@@ -273,6 +293,9 @@ def _describe(spec):
     return s
 
 def _telemetry_impl(ctx: FeatureContext):
+    for var, name in unsupported_exporters(ctx.std.env):
+        _LOG.warn(ctx.std, "%s lists %r, which this CLI can't export to; ignoring it. Supported: %s." % (var, name, ", ".join(_EXPORTER_NAMES)))
+
     # Console exporters are independent of `discover_endpoints`: local
     # stderr output, not OTLP endpoint auto-discovery.
     _register_console(ctx)

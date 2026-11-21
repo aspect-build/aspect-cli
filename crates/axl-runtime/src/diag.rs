@@ -1,14 +1,16 @@
 //! Severity-prefixed user-facing diagnostics for the Rust side of the CLI.
 //!
-//! The Rust counterpart of the `info` / `detail` / `warn` / `error` std helpers
-//! in `lib/environment.axl`: the same `INFO:` / `WARNING:` / `ERROR:` prefix
+//! The Rust counterpart of the `debug` / `info` / `detail` / `warn` / `error`
+//! std helpers in `lib/environment.axl`: the same `DEBUG:` / `INFO:` /
+//! `WARNING:` / `ERROR:` prefix
 //! style (mirroring Bazel's uppercase severity labels), the same ANSI colors,
 //! and the same "degrade to plain text when color is off" behavior — so a line
 //! printed from Rust is indistinguishable from one printed by an AXL task.
 //!
 //! Use this for user-facing subsystem messages (a backend became unreachable,
-//! a fallback fired). It is **not** the structured/debug channel — that is
-//! `tracing` (and the `ASPECT_DEBUG`-gated ad-hoc logging some subsystems keep).
+//! a fallback fired). It is **not** the structured channel - that is
+//! `tracing`; the runtime's `trace!` macro emits a log record there and the
+//! [`debug`] line here.
 //!
 //! Both write to stderr and color by the same answer,
 //! [`crate::color::console_supports_color`]: the process's memoized
@@ -17,8 +19,9 @@
 //! `std.io.stderr.color` read.
 //!
 //! Levels, quietest first: debug, detail, info, warning, error. [`detail`] and
-//! the AXL `detail` helper follow [`verbose`], and the AXL `debug` helper's
-//! `DEBUG:` line follows [`verbosity`] being [`Verbose::Debug`]. The `Console`
+//! the AXL `detail` helper follow [`verbose`], and [`debug`] (which the
+//! runtime's `trace!` macro calls) and the AXL `debug` helper print their
+//! `DEBUG:` line only when [`debugging`]. The `Console`
 //! feature sets the level for the running task when the console resolves;
 //! before that, early in start-up, it is [`Verbose::On`] unless the CLI set it
 //! from `ASPECT_VERBOSE` / `ASPECT_DEBUG`. Everything else prints under every
@@ -121,9 +124,16 @@ pub fn verbose() -> bool {
     verbosity().shows_detail()
 }
 
+/// Whether debug lines print: the level is [`Verbose::Debug`].
+pub fn debugging() -> bool {
+    verbosity() == Verbose::Debug
+}
+
 /// Severity of a diagnostic line, carrying its label and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Severity {
+    /// Grey `DEBUG:` - internals a bug report needs.
+    Debug,
     /// Cyan `INFO:` — a notable but expected runtime branch fired.
     Info,
     /// Yellow `WARNING:` — a subsystem problem; the task continues.
@@ -136,6 +146,7 @@ impl Severity {
     /// The uppercase label (without the trailing colon).
     fn label(self) -> &'static str {
         match self {
+            Severity::Debug => "DEBUG",
             Severity::Info => "INFO",
             Severity::Warning => "WARNING",
             Severity::Error => "ERROR",
@@ -143,9 +154,10 @@ impl Severity {
     }
 
     /// The SGR color-open sequence for the label, matching the AXL helpers
-    /// (`INFO` bold cyan, `WARNING`/`ERROR` plain yellow/red).
+    /// (`DEBUG` grey, `INFO` bold cyan, `WARNING`/`ERROR` plain yellow/red).
     fn color(self) -> &'static str {
         match self {
+            Severity::Debug => "\x1b[0;90m",
             Severity::Info => "\x1b[1;36m",
             Severity::Warning => "\x1b[0;33m",
             Severity::Error => "\x1b[0;31m",
@@ -182,6 +194,14 @@ fn colorize() -> bool {
 /// severity is computed.
 pub(crate) fn emit(sev: Severity, msg: &str) {
     errln!("{}", format_line(sev, colorize(), msg));
+}
+
+/// Print a grey `DEBUG:` line when [`debugging`]. The `trace!` macro calls
+/// it beside the log record it emits.
+pub fn debug(msg: &str) {
+    if debugging() {
+        emit(Severity::Debug, msg);
+    }
 }
 
 /// Print a cyan `INFO:` line for a notable runtime branch.
@@ -272,7 +292,12 @@ mod tests {
 
     #[test]
     fn plain_omits_ansi() {
-        for sev in [Severity::Info, Severity::Warning, Severity::Error] {
+        for sev in [
+            Severity::Debug,
+            Severity::Info,
+            Severity::Warning,
+            Severity::Error,
+        ] {
             let line = format_line(sev, false, "hello");
             assert_eq!(line, format!("{}: hello", sev.label()));
             assert!(!line.contains('\x1b'), "{sev:?} leaked an escape: {line:?}");

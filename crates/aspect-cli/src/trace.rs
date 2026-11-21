@@ -194,8 +194,8 @@ fn discard_buffer() {
 /// the rest of the process's tracing doesn't pollute these sinks.
 ///
 /// Activated by `ctx.telemetry.exporters.add(file=..., format=..., signals=...)`
-/// — including the stock `ASPECT_DEBUG=1` translation in
-/// `aspect/feature/telemetry.axl`.
+/// and by a console spec's `traces` / `logs` (what `ASPECT_DEBUG=1` and
+/// `OTEL_<SIGNAL>_EXPORTER=console` register in `aspect/feature/telemetry.axl`).
 ///
 /// Pre-install events (anything fired before `install_late_exporters`
 /// runs) are buffered into `EVENT_BUFFER` and replayed on first sink
@@ -874,8 +874,8 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
         discard_buffer();
     }
 
-    // OTel stays enabled even without an OTLP spec: file-only configurations
-    // (such as the `ASPECT_DEBUG=1` stderr spec) still need the trace macros.
+    // OTel stays enabled even without an OTLP spec: file- and console-only
+    // configurations (such as `ASPECT_DEBUG=1`'s) still need the trace macros.
     span_buf.install_late(span_exporters).await;
     log_buf.install_late(log_exporters).await;
 

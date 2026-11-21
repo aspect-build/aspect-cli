@@ -26,8 +26,9 @@ pub fn aspect_cli() -> String {
 /// `ASPECT_*` would override a fixture's config, the CI identity variables
 /// steer the built-in tasks into their CI code paths (status checks, runner
 /// detection) - the same filtering `tools/cache-diff-integration.py` does for
-/// the same reason - and a coding agent's variables switch the console to its
-/// `agent` layout. `HOME` and `PATH` stay: the CLI resolves its builtins cache
+/// the same reason - a coding agent's variables switch the console to its
+/// `agent` layout, and `OTEL_*` would register exporters that print to
+/// stderr or ship to a collector. `HOME` and `PATH` stay: the CLI resolves its builtins cache
 /// under `HOME`. The task history goes to a temp folder of the test process's
 /// own.
 #[allow(dead_code)]
@@ -40,6 +41,7 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
         "CIRCLE",
         "GITHUB_",
         "GITLAB_",
+        "OTEL_",
     ];
     let mut env: std::collections::HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| {

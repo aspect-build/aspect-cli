@@ -629,6 +629,31 @@ fn debug_lines_print_only_at_the_debug_level() {
     );
 }
 
+/// The runtime's own debug records (`trace!`) print as `DEBUG:` lines at the
+/// `debug` level, like AXL's, once each.
+#[test]
+fn runtime_debug_records_print_as_debug_lines() {
+    let count = |env: &[(&str, &str)]| {
+        let output = run_with_env("", &["check"], false, env);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stderr(&output).matches("module @aspect at ").count()
+    };
+    assert_eq!(count(&[]), 0);
+    assert_eq!(count(&[("ASPECT_VERBOSE", "debug")]), 1);
+    assert_eq!(count(&[("ASPECT_DEBUG", "1")]), 1);
+}
+
+/// A `debug()` record reaches a log exporter whatever the level:
+/// `OTEL_LOGS_EXPORTER=console` prints it raw without a `DEBUG:` line.
+#[test]
+fn a_console_log_exporter_prints_debug_records_at_any_level() {
+    let output = run_with_env("", &["check"], false, &[("OTEL_LOGS_EXPORTER", "console")]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert!(err.lines().any(|l| l == "task debug"), "{err}");
+    assert!(!err.contains("DEBUG:"), "{err}");
+}
+
 #[test]
 fn an_invalid_aspect_verbose_names_the_closest_value() {
     let output = run_with_env("", &["check"], false, &[("ASPECT_VERBOSE", "debgu")]);
