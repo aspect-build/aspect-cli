@@ -82,6 +82,16 @@ pub trait TaskLike<'v> {
             .map(|(k, v)| (k.as_str(), v))
             .collect()
     }
+
+    /// Returns the args only config.axl can set (`args.custom` and
+    /// `config_only = True`): the complement of [`Self::cli_args`].
+    fn config_args(&self) -> Vec<(&str, &Arg)> {
+        self.args()
+            .iter()
+            .filter(|(_, v)| !v.is_cli_exposed())
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
 }
 
 /// Cast helper: borrow anything carrying a task as `&dyn TaskLike<'v>`.

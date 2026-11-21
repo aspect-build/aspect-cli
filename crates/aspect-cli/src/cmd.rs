@@ -9,7 +9,9 @@
 //!   the parse. `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
-//!   and for the feature args only `.aspect/config.axl` can set.
+//!   and for the feature args only `.aspect/config.axl` can set. Each task's
+//!   `--help` lists its config-only args apart from its flags, and
+//!   `print_describe()` reports them for tasks and features as `config_args`.
 //! * [`Dispatch`] — carries `task_id`, `task_name`, `task_friendly_name`, `task_uuid`, and the parsed
 //!   matches. `task_args(...)` and `feature_args(...)` produce the merged
 //!   runtime [`Arguments`] for a given task or feature.
@@ -31,6 +33,7 @@ use axl_runtime::engine::arguments::Arguments;
 use axl_runtime::engine::feature::FeatureLike;
 use axl_runtime::engine::names::to_display_name;
 use axl_runtime::engine::task::{MAX_TASK_GROUPS, TaskLike};
+use axl_runtime::engine::task_map::task_key;
 use axl_runtime::eval::TimingMode;
 use axl_runtime::module::Mod;
 use axl_runtime::suggest;
@@ -181,7 +184,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                         ClapArg::new("task")
                             .value_name("TASK")
                             .required(false)
-                            .help("Describe one task in full, e.g. `aspect describe 'cache diff'`. Omit for the index."),
+                            .help("Describe one task in full, e.g. `aspect describe 'cache diff'`, or one feature, e.g. `aspect describe 'feature console'`. Omit for the index."),
                     )
                     .arg(
                         ClapArg::new("output")
@@ -346,12 +349,9 @@ impl<'a, 'v> Cmd<'a, 'v> {
         })
     }
 
-    /// Render `aspect feature [<name>]` and return the process exit code.
-    ///
-    /// With no name, lists every active feature (keyed by the kebab slug the
-    /// user passes back in). With a name, prints just that feature's flags. An
-    /// unknown name lists the valid ones on stderr and exits 2.
-    /// Print the resolved surface as JSON (`aspect describe`).
+    /// Print the resolved surface as JSON (`aspect describe`): the index, or
+    /// with `task` set, one task (`'cache diff'`) or one feature
+    /// (`'feature console'`).
     ///
     /// Pretty-printed rather than compact: the output is read far more often
     /// than it is piped into another program, and diffs of it are useful.
@@ -366,20 +366,17 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     self.aspect_root,
                     self.modules,
                 );
-                match select_task(&full, name) {
+                match select_task(&full, name).or_else(|| select_feature(&full, name)) {
                     Some(t) => t,
                     None => {
-                        let commands = describe_commands(&full);
                         let want = name.trim().trim_start_matches("aspect ").trim();
-                        errln!(
-                            "error: no task {name:?}{}",
-                            suggest::did_you_mean_then(
-                                want,
-                                commands.iter().copied(),
-                                ". ",
-                                "Run `aspect describe` for the list of commands."
-                            )
-                        );
+                        let rest = "Run `aspect describe` for the list of commands and features.";
+                        match describe_suggestion(&full, want) {
+                            Some(c) => errln!(
+                                "error: no task or feature {name:?}; did you mean {c:?}? {rest}"
+                            ),
+                            None => errln!("error: no task or feature {name:?}. {rest}"),
+                        }
                         return ExitCode::FAILURE;
                     }
                 }
@@ -397,6 +394,11 @@ impl<'a, 'v> Cmd<'a, 'v> {
         }
     }
 
+    /// Render `aspect feature [<name>]` and return the process exit code.
+    ///
+    /// With no name, lists every active feature (keyed by the kebab slug the
+    /// user passes back in). With a name, prints just that feature's flags. An
+    /// unknown name lists the valid ones on stderr and exits 2.
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
             .features
@@ -1360,7 +1362,8 @@ fn stringify_value(v: Value<'_>) -> String {
 //
 // Built once per feature. Each task command registers the CLI args hidden (so
 // they parse but don't clutter `--help`); `aspect feature [<name>]` renders
-// them, and the config-only args, for discovery via `Cmd::print_feature_help`.
+// them, and the config-only args, for discovery via `Cmd::print_feature_help`;
+// `aspect describe` reports both.
 
 struct FeatureBlock {
     /// Args exposed as flags, with config.axl overrides baked into their defaults.
@@ -1431,91 +1434,64 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         Arg::Positional { .. } | Arg::TrailingVarArgs { .. } | Arg::Passthrough { .. } => None,
         _ => Some(format!("--{}", long_flag(scope, name, arg))),
     };
-    let (kind, default, values, description, short) = match arg {
+    let (default, values, description, short) = match arg {
         Arg::String {
             default,
             values,
             description,
             short,
             ..
-        } => ("string", json!(default), json!(values), description, short),
+        } => (json!(default), json!(values), description, short),
         Arg::Boolean {
             default,
             description,
             short,
             ..
-        } => ("boolean", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::Int {
             default,
             description,
             short,
             ..
-        } => ("int", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::UInt {
             default,
             description,
             short,
             ..
-        } => ("uint", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::StringList {
             default,
             description,
             short,
             ..
-        } => (
-            "string_list",
-            json!(default),
-            json!(null),
-            description,
-            short,
-        ),
+        } => (json!(default), json!(null), description, short),
         Arg::BooleanList {
             default,
             description,
             short,
             ..
-        } => (
-            "boolean_list",
-            json!(default),
-            json!(null),
-            description,
-            short,
-        ),
+        } => (json!(default), json!(null), description, short),
         Arg::IntList {
             default,
             description,
             short,
             ..
-        } => ("int_list", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::UIntList {
             default,
             description,
             short,
             ..
-        } => ("uint_list", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::Positional {
             default,
             description,
             ..
-        } => (
-            "positional",
-            json!(default),
-            json!(null),
-            description,
-            &None,
-        ),
-        Arg::TrailingVarArgs { description } => (
-            "trailing_var_args",
-            json!(null),
-            json!(null),
-            description,
-            &None,
-        ),
-        Arg::Passthrough { description, .. } => {
-            ("passthrough", json!(null), json!(null), description, &None)
-        }
-        // Filtered out by `is_cli_exposed` before reaching here.
-        Arg::Custom { description, .. } => ("custom", json!(null), json!(null), description, &None),
+        } => (json!(default), json!(null), description, &None),
+        Arg::TrailingVarArgs { description } => (json!(null), json!(null), description, &None),
+        Arg::Passthrough { description, .. } => (json!(null), json!(null), description, &None),
+        Arg::Custom { description, .. } => (json!(null), json!(null), description, &None),
     };
     // `Arg::is_required` reports false for positionals — they carry cardinality
     // instead of a `required` flag — so a `minimum = 1` positional would read as
@@ -1538,7 +1514,7 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
     };
     json!({
         "name": name,
-        "type": kind,
+        "type": arg_type(arg),
         "flag": flag,
         "short": short.as_ref().map(|s| format!("-{s}")),
         "required": required,
@@ -1550,6 +1526,39 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         // collects unrecognized flags from.
         "position": arg.passthrough_position().map(|p| p.as_str()),
         "description": description,
+    })
+}
+
+/// The `type` an `aspect describe` entry reports for `arg`.
+fn arg_type(arg: &Arg) -> &'static str {
+    match arg {
+        Arg::String { .. } => "string",
+        Arg::Boolean { .. } => "boolean",
+        Arg::Int { .. } => "int",
+        Arg::UInt { .. } => "uint",
+        Arg::StringList { .. } => "string_list",
+        Arg::BooleanList { .. } => "boolean_list",
+        Arg::IntList { .. } => "int_list",
+        Arg::UIntList { .. } => "uint_list",
+        Arg::Positional { .. } => "positional",
+        Arg::TrailingVarArgs { .. } => "trailing_var_args",
+        Arg::Passthrough { .. } => "passthrough",
+        Arg::Custom { .. } => "custom",
+    }
+}
+
+/// One arg only `.aspect/config.axl` can set, for a task's or feature's
+/// `config_args` list. It has no flag, so it carries `config_only: true` and
+/// the config.axl expression that sets it (`setter` is the args store, e.g.
+/// `ctx.tasks["build"].args`) in place of the flag fields [`describe_arg`]
+/// reports. No default: an `args.custom` one is an arbitrary Starlark value.
+fn describe_config_arg(setter: &str, name: &str, arg: &Arg) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "type": arg_type(arg),
+        "config_only": true,
+        "config_axl": format!("{setter}.{name}"),
+        "description": arg.description(),
     })
 }
 
@@ -1616,20 +1625,66 @@ fn describe_index(
         "features": features.iter().map(|f| f.name()).collect::<Vec<_>>(),
         "next": {
             "task_detail": "aspect describe '<command without the leading `aspect `>' — e.g. aspect describe 'cache diff'",
+            "feature_detail": "aspect describe 'feature <name>' - e.g. aspect describe 'feature console'",
             "feature_flags": "aspect feature <name>",
         },
     })
 }
 
-/// The command path of every task in a full [`describe_json`] document,
-/// without the leading `aspect `.
-fn describe_commands(full: &serde_json::Value) -> Vec<&str> {
-    full["tasks"]
+/// Every name `aspect describe <name>` accepts in a full [`describe_json`]
+/// document: each task's command path without the leading `aspect `, and
+/// `feature <name>` for each feature.
+fn describe_commands(full: &serde_json::Value) -> Vec<String> {
+    let tasks = full["tasks"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|t| Some(t["command"].as_str()?.trim_start_matches("aspect ")))
-        .collect()
+        .filter_map(|t| {
+            Some(
+                t["command"]
+                    .as_str()?
+                    .trim_start_matches("aspect ")
+                    .to_owned(),
+            )
+        });
+    let features = full["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| Some(format!("{FEATURE_COMMAND} {}", f["name"].as_str()?)));
+    tasks.chain(features).collect()
+}
+
+/// What to suggest for `want`, a name `aspect describe <name>` doesn't accept.
+///
+/// An exact feature slug typed without the leading `feature ` gets
+/// `feature <name>`. Otherwise the [`suggest::closest`] of the
+/// [`describe_commands`] and the bare feature slugs wins, so a near task and a
+/// near feature compete on edits; a bare slug is suggested as
+/// `feature <name>`, the form `describe` accepts.
+fn describe_suggestion(full: &serde_json::Value, want: &str) -> Option<String> {
+    let commands = describe_commands(full);
+    let slugs: Vec<&str> = full["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    if slugs.contains(&want) {
+        return Some(format!("{FEATURE_COMMAND} {want}"));
+    }
+    let c = suggest::closest(
+        want,
+        commands
+            .iter()
+            .map(String::as_str)
+            .chain(slugs.iter().copied()),
+    )?;
+    Some(if commands.iter().any(|cmd| cmd == c) {
+        c.to_owned()
+    } else {
+        format!("{FEATURE_COMMAND} {c}")
+    })
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,
@@ -1642,8 +1697,28 @@ fn select_task(full: &serde_json::Value, name: &str) -> Option<serde_json::Value
     })
 }
 
+/// Pull one feature out of a full [`describe_json`] document by the command
+/// that shows its help, `feature <name>` (with or without the leading
+/// `aspect `). No task path starts with `feature`: the builtin command holds
+/// that top-level name, so a `feature` group fails to build.
+fn select_feature(full: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    let want = name.trim().trim_start_matches("aspect ").trim();
+    let slug = want
+        .strip_prefix(FEATURE_COMMAND)?
+        .strip_prefix(' ')?
+        .trim();
+    full["features"]
+        .as_array()?
+        .iter()
+        .find(|f| f["name"] == slug)
+        .cloned()
+}
+
 /// The full resolved surface as JSON: every task reachable in this repo, the
-/// flags each accepts, and the feature flags accepted everywhere.
+/// flags each accepts, and the feature flags accepted everywhere. Each task and
+/// feature also lists, as `config_args`, the args only `.aspect/config.axl` can
+/// set (see [`describe_config_arg`]); they are kept out of `args` / `flags` so
+/// every entry there stays something a caller can type.
 ///
 /// This exists because the Aspect surface is per-repo — a caller cannot know
 /// what `aspect <task>` means here without asking. One call answers it.
@@ -1688,6 +1763,11 @@ fn describe_json(
                 "description": task.description(),
                 "defined_in": defined_in_label(task.path(), aspect_root, modules),
                 "args": args,
+                "config_args": task
+                    .config_args()
+                    .into_iter()
+                    .map(|(arg_name, arg)| describe_config_arg(&task_config_setter(*task), arg_name, arg))
+                    .collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -1721,6 +1801,11 @@ fn describe_json(
                 "description": feat.description(),
                 "defined_in": defined_in_label(feat.path(), aspect_root, modules),
                 "flags": flags,
+                "config_args": block
+                    .config_args
+                    .iter()
+                    .map(|(arg_name, arg)| describe_config_arg(&feature_config_setter(*feat), arg_name, arg))
+                    .collect::<Vec<_>>(),
             }))
         })
         .collect();
@@ -1848,6 +1933,7 @@ fn feature_config_setter(feat: &dyn FeatureLike<'_>) -> String {
 /// clap's next-line layout (name where a flag's long name starts, every
 /// non-blank line of its help indented below it), closed by how
 /// `.aspect/config.axl` sets them.
+///
 /// Current values are not shown: they would need the repo's config evaluated.
 /// It goes in through `after_help`, which clap writes verbatim (a `{` in the
 /// help is not template-parsed) and strips of ANSI when stdout is not a
@@ -1924,10 +2010,20 @@ fn task_option_args() -> [ClapArg; 5] {
     ]
 }
 
+/// The config.axl store a task's args are set through: `ctx.tasks["<key>"].args`.
+fn task_config_setter(task: &dyn TaskLike<'_>) -> String {
+    format!(
+        "ctx.tasks[\"{}\"].args",
+        task_key(task.group(), &task.kind())
+    )
+}
+
 /// Assemble one task's clap command. `--help` lists the task's own options
 /// first, then `Task Options` when the task sets `show_task_options`, then
-/// `-h, --help`; the features footer follows only on a task showing its task
-/// options, since both concern CI reporting.
+/// `-h, --help`, then the args only `.aspect/config.axl` can set (see
+/// [`config_args_section`]), then the dimmed [`help_footer`]; the features
+/// paragraph of that footer shows only on a task showing its task options,
+/// since both concern CI reporting.
 fn task_command(
     index: usize,
     task: &dyn TaskLike<'_>,
@@ -2046,8 +2142,11 @@ fn task_command(
         }
         None => "{about-with-newline}\n".to_string(),
     };
+    if let Some(section) = config_args_section(&task_config_setter(task), task.config_args()) {
+        cmd = cmd.after_help(section);
+    }
     cmd.help_template(format!(
-        "{cli_header}\n\n{about_block}{{usage-heading}} {{usage}}\n\n{{all-args}}{}",
+        "{cli_header}\n\n{about_block}{{usage-heading}} {{usage}}\n\n{{all-args}}{{after-help}}{}",
         help_footer(task),
     ))
 }
@@ -2674,6 +2773,23 @@ mod tests {
         match cmd.build("0.0.0") {
             Err(CmdError::ReservedName(name, ..)) => assert_eq!(name, FEATURE_COMMAND),
             other => panic!("expected ReservedName, got {:?}", other),
+        }
+    }
+
+    /// What lets `aspect describe 'feature <name>'` name a feature: no task
+    /// path can start with `feature`.
+    #[test]
+    fn build_rejects_a_group_named_feature() {
+        let t = stub_task("console", &[FEATURE_COMMAND], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        match cmd.build("0.0.0") {
+            Err(CmdError::NameConflict(name, ..)) => assert_eq!(name, FEATURE_COMMAND),
+            other => panic!("expected NameConflict, got {:?}", other),
         }
     }
 
@@ -3444,6 +3560,236 @@ mod tests {
 
         let plain = stub_task("greet", &[], SmallMap::new());
         assert_eq!(help_footer(&plain), "");
+    }
+
+    // ── Config-only args in `--help` and `aspect describe` ────────────────
+
+    /// The plain `--help` of a top-level `task`, built through the full root
+    /// as in `main`.
+    fn plain_task_help(task: &StubTask) -> String {
+        let cmd = Cmd {
+            tasks: vec![task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        let help = root
+            .find_subcommand_mut(&task.name)
+            .expect("task subcommand")
+            .render_help()
+            .ansi()
+            .to_string();
+        strip_ansi(&help)
+    }
+
+    /// A Bazel-shaped task: one flag, a config-only list whose help carries a
+    /// `{`, a custom arg without help, and a passthrough bucket for the footer.
+    fn config_args_task() -> StubTask {
+        let mut value_flags = arg_string_list(&["-c"], true);
+        if let Arg::StringList { description, .. } = &mut value_flags {
+            *description =
+                Some(r#"Flags that take a separate value, e.g. {"-c": ...}."#.to_owned());
+        }
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("recipient".to_owned(), arg_string("world"));
+        args.insert("value_flags".to_owned(), value_flags);
+        args.insert("settings".to_owned(), arg_custom(None));
+        args.insert(
+            "forwarded".to_owned(),
+            Arg::Passthrough {
+                position: PassthroughPosition::PostCommand,
+                value_flags_from: Some("value_flags".to_owned()),
+                description: Some("Other flags go to the tool.".to_owned()),
+            },
+        );
+        stub_task("greet", &[], args)
+    }
+
+    #[test]
+    fn task_help_lists_config_only_args_under_their_own_heading() {
+        let help = plain_task_help(&config_args_task());
+        let tail = help
+            .split_once("\nOptions:\n")
+            .map(|(_, tail)| tail)
+            .unwrap_or_else(|| panic!("no generic options heading: {help}"));
+        assert_eq!(
+            tail,
+            "  -h, --help  Print help\n\
+             \n\
+             Set in .aspect/config.axl:\n      \
+                   value_flags\n          \
+                       Flags that take a separate value, e.g. {\"-c\": ...}.\n      \
+                   settings\n\
+             \n\
+             Set these as ctx.tasks[\"greet\"].args.<NAME> in .aspect/config.axl; \
+             they have no command-line flag.\n\
+             \n\
+             Other flags go to the tool.\n",
+        );
+        assert!(!help.contains("--value-flags"), "{help}");
+        assert!(!help.contains("--settings"), "{help}");
+    }
+
+    #[test]
+    fn task_help_without_config_only_args_has_no_config_heading() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("recipient".to_owned(), arg_string("world"));
+        let help = plain_task_help(&stub_task("greet", &[], args));
+        let tail = help
+            .split_once("Greet Options:\n")
+            .map(|(_, tail)| tail)
+            .unwrap_or_else(|| panic!("no task options heading: {help}"));
+        assert_eq!(
+            tail,
+            "      --recipient <recipient>  [default: world]\n\
+             \n\
+             Options:\n  \
+               -h, --help  Print help\n",
+        );
+    }
+
+    #[test]
+    fn config_args_are_set_through_the_tasks_group_path() {
+        let nested = stub_task("login", &["auth", "sso"], SmallMap::new());
+        assert_eq!(
+            task_config_setter(&nested),
+            r#"ctx.tasks["auth/sso/login"].args"#
+        );
+        let f = stub_feature("ArtifactUpload");
+        assert_eq!(
+            feature_config_setter(&f),
+            "ctx.features[ArtifactUpload].args"
+        );
+    }
+
+    #[test]
+    fn describe_lists_a_tasks_config_only_args_apart_from_its_flags() {
+        let task = config_args_task();
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        let t = &doc["tasks"][0];
+
+        let arg_names: Vec<&str> = t["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(arg_names, ["recipient", "forwarded"]);
+        assert_eq!(
+            t["config_args"],
+            serde_json::json!([
+                {
+                    "name": "value_flags",
+                    "type": "string_list",
+                    "config_only": true,
+                    "config_axl": "ctx.tasks[\"greet\"].args.value_flags",
+                    "description": "Flags that take a separate value, e.g. {\"-c\": ...}.",
+                },
+                {
+                    "name": "settings",
+                    "type": "custom",
+                    "config_only": true,
+                    "config_axl": "ctx.tasks[\"greet\"].args.settings",
+                    "description": null,
+                },
+            ])
+        );
+
+        let plain = stub_task("plain", &[], SmallMap::new());
+        let tasks: Vec<&dyn TaskLike> = vec![&plain];
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        assert_eq!(doc["tasks"][0]["config_args"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn describe_lists_a_features_config_only_args_apart_from_its_flags() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("mode".to_owned(), arg_string("auto"));
+        args.insert(
+            "templates".to_owned(),
+            arg_custom(Some("Overrides keyed by slot.")),
+        );
+        let console = feature_with_args("Console", "", args);
+        let mut only: SmallMap<String, Arg> = SmallMap::new();
+        only.insert("templates".to_owned(), arg_custom(None));
+        let config_only = feature_with_args("ConfigOnly", "", only);
+        let features: Vec<&dyn FeatureLike> = vec![&console, &config_only];
+        let doc = describe_json("1.2.3", &[], &features, Path::new("/repo"), &[]);
+
+        let f = &doc["features"][0];
+        assert_eq!(f["name"], "console");
+        assert_eq!(f["flags"].as_array().unwrap().len(), 1);
+        assert_eq!(f["flags"][0]["flag"], "--console:mode");
+        assert_eq!(
+            f["config_args"],
+            serde_json::json!([{
+                "name": "templates",
+                "type": "custom",
+                "config_only": true,
+                "config_axl": "ctx.features[Console].args.templates",
+                "description": "Overrides keyed by slot.",
+            }])
+        );
+        // A feature with no flags at all is still described for its config args.
+        let g = &doc["features"][1];
+        assert_eq!(g["name"], "config-only");
+        assert_eq!(g["flags"], serde_json::json!([]));
+        assert_eq!(g["config_args"][0]["name"], "templates");
+    }
+
+    #[test]
+    fn describe_selects_a_feature_by_its_feature_command() {
+        let f = stub_feature("ArtifactUpload");
+        let features: Vec<&dyn FeatureLike> = vec![&f];
+        let doc = describe_json("1.2.3", &[], &features, Path::new("/repo"), &[]);
+        for name in ["feature artifact-upload", "aspect feature artifact-upload"] {
+            let found = select_feature(&doc, name).unwrap_or_else(|| panic!("{name:?}"));
+            assert_eq!(found["name"], "artifact-upload");
+        }
+        for miss in ["artifact-upload", "featureartifact-upload", "feature nope"] {
+            assert!(select_feature(&doc, miss).is_none(), "{miss:?}");
+        }
+    }
+
+    #[test]
+    fn describe_suggests_a_task_or_the_feature_command() {
+        let doc = serde_json::json!({
+            "tasks": [
+                {"command": "aspect check"},
+                {"command": "aspect consul"},
+                {"command": "aspect lint"},
+            ],
+            "features": [{"name": "console"}, {"name": "lint"}, {"name": "tips"}],
+        });
+        for (want, expected) in [
+            ("chekc", Some("check")),
+            ("feature consle", Some("feature console")),
+            ("console", Some("feature console")),
+            ("tips", Some("feature tips")),
+            ("consle", Some("feature console")),
+            ("consull", Some("consul")),
+            ("lnt", Some("lint")),
+            ("tip", Some("feature tips")),
+            ("ti", None),
+            ("nonesuch", None),
+        ] {
+            assert_eq!(
+                describe_suggestion(&doc, want).as_deref(),
+                expected,
+                "{want:?}"
+            );
+            if let Some(name) = expected {
+                assert!(
+                    select_task(&doc, name)
+                        .or_else(|| select_feature(&doc, name))
+                        .is_some(),
+                    "{name:?} is suggested but not accepted"
+                );
+            }
+        }
     }
 
     #[test]
