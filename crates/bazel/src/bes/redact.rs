@@ -600,28 +600,61 @@ fn redact_header_value(value: &str) -> String {
     }
 }
 
-/// Replace `scheme://user:password@host/...` with `scheme://<REDACTED>@host/...`.
-/// No-op when the input doesn't contain `://` or the authority has no `@`.
+/// Replace the login of every URL in `s`, `scheme://user:password@host/...`,
+/// with `scheme://<REDACTED>@host/...` (see [`login_end`] for where a login
+/// ends). No-op when no URL in it has one.
 pub fn strip_url_creds(s: &str) -> Cow<'_, str> {
-    let Some(scheme_end) = s.find("://") else {
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(found) = s[search..].find("://") {
+        let start = search + found + 3;
+        let end = s[start..]
+            .find(char::is_whitespace)
+            .map_or(s.len(), |i| start + i);
+        if let Some(at) = login_end(&s[start..end]) {
+            out.push_str(&s[copied..start]);
+            out.push_str(REDACTED);
+            copied = start + at;
+        }
+        search = start;
+    }
+    if copied == 0 {
         return Cow::Borrowed(s);
-    };
-    // Look for `user[:pass]@` between `scheme://` and the next `/` (authority section).
-    let authority_start = scheme_end + 3;
-    let rest = &s[authority_start..];
-    // The authority ends at the path, the query or the fragment, so an `@`
-    // in a query (`?user=me@corp.com`) is not taken for a login's.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let Some(at) = authority.find('@') else {
-        return Cow::Borrowed(s);
-    };
-    // Reconstruct with creds replaced.
-    let mut out = String::with_capacity(s.len());
-    out.push_str(&s[..authority_start]);
-    out.push_str(REDACTED);
-    out.push_str(&rest[at..]); // includes the `@` and everything after
+    }
+    out.push_str(&s[copied..]);
     Cow::Owned(out)
+}
+
+/// Where the login of the URL whose text after `://` is `url` ends: the
+/// offset of its closing `@`, or None for a URL with none.
+///
+/// The login is up to the last `@` before the first `/`, `?` or `#`, so a
+/// raw `@` in a password is part of it. With no `@` there, a later one still
+/// closes a login when what comes before it reads as `user:password` with a
+/// raw `/`, `?` or `#` in the password: a `:` before the first of those, not
+/// starting a port (`host:8080/path@x` is a path), and no `=` or `&` (a
+/// query's `?user=me@corp.com`); then the last `@` before the next `/`, `?`
+/// or `#` closes it. Mirrored in `bazel_results.axl`'s `strip_url_creds`.
+pub fn login_end(url: &str) -> Option<usize> {
+    let breaks = ['/', '?', '#'];
+    let authority = url.find(breaks).unwrap_or(url.len());
+    if let Some(at) = url[..authority].rfind('@') {
+        return Some(at);
+    }
+    let colon = url[..authority].find(':')?;
+    let port = &url[colon + 1..authority];
+    if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let first = authority + url[authority..].find('@')?;
+    if url[..first].contains(['=', '&']) {
+        return None;
+    }
+    let next = url[first + 1..]
+        .find(breaks)
+        .map_or(url.len(), |i| first + 1 + i);
+    url[..next].rfind('@')
 }
 
 #[cfg(test)]
@@ -1103,6 +1136,31 @@ mod tests {
 
     /// The authority ends at the path, query or fragment: an `@` past it is
     /// no login.
+    #[test]
+    fn a_login_may_hold_raw_specials_and_every_url_is_checked() {
+        let r = REDACTED;
+        for (url, want) in [
+            (
+                "grpcs://alice:p@ssw0rd@bes.example.com",
+                format!("grpcs://{r}@bes.example.com"),
+            ),
+            (
+                "https://ci:pa/ss@github.com/x",
+                format!("https://{r}@github.com/x"),
+            ),
+            ("https://u:p?ss@h", format!("https://{r}@h")),
+            ("https://u:p#ss@h/x", format!("https://{r}@h/x")),
+            ("https://h:8080/path@x", "https://h:8080/path@x".to_string()),
+            ("https://h.example/a@b", "https://h.example/a@b".to_string()),
+            (
+                "a=https://h.example b=https://u:pw@h2.example",
+                format!("a=https://h.example b=https://{r}@h2.example"),
+            ),
+        ] {
+            assert_eq!(strip_url_creds(url), want, "{url}");
+        }
+    }
+
     #[test]
     fn url_creds_are_only_in_the_authority() {
         assert_eq!(

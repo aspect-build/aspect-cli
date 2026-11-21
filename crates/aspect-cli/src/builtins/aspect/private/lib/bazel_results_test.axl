@@ -2031,6 +2031,13 @@ def _test_strip_url_creds_stops_at_the_authority(ctx):
     for url in ["https://ci.example.com?user=me@corp.com", "https://h.example/a@b", "https://h.example#a@b"]:
         _eq("unchanged: " + url, strip_url_creds(url), url)
     _eq("a login before a query", strip_url_creds("https://u:p@h.example?x=1"), "https://u:<REDACTED>@h.example?x=1")
+    for url, want in [
+        ("grpcs://alice:p@ssw0rd@bes.example.com", "grpcs://alice:<REDACTED>@bes.example.com"),
+        ("https://ci:pa/ss@github.com/x", "https://ci:<REDACTED>@github.com/x"),
+        ("https://u:p?ss@h", "https://u:<REDACTED>@h"),
+        ("https://h:8080/path@x", "https://h:8080/path@x"),
+    ]:
+        _eq("raw specials: " + url, strip_url_creds(url), want)
 
 def _test_strip_url_creds_stops_at_whitespace(ctx):
     """An `@` in a later word does not belong to this URL's userinfo, so a
