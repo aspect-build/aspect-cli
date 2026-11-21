@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+pub mod expanded;
 pub mod feed;
 pub mod sink;
 mod spawn_metrics;
@@ -50,8 +51,8 @@ pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
 /// path is written as one of the [`copies`]. `%workspace%` stands for
 /// `workspace`, as Bazel expands it in this flag, and a boolean value names
 /// no file, as does the `--no` form Bazel 10 takes. The option's old name,
-/// which Bazel still takes, is read as it. See [`crate::rc::requested_path`]
-/// for how empty and relative values resolve, against `directory`.
+/// which Bazel still takes, is read as it. An empty value names no file, and
+/// a relative one is placed against `directory`, as `place` says.
 pub fn requested_path(
     flags: &[String],
     verb: &str,
@@ -67,23 +68,31 @@ pub fn requested_path(
     if off == Some(true) {
         return None;
     }
-    let path = crate::rc::requested_home_path(&flags, COMPACT_FILE_FLAG, verb, None)?;
-    let text = path.to_string_lossy();
+    let value = crate::rc::last_flag_value(&flags, COMPACT_FILE_FLAG, verb)?;
     // Bazel 10 reads a boolean here (off, or stream it to remote storage),
     // which names no file.
-    if crate::rc::parse_bool(&text).is_some() {
+    if value.is_empty() || crate::rc::parse_bool(&value).is_some() {
         return None;
     }
+    Some(place(&value, directory, workspace))
+}
+
+/// The file an execution log flag's `value` names, as Bazel places all three
+/// formats: `~/` is the user's home, `%workspace%` the `workspace` root, and
+/// a relative path is under `directory`, the spawn's working directory.
+fn place(value: &str, directory: Option<&str>, workspace: Option<&Path>) -> PathBuf {
+    let path = crate::rc::home_path(value);
+    let text = path.to_string_lossy();
     let path = match workspace {
         Some(root) if text.contains("%workspace%") => {
             PathBuf::from(text.replace("%workspace%", &root.to_string_lossy()))
         }
         _ => path,
     };
-    Some(match directory {
+    match directory {
         Some(dir) if path.is_relative() => Path::new(dir).join(path),
         _ => path,
-    })
+    }
 }
 
 /// The name Bazel 7.1 to 7.3 knew the compact log by, which later ones still
@@ -135,23 +144,6 @@ fn with_current_name(flags: &[String]) -> Vec<String> {
             flag.clone()
         })
         .collect()
-}
-
-/// The execution log formats other than the compact one.
-const OTHER_FORMATS: [&str; 2] = ["--execution_log_binary_file", "--execution_log_json_file"];
-
-/// Whether `flags` have Bazel write a binary or JSON execution log for
-/// `verb`, which it refuses beside a compact one. Any value names one, empty
-/// or `true` included (Bazel's default location, or a stream to remote
-/// storage), and so does the bare flag; only a false boolean or the `--no`
-/// form does not.
-pub fn other_format(flags: &[String], verb: &str) -> bool {
-    OTHER_FORMATS.iter().any(|name| {
-        // A value that is not a boolean is a path, which is a format.
-        crate::rc::last_word(flags, verb, |token| {
-            crate::rc::bool_token(token, name).map(|word| word.unwrap_or(true))
-        }) == Some(true)
-    })
 }
 
 /// The compact copies the CLI writes from the stream: the path the caller
@@ -237,36 +229,6 @@ mod tests {
             requested_path(&flags, "test", Some("/ws"), Some(Path::new("/ws"))),
             Some(PathBuf::from("/ws/.aspect/generated/exec.log.zstd"))
         );
-    }
-
-    #[test]
-    fn another_format_is_any_value_but_a_false_one() {
-        for (line, other) in [
-            (vec!["--execution_log_json_file=/tmp/x.json"], true),
-            (vec!["--execution_log_binary_file="], true),
-            (vec!["--execution_log_binary_file"], true),
-            (vec!["--execution_log_binary_file=true"], true),
-            (vec!["--execution_log_binary_file=False"], false),
-            (vec!["--noexecution_log_json_file"], false),
-            (
-                vec!["--execution_log_json_file=x", "--noexecution_log_json_file"],
-                false,
-            ),
-            (
-                vec!["--default_override=0:build=--execution_log_binary_file="],
-                true,
-            ),
-            (
-                vec![
-                    "--noexecution_log_binary_file",
-                    "--default_override=0:build=--execution_log_binary_file=x",
-                ],
-                false,
-            ),
-            (vec!["--execution_log_compact_file=x"], false),
-        ] {
-            assert_eq!(other_format(&flags(&line), "build"), other, "{line:?}");
-        }
     }
 
     #[test]

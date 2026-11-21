@@ -22,7 +22,8 @@
 //!     the real format: one zstd frame over varint-length-prefixed messages,
 //!     written as a regular file the way Bazel writes it. Entry counts above the
 //!     decoded channel's 1000-entry capacity are the point — truncation past the
-//!     capacity is invisible without a log longer than it.
+//!     capacity is invisible without a log longer than it. One with
+//!     `execlog_spawn` ends the log with a spawn producing the last file.
 //!
 //!     When `--experimental_workspace_rules_log_file <path>` is present, a
 //!     scenario with `workspace_events` writes that many length-delimited
@@ -31,6 +32,8 @@
 //!
 //!     `BASIL_EXECLOG_PUMP_HANDSHAKE` turns that into a two-way exchange — see
 //!     [`await_pump_handshake`].
+//!
+//!     More than one execution log format fails the build, as in Bazel.
 //!
 //!     When `--profile <path>` is present, any build writes a stand-in
 //!     profile there before the client exits, as Bazel finishes its own.
@@ -166,10 +169,32 @@ fn run_info(args: &[String]) {
     }
 }
 
+/// Exit as Bazel does when more than one execution log format is asked for:
+/// a value names one unless it is empty or, from Bazel 10, `false`.
+fn refuse_more_than_one_log_format(args: &[String], verb: &str) {
+    let formats = [
+        "--execution_log_compact_file",
+        "--execution_log_binary_file",
+        "--execution_log_json_file",
+    ];
+    let asked = formats
+        .iter()
+        .filter(|name| {
+            bazel::rc::last_flag_value(args, name, verb)
+                .is_some_and(|v| !v.is_empty() && v != "false")
+        })
+        .count();
+    if asked > 1 {
+        eprintln!("basil: Must specify at most one of {}", formats.join(", "));
+        process::exit(2);
+    }
+}
+
 fn run_build(args: &[String], verb: &str) {
     let flag = |name: &str| bazel::rc::last_flag_value(args, name, verb);
     let bes_path = flag("--build_event_binary_file");
     let execlog_path = flag("--execution_log_compact_file");
+    refuse_more_than_one_log_format(args, verb);
     // Bazel finishes the profile before its client exits; any build writes one.
     if let Some(path) = flag("--profile") {
         fs::write(&path, BASIL_PROFILE).unwrap_or_else(|e| panic!("basil: writing {path}: {e}"));
@@ -221,7 +246,9 @@ fn run_build(args: &[String], verb: &str) {
     }
 
     let log = || match &execlog_path {
-        Some(path) if s.execlog_entries > 0 => write_execlog(path, s.execlog_entries),
+        Some(path) if s.execlog_entries > 0 => {
+            write_execlog(path, s.execlog_entries, s.execlog_spawn)
+        }
         _ => {}
     };
 
@@ -380,6 +407,8 @@ struct Scenario {
     /// publishes it before BES, where a consumer can read it during the build;
     /// non-zero puts it out of reach of anything but an end-of-build drain.
     execlog_delay: Duration,
+    /// End the execution log with a spawn whose output is its last file.
+    execlog_spawn: bool,
     /// Test labels to report through `--build_event_json_file`, when the runtime
     /// asked for one. Empty writes no JSON log at all.
     ///
@@ -404,6 +433,7 @@ impl Default for Scenario {
             exit: ExitBehavior::Code(0),
             execlog_entries: 0,
             execlog_delay: Duration::ZERO,
+            execlog_spawn: false,
             json_bep_tests: &[],
             workspace_events: 0,
             workspace_corrupt: false,
@@ -531,9 +561,12 @@ fn await_pump_handshake(file: &str) {
 /// enough for a consumer to count and to tell apart by `id`. `id` runs from 1 so
 /// a test can assert it received a contiguous `1..=count` and catch a prefix.
 ///
+/// With `spawn`, a `Spawn` record whose output is the last file follows them,
+/// so an expanded log written from this one has a spawn in it.
+///
 /// Built under a sibling `.partial` name and renamed into place, so a reader
 /// sees either no file yet or the whole thing, never a log cut off mid-write.
-fn write_execlog(path: &str, count: u32) {
+fn write_execlog(path: &str, count: u32, spawn: bool) {
     let partial = format!("{path}.partial");
     let file = fs::File::create(&partial)
         .unwrap_or_else(|e| panic!("basil: creating execlog path {partial:?}: {e}"));
@@ -544,6 +577,22 @@ fn write_execlog(path: &str, count: u32) {
             r#type: Some(exec_log_entry::Type::File(exec_log_entry::File {
                 path: format!("basil/f{id}.txt"),
                 digest: None,
+            })),
+        };
+        encoder
+            .write_all(&entry.encode_length_delimited_to_vec())
+            .unwrap_or_else(|e| panic!("basil: writing execlog: {e}"));
+    }
+    if spawn {
+        let entry = ExecLogEntry {
+            id: count + 1,
+            r#type: Some(exec_log_entry::Type::Spawn(exec_log_entry::Spawn {
+                args: vec!["basil".into(), "spawn".into()],
+                mnemonic: "Basil".into(),
+                outputs: vec![exec_log_entry::Output {
+                    r#type: Some(exec_log_entry::output::Type::OutputId(count)),
+                }],
+                ..Default::default()
             })),
         };
         encoder
@@ -661,6 +710,13 @@ fn scenario(name: &str) -> Scenario {
         // `BEYOND_CAPACITY` is comfortably past it.
         "execlog_beyond_capacity" => Scenario {
             execlog_entries: BEYOND_CAPACITY,
+            ..Default::default()
+        },
+
+        // A short log ending in one spawn, for an expanded log written from it.
+        "execlog_one_spawn" => Scenario {
+            execlog_entries: 1,
+            execlog_spawn: true,
             ..Default::default()
         },
 

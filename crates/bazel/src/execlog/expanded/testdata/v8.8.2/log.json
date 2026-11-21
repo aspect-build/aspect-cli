@@ -1,0 +1,333 @@
+{
+  "commandArgs": ["/bin/bash", "-c", "source ../bazel_tools/tools/genrule/genrule-setup.sh; echo a \u003e bazel-out/darwin_arm64-fastbuild/bin/a.txt"],
+  "environmentVariables": [{
+    "name": "PATH",
+    "value": "/bin:/usr/bin:/usr/local/bin"
+  }],
+  "platform": {
+    "properties": []
+  },
+  "inputs": [{
+    "path": "../bazel_tools/tools/genrule/genrule-setup.sh",
+    "digest": {
+      "hash": "bed43d0bb00449e82a04fbb6535f490fa5d7ed140b1c3ad2d463d5c295e9e836",
+      "sizeBytes": "858",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "listedOutputs": ["bazel-out/darwin_arm64-fastbuild/bin/a.txt"],
+  "remotable": true,
+  "cacheable": true,
+  "timeoutMillis": "0",
+  "mnemonic": "Genrule",
+  "actualOutputs": [{
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/a.txt",
+    "digest": {
+      "hash": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "runner": "darwin-sandbox",
+  "cacheHit": false,
+  "status": "",
+  "exitCode": 0,
+  "remoteCacheable": true,
+  "targetLabel": "//:a",
+  "metrics": {
+    "totalTime": "0.019s",
+    "executionWallTime": "0.019s",
+    "inputBytes": "0",
+    "inputFiles": "0",
+    "memoryEstimateBytes": "0",
+    "inputBytesLimit": "0",
+    "inputFilesLimit": "0",
+    "outputBytesLimit": "0",
+    "outputFilesLimit": "0",
+    "memoryBytesLimit": "0",
+    "startTime": "2026-11-18T19:26:59.990Z"
+  }
+}{
+  "commandArgs": ["/bin/bash", "-c", "source ../bazel_tools/tools/genrule/genrule-setup.sh; cat bazel-out/darwin_arm64-fastbuild/bin/a.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/b.txt \u0026\u0026 echo b \u003e\u003e bazel-out/darwin_arm64-fastbuild/bin/b.txt"],
+  "environmentVariables": [{
+    "name": "PATH",
+    "value": "/bin:/usr/bin:/usr/local/bin"
+  }],
+  "platform": {
+    "properties": []
+  },
+  "inputs": [{
+    "path": "../bazel_tools/tools/genrule/genrule-setup.sh",
+    "digest": {
+      "hash": "bed43d0bb00449e82a04fbb6535f490fa5d7ed140b1c3ad2d463d5c295e9e836",
+      "sizeBytes": "858",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/a.txt",
+    "digest": {
+      "hash": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "listedOutputs": ["bazel-out/darwin_arm64-fastbuild/bin/b.txt"],
+  "remotable": true,
+  "cacheable": true,
+  "timeoutMillis": "0",
+  "mnemonic": "Genrule",
+  "actualOutputs": [{
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/b.txt",
+    "digest": {
+      "hash": "911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "runner": "darwin-sandbox",
+  "cacheHit": false,
+  "status": "",
+  "exitCode": 0,
+  "remoteCacheable": true,
+  "targetLabel": "//:b",
+  "metrics": {
+    "totalTime": "0.020s",
+    "executionWallTime": "0.020s",
+    "inputBytes": "0",
+    "inputFiles": "0",
+    "memoryEstimateBytes": "0",
+    "inputBytesLimit": "0",
+    "inputFilesLimit": "0",
+    "outputBytesLimit": "0",
+    "outputFilesLimit": "0",
+    "memoryBytesLimit": "0",
+    "startTime": "2026-11-18T19:27:00.012Z"
+  }
+}{
+  "commandArgs": ["/bin/bash", "-c", "mkdir -p bazel-out/darwin_arm64-fastbuild/bin/t/sub bazel-out/darwin_arm64-fastbuild/bin/t/a \u0026\u0026 echo one \u003e bazel-out/darwin_arm64-fastbuild/bin/t/one.txt \u0026\u0026 echo two \u003e bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt \u0026\u0026 echo a \u003e bazel-out/darwin_arm64-fastbuild/bin/t/a.txt \u0026\u0026 echo b \u003e bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt"],
+  "environmentVariables": [],
+  "platform": {
+    "properties": []
+  },
+  "inputs": [],
+  "listedOutputs": ["bazel-out/darwin_arm64-fastbuild/bin/t"],
+  "remotable": true,
+  "cacheable": true,
+  "timeoutMillis": "0",
+  "mnemonic": "MakeTree",
+  "actualOutputs": [{
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt",
+    "digest": {
+      "hash": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a.txt",
+    "digest": {
+      "hash": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/one.txt",
+    "digest": {
+      "hash": "2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt",
+    "digest": {
+      "hash": "27dd8ed44a83ff94d557f9fd0412ed5a8cbca69ea04922d88c01184a07300a5a",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "runner": "darwin-sandbox",
+  "cacheHit": false,
+  "status": "",
+  "exitCode": 0,
+  "remoteCacheable": true,
+  "targetLabel": "//:t",
+  "metrics": {
+    "totalTime": "0.020s",
+    "executionWallTime": "0.020s",
+    "inputBytes": "0",
+    "inputFiles": "0",
+    "memoryEstimateBytes": "0",
+    "inputBytesLimit": "0",
+    "inputFilesLimit": "0",
+    "outputBytesLimit": "0",
+    "outputFilesLimit": "0",
+    "memoryBytesLimit": "0",
+    "startTime": "2026-11-18T19:26:59.998Z"
+  }
+}{
+  "commandArgs": ["/bin/bash", "-c", "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh bazel-out/darwin_arm64-fastbuild/bin/b.txt src.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/u.out"],
+  "environmentVariables": [],
+  "platform": {
+    "properties": []
+  },
+  "inputs": [{
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/b.txt",
+    "digest": {
+      "hash": "911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a.txt",
+    "digest": {
+      "hash": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/a/b.txt",
+    "digest": {
+      "hash": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f",
+      "sizeBytes": "2",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/one.txt",
+    "digest": {
+      "hash": "2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/t/sub/two.txt",
+    "digest": {
+      "hash": "27dd8ed44a83ff94d557f9fd0412ed5a8cbca69ea04922d88c01184a07300a5a",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh",
+    "digest": {
+      "hash": "45186c23371e957f59fcf94aa34e9ad95e41b9ff83494b23656bf0546e754fbb",
+      "sizeBytes": "19",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": true,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh.runfiles/_main/cat_tool.sh",
+    "digest": {
+      "hash": "45186c23371e957f59fcf94aa34e9ad95e41b9ff83494b23656bf0546e754fbb",
+      "sizeBytes": "19",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": true,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh.runfiles/_main/data.txt",
+    "digest": {
+      "hash": "6667b2d1aab6a00caa5aee5af8ad9f1465e567abf1c209d15727d57b3e8f6e5f",
+      "sizeBytes": "5",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": true,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh.runfiles/_main/external/bazel_tools/tools/genrule/genrule-setup.sh",
+    "digest": {
+      "hash": "bed43d0bb00449e82a04fbb6535f490fa5d7ed140b1c3ad2d463d5c295e9e836",
+      "sizeBytes": "858",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": true,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh.runfiles/_repo_mapping",
+    "digest": {
+      "hash": "d1940e417f6d295b6c80c3b32ece5196d979c53754dc19bd7f1d54e1487da469",
+      "sizeBytes": "76",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": true,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "bazel-out/darwin_arm64-opt-exec-ST-d57f47055a04/bin/cat_tool.sh.runfiles/bazel_tools/tools/genrule/genrule-setup.sh",
+    "digest": {
+      "hash": "bed43d0bb00449e82a04fbb6535f490fa5d7ed140b1c3ad2d463d5c295e9e836",
+      "sizeBytes": "858",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": true,
+    "symlinkTargetPath": ""
+  }, {
+    "path": "src.txt",
+    "digest": {
+      "hash": "ef8aed55fba64258003f3479ff60a060ddb8301d170110a0d2dfa0ce4ea04eb3",
+      "sizeBytes": "4",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "listedOutputs": ["bazel-out/darwin_arm64-fastbuild/bin/u.out"],
+  "remotable": true,
+  "cacheable": true,
+  "timeoutMillis": "0",
+  "mnemonic": "UseTool",
+  "actualOutputs": [{
+    "path": "bazel-out/darwin_arm64-fastbuild/bin/u.out",
+    "digest": {
+      "hash": "bfc69a20b093cea94dedd2af78d6a4e155a725b26e30df6d78d5ac86d3998799",
+      "sizeBytes": "8",
+      "hashFunctionName": "SHA-256"
+    },
+    "isTool": false,
+    "symlinkTargetPath": ""
+  }],
+  "runner": "darwin-sandbox",
+  "cacheHit": false,
+  "status": "",
+  "exitCode": 0,
+  "remoteCacheable": true,
+  "targetLabel": "//:u",
+  "metrics": {
+    "totalTime": "0.194s",
+    "executionWallTime": "0.194s",
+    "inputBytes": "0",
+    "inputFiles": "0",
+    "memoryEstimateBytes": "0",
+    "inputBytesLimit": "0",
+    "inputFilesLimit": "0",
+    "outputBytesLimit": "0",
+    "outputFilesLimit": "0",
+    "memoryBytesLimit": "0",
+    "startTime": "2026-11-18T19:27:00.036Z"
+  }
+}

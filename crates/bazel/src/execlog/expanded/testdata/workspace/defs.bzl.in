@@ -1,0 +1,33 @@
+def _tree_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name)
+    ctx.actions.run_shell(
+        outputs = [out],
+        command = "mkdir -p {0}/sub {0}/a && echo one > {0}/one.txt && echo two > {0}/sub/two.txt && echo a > {0}/a.txt && echo b > {0}/a/b.txt".format(out.path),
+        mnemonic = "MakeTree",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+tree = rule(implementation = _tree_impl)
+
+def _tool_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\ncat \"$@\"\n", is_executable = True)
+    return [DefaultInfo(executable = exe, runfiles = ctx.runfiles(files = ctx.files.data))]
+
+tool = rule(implementation = _tool_impl, executable = True, attrs = {"data": attr.label_list(allow_files = True)})
+
+def _use_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    ctx.actions.run_shell(
+        outputs = [out],
+        inputs = ctx.files.srcs,
+        tools = [ctx.executable.tool],
+        command = "{} {} > {}".format(ctx.executable.tool.path, " ".join([f.path for f in ctx.files.srcs if not f.is_directory]), out.path),
+        mnemonic = "UseTool",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+use_tool = rule(implementation = _use_impl, attrs = {
+    "srcs": attr.label_list(allow_files = True),
+    "tool": attr.label(executable = True, cfg = "exec"),
+})

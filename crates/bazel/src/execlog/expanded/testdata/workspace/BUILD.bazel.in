@@ -1,0 +1,7 @@
+load(":defs.bzl", "tool", "tree", "use_tool")
+
+genrule(name = "a", outs = ["a.txt"], cmd = "echo a > $@")
+genrule(name = "b", srcs = [":a"], outs = ["b.txt"], cmd = "cat $< > $@ && echo b >> $@")
+tree(name = "t")
+tool(name = "cat_tool", data = ["data.txt", "@bazel_tools//tools/genrule:genrule-setup.sh"])
+use_tool(name = "u", srcs = [":b", ":t", "src.txt"], tool = ":cat_tool")

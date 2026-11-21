@@ -16,7 +16,7 @@ rust_library(
     compile_data = [
         "src/command/runinfo.bzl",
         "src/label_cases.json",
-    ],
+    ] + glob(["src/execlog/expanded/testdata/**"]),
     crate_features = ["starlark"],
     proc_macro_deps = [
         "@crates//:starlark_derive",
