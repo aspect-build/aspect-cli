@@ -2,11 +2,13 @@
 //! `task.json`; see `engine::task_record`), newest first, and the current
 //! run's links.
 //!
-//! A record is handed out as a dict, its command line redacted, with two
-//! keys of the reader's own: `dir`, the entry's folder, and, for a run whose
-//! record says `running`, `status` set to `abandoned` once its process is no
-//! longer running (gone, or silent for a week), as after a crash. Records of
-//! a newer schema are skipped.
+//! A record is handed out as a dict, its command line redacted, with keys of
+//! the reader's own: `dir`, the entry's folder; `outcome`, how it ended in a
+//! word ([`outcome_of`]); each build's `build_events`, the stream its folder
+//! kept, for `bazel.build_events.read`; and, for a run whose record says
+//! `running`, `status` set to `abandoned` once its process is no longer
+//! running (gone, or silent for a week), as after a crash. Records of a newer
+//! schema are skipped.
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -48,17 +50,60 @@ starlark_simple_value!(History);
 fn shown(dir: &std::path::Path, record: &TaskRecord) -> serde_json::Value {
     let mut value = serde_json::to_value(record.redacted()).unwrap_or_default();
     value["dir"] = dir.to_string_lossy().into_owned().into();
-    let written = std::fs::metadata(dir.join(crate::engine::task_record::FILE_NAME))
-        .and_then(|m| m.modified())
-        .ok();
-    if record.status == "running"
-        && record.pid != std::process::id()
-        && !crate::engine::task_record::still_running(record, written)
-    {
+    if abandoned(dir, record) {
         value["status"] = "abandoned".into();
+    }
+    value["outcome"] = outcome_of(dir, record).into();
+    // Each build's stream, where its folder kept one, for
+    // `bazel.build_events.read`.
+    if let Some(builds) = value.get_mut("bazel").and_then(|b| b.as_array_mut()) {
+        for (build, kept) in builds.iter_mut().zip(&record.bazel) {
+            let file = kept
+                .folder
+                .as_ref()
+                .map(|f| dir.join(f).join(bazel::bes::binary_file::FILE_NAME))
+                .filter(|f| f.is_file());
+            if let Some(file) = file {
+                build["build_events"] = file.to_string_lossy().into_owned().into();
+            }
+        }
     }
     value
 }
+
+/// Whether a record saying `running` is of a run no longer going (a crash's).
+fn abandoned(dir: &std::path::Path, record: &TaskRecord) -> bool {
+    let written = std::fs::metadata(dir.join(crate::engine::task_record::FILE_NAME))
+        .and_then(|m| m.modified())
+        .ok();
+    record.status == "running"
+        && record.pid != std::process::id()
+        && !crate::engine::task_record::still_running(record, written)
+}
+
+/// How a run ended, in a word: `ok`, `failed` (a non-zero exit), `error` (an
+/// error ended it), `cancelled`, `running` or `abandoned`.
+fn outcome_of(dir: &std::path::Path, record: &TaskRecord) -> &'static str {
+    if record.status == "running" {
+        return if abandoned(dir, record) {
+            "abandoned"
+        } else {
+            "running"
+        };
+    }
+    if !record.error.is_empty() {
+        "error"
+    } else if record.cancelled {
+        "cancelled"
+    } else if record.exit_code.unwrap_or(0) == 0 {
+        "ok"
+    } else {
+        "failed"
+    }
+}
+
+/// The outcomes `list` filters by.
+const OUTCOMES: &[&str] = &["ok", "failed", "error", "cancelled", "running", "abandoned"];
 
 #[starlark_module]
 fn history_methods(registry: &mut MethodsBuilder) {
@@ -74,20 +119,40 @@ fn history_methods(registry: &mut MethodsBuilder) {
             .into_owned())
     }
 
-    /// The records of past runs, newest first: at most `limit` of them,
-    /// only those of task `kind` when given. Each is a dict, as
+    /// The records of past runs, newest first: at most `limit` of them, only
+    /// those of task `kind`, those that ended `outcome` (`ok`, `failed`,
+    /// `error`, `cancelled`, `running`, `abandoned`), and those run on git
+    /// `branch`, when given. Each is a dict, as
     /// `task.json` has it, its command line redacted, with `dir`, the
     /// entry's folder. This run's own record is among them, `running`.
     fn list<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = 50)] limit: u32,
         #[starlark(require = named, default = NoneOr::None)] kind: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] outcome: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] branch: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<Value<'v>>> {
         let history = RuntimeEnv::from_eval(eval)?.history.clone();
-        let kind = kind.into_option();
-        let records = history.records(limit as usize, |r| {
+        let (kind, wanted, branch) = (
+            kind.into_option(),
+            outcome.into_option(),
+            branch.into_option(),
+        );
+        if let Some(o) = &wanted
+            && !OUTCOMES.contains(&o.as_str())
+        {
+            anyhow::bail!(
+                "unknown outcome {o:?}; the outcomes are {}",
+                OUTCOMES.join(", ")
+            );
+        }
+        let records = history.records(limit as usize, |dir, r| {
             kind.as_ref().is_none_or(|k| &r.task.kind == k)
+                && wanted.as_ref().is_none_or(|o| outcome_of(dir, r) == o)
+                && branch
+                    .as_ref()
+                    .is_none_or(|b| r.git.as_ref().and_then(|g| g.branch.as_ref()) == Some(b))
         });
         Ok(records
             .iter()

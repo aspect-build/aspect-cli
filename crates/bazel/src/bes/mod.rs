@@ -12,6 +12,7 @@ pub mod kind;
 pub mod outputs;
 pub mod redact;
 pub mod sink;
+pub mod stored;
 pub mod warning;
 
 #[cfg(test)]

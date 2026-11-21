@@ -44,6 +44,7 @@ mod query;
 mod retry;
 mod run;
 mod runner;
+mod stored_events;
 mod wrappers;
 
 use wrappers::ExecLogSink;
@@ -1401,6 +1402,42 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         Ok(build::BuildEventSink::new_file(path))
     }
 
+    /// Read a build event stream kept on disk: a `--build_event_binary_file`,
+    /// such as the `build_events.binpb` the task history keeps in each
+    /// build's folder (`ctx.std.history`'s records name the folders). Iterate
+    /// it for the same `BuildEvent` values a live build's `iterator()`
+    /// yields, so code written for a build's events reads an earlier one's.
+    /// `kinds=` filters as `iterator()`'s does. Read lazily as iterated, it
+    /// ends at the end of the file: once it has, `complete` says whether
+    /// Bazel's final event was in it (a build cut short has none), and
+    /// `error` why reading stopped early (a stream cut partway through a
+    /// message, or one that does not decode), else None. A file that cannot
+    /// be opened is an error.
+    #[starlark(as_type = stored_events::StoredBuildEvents)]
+    fn read<'v>(
+        #[starlark(require = pos)] path: &str,
+        #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
+            UnpackList<values::Value>,
+        >,
+    ) -> anyhow::Result<stored_events::StoredBuildEvents> {
+        let kinds = match kinds {
+            NoneOr::None => None,
+            NoneOr::Other(list) => {
+                if list.items.is_empty() {
+                    anyhow::bail!(
+                        "kinds=[] is not valid; omit `kinds` to receive every event kind"
+                    );
+                }
+                let mut set = std::collections::HashSet::new();
+                for item in &list.items {
+                    set.insert(build::parse_event_kind(*item)?);
+                }
+                Some(set)
+            }
+        };
+        stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds)
+    }
+
     /// Create a handle iterating this build's BES stream. Pass it in
     /// `build_events=[...]` and then `for event in iter:`. Optional
     /// `kinds=["action_executed", "named_set_of_files", ...]` filters at
@@ -1571,6 +1608,8 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
 fn register_build_types(globals: &mut GlobalsBuilder) {
     const Build: StarlarkValueAsType<build::Build> = StarlarkValueAsType::new();
     const BuildEventIter: StarlarkValueAsType<build::BuildEventIter> = StarlarkValueAsType::new();
+    const StoredBuildEvents: StarlarkValueAsType<stored_events::StoredBuildEvents> =
+        StarlarkValueAsType::new();
     const BuildEventSink: StarlarkValueAsType<build::BuildEventSink> = StarlarkValueAsType::new();
     const BuildStatus: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
     const Cancellation: StarlarkValueAsType<cancel::Cancellation> = StarlarkValueAsType::new();

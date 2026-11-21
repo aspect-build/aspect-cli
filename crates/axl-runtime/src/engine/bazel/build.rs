@@ -2671,6 +2671,55 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// A build's stream kept in the history reads back as the events it
+    /// streamed: found through the run's record, then `bazel.build_events.read`,
+    /// whole and complete; `kinds=` filters it.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_stream_reads_back_through_the_history() {
+        let history = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(flags = ["--scenario=success"], build_events = [iter], stderr = None)
+    live = [type(e.payload) for e in iter]
+    if not build.wait().success: return 1
+    record = ctx.std.history.get(ctx.task.id)
+    if record["outcome"] != "running": return 2
+    if [r["task"]["id"] for r in ctx.std.history.list(outcome = "running")] != [ctx.task.id]: return 3
+    if ctx.std.history.list(outcome = "ok"): return 4
+    path = record["bazel"][0]["build_events"]
+    stored = bazel.build_events.read(path)
+    kept = [type(e.payload) for e in stored]
+    if kept != live or not stored.complete or stored.error != None: return 5
+    started = [type(e.payload) for e in bazel.build_events.read(path, kinds = ["started"])]
+    if started != [live[0]] or len(started) != 1: return 6
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        run_task_with_history(script, history.path());
+    }
+
+    #[test]
+    fn an_unknown_outcome_is_an_error() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.std.history.list(outcome = "fine")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect_err("an unknown outcome");
+        assert!(
+            format!("{err:#}").contains("the outcomes are ok, failed"),
+            "{err:#}"
+        );
+    }
+
     /// Every build's profile stays in its history folder, and a `--profile`
     /// the caller asked for gets a copy once the client exits, in the format
     /// its name asks for.
