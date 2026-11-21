@@ -261,7 +261,7 @@ def tip_replace(
     """Build a `replace` `TipSuggestion`. Omitted fields keep the tip's
     current value. See `TipSuggestion` for field semantics."""
     if show != None and show not in _VALID_SHOW:
-        fail("tip_replace: unknown show %r; valid: %s" % (show, ", ".join(_VALID_SHOW)))
+        fail("tip_replace: unknown show %r%s" % (show, did_you_mean_then(show, _VALID_SHOW, "; ", "valid: " + ", ".join(_VALID_SHOW))))
     return TipSuggestion(
         action = TipAction("replace"),
         severity = severity,
@@ -449,12 +449,12 @@ def tip_rule(
     (the group's first match's, or under `TIP_SHOW_EACH` each match's own)
     and the `aggregate` values. See "Tip rules" in this file."""
     if severity not in _SEVERITY_ORDER:
-        fail("tip rule %r: unknown severity %r; valid: %s" % (id, severity, ", ".join(_SEVERITY_ORDER.keys())))
+        fail("tip rule %r: unknown severity %r%s" % (id, severity, did_you_mean_then(severity, _SEVERITY_ORDER.keys(), "; ", "valid: " + ", ".join(_SEVERITY_ORDER.keys()))))
     for s in surfaces or []:
         if s not in _VALID_SURFACES:
-            fail("tip rule %r: unknown surface %r; valid: %s" % (id, s, ", ".join(_VALID_SURFACES)))
+            fail("tip rule %r: unknown surface %r%s" % (id, s, did_you_mean_then(s, _VALID_SURFACES, "; ", "valid: " + ", ".join(_VALID_SURFACES))))
     if show not in _VALID_SHOW:
-        fail("tip rule %r: unknown show %r; valid: %s" % (id, show, ", ".join(_VALID_SHOW)))
+        fail("tip rule %r: unknown show %r%s" % (id, show, did_you_mean_then(show, _VALID_SHOW, "; ", "valid: " + ", ".join(_VALID_SHOW))))
     if max_shown < 0:
         fail("tip rule %r: max_shown must be >= 0 (0: no limit), got %d" % (id, max_shown))
     for name, a in aggregate.items():
@@ -833,7 +833,7 @@ def add_tip(
     if type not in _VALID_TEMPLATE_TYPES:
         fail("unknown tip template type %r%s" % (type, did_you_mean_then(type, _VALID_TEMPLATE_TYPES, "; ", "valid: " + ", ".join(_VALID_TEMPLATE_TYPES))))
     if show not in _VALID_SHOW:
-        fail("tip %r: unknown show %r; valid: %s" % (id, show, ", ".join(_VALID_SHOW)))
+        fail("tip %r: unknown show %r%s" % (id, show, did_you_mean_then(show, _VALID_SHOW, "; ", "valid: " + ", ".join(_VALID_SHOW))))
     if max_shown < 0:
         fail("tip %r: max_shown must be >= 0 (0: no limit), got %d" % (id, max_shown))
     for name, a in (aggregates or {}).items():

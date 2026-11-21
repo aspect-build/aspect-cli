@@ -51,6 +51,7 @@ exits, and would leave a held line stalling Bazel), and inside `build.wait()`.
 """
 
 load("@aspect//bazel/console_tips.axl", "CONSOLE_TIP_RULES")
+load("../private/lib/text.axl", "did_you_mean_then")
 load("../private/lib/tips.axl", "RULE_VARS", "all_tip_rules", "emit_rule_tips", "rule_aggregation")
 
 # The default stages, by the names `disable` takes.
@@ -150,9 +151,9 @@ def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = 
     problems = []
     for n in disable:
         if n not in STAGE_NAMES:
-            problems.append("unknown console stage %r is ignored; the stages are %s" % (n, ", ".join(STAGE_NAMES)))
+            problems.append("unknown console stage %r is ignored%s" % (n, did_you_mean_then(n, STAGE_NAMES, "; ", "the stages are " + ", ".join(STAGE_NAMES))))
     if profile not in PROFILES:
-        problems.append("unknown console profile %r; using human" % profile)
+        problems.append("unknown console profile %r%s" % (profile, did_you_mean_then(profile, PROFILES, "; ", "using human")))
         profile = "human"
 
     def _valid(patterns):
@@ -209,8 +210,9 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     stderr are both terminals, since Bazel decides colour and its live UI for
     both. Plain lines carry Bazel's status line every few seconds unless
     `trait.output_progress` is False. Colour shows as `colour`, the user's own
-    `--color`, says; else on a terminal. Bazel itself is asked for curses and
-    colour either way: see `bazel.output.processor`."""
+    `--color`, says; else on a terminal, without a non-empty `NO_COLOR`.
+    Bazel itself is asked for curses and colour either way: see
+    `bazel.output.processor`."""
     stages = list(trait.output_stages) + list(extra)
     if not stages and trait.output_display != "none" and not trait.output_frame:
         return None

@@ -124,7 +124,8 @@ rc or `--bazel-flag`) decides what is shown, under either profile.
 
 Only messages Bazel colours can be told from the output of the actions it
 runs, so Bazel is always asked for colour too, and what is shown keeps it as
-your own `--color` says, else on a terminal only.
+your own `--color` says, else on a terminal only, and never under a non-empty
+`NO_COLOR`.
 
 A stage setting that is not valid (an unknown stage name, a pattern that does
 not compile) is left out with a warning rather than failing the task: this
