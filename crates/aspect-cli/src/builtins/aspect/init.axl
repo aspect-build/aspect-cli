@@ -30,6 +30,7 @@ load("./private/lib/errors.axl", "error_reasons")
 load("./private/lib/exit_status.axl", "exit_code_of")
 load("./private/lib/init_render.axl", "CONFIG_FILENAME", "InitError", "load_config", "preset_flags", "preset_names", "render")
 load("./private/lib/prompt.axl", "prompt_choice")
+load("./private/lib/text.axl", "did_you_mean_then")
 
 # Default template source: the latest published release of this GitHub repo.
 # `--template-ref` overrides the ref (branch, tag, or commit), e.g.
@@ -83,7 +84,7 @@ def parse_template(spec):
         if not path:
             fail(InitError("invalid --template {!r}: file: needs a directory, e.g. 'file:/path/to/checkout'".format(spec)))
         return TemplateSource(scheme = _TEMPLATE_SCHEME("file"), value = path)
-    fail(InitError("unknown --template scheme {!r} in {!r}; supported: github:, file:".format(scheme, spec)))
+    fail(InitError("unknown --template scheme {!r} in {!r}{}".format(scheme, spec, did_you_mean_then(scheme, ["github", "file"], "; ", "supported: github:, file:"))))
 
 def _prompt_preset(ctx, names):
     """Prompt the user to choose a preset by name, printing an off-TTY hint.

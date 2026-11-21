@@ -493,9 +493,10 @@ fn build_alias<'v>(
     for (k, v) in defaults.entries {
         let Some(existing) = overlaid.get(&k) else {
             return Err(anyhow::anyhow!(
-                "task.alias defaults[{:?}]: no such arg on aliased task `{}`",
+                "task.alias defaults[{:?}]: no such arg on aliased task `{}`{}",
                 k,
                 base.kind(),
+                crate::suggest::did_you_mean(&k, overlaid.keys().map(String::as_str)),
             ));
         };
         let next = existing.with_default(&k, v, eval.heap())?;
@@ -833,6 +834,20 @@ base = task(
 buildifier = base.alias(defaults = {"nope": "x"})
 "#,
             "no such arg",
+        );
+    }
+
+    #[test]
+    fn alias_near_miss_default_key_suggests_the_arg() {
+        assert_eval_err_contains(
+            r#"
+base = task(
+    implementation = _impl,
+    args = {"mode": args.string(default = "auto")},
+)
+buildifier = base.alias(defaults = {"mdoe": "x"})
+"#,
+            r#"no such arg on aliased task `base`; did you mean "mode"?"#,
         );
     }
 

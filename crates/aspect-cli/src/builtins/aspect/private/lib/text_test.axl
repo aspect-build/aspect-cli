@@ -6,7 +6,11 @@ Run with:
 
 load(
     "./text.axl",
+    "closest",
+    "did_you_mean",
+    "did_you_mean_then",
     "display_width",
+    "edit_distance",
     "format_bytes_iec",
     "format_int_comma",
     "has_unsafe_chars",
@@ -62,6 +66,47 @@ def _test_strings(ctx):
     _eq("join adds a slash", join_url("https://x", "y"), "https://x/y")
     _eq("join keeps one slash", join_url("https://x/", "y"), "https://x/y")
 
+def _test_edit_distance(ctx):
+    _eq("same", edit_distance("test", "test"), 0)
+    _eq("one dropped", edit_distance("lnt", "lint"), 1)
+    _eq("transposed costs two", edit_distance("tset", "test"), 2)
+    _eq("from empty", edit_distance("", "add"), 3)
+    _eq("counts characters", edit_distance("tést", "test"), 1)
+
+# The candidates and cases `crates/axl-runtime/src/suggest.rs` checks Rust's
+# `closest` on.
+_CANDIDATES = ["build", "test", "lint", "format", "buildifier", "deploy", "worktree add", "worktree release", "add", "release"]
+
+def _test_closest(ctx):
+    for key, expected in [
+        ("tset", "test"),
+        ("bulid", "build"),
+        ("lnt", "lint"),
+        ("worktree ad", "worktree add"),
+        ("relase", "release"),
+        ("buildifer", "buildifier"),
+        ("deplyo", "deploy"),
+        ("tost", "test"),
+        ("test", ""),
+        ("add", ""),
+        ("worktree add", ""),
+        ("release-notes", ""),
+        ("fmt", ""),
+        ("abc", ""),
+        ("ad", ""),
+        ("tt", ""),
+    ]:
+        _eq("closest to %r" % key, closest(key, _CANDIDATES), expected)
+    _eq("ties go to sorted order", closest("bat", ["cat", "bar"]), "bar")
+    _eq("suffix", did_you_mean("tset", _CANDIDATES), '; did you mean "test"?')
+    _eq("far miss, no suffix", did_you_mean("release-notes", _CANDIDATES), "")
+    _eq("no string, no suffix", did_you_mean(3, _CANDIDATES), "")
+    _eq("suggestion first", did_you_mean_then("tset", _CANDIDATES, "; ", "expected one of a, b"), '; did you mean "test"? Expected one of a, b')
+    _eq("far miss keeps the rest", did_you_mean_then("release-notes", _CANDIDATES, "; ", "expected one of a, b"), "; expected one of a, b")
+    _eq("short key keeps the rest", did_you_mean_then("tt", _CANDIDATES, "; ", "expected one of a, b"), "; expected one of a, b")
+    _eq("nothing after", did_you_mean_then("tset", _CANDIDATES, ". ", ""), '; did you mean "test"?')
+    _eq("no string keeps the rest", did_you_mean_then(3, _CANDIDATES, "; ", "x"), "; x")
+
 def _test_unsafe_characters(ctx):
     """What a terminal acts on or hides is caught, and shown escaped."""
     _eq("plain text is safe", has_unsafe_chars("sess-1 é ﾃｽﾄ"), False)
@@ -85,6 +130,8 @@ _UNIT_TESTS = [
     _test_utf8_len,
     _test_format_numbers,
     _test_strings,
+    _test_edit_distance,
+    _test_closest,
 ]
 
 def _impl(ctx):

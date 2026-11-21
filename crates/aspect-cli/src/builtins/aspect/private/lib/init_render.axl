@@ -22,6 +22,7 @@ Public API:
 """
 
 load("./path_utils.axl", "path_utils")
+load("./text.axl", "did_you_mean_then")
 
 # A bad flag, a template that cannot be fetched or read, or a failing command:
 # the user's to fix, so it ends the task with its message and no traceback.
@@ -41,7 +42,7 @@ def preset_names(config):
 
 def preset_flags(config, name):
     if name not in config["presets"]:
-        fail(InitError("unknown preset {!r}; known presets: {}".format(name, ", ".join(preset_names(config)))))
+        fail(InitError("unknown preset {!r}{}".format(name, did_you_mean_then(name, preset_names(config), "; ", "known presets: " + ", ".join(preset_names(config))))))
     return config["presets"][name]
 
 # --- predicate evaluation (data, not code) -----------------------------------

@@ -17,8 +17,9 @@ contracts a config writes against:
   - The template args — overrides reach the rendered body, "title"/"summary"/
     "details" are independent, `template_preset` / `templates` /
     `task_presets` / `task_templates` layer per task and are validated at
-    load, every renderer module exports the templates a config patches, and a
-    broken template degrades to a fallback.
+    load, a near-miss task key is warned about, every renderer module exports
+    the templates a config patches, and a broken template degrades to a
+    fallback.
   - `Phases.status_surface_update` — verdicts resolve, chain, and
     compose across surfaces, and a `remove` no surface can honor downgrades to
     a publish.
@@ -728,6 +729,7 @@ def _assert_resolve_templates():
             fail("scope key %r has no renderer" % kind)
 
     _assert_task_args()
+    _assert_near_miss_task_keys()
 
 def _fake_task(kind, group = []):
     return struct(kind = kind, group = group)
@@ -744,7 +746,43 @@ def _args(template_preset = "default", templates = None, task_presets = None, ta
     )
 
 def _resolve(task, renderer_kind, **kwargs):
-    return template_presets.resolve(template_presets.config("F", _args(**kwargs)), task, renderer_kind)
+    return template_presets.resolve(template_presets.config("F", struct(args = _args(**kwargs), task_paths = [])), task, renderer_kind)
+
+# The command paths of a repo with built-in, grouped, alias and custom tasks;
+# `console.rs` checks `Console` against the same table.
+_TASK_PATHS = ["build", "test", "lint", "format", "buildifier", "deploy", "worktree add", "worktree release"]
+
+def _assert_near_miss_task_keys():
+    """A task key that names no task here but nearly does is warned about,
+    once per key; one far from every task stays silent."""
+    for key, want in [
+        ("tset", "test"),
+        ("bulid", "build"),
+        ("lnt", "lint"),
+        ("worktree ad", "worktree add"),
+        ("relase", "release"),
+        ("buildifer", "buildifier"),
+        ("deplyo", "deploy"),
+        ("test", ""),
+        ("add", ""),
+        ("worktree add", ""),
+        ("release-notes", ""),
+        ("fmt", ""),
+        ("abc", ""),
+        ("ad", ""),
+        ("tt", ""),
+    ]:
+        _eq("closest to %r" % key, template_presets.closest_task_key(key, _TASK_PATHS), want)
+
+    args = _args(
+        task_presets = {"tset": "full", "test": "default"},
+        task_templates = {"tset": {"title": "a", "summary": "b"}, "worktree ad": {"title": "c"}, "release-notes": {"title": "d"}},
+    )
+    _eq("one warning per key", template_presets.near_miss_warnings("F", args, _TASK_PATHS), [
+        'F task_presets["tset"] and task_templates["tset"] name no task here; did you mean "test"?',
+        'F task_templates["worktree ad"] names no task here; did you mean "worktree add"?',
+    ])
+    _eq("no tasks, no warnings", template_presets.near_miss_warnings("F", args, []), [])
 
 def _assert_task_args():
     """`template_presets.resolve` layers `template_preset`, `templates`,
@@ -823,6 +861,23 @@ def _assert_task_args():
         if not [e for e in errors if want in e]:
             fail("no error contains %r in:\n  %s" % (want, "\n  ".join(errors)))
     _eq("twelve problems", len(errors), 12)
+
+    # A closed set names its near miss: a slot, a preset.
+    errors = template_presets.config_errors("F", _args(
+        templates = {"sumary": "S", "ttl": "T"},
+        task_presets = {"lint": "defualt", "test": "loud", "build": "fl"},
+        task_templates = {"build": {"detail": "D"}},
+    ))
+    for want in [
+        """F templates: "sumary" is not a slot; did you mean "summary"? Expected one of details, summary, title""",
+        """F templates: "ttl" is not a slot; did you mean "title"? Expected one of details, summary, title""",
+        """F task_presets["lint"]: unknown template preset "defualt"; did you mean "default"? Known presets: default, full""",
+        """F task_presets["test"]: unknown template preset "loud"; known presets: default, full""",
+        """F task_presets["build"]: unknown template preset "fl"; known presets: default, full""",
+        """F task_templates["build"]: "detail" is not a slot; did you mean "details"? Expected one of details, summary, title""",
+    ]:
+        if want not in errors:
+            fail("no error is %r in:\n  %s" % (want, "\n  ".join(errors)))
 
     # Blocks in `templates` get one error spelling out their `task_templates`:
     # a renderer block reaches each built-in kind it draws, and a task's own

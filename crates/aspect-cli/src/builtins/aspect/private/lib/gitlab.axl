@@ -13,6 +13,7 @@ OAuth bearer); `auth_kind` picks the header convention:
 
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./rate_limit.axl", "BUCKET_APP", "record_from_headers")
+load("./text.axl", "did_you_mean_then")
 
 DEFAULT_GITLAB_API = "https://gitlab.com/api/v4"
 
@@ -499,7 +500,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
     if roles:
         for role in roles:
             if not validate_role(role):
-                msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
+                msg = "unknown role %r%s" % (role, did_you_mean_then(role, VALID_ROLES, ", ", "valid roles: " + ", ".join(VALID_ROLES)))
                 fail(msg)
 
     url = aspect_cloud_url(ctx, "/gitlab/token")

@@ -560,6 +560,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .collect()
     }
 
+    /// The command path of every task in [`Self::tasks`], sorted: what a
+    /// `task_presets` or `task_templates` key is checked against.
+    pub fn task_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .tasks()
+            .into_iter()
+            .map(|t| task_command_path(t.group(), &t.kind()))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     /// Snapshot of all features discovered in Phase 1, borrowed as `&dyn FeatureLike`.
     pub fn features(&self) -> Vec<&'v dyn FeatureLike<'v>> {
         self.features
@@ -743,6 +756,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 &args_builder(feature, self.heap()),
                 identity,
                 host,
+                &self.task_paths(),
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };
@@ -750,7 +764,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     }
 
     /// Print the banner and the task's opening `header` slot through
-    /// `console`, for the task at `task_index` in `self.tasks()`.
+    /// `console`, for the task at `task_index` in `self.tasks()`, then the
+    /// console's own config warnings ([`Console::warnings`]).
     ///
     /// Called from the CLI before `execute_features_with_args` so that any
     /// diagnostic output emitted during feature initialization (auth WARNINGs,
@@ -778,6 +793,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             Slot::Header,
             minijinja::context! { label => label, highlight_style => verb_seq, highlight_reset => reset },
         );
+        for warning in console.warnings() {
+            crate::diag::warn(warning);
+        }
         Ok(())
     }
 
@@ -803,6 +821,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 "execute_configs() must be called before execute_features_with_args()"
             ))
         })?;
+        let task_paths = Arc::new(self.task_paths());
 
         for feature in self.features() {
             let args = args_builder(feature, heap);
@@ -823,6 +842,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 self.hooks_value,
                 self.loader.env.signals.clone(),
                 self.loader.env.stream_color,
+                task_paths.clone(),
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
@@ -1337,8 +1357,14 @@ impl std::str::FromStr for TimingMode {
             "short" => Ok(TimingMode::Short),
             "detailed" => Ok(TimingMode::Detailed),
             other => Err(format!(
-                "invalid timing mode {:?}; expected one of: none, total, short, detailed",
-                other
+                "invalid timing mode {:?}{}",
+                other,
+                crate::suggest::did_you_mean_then(
+                    other,
+                    ["none", "total", "short", "detailed"],
+                    "; ",
+                    "expected one of: none, total, short, detailed"
+                )
             )),
         }
     }
@@ -1526,6 +1552,19 @@ mod tests {
     use crate::module::Mod;
     use starlark::values::ValueLike;
     use std::time::Duration;
+
+    #[test]
+    fn a_near_miss_timing_mode_is_suggested() {
+        let err = "shrot".parse::<TimingMode>().unwrap_err();
+        assert!(
+            err.ends_with(
+                r#"; did you mean "short"? Expected one of: none, total, short, detailed"#
+            ),
+            "{err}"
+        );
+        let err = "verbose".parse::<TimingMode>().unwrap_err();
+        assert!(!err.contains("did you mean"), "{err}");
+    }
 
     /// A task declaring an `args.passthrough()` bucket promises to act on what
     /// the CLI routes into it. These four pin the whole contract: the task gets

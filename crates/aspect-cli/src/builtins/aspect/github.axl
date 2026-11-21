@@ -1,6 +1,7 @@
 load("./private/lib/aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/github.axl", "github")
+load("./private/lib/text.axl", "did_you_mean_then")
 
 def _token_impl(ctx: TaskContext) -> int:
     repo_args = ctx.args.repo
@@ -20,7 +21,7 @@ def _token_impl(ctx: TaskContext) -> int:
     if ctx.args.roles:
         for role in ctx.args.roles:
             if not github.validate_role(role):
-                error(ctx.std, "Unknown role %r; valid roles: %s" % (role, ", ".join(github.VALID_ROLES)))
+                error(ctx.std, "Unknown role %r%s" % (role, did_you_mean_then(role, github.VALID_ROLES, "; ", "valid roles: " + ", ".join(github.VALID_ROLES))))
                 return 1
 
     body = json.encode({"owner": owner, "repo": repo_name})

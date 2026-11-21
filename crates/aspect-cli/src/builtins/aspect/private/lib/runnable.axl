@@ -8,6 +8,8 @@ The two must agree on every label; both test suites run the cases in
 `crates/bazel/src/label_cases.json`.
 """
 
+load("./text.axl", "did_you_mean")
+
 _RUN_IN_NAMED_MODES = ["runfiles", "cwd", "bazel-root", "aspect-root", "git-root"]
 
 # Shared `description=` body for `--run-in`'s task-arg definition. Tasks
@@ -63,8 +65,8 @@ def resolve_run_in(ctx, choice: str) -> str | None:
         return choice
     if choice.startswith("./") or choice.startswith("../"):
         return ctx.std.env.current_dir() + "/" + choice
-    fail("--run-in: expected one of %s, an absolute path, or a ./relative path; got %r" %
-         (_RUN_IN_NAMED_MODES, choice))
+    fail("--run-in: expected one of %s, an absolute path, or a ./relative path; got %r%s" %
+         (_RUN_IN_NAMED_MODES, choice, did_you_mean(choice, _RUN_IN_NAMED_MODES)))
 
 def normalize_label(label):
     """Return the standard spelling of a Bazel label.

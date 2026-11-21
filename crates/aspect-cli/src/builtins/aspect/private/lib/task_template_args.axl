@@ -23,7 +23,8 @@ def task_template_args(preset_example: str, slot_example: str) -> dict:
                            "(\"worktree add\"), e.g. {\"worktree add\": \"%s\"}. That task starts " +
                            "from this preset instead of `template_preset`, without `templates`, " +
                            "unless `template_preset` is set on the command line. " +
-                           "An entry naming no task here is ignored.") % preset_example,
+                           "An entry naming no task here is ignored, with a warning when it is " +
+                           "a near miss of one.") % preset_example,
         ),
         "task_templates": args.custom(
             dict,
@@ -32,6 +33,7 @@ def task_template_args(preset_example: str, slot_example: str) -> dict:
                            "path (\"worktree add\"), each a dict of slot → template like " +
                            "`templates`, e.g. {\"lint\": {\"%s\": ...}}. They beat `templates` and " +
                            "the task's preset; a command-path entry beats a kind entry. An entry " +
-                           "naming no task here is ignored.") % slot_example,
+                           "naming no task here is ignored, with a warning when it is a near " +
+                           "miss of one.") % slot_example,
         ),
     }

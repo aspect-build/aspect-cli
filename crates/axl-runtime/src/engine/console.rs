@@ -24,11 +24,14 @@ use super::template::json_to_minijinja;
 ///
 /// A disabled feature gives the `full` layout. Fails on a malformed
 /// `templates`, `task_presets` or `task_templates` value and on everything
-/// [`Surface::resolve`] refuses.
+/// [`Surface::resolve`] refuses. The surface carries a warning for each
+/// `task_presets` / `task_templates` key that is a near miss of one of
+/// `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
     args: &Arguments<'_>,
     task: TaskIdentity,
     host: Host,
+    task_paths: &[String],
 ) -> Result<Surface, String> {
     if !args
         .get("enabled")
@@ -75,7 +78,10 @@ pub fn from_feature_args(
             overrides.set_for_task(task_key, slot, template)?;
         }
     }
-    Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)
+    Ok(
+        Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)?
+            .with_warnings(overrides.near_miss_warnings(task_paths)),
+    )
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -196,8 +202,12 @@ fn console_methods(registry: &mut MethodsBuilder) {
         #[starlark(kwargs)] context: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<String> {
         let console = downcast(this)?;
-        let slot = Slot::from_name(slot)
-            .ok_or_else(|| anyhow::anyhow!("console.render: unknown slot {slot:?}"))?;
+        let slot = Slot::from_name(slot).ok_or_else(|| {
+            anyhow::anyhow!(
+                "console.render: unknown slot {slot:?}{}",
+                crate::suggest::did_you_mean(slot, Slot::ALL.map(Slot::name))
+            )
+        })?;
         let mut json = serde_json::Map::new();
         for (k, v) in context {
             json.insert(k, v.to_json_value()?);
@@ -241,7 +251,7 @@ args = {{"templates": templates, "task_presets": task_presets, "task_templates":
             for (name, value) in DictRef::from_value(bound).unwrap().iter() {
                 args.insert(name.unpack_str().unwrap().into(), value);
             }
-            let surface = from_feature_args(&args, task(), Host::default())?;
+            let surface = from_feature_args(&args, task(), Host::default(), &[])?;
             Ok(surface.render(slot, minijinja::context! { text => "x" }))
         })
     }
@@ -336,11 +346,32 @@ task_templates = {"check": {"progress": "mine"}}"#;
         crate::test::eval("enabled = False").with_value("enabled", |enabled| {
             let args = Arguments::new();
             args.insert("enabled".into(), enabled);
-            let surface = from_feature_args(&args, task(), Host::default()).unwrap();
+            let surface = from_feature_args(&args, task(), Host::default(), &[]).unwrap();
             assert_eq!(surface.preset(), "full");
         });
-        let surface = from_feature_args(&Arguments::new(), task(), Host::default()).unwrap();
+        let surface = from_feature_args(&Arguments::new(), task(), Host::default(), &[]).unwrap();
         assert_eq!(surface.preset(), DEFAULT_PRESET);
+    }
+
+    #[test]
+    fn the_surface_carries_near_miss_warnings() {
+        crate::test::eval(r#"task_presets = {"chek": "silent", "release-notes": "silent"}"#)
+            .with_value("task_presets", |task_presets| {
+                let args = Arguments::new();
+                args.insert("task_presets".into(), task_presets);
+                let paths = ["check".to_owned()];
+                let surface = from_feature_args(&args, task(), Host::default(), &paths).unwrap();
+                assert_eq!(
+                    surface.warnings(),
+                    [r#"Console task_presets["chek"] names no task here; did you mean "check"?"#]
+                );
+                assert!(
+                    from_feature_args(&args, task(), Host::default(), &[])
+                        .unwrap()
+                        .warnings()
+                        .is_empty()
+                );
+            });
     }
 
     #[test]
@@ -442,7 +473,7 @@ check = task(implementation = _impl)
 "#;
         let err = crate::test::eval(code).run_task(0).unwrap_err();
         assert!(
-            format!("{err:?}").contains("unknown slot \"verdcit\""),
+            format!("{err:?}").contains(r#"unknown slot "verdcit"; did you mean "verdict"?"#),
             "{err:?}"
         );
     }

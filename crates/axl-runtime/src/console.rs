@@ -22,6 +22,12 @@
 //!   <  task_templates[<task kind>]  <  task_templates[<command path>]
 //! ```
 //!
+//! A key that names no task here is inert, so a user-level `config.axl` can
+//! name tasks only some repos have; one that is a near miss of a task here
+//! (`tset`) gets a warning naming the task it likely meant. Slots and presets
+//! are closed sets, so an unknown one fails, naming the near miss when there
+//! is one (see [`crate::suggest`]).
+//!
 //! Two rules keep a template from costing the reader the task's outcome or the
 //! log's structure:
 //!
@@ -40,12 +46,13 @@
 //! Buildkite sections come from the [`Host`] it is built with, which a run
 //! takes from its [`Env`] ([`Host::of`]) and a test spells out.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
 
 use minijinja::{Environment, Value as JinjaValue};
 
 use crate::engine::store::Env;
+use crate::suggest;
 
 /// One line-shaped piece of the terminal surface.
 ///
@@ -118,8 +125,13 @@ impl Slot {
     fn parse(name: &str, at: &str) -> Result<Slot, String> {
         Slot::from_name(name).ok_or_else(|| {
             format!(
-                "Console {at}: {name:?} is not a slot; expected one of {}",
-                Slot::ALL.map(Slot::name).join(", ")
+                "Console {at}: {name:?} is not a slot{}",
+                suggest::did_you_mean_then(
+                    name,
+                    Slot::ALL.map(Slot::name),
+                    "; ",
+                    &format!("expected one of {}", Slot::ALL.map(Slot::name).join(", ")),
+                ),
             )
         })
     }
@@ -334,6 +346,38 @@ impl Overrides {
         (preset, resolved)
     }
 
+    /// A warning for each `task_presets` / `task_templates` key that names no
+    /// task here but is a near miss of one that does (see
+    /// [`closest_task_key`]), naming every arg the key appears in. A key far
+    /// from every task stays silent: a user-level `config.axl` applies to
+    /// every repo, and only some of them define the task.
+    pub fn near_miss_warnings(&self, task_paths: &[String]) -> Vec<String> {
+        let keys: BTreeSet<&str> = self
+            .task_presets
+            .keys()
+            .chain(self.task_templates.keys())
+            .map(String::as_str)
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| {
+                let closest = closest_task_key(key, task_paths)?;
+                let args: Vec<String> = [
+                    ("task_presets", self.task_presets.contains_key(key)),
+                    ("task_templates", self.task_templates.contains_key(key)),
+                ]
+                .into_iter()
+                .filter(|(_, has)| *has)
+                .map(|(arg, _)| format!("{arg}[{key:?}]"))
+                .collect();
+                let verb = if args.len() == 1 { "names" } else { "name" };
+                Some(format!(
+                    "Console {} {verb} no task here; did you mean {closest:?}?",
+                    args.join(" and ")
+                ))
+            })
+            .collect()
+    }
+
     /// `task`'s `task_presets` entry, the command path's over the kind's.
     fn preset_for(&self, task: &TaskIdentity) -> Option<&str> {
         if self.preset_from_cli {
@@ -397,6 +441,8 @@ pub struct Console {
     host: Host,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
+    /// Config warnings, printed under the header; see [`Console::warnings`].
+    warnings: Vec<String>,
 }
 
 impl std::fmt::Debug for Preset {
@@ -417,7 +463,8 @@ impl Console {
     /// Fails on an unknown preset or an override that does not compile,
     /// wherever it is scoped. An entry for a task this repo lacks is checked but
     /// otherwise inert, as on the CI surfaces: a user-level `config.axl` applies
-    /// to every repo, and only some of them define that task.
+    /// to every repo, and only some of them define that task. A near miss of a
+    /// task here is no error either; [`Overrides::near_miss_warnings`] names it.
     pub fn resolve(
         preset_name: &str,
         overrides: &Overrides,
@@ -449,7 +496,23 @@ impl Console {
             host,
             task,
             warned: Mutex::new(HashSet::new()),
+            warnings: Vec::new(),
         }
+    }
+
+    /// This console with `warnings` about its config, such as
+    /// [`Overrides::near_miss_warnings`], to print under the header.
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Console {
+        self.warnings = warnings;
+        self
+    }
+
+    /// Warnings about the config this console was resolved from. They print
+    /// under the header rather than when the console resolves, so on
+    /// Buildkite they land in the task's log section with the feature
+    /// warnings rather than in whatever section came before it.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Name of the selected preset.
@@ -552,12 +615,29 @@ fn task_key(key: &str, label: &str) -> Result<(), String> {
     }
 }
 
+/// The task key `key` is most likely a typo of, given the command path of
+/// every task here (`worktree add`), or `None`: [`suggest::closest`] over
+/// every task key, a kind (a path's last word) or a command path.
+/// `template_presets.axl` applies the same rule on the CI surfaces.
+fn closest_task_key(key: &str, task_paths: &[String]) -> Option<String> {
+    let known: BTreeSet<&str> = task_paths
+        .iter()
+        .flat_map(|path| [path.as_str(), path.rsplit(' ').next().unwrap_or(path)])
+        .collect();
+    suggest::closest(key, known).map(str::to_owned)
+}
+
 /// The built-in preset `name`, or an error naming where it was asked for.
 fn preset_named(name: &str, at: &str) -> Result<&'static Preset, String> {
     PRESETS.into_iter().find(|p| p.name == name).ok_or_else(|| {
         format!(
-            "Console {at}: unknown template preset {name:?}; expected one of {}",
-            PRESETS.map(|p| p.name).join(", ")
+            "Console {at}: unknown template preset {name:?}{}",
+            suggest::did_you_mean_then(
+                name,
+                PRESETS.map(|p| p.name),
+                "; ",
+                &format!("expected one of {}", PRESETS.map(|p| p.name).join(", ")),
+            ),
         )
     })
 }
@@ -1023,6 +1103,31 @@ mod tests {
     }
 
     #[test]
+    fn a_near_miss_slot_or_preset_is_suggested() {
+        let slot = |name: &str| Overrides::default().set(name, "x".into()).unwrap_err();
+        assert!(
+            slot("verdcit").ends_with(r#""verdcit" is not a slot; did you mean "verdict"? Expected one of banner, header, phase, progress, verdict, section"#),
+            "{}",
+            slot("verdcit")
+        );
+        assert!(
+            slot("summary").ends_with("section"),
+            "far miss: {}",
+            slot("summary")
+        );
+        assert!(!slot("ph").contains("did you mean"));
+
+        let preset = |name: &str| {
+            Console::resolve(name, &Overrides::default(), task(), Host::default())
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert!(preset("plian").contains(r#""plian"; did you mean "plain"? Expected one of "#));
+        assert!(!preset("loud").contains("did you mean"));
+        assert!(!preset("fl").contains("did you mean"));
+    }
+
+    #[test]
     fn every_preset_template_compiles_and_the_default_is_listed() {
         let env = Environment::new();
         for p in PRESETS {
@@ -1032,5 +1137,70 @@ mod tests {
             }
         }
         assert!(PRESETS.iter().any(|p| p.name == DEFAULT_PRESET));
+    }
+
+    /// The command paths of a repo with built-in, grouped, alias and custom
+    /// tasks. `buildkite_annotations_test.axl` checks the CI surfaces against the
+    /// same table.
+    fn task_paths() -> Vec<String> {
+        [
+            "build",
+            "test",
+            "lint",
+            "format",
+            "buildifier",
+            "deploy",
+            "worktree add",
+            "worktree release",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn a_near_miss_names_the_closest_task() {
+        for (key, expected) in [
+            ("tset", Some("test")),
+            ("bulid", Some("build")),
+            ("lnt", Some("lint")),
+            ("worktree ad", Some("worktree add")),
+            ("relase", Some("release")),
+            ("buildifer", Some("buildifier")),
+            ("deplyo", Some("deploy")),
+            ("test", None),
+            ("add", None),
+            ("worktree add", None),
+            ("release-notes", None),
+            ("fmt", None),
+            ("abc", None),
+            ("ad", None),
+            ("tt", None),
+        ] {
+            assert_eq!(
+                closest_task_key(key, &task_paths()).as_deref(),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_near_miss_is_warned_about_once_per_key() {
+        let mut o = Overrides::default();
+        o.set_preset_for_task("tset", "silent".into()).unwrap();
+        o.set_for_task("tset", "header", "a".into()).unwrap();
+        o.set_for_task("tset", "verdict", "b".into()).unwrap();
+        o.set_for_task("worktree ad", "header", "c".into()).unwrap();
+        o.set_for_task("release-notes", "header", "d".into())
+            .unwrap();
+        o.set_preset_for_task("test", "plain".into()).unwrap();
+        assert_eq!(
+            o.near_miss_warnings(&task_paths()),
+            [
+                r#"Console task_presets["tset"] and task_templates["tset"] name no task here; did you mean "test"?"#,
+                r#"Console task_templates["worktree ad"] names no task here; did you mean "worktree add"?"#,
+            ]
+        );
+        assert!(o.near_miss_warnings(&[]).is_empty());
     }
 }

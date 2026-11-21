@@ -48,6 +48,8 @@ grouped_check = task(
     args = {"code": args.int(default = 0), "flag": args.boolean(default = False)},
 )
 
+strict_check = check.alias(defaults = {"flag": True}, summary = "Check, warning on a flag.")
+
 def _section(ctx):
     buildkite_section(ctx, ":rocket:", "Runner metadata")
     return 0
@@ -72,7 +74,8 @@ const EVENTS: &str = "event:running:False\nevent:running:False\n";
 
 /// Run `aspect <args>` in a scratch workspace with `tasks.axl` and a
 /// `config.axl` of `OBSERVE` followed by `config_body` (statements run inside
-/// `config(ctx)`).
+/// `config(ctx)`), under an empty `$HOME` so no user-level `config.axl`
+/// applies.
 fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
@@ -92,7 +95,8 @@ fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
         .current_dir(dir.path())
         .env_clear()
         .envs(base_env())
-        .env("ASPECT_CLI_CACHE", dir.path().join("cache"));
+        .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
+        .env("HOME", dir.path().join("home"));
     if buildkite {
         cmd.env("BUILDKITE", "true");
     }
@@ -291,7 +295,7 @@ fn a_misnamed_slot_is_refused() {
     let err = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(
-        err.contains(r#"task_templates["check"]: "verdcit" is not a slot"#),
+        err.contains(r#"task_templates["check"]: "verdcit" is not a slot; did you mean "verdict"? Expected one of banner, header, phase, progress, verdict, section"#),
         "{err}"
     );
 }
@@ -310,6 +314,68 @@ ctx.features[Console].args.task_presets = {"deploy": "silent"}"#,
     let err = stderr(&output);
     assert!(err.contains("→ ✅ Passed check task"), "{err}");
     assert!(!err.contains("deployed"), "{err}");
+    assert!(!err.contains("names no task here"), "{err}");
+}
+
+/// A key a slip away from a task here is most likely a typo, so it is named
+/// once, whichever args carry it, on `Console` and on a CI surface alike, and
+/// under the header, so on Buildkite it lands in the task's section.
+#[test]
+fn a_near_miss_task_key_is_warned_about_once() {
+    let output = run(
+        r#"ctx.features[Console].args.task_templates = {"chek": {"verdict": "x"}, "fx chek": {"verdict": "y"}}
+ctx.features[Console].args.task_presets = {"chek": "silent", "strict-chek": "silent"}
+ctx.features[BuildkiteAnnotations].args.enabled = True
+ctx.features[BuildkiteAnnotations].args.task_presets = {"fx chekc": "full"}"#,
+        &["check"],
+        false,
+    );
+    assert_task_behaviour(&output, "full", 0);
+    let err = stderr(&output);
+    let header = err
+        .find("Running check")
+        .unwrap_or_else(|| panic!("no header in:\n{err}"));
+    for warning in [
+        r#"Console task_presets["chek"] and task_templates["chek"] name no task here; did you mean "check"?"#,
+        r#"Console task_templates["fx chek"] names no task here; did you mean "fx check"?"#,
+        r#"Console task_presets["strict-chek"] names no task here; did you mean "strict-check"?"#,
+        r#"BuildkiteAnnotations task_presets["fx chekc"] names no task here; did you mean "fx check"?"#,
+    ] {
+        assert_eq!(err.matches(warning).count(), 1, "{warning}\n{err}");
+        assert!(err.find(warning) > Some(header), "{warning}\n{err}");
+    }
+}
+
+/// A preset with a blank header still prints the warning, first thing; on
+/// Buildkite it follows the task's section marker, which every preset keeps.
+#[test]
+fn a_near_miss_warning_prints_under_a_blank_header() {
+    for buildkite in [false, true] {
+        let output = run(
+            r#"ctx.features[Console].args.task_presets = {"chek": "silent"}"#,
+            &["check", "--console:template-preset=silent"],
+            buildkite,
+        );
+        assert_task_behaviour(&output, "silent", 0);
+        let err = stderr(&output);
+        let lines: Vec<&str> = err.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| {
+                l.ends_with(
+                    r#"Console task_presets["chek"] names no task here; did you mean "check"?"#,
+                )
+            })
+            .unwrap_or_else(|| panic!("no warning in:\n{err}"));
+        if buildkite {
+            assert!(
+                at == 1 && lines[0].starts_with("--- ") && lines[0].contains("Running"),
+                "{err}"
+            );
+        } else {
+            assert_eq!(at, 0, "{err}");
+        }
+    }
 }
 
 #[test]

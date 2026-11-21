@@ -24,6 +24,7 @@ use crate::color::StreamColor;
 /// - `ctx.std` — standard library
 /// - `ctx.http` — HTTP client
 /// - `ctx.hooks` — pre-task and post-task hooks around the task body
+/// - `ctx.task_paths` - the command path of every task the repo defines
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<FeatureContext>")]
 pub struct FeatureContext<'v> {
@@ -42,6 +43,8 @@ pub struct FeatureContext<'v> {
     /// What `std.io.<stream>.color` reports.
     #[allocative(skip)]
     pub(crate) stream_color: StreamColor,
+    /// Behind `ctx.task_paths`.
+    pub(crate) task_paths: Arc<Vec<String>>,
 }
 
 unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
@@ -61,6 +64,7 @@ impl<'v> FeatureContext<'v> {
         hooks: Value<'v>,
         signals: Arc<Signals>,
         stream_color: StreamColor,
+        task_paths: Arc<Vec<String>>,
     ) -> Self {
         Self {
             args,
@@ -69,6 +73,7 @@ impl<'v> FeatureContext<'v> {
             hooks,
             signals,
             stream_color,
+            task_paths,
         }
     }
 }
@@ -90,6 +95,7 @@ impl<'v> Freeze for FeatureContext<'v> {
             hooks: self.hooks.freeze(freezer)?,
             signals: self.signals,
             stream_color: self.stream_color,
+            task_paths: self.task_paths,
         })
     }
 }
@@ -119,6 +125,8 @@ pub struct FrozenFeatureContext {
     /// What `std.io.<stream>.color` reports.
     #[allocative(skip)]
     stream_color: StreamColor,
+    #[allocative(skip)]
+    task_paths: Arc<Vec<String>>,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenFeatureContext {
@@ -207,6 +215,20 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
         }
         if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
             return Ok(c.telemetry.to_value());
+        }
+        Err(anyhow::anyhow!("expected FeatureContext"))
+    }
+
+    /// The command path of every task the repo defines (`worktree add`; a
+    /// top-level task's is its kind), sorted. The tasks a config added are
+    /// included.
+    #[starlark(attribute)]
+    fn task_paths<'v>(this: Value<'v>) -> anyhow::Result<Vec<String>> {
+        if let Some(c) = this.downcast_ref::<FeatureContext>() {
+            return Ok(c.task_paths.to_vec());
+        }
+        if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
+            return Ok(c.task_paths.to_vec());
         }
         Err(anyhow::anyhow!("expected FeatureContext"))
     }

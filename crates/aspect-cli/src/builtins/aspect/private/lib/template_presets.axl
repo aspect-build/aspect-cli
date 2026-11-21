@@ -54,8 +54,13 @@ the path winning. A task with its own preset starts from that preset alone,
 without `templates`; `task_templates` beat both. A `template_preset` typed on
 the command line applies to every task, over `task_presets`. `config`
 validates the four when the feature loads and `resolve` applies them per
-task. The comment surfaces aggregate every task, so they take only
-`template_preset` and `templates`, which `comment_body` validates.
+task. An unknown slot or preset fails, naming the near miss when there is
+one (`did_you_mean_then` in `text.axl`). A key that names no task here is
+inert, so a user-level config can name tasks only some repos have; `config`
+warns about one that is a near miss of a task here (`"tset"`), by the rule
+the `Console` feature applies. The comment surfaces aggregate every task, so
+they take only `template_preset` and `templates`, which `comment_body`
+validates.
 
 Presets themselves keep the scoped shape `resolve_templates` documents,
 because a `details` template is written against one renderer's data.
@@ -74,8 +79,10 @@ load(
     "kind_for_task",
     "resolve_templates",
 )
+load("./environment.axl", "warn")
 load("./task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 load("./template_preset_default.axl", "DEFAULT_TEMPLATES")
+load("./text.axl", "closest", "did_you_mean_then")
 
 TemplatePreset = record(
     name = field(str),
@@ -200,7 +207,7 @@ _NAMES = _validate(_PRESETS, _DEFAULT)
 def _templates(name: str) -> dict:
     """The template overrides `name` contributes, shaped as a `resolve_templates` layer."""
     if name not in _PRESETS:
-        fail("unknown template preset {!r}; known presets: {}".format(name, ", ".join(_NAMES)))
+        fail("unknown template preset {!r}{}".format(name, did_you_mean_then(name, _NAMES, "; ", "known presets: " + ", ".join(_NAMES))))
     return _PRESETS[name].templates
 
 def _command_path(task) -> str:
@@ -253,10 +260,10 @@ def _slot_map_errors(label: str, value) -> list[str]:
     errors = []
     for slot in sorted(value.keys(), key = _key_order):
         if slot not in RENDERER_TEMPLATE_SLOTS:
-            errors.append("{}: {!r} is not a slot; expected one of {}".format(
+            errors.append("{}: {!r} is not a slot{}".format(
                 label,
                 slot,
-                ", ".join(RENDERER_TEMPLATE_SLOTS),
+                did_you_mean_then(slot, RENDERER_TEMPLATE_SLOTS, "; ", "expected one of " + ", ".join(RENDERER_TEMPLATE_SLOTS)),
             ))
         else:
             errors.extend(_template_errors("{}[{!r}]".format(label, slot), value[slot], slot))
@@ -345,11 +352,11 @@ def _config_errors(feature: str, args) -> list[str]:
         errors.extend(_task_key_errors(label, key))
         name = task_presets[key]
         if type(name) != "string" or name not in _PRESETS:
-            errors.append("{}[{!r}]: unknown template preset {!r}; known presets: {}".format(
+            errors.append("{}[{!r}]: unknown template preset {!r}{}".format(
                 label,
                 key,
                 name,
-                ", ".join(_NAMES),
+                did_you_mean_then(name, _NAMES, "; ", "known presets: " + ", ".join(_NAMES)),
             ))
     task_templates = _dict_arg(errors, feature + " task_templates", args.task_templates)
     for key in sorted(task_templates.keys(), key = _key_order):
@@ -357,13 +364,49 @@ def _config_errors(feature: str, args) -> list[str]:
         errors.extend(_slot_map_errors("{} task_templates[{!r}]".format(feature, key), task_templates[key]))
     return errors
 
-def _config(feature: str, args):
-    """Validate a per-task surface's template args and return them for
-    `resolve`. Fails on anything `_config_errors` finds, so a bad config is
-    refused when the feature loads rather than when its task first reports."""
+def _closest_task_key(key: str, task_paths: list[str]) -> str:
+    """The task key `key` is most likely a typo of, given the command path of
+    every task here (`worktree add`), or "": `closest` over every task key, a
+    kind (a path's last word) or a command path. The rule `Console` applies in
+    `crates/axl-runtime/src/console.rs`.
+    """
+    known = {}
+    for path in task_paths:
+        known[path] = True
+        known[path.split(" ")[-1]] = True
+    return closest(key, known.keys())
+
+def _near_miss_warnings(feature: str, args, task_paths: list[str]) -> list[str]:
+    """A warning for each `task_presets` / `task_templates` key that is a near
+    miss of a task here (`_closest_task_key`), naming every arg the key
+    appears in. Expects args `_config_errors` passed."""
+    by_arg = [("task_presets", args.task_presets or {}), ("task_templates", args.task_templates or {})]
+    keys = {key: True for _, value in by_arg for key in value}
+    warnings = []
+    for key in sorted(keys.keys()):
+        near = _closest_task_key(key, task_paths)
+        if not near:
+            continue
+        named = ["%s[%r]" % (arg, key) for arg, value in by_arg if key in value]
+        warnings.append("{} {} {} no task here; did you mean {!r}?".format(
+            feature,
+            " and ".join(named),
+            "names" if len(named) == 1 else "name",
+            near,
+        ))
+    return warnings
+
+def _config(feature: str, ctx):
+    """Validate a per-task surface's template args, `ctx.args`, and return
+    them for `resolve`. Fails on anything `_config_errors` finds, so a bad
+    config is refused when the feature loads rather than when its task first
+    reports, and warns once about each near-miss task key."""
+    args = ctx.args
     errors = _config_errors(feature, args)
     if errors:
         fail("\n".join(errors))
+    for warning in _near_miss_warnings(feature, args, ctx.task_paths):
+        warn(ctx.std, warning)
     return struct(
         template_preset = args.template_preset,
         preset_from_cli = args.is_explicit("template_preset"),
@@ -440,10 +483,12 @@ template_presets = namespace(
     DEFAULT = _DEFAULT,
     NAMES = _NAMES,
     args = _args,
+    closest_task_key = _closest_task_key,
     comment_body = _comment_body,
     comment_errors = _comment_errors,
     config = _config,
     config_errors = _config_errors,
+    near_miss_warnings = _near_miss_warnings,
     resolve = _resolve,
     task_args = _task_args,
     templates = _templates,

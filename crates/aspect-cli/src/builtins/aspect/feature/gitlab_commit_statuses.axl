@@ -190,7 +190,7 @@ def _state_for(status, final):
 def _gitlab_commit_statuses(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
 
-    template_config = template_presets.config("GitlabCommitStatuses", ctx.args)
+    template_config = template_presets.config("GitlabCommitStatuses", ctx)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     mode = ctx.args.mode

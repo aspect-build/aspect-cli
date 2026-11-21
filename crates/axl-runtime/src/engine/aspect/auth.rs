@@ -695,8 +695,9 @@ pub(crate) fn select_deployment(
             .cloned()
             .ok_or_else(|| {
                 TaskExit::error(format!(
-                    "unknown deployment: {:?}\n\nConfigure it with `aspect auth configure <host>`.",
-                    name
+                    "unknown deployment: {:?}{}\n\nConfigure it with `aspect auth configure <host>`.",
+                    name,
+                    crate::suggest::did_you_mean(name, deployments.iter().map(|d| d.name.as_str()))
                 ))
                 .into()
             });
@@ -1558,7 +1559,8 @@ fn apply_remove(deployments: &mut Vec<Deployment>, name: &str) -> anyhow::Result
     deployments.retain(|d| d.name != name);
     if deployments.len() == before {
         return Err(TaskExit::error(format!(
-            "unknown deployment: {name:?}\n\nRun `aspect auth status` to see configured deployments."
+            "unknown deployment: {name:?}{}\n\nRun `aspect auth status` to see configured deployments.",
+            crate::suggest::did_you_mean(name, deployments.iter().map(|d| d.name.as_str()))
         ))
         .into());
     }
@@ -1596,8 +1598,9 @@ fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyh
     if let Some(target) = target {
         if !deployments.iter().any(|d| d.name == target) {
             return Err(TaskExit::error(format!(
-                "unknown deployment: {:?}\n\nConfigure it with `aspect auth configure <host>`.",
-                target
+                "unknown deployment: {:?}{}\n\nConfigure it with `aspect auth configure <host>`.",
+                target,
+                crate::suggest::did_you_mean(target, deployments.iter().map(|d| d.name.as_str()))
             ))
             .into());
         }
@@ -5168,6 +5171,14 @@ mod tests {
             "acme"
         );
         assert!(select_deployment(&deployments, Some("nope")).is_err());
+        let err = select_deployment(&deployments, Some("acem")).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with(r#"unknown deployment: "acem"; did you mean "acme"?"#),
+            "{err}"
+        );
+        let err = select_deployment(&deployments, Some("nope")).unwrap_err();
+        assert!(!err.to_string().contains("did you mean"), "{err}");
     }
 
     /// The alias reaches Aspect Cloud everywhere a deployment is named, not just in

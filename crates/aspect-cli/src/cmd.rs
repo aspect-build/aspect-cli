@@ -33,6 +33,7 @@ use axl_runtime::engine::names::to_display_name;
 use axl_runtime::engine::task::{MAX_TASK_GROUPS, TaskLike};
 use axl_runtime::eval::TimingMode;
 use axl_runtime::module::Mod;
+use axl_runtime::suggest;
 use clap::builder::{PossibleValuesParser, Resettable, StyledStr};
 use clap::parser::ValueSource;
 use clap::{Arg as ClapArg, ArgAction, ArgMatches, Command, value_parser};
@@ -368,8 +369,16 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 match select_task(&full, name) {
                     Some(t) => t,
                     None => {
+                        let commands = describe_commands(&full);
+                        let want = name.trim().trim_start_matches("aspect ").trim();
                         errln!(
-                            "error: no task {name:?}. Run `aspect describe` for the list of commands."
+                            "error: no task {name:?}{}",
+                            suggest::did_you_mean_then(
+                                want,
+                                commands.iter().copied(),
+                                ". ",
+                                "Run `aspect describe` for the list of commands."
+                            )
                         );
                         return ExitCode::FAILURE;
                     }
@@ -419,8 +428,13 @@ impl<'a, 'v> Cmd<'a, 'v> {
                         ("", "")
                     };
                     errln!(
-                        "{red}error:{reset} unknown feature {name:?}. Valid features: {}",
-                        valid.join(", ")
+                        "{red}error:{reset} unknown feature {name:?}{}",
+                        suggest::did_you_mean_then(
+                            name,
+                            valid.iter().map(String::as_str),
+                            ". ",
+                            &format!("Valid features: {}", valid.join(", "))
+                        )
                     );
                     ExitCode::from(2)
                 }
@@ -1605,6 +1619,17 @@ fn describe_index(
             "feature_flags": "aspect feature <name>",
         },
     })
+}
+
+/// The command path of every task in a full [`describe_json`] document,
+/// without the leading `aspect `.
+fn describe_commands(full: &serde_json::Value) -> Vec<&str> {
+    full["tasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| Some(t["command"].as_str()?.trim_start_matches("aspect ")))
+        .collect()
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,
