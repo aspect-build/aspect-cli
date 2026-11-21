@@ -662,9 +662,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// the task history's record of the run: the record keeps the command
     /// line as typed, readable by its user alone, and redacts the value given
     /// on it wherever it shows it, there, in the flags of the task's Bazel
-    /// invocations and in the error the task ends with (a value of 4
-    /// characters or more, past the flag itself); once the run's files are
-    /// evicted, on disk too. Only the record: the build event stream and the
+    /// invocations, in its links and in the error the task ends with (a
+    /// value of 4 characters or more, past the flag itself); once the run's
+    /// files are evicted, on disk too. Only the record: the build event stream and the
     /// announced Bazel command apply their own rules. Prefer an environment
     /// variable or a file for a secret; this is for one that has to be a flag.
     fn string<'v>(

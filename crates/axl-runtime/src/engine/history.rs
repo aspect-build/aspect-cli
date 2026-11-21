@@ -238,10 +238,7 @@ impl History {
         let file = self.task_record.lock().unwrap().clone()?;
         let entry = file.path().parent()?.to_path_buf();
         // A secret the task passes on into a flag is redacted there too.
-        let secrets = {
-            let (argv, secret_flags, value_shorts) = &*self.command_line.lock().unwrap();
-            task_record::secret_values(argv, secret_flags, value_shorts)
-        };
+        let secrets = self.secret_values();
         let record = BazelRecord {
             command: command.to_owned(),
             patterns: task_record::scrub(patterns, &secrets),
@@ -303,13 +300,24 @@ impl History {
         Some((dir, record))
     }
 
-    /// Add a link (a results page) to the task's record.
+    /// The values the task's secret flags were given on its command line.
+    fn secret_values(&self) -> Vec<String> {
+        let (argv, secret_flags, value_shorts) = &*self.command_line.lock().unwrap();
+        task_record::secret_values(argv, secret_flags, value_shorts)
+    }
+
+    /// Add a link (a results page) to the task's record, as the record's
+    /// other text is kept: the task's secrets' values scrubbed from it, and
+    /// the URL's credentials (`user:pass@`) stripped.
     pub fn link(&self, label: &str, url: &str) {
         if let Some(file) = self.task_record.lock().unwrap().as_ref() {
+            let secrets = self.secret_values();
+            let url = bazel::bes::redact::strip_url_creds(url);
+            let text = task_record::scrub(&[label.to_owned(), url.into_owned()], &secrets);
             file.update(|r| {
                 let link = Link {
-                    label: label.to_owned(),
-                    url: url.to_owned(),
+                    label: text[0].clone(),
+                    url: text[1].clone(),
                 };
                 if !r.links.contains(&link) {
                     r.links.push(link);
@@ -991,6 +999,28 @@ mod tests {
         h.begin(&id(99));
         next(&h);
         assert!(live.exists());
+    }
+
+    /// A link is kept scrubbed of the task's secrets and URL credentials.
+    #[test]
+    fn a_link_is_kept_without_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(root.path(), 1 << 30, 10);
+        h.set_command_line(
+            vec!["aspect".into(), "--token=S3CRET".into()],
+            vec!["--token".into()],
+            vec![],
+        );
+        h.begin_task(&id(1), TaskStart::default());
+        h.link("Deploy S3CRET", "https://user:pw@host/x?t=S3CRET");
+        let record = h.record(&id(1)).unwrap().1;
+        assert_eq!(
+            (record.links[0].label.as_str(), record.links[0].url.as_str()),
+            (
+                "Deploy <REDACTED>",
+                "https://<REDACTED>@host/x?t=<REDACTED>"
+            )
+        );
     }
 
     /// A run that builds nothing still caps the records at its end.
