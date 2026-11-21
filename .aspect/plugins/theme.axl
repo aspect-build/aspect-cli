@@ -10,8 +10,9 @@ Everything is a `rewrite` stage, so where curses is shown it reaches the rows
 of Bazel's live progress area too; in plain lines there are none. A
 rewritten row stays one row: under a PTY a row made wider than Bazel drew it
 is cut to that many terminal columns, so a running action's marker takes the
-place of three of its indent's spaces. Colour is added only when stderr is a
-terminal, since nothing strips what a stage adds.
+place of three of its indent's spaces. Colour is added only where stderr
+takes it (`std.io.stderr.color`: a terminal, without `NO_COLOR`), since
+nothing strips what a stage adds.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
@@ -74,7 +75,7 @@ STYLES = {
 }
 
 def _theme_impl(ctx: FeatureContext):
-    if not ctx.std.io.stderr.is_tty:
+    if not ctx.std.io.stderr.color:
         return
     ctx.traits[BazelTrait].output_stages.extend(STYLES[ctx.args.style]())
 
