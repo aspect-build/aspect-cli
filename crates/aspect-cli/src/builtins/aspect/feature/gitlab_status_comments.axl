@@ -55,7 +55,6 @@ template's variable contract.
 load(
     "@aspect//feature/github_status_comments.axl",
     "DEFAULT_BODY_TEMPLATE",
-    "DEFAULT_STATUS_BADGES",
     "absorb_duplicate_states",
     "bucket_entries",
     "contribute_rejected",
@@ -75,6 +74,7 @@ load(
     "should_create_fallback",
     "superseded",
     "uncoordinated_interval_s",
+    status_badges_for = "status_badges",
 )
 load("@std//time.axl", "monotonic", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
@@ -145,6 +145,7 @@ def _own_entry(ctx, _state, run_id, run_attempt, job_name):
 def _gitlab_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
     body_template = template_presets.comment_body("GitlabStatusComments", ctx.args, DEFAULT_BODY_TEMPLATE)
+    status_badges = status_badges_for("GitlabStatusComments", ctx.args.status_badges)
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -198,9 +199,6 @@ def _gitlab_status_comments(ctx: FeatureContext):
     ci_host = detect_ci_host(env) or {"label": "GitLab CI", "icon": "🦊"}
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
     coordinate = ctx.args.coordinate
-
-    status_badges = dict(DEFAULT_STATUS_BADGES)
-    status_badges.update(ctx.args.status_badges or {})
 
     _state = {}
     _state["_workflow_name"] = workflow_name
@@ -698,7 +696,8 @@ GitlabStatusComments = feature(
             description = "Override badge_key -> badge mapping merged over defaults " +
                           "(failed='❌', warning='⚠️', running='🔄', passed='✅', " +
                           "aborted='🔥'). Keys are badge keys, not task statuses: a task " +
-                          "still running but already failing takes the `failed` badge.",
+                          "still running but already failing takes the `failed` badge. Any " +
+                          "other key fails when the feature loads.",
         ),
     } | template_presets.args(),
 )

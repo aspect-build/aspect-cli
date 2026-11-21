@@ -53,6 +53,8 @@ load(
     "serialize_state",
     "should_create_fallback",
     "snippet_key",
+    "status_badge_errors",
+    "status_badges",
     "superseded",
     "terminal_post_deadline_s",
 )
@@ -607,6 +609,27 @@ def _check_format_http_failure_detail():
         fail("format_http_failure_detail truncation: expected cap at 200 + '...', got %d chars" % len(truncated))
     if not truncated.endswith("..."):
         fail("format_http_failure_detail truncation: expected '...' suffix, got %r" % truncated[-10:])
+
+def _check_status_badges():
+    _eq("no overrides", status_badges("C", None), DEFAULT_STATUS_BADGES)
+    _eq("an override replaces its label", status_badges("C", {"passed": "ok"})["passed"], "ok")
+    _eq("known keys pass", status_badge_errors("C", {"failed": "x", "aborted": "y"}), [])
+    _eq(
+        "a near miss is suggested",
+        status_badge_errors("C", {"pased": "x"}),
+        ['C status_badges: "pased" is not a badge; expected one of aborted, failed, passed, running, warning; did you mean "passed"?'],
+    )
+    _eq(
+        "a far miss is refused alone",
+        status_badge_errors("C", {"skipped": "x"}),
+        ['C status_badges: "skipped" is not a badge; expected one of aborted, failed, passed, running, warning'],
+    )
+    _eq(
+        "a short key gets no suggestion",
+        status_badge_errors("C", {"ok": "x"}),
+        ['C status_badges: "ok" is not a badge; expected one of aborted, failed, passed, running, warning'],
+    )
+    _eq("not a dict", status_badge_errors("C", ["x"]), ["C status_badges must be a dict, got [\"x\"]"])
 
 def _check_lease_held():
     # First cycle: nobody has published → never honor the lease.
@@ -1986,6 +2009,7 @@ def _test_impl(ctx):
     _check_collect_tip_rows(ctx)
     _check_repro_dedup_consecutive_headings(ctx)
     _check_format_http_failure_detail()
+    _check_status_badges()
     _check_lease_held()
     _check_retry_terminal_post()
     _check_terminal_post_deadline_s()
