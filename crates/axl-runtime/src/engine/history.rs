@@ -26,14 +26,18 @@
 //! [`Retention::every`]: the oldest started first while the history is over
 //! [`Retention::budget`], never below [`Retention::keep`] invocations, and
 //! never one written to within [`Retention::guard`], which may be a build or an
-//! upload still running in another workspace. Liveness is read from those times
-//! alone, so a run elsewhere that has gone longer than the guard without
-//! writing, and is not among the newest kept, can lose its files. Entries with
+//! upload still running in another workspace, nor one whose record says its
+//! run is still going ([`task_record::still_running`]: another live process,
+//! the record written within a week). Past that, a run elsewhere that has
+//! gone longer than the guard without writing, and is not among the newest
+//! kept, can lose its files; its record, written again later, stays evicted. Entries with
 //! only a record (a task that never built, one evicted) count toward neither
 //! the budget nor `keep`; they are capped apart, by [`Retention::records`] and
-//! [`Retention::record_age`] ([`prune_records`]). Dotfiles at the root serve
-//! the prune: `.pruned`, whose time is the last prune's, and `.sizes`, the
-//! sizes of invocations that have settled (and, briefly, its temp file).
+//! [`Retention::record_age`] ([`prune_records`]), also at the end of a run
+//! that started no prune. Dotfiles at the root serve the prune: `.pruned`
+//! and `.pruned-records`, whose times are the last prune's and the last
+//! capping's, and `.sizes`, the sizes of invocations that have settled (and,
+//! briefly, its temp file).
 
 use std::collections::HashMap;
 use std::fs;
@@ -676,8 +680,9 @@ fn evict(entry: &Path) -> io::Result<bool> {
 /// Remove the records of runs with no files past [`Retention::records`] of
 /// them, the most recently started first, or started over
 /// [`Retention::record_age`] ago; never `current`, nor one written to within
-/// [`Retention::guard`] (a task still running). They count toward neither the
-/// budget nor [`Retention::keep`], which are for files.
+/// [`Retention::guard`], nor one still running
+/// ([`task_record::still_running`]). They count toward neither the budget
+/// nor [`Retention::keep`], which are for files.
 fn prune_records(root: &Path, retention: Retention, current: &Path) {
     let Ok(read) = fs::read_dir(root) else {
         return;
@@ -703,6 +708,12 @@ fn prune_records(root: &Path, retention: Retention, current: &Path) {
         }
         let (_, newest) = tree_size_and_newest(record);
         if newest.is_none_or(|t| !idle_for(t, retention.guard)) {
+            continue;
+        }
+        // Nor a run still going, however long it has been quiet.
+        let path = record.join(task_record::FILE_NAME);
+        let written = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if task_record::read(&path).is_some_and(|r| task_record::still_running(&r, written)) {
             continue;
         }
         let _ = fs::remove_dir_all(record);
@@ -947,6 +958,34 @@ mod tests {
         h.begin(&id(99));
         next(&h);
         assert!(live.join(BAZEL_DIR).exists());
+    }
+
+    /// The records cap spares a run still going, however quiet.
+    #[cfg(unix)]
+    #[test]
+    fn the_records_cap_spares_a_live_run() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join(name(1));
+        with_record(&live, OLD);
+        let record = TaskRecord {
+            schema: task_record::SCHEMA,
+            status: "running".into(),
+            pid: std::os::unix::process::parent_id(),
+            ..Default::default()
+        };
+        let path = live.join(task_record::FILE_NAME);
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        for p in [&path, &live] {
+            fs::File::open(p)
+                .unwrap()
+                .set_modified(SystemTime::now() - OLD)
+                .unwrap();
+        }
+        let mut h = history(root.path(), 1 << 30, 0);
+        h.retention.records = 0;
+        h.begin(&id(99));
+        next(&h);
+        assert!(live.exists());
     }
 
     /// A run that builds nothing still caps the records at its end.

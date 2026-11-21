@@ -503,8 +503,18 @@ impl RecordFile {
         });
     }
 
+    /// Write the record. One a prune evicted meanwhile (a run silent past
+    /// [`RUNNING_IDLE`], taken for a crash's) stays evicted: the eviction is
+    /// taken in before the write, so its files' secret is not written back.
     fn save(&self) -> io::Result<()> {
-        let text = serde_json::to_vec_pretty(&*self.record.lock().unwrap())?;
+        let mut record = self.record.lock().unwrap();
+        if record.evicted.is_none()
+            && let Some(evicted) = read(&self.path).and_then(|on_disk| on_disk.evicted)
+        {
+            record.evict(SystemTime::now());
+            record.evicted = Some(evicted);
+        }
+        let text = serde_json::to_vec_pretty(&*record)?;
         write_private(&self.path, &text)
     }
 }
@@ -1000,6 +1010,29 @@ mod tests {
         let text = "Traceback (most recent call last):\n  * a.axl:3, in _impl\nerror: fail: boom\n --> a.axl:3:5\n";
         assert_eq!(error_line(text), "fail: boom");
         assert_eq!(error_line("plain\nmore"), "plain");
+    }
+
+    /// A record a prune evicted while its run went on stays evicted when the
+    /// run writes it again.
+    #[test]
+    fn an_eviction_meanwhile_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = TaskRecord {
+            schema: SCHEMA,
+            status: "running".into(),
+            argv: s(&["aspect", "--token=S3CRET"]),
+            secret_flags: s(&["--token"]),
+            ..Default::default()
+        };
+        let file = RecordFile::begin(dir.path(), record, None).unwrap();
+        let mut evicted = read(file.path()).unwrap();
+        evicted.evict(SystemTime::UNIX_EPOCH);
+        fs::write(file.path(), serde_json::to_vec(&evicted).unwrap()).unwrap();
+        file.end(Some(0), String::new(), String::new(), false);
+        let after = read(file.path()).unwrap();
+        assert_eq!(after.evicted.as_deref(), Some("1970-01-01T00:00:00.000Z"));
+        assert!(after.argv_redacted && !after.argv[1].contains("S3CRET"));
+        assert_eq!((after.status.as_str(), after.exit_code), ("ended", Some(0)));
     }
 
     #[test]
