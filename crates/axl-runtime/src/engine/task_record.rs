@@ -481,7 +481,8 @@ impl RecordFile {
         self.record.lock().unwrap().clone()
     }
 
-    /// The task's end: how it ended, the git details if they have come.
+    /// The task's end: how it ended (its error and closing line with any
+    /// URL's credentials stripped), the git details if they have come.
     pub fn end(&self, exit_code: Option<u8>, conclusion: String, error: String, cancelled: bool) {
         let git = self.git.lock().unwrap().take().and_then(|rx| {
             let GitPart::Head(mut git) = rx.recv_timeout(GIT_WAIT).ok()? else {
@@ -499,8 +500,9 @@ impl RecordFile {
             r.ended = Some(timestamp(now));
             r.duration_ms = Some(duration.as_millis() as u64);
             r.exit_code = exit_code;
-            r.conclusion = conclusion;
-            r.error = error;
+            // URL credentials go at once, as the command line's are shown.
+            r.conclusion = bazel::bes::redact::strip_url_creds(&conclusion).into_owned();
+            r.error = bazel::bes::redact::strip_url_creds(&error).into_owned();
             r.cancelled = cancelled;
             if git.is_some() {
                 r.git = git;
@@ -1116,6 +1118,23 @@ mod tests {
             after.bazel[0].summary.as_ref().unwrap().failures[0].logs,
             ["bazel/2/actions/a.stderr"],
             "a later build's logs kept, the evicted one's dropped"
+        );
+    }
+
+    #[test]
+    fn url_credentials_in_the_end_text_are_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = RecordFile::begin(dir.path(), TaskRecord::default(), None).unwrap();
+        file.end(
+            Some(1),
+            "Pushed to https://u:tok@reg.example".into(),
+            "fail: push to https://u:tok@reg.example failed".into(),
+            false,
+        );
+        let r = read(file.path()).unwrap();
+        assert!(
+            !r.error.contains("tok") && !r.conclusion.contains("tok"),
+            "{r:?}"
         );
     }
 

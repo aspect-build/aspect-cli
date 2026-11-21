@@ -306,9 +306,9 @@ impl History {
         task_record::secret_values(argv, secret_flags, value_shorts)
     }
 
-    /// Add a link (a results page) to the task's record, as the record's
-    /// other text is kept: the task's secrets' values scrubbed from it, and
-    /// the URL's credentials (`user:pass@`) stripped.
+    /// Add a link (a results page) to the task's record, kept scrubbed of
+    /// the task's secrets' values and with the URL's credentials
+    /// (`user:pass@`) stripped.
     pub fn link(&self, label: &str, url: &str) {
         if let Some(file) = self.task_record.lock().unwrap().as_ref() {
             let secrets = self.secret_values();

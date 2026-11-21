@@ -2038,6 +2038,8 @@ def _test_strip_url_creds_stops_at_the_authority(ctx):
         ("https://h:8080/path@x", "https://h:8080/path@x"),
         ("http://[::1]:8080/~me@x", "http://[::1]:8080/~me@x"),
         ("https://host:abc/https://u:p@x", "https://host:<REDACTED>@x"),
+        ("1h://tok@host", "1h://<REDACTED>@host"),
+        (" ".join(["https://h%d.example" % i for i in range(12)]) + " https://u:p@h", " ".join(["https://h%d.example" % i for i in range(12)]) + " https://u:<REDACTED>@h"),
     ]:
         _eq("raw specials: " + url, strip_url_creds(url), want)
 

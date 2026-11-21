@@ -2413,41 +2413,20 @@ def strip_url_creds(s):
     itself the secret and the whole userinfo goes: → `scheme://<REDACTED>@host`.
 
     Where a login ends is `_login_end`'s: a raw `@`, `/`, `?` or `#` in a
-    password is part of it, an `@` in a path or a query is not.
-
-    Scheme must start with a letter then scheme-legal chars (alnum, `+-.`).
-    Handles ~10 URLs per string.
+    password is part of it, an `@` in a path or a query is not. Every `://`
+    in `s` starts a URL, whatever comes before it, as in the Rust copy
+    (`bazel::bes::redact::strip_url_creds`).
     """
     if "://" not in s:
         return s
     result = s
     cursor = 0
-    for _ in range(10):
+
+    # Every URL in it, as the Rust copy: each pass moves past one.
+    for _ in range(len(s)):
         idx = result.find("://", cursor)
         if idx < 0:
             break
-
-        # Walk back to scheme start; require ≥1 alpha char.
-        scheme_start = idx
-        i = idx - 1
-        for _ in range(64):
-            if i < 0:
-                break
-            c = result[i]
-            is_alpha = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
-            is_digit = c >= "0" and c <= "9"
-            if is_alpha or is_digit or c == "+" or c == "-" or c == ".":
-                scheme_start = i
-                i -= 1
-            else:
-                break
-
-        # Scheme must start with a letter.
-        first = result[scheme_start]
-        is_first_alpha = (first >= "a" and first <= "z") or (first >= "A" and first <= "Z")
-        if not is_first_alpha or scheme_start == idx:
-            cursor = idx + 3
-            continue
 
         # The `@` closing the userinfo (`_login_end`), within the URL's text
         # up to whitespace, and the user/password `:` before it.
