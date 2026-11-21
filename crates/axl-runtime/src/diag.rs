@@ -10,10 +10,9 @@
 //! a fallback fired). It is **not** the structured/debug channel — that is
 //! `tracing` (and the `ASPECT_DEBUG`-gated ad-hoc logging some subsystems keep).
 //!
-//! Both write to stderr and color by the same rule,
+//! Both write to stderr and color by the same answer,
 //! [`crate::color::console_supports_color`], which AXL reads as
-//! `std.io.stderr.color`. Rust callers have no Starlark `std` handle, so the
-//! predicate here reads the process environment and stderr's TTY directly.
+//! `std.io.stderr.color`.
 
 use crate::errln;
 

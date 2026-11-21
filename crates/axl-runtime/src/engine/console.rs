@@ -384,6 +384,29 @@ check = task(implementation = _impl)
     }
 
     #[test]
+    fn a_file_stream_never_reports_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.txt");
+        let code = format!(
+            r#"
+def _impl(ctx):
+    f = ctx.std.fs.create({path:?})
+    color = f.color
+    f.close()
+    return 1 if color else 0
+
+check = task(implementation = _impl)
+"#,
+            path = path.to_str().unwrap()
+        );
+        let got = crate::test::eval(&code)
+            .with_color_env(true, true, &[])
+            .run_task(0)
+            .unwrap();
+        assert_eq!(got, Some(0));
+    }
+
+    #[test]
     fn ctx_console_refuses_an_unknown_slot() {
         let code = r#"
 def _impl(ctx):
