@@ -581,3 +581,58 @@ cancelled = task(implementation = _impl)
         started.elapsed()
     );
 }
+
+/// One build both captures its console and keeps its logs: the console's
+/// raw log and the kept logs' indexes share its history folder.
+#[test]
+fn a_build_keeps_its_console_and_its_logs_in_one_folder() {
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let dir = workspace("fixture.axl", |_| {
+        format!(
+            r#"def _impl(ctx):
+    # A stage that can drop a line, so the raw console is kept.
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.drop(["^never matches$"])])
+    build = ctx.bazel.build(
+        flags = ["--scenario=action_and_test_logs", "--basil-scratch={scratch}"] + processor.flags,
+        output = processor,
+        keep_action_logs = "failed",
+        keep_test_logs = "all",
+    )
+    build.wait()
+    return 0
+
+both = task(implementation = _impl)
+"#,
+            scratch = scratch.path().display()
+        )
+    });
+    let out = aspect(dir.path(), "both")
+        .env("CI", "true")
+        .output()
+        .expect("running aspect");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entries: Vec<_> = std::fs::read_dir(dir.path().join("history"))
+        .expect("history")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("bazel/1").is_dir())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let invocation = entries[0].join("bazel/1");
+    for name in ["console.log", "actions.json", "testlogs.json"] {
+        assert!(
+            invocation.join(name).is_file(),
+            "{name} missing from {}",
+            invocation.display()
+        );
+    }
+    assert!(
+        invocation
+            .join("actions/pkg/broken/Genrule-1.stderr")
+            .is_file()
+    );
+}
