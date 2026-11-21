@@ -644,9 +644,14 @@ fn evict(entry: &Path) -> io::Result<bool> {
     if !record_path.is_file() {
         return fs::remove_dir_all(entry).map(|()| true);
     }
-    let record = task_record::read(&record_path);
+    // Under the entry's lock, which the run's own writes hold too.
+    task_record::with_entry_lock(entry, || evict_locked(entry, &record_path))
+}
+
+fn evict_locked(entry: &Path, record_path: &Path) -> io::Result<bool> {
+    let record = task_record::read(record_path);
     // Its process would write its record over the eviction's at its end.
-    let written = fs::metadata(&record_path).and_then(|m| m.modified()).ok();
+    let written = fs::metadata(record_path).and_then(|m| m.modified()).ok();
     if record
         .as_ref()
         .is_some_and(|r| task_record::still_running(r, written))
@@ -674,7 +679,7 @@ fn evict(entry: &Path) -> io::Result<bool> {
     };
     record.evict(SystemTime::now());
     let bytes = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
-    task_record::write_private(&record_path, &bytes).map(|()| true)
+    task_record::write_private(record_path, &bytes).map(|()| true)
 }
 
 /// Remove the records of runs with no files past [`Retention::records`] of

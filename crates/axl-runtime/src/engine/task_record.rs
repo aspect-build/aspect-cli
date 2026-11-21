@@ -429,6 +429,9 @@ pub struct RecordFile {
     path: PathBuf,
     record: Mutex<TaskRecord>,
     started: SystemTime,
+    /// The values of its secret flags, from the command line as typed: what
+    /// is written after an eviction is scrubbed of them.
+    secrets: Vec<String>,
     /// The git details, read beside the task (see [`read_git`]): the commit
     /// and branch, then whether the tree was dirty.
     git: Mutex<Option<Receiver<GitPart>>>,
@@ -449,10 +452,12 @@ impl RecordFile {
                 .spawn(move || read_git(&root, &tx));
             rx
         });
+        let secrets = secret_values(&record.argv, &record.secret_flags, &record.value_shorts);
         let file = Arc::new(Self {
             path: dir.join(FILE_NAME),
             record: Mutex::new(record),
             started: SystemTime::now(),
+            secrets,
             git: Mutex::new(git),
         });
         file.save()?;
@@ -503,19 +508,59 @@ impl RecordFile {
         });
     }
 
-    /// Write the record. One a prune evicted meanwhile (a run silent past
-    /// [`RUNNING_IDLE`], taken for a crash's) stays evicted: the eviction is
-    /// taken in before the write, so its files' secret is not written back.
+    /// Write the record, holding its entry's lock ([`with_entry_lock`]),
+    /// which a prune's eviction holds too, so neither writes over the other.
+    /// One a prune evicted meanwhile (a run silent past [`RUNNING_IDLE`],
+    /// taken for a crash's) stays evicted: the eviction is taken in first,
+    /// and whatever is written after it (an error, the line the task ended
+    /// on, log paths) is scrubbed of the secrets and of the files it no
+    /// longer has.
     fn save(&self) -> io::Result<()> {
-        let mut record = self.record.lock().unwrap();
-        if record.evicted.is_none()
-            && let Some(evicted) = read(&self.path).and_then(|on_disk| on_disk.evicted)
-        {
-            record.evict(SystemTime::now());
-            record.evicted = Some(evicted);
-        }
-        let text = serde_json::to_vec_pretty(&*record)?;
-        write_private(&self.path, &text)
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        with_entry_lock(dir, || {
+            let mut record = self.record.lock().unwrap();
+            if record.evicted.is_none()
+                && let Some(evicted) = read(&self.path).and_then(|on_disk| on_disk.evicted)
+            {
+                record.evict(SystemTime::now());
+                record.evicted = Some(evicted);
+            }
+            if record.evicted.is_some() {
+                let text = scrub(
+                    &[record.error.clone(), record.conclusion.clone()],
+                    &self.secrets,
+                );
+                (record.error, record.conclusion) = (text[0].clone(), text[1].clone());
+                for b in &mut record.bazel {
+                    if let Some(s) = b.summary.as_mut() {
+                        s.failures.iter_mut().for_each(|f| f.logs.clear());
+                    }
+                }
+            }
+            let text = serde_json::to_vec_pretty(&*record)?;
+            write_private(&self.path, &text)
+        })
+    }
+}
+
+/// Run `f` holding an exclusive lock on the entry folder `dir` (an advisory
+/// `flock` of the folder itself, so no file of its own is left in it): the
+/// record's writer and a prune's eviction each read and write it whole
+/// under it. Without a lock to be had, `f` runs anyway.
+pub fn with_entry_lock<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    #[cfg(unix)]
+    {
+        let lock = fs::File::open(dir)
+            .ok()
+            .and_then(|d| nix::fcntl::Flock::lock(d, nix::fcntl::FlockArg::LockExclusive).ok());
+        let out = f();
+        drop(lock);
+        out
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        f()
     }
 }
 
@@ -1028,11 +1073,20 @@ mod tests {
         let mut evicted = read(file.path()).unwrap();
         evicted.evict(SystemTime::UNIX_EPOCH);
         fs::write(file.path(), serde_json::to_vec(&evicted).unwrap()).unwrap();
-        file.end(Some(0), String::new(), String::new(), false);
+        file.end(
+            Some(1),
+            "Rejected S3CRET".into(),
+            "fail: S3CRET bad".into(),
+            false,
+        );
         let after = read(file.path()).unwrap();
         assert_eq!(after.evicted.as_deref(), Some("1970-01-01T00:00:00.000Z"));
         assert!(after.argv_redacted && !after.argv[1].contains("S3CRET"));
-        assert_eq!((after.status.as_str(), after.exit_code), ("ended", Some(0)));
+        assert_eq!((after.status.as_str(), after.exit_code), ("ended", Some(1)));
+        assert!(
+            !after.error.contains("S3CRET") && !after.conclusion.contains("S3CRET"),
+            "written after the eviction, scrubbed: {after:?}"
+        );
     }
 
     #[test]
