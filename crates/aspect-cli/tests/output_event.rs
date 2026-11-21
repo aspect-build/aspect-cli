@@ -502,6 +502,21 @@ def config(ctx: ConfigContext):
 /// that.
 #[test]
 fn a_cancelled_build_forwards_what_bazel_prints_while_it_winds_down() {
+    cancel_a_build(false);
+}
+
+/// The same behind a wrapper script that runs Bazel as its child rather than
+/// `exec` it (as bazelisk, or a `tools/bazel` that does not `exec`): the
+/// real client, a grandchild holding the console's PTY, still gets the
+/// interrupt and its last line still reaches the console.
+#[test]
+fn a_cancelled_build_behind_a_wrapper_still_forwards_the_clients_last_line() {
+    cancel_a_build(true);
+}
+
+/// Cancel a build at basil's prompt and check its wind-down line was
+/// forwarded; `wrapped` runs basil behind a shell wrapper.
+fn cancel_a_build(wrapped: bool) {
     let dir = workspace("fixture.axl", |_| {
         r#"def _impl(ctx):
     processor = bazel.output.processor(display = "lines")
@@ -516,7 +531,24 @@ cancelled = task(implementation = _impl)
 "#
         .to_string()
     });
-    let mut child = aspect(dir.path(), "cancelled")
+    let mut cmd = aspect(dir.path(), "cancelled");
+    if wrapped {
+        let wrapper = dir.path().join("bazel-wrapper.sh");
+        // `; status=$?`, so the shell waits on basil rather than exec it.
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\"{}\" \"$@\"; status=$?; exit $status\n",
+                basil_bin()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cmd.env("BAZEL_REAL", &wrapper);
+    }
+    let started = Instant::now();
+    let mut child = cmd
         .env("CI", "true")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -541,5 +573,11 @@ cancelled = task(implementation = _impl)
     assert!(
         seen.contains("INFO: cleaned up after the interrupt"),
         "the interrupted client's last line was lost:\n{seen}"
+    );
+    // Well inside the console's linger cap: the stream ended with the client.
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "took {:?}:\n{seen}",
+        started.elapsed()
     );
 }
