@@ -126,7 +126,7 @@ pub struct History {
     pruning: Mutex<Option<JoinHandle<()>>>,
     /// The command line the task was run with; see
     /// [`set_command_line`](Self::set_command_line).
-    command_line: Mutex<(Vec<String>, Vec<String>)>,
+    command_line: Mutex<(Vec<String>, Vec<String>, Vec<String>)>,
     /// The task invocation's `task.json`, once [`begin_task`](Self::begin_task)
     /// has written it.
     task_record: Mutex<Option<Arc<RecordFile>>>,
@@ -162,17 +162,23 @@ impl History {
             record: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             pruning: Mutex::new(None),
-            command_line: Mutex::new((vec![], vec![])),
+            command_line: Mutex::new((vec![], vec![], vec![])),
             task_record: Mutex::new(None),
             slots: Mutex::new(vec![]),
         }
     }
 
     /// The command line the task runs with, `argv` as typed (the program
-    /// first), and the spellings of the flags whose values are secrets, for
-    /// its record (see [`task_record`]).
-    pub fn set_command_line(&self, argv: Vec<String>, secret_flags: Vec<String>) {
-        *self.command_line.lock().unwrap() = (argv, secret_flags);
+    /// first), the spellings of the flags whose values are secrets, and the
+    /// other short flags that take a value, for its record (see
+    /// [`task_record`]).
+    pub fn set_command_line(
+        &self,
+        argv: Vec<String>,
+        secret_flags: Vec<String>,
+        value_shorts: Vec<String>,
+    ) {
+        *self.command_line.lock().unwrap() = (argv, secret_flags, value_shorts);
     }
 
     /// [`begin`](Self::begin) the task invocation `task_id`, and make its
@@ -185,7 +191,7 @@ impl History {
             Some(invocation) => invocation.dir.clone(),
             None => return,
         };
-        let (argv, secret_flags) = self.command_line.lock().unwrap().clone();
+        let (argv, secret_flags, value_shorts) = self.command_line.lock().unwrap().clone();
         let record = TaskRecord {
             schema: task_record::SCHEMA,
             status: "running".into(),
@@ -199,6 +205,7 @@ impl History {
             pid: std::process::id(),
             argv,
             secret_flags,
+            value_shorts,
             cwd: std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -228,8 +235,8 @@ impl History {
         let entry = file.path().parent()?.to_path_buf();
         // A secret the task passes on into a flag is redacted there too.
         let secrets = {
-            let (argv, secret_flags) = &*self.command_line.lock().unwrap();
-            task_record::secret_values(argv, secret_flags)
+            let (argv, secret_flags, value_shorts) = &*self.command_line.lock().unwrap();
+            task_record::secret_values(argv, secret_flags, value_shorts)
         };
         let record = BazelRecord {
             command: command.to_owned(),
@@ -323,9 +330,10 @@ impl History {
             return;
         };
         file.end(exit_code, conclusion, error, cancelled);
-        // A run that started no prune (it kept no build's files) still caps
-        // the records, which runs like it add, unless one did within
-        // `every`: a walk of the root's names, cheap beside a prune.
+        // A run that started no prune (it kept no build's files, or another
+        // task had pruned) still caps the records, which runs like it add,
+        // unless one did within `every`: a walk of the root's names, cheap
+        // beside a prune.
         let pruned = self.pruning.lock().unwrap().is_some();
         if !pruned
             && let Some(current) = file.path().parent()
@@ -598,8 +606,13 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
         }
         // Gone either way, a concurrent prune having got there first.
         match evict(entry) {
-            // A run still going is left whole, its files counted.
-            Ok(false) => {}
+            // A run still going is left whole, its files counted, and its
+            // size kept if it had settled.
+            Ok(false) => {
+                if let Some(s) = settles {
+                    settled.insert(name, s);
+                }
+            }
             // Part of it may be gone, so it is measured again next time.
             Err(e) if e.kind() != io::ErrorKind::NotFound => {}
             _ => total -= size,
@@ -620,8 +633,8 @@ fn holds_files(dir: &Path) -> bool {
 /// Remove an entry's files but its record, which is kept, its command line
 /// redacted ([`TaskRecord::evict`]); one of a newer schema is kept as it is,
 /// and an entry with no record goes whole. Whether it was evicted: a run
-/// whose record says it is running, in a process still alive, is left whole
-/// (false), since that process would write its record over the eviction's.
+/// still running ([`task_record::still_running`]) is left whole (false),
+/// since its process would write its record over the eviction's.
 fn evict(entry: &Path) -> io::Result<bool> {
     let record_path = entry.join(task_record::FILE_NAME);
     if !record_path.is_file() {
@@ -629,9 +642,10 @@ fn evict(entry: &Path) -> io::Result<bool> {
     }
     let record = task_record::read(&record_path);
     // Its process would write its record over the eviction's at its end.
+    let written = fs::metadata(&record_path).and_then(|m| m.modified()).ok();
     if record
         .as_ref()
-        .is_some_and(|r| r.status == "running" && task_record::alive(r.pid))
+        .is_some_and(|r| task_record::still_running(r, written))
     {
         return Ok(false);
     }
@@ -906,6 +920,7 @@ mod tests {
 
     /// A run whose record says it is running, in a live process, keeps its
     /// files: that process would write its record over the eviction's.
+    #[cfg(unix)]
     #[test]
     fn a_live_run_is_not_evicted() {
         let root = tempfile::tempdir().unwrap();
@@ -913,7 +928,8 @@ mod tests {
         let record = TaskRecord {
             schema: task_record::SCHEMA,
             status: "running".into(),
-            pid: std::process::id(),
+            // The parent stands in for another live process.
+            pid: std::os::unix::process::parent_id(),
             ..Default::default()
         };
         fs::write(

@@ -1104,10 +1104,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         Ok(exit_code)
     }
 
-    /// The command line the task runs with, as typed, and the spellings of
-    /// its flags whose values are secrets, for its history record.
-    pub fn set_task_command_line(&self, argv: Vec<String>, secret_flags: Vec<String>) {
-        self.loader.env.history.set_command_line(argv, secret_flags);
+    /// The command line the task runs with, as typed, the spellings of its
+    /// flags whose values are secrets, and its other short flags that take a
+    /// value, for its history record.
+    pub fn set_task_command_line(
+        &self,
+        argv: Vec<String>,
+        secret_flags: Vec<String>,
+        value_shorts: Vec<String>,
+    ) {
+        self.loader
+            .env
+            .history
+            .set_command_line(argv, secret_flags, value_shorts);
     }
 
     pub fn finish(self) -> FinishedEval {

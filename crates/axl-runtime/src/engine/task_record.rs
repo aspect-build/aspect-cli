@@ -64,6 +64,10 @@ pub struct TaskRecord {
     /// `--feature:token`).
     #[serde(default)]
     pub secret_flags: Vec<String>,
+    /// The short flags that take a value but are not secrets (`-m`), to tell
+    /// a cluster's value from a secret flag in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_shorts: Vec<String>,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
@@ -152,7 +156,7 @@ impl TaskRecord {
     /// Forget the run's files: the command line redacted, the time noted.
     pub fn evict(&mut self, at: SystemTime) {
         if !self.argv_redacted {
-            self.argv = redact_argv(&self.argv, &self.secret_flags);
+            self.argv = redact_argv(&self.argv, &self.secret_flags, &self.value_shorts);
             self.argv_redacted = true;
         }
         for b in &mut self.bazel {
@@ -169,7 +173,7 @@ impl TaskRecord {
     pub fn redacted(&self) -> TaskRecord {
         let mut shown = self.clone();
         if !shown.argv_redacted {
-            shown.argv = redact_argv(&shown.argv, &shown.secret_flags);
+            shown.argv = redact_argv(&shown.argv, &shown.secret_flags, &shown.value_shorts);
             shown.argv_redacted = true;
         }
         shown
@@ -188,16 +192,24 @@ const MIN_SCRUBBED: usize = 4;
 /// too ([`scrub`]), as when a task passes it on in another flag; then
 /// everything by the build event stream's rules (`bazel::bes::redact`). After
 /// a bare `--` only the scrub and those rules apply.
-pub fn redact_argv(argv: &[String], secret_flags: &[String]) -> Vec<String> {
-    let (out, values) = split_secrets(argv, secret_flags);
+pub fn redact_argv(
+    argv: &[String],
+    secret_flags: &[String],
+    value_shorts: &[String],
+) -> Vec<String> {
+    let (out, values) = split_secrets(argv, secret_flags, value_shorts);
     let out = scrub(&out, &values);
     bazel::bes::redact::redact_command_args(out.iter().map(String::as_str))
 }
 
 /// The values `argv` gives the flags in `secret_flags`, in every spelling
 /// [`redact_argv`] takes.
-pub fn secret_values(argv: &[String], secret_flags: &[String]) -> Vec<String> {
-    split_secrets(argv, secret_flags).1
+pub fn secret_values(
+    argv: &[String],
+    secret_flags: &[String],
+    value_shorts: &[String],
+) -> Vec<String> {
+    split_secrets(argv, secret_flags, value_shorts).1
 }
 
 /// Each of `args` with every one of `values` (those of at least
@@ -225,8 +237,14 @@ pub fn scrub(args: &[String], values: &[String]) -> Vec<String> {
 
 /// `argv` with the values of `secret_flags` replaced, and those values. A
 /// spelling ending in `=` (a flag that may be given bare) takes its value
-/// only after `=`, never from the next argument.
-fn split_secrets(argv: &[String], secret_flags: &[String]) -> (Vec<String>, Vec<String>) {
+/// only after `=`, never from the next argument. `value_shorts` are the
+/// other short flags that take a value (`-m`): in a cluster, one takes the
+/// rest of it, as the parser reads it, so no secret flag follows it there.
+fn split_secrets(
+    argv: &[String],
+    secret_flags: &[String],
+    value_shorts: &[String],
+) -> (Vec<String>, Vec<String>) {
     let redacted = bazel::bes::redact::REDACTED;
     let spelled = |f: &String| (f.trim_end_matches('=').to_owned(), !f.ends_with('='));
     let long: Vec<(String, bool)> = secret_flags
@@ -286,6 +304,17 @@ fn split_secrets(argv: &[String], secret_flags: &[String]) -> (Vec<String>, Vec<
             cluster
                 .char_indices()
                 .take_while(|(_, c)| c.is_ascii_alphanumeric())
+                // Up to and including the first that takes a value: the rest
+                // is its value.
+                .scan(false, |past_value, (at, c)| {
+                    if *past_value {
+                        return None;
+                    }
+                    *past_value = value_shorts
+                        .iter()
+                        .any(|v| v.strip_prefix('-') == Some(c.encode_utf8(&mut [0; 4])));
+                    Some((at, c))
+                })
                 .find_map(|(at, c)| {
                     short
                         .iter()
@@ -336,6 +365,23 @@ pub fn alive(pid: u32) -> bool {
         let _ = pid;
         true
     }
+}
+
+/// How long a record may say `running` without being written before its
+/// run is taken to have ended without saying so, though a process has its
+/// pid: pids are reused, and a crash's would keep its files forever.
+const RUNNING_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Whether the run of `record`, last written at `written`, is still going:
+/// it says `running`, from a process other than this one (whose own run is
+/// in no other entry), alive, and it was written within [`RUNNING_IDLE`].
+pub fn still_running(record: &TaskRecord, written: Option<SystemTime>) -> bool {
+    let recent = written.is_some_and(|t| {
+        SystemTime::now()
+            .duration_since(t)
+            .map_or(true, |ago| ago < RUNNING_IDLE)
+    });
+    record.status == "running" && record.pid != std::process::id() && alive(record.pid) && recent
 }
 
 /// The message of an error a task ended with, without the traceback its
@@ -712,7 +758,7 @@ mod tests {
         ]);
         let r = bazel::bes::redact::REDACTED;
         assert_eq!(
-            redact_argv(&argv, &secrets),
+            redact_argv(&argv, &secrets, &[]),
             vec![
                 "aspect".to_string(),
                 "deploy".into(),
@@ -748,7 +794,8 @@ mod tests {
                     "-t=EQUALS",
                     "--bazel-flag=--define=T=S3CRET"
                 ]),
-                &secrets
+                &secrets,
+                &[]
             ),
             vec![
                 "x".to_string(),
@@ -760,11 +807,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            secret_values(&s(&["--token", "abcd", "-tefgh"]), &secrets),
+            secret_values(&s(&["--token", "abcd", "-tefgh"]), &secrets, &[]),
             ["abcd", "efgh"]
         );
         assert_eq!(
-            secret_values(&s(&["-//pkg/test:all", "--", "-tx"]), &secrets),
+            secret_values(&s(&["-//pkg/test:all", "--", "-tx"]), &secrets, &[]),
             Vec::<String>::new(),
             "a negative pattern is no cluster, and nothing after `--` is a flag"
         );
@@ -779,7 +826,8 @@ mod tests {
                     "-tv",
                     "-t=efgh"
                 ]),
-                &bare
+                &bare,
+                &[]
             ),
             vec![
                 "x".to_string(),
@@ -790,6 +838,15 @@ mod tests {
                 format!("-t={r}"),
             ],
             "a flag that may be bare takes a value only after `=`"
+        );
+        assert_eq!(
+            redact_argv(
+                &s(&["deploy", "-mtest-release", "-vmt"]),
+                &secrets,
+                &s(&["-m"])
+            ),
+            vec!["deploy".to_string(), "-mtest-release".into(), "-vmt".into()],
+            "a value-taking short flag takes the rest of its cluster"
         );
         assert_eq!(
             scrub(&s(&["--define=K=abcd", "a=abc"]), &s(&["abcd", "abc"])),
@@ -832,6 +889,33 @@ mod tests {
             let mode = fs::metadata(file.path()).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_is_running_only_from_another_live_process_written_lately() {
+        let running = |pid| TaskRecord {
+            status: "running".into(),
+            pid,
+            ..Default::default()
+        };
+        let now = Some(SystemTime::now());
+        // The parent stands in for another live process.
+        let parent = std::os::unix::process::parent_id();
+        assert!(still_running(&running(parent), now));
+        assert!(
+            !still_running(&running(std::process::id()), now),
+            "this process's own pid, reused"
+        );
+        let idle = Some(SystemTime::now() - RUNNING_IDLE);
+        assert!(!still_running(&running(parent), idle), "silent too long");
+        assert!(!still_running(&running(parent), None));
+        let ended = TaskRecord {
+            pid: parent,
+            status: "ended".into(),
+            ..Default::default()
+        };
+        assert!(!still_running(&ended, now));
     }
 
     #[test]

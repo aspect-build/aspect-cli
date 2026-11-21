@@ -380,6 +380,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     .map(|a| a.to_string_lossy().into_owned())
                     .collect(),
                 cmd.secret_flags(dispatch.task_id),
+                cmd.value_short_flags(dispatch.task_id),
             );
             let task_start = std::time::Instant::now();
             let exit = mpe.execute_tasks_with_args(

@@ -251,6 +251,40 @@ impl<'a, 'v> Cmd<'a, 'v> {
         flags
     }
 
+    /// The short flags on task `task_id`'s command line that take a value
+    /// and are not secrets (`-m`): its own args' and every feature's. In a
+    /// cluster one takes the rest of it, which [`Cmd::secret_flags`]'s
+    /// redaction needs to know.
+    pub fn value_short_flags(&self, task_id: usize) -> Vec<String> {
+        let mut flags = vec![];
+        let mut add = |arg: &Arg| {
+            if arg.secret() || !arg.is_cli_exposed() {
+                return;
+            }
+            let short = match arg {
+                Arg::String { short, .. }
+                | Arg::Int { short, .. }
+                | Arg::UInt { short, .. }
+                | Arg::StringList { short, .. }
+                | Arg::IntList { short, .. }
+                | Arg::UIntList { short, .. } => short,
+                _ => return,
+            };
+            if let Some(short) = short {
+                flags.push(format!("-{short}"));
+            }
+        };
+        if let Some(task) = self.tasks.get(task_id) {
+            task.args().values().for_each(&mut add);
+        }
+        for feat in &self.features {
+            feat.args().values().for_each(&mut add);
+        }
+        flags.sort();
+        flags.dedup();
+        flags
+    }
+
     pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
         let leaf = deepest_subcommand(&matches).ok_or(CmdError::NoTaskSelected)?;
         let task_id = *leaf
@@ -3270,6 +3304,36 @@ mod tests {
     }
 
     // ── Override merge (no heap path: no overrides applied) ────────────────
+
+    /// The secret flags in each spelling the parser takes, a bare-capable
+    /// one's with `=`, and the other value-taking shorts.
+    #[test]
+    fn secret_and_value_short_flags() {
+        let with = |short: Option<&str>, bare: Option<&str>, secret: bool| Arg::String {
+            required: false,
+            default: String::new(),
+            short: short.map(str::to_owned),
+            long: None,
+            values: None,
+            description: None,
+            bare: bare.map(str::to_owned),
+            config_only: false,
+            secret,
+        };
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("api_token".to_owned(), with(Some("t"), None, true));
+        args.insert("key".to_owned(), with(None, Some("default"), true));
+        args.insert("message".to_owned(), with(Some("m"), None, false));
+        let t = stub_task("deploy", &[], args);
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        assert_eq!(cmd.secret_flags(0), ["--api-token", "--key=", "-t"]);
+        assert_eq!(cmd.value_short_flags(0), ["-m"]);
+    }
 
     #[test]
     fn task_args_merges_cli_value() {

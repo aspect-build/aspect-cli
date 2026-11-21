@@ -5,7 +5,8 @@
 //! A record is handed out as a dict, its command line redacted, with two
 //! keys of the reader's own: `dir`, the entry's folder, and, for a run whose
 //! record says `running`, `status` set to `abandoned` once its process is no
-//! longer alive, as after a crash. Records of a newer schema are skipped.
+//! longer running (gone, or silent for a week), as after a crash. Records of
+//! a newer schema are skipped.
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -42,13 +43,17 @@ impl<'v> StarlarkValue<'v> for History {
 starlark_simple_value!(History);
 
 /// A record as handed out: redacted, with its folder, and a `running` one
-/// whose process is gone marked `abandoned`.
+/// of another process no longer running (`still_running`) marked
+/// `abandoned`.
 fn shown(dir: &std::path::Path, record: &TaskRecord) -> serde_json::Value {
     let mut value = serde_json::to_value(record.redacted()).unwrap_or_default();
     value["dir"] = dir.to_string_lossy().into_owned().into();
+    let written = std::fs::metadata(dir.join(crate::engine::task_record::FILE_NAME))
+        .and_then(|m| m.modified())
+        .ok();
     if record.status == "running"
         && record.pid != std::process::id()
-        && !crate::engine::task_record::alive(record.pid)
+        && !crate::engine::task_record::still_running(record, written)
     {
         value["status"] = "abandoned".into();
     }
