@@ -30,6 +30,7 @@ rust_library(
         "//crates/axl-proto",
         "@crates//:allocative",
         "@crates//:anyhow",
+        "@crates//:chrono",
         "@crates//:fibre",
         "@crates//:futures",
         "@crates//:http",

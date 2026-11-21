@@ -40,3 +40,41 @@ impl BuildEventEnvelope {
         }
     }
 }
+
+/// The local path a BES `File` names by `file://` URI, `%XX` escapes
+/// decoded; None for a remote or inline one.
+pub fn local_path(file: &axl_proto::build_event_stream::File) -> Option<std::path::PathBuf> {
+    use axl_proto::build_event_stream::file;
+    match file.file.as_ref()? {
+        file::File::Uri(uri) => uri
+            .strip_prefix("file://")
+            .map(|p| std::path::PathBuf::from(percent_decode(p))),
+        _ => None,
+    }
+}
+
+/// `%XX` escapes decoded, as Bazel writes a file URI's path.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
+}

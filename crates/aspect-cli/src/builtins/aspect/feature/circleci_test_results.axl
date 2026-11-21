@@ -9,33 +9,11 @@ on CircleCI.
 
 load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//helpers.axl", "file_uri_to_path")
-load("../private/lib/artifacts.axl", "testlog_dest_dir")
-load("../private/lib/bazel_results.axl", "bes_get")
+load("../private/lib/artifacts.axl", "should_collect_test", "testlog_dest_dir")
+load("../private/lib/bazel_results.axl", "bes_get", "test_result_cached")
 load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")
 load("../private/lib/tar.axl", "tar_create")
-
-# Non-passing statuses for upload_test_results="failed" (mirrors lib/artifacts.axl).
-_NOT_PASSED_STATUSES = [
-    "failed",
-    "timeout",
-    "failed_to_build",
-    "remote_failure",
-    "blaze_halted_before_testing",
-    "flaky",
-    "incomplete",
-    "no_status",
-]
-
-def _should_collect(strategy: str, status: str, cached: bool) -> bool:
-    """all=every test, executed=ran this build, failed=non-passing only."""
-    if strategy == "all":
-        return True
-    if strategy == "executed":
-        return not cached
-    if strategy == "failed":
-        return status in _NOT_PASSED_STATUSES
-    return False
 
 def collect_test_xml(ctx, event, strategy: str, entries: dict, upload_failed_attempts: bool) -> None:
     """Record `{dest: {"src", "cached"}}` for each test.xml in a test_result event.
@@ -56,10 +34,8 @@ def collect_test_xml(ctx, event, strategy: str, entries: dict, upload_failed_att
 
     payload = event.payload
     status = bes_get(payload, "status", "") or ""
-    cached_locally = bool(bes_get(payload, "cached_locally", False))
-    cached_remotely = bool(bes_get(bes_get(payload, "execution_info", None), "cached_remotely", False))
-    cached = cached_locally or cached_remotely
-    if not _should_collect(strategy, status, cached):
+    cached = test_result_cached(payload)
+    if not should_collect_test(strategy, status, cached):
         return
 
     for file in (bes_get(payload, "test_action_output", None) or []):

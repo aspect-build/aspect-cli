@@ -284,6 +284,19 @@ def add_task_flags(bazel_trait, flags: list) -> None:
 
     bazel_trait.rc_flags.append(_unset_deferring)
 
+# Asks Bazel to report every action in the build event stream, not only the
+# failed ones: what keeping or uploading every action's logs needs.
+PUBLISH_ALL_ACTIONS = "--build_event_publish_all_actions"
+
+def publish_all_actions(bazel_trait) -> None:
+    """Have every build of the task report every action (`PUBLISH_ALL_ACTIONS`):
+    `ArtifactUpload`'s `upload_build_logs = "all"`. A build keeping every
+    action's logs in the history gets the flag from the runtime instead. Added
+    once however often it is asked; a build option, so it stays out of a
+    task's query."""
+    if PUBLISH_ALL_ACTIONS not in bazel_trait.extra_flags:
+        add_task_flags(bazel_trait, [PUBLISH_ALL_ACTIONS])
+
 def protected_omissions(omitted: list) -> list:
     """The entries of `omitted` that name a `PROTECTED_FLAGS` flag, as the user
     spelled them; empty when every omission is allowed."""
@@ -449,7 +462,8 @@ def exec_log_flags(exec_log_path: str) -> list:
     is how the backend reads it; build outputs are uploaded only where the
     repository asks for `all`. Per-action cache and timing data in the Web UI
     comes from this log, which is also why the per-action BEP events behind
-    `--build_event_publish_all_actions` are not requested. Gated to Bazel 7.4,
+    `--build_event_publish_all_actions` are requested only where every
+    action's logs are kept or uploaded. Gated to Bazel 7.4,
     the first to know the flag without its `experimental_` prefix. An execution
     option, so scoped to `build` and never reaching a task's `query`. The rc keeps it in its own
     `aspect-exec-log` group, the upload being slow on a thin link, so a

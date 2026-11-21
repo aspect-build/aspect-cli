@@ -1,0 +1,60 @@
+"""What each task invocation's history keeps of its builds' logs.
+
+The task history (`aspect/history/` in the user cache, or
+`$ASPECT_HISTORY_DIR`) keeps every build's execution log, profile and build
+event stream already. This feature adds, off by default:
+
+- **Action logs** (`--history:action-logs`): the stdout and stderr Bazel
+  wrote for each action, kept in the build's folder as
+  `bazel/<n>/actions/[external/<repo>/]<package>/<name>/<mnemonic>-<k>.{stdout,stderr}` and
+  listed, with each action's label, mnemonic, output, exit code and times, in
+  `bazel/<n>/actions.json`. `failed` keeps failed actions', which Bazel
+  reports by default; `all` keeps every action's that wrote any: those builds run
+  with `--build_event_publish_all_actions` so Bazel reports them. They are
+  hard-linked from where Bazel wrote them, which costs no space until the next
+  build replaces Bazel's own, and copied where a link cannot be made.
+- **Test logs** (`--history:test-logs`): each attempt's `test.log`,
+  `test.xml` and other outputs, copied to
+  `bazel/<n>/testlogs/[external/<repo>/]<package>/<name>/run_<r>/shard_<s>/attempt_<a>/` and
+  listed in `bazel/<n>/testlogs.json`. `failed` keeps attempts that did
+  not pass (a flaky one did not), `executed` those this build ran rather than
+  took from a cache, `all` every one.
+
+The options apply to `aspect build` and `aspect test`; other tasks keep no
+logs unless they pass `keep_*` to `ctx.bazel.build` themselves. `none`, the
+default, leaves what config set on `BazelTrait`. With a remote cache Bazel
+names logs by `bytestream://` URIs: test logs are then found in the local
+output tree, but action logs are not kept, and are counted in the index as
+`not_local`. The history is readable by its user
+alone and pruned as usual. Uploading the same logs as CI artifacts is
+`ArtifactUpload`'s (`--artifact-upload:upload-build-logs`,
+`--artifact-upload:upload-test-logs`).
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+def _history_impl(ctx: FeatureContext):
+    # Only what was asked for: `none` leaves a value config set in place.
+    t = ctx.traits[BazelTrait]
+    if ctx.args.action_logs != "none":
+        t.keep_action_logs = ctx.args.action_logs
+    if ctx.args.test_logs != "none":
+        t.keep_test_logs = ctx.args.test_logs
+
+History = feature(
+    display_name = "History",
+    summary = "Keep builds' action logs and test logs in the task history.",
+    implementation = _history_impl,
+    args = {
+        "action_logs": args.string(
+            default = "none",
+            values = ["none", "failed", "all"],
+            description = "Which actions' stdout and stderr to keep in the history: 'none' (default; leaves config's choice), 'failed', or 'all' (adds --build_event_publish_all_actions).",
+        ),
+        "test_logs": args.string(
+            default = "none",
+            values = ["none", "failed", "executed", "all"],
+            description = "Which test attempts' logs to keep in the history: 'none' (default; leaves config's choice), 'failed', 'executed' (ran in this build, not cached) or 'all'.",
+        ),
+    },
+)

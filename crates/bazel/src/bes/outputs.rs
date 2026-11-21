@@ -215,7 +215,6 @@ impl Outputs {
     /// `name`, which BES fills whatever the upload strategy; a `file://` URI
     /// when there is no prefix to go by.
     fn file_path(&self, file: &axl_proto::build_event_stream::File) -> Option<PathBuf> {
-        use axl_proto::build_event_stream::file::File as Loc;
         if !file.path_prefix.is_empty() {
             if let Some(root) = &self.exec_root {
                 let mut path = root.clone();
@@ -226,12 +225,7 @@ impl Outputs {
                 return Some(path);
             }
         }
-        match &file.file {
-            Some(Loc::Uri(uri)) if uri.starts_with("file://") => {
-                Some(PathBuf::from(uri.trim_start_matches("file://")))
-            }
-            _ => None,
-        }
+        crate::bes::local_path(file)
     }
 
     /// The target `key`, if it is now ready; it stops being pending.

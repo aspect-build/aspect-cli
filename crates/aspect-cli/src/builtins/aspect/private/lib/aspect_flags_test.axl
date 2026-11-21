@@ -26,6 +26,7 @@ load(
     "history_exec_log_flags",
     "omit_flags",
     "protected_omissions",
+    "publish_all_actions",
     "runner_bes_flags",
     "runner_cache_flags",
     "runner_diagnostics_flags",
@@ -253,6 +254,13 @@ def _test_runner_executor_flags(_ctx):
 def _fake_trait():
     return struct(extra_flags = [], rc_flags = [], injected_flag_filters = [])
 
+def _test_publish_all_actions_once(_ctx):
+    # Asked twice, the flag is added once.
+    t = _fake_trait()
+    publish_all_actions(t)
+    publish_all_actions(t)
+    _eq("once", _texts(t.extra_flags), ["--build_event_publish_all_actions"])
+
 def _test_add_task_flags_defers_the_keepalive(_ctx):
     # The keepalive goes through an rc hook; everything else straight onto
     # `extra_flags`, where it beats the repository's rc.
@@ -374,6 +382,7 @@ _UNIT_TESTS = [
     _test_runner_bes_flags,
     _test_runner_executor_flags,
     _test_add_task_flags_defers_the_keepalive,
+    _test_publish_all_actions_once,
     _test_unset_flags,
     _test_color_flags,
     _test_exec_log_flags,

@@ -4,7 +4,8 @@ Run with: aspect dev test-artifacts
 """
 
 load("@std//time.axl", "time")
-load("./artifacts.axl", "new_testlog_state", "pending_testlogs", "profile_flags", "publish_group_artifacts", "testonly_new_upload_group", "testonly_upload_group_per_file", "upsert_artifact")
+load("./artifacts.axl", "collect_build_action_logs", "new_testlog_state", "pending_testlogs", "profile_flags", "publish_group_artifacts", "should_collect_test", "testonly_new_upload_group", "testonly_upload_group_per_file", "upsert_artifact")
+load("./bazel_results.axl", "test_result_cached")
 
 def _eq(label, got, want):
     if got != want:
@@ -161,8 +162,56 @@ def _test_circleci_permanent_and_transient_failures(ctx):
     _eq("c retried once", attempts["testlogs/c/test.log"], 2)
     _eq("both successful links queued", len(group["pending_urls"]), 2)
 
+def _test_build_action_logs_by_strategy(ctx):
+    scratch = ctx.std.fs.mkdtemp()
+    out = scratch + "/stdout-1"
+    ctx.std.fs.write(out, "built\n")
+
+    def _action(label, success, stdout):
+        return struct(
+            kind = "action_completed",
+            id = struct(label = label, primary_output = "bazel-out/bin/" + label.split(":")[-1]),
+            payload = struct(
+                success = success,
+                type = "Genrule",
+                stdout = struct(file = "file://" + stdout) if stdout else None,
+                stderr = None,
+            ),
+        )
+
+    def _collect(strategy, events):
+        entries = []
+        for event in events:
+            collect_build_action_logs(ctx, event, strategy, scratch + "/" + strategy, {}, entries)
+        return sorted([e["dest"] for e in entries])
+
+    events = [
+        _action("//p:fails", False, None),
+        _action("//p:prints", True, out),
+        _action("//p:silent", True, None),
+    ]
+    failed = _collect("failed", events)
+    _eq("failed: both streams of the failed action only", len(failed), 2)
+    _eq("all: the failed action whole too", len([d for d in _collect("all", events) if "fails" in d]), 2)
+    if [d for d in failed if "prints" in d or "silent" in d]:
+        fail("failed collected a success: %r" % failed)
+    every = [d for d in _collect("all", events) if "fails" not in d]
+    _eq("all: a success's streams with output only", len(every), 1)
+    if "prints" not in every[0] or "stdout" not in every[0]:
+        fail("all: %r" % every)
+    _eq("none", _collect("none", events), [])
+
+def _test_executed_skips_any_cache_hit(_ctx):
+    _eq("ran", should_collect_test("executed", "passed", False), True)
+    _eq("cached", should_collect_test("executed", "passed", True), False)
+    _eq("ran here", test_result_cached(struct(cached_locally = False, execution_info = struct(cached_remotely = False))), False)
+    _eq("local cache", test_result_cached(struct(cached_locally = True, execution_info = None)), True)
+    _eq("remote cache", test_result_cached(struct(cached_locally = False, execution_info = struct(cached_remotely = True))), True)
+
 _UNIT_TESTS = [
     _test_profile_flags,
+    _test_executed_skips_any_cache_hit,
+    _test_build_action_logs_by_strategy,
     _test_pending_testlogs,
     _test_circleci_incremental_links,
     _test_circleci_duplicate_and_archive,

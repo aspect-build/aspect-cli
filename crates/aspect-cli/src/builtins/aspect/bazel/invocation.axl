@@ -245,6 +245,8 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
         handle = inv.ctx.bazel.test(
             build_events = build_events,
             execution_log = xl.sinks or False,
+            keep_action_logs = inv.trait.keep_action_logs,
+            keep_test_logs = inv.trait.keep_test_logs,
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,
@@ -254,6 +256,8 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
         handle = inv.ctx.bazel.build(
             build_events = build_events,
             execution_log = xl.sinks or False,
+            keep_action_logs = inv.trait.keep_action_logs,
+            keep_test_logs = inv.trait.keep_test_logs,
             announce_version = inv.announce_version,
             announce_command = inv.announce_command,
             flags = inv.rc_flags + extra_flags,

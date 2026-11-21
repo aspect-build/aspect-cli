@@ -112,7 +112,7 @@ _TEST_STATUS_NO_STATUS = "no_status"
 _TEST_STATUS_FAILED_TO_BUILD = "failed_to_build"
 _TEST_STATUS_INCOMPLETE = "incomplete"
 _TEST_STATUS_REMOTE_FAILURE = "remote_failure"
-_TEST_STATUS_BLAZE_HALTED_BEFORE_TESTING = "blaze_halted_before_testing"
+_TEST_STATUS_TOOL_HALTED_BEFORE_TESTING = "tool_halted_before_testing"
 
 # Non-pass terminal statuses. REMOTE_FAILURE / BLAZE_HALTED_BEFORE_TESTING are
 # genuine failures and must not be counted as passes.
@@ -121,7 +121,7 @@ _FAILED_STATUSES = [
     _TEST_STATUS_TIMEOUT,
     _TEST_STATUS_FAILED_TO_BUILD,
     _TEST_STATUS_REMOTE_FAILURE,
-    _TEST_STATUS_BLAZE_HALTED_BEFORE_TESTING,
+    _TEST_STATUS_TOOL_HALTED_BEFORE_TESTING,
 ]
 
 def html_escape(s):
@@ -213,6 +213,13 @@ def bes_get(obj, field, default = None):
     if obj == None:
         return default
     return getattr(obj, field, default)
+
+def test_result_cached(payload) -> bool:
+    """Whether a `test_result` came from a local or a remote cache: either way
+    the build did not run it."""
+    return bool(bes_get(payload, "cached_locally", False)) or bool(
+        bes_get(bes_get(payload, "execution_info", None), "cached_remotely", False),
+    )
 
 def bb_clientd_root(env: std.Env) -> str | None:
     """Resolve the bb_clientd mount root for bytestream:// URI resolution.
