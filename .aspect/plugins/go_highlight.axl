@@ -6,7 +6,8 @@ A compiler error's `file.go:line:col:` prefix is coloured yellow, and
 TypeScript's `file.ts(line,col):` is rewritten to `file.ts:line:col:` so an
 editor's terminal can open it at that spot. Compiler errors are action
 output, which every `rewrite` reaches. Colour only goes where stderr takes
-it (`std.io.stderr.color`: a terminal, without `NO_COLOR`).
+it (`std.io.stderr.color`: a terminal or a CI log that renders it,
+without `NO_COLOR`).
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
