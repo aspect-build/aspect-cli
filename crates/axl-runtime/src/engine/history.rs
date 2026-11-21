@@ -215,8 +215,8 @@ impl History {
     }
 
     /// Note a Bazel invocation of the task: its command, patterns and flags
-    /// (redacted here), and its history `folder` when it keeps files. None
-    /// without a record.
+    /// (redacted here, the values of the task's secret flags among them), and
+    /// its history `folder` when it keeps files. None without a record.
     pub fn bazel_started(
         &self,
         command: &str,
@@ -226,10 +226,19 @@ impl History {
     ) -> Option<Arc<BazelSlot>> {
         let file = self.task_record.lock().unwrap().clone()?;
         let entry = file.path().parent()?.to_path_buf();
+        // A secret the task passes on into a flag is redacted there too.
+        let secrets = {
+            let (argv, secret_flags) = &*self.command_line.lock().unwrap();
+            task_record::secret_values(argv, secret_flags)
+        };
         let record = BazelRecord {
             command: command.to_owned(),
-            patterns: patterns.to_vec(),
-            flags: bazel::bes::redact::redact_command_args(flags.iter().map(String::as_str)),
+            patterns: task_record::scrub(patterns, &secrets),
+            flags: bazel::bes::redact::redact_command_args(
+                task_record::scrub(flags, &secrets)
+                    .iter()
+                    .map(String::as_str),
+            ),
             folder: folder
                 .and_then(|f| f.strip_prefix(&entry).ok())
                 .map(|f| f.to_string_lossy().into_owned()),
@@ -588,12 +597,13 @@ fn holds_files(dir: &Path) -> bool {
 }
 
 /// Remove an entry's files but its record, which is kept, its command line
-/// redacted ([`TaskRecord::evict`]); an entry with no record goes whole.
+/// redacted ([`TaskRecord::evict`]); one of a newer schema is kept as it is,
+/// and an entry with no record goes whole.
 fn evict(entry: &Path) -> io::Result<()> {
     let record_path = entry.join(task_record::FILE_NAME);
-    let Some(mut record) = task_record::read(&record_path) else {
+    if !record_path.is_file() {
         return fs::remove_dir_all(entry);
-    };
+    }
     for e in fs::read_dir(entry)?.filter_map(|e| e.ok()) {
         if e.file_name() == task_record::FILE_NAME {
             continue;
@@ -609,6 +619,10 @@ fn evict(entry: &Path) -> io::Result<()> {
             _ => {}
         }
     }
+    // A record this CLI cannot read (a newer one's) is left as it is.
+    let Some(mut record) = task_record::read(&record_path) else {
+        return Ok(());
+    };
     record.evict(SystemTime::now());
     let bytes = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
     task_record::write_private(&record_path, &bytes)
@@ -857,6 +871,28 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, [std::ffi::OsString::from(task_record::FILE_NAME)]);
+    }
+
+    /// A record this CLI cannot read, a newer one's, is kept as it is.
+    #[test]
+    fn eviction_keeps_a_newer_record_as_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let old = entry(root.path(), 1, 1000, OLD);
+        let newer = br#"{"schema": 99, "argv": ["aspect"]}"#;
+        fs::write(old.join(task_record::FILE_NAME), newer).unwrap();
+        fs::File::open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - OLD)
+            .unwrap();
+        fs::File::open(old.join(task_record::FILE_NAME))
+            .unwrap()
+            .set_modified(SystemTime::now() - OLD)
+            .unwrap();
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(!old.join(BAZEL_DIR).exists());
+        assert_eq!(fs::read(old.join(task_record::FILE_NAME)).unwrap(), newer);
     }
 
     /// Records without files count toward neither the budget nor `keep`.

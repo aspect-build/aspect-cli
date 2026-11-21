@@ -98,10 +98,17 @@ def show_lines(record) -> list:
         lines.append("Link      %s: %s" % (link.get("label", ""), link.get("url", "")))
     dir = record.get("dir", "")
     for n, build in enumerate(record.get("bazel", [])):
-        head = "%s %s" % (build.get("command", ""), " ".join(build.get("patterns", [])))
+        head = " ".join([build.get("command", "")] + build.get("patterns", []))
         code = build.get("exit_code")
-        head += " · " + ("running" if code == None and not build.get("ended") else "exit %s" % code)
-        lines.append("Bazel %d   %s" % (n + 1, head.strip()))
+        if code != None:
+            head += " · exit %d" % code
+        elif build.get("ended"):
+            head += " · ended by a signal"
+        elif record.get("status") in ("running", "abandoned"):
+            head += " · " + record["status"]
+        else:
+            head += " · not waited for"
+        lines.append("Bazel %d   %s" % (n + 1, head))
         summary = build.get("summary")
         if not summary:
             continue

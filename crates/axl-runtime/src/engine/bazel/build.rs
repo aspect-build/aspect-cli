@@ -901,7 +901,8 @@ pub struct Build {
     trace_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
 
     /// The sink keeping action and test logs in the history, joined by
-    /// `wait()` once the stream ends, so its index is written by then.
+    /// `wait()` once the stream ends, so its index is written by then; held
+    /// by `history_slot` instead when there is one.
     #[allocative(skip)]
     keep_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
 
@@ -1516,6 +1517,15 @@ impl Build {
                 )),
                 _ => None,
             };
+            // With a record, the record's slot joins the keep sink, first,
+            // so its failures are matched with the indexes the sink writes.
+            let keep_sink = match (&history_slot, keep_sink) {
+                (Some(slot), Some(keep)) => {
+                    slot.keep_with(keep);
+                    None
+                }
+                (_, keep) => keep,
+            };
             if let (Some(slot), Some(stream)) = (&history_slot, build_event_stream.stream()) {
                 slot.summarize_from(bazel::bes::sink::summary::spawn(
                     stream.subscribe_filtered(Some(bazel::bes::sink::summary::filter())),
@@ -1751,6 +1761,7 @@ impl Build {
         if let Some(keep_sink) = build.keep_sink.take() {
             let _ = keep_sink.join();
         }
+        // Joins the keep sink itself when it holds it.
         if let Some(slot) = &build.history_slot {
             slot.summarize(false);
         }

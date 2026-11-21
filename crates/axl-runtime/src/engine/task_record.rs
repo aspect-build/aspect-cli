@@ -39,8 +39,10 @@ pub const FILE_NAME: &str = "task.json";
 /// The schema this writes.
 pub const SCHEMA: u32 = 1;
 
-/// How long the task's end waits for the git details read at its start.
-const GIT_WAIT: Duration = Duration::from_millis(300);
+/// How long the task's end waits for the commit and branch read at its
+/// start; whether the tree was dirty is taken only if it has come by then,
+/// since `git status` can take seconds in a large repository.
+const GIT_WAIT: Duration = Duration::from_millis(100);
 
 /// A task invocation's record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -110,8 +112,8 @@ pub struct Git {
     pub commit: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    /// Whether tracked files differed from the commit; absent when that
-    /// took too long to tell.
+    /// Whether tracked files differed from the commit; absent when that had
+    /// not been told by the task's end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
 }
@@ -174,53 +176,125 @@ impl TaskRecord {
     }
 }
 
+/// The shortest secret value scrubbed wherever it appears ([`scrub`]):
+/// shorter ones would match too much text that is not them.
+const MIN_SCRUBBED: usize = 4;
+
 /// `argv` with secrets redacted: the value of each of `secret_flags`, as
-/// `--flag=value`, `--flag value`, `-f value` or `-fvalue`, then everything
-/// by the build event stream's rules (`bazel::bes::redact`). A value after a
-/// bare `--` is an argument, not a flag's, and is left to those rules.
+/// `--flag=value`, `--flag value`, `-f value`, `-fvalue`, or in a cluster of
+/// short flags (`-vf value`, `-vfvalue`); each such value anywhere else in it
+/// too ([`scrub`]), as when a task passes it on in another flag; then
+/// everything by the build event stream's rules (`bazel::bes::redact`). After
+/// a bare `--` only the scrub and those rules apply.
 pub fn redact_argv(argv: &[String], secret_flags: &[String]) -> Vec<String> {
+    let (out, values) = split_secrets(argv, secret_flags);
+    let out = scrub(&out, &values);
+    bazel::bes::redact::redact_command_args(out.iter().map(String::as_str))
+}
+
+/// The values `argv` gives the flags in `secret_flags`, in every spelling
+/// [`redact_argv`] takes.
+pub fn secret_values(argv: &[String], secret_flags: &[String]) -> Vec<String> {
+    split_secrets(argv, secret_flags).1
+}
+
+/// Each of `args` with every one of `values` (those of at least
+/// [`MIN_SCRUBBED`] characters) in it replaced by the redaction marker.
+pub fn scrub(args: &[String], values: &[String]) -> Vec<String> {
     let redacted = bazel::bes::redact::REDACTED;
+    let mut values: Vec<&String> = values
+        .iter()
+        .filter(|v| v.chars().count() >= MIN_SCRUBBED)
+        .collect();
+    // Longest first, so a value inside another is not replaced first.
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    args.iter()
+        .map(|arg| {
+            let mut arg = arg.clone();
+            for v in &values {
+                if arg.contains(v.as_str()) {
+                    arg = arg.replace(v.as_str(), redacted);
+                }
+            }
+            arg
+        })
+        .collect()
+}
+
+/// `argv` with the values of `secret_flags` replaced, and those values.
+fn split_secrets(argv: &[String], secret_flags: &[String]) -> (Vec<String>, Vec<String>) {
+    let redacted = bazel::bes::redact::REDACTED;
+    let long: Vec<&str> = secret_flags
+        .iter()
+        .map(String::as_str)
+        .filter(|f| f.starts_with("--"))
+        .collect();
+    let short: Vec<char> = secret_flags
+        .iter()
+        .filter(|f| !f.starts_with("--"))
+        .filter_map(|f| {
+            let mut c = f.strip_prefix('-')?.chars();
+            let only = c.next()?;
+            c.next().is_none().then_some(only)
+        })
+        .collect();
     let mut out = Vec::with_capacity(argv.len());
+    let mut values = vec![];
     let mut takes_value = false;
     let mut ended = false;
     for arg in argv {
         if takes_value {
             takes_value = false;
+            values.push(arg.clone());
             out.push(redacted.to_string());
             continue;
         }
-        if ended {
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
+        if ended || arg == "--" {
             ended = true;
             out.push(arg.clone());
             continue;
         }
-        let mut done = false;
-        for flag in secret_flags {
-            if arg == flag {
-                takes_value = true;
-                done = true;
-                out.push(arg.clone());
-                break;
-            }
-            if let Some(rest) = arg.strip_prefix(flag.as_str()) {
-                let long = flag.starts_with("--");
-                if rest.starts_with('=') || (!long && !rest.is_empty()) {
-                    let sep = if rest.starts_with('=') { "=" } else { "" };
-                    out.push(format!("{flag}{sep}{redacted}"));
-                    done = true;
-                    break;
+        if let Some(flag) = long.iter().find(|f| arg == **f) {
+            takes_value = true;
+            out.push((*flag).to_string());
+            continue;
+        }
+        if let Some((flag, value)) = long.iter().find_map(|f| {
+            arg.strip_prefix(*f)
+                .and_then(|r| r.strip_prefix('='))
+                .map(|v| (f, v))
+        }) {
+            values.push(value.to_owned());
+            out.push(format!("{flag}={redacted}"));
+            continue;
+        }
+        // A cluster of short flags: the first secret one takes the rest of
+        // the token as its value (an `=` before it dropped), or, at the end,
+        // the next token.
+        if let Some(cluster) = arg
+            .strip_prefix('-')
+            .filter(|c| !c.is_empty() && !c.starts_with('-'))
+        {
+            if let Some((at, c)) = cluster.char_indices().find(|(_, c)| short.contains(c)) {
+                let head = &arg[..1 + at + c.len_utf8()];
+                let rest = &cluster[at + c.len_utf8()..];
+                if rest.is_empty() {
+                    takes_value = true;
+                    out.push(arg.clone());
+                } else {
+                    let (eq, value) = match rest.strip_prefix('=') {
+                        Some(v) => ("=", v),
+                        None => ("", rest),
+                    };
+                    values.push(value.to_owned());
+                    out.push(format!("{head}{eq}{redacted}"));
                 }
+                continue;
             }
         }
-        if !done {
-            out.push(arg.clone());
-        }
+        out.push(arg.clone());
     }
-    bazel::bes::redact::redact_command_args(out.iter().map(String::as_str))
+    (out, values)
 }
 
 /// `time` as RFC 3339 in UTC, to the millisecond.
@@ -234,8 +308,9 @@ pub struct RecordFile {
     path: PathBuf,
     record: Mutex<TaskRecord>,
     started: SystemTime,
-    /// The git details, read beside the task (see [`read_git`]).
-    git: Mutex<Option<Receiver<Git>>>,
+    /// The git details, read beside the task (see [`read_git`]): the commit
+    /// and branch, then whether the tree was dirty.
+    git: Mutex<Option<Receiver<GitPart>>>,
 }
 
 impl RecordFile {
@@ -250,11 +325,7 @@ impl RecordFile {
             let (tx, rx) = mpsc::channel();
             let _ = std::thread::Builder::new()
                 .name("history-git".into())
-                .spawn(move || {
-                    if let Some(git) = read_git(&root) {
-                        let _ = tx.send(git);
-                    }
-                });
+                .spawn(move || read_git(&root, &tx));
             rx
         });
         let file = Arc::new(Self {
@@ -286,12 +357,15 @@ impl RecordFile {
 
     /// The task's end: how it ended, the git details if they have come.
     pub fn end(&self, exit_code: Option<u8>, conclusion: String, error: String, cancelled: bool) {
-        let git = self
-            .git
-            .lock()
-            .unwrap()
-            .take()
-            .and_then(|rx| rx.recv_timeout(GIT_WAIT).ok());
+        let git = self.git.lock().unwrap().take().and_then(|rx| {
+            let GitPart::Head(mut git) = rx.recv_timeout(GIT_WAIT).ok()? else {
+                return None;
+            };
+            if let Ok(GitPart::Dirty(dirty)) = rx.try_recv() {
+                git.dirty = Some(dirty);
+            }
+            Some(git)
+        });
         let now = SystemTime::now();
         let duration = now.duration_since(self.started).unwrap_or_default();
         self.update(|r| {
@@ -325,7 +399,6 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
-        file.sync_data()?;
         fs::rename(&temp, path)
     })();
     if result.is_err() {
@@ -341,12 +414,22 @@ pub fn read(path: &Path) -> Option<TaskRecord> {
     (record.schema <= SCHEMA).then_some(record)
 }
 
-/// The repository's commit, branch and whether tracked files differ, from
-/// `git`; None outside a repository or without git. Run beside the task, so
-/// it never delays its start.
-fn read_git(root: &Path) -> Option<Git> {
-    let git = |args: &[&str]| -> Option<(bool, String)> {
+/// What [`read_git`] sends, in this order.
+#[derive(Debug)]
+enum GitPart {
+    Head(Git),
+    Dirty(bool),
+}
+
+/// Send the repository's commit and branch, then whether tracked files
+/// differ, from `git`; nothing outside a repository or without git. Run
+/// beside the task, so it never delays its start.
+fn read_git(root: &Path, tx: &mpsc::Sender<GitPart>) {
+    let git = |args: &[&str]| -> Option<String> {
+        // No optional locks: `git status` would otherwise take the index's
+        // lock to refresh it, and a `git commit` of the user's at once fail.
         let out = Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(root)
             .args(args)
@@ -354,26 +437,37 @@ fn read_git(root: &Path) -> Option<Git> {
             .stderr(std::process::Stdio::null())
             .output()
             .ok()?;
-        Some((
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        ))
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let (ok, commit) = git(&["rev-parse", "--verify", "-q", "HEAD"])?;
-    if !ok || commit.is_empty() {
-        return None;
-    }
-    let branch = git(&["symbolic-ref", "-q", "--short", "HEAD"])
-        .filter(|(ok, b)| *ok && !b.is_empty())
-        .map(|(_, b)| b);
-    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
-        .filter(|(ok, _)| *ok)
-        .map(|(_, out)| !out.is_empty());
-    Some(Git {
-        commit,
+    // One call for both: the commit, then `HEAD`'s ref (`HEAD` itself when
+    // detached).
+    let Some(head) = git(&[
+        "rev-parse",
+        "--verify",
+        "HEAD",
+        "--symbolic-full-name",
+        "HEAD",
+    ]) else {
+        return;
+    };
+    let mut lines = head.lines();
+    let Some(commit) = lines.next().map(str::trim).filter(|c| !c.is_empty()) else {
+        return;
+    };
+    let branch = lines
+        .next()
+        .and_then(|r| r.trim().strip_prefix("refs/heads/"))
+        .map(str::to_owned);
+    let _ = tx.send(GitPart::Head(Git {
+        commit: commit.to_owned(),
         branch,
-        dirty,
-    })
+        dirty: None,
+    }));
+    if let Some(status) = git(&["status", "--porcelain", "--untracked-files=no"]) {
+        let _ = tx.send(GitPart::Dirty(!status.trim().is_empty()));
+    }
 }
 
 /// A Bazel invocation's place in the record, kept up to date as it ends.
@@ -385,6 +479,9 @@ pub struct BazelSlot {
     folder: Option<PathBuf>,
     /// The reader of its summary, joined once its stream is over.
     tally: Mutex<Option<JoinHandle<Summary>>>,
+    /// The sink keeping its logs, whose indexes the summary's failures are
+    /// matched with: joined first.
+    keep: Mutex<Option<JoinHandle<bazel::fanout::SinkOutcome>>>,
 }
 
 impl BazelSlot {
@@ -399,7 +496,13 @@ impl BazelSlot {
             index,
             folder,
             tally: Mutex::new(None),
+            keep: Mutex::new(None),
         })
+    }
+
+    /// The sink keeping its logs, to join before matching failures with them.
+    pub fn keep_with(&self, keep: JoinHandle<bazel::fanout::SinkOutcome>) {
+        *self.keep.lock().unwrap() = Some(keep);
     }
 
     /// Read its summary from `tally`.
@@ -421,14 +524,23 @@ impl BazelSlot {
         });
     }
 
-    /// Its stream is over: the summary, its failures given the logs the
-    /// history kept. With `only_if_done`, a summary still being read is left
-    /// (the task is ending without waiting for the build).
+    /// Its stream is over: the keep sink joined, then the summary, its
+    /// failures given the logs the history kept. With `only_if_done`, a
+    /// summary or a keep sink still at work is left (the task is ending
+    /// without waiting for the build).
     pub fn summarize(&self, only_if_done: bool) {
         let mut tally = self.tally.lock().unwrap();
-        if only_if_done && !tally.as_ref().is_some_and(|t| t.is_finished()) {
+        let mut keep = self.keep.lock().unwrap();
+        if only_if_done
+            && (!tally.as_ref().is_some_and(|t| t.is_finished())
+                || keep.as_ref().is_some_and(|k| !k.is_finished()))
+        {
             return;
         }
+        if let Some(keep) = keep.take() {
+            let _ = keep.join();
+        }
+        drop(keep);
         let Some(Ok(mut summary)) = tally.take().map(JoinHandle::join) else {
             return;
         };
@@ -565,6 +677,44 @@ mod tests {
                 "--".into(),
                 "--token=passed-on".into(),
             ]
+        );
+    }
+
+    /// A secret short flag in a cluster, and the secret's value passed on
+    /// elsewhere on the command line, as another flag's.
+    #[test]
+    fn a_secret_is_redacted_in_a_cluster_and_wherever_it_is_passed_on() {
+        let secrets = s(&["-t", "--token"]);
+        let r = bazel::bes::redact::REDACTED;
+        assert_eq!(
+            redact_argv(
+                &s(&[
+                    "x",
+                    "-vtS3CRET",
+                    "-vt",
+                    "OTHER1",
+                    "-t=EQUALS",
+                    "--bazel-flag=--define=T=S3CRET"
+                ]),
+                &secrets
+            ),
+            vec![
+                "x".to_string(),
+                format!("-vt{r}"),
+                "-vt".into(),
+                r.into(),
+                format!("-t={r}"),
+                format!("--bazel-flag=--define=T={r}"),
+            ]
+        );
+        assert_eq!(
+            secret_values(&s(&["--token", "abcd", "-tefgh"]), &secrets),
+            ["abcd", "efgh"]
+        );
+        assert_eq!(
+            scrub(&s(&["--define=K=abcd", "a=abc"]), &s(&["abcd", "abc"])),
+            vec![format!("--define=K={r}"), "a=abc".into()],
+            "too short a value is left alone"
         );
     }
 

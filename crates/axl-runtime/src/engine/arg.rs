@@ -660,9 +660,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// distinguish "absent" from "passed with no value".
     ///
     /// `secret = True` marks the value as a secret (a token, a password): the
-    /// CLI redacts it from any command line it shows or keeps, such as the
-    /// task history's record of the run. Prefer an environment variable or a
-    /// file for a secret; this is for one that has to be a flag.
+    /// task history's record of the run redacts the value given on the
+    /// command line wherever it shows or keeps it, there and in the flags of
+    /// the task's Bazel invocations (a value of 4 characters or more, past
+    /// the flag itself). Prefer an environment variable or a file for a
+    /// secret; this is for one that has to be a flag.
     fn string<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<String>,
