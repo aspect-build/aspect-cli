@@ -379,7 +379,8 @@ def _templates_description(output: str) -> str:
             "\"title\", \"summary\", \"details\". They apply to every task that renders with " +
             "`template_preset` (not one with its own `task_presets` entry); one task's own go in " +
             "`task_templates`. The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
-            "`state` and `status`; a broken title falls back to the built-in layout. Empty dict " +
+            "`state`, `state_detail` and `status`; a title that fails to render or renders blank " +
+            "falls back to the built-in layout. Empty dict " +
             "(default) leaves the selected `template_preset` in effect.")
 
 def _task_args() -> dict:

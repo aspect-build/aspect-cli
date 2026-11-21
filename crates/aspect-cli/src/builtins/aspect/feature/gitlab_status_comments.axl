@@ -687,15 +687,18 @@ GitlabStatusComments = feature(
             default = {},
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
                           "Vars available match the GithubStatusComments template contract " +
-                          "(see feature/github_status_comments.axl). Empty dict → the selected `template_preset`. " +
-                          "config.axl only.",
+                          "(`aspect feature github-status-comments` lists them), except that `build_snippets`, " +
+                          "`test_snippets`, the `*_overflow_note` lines, `last_updated_at` and " +
+                          "`api_usage` are always empty here. " +
+                          "Empty dict → the selected `template_preset`.",
         ),
         "status_badges": args.custom(
             dict,
             default = {},
-            description = "Override badge_key -> label mapping merged over defaults " +
-                          "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
-                          "passed='✅ passed', aborted='🔥 aborted'). config.axl only.",
+            description = "Override badge_key -> badge mapping merged over defaults " +
+                          "(failed='❌', warning='⚠️', running='🔄', passed='✅', " +
+                          "aborted='🔥'). Keys are badge keys, not task statuses: a task " +
+                          "still running but already failing takes the `failed` badge.",
         ),
     } | template_presets.args(),
 )
