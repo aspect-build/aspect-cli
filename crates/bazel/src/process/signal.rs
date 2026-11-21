@@ -1,24 +1,37 @@
 //! The operating system's half of stopping a process: one function per
-//! intent, each a best-effort single signal, and the liveness probes the
-//! stop sequences read. Unix sends signals; Windows sends a console break to
+//! intent, each a best-effort signal (one per process for a [`Target::Tree`],
+//! whose members [`descendants`] lists), and the liveness probes the stop
+//! sequences read. Unix sends signals; Windows sends a console break to
 //! the child's own console group (children are spawned with
 //! `CREATE_NEW_PROCESS_GROUP`, see [`creation_flags`]) and terminates
 //! processes through a handle.
 
 use std::process::Command;
 
-/// What a signal is aimed at: one process, or a whole process group (unix
-/// only; a group target on Windows falls back to the leader).
+/// What a signal is aimed at: one process, a whole process group (unix), or
+/// a process and every process below it (macOS and Linux, which can list
+/// them; elsewhere a tree is its root alone, and on Windows a group is too).
+///
+/// A tree is for a child that shares our process group, so no group signal
+/// can single it out: `bazel` is often bazelisk, which runs the real client
+/// as its child and does not pass a SIGINT on, and a `tools/bazel` wrapper
+/// script that runs it rather than `exec` it is a shell, which defers a
+/// SIGINT until its foreground child exits. Signalled alone, either holds
+/// the SIGINT while the real client never sees one. Unlike a terminal's
+/// Ctrl+C, a tree also reaches a descendant that left the group (`setsid`);
+/// a process started after the members are listed, just before the signal,
+/// is missed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     Pid(u32),
     Group(i32),
+    Tree(u32),
 }
 
 impl Target {
     pub fn pid(self) -> u32 {
         match self {
-            Target::Pid(pid) => pid,
+            Target::Pid(pid) | Target::Tree(pid) => pid,
             Target::Group(group) => group as u32,
         }
     }
@@ -46,6 +59,15 @@ mod imp {
         let pid = match target {
             Target::Pid(pid) => Pid::from_raw(pid as i32),
             Target::Group(group) => Pid::from_raw(-group),
+            Target::Tree(root) => {
+                // Probing a tree is probing its root.
+                if signal.is_some() {
+                    for pid in super::descendants(root) {
+                        let _ = signal::kill(Pid::from_raw(pid as i32), signal);
+                    }
+                }
+                Pid::from_raw(root as i32)
+            }
         };
         signal::kill(pid, signal).is_ok()
     }
@@ -172,6 +194,83 @@ mod imp {
 }
 
 pub use imp::{has_exited, interrupt, is_running, kill, terminate};
+
+/// Every process below `root`, children before their own children; empty
+/// where the platform gives no way to list them.
+pub fn descendants(root: u32) -> Vec<u32> {
+    let children = children_lister();
+    let mut found = vec![];
+    let mut next = vec![root];
+    while let Some(parent) = next.pop() {
+        for child in children(parent) {
+            // A cycle cannot happen in a process tree, but a pid reused
+            // mid-walk could make one.
+            if child != root && !found.contains(&child) {
+                found.push(child);
+                next.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// A way to list a process's children: one syscall each on macOS.
+#[cfg(target_os = "macos")]
+fn children_lister() -> impl Fn(u32) -> Vec<u32> {
+    |parent| {
+        use nix::libc;
+        let mut buf = vec![0 as libc::pid_t; 64];
+        loop {
+            let bytes = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+            // SAFETY: the buffer holds `bytes` bytes; the call writes at most
+            // that, and returns how many pids it wrote.
+            let n = unsafe {
+                libc::proc_listchildpids(parent as libc::pid_t, buf.as_mut_ptr().cast(), bytes)
+            };
+            if n <= 0 {
+                return vec![];
+            }
+            // A full buffer may have been cut short: ask again with room.
+            if n as usize >= buf.len() {
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            return buf[..n as usize]
+                .iter()
+                .filter(|&&p| p > 0)
+                .map(|&p| p as u32)
+                .collect();
+        }
+    }
+}
+
+/// A way to list a process's children: on Linux one scan of `/proc` for the
+/// whole walk, each `stat`'s parent read once.
+#[cfg(target_os = "linux")]
+fn children_lister() -> impl Fn(u32) -> Vec<u32> {
+    let mut by_parent: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for pid in entries.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok()) {
+            // `/proc/<pid>/stat`: the parent is the second field after the
+            // command, which is in parentheses and may hold spaces.
+            let parent = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let rest = &stat[stat.rfind(')')? + 1..];
+                    rest.split_whitespace().nth(1)?.parse::<u32>().ok()
+                });
+            if let Some(parent) = parent {
+                by_parent.entry(parent).or_default().push(pid);
+            }
+        }
+    }
+    move |parent| by_parent.get(&parent).cloned().unwrap_or_default()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn children_lister() -> impl Fn(u32) -> Vec<u32> {
+    |_| vec![]
+}
 
 /// Best-effort one-line description of a running process for diagnostics:
 /// its command line, plus its working directory where the platform exposes
@@ -351,5 +450,46 @@ mod tests {
         // Still reapable: WNOWAIT left the status in place.
         assert!(child.wait().unwrap().signal().is_some());
         assert!(has_exited(child.id()));
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod tree_tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    /// A grandchild (root shell → shell → sleep) is listed under the root,
+    /// and a tree signal reaches it.
+    #[test]
+    fn a_tree_signal_reaches_a_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let mut root = Command::new("sh")
+            .arg("-c")
+            .arg("sh -c 'sleep 30 & echo $! > \"$PID_FILE\"; wait'; true")
+            .env("PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let grandchild = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .filter(|pid| descendants(root.id()).contains(pid))
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "grandchild never listed");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(kill(Target::Tree(root.id())));
+        root.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while is_running(Target::Pid(grandchild)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!is_running(Target::Pid(grandchild)), "grandchild survived");
     }
 }

@@ -11,8 +11,10 @@
 //!   group when it leads one: interrupt (SIGINT; a console break on Windows),
 //!   then terminate (SIGTERM) after [`CHILD_GRACE`], then kill (SIGKILL)
 //!   after another;
-//! - a bazel client: one interrupt (SIGINT), bazel's own graceful cancel, and
-//!   nothing more. Draining its build events afterwards is AXL's job.
+//! - a bazel client: bazel's own Ctrl+C sequence (see [`BAZEL_SIGINT_TICK`]),
+//!   each signal to the client and every process below it, so the real
+//!   client behind bazelisk or a wrapper script gets it too. Draining its
+//!   build events afterwards is AXL's job.
 //!
 //! The waits here are the safe points for the default ending: each runs under
 //! [`Signals::block`], so a wait on a child ends the task once the root is
@@ -85,10 +87,14 @@ pub(crate) struct Stop {
 }
 
 impl Stop {
+    /// What the sequence signals: the group a child leads; else a bazel
+    /// client and every process below it, so a wrapper script's own client
+    /// gets the signal too (see [`Target::Tree`]); else the child alone.
     fn target(&self) -> Target {
-        match self.group {
-            Some(group) => Target::Group(group),
-            None => Target::Pid(self.pid),
+        match (self.group, self.kind) {
+            (Some(group), _) => Target::Group(group),
+            (None, Kind::Bazel) => Target::Tree(self.pid),
+            (None, Kind::Process) => Target::Pid(self.pid),
         }
     }
 
@@ -192,7 +198,7 @@ impl Stop {
     /// Bazel's Ctrl+C sequence (see [`BAZEL_SIGINT_TICK`]). A terminal's
     /// SIGINT counts as the first rung.
     async fn stop_bazel(&self) {
-        let target = Target::Pid(self.pid);
+        let target = self.target();
         let mut sent = if self.already_signalled() { 1 } else { 0 };
         while sent < 2 {
             if sent > 0 {
@@ -245,8 +251,8 @@ impl Bound {
         &self.token
     }
 
-    /// What a signal sent now is aimed at: the group the child leads, else
-    /// the child.
+    /// What a signal sent now is aimed at: the group the child leads; else a
+    /// bazel client and every process below it; else the child.
     pub fn target(&self) -> Target {
         self.stop.target()
     }
@@ -525,7 +531,7 @@ mod tests {
         with_runtime(|signals| {
             let token = CancellationToken::new();
             let mut cmd = Command::new("sh");
-            cmd.args(["-c", "trap '' INT TERM; sleep 30"])
+            cmd.args(["-c", "trap '' INT TERM; exec sleep 30"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -590,6 +596,91 @@ mod tests {
                 !os::is_running(Target::Pid(descendant)),
                 "descendant survived"
             );
+        });
+    }
+
+    /// What each kind of child is signalled as: a bazel client as its tree.
+    #[test]
+    fn a_bazel_client_is_signalled_as_its_tree() {
+        with_runtime(|signals| {
+            let token = CancellationToken::new();
+            for (kind, group, want) in [
+                (Kind::Bazel, None, "tree"),
+                (Kind::Process, None, "pid"),
+                (Kind::Process, Some(0), "group"),
+            ] {
+                let mut cmd = Command::new("sleep");
+                cmd.arg("5").stdin(Stdio::null());
+                if group.is_some() {
+                    use std::os::unix::process::CommandExt;
+                    cmd.process_group(0);
+                }
+                let (mut child, bound) = spawn(&mut cmd, &signals, &token, group, kind).unwrap();
+                let got = match bound.target() {
+                    Target::Tree(pid) if pid == child.id() => "tree",
+                    Target::Pid(pid) if pid == child.id() => "pid",
+                    Target::Group(g) if g as u32 == child.id() => "group",
+                    other => panic!("{kind:?}: {other:?}"),
+                };
+                assert_eq!(got, want, "{kind:?}");
+                let _ = child.kill();
+                let _ = child.wait();
+                bound.mark_exited();
+            }
+        });
+    }
+
+    /// A bazel client behind a wrapper script (a shell that runs it as its
+    /// own child, as a `tools/bazel` that does not `exec` it does) still gets
+    /// the ladder: a shell waiting on its foreground child would hold a
+    /// SIGINT sent to it alone until the build ended.
+    #[test]
+    fn a_bazel_client_behind_a_wrapper_gets_the_ladder() {
+        with_runtime(|signals| {
+            let dir = tempfile::tempdir().unwrap();
+            let count = dir.path().join("count");
+            let token = CancellationToken::new();
+            let ready = dir.path().join("ready");
+            let client = "n=0; trap 'n=$((n+1)); echo $n > \"$COUNT\"; [ $n -ge 3 ] && exit 0' INT; touch \"$READY\"; while :; do sleep 0.05; done";
+            let mut cmd = Command::new("sh");
+            // `; true`, so the wrapper waits on the client rather than exec it.
+            cmd.arg("-c")
+                .arg("sh -c \"$CLIENT\"; true")
+                .env("CLIENT", client)
+                .env("COUNT", &count)
+                .env("READY", &ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Bazel).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() {
+                assert!(Instant::now() < deadline, "the client never started");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            token.cancel();
+            let cell = RefCell::new(Some(child));
+            // On CI the ladder stops after two SIGINTs and leaves the client.
+            let timeout = if crate::ci::on_recognized_ci() { 1 } else { 5 };
+            let status = wait(&cell, &bound, Some(Duration::from_secs(timeout))).unwrap();
+            let sent: u32 = std::fs::read_to_string(&count)
+                .expect("the client behind the wrapper got a SIGINT")
+                .trim()
+                .parse()
+                .unwrap();
+            if crate::ci::on_recognized_ci() {
+                assert_eq!(sent, 2);
+                assert!(status.is_none(), "the client is left to finish");
+                let mut guard = cell.borrow_mut();
+                let child = guard.as_mut().unwrap();
+                // The whole tree, before the wrapper goes and its client is
+                // handed to init.
+                os::kill(Target::Tree(child.id()));
+                let _ = child.wait();
+            } else {
+                assert_eq!(sent, 3);
+                assert!(status.is_some(), "the wrapper exits with its client");
+            }
         });
     }
 
@@ -703,7 +794,7 @@ mod tests {
     fn a_wait_ends_with_the_exit_once_the_body_is_forced() {
         with_runtime(|signals| {
             let mut cmd = Command::new("sh");
-            cmd.args(["-c", "trap '' INT TERM; sleep 30"])
+            cmd.args(["-c", "trap '' INT TERM; exec sleep 30"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());

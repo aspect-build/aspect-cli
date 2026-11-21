@@ -1341,7 +1341,7 @@ impl Build {
         cmd.stdin(Stdio::null());
 
         // Bound to `cancellation` (the root unless the task said otherwise):
-        // cancelling it sends the client one SIGINT.
+        // cancelling it runs bazel's Ctrl+C sequence on the client's tree.
         let (mut child, bound) = children::spawn(
             &mut cmd,
             &signals,
@@ -1503,7 +1503,9 @@ impl Build {
                     let waited =
                         children::wait_with(&bound, Some(ABANDON_STOP), || child.try_wait());
                     if !matches!(waited, Ok(Some(_))) {
-                        let _ = child.kill();
+                        // The whole tree: the real client behind bazelisk or
+                        // a wrapper would outlive its parent.
+                        bazel::process::signal::kill(bound.target());
                         let _ = child.wait();
                         bound.mark_exited();
                     }
@@ -1585,13 +1587,13 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Send the client one SIGINT now, bazel's graceful cancel, without
-    /// going through its token.
+    /// going through its token: to the client and every process below it, so
+    /// the real client behind bazelisk or a wrapper script gets it too.
     fn interrupt<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         // Nothing after a reap: the pid may be someone else's by then.
         if !build.bound.exited() {
-            let pid = build.child.borrow().id();
-            bazel::process::signal::interrupt(bazel::process::signal::Target::Pid(pid));
+            bazel::process::signal::interrupt(build.bound.target());
         }
         Ok(NoneType)
     }
