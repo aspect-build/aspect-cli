@@ -538,6 +538,33 @@ check = task(implementation = _impl)
     }
 
     #[test]
+    fn an_agent_snapshot_picks_the_agent_preset() {
+        let code = r#"
+def _feature(ctx):
+    pass
+
+def _impl(ctx):
+    return 1 if ctx.console.template_preset == "agent" else 0
+
+Console = feature(
+    implementation = _feature,
+    args = {"template_preset": args.string(default = "full")},
+)
+check = task(implementation = _impl)
+"#;
+        let on = |vars: &[(&str, &str)]| {
+            crate::test::eval(code)
+                .with_features(&["Console"])
+                .with_host_env(false, false, vars)
+                .run_task(0)
+                .unwrap()
+        };
+        assert_eq!(on(&[("CLAUDECODE", "1")]), Some(1), "Claude Code");
+        assert_eq!(on(&[("AI_AGENT", "")]), Some(0), "an empty AI_AGENT");
+        assert_eq!(on(&[]), Some(0), "no agent");
+    }
+
+    #[test]
     fn a_file_stream_never_reports_color() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.txt");

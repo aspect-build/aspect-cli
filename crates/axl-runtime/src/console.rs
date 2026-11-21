@@ -41,7 +41,7 @@
 //!
 //! The base preset is the first of these that applies: `template_preset` typed
 //! on the command line, `template_preset` set in a `config.axl`, [`AGENT_PRESET`]
-//! when [`crate::agent`] finds a coding agent in the environment, and
+//! when [`Host::coding_agent`] says a coding agent runs the process, and
 //! [`DEFAULT_PRESET`]. An agent that wants another layout sets
 //! `template_preset` either way; even `full` set in config keeps detection out.
 //!
@@ -52,9 +52,10 @@
 //! Overrides are compiled when the console is resolved, so a syntax error fails
 //! the run before the task starts rather than mid-task.
 //!
-//! A console never reads the process: whether it colors and whether it opens
-//! Buildkite sections come from the [`Host`] it is built with, which a run
-//! takes from its [`Env`] ([`Host::of`]) and a test spells out.
+//! A console never reads the process: whether it colors, whether it opens
+//! Buildkite sections and whether a coding agent runs it come from the
+//! [`Host`] it is built with, which a run takes from its [`Env`]
+//! ([`Host::of`]) and a test spells out.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
