@@ -2,12 +2,21 @@
 
 Registers exporters from four sources:
 
-  1. ASPECT_DEBUG=1 — always (regardless of `discover_endpoints`) wires up
-     a compact stderr exporter for local debugging. Independent of the
-     OTLP paths below.
+  1. Console exporters - always (regardless of `discover_endpoints`) a stderr
+     exporter (`ctx.telemetry.exporters.add(console = True, ...)`) for each
+     signal whose standard `OTEL_TRACES_EXPORTER` / `OTEL_LOGS_EXPORTER` /
+     `OTEL_METRICS_EXPORTER` lists `console` (a comma-separated list, per the
+     OTel spec), plus traces and metrics under `ASPECT_DEBUG=1`. Not logs:
+     `ASPECT_DEBUG=1` already prints every `debug()` record as a `DEBUG:` line
+     (it sets the Console verbose level to `debug`), so
+     `OTEL_LOGS_EXPORTER=console` is the way to see the raw records too. A
+     console exporter is a local debugging aid: it doesn't make a Bazel build's
+     streams become telemetry the way an OTLP exporter does.
 
   2. Environment variables — when `discover_endpoints = True` (default), reads the
-     standard `OTEL_EXPORTER_OTLP_*` vars and registers matching endpoints.
+     standard `OTEL_EXPORTER_OTLP_*` vars and registers matching endpoints
+     for each signal whose `OTEL_<SIGNAL>_EXPORTER` is unset or lists `otlp`
+     (so `none`, or `console` alone, keeps that signal off the endpoints).
      Preserves the familiar behavior where setting those vars in CI is
      enough to ship traces, logs and metrics, without baking the env-var
      sniff into the runtime; the path is fully Starlark-driven.
@@ -74,6 +83,10 @@ can do here you can do directly via option 4.
 Future versions of this feature may layer additional default behaviors on
 top (detected CI-host endpoints, sampling defaults, etc.).
 
+`OTEL_<SIGNAL>_EXPORTER` takes `otlp`, `console` and `none`; any other name
+(`zipkin`, `prometheus`) is ignored with a warning, as the spec asks of an
+unrecognized value.
+
 Environment variables read when `discover_endpoints = True`:
   OTEL_EXPORTER_OTLP_ENDPOINT          — single endpoint for all signals
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT   — traces-only override
@@ -83,12 +96,27 @@ Environment variables read when `discover_endpoints = True`:
   OTEL_EXPORTER_OTLP_HEADERS           — comma-separated key=value list
                                          applied to every endpoint registered
                                          by this feature
+  OTEL_TRACES_EXPORTER / OTEL_LOGS_EXPORTER / OTEL_METRICS_EXPORTER
+                                       — which signals the endpoints carry
+                                         (read whatever `discover_endpoints`
+                                         says, for the console exporters)
 
 Per-signal endpoint overrides take precedence over the catch-all. If only the
 catch-all is set, one endpoint is registered for all signals; if a per-signal
 endpoint is set, it is registered for just that signal (and the catch-all,
 where present, covers any remaining signals).
 """
+
+load("../private/lib/environment.axl", "debug", "feature_logger")
+
+_LOG = feature_logger("Telemetry")
+
+_SIGNALS = ("traces", "logs", "metrics")
+
+_EXPORTER_NAMES = ("otlp", "console", "none")
+
+# ASPECT_DEBUG's console signals. Its logs already print as DEBUG: lines.
+_ASPECT_DEBUG_SIGNALS = ("traces", "metrics")
 
 _AUTO = "auto"
 _ALWAYS = "always"
@@ -119,6 +147,43 @@ _OTLP_HTTP_PATHS = {
     "logs": "/v1/logs",
     "metrics": "/v1/metrics",
 }
+
+def _exporter_names(env, signal):
+    """The exporter names `OTEL_<SIGNAL>_EXPORTER` lists, lowercased."""
+    raw = env.var("OTEL_%s_EXPORTER" % signal.upper()) or ""
+    return [n.strip().lower() for n in raw.split(",") if n.strip()]
+
+def unsupported_exporters(env):
+    """`(variable, name)` for each name an `OTEL_<SIGNAL>_EXPORTER` lists
+    that is none of `otlp`, `console` and `none`."""
+    return [
+        ("OTEL_%s_EXPORTER" % s.upper(), n)
+        for s in _SIGNALS
+        for n in _exporter_names(env, s)
+        if n not in _EXPORTER_NAMES
+    ]
+
+def console_signals(env):
+    """The signals that get a console exporter: each one whose
+    `OTEL_<SIGNAL>_EXPORTER` lists `console`, plus traces and metrics when
+    `ASPECT_DEBUG` is set. In `_SIGNALS` order."""
+    aspect_debug = bool(env.var("ASPECT_DEBUG"))
+    return [
+        s
+        for s in _SIGNALS
+        if "console" in _exporter_names(env, s) or (aspect_debug and s in _ASPECT_DEBUG_SIGNALS)
+    ]
+
+def env_endpoint_signals(env):
+    """The signals the `OTEL_EXPORTER_OTLP_*` endpoints may carry: each one
+    whose `OTEL_<SIGNAL>_EXPORTER` is unset (the spec's default is `otlp`) or
+    lists `otlp`."""
+    out = []
+    for s in _SIGNALS:
+        names = _exporter_names(env, s)
+        if not names or "otlp" in names:
+            out.append(s)
+    return out
 
 def _register_env_endpoints(ctx):
     env = ctx.std.env
@@ -155,7 +220,7 @@ def _register_env_endpoints(ctx):
             by_url[url].append(signal)
 
     is_http = protocol != "grpc"
-    for signal in ("traces", "logs", "metrics"):
+    for signal in env_endpoint_signals(env):
         if per_signal[signal]:
             _add(per_signal[signal], signal)
         elif catch_all:
@@ -202,22 +267,25 @@ def _register_endpoint_args(ctx):
             fail("Telemetry: --telemetry:endpoint entry %r is missing a URL" % entry)
         ctx.telemetry.exporters.add(url = url, headers = headers)
 
-def _register_aspect_debug(ctx):
-    """`ASPECT_DEBUG=1` translates into a stderr exporter (compact format).
+def _register_console(ctx):
+    """One console exporter for `console_signals`, if any.
 
     Lives here as a user-space convention rather than a Rust-side special
-    case — there's no ASPECT_DEBUG-aware branching in the runtime; the
-    same exporter mechanism handles stderr the same way it handles OTLP.
+    case: the runtime has no exporter-env branching, and a console exporter
+    is registered like any other.
     """
-    if ctx.std.env.var("ASPECT_DEBUG"):
-        ctx.telemetry.exporters.add(file = "stderr", format = "compact")
+    signals = console_signals(ctx.std.env)
+    if signals:
+        ctx.telemetry.exporters.add(console = True, signals = signals)
 
 def _describe(spec):
-    """Render an ExporterSpec as a one-line trace.log string."""
+    """Render an ExporterSpec as a one-line debug string."""
     if spec.kind == "otlp":
         s = "otlp:%s [%s]" % (spec.url, spec.protocol)
         if spec.headers:
             s += " headers=" + ",".join(sorted(spec.headers.keys()))
+    elif spec.kind == "console":
+        s = "console"
     else:
         s = "file:%s [%s]" % (spec.file, spec.format)
     if spec.signals:
@@ -225,10 +293,12 @@ def _describe(spec):
     return s
 
 def _telemetry_impl(ctx: FeatureContext):
-    # ASPECT_DEBUG is independent of `discover_endpoints` — it controls
-    # local stderr debug output, not OTLP endpoint auto-discovery. Users
-    # may legitimately want one without the other.
-    _register_aspect_debug(ctx)
+    for var, name in unsupported_exporters(ctx.std.env):
+        _LOG.warn(ctx.std, "%s lists %r, which this CLI can't export to; ignoring it. Supported: %s." % (var, name, ", ".join(_EXPORTER_NAMES)))
+
+    # Console exporters are independent of `discover_endpoints`: local
+    # stderr output, not OTLP endpoint auto-discovery.
+    _register_console(ctx)
     if ctx.args.discover_endpoints:
         _register_env_endpoints(ctx)
     if ctx.args.endpoint:
@@ -238,9 +308,9 @@ def _telemetry_impl(ctx: FeatureContext):
     if ctx.args.execution_log != _AUTO:
         ctx.telemetry.execution_log = ctx.args.execution_log
 
-    trace.log("telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
+    debug(ctx.std, "telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
     for spec in ctx.telemetry.exporters:
-        trace.log("  - " + _describe(spec))
+        debug(ctx.std, "  - " + _describe(spec))
 
 Telemetry = feature(
     display_name = "Telemetry",

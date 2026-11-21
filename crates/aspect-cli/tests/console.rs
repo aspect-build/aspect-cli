@@ -2,6 +2,10 @@
 //! prints around a task: task output, diagnostics, exit codes and the lifecycle
 //! events CI surfaces consume are the same under every layout.
 //!
+//! The exceptions are `detail()` lines, which the preset (or `verbose`) shows
+//! or hides, and `debug()` lines, which only the `debug` verbose level shows;
+//! `info()` lines print under every layout.
+//!
 //! Spawns the real CLI so the feature's args, `config.axl` overrides, the
 //! runtime-rendered header and verdict, and the AXL-rendered phase and progress
 //! lines are exercised together.
@@ -13,12 +17,15 @@ use common::{aspect_cli, base_env};
 use std::process::{Command, Output};
 
 const TASKS: &str = r#"
-load("@aspect//private/lib/environment.axl", "buildkite_section", "warn")
+load("@aspect//private/lib/environment.axl", "buildkite_section", "debug", "detail", "info", "warn")
 load("@aspect//private/lib/lifecycle.axl", "Phase", "Phases", "phases")
 
 def _impl(ctx):
     ctx.std.io.stdout.write("preset=%s\n" % ctx.console.template_preset)
     warn(ctx.std, "task warning")
+    detail(ctx.std, "task detail")
+    debug(ctx.std, "task debug")
+    info(ctx.std, "task info")
     ph = phases.new(ctx, {})
     ph.update("running", "phase progress", phase = Phase(name = "work"))
     ph.update("running", "heartbeat progress")
@@ -55,6 +62,11 @@ def _section(ctx):
     return 0
 
 section = task(implementation = _section, summary = "Open a task-owned Buildkite section.")
+
+def _conclude(ctx):
+    return TaskConclusion(exit_code = 0, message = "nothing to do")
+
+conclude = task(implementation = _conclude, summary = "End with an exit message.")
 "#;
 
 /// Writes every lifecycle event to stdout, so a layout that hid one would show.
@@ -77,6 +89,11 @@ const EVENTS: &str = "event:running:False\nevent:running:False\n";
 /// `config(ctx)`), under an empty `$HOME` so no user-level `config.axl`
 /// applies.
 fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
+    run_with_env(config_body, args, buildkite, &[])
+}
+
+/// [`run`] with `env` added to the CLI's environment.
+fn run_with_env(config_body: &str, args: &[&str], buildkite: bool, env: &[(&str, &str)]) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     let aspect = dir.path().join(".aspect");
@@ -100,6 +117,7 @@ fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
     if buildkite {
         cmd.env("BUILDKITE", "true");
     }
+    cmd.envs(env.iter().copied());
     let output = cmd
         .output()
         .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
@@ -111,7 +129,9 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// The task's own output and the lifecycle events, which no layout touches.
+/// The task's own output, its `info` line and the lifecycle events, which no
+/// layout touches, and its `detail` line, which only the layouts that show
+/// detail lines print.
 fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
     let err = stderr(output);
     assert_eq!(output.status.code(), Some(code), "{err}");
@@ -122,6 +142,12 @@ fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
         "{err}"
     );
     assert!(err.contains("task warning"), "{err}");
+    assert!(err.contains(": task info"), "{preset}: {err}");
+    assert_eq!(
+        err.contains(": task detail"),
+        matches!(preset, "full" | "plain"),
+        "{preset}: {err}"
+    );
 }
 
 #[test]
@@ -183,12 +209,20 @@ fn silent_prints_nothing_of_aspects_own() {
         false,
     );
     let err = stderr(&output);
-    assert_eq!(err.trim(), "WARNING: task warning", "{err}");
+    assert_eq!(
+        err.trim(),
+        "WARNING: task warning\nINFO: task info",
+        "{err}"
+    );
 }
 
 #[test]
 fn buildkite_sections_print_under_every_preset() {
-    for preset in ["compact", "silent"] {
+    for (preset, verdict) in [
+        ("compact", "+++ :x: "),
+        ("silent", "+++ :x: "),
+        ("agent", "+++ \u{1b}[1;31mFailed"),
+    ] {
         let flag = format!("--console:template-preset={preset}");
         let output = run("", &["check", &flag, "--code", "3"], true);
         assert_task_behaviour(&output, preset, 3);
@@ -200,8 +234,11 @@ fn buildkite_sections_print_under_every_preset() {
         assert_eq!(sections.len(), 5, "{preset}: {err}");
         assert!(sections[0].contains("Running"), "{preset}: {err}");
         assert_eq!(sections[3], "^^^ +++", "{preset}: {err}");
-        assert!(sections[4].starts_with("+++ :x: "), "{preset}: {err}");
+        assert!(sections[4].starts_with(verdict), "{preset}: {err}");
         assert!(!err.contains("heartbeat progress"), "{preset}: {err}");
+        if preset == "agent" {
+            assert!(!err.contains(":aspect:"), "{err}");
+        }
     }
 }
 
@@ -227,6 +264,7 @@ ctx.features[Console].args.task_templates = {
         [
             "start check",
             "WARNING: task warning",
+            "INFO: task info",
             "· heartbeat progress",
             "failed 3 init,work,finish"
         ],
@@ -461,7 +499,7 @@ ctx.features[Console].args.task_presets = {"check": "silent", "fx check": "compa
     assert_task_behaviour(&top, "silent", 0);
     assert_eq!(
         stderr(&top).trim(),
-        "WARNING: task warning",
+        "WARNING: task warning\nINFO: task info",
         "{}",
         stderr(&top)
     );
@@ -471,4 +509,170 @@ ctx.features[Console].args.task_presets = {"check": "silent", "fx check": "compa
     let err = stderr(&grouped);
     assert!(err.contains("→ ✅ Passed fx check task in "), "{err}");
     assert!(!err.contains("Running"), "{err}");
+}
+
+/// Under a coding agent the default layout is `agent`; a preset chosen on the
+/// command line or in `config.axl`, even `full`, keeps detection out.
+#[test]
+fn a_coding_agent_gets_the_agent_layout_unless_a_preset_is_chosen() {
+    let agent = [("CLAUDECODE", "1")];
+    let output = run_with_env("", &["check", "--code", "3"], false, &agent);
+    assert_task_behaviour(&output, "agent", 3);
+    let err = stderr(&output);
+    for gone in ["Running", "phase progress", "❌", "🎬"] {
+        assert!(!err.contains(gone), "{gone}: {err}");
+    }
+    let verdict: Vec<&str> = err.lines().filter(|l| l.contains("Failed")).collect();
+    assert_eq!(verdict.len(), 1, "{err}");
+    assert!(
+        verdict[0].starts_with("→ Failed check task (exit code 3) in "),
+        "{err}"
+    );
+
+    let configured = run_with_env(
+        r#"ctx.features[Console].args.template_preset = "full""#,
+        &["check"],
+        false,
+        &agent,
+    );
+    assert_task_behaviour(&configured, "full", 0);
+
+    let typed = run_with_env(
+        "",
+        &["check", "--console:template-preset=plain"],
+        false,
+        &agent,
+    );
+    assert_task_behaviour(&typed, "plain", 0);
+
+    let per_task = run_with_env(
+        r#"ctx.features[Console].args.task_presets = {"check": "compact"}"#,
+        &["check"],
+        false,
+        &agent,
+    );
+    assert_task_behaviour(&per_task, "compact", 0);
+}
+
+/// A user-level `~/.aspect/config.axl` that sets `template_preset` keeps
+/// detection out as a repository's does.
+#[test]
+fn a_user_level_preset_beats_coding_agent_detection() {
+    let home = tempfile::tempdir().expect("temp home");
+    let aspect = home.path().join(".aspect");
+    std::fs::create_dir(&aspect).expect("~/.aspect");
+    std::fs::write(
+        aspect.join("config.axl"),
+        "load(\"@aspect//feature/console.axl\", \"Console\")\n\ndef config(ctx):\n    ctx.features[Console].args.template_preset = \"full\"\n",
+    )
+    .expect("~/.aspect/config.axl");
+    let home = home.path().to_str().expect("utf-8 home");
+    let output = run_with_env(
+        "",
+        &["check"],
+        false,
+        &[("CLAUDECODE", "1"), ("HOME", home)],
+    );
+    assert_task_behaviour(&output, "full", 0);
+}
+
+#[test]
+fn verbose_overrides_the_preset() {
+    let shown = |config: &str, args: &[&str]| {
+        let output = run(config, args, false);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stderr(&output).contains("INFO: task detail")
+    };
+    assert!(shown(
+        "",
+        &[
+            "check",
+            "--console:template-preset=silent",
+            "--console:verbose"
+        ]
+    ));
+    assert!(!shown("", &["check", "--console:verbose=false"]));
+    let hidden = "ctx.features[Console].args.verbose = False";
+    assert!(!shown(hidden, &["check"]));
+    assert!(shown(hidden, &["check", "--console:verbose=true"]));
+}
+
+/// A `debug()` line prints only at the `debug` level, however that is chosen,
+/// and once: `ASPECT_DEBUG=1` adds no raw log record beside it.
+#[test]
+fn debug_lines_print_only_at_the_debug_level() {
+    let count = |config: &str, args: &[&str], env: &[(&str, &str)]| {
+        let output = run_with_env(config, args, false, env);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stderr(&output).matches("DEBUG: task debug").count()
+    };
+    assert_eq!(count("", &["check"], &[]), 0);
+    assert_eq!(count("", &["check", "--console:verbose"], &[]), 0);
+    assert_eq!(count("", &["check", "--console:verbose=debug"], &[]), 1);
+    assert_eq!(count("", &["check"], &[("ASPECT_VERBOSE", "debug")]), 1);
+    assert_eq!(count("", &["check"], &[("ASPECT_DEBUG", "1")]), 1);
+    let config = r#"ctx.features[Console].args.verbose = "debug""#;
+    assert_eq!(count(config, &["check"], &[]), 1);
+    assert_eq!(
+        count(config, &["check"], &[("ASPECT_VERBOSE", "false")]),
+        0,
+        "the environment beats config.axl"
+    );
+    assert_eq!(
+        count(
+            "",
+            &["check", "--console:verbose=false"],
+            &[("ASPECT_DEBUG", "1")]
+        ),
+        0,
+        "the command line beats the environment"
+    );
+}
+
+/// The runtime's own debug records (`trace!`) print as `DEBUG:` lines at the
+/// `debug` level, like AXL's, once each.
+#[test]
+fn runtime_debug_records_print_as_debug_lines() {
+    let count = |env: &[(&str, &str)]| {
+        let output = run_with_env("", &["check"], false, env);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stderr(&output).matches("module @aspect at ").count()
+    };
+    assert_eq!(count(&[]), 0);
+    assert_eq!(count(&[("ASPECT_VERBOSE", "debug")]), 1);
+    assert_eq!(count(&[("ASPECT_DEBUG", "1")]), 1);
+}
+
+/// A `debug()` record reaches a log exporter whatever the level:
+/// `OTEL_LOGS_EXPORTER=console` prints it raw without a `DEBUG:` line.
+#[test]
+fn a_console_log_exporter_prints_debug_records_at_any_level() {
+    let output = run_with_env("", &["check"], false, &[("OTEL_LOGS_EXPORTER", "console")]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert!(err.lines().any(|l| l == "task debug"), "{err}");
+    assert!(!err.contains("DEBUG:"), "{err}");
+}
+
+#[test]
+fn an_invalid_aspect_verbose_names_the_closest_value() {
+    let output = run_with_env("", &["check"], false, &[("ASPECT_VERBOSE", "debgu")]);
+    assert_ne!(output.status.code(), Some(0));
+    let err = stderr(&output);
+    assert!(
+        err.contains(r#"got "debgu"; did you mean "debug"?"#),
+        "{err}"
+    );
+}
+
+/// A task's exit message is its answer, so no preset hides it.
+#[test]
+fn an_exit_message_prints_under_every_preset() {
+    for preset in ["full", "compact", "agent", "silent"] {
+        let flag = format!("--console:template-preset={preset}");
+        let output = run("", &["conclude", &flag], false);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(0), "{preset}: {err}");
+        assert!(err.contains("INFO: nothing to do"), "{preset}: {err}");
+    }
 }

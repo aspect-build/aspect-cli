@@ -12,9 +12,12 @@
 //! called with the set of `ExporterSpec`s collected from
 //! `ctx.telemetry.exporters.add(...)`. Each OTLP spec becomes a real OTLP
 //! exporter; the buffer is replayed. Each file spec adds a sink (stderr, stdout
-//! or a file path) to the file-sinks layer. Users who want
-//! `ASPECT_DEBUG=1`-style stderr output register a stderr exporter from
-//! .axl config — there's no env-var special-casing in this binary.
+//! or a file path) to the file-sinks layer. A console spec adds a console span
+//! exporter (`crate::console_exporter`) for traces, a console metric reader
+//! for metrics, and a compact stderr sink for log records and span events.
+//! `ASPECT_DEBUG=1` and `OTEL_<SIGNAL>_EXPORTER=console` register console
+//! specs from the Telemetry feature's .axl; there's no env-var special-casing
+//! in this binary.
 //!
 //! At exit, `OtelGuard` reports any spans that never reached a collector (see
 //! `trace_buffer::SpanLoss`) and the setting that would have kept them, and
@@ -50,6 +53,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+use crate::console_exporter::{ConsoleMetricExporter, ConsoleSpanExporter};
 use crate::otlp_http::OtlpHttpClient;
 use crate::trace_buffer::{
     BufferingLogExporter, BufferingSpanExporter, CountingSpanProcessor, FirstError,
@@ -190,8 +194,8 @@ fn discard_buffer() {
 /// the rest of the process's tracing doesn't pollute these sinks.
 ///
 /// Activated by `ctx.telemetry.exporters.add(file=..., format=..., signals=...)`
-/// — including the stock `ASPECT_DEBUG=1` translation in
-/// `aspect/feature/telemetry.axl`.
+/// and by a console spec's `traces` / `logs` (what `ASPECT_DEBUG=1` and
+/// `OTEL_<SIGNAL>_EXPORTER=console` register in `aspect/feature/telemetry.axl`).
 ///
 /// Pre-install events (anything fired before `install_late_exporters`
 /// runs) are buffered into `EVENT_BUFFER` and replayed on first sink
@@ -425,9 +429,54 @@ fn merged_resource(extra: &BTreeMap<String, String>) -> Resource {
     b.build()
 }
 
+/// A span exporter installed after phase 3: OTLP, or the console.
+#[derive(Debug)]
+enum LateSpanExporter {
+    Otlp(opentelemetry_otlp::SpanExporter),
+    Console(ConsoleSpanExporter),
+}
+
+impl opentelemetry_sdk::trace::SpanExporter for LateSpanExporter {
+    async fn export(
+        &self,
+        batch: Vec<opentelemetry_sdk::trace::SpanData>,
+    ) -> opentelemetry_sdk::error::OTelSdkResult {
+        match self {
+            LateSpanExporter::Otlp(e) => e.export(batch).await,
+            LateSpanExporter::Console(e) => e.export(batch).await,
+        }
+    }
+
+    fn shutdown_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> opentelemetry_sdk::error::OTelSdkResult {
+        match self {
+            LateSpanExporter::Otlp(e) => e.shutdown_with_timeout(timeout),
+            LateSpanExporter::Console(e) => e.shutdown_with_timeout(timeout),
+        }
+    }
+
+    fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        match self {
+            LateSpanExporter::Otlp(e) => e.force_flush(),
+            LateSpanExporter::Console(e) => e.force_flush(),
+        }
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        match self {
+            LateSpanExporter::Otlp(e) => e.set_resource(resource),
+            LateSpanExporter::Console(e) => e.set_resource(resource),
+        }
+    }
+}
+
+type SpanBuffer = BufferingSpanExporter<LateSpanExporter>;
+
 /// Process-wide handles to the buffering exporters so phase-3 → late-init
 /// can reach them. Set in `init()`; read in `install_late_exporters()`.
-static SPAN_BUFFER: OnceLock<BufferingSpanExporter> = OnceLock::new();
+static SPAN_BUFFER: OnceLock<SpanBuffer> = OnceLock::new();
 static LOG_BUFFER: OnceLock<BufferingLogExporter> = OnceLock::new();
 /// Set by `install_late_exporters` when at least one endpoint requested
 /// `metrics`, with the first error its exporters returned. Read by
@@ -444,7 +493,7 @@ static ANY_LATE_EXPORTER: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 /// backed by the buffering exporters, and install the tracer provider
 /// globally. Returns the guard that flushes/shuts down providers on drop.
 pub fn init() -> OtelGuard {
-    let span_buffer = BufferingSpanExporter::new(Arc::new(SpanTally::default()));
+    let span_buffer = SpanBuffer::new(Arc::new(SpanTally::default()));
     let log_buffer = BufferingLogExporter::new();
 
     let queue_size = env_usize(env_var, OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_SIZE);
@@ -770,13 +819,14 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
     let mut log_exporters = Vec::new();
     let mut metric_exporters = Vec::new();
     let mut any_file = false;
+    let mut console_metrics = false;
 
     for spec in &specs {
         match spec {
             ExporterSpec::Otlp(otlp) => {
                 let resource = merged_resource(&otlp.resource_attributes);
                 if otlp.signals.traces {
-                    let mut ex = build_otlp_span_exporter(otlp)?;
+                    let mut ex = LateSpanExporter::Otlp(build_otlp_span_exporter(otlp)?);
                     opentelemetry_sdk::trace::SpanExporter::set_resource(&mut ex, &resource);
                     span_exporters.push(ex);
                 }
@@ -793,6 +843,28 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
                 activate_file_spec(file)?;
                 any_file = true;
             }
+            ExporterSpec::Console(console) => {
+                let signals = console.signals;
+                if signals.traces {
+                    span_exporters.push(LateSpanExporter::Console(ConsoleSpanExporter));
+                }
+                if signals.metrics {
+                    console_metrics = true;
+                }
+                // Span events and log records print as they happen.
+                if signals.traces || signals.logs {
+                    activate_file_spec(&FileSpec {
+                        destination: FileDestination::Stderr,
+                        format: FileFormat::Compact,
+                        signals: Signals {
+                            metrics: false,
+                            ..signals
+                        },
+                        resource_attributes: BTreeMap::new(),
+                    })?;
+                    any_file = true;
+                }
+            }
         }
     }
 
@@ -802,12 +874,12 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
         discard_buffer();
     }
 
-    // OTel stays enabled even without an OTLP spec: file-only configurations
-    // (such as the `ASPECT_DEBUG=1` stderr spec) still need the trace macros.
+    // OTel stays enabled even without an OTLP spec: file- and console-only
+    // configurations (such as `ASPECT_DEBUG=1`'s) still need the trace macros.
     span_buf.install_late(span_exporters).await;
     log_buf.install_late(log_exporters).await;
 
-    if !metric_exporters.is_empty() {
+    if !metric_exporters.is_empty() || console_metrics {
         let (attributes, conflicts) = metric_resource_attributes(&metric_exporters);
         for key in conflicts {
             errln!(
@@ -829,6 +901,13 @@ async fn install_late_exporters_async(specs: Vec<ExporterSpec>) -> anyhow::Resul
             }
             let reader = reader.build();
             builder = builder.with_reader(reader);
+        }
+        if console_metrics {
+            let mut reader = PeriodicReader::builder(ConsoleMetricExporter);
+            if let Some(interval) = metric_export_interval(env_var) {
+                reader = reader.with_interval(interval);
+            }
+            builder = builder.with_reader(reader.build());
         }
         let provider = builder.build();
         global::set_meter_provider(provider.clone());
@@ -877,7 +956,7 @@ fn shutdown_report(
 pub(crate) struct OtelGuard {
     tracer_provider: SdkTracerProvider,
     logger_provider: SdkLoggerProvider,
-    span_buffer: BufferingSpanExporter,
+    span_buffer: SpanBuffer,
     queue_size: usize,
 }
 

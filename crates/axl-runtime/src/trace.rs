@@ -47,14 +47,18 @@ pub fn enabled() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Rust-side log emission. The host's tracing subscriber chain decides what
-/// to do with it (stderr fmt layer when `ASPECT_DEBUG=1`, OTel logs bridge
-/// when an OTLP endpoint is registered, both, or neither).
+/// Rust-side debug line, the counterpart of AXL's `debug()`: a log record on
+/// the `axl.log` target for the registered exporters, and a `DEBUG:` line
+/// ([`crate::diag::debug`]) at the `debug` verbose level. Takes `format!`
+/// arguments.
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {{
         if $crate::trace::enabled() {
             ::tracing::trace!(target: "axl.log", $($arg)*);
+        }
+        if $crate::diag::debugging() {
+            $crate::diag::debug(&format!($($arg)*));
         }
     }};
 }
@@ -127,14 +131,16 @@ fn emit_event(
 /// Entry points:
 ///
 /// * `trace(*args)` / `trace.log(*args)` — free-form log line. The bare
-///   call is an alias for `trace.log`. With `ASPECT_DEBUG=1`, prints to
-///   stderr. With OTLP active (any endpoint registered via
-///   `ctx.telemetry.exporters.add(...)`), emits as a `Severity::Trace`
-///   LogRecord. Keyword arguments are not accepted on the log path; route
+///   call is an alias for `trace.log`. Prints nothing itself: a file or
+///   console exporter of `logs` (`OTEL_LOGS_EXPORTER=console`) prints it,
+///   and with OTLP active (any endpoint registered via
+///   `ctx.telemetry.exporters.add(...)`) it emits as a `Severity::Trace`
+///   LogRecord. `debug()` in `lib/environment.axl` adds a `DEBUG:` line. Keyword arguments are not accepted on the log path; route
 ///   structured data through `trace.event`.
 /// * `trace.event(name, *, message=None, category=None, error=None, fields=None)`
 ///   — structured event. Top-level slots and `fields` live in separate
-///   namespaces. With `ASPECT_DEBUG=1`, prints a compact line to stderr.
+///   namespaces. A file or console exporter of `traces` (`ASPECT_DEBUG=1`,
+///   `OTEL_TRACES_EXPORTER=console`) prints a compact line to stderr.
 ///   With OTLP active, attaches as an OTel span event on the active span
 ///   (`axl.event` target). Span events have no severity slot in the OTel
 ///   data model, so there's no `level=` parameter.
@@ -204,9 +210,10 @@ impl<'v> StarlarkValue<'v> for Trace {
 fn trace_methods(registry: &mut MethodsBuilder) {
     /// Emit a free-form log line. Positional args are stringified and
     /// joined by spaces. Routed through `tracing` on the `axl.log` target;
-    /// the host's subscriber chain decides where it lands (stderr fmt
-    /// layer when `ASPECT_DEBUG=1`, OTel logs bridge when an OTLP endpoint
-    /// is registered).
+    /// the host's subscriber chain decides where it lands (a file or
+    /// console sink of `logs`, the OTel logs bridge when an OTLP endpoint
+    /// is registered). Prints nothing itself; see `debug()` in
+    /// `lib/environment.axl`.
     fn log<'v>(
         this: Value<'v>,
         #[starlark(args)] args: UnpackTuple<Value<'v>>,

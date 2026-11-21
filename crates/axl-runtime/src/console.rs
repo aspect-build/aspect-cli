@@ -36,21 +36,38 @@
 //! - On Buildkite, `header`, `phase`, `verdict` and `section` open log
 //!   sections. The section marker is printed for them, leading whitespace is
 //!   dropped so it is never untitled, and a blank render is replaced by the
-//!   preset's text (or `full`'s), so collapsing and the failing-phase
-//!   expansion survive every layout.
+//!   preset's text (or `full`'s, `plain`'s for a preset without emojis), so
+//!   collapsing and the failing-phase expansion survive every layout.
+//!
+//! The base preset is the first of these that applies: `template_preset` typed
+//! on the command line, `template_preset` set in a `config.axl`, [`AGENT_PRESET`]
+//! when [`Host::coding_agent`] says a coding agent runs the process, and
+//! [`DEFAULT_PRESET`]. An agent that wants another layout sets
+//! `template_preset` either way; even `full` set in config keeps detection out.
+//!
+//! The preset a task renders with also decides whether detail lines (the
+//! `INFO:` asides AXL's `detail()` prints) show (see [`crate::diag::verbose`]),
+//! unless a verbose level overrides it. The level is the first of these set:
+//! the feature's `verbose` arg typed on the command line, `ASPECT_DEBUG` or
+//! `ASPECT_VERBOSE` ([`Host::verbose`]), the arg set in a `config.axl`. Only
+//! the `debug` level shows AXL's `DEBUG:` lines. Other `INFO:` lines and
+//! `WARNING:` and `ERROR:` lines always print.
 //!
 //! Overrides are compiled when the console is resolved, so a syntax error fails
 //! the run before the task starts rather than mid-task.
 //!
-//! A console never reads the process: whether it colors and whether it opens
-//! Buildkite sections come from the [`Host`] it is built with, which a run
-//! takes from its [`Env`] ([`Host::of`]) and a test spells out.
+//! A console never reads the process: whether it colors, whether it opens
+//! Buildkite sections, whether a coding agent runs it and the environment's
+//! verbose level come from the
+//! [`Host`] it is built with, which a run takes from its [`Env`]
+//! ([`Host::of`]) and a test spells out.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
 
 use minijinja::{Environment, Value as JinjaValue};
 
+use crate::diag::Verbose;
 use crate::engine::store::Env;
 use crate::suggest;
 
@@ -141,6 +158,11 @@ impl Slot {
 /// `template_preset` arg lists the same names and describes each.
 pub struct Preset {
     pub name: &'static str,
+    /// Its lines carry emojis and Buildkite emoji shortcodes, so a blank
+    /// Buildkite section falls back to `full`'s text rather than `plain`'s.
+    emoji: bool,
+    /// Detail lines print under it unless the `verbose` arg says otherwise.
+    verbose: bool,
     banner: &'static str,
     header: &'static str,
     phase: &'static str,
@@ -196,6 +218,8 @@ macro_rules! verdict_icon {
 /// emoji leads it and a phase without one shows `:aspect:`.
 const FULL: Preset = Preset {
     name: "full",
+    emoji: true,
+    verbose: true,
     // Jinja drops one trailing newline, so two keep the blank line under it.
     banner: "{{ line }}\n\n",
     header: concat!("{{ ':aspect:' if buildkite else '→ 🎬' }} ", header_text!()),
@@ -218,6 +242,8 @@ const FULL: Preset = Preset {
 /// `full` without emojis or Buildkite emoji shortcodes.
 const PLAIN: Preset = Preset {
     name: "plain",
+    emoji: false,
+    verbose: true,
     banner: FULL.banner,
     header: concat!("{% if not buildkite %}→ {% endif %}", header_text!()),
     phase: concat!(
@@ -235,6 +261,8 @@ const PLAIN: Preset = Preset {
 
 const COMPACT: Preset = Preset {
     name: "compact",
+    emoji: true,
+    verbose: false,
     banner: "",
     header: "",
     phase: "",
@@ -247,8 +275,25 @@ const COMPACT: Preset = Preset {
     section: "",
 };
 
+/// `compact` without emojis or Buildkite emoji shortcodes, for a coding agent
+/// reading the output. Its own preset so it can change without changing
+/// `compact`.
+const AGENT: Preset = Preset {
+    name: "agent",
+    emoji: false,
+    verbose: false,
+    banner: "",
+    header: "",
+    phase: "",
+    progress: "",
+    verdict: concat!("{% if not buildkite %}→ {% endif %}", verdict_text!()),
+    section: "",
+};
+
 const SILENT: Preset = Preset {
     name: "silent",
+    emoji: true,
+    verbose: false,
     banner: "",
     header: "",
     phase: "",
@@ -258,10 +303,14 @@ const SILENT: Preset = Preset {
 };
 
 /// Built-in presets, in the order `--help` lists them.
-pub const PRESETS: [&Preset; 4] = [&FULL, &PLAIN, &COMPACT, &SILENT];
+pub const PRESETS: [&Preset; 5] = [&FULL, &PLAIN, &COMPACT, &AGENT, &SILENT];
 
 /// The preset a run uses when nothing selects another.
 pub const DEFAULT_PRESET: &str = FULL.name;
+
+/// The preset a run under a coding agent uses when neither the command line
+/// nor a `config.axl` selects one.
+pub const AGENT_PRESET: &str = AGENT.name;
 
 /// The `Console` feature's `templates`, `task_presets` and `task_templates`,
 /// before they are narrowed to one task.
@@ -274,6 +323,9 @@ pub struct Overrides {
     /// The feature's preset came from the command line, so it beats
     /// `task_presets`.
     preset_from_cli: bool,
+    /// The verbose level, when the command line, the environment or a
+    /// `config.axl` overrides the preset's.
+    verbose: Option<Verbose>,
 }
 
 impl Overrides {
@@ -310,6 +362,11 @@ impl Overrides {
     /// typed on the command line.
     pub fn preset_from_cli(&mut self) {
         self.preset_from_cli = true;
+    }
+
+    /// Set the verbose level whatever the preset.
+    pub fn set_verbose(&mut self, level: Verbose) {
+        self.verbose = Some(level);
     }
 
     /// Every override with the arg path naming it.
@@ -419,17 +476,26 @@ pub struct Host {
     /// Whether the run is on Buildkite, where the section slots open log
     /// sections.
     pub buildkite: bool,
+    /// Whether a coding agent runs the process ([`crate::agent`]), so the
+    /// base preset is [`AGENT_PRESET`] when nothing chooses one.
+    pub coding_agent: bool,
+    /// The level `ASPECT_VERBOSE` / `ASPECT_DEBUG` set, which beats a
+    /// `config.axl`'s `verbose` and loses to the command line's.
+    pub verbose: Option<Verbose>,
 }
 
 impl Host {
-    /// The host of the run `env` describes: its stderr color and its
-    /// Buildkite snapshot, both resolved once for the run (the process's
-    /// own, or a test harness's).
-    pub fn of(env: &Env) -> Host {
-        Host {
+    /// The host of the run `env` describes: its stderr color, its Buildkite
+    /// snapshot, whether a coding agent runs it and the verbose level its
+    /// environment sets, all resolved once for the run (the process's own, or
+    /// a test harness's). Fails on an invalid `ASPECT_VERBOSE`.
+    pub fn of(env: &Env) -> Result<Host, String> {
+        Ok(Host {
             color: env.stream_color.stderr,
             buildkite: env.buildkite,
-        }
+            coding_agent: env.coding_agent,
+            verbose: env.verbose.clone()?,
+        })
     }
 }
 
@@ -439,6 +505,8 @@ pub struct Console {
     preset: &'static Preset,
     overrides: BTreeMap<Slot, String>,
     host: Host,
+    /// The verbose level: the overridden one, else the preset's.
+    verbose: Verbose,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
     /// Config warnings, printed under the header; see [`Console::warnings`].
@@ -455,7 +523,7 @@ impl Console {
     /// The `full` layout with no overrides, on `host`: what a run without the
     /// `Console` feature (or with it disabled) prints.
     pub fn builtin(task: TaskIdentity, host: Host) -> Console {
-        Console::new(&FULL, BTreeMap::new(), task, host)
+        Console::new(&FULL, BTreeMap::new(), host.verbose, task, host)
     }
 
     /// Resolve `preset_name` plus `overrides` for `task`, on `host`.
@@ -481,12 +549,19 @@ impl Console {
             env.template_from_str(template)
                 .map_err(|e| format!("Console {at} does not compile: {e}"))?;
         }
-        Ok(Console::new(preset, resolved, task, host))
+        Ok(Console::new(
+            preset,
+            resolved,
+            overrides.verbose,
+            task,
+            host,
+        ))
     }
 
     fn new(
         preset: &'static Preset,
         overrides: BTreeMap<Slot, String>,
+        verbose: Option<Verbose>,
         task: TaskIdentity,
         host: Host,
     ) -> Console {
@@ -494,6 +569,11 @@ impl Console {
             preset,
             overrides,
             host,
+            verbose: verbose.unwrap_or(if preset.verbose {
+                Verbose::On
+            } else {
+                Verbose::Off
+            }),
             task,
             warned: Mutex::new(HashSet::new()),
             warnings: Vec::new(),
@@ -530,6 +610,17 @@ impl Console {
         self.host.color
     }
 
+    /// Whether detail lines print for this task.
+    pub fn verbose(&self) -> bool {
+        self.verbose.shows_detail()
+    }
+
+    /// The verbose level for this task, which also says whether debug lines
+    /// print.
+    pub fn verbosity(&self) -> Verbose {
+        self.verbose
+    }
+
     /// Render `slot` with `context`, plus the shared `buildkite` and `task`
     /// keys. Returns `""` for a slot the layout leaves blank, except where
     /// Buildkite needs the line to open a section.
@@ -555,14 +646,15 @@ impl Console {
     /// `rendered` as the text after a Buildkite section marker. Leading
     /// whitespace, such as the line break a terminal layout uses to set a line
     /// off, would leave the marker untitled, so it goes; a title still blank
-    /// after that comes from the preset, or from `full` where the preset leaves
-    /// the slot blank.
+    /// after that comes from the preset, or where the preset leaves the slot
+    /// blank from `full`, or `plain` for a preset without emojis.
     fn section_title(&self, slot: Slot, rendered: &str, context: &JinjaValue) -> String {
         let title = rendered.trim_start();
         if !title.is_empty() {
             return title.to_owned();
         }
-        [self.preset, &FULL]
+        let fallback = if self.preset.emoji { &FULL } else { &PLAIN };
+        [self.preset, fallback]
             .into_iter()
             .map(|preset| render_builtin(preset, slot, context))
             .find(|text| !text.trim().is_empty())
@@ -667,8 +759,8 @@ mod tests {
 
     fn console(preset: &str, overrides: &Overrides, buildkite: bool) -> Console {
         let host = Host {
-            color: false,
             buildkite,
+            ..Host::default()
         };
         Console::resolve(preset, overrides, task(), host).unwrap()
     }
@@ -853,6 +945,72 @@ mod tests {
         assert_eq!(
             bk.render(Slot::Verdict, verdict(false)),
             ":white_check_mark: Passed · test task in 1.2s · 4 tests"
+        );
+    }
+
+    #[test]
+    fn agent_is_compact_without_emojis() {
+        let c = console("agent", &Overrides::default(), false);
+        for slot in [Slot::Banner, Slot::Header, Slot::Phase, Slot::Progress] {
+            assert_eq!(c.render(slot, header()), "", "{slot:?}");
+        }
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(true)),
+            "→ Failed test task (exit code 3) in 1.2s · 4 tests"
+        );
+        let bk = console("agent", &Overrides::default(), true);
+        assert_eq!(
+            bk.render(Slot::Verdict, verdict(false)),
+            "Passed · test task in 1.2s · 4 tests"
+        );
+        assert_eq!(
+            bk.render(Slot::Header, header()),
+            "<c>Running<r> test task",
+            "a blank section falls back to plain, not full"
+        );
+        assert_eq!(
+            bk.render(
+                Slot::Section,
+                minijinja::context! { icon => ":rocket:", title => "Runner metadata" }
+            ),
+            "Runner metadata"
+        );
+    }
+
+    #[test]
+    fn the_preset_decides_verbose_unless_overridden() {
+        for (preset, shown) in [
+            ("full", true),
+            ("plain", true),
+            ("compact", false),
+            ("agent", false),
+            ("silent", false),
+        ] {
+            let c = console(preset, &Overrides::default(), false);
+            assert_eq!(c.verbose(), shown, "{preset}");
+            for level in [Verbose::Off, Verbose::On, Verbose::Debug] {
+                let mut o = Overrides::default();
+                o.set_verbose(level);
+                let c = console(preset, &o, false);
+                assert_eq!(c.verbosity(), level, "{preset}");
+                assert_eq!(c.verbose(), level != Verbose::Off, "{preset}");
+            }
+        }
+        let mut o = Overrides::default();
+        o.set_preset_for_task("test", "compact".into()).unwrap();
+        assert!(
+            !console("full", &o, false).verbose(),
+            "the task's own preset decides"
+        );
+        assert!(Console::builtin(task(), Host::default()).verbose());
+        let host = Host {
+            verbose: Some(Verbose::Debug),
+            ..Host::default()
+        };
+        assert_eq!(
+            Console::builtin(task(), host).verbosity(),
+            Verbose::Debug,
+            "a disabled feature keeps the environment's level"
         );
     }
 

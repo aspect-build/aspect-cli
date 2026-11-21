@@ -33,7 +33,7 @@ load("./agent.axl", agent_label = "label")
 load("./ansi.axl", "ansi")
 load("./bazel_paths.axl", "last_used", "mtime_us", "output_user_root")
 load("./duration.axl", "compact_us")
-load("./environment.axl", "info")
+load("./environment.axl", "detail")
 load("./git_checkout.axl", "git_checkout")
 load("./path_utils.axl", "normpath")
 load("./table.axl", "tilde")
@@ -561,7 +561,7 @@ def _scan(ctx: TaskContext, root: str, now_us: int, policy) -> list:
 def _scan_root(ctx: TaskContext, streaming: bool, root: str, policy) -> tuple:
     """`(bases, now_us)`: `root` announced and scanned under `policy`, against
     one clock reading that the caller's ages also use."""
-    info(ctx.std, "Bazel output user root: " + tilde(root, ctx.std.env.home_dir()))
+    detail(ctx.std, "Bazel output user root: " + tilde(root, ctx.std.env.home_dir()))
     now_us = time.now_ms() * 1000
     _say(streaming, "  scanning %ss…" % BASE)
     return (_scan(ctx, root, now_us, policy), now_us)

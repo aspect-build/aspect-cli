@@ -302,7 +302,7 @@ load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_mani
 load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
-load("./private/lib/environment.axl", "error", "info", "sanitize_filename", "warn")
+load("./private/lib/environment.axl", "debug", "detail", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -971,7 +971,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
                 event = events.try_pop()
                 if event == None:
                     break
-                if process_event(data, event, bb_root):
+                if process_event(data, event, bb_root, std = ctx.std):
                     interesting = True
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)
@@ -1001,7 +1001,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
 
     if not status.success:
         return {}, {}, [], exit_code_of(status)
-    info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
+    detail(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2. Parse the gRPC log regardless of exit code — non-zero usually
     # just means DeliveryHash wasn't cached yet, normal on first delivery.
@@ -1149,7 +1149,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
         getactionresult_count += 1
-        trace.log(entry)
+        debug(ctx.std, str(entry))
         entry_label = normalize_label(entry.metadata.target_id)
         mnemonic = entry.metadata.action_mnemonic
         if mnemonic == _DELIVERY_HASH_MNEMONIC:
@@ -1216,7 +1216,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
     ctx.std.fs.remove_file(log_path)
 
     if _unresolved == 0:
-        info(ctx.std, "Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
+        detail(ctx.std, "Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
         info(ctx.std, "Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
@@ -1744,7 +1744,7 @@ def _delivery_impl(ctx):
 
     if query_expr:
         # Echo the query so the resolved set (or failure) is attributable to it.
-        info(ctx.std, "Running bazel query: {}".format(query_expr))
+        detail(ctx.std, "Running bazel query: {}".format(query_expr))
 
         # The query runs under the rc set by use_rc, self-expanded for the
         # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
@@ -1820,7 +1820,7 @@ def _delivery_impl(ctx):
     if phase_1_2_runs:
         _t_build = time.monotonic()
         output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri or "", color)
-        info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
+        detail(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
             handler(ctx, build_code)
@@ -1957,7 +1957,7 @@ def _delivery_impl(ctx):
 
     if delivery_targets and skip_delivery_build:
         info(ctx.std, "Skipping the delivery build: --dry-run dispatches nothing, so its outputs would go unused." +
-                      " Pass --dry-run=build to build the pending targets anyway — it fills each manifest entry's" +
+                      " Pass --dry-run=build to build the pending targets anyway - it fills each manifest entry's" +
                       " on-disk paths and runs the per-target 'never built' / 'not runnable' checks, at the cost of a" +
                       " full release build.")
 
@@ -1987,12 +1987,12 @@ def _delivery_impl(ctx):
             mnemonics = non_hermetic_misses.get(normalize_label(label), [])
             blocked = bool(blocking_culprits)
             if mnemonics:
-                detail = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
+                reason = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
             elif blocked:
-                detail = "an uncacheable action blocked hashing — see the ERROR/WARNING above for the culprit target(s) and the fix"
+                reason = "an uncacheable action blocked hashing - see the ERROR/WARNING above for the culprit target(s) and the fix"
             else:
-                detail = "not in grpc log; target may be an alias — use the actual target label"
-            msg = "no digest: {}. Phase-2 raw log: {}".format(detail, _PHASE2_LOG_PATH.format(ctx.task.name))
+                reason = "not in grpc log; target may be an alias - use the actual target label"
+            msg = "no digest: {}. Phase-2 raw log: {}".format(reason, _PHASE2_LOG_PATH.format(ctx.task.name))
 
             # An uncacheable action is a hard error; a non-resolution with no
             # uncacheable action present stays a warning as it always has.
@@ -2200,7 +2200,7 @@ def _delivery_impl(ctx):
                         error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(build_exit_code, phase3_log_path))
                         _surface_phase_stderr(ctx, 3, phase3_log_path)
                     else:
-                        info(ctx.std, "Delivery build took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
+                        detail(ctx.std, "Delivery build took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
                     build_done = True
 
             # Pull every target that settled since the last tick: its `Runnable`

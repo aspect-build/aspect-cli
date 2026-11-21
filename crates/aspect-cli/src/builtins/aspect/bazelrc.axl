@@ -167,7 +167,7 @@ load(
 )
 load("./private/lib/deployment_flags.axl", "AUTO", "BARE", "REMOTE_CAPABILITIES", "capability_label", "join_and", "no_bazel_endpoint_message", "parse_remote", "serves_bazel_endpoint")
 load("./private/lib/deployment_rc.axl", "config_collisions", "config_name", "deployment_configs", "deployment_environment", "deployment_group_auth", "login_hint")
-load("./private/lib/environment.axl", "bazel_misdetects_color", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
+load("./private/lib/environment.axl", "bazel_misdetects_color", "detail", "detect_ci", "env_names_deployment", "get_workflows_environment", "info", "is_aspect_workflows_runner", "warn")
 load("./private/lib/rc_groups.axl", "HOST_GROUPS", "bes_chains", "enable_lines", "rc_groups")
 
 _BAZEL_BOUNDARY_FILES = ["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"]
@@ -317,9 +317,9 @@ def _announce_home_mode(ctx: TaskContext, value: str, home_mode: bool, reason: s
     if value not in ["", AUTO]:
         return
     if home_mode:
-        info(ctx.std, "--home=auto: %s, so this machine's rc under ~/.aspect is written rather than the checkout's. `--home=false` writes the checkout's pair instead." % reason)
+        detail(ctx.std, "--home=auto: %s, so this machine's rc under ~/.aspect is written rather than the checkout's. `--home=false` writes the checkout's pair instead." % reason)
     else:
-        info(ctx.std, "--home=auto: not CI, so the checkout's %s pair is written rather than this machine's. `--home=true` writes ~/.aspect/bazelrc instead." % GENERATED_RC)
+        detail(ctx.std, "--home=auto: not CI, so the checkout's %s pair is written rather than this machine's. `--home=true` writes ~/.aspect/bazelrc instead." % GENERATED_RC)
 
 def _announce_remote_spec(ctx: TaskContext, value: str, spec, reason: str, machine_rc: bool):
     """Say what `--remote=auto` turned on and on what evidence. The endpoints are
@@ -328,15 +328,15 @@ def _announce_remote_spec(ctx: TaskContext, value: str, spec, reason: str, machi
     if value not in ["", AUTO]:
         return
     if not machine_rc:
-        info(ctx.std, "--remote=auto: a checkout's rc enables nothing — it is shared by every host that builds here, so its sections stay behind a --config. `--home=true` writes this machine's rc, where --remote decides what is on.")
+        detail(ctx.std, "--remote=auto: a checkout's rc enables nothing - it is shared by every host that builds here, so its sections stay behind a --config. `--home=true` writes this machine's rc, where --remote decides what is on.")
         return
     wanted = [capability_label(name) for name in REMOTE_CAPABILITIES if spec.on[name]]
     if wanted:
-        info(ctx.std, "--remote=auto: %s, so the deployment's %s %s enabled for every `bazel` build here. `--remote=none` leaves them defined but off." %
-                      (reason, join_and(wanted), "is" if len(wanted) == 1 else "are"))
+        detail(ctx.std, "--remote=auto: %s, so the deployment's %s %s enabled for every `bazel` build here. `--remote=none` leaves them defined but off." %
+                        (reason, join_and(wanted), "is" if len(wanted) == 1 else "are"))
     elif not reason:
         # On CI with nothing enabled, the decline said why in its own words.
-        info(ctx.std, "--remote=auto: not CI, so no endpoint is enabled — a developer's rc stays inert until a --config names one. `--remote` enables the remote cache and BES backend here.")
+        detail(ctx.std, "--remote=auto: not CI, so no endpoint is enabled - a developer's rc stays inert until a --config names one. `--remote` enables the remote cache and BES backend here.")
 
 def _sections_to_enable(default, spec) -> list:
     """The deployment sections a machine's rc would turn on for `spec`: the
@@ -533,7 +533,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     shown = lambda path: _relative(path, base, home_mode)
     if chain_to_repo:
-        info(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on — nothing here restates them." %
+        info(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on - nothing here restates them." %
                       (verb, shown(paths.output), ", ".join(enabled), "%workspace%/" + GENERATED_RC))
         return 0
     if env_deployment:

@@ -98,7 +98,7 @@ load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./aspect_flags.axl", "add_task_flags", "endpoint_flags", "history_exec_log_flags")
 load("./deployment_rc.axl", "credential_helper_flag")
-load("./environment.axl", "detect_ci", "env_names_deployment", "info")
+load("./environment.axl", "detail", "detect_ci", "env_names_deployment")
 load("./text.axl", "did_you_mean_then")
 
 REMOTE_REFUSED_BY_ENV = (
@@ -501,10 +501,10 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
     attempt only — a retry reuses the same flags."""
     line = deployment_announcement(flags)
     if line:
-        info(ctx.std, line)
+        detail(ctx.std, line)
         explanation = auto_remote_explanation(flags)
         if explanation:
-            info(ctx.std, explanation)
+            detail(ctx.std, explanation)
 
 def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag: str, what: str) -> list:
     """Per-invocation auth for an endpoint owned by a configured deployment named

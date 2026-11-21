@@ -1,6 +1,7 @@
 mod builtins;
 mod cli_metrics;
 mod cmd;
+mod console_exporter;
 mod crash_handler;
 mod credential_helper;
 mod helpers;
@@ -111,6 +112,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     }
 
     let mut _tracing = time("tracing", trace::init);
+    // Debug lines from config.axl and other start-up AXL print before the
+    // console resolves the level; an invalid value fails there.
+    if let Ok(Some(level)) = axl_runtime::diag::Verbose::from_env(|name| std::env::var_os(name)) {
+        axl_runtime::diag::set_verbose(level);
+    }
     let _root = info_span!(
         "root",
         version = cargo_pkg_short_version(),

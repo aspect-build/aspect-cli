@@ -197,7 +197,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            if process_event(data, event, bb_root):
+            if process_event(data, event, bb_root, std = ctx.std):
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             ph.dispatch(phases.Update(

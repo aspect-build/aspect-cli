@@ -91,4 +91,27 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
         let this = this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
         Ok(this.stdin.dupe())
     }
+
+    /// Whether detail lines print: the `INFO:` asides a reader can do
+    /// without. The `Console` feature decides for the running task: its preset
+    /// (shown under `full` and `plain`, hidden under `compact`, `agent` and
+    /// `silent`) unless a verbose level overrides it: the `verbose` arg on the
+    /// command line, `ASPECT_DEBUG` / `ASPECT_VERBOSE`, the arg in a
+    /// `config.axl`. True before the console resolves unless the environment
+    /// says `false`. `detail()` in `lib/environment.axl` follows it; `info()`
+    /// always prints. True at the `debug` level too; see `debug`.
+    #[starlark(attribute)]
+    fn verbose<'v>(this: values::Value) -> anyhow::Result<bool> {
+        this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
+        Ok(crate::diag::verbose())
+    }
+
+    /// Whether debug lines print: the verbose level is `debug`
+    /// (`--console:verbose=debug`, `ASPECT_VERBOSE=debug` or `ASPECT_DEBUG=1`).
+    /// `debug()` in `lib/environment.axl` follows it.
+    #[starlark(attribute)]
+    fn debug<'v>(this: values::Value) -> anyhow::Result<bool> {
+        this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
+        Ok(crate::diag::verbosity() == crate::diag::Verbose::Debug)
+    }
 }

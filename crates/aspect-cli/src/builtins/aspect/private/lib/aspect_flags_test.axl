@@ -316,7 +316,7 @@ def _test_color_flags(_ctx):
     # gives the job a PTY, so Bazel colors unaided and it is left out.
     def std(color = True, **vars):
         return struct(
-            io = struct(stderr = struct(color = color)),
+            io = struct(stderr = struct(color = color), debug = False),
             env = struct(var = lambda k: vars.get(k, "")),
         )
 
