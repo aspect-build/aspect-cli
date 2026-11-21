@@ -2,7 +2,8 @@
 //!
 //! A single source of truth so the several places that change behavior on CI
 //! (cancellation strategy, task-header formatting, auto task naming) agree on
-//! what "on CI" means. Color asks the narrower [`renders_ansi`].
+//! what "on CI" means. Color asks the narrower [`renders_ansi`], and the
+//! console's Buildkite log sections ask [`buildkite_from`].
 
 use std::path::PathBuf;
 
@@ -42,7 +43,7 @@ pub(crate) fn renders_ansi(set: impl Fn(&str) -> bool) -> bool {
 /// True on Buildkite: `BUILDKITE` set to a non-empty value, where `var` reads
 /// one environment variable. [`crate::engine::store::Env`] resolves it once
 /// per run over the process environment, or a test's snapshot.
-pub fn buildkite_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+pub(crate) fn buildkite_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
     var("BUILDKITE").is_some_and(|v| !v.is_empty())
 }
 
