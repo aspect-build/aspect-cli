@@ -899,6 +899,11 @@ pub struct Build {
     #[allocative(skip)]
     trace_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
 
+    /// The sink keeping action and test logs in the history, joined by
+    /// `wait()` once the stream ends, so its index is written by then.
+    #[allocative(skip)]
+    keep_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
+
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
 }
@@ -1118,10 +1123,14 @@ impl Build {
         cancellation: &CancellationToken,
         rt: AsyncRuntime,
         history: &History,
+        keep_logs: bazel::bes::sink::keep::Keep,
     ) -> Result<Build, std::io::Error> {
+        // Logs to keep are read from the stream, which a build keeping some
+        // has even with no other consumer; and keeping them makes the history
+        // folder (below).
         let (build_events, bes_telemetry) = telemetry
             .build_events()
-            .resolve(build_events, telemetry.exporting());
+            .resolve(build_events || keep_logs.any(), telemetry.exporting());
         let (flags, history_asked) = bazel::execlog::take_history_request(flags);
         let workspace = workspace_of(directory.as_deref());
         let requested_execlog_path = bazel::execlog::requested_path(
@@ -1245,15 +1254,18 @@ impl Build {
         // command line; bazel creates the file. The reader is started later,
         // once the spawned child's pid is in hand and every subscriber is bound.
         //
-        // Bazel's default action publishing (failed actions only) is all any
-        // consumer of the stream reads; per-action data comes from the
-        // execution log, so `--build_event_publish_all_actions` is not asked
-        // for.
+        // Bazel's default action publishing (failed actions only) is left
+        // alone, per-action data coming from the execution log, unless this
+        // build keeps every action's logs (below). A feature uploading every
+        // action's logs adds `--build_event_publish_all_actions` itself.
         let bes_file = if build_events {
             let file = BuildEventStream::reserve();
             cmd.arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg(bazel::bes::binary_file::FLAG)
                 .arg(file.path());
+            if keep_logs.actions == bazel::bes::sink::keep::ActionLogs::All {
+                cmd.arg(bazel::bes::sink::keep::PUBLISH_ALL_ACTIONS);
+            }
             Some(file)
         } else {
             None
@@ -1483,36 +1495,47 @@ impl Build {
             let trace_sink = bes_telemetry.then(|| {
                 tracing_sink::Tracing::spawn(build_event_stream.stream().unwrap().subscribe())
             });
+            // Without a history folder (none can be made) nothing is kept;
+            // `history_dir` has said why.
+            let keep_sink = match (keep_logs.any(), &history_dir, build_event_stream.stream()) {
+                (true, Some(dir), Some(stream)) => Some(keep_logs.spawn(
+                    stream.subscribe_filtered(Some(keep_logs.filter())),
+                    dir.clone(),
+                )),
+                _ => None,
+            };
             Ok((
                 workspace_event_stream,
                 execlog_stream,
                 sink_invocation_id,
                 trace_sink,
+                keep_sink,
             ))
         })();
-        let (workspace_event_stream, execlog_stream, sink_invocation_id, trace_sink) = match parts {
-            Ok(parts) => parts,
-            Err(err) => {
-                // A handle bound before the failure is a subscriber its reader
-                // would wait for forever; nothing else will release it.
-                if execlog_bound {
-                    execlog_iters.iter().for_each(ExecLogIter::release);
-                }
-                build_event_stream.abandon(|| {
-                    bound.token().cancel();
-                    let waited =
-                        children::wait_with(&bound, Some(ABANDON_STOP), || child.try_wait());
-                    if !matches!(waited, Ok(Some(_))) {
-                        // The whole tree: the real client behind bazelisk or
-                        // a wrapper would outlive its parent.
-                        bazel::process::signal::kill(bound.target());
-                        let _ = child.wait();
-                        bound.mark_exited();
+        let (workspace_event_stream, execlog_stream, sink_invocation_id, trace_sink, keep_sink) =
+            match parts {
+                Ok(parts) => parts,
+                Err(err) => {
+                    // A handle bound before the failure is a subscriber its reader
+                    // would wait for forever; nothing else will release it.
+                    if execlog_bound {
+                        execlog_iters.iter().for_each(ExecLogIter::release);
                     }
-                });
-                return Err(err);
-            }
-        };
+                    build_event_stream.abandon(|| {
+                        bound.token().cancel();
+                        let waited =
+                            children::wait_with(&bound, Some(ABANDON_STOP), || child.try_wait());
+                        if !matches!(waited, Ok(Some(_))) {
+                            // The whole tree: the real client behind bazelisk or
+                            // a wrapper would outlive its parent.
+                            bazel::process::signal::kill(bound.target());
+                            let _ = child.wait();
+                            bound.mark_exited();
+                        }
+                    });
+                    return Err(err);
+                }
+            };
 
         // Start reading only now that every subscriber is bound (see
         // `BuildEventStream::new`).
@@ -1532,6 +1555,7 @@ impl Build {
             bound,
             signals,
             trace_sink: RefCell::new(trace_sink),
+            keep_sink: RefCell::new(keep_sink),
             span: RefCell::new(span),
         })
     }
@@ -1684,23 +1708,33 @@ impl Build {
             .expect("a wait without a timeout reports a status");
 
         // Wait for BES stream to complete.
-        if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
-            match event_stream.join() {
+        let stream_error = match &mut *build.build_event_stream.borrow_mut() {
+            Some(event_stream) => match event_stream.join() {
                 Ok(_) => {
                     if let Some(warning) =
                         bazel::bes::warning::incomplete_events(event_stream.end(), result.success())
                     {
                         errln!("{warning}");
                     }
+                    None
                 }
-                Err(err) => anyhow::bail!("build event stream thread error: {}", err),
-            }
-        }
-        // The sink may still hold the stream's last events, `BuildMetrics`
-        // among them; the task must not exit before they are recorded. It
-        // never fails, and it ends once it has drained the closed stream.
+                Err(err) => Some(err),
+            },
+            None => None,
+        };
+        // The sinks may still hold the stream's last events (`BuildMetrics`
+        // for the trace sink; the logs for the keep sink, which writes its
+        // index once the stream ends), so the task must not exit before they
+        // are done, even after a failed join above. They never fail, and they
+        // end once they have drained the closed stream.
         if let Some(trace_sink) = build.trace_sink.take() {
             let _ = trace_sink.join();
+        }
+        if let Some(keep_sink) = build.keep_sink.take() {
+            let _ = keep_sink.join();
+        }
+        if let Some(err) = stream_error {
+            anyhow::bail!("build event stream thread error: {}", err);
         }
 
         // Both logs are joined before either failure is reported, so one
@@ -2389,6 +2423,104 @@ Test = task(implementation = _impl)
             kept,
             "the copy is the log, whole"
         );
+    }
+
+    /// A build asked to keep logs keeps the ones it was asked for in its
+    /// history folder, with an index, though nothing else read its events.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_keeps_the_logs_it_was_asked_for_in_history() {
+        let history = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=action_and_test_logs", "--basil-scratch=SCRATCH"],
+        keep_action_logs = "failed",
+        keep_test_logs = "all",
+        stderr = None,
+    )
+    build.wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#
+        .replace("SCRATCH", scratch.path().to_str().unwrap());
+        run_task_with_history(&script, history.path());
+        let dir = bazel_dir(&only_invocation(history.path()), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("actions/pkg/broken/Genrule-1.stderr")).unwrap(),
+            "ERROR: broken\n"
+        );
+        assert!(
+            !dir.join("actions/pkg/fine").exists(),
+            "a success is not kept under `failed`"
+        );
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("actions.json")).unwrap()).unwrap();
+        assert_eq!(index["actions"][0]["label"], "//pkg:broken");
+        for (label, text) in [("fails", "FAIL\n"), ("passes", "PASS\n")] {
+            let log = dir.join(format!(
+                "testlogs/pkg/{label}/run_1/shard_1/attempt_1/test.log"
+            ));
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), text, "{label}");
+        }
+        let args = std::fs::read_to_string(scratch.path().join("args")).unwrap();
+        assert!(
+            !args.contains("--build_event_publish_all_actions"),
+            "`failed` needs Bazel's default publishing"
+        );
+    }
+
+    /// Keeping every action's logs runs the build with
+    /// `--build_event_publish_all_actions`, and keeps a successful action's.
+    #[cfg(unix)]
+    #[test]
+    fn keeping_every_actions_logs_asks_bazel_for_every_action() {
+        let history = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    ctx.bazel.build(
+        flags = ["--scenario=action_and_test_logs", "--basil-scratch=SCRATCH"],
+        keep_action_logs = "all",
+        stderr = None,
+    ).wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#
+        .replace("SCRATCH", scratch.path().to_str().unwrap());
+        run_task_with_history(&script, history.path());
+        let args = std::fs::read_to_string(scratch.path().join("args")).unwrap();
+        assert!(
+            args.lines()
+                .any(|a| a == "--build_event_publish_all_actions"),
+            "{args}"
+        );
+        let dir = bazel_dir(&only_invocation(history.path()), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("actions/pkg/fine/Genrule-1.stdout")).unwrap(),
+            "fine\n"
+        );
+        assert!(!dir.join("testlogs").exists(), "test logs not asked for");
+    }
+
+    #[test]
+    fn an_unknown_keep_value_is_an_error() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.bazel.build(flags = ["--scenario=success"], keep_test_logs = "some")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect_err("an unknown value");
+        assert!(format!("{err:#}").contains("keep_test_logs"), "{err:#}");
     }
 
     /// A build whose events the CLI reads keeps them in its history folder, as

@@ -481,6 +481,7 @@ fn start<'v>(
         cancellation,
         env.rt.clone(),
         &env.history,
+        bazel::bes::sink::keep::Keep::default(),
     )?;
 
     let recv = ours

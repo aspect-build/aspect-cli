@@ -552,6 +552,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
     ///   exact bazel command line) before spawning. Resolved from the
     ///   `--announce-bazel-command` task flag.
+    /// * `keep_action_logs` - Keep actions' stdout and stderr in the task
+    ///   invocation's history (`bazel/<n>/actions/`, listed in
+    ///   `bazel/<n>/actions.json`): `none` (the default), `failed`, or `all`, for which the
+    ///   build runs with `--build_event_publish_all_actions` so Bazel reports
+    ///   every action.
+    ///   Hard-linked from where Bazel wrote them, else copied.
+    /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
+    ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
+    ///   (attempts this build ran, not cached) or `all`. Copied.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -613,8 +622,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
         >,
+        #[starlark(require = named, default = "none")] keep_action_logs: &str,
+        #[starlark(require = named, default = "none")] keep_test_logs: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
+        let keep_logs = keep_logs(keep_action_logs, keep_test_logs)?;
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
@@ -648,6 +660,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
             &env.history,
+            keep_logs,
         )?;
         Ok(build)
     }
@@ -708,6 +721,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
     ///   exact bazel command line) before spawning. Resolved from the
     ///   `--announce-bazel-command` task flag.
+    /// * `keep_action_logs` - Keep actions' stdout and stderr in the task
+    ///   invocation's history (`bazel/<n>/actions/`, listed in
+    ///   `bazel/<n>/actions.json`): `none` (the default), `failed`, or `all`, for which the
+    ///   build runs with `--build_event_publish_all_actions` so Bazel reports
+    ///   every action.
+    ///   Hard-linked from where Bazel wrote them, else copied.
+    /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
+    ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
+    ///   (attempts this build ran, not cached) or `all`. Copied.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -767,8 +789,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
         >,
+        #[starlark(require = named, default = "none")] keep_action_logs: &str,
+        #[starlark(require = named, default = "none")] keep_test_logs: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
+        let keep_logs = keep_logs(keep_action_logs, keep_test_logs)?;
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
@@ -803,6 +828,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &cancellation_token(&env.signals, cancellation),
             env.rt.clone(),
             &env.history,
+            keep_logs,
         )?;
         Ok(test)
     }
@@ -1638,6 +1664,25 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         run::register_run_types(globals);
         run::register_run_errors(globals);
     });
+}
+
+/// The `keep_action_logs` and `keep_test_logs` of `ctx.bazel.build`/`test`.
+fn keep_logs(actions: &str, tests: &str) -> anyhow::Result<bazel::bes::sink::keep::Keep> {
+    use bazel::bes::sink::keep::{ActionLogs, Keep, TestLogs};
+    Ok(Keep {
+        actions: ActionLogs::parse(actions).ok_or_else(|| {
+            anyhow::anyhow!(
+                "keep_action_logs: {actions:?} is not one of {}",
+                ActionLogs::NAMES
+            )
+        })?,
+        tests: TestLogs::parse(tests).ok_or_else(|| {
+            anyhow::anyhow!(
+                "keep_test_logs: {tests:?} is not one of {}",
+                TestLogs::NAMES
+            )
+        })?,
+    })
 }
 
 #[cfg(test)]

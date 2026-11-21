@@ -9,8 +9,10 @@
 //! trace; one that fails before writing its files leaves an empty folder.
 //!
 //! A Bazel invocation's folder holds its compact execution log, workspace log,
-//! trace profile and build event stream, each when the build has one (see
-//! `ctx.bazel.build`). The folders are readable by their user alone, since an
+//! trace profile and build event stream, each when the build has one, and the
+//! action and test logs the build was asked to keep (`actions/` and
+//! `testlogs/`, listed in `actions.json` and `testlogs.json`; see `ctx.bazel.build` and
+//! `bazel::bes::sink::keep`). The folders are readable by their user alone, since an
 //! execution log holds action command lines and environment variables
 //! unredacted; the build event stream is kept as the CLI redacted it.
 //!

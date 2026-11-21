@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 mod events;
 pub mod grpc;
+pub mod keep;
 mod metrics;
 pub mod retry;
 pub mod tracing;

@@ -38,7 +38,8 @@ Consumer:
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("./bazel_results.axl", "bes_get", "file_uri_to_path", "testlog_path", "testlogs_dir")
+load("./aspect_flags.axl", "publish_all_actions")
+load("./bazel_results.axl", "bes_get", "file_uri_to_path", "test_result_cached", "testlog_path", "testlogs_dir")
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
@@ -512,18 +513,19 @@ _NOT_PASSED_STATUSES = [
     "timeout",
     "failed_to_build",
     "remote_failure",
-    "blaze_halted_before_testing",
+    "tool_halted_before_testing",
     "flaky",
     "incomplete",
     "no_status",
 ]
 
-def _should_collect_test(strategy, status, cached_locally):
+def should_collect_test(strategy, status, cached):
     """Decide whether a test's output files should be queued for upload.
 
       none      — never (upstream short-circuits; included for completeness)
       all       — every test, including cached passes
-      executed  — every test that actually ran (cached passes skipped)
+      executed  — every test that ran in this build (from a local or remote
+                  cache: skipped)
       failed    — only non-passing statuses (see _NOT_PASSED_STATUSES)
     Unknown strategy → fail closed (don't leak logs on operator typo).
     """
@@ -532,7 +534,7 @@ def _should_collect_test(strategy, status, cached_locally):
     if strategy == "all":
         return True
     if strategy == "executed":
-        return not cached_locally
+        return not cached
     if strategy == "failed":
         return status in _NOT_PASSED_STATUSES
     return False
@@ -653,8 +655,9 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files, state
 
     payload = event.payload
     status = bes_get(payload, "status", "") or ""
-    cached_locally = bool(bes_get(payload, "cached_locally", False))
-    if not _should_collect_test(strategy, status, cached_locally):
+
+    cached = test_result_cached(payload)
+    if not should_collect_test(strategy, status, cached):
         return
 
     dest_dir = testlog_dest_dir(label, run, shard, attempt)
@@ -685,7 +688,7 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files, state
         skipped_files.append({"label": label, "name": file.name, "reason": "not found", "raw": src})
 
 def build_log_relpath(label, mnemonic, primary_output, stream):
-    """Label-relative path for one failed build stream's log.
+    """Label-relative path for one build stream's log.
 
     Mirrors the test-log layout (`testlog_dest_dir`): the target's package and
     name become directories (`//foo/bar:baz` → `foo/bar/baz/`), so a reader can
@@ -776,11 +779,14 @@ def _build_log_body(ctx, raw):
     return text
 
 def collect_build_action_logs(ctx, event, strategy, scratch_dir, seen_dests, build_entries):
-    """Append a failed build action's stdout+stderr entries to `build_entries`,
-    one archive entry per stream.
+    """Append a build action's stdout and stderr entries to `build_entries`,
+    one archive entry per stream: a failed action's both streams, so the
+    archive shows each was checked; and under `all`, also each successful
+    action's stream that has output.
 
     Only `action_completed` carries build stdout/stderr (tests →
-    `_collect_test_files`); `strategy` gates collection ("none" / "failed").
+    `_collect_test_files`); `strategy` gates collection ("none" / "failed" /
+    "all", every action Bazel reports: see `upload_build_logs`).
 
     Every stream is materialized into `scratch_dir` (job-scoped, writable) as a
     self-describing file: a `build_log_header` provenance block (target / action
@@ -792,14 +798,14 @@ def collect_build_action_logs(ctx, event, strategy, scratch_dir, seen_dests, bui
 
     Field reads go through `bes_get`, so a schema mismatch no-ops.
     """
-    if event.kind != "action_completed" or strategy != "failed":
+    if event.kind != "action_completed" or strategy not in ("failed", "all"):
         return
 
-    # Skip successes and events with no `success` field (aborted variant): only
-    # a definitively-failed action should stage logs.
+    # Skip events with no `success` field (aborted variant), and under
+    # `failed`, successes: only a definitively-failed action stages logs then.
     payload = event.payload
     success = bes_get(payload, "success", None)
-    if success == None or success:
+    if success == None or (success and strategy == "failed"):
         return
 
     label = bes_get(event.id, "label", "") or ""
@@ -810,8 +816,12 @@ def collect_build_action_logs(ctx, event, strategy, scratch_dir, seen_dests, bui
     primary_output = bes_get(event.id, "primary_output", "") or ""
     mnemonic = bes_get(payload, "type", "") or ""
 
-    for stream in ("stdout", "stderr"):
-        raw = bes_get(bes_get(payload, stream, None), "file", None)
+    streams = [(s, bes_get(bes_get(payload, s, None), "file", None)) for s in ("stdout", "stderr")]
+    if strategy == "all" and success:
+        # Every action is reported under `all`, most succeeding with no output
+        # at all; a failed one is staged whole, as under `failed`.
+        streams = [(s, raw) for s, raw in streams if raw != None]
+    for stream, raw in streams:
         dest = dedup_path(build_log_relpath(label, mnemonic, primary_output, stream), seen_dests)
 
         # Label-relative display name (carries any `.N` dedup suffix) — the
@@ -1041,6 +1051,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
             file_kind = "testlog_file",
         ))
 
+    if not is_local and upload_build_logs == "all":
+        publish_all_actions(bazel_trait)
     if not is_local and upload_buildlogs:
         build_entries = []
         build_seen_dests = {}
@@ -1116,7 +1128,7 @@ ArtifactUpload = feature(
         #   upload_exec_log  — action env vars + command lines; no on-disk
         #                      redaction yet. Highest risk.
         #   upload_test_logs — test stdout/stderr/XML may echo secrets.
-        #   upload_build_logs — failed build actions' stdout/stderr; a compiler
+        #   upload_build_logs — build actions' stdout/stderr; a compiler
         #                       or codegen command can echo secrets from env or
         #                       argv, same as a test.
         #   upload_bep       — redacted at the stream source
@@ -1129,17 +1141,19 @@ ArtifactUpload = feature(
             description = "Which test logs to upload as artifacts. " +
                           "'none' (default) uploads nothing. 'failed' uploads " +
                           "only non-passing tests. 'executed' uploads every test " +
-                          "that ran (skips cached passes). 'all' uploads everything.",
+                          "that ran in this build (skips results from a local or remote cache). 'all' uploads everything.",
         ),
         "upload_build_logs": args.string(
             default = "none",
-            values = ["none", "failed"],
+            values = ["none", "failed", "all"],
             description = "Which build-action logs to upload as artifacts. A failed " +
                           "build target's stdout/stderr (compiler errors, codegen " +
                           "output) is uploaded per (target, action), alongside the " +
                           "failure snippet shown on status surfaces. 'none' (default) " +
                           "uploads nothing. 'failed' uploads the stdout/stderr of every " +
-                          "build action Bazel reports unsuccessful.",
+                          "build action Bazel reports unsuccessful. 'all' uploads every " +
+                          "action's that wrote any, adding --build_event_publish_all_actions " +
+                          "so Bazel reports them.",
         ),
         "upload_profile": args.boolean(
             default = False,

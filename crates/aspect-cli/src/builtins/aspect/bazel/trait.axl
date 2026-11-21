@@ -157,6 +157,8 @@ BazelTrait = trait(
     extra_info_flags = attr(list[str], default = [], description = "Additional Bazel flags scoped to Bazel's `info` rc section: the `ctx.bazel.info` probes (e.g. `aspect test --coverage` reading output_path). `info` also reads the `build` section, so a build option reaches it through extra_flags — but it is not limited to build options: `--show_make_env` is accepted by `info` and rejected by `bazel build` (Bazel 9.0.1), so this field is its only home"),
     extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
     build_event_sinks = attr(list[bazel.build.BuildEventSink], default = [], description = "Build Event Protocol sinks to stream events to during the build"),
+    keep_action_logs = attr(str, default = "none", description = "Which actions' stdout and stderr each build of `aspect build` and `aspect test` keeps in the task invocation's history (`bazel/<n>/actions/`, listed in `bazel/<n>/actions.json`): `none`, `failed` or `all`. `all` runs those builds with `--build_event_publish_all_actions`. See `ctx.bazel.build`'s `keep_action_logs`"),
+    keep_test_logs = attr(str, default = "none", description = "Which test logs each build of `aspect build` and `aspect test` keeps in the task invocation's history (`bazel/<n>/testlogs/`, listed in `bazel/<n>/testlogs.json`): `none`, `failed`, `executed` or `all`. See `ctx.bazel.build`'s `keep_test_logs`"),
     execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
 
     # Optional transforms — only called when set

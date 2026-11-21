@@ -62,10 +62,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use axl_proto::build_event_stream::{
-    ActionExecuted, BuildEvent, BuildEventId, BuildFinished, BuildStarted, NamedSetOfFiles,
+    ActionExecuted, BuildEvent, BuildEventId, BuildFinished, BuildStarted, File, NamedSetOfFiles,
+    TestResult, TestStatus,
     build_event::Payload,
-    build_event_id::{ActionCompletedId, BuildFinishedId, BuildStartedId, Id, NamedSetOfFilesId},
+    build_event_id::{
+        ActionCompletedId, BuildFinishedId, BuildStartedId, Id, NamedSetOfFilesId, TestResultId,
+    },
     build_finished::ExitCode,
+    file,
 };
 use axl_proto::tools::protos::{ExecLogEntry, exec_log_entry};
 use axl_proto::workspace_log::WorkspaceEvent;
@@ -197,6 +201,14 @@ fn run_build(args: &[String], verb: &str) {
         process::exit(0);
     }
 
+    if let Some(dir) = flag("--basil-scratch") {
+        // Where a scenario writes files for the runtime to read: a folder the
+        // test owns, so they go with it.
+        let _ = fs::create_dir_all(&dir);
+        // The arguments it ran with, for the test to read.
+        let _ = fs::write(Path::new(&dir).join("args"), args.join("\n"));
+        let _ = SCRATCH.set(PathBuf::from(dir));
+    }
     let s = scenario(&scenario_name);
 
     if let Some(path) = flag("--experimental_workspace_rules_log_file") {
@@ -564,6 +576,9 @@ fn write_workspace_log(path: &str, count: u32) {
         .unwrap_or_else(|e| panic!("basil: publishing workspace log to {path:?}: {e}"));
 }
 
+/// Where a scenario writes the files it reports (see `run_build`).
+static SCRATCH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// Resolve a scenario by name. Each scenario documents the behavior or bug
 /// it targets. Add new ones here.
 fn scenario(name: &str) -> Scenario {
@@ -725,6 +740,53 @@ fn scenario(name: &str) -> Scenario {
             ..Default::default()
         },
 
+        // Two actions and two tests whose logs are real files, as Bazel names
+        // them: a failed action with stderr and a successful one with stdout
+        // (Bazel reports that one only under `--build_event_publish_all_actions`),
+        // a failed and a passing test attempt with a `test.log`. For the
+        // history's log keeping.
+        "action_and_test_logs" => {
+            let dir = SCRATCH
+                .get()
+                .cloned()
+                .unwrap_or_else(|| env::temp_dir().join(format!("basil-logs-{}", process::id())));
+            fs::create_dir_all(&dir).expect("basil: log dir");
+            let log = |name: &str, text: &str| -> File {
+                let path = dir.join(name);
+                fs::write(&path, text).expect("basil: writing a log");
+                File {
+                    name: name.to_string(),
+                    file: Some(file::File::Uri(format!("file://{}", path.display()))),
+                    ..Default::default()
+                }
+            };
+            Scenario {
+                attempts: vec![vec![
+                    build_started(),
+                    action_with_logs(
+                        "//pkg:broken",
+                        false,
+                        None,
+                        Some(log("stderr-1", "ERROR: broken\n")),
+                    ),
+                    action_with_logs("//pkg:fine", true, Some(log("stdout-2", "fine\n")), None),
+                    test_result_with_log(
+                        "//pkg:fails",
+                        TestStatus::Failed,
+                        log("test.log", "FAIL\n"),
+                    ),
+                    test_result_with_log(
+                        "//pkg:passes",
+                        TestStatus::Passed,
+                        log("pass.log", "PASS\n"),
+                    ),
+                    build_finished(1, true),
+                ]],
+                exit: ExitBehavior::Code(1),
+                ..Default::default()
+            }
+        }
+
         other => {
             eprintln!("basil: unknown scenario {other:?}");
             process::exit(2);
@@ -760,6 +822,62 @@ fn action_executed() -> BuildEvent {
         payload: Some(Payload::Action(ActionExecuted {
             success: true,
             r#type: "Genrule".to_string(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+/// A failed or successful `Genrule` action for `label`, with its logs.
+fn action_with_logs(
+    label: &str,
+    success: bool,
+    stdout: Option<File>,
+    stderr: Option<File>,
+) -> BuildEvent {
+    BuildEvent {
+        id: Some(BuildEventId {
+            id: Some(Id::ActionCompleted(ActionCompletedId {
+                label: label.to_string(),
+                primary_output: format!(
+                    "bazel-out/bin/{}.out",
+                    label.rsplit(':').next().unwrap_or("")
+                ),
+                ..Default::default()
+            })),
+        }),
+        last_message: false,
+        payload: Some(Payload::Action(ActionExecuted {
+            success,
+            r#type: "Genrule".to_string(),
+            exit_code: if success { 0 } else { 1 },
+            stdout,
+            stderr,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+/// One test attempt for `label`, with `log` as its only output.
+fn test_result_with_log(label: &str, status: TestStatus, log: File) -> BuildEvent {
+    BuildEvent {
+        id: Some(BuildEventId {
+            id: Some(Id::TestResult(TestResultId {
+                label: label.to_string(),
+                run: 1,
+                shard: 1,
+                attempt: 1,
+                ..Default::default()
+            })),
+        }),
+        last_message: false,
+        payload: Some(Payload::TestResult(TestResult {
+            status: status as i32,
+            test_action_output: vec![File {
+                name: "test.log".to_string(),
+                ..log
+            }],
             ..Default::default()
         })),
         ..Default::default()
