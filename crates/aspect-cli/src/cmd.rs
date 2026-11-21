@@ -1434,90 +1434,64 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         Arg::Positional { .. } | Arg::TrailingVarArgs { .. } | Arg::Passthrough { .. } => None,
         _ => Some(format!("--{}", long_flag(scope, name, arg))),
     };
-    let (kind, default, values, description, short) = match arg {
+    let (default, values, description, short) = match arg {
         Arg::String {
             default,
             values,
             description,
             short,
             ..
-        } => ("string", json!(default), json!(values), description, short),
+        } => (json!(default), json!(values), description, short),
         Arg::Boolean {
             default,
             description,
             short,
             ..
-        } => ("boolean", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::Int {
             default,
             description,
             short,
             ..
-        } => ("int", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::UInt {
             default,
             description,
             short,
             ..
-        } => ("uint", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::StringList {
             default,
             description,
             short,
             ..
-        } => (
-            "string_list",
-            json!(default),
-            json!(null),
-            description,
-            short,
-        ),
+        } => (json!(default), json!(null), description, short),
         Arg::BooleanList {
             default,
             description,
             short,
             ..
-        } => (
-            "boolean_list",
-            json!(default),
-            json!(null),
-            description,
-            short,
-        ),
+        } => (json!(default), json!(null), description, short),
         Arg::IntList {
             default,
             description,
             short,
             ..
-        } => ("int_list", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::UIntList {
             default,
             description,
             short,
             ..
-        } => ("uint_list", json!(default), json!(null), description, short),
+        } => (json!(default), json!(null), description, short),
         Arg::Positional {
             default,
             description,
             ..
-        } => (
-            "positional",
-            json!(default),
-            json!(null),
-            description,
-            &None,
-        ),
-        Arg::TrailingVarArgs { description } => (
-            "trailing_var_args",
-            json!(null),
-            json!(null),
-            description,
-            &None,
-        ),
-        Arg::Passthrough { description, .. } => {
-            ("passthrough", json!(null), json!(null), description, &None)
-        }
-        Arg::Custom { description, .. } => ("custom", json!(null), json!(null), description, &None),
+        } => (json!(default), json!(null), description, &None),
+        Arg::TrailingVarArgs { description } => (json!(null), json!(null), description, &None),
+        Arg::Passthrough { description, .. } => (json!(null), json!(null), description, &None),
+        Arg::Custom { description, .. } => (json!(null), json!(null), description, &None),
     };
     // `Arg::is_required` reports false for positionals — they carry cardinality
     // instead of a `required` flag — so a `minimum = 1` positional would read as
@@ -1540,7 +1514,7 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
     };
     json!({
         "name": name,
-        "type": kind,
+        "type": arg_type(arg),
         "flag": flag,
         "short": short.as_ref().map(|s| format!("-{s}")),
         "required": required,
@@ -1555,6 +1529,24 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
     })
 }
 
+/// The `type` an `aspect describe` entry reports for `arg`.
+fn arg_type(arg: &Arg) -> &'static str {
+    match arg {
+        Arg::String { .. } => "string",
+        Arg::Boolean { .. } => "boolean",
+        Arg::Int { .. } => "int",
+        Arg::UInt { .. } => "uint",
+        Arg::StringList { .. } => "string_list",
+        Arg::BooleanList { .. } => "boolean_list",
+        Arg::IntList { .. } => "int_list",
+        Arg::UIntList { .. } => "uint_list",
+        Arg::Positional { .. } => "positional",
+        Arg::TrailingVarArgs { .. } => "trailing_var_args",
+        Arg::Passthrough { .. } => "passthrough",
+        Arg::Custom { .. } => "custom",
+    }
+}
+
 /// One arg only `.aspect/config.axl` can set, for a task's or feature's
 /// `config_args` list. It has no flag, so it carries `config_only: true` and
 /// the config.axl expression that sets it (`setter` is the args store, e.g.
@@ -1563,7 +1555,7 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
 fn describe_config_arg(setter: &str, name: &str, arg: &Arg) -> serde_json::Value {
     serde_json::json!({
         "name": name,
-        "type": describe_arg(Scope::Task, name, arg)["type"],
+        "type": arg_type(arg),
         "config_only": true,
         "config_axl": format!("{setter}.{name}"),
         "description": arg.description(),
@@ -1663,25 +1655,36 @@ fn describe_commands(full: &serde_json::Value) -> Vec<String> {
     tasks.chain(features).collect()
 }
 
-/// What to suggest for `want`, a name `aspect describe <name>` doesn't accept:
-/// the [`suggest::closest`] of [`describe_commands`], or else, for a feature
-/// named (or nearly named) without the leading `feature `, `feature <name>`.
+/// What to suggest for `want`, a name `aspect describe <name>` doesn't accept.
+///
+/// An exact feature slug typed without the leading `feature ` gets
+/// `feature <name>`. Otherwise the [`suggest::closest`] of the
+/// [`describe_commands`] and the bare feature slugs wins, so a near task and a
+/// near feature compete on edits; a bare slug is suggested as
+/// `feature <name>`, the form `describe` accepts.
 fn describe_suggestion(full: &serde_json::Value, want: &str) -> Option<String> {
     let commands = describe_commands(full);
-    if let Some(c) = suggest::closest(want, commands.iter().map(String::as_str)) {
-        return Some(c.to_owned());
-    }
     let slugs: Vec<&str> = full["features"]
-        .as_array()?
-        .iter()
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|f| f["name"].as_str())
         .collect();
-    slugs
-        .iter()
-        .copied()
-        .find(|s| *s == want)
-        .or_else(|| suggest::closest(want, slugs.iter().copied()))
-        .map(|s| format!("{FEATURE_COMMAND} {s}"))
+    if slugs.contains(&want) {
+        return Some(format!("{FEATURE_COMMAND} {want}"));
+    }
+    let c = suggest::closest(
+        want,
+        commands
+            .iter()
+            .map(String::as_str)
+            .chain(slugs.iter().copied()),
+    )?;
+    Some(if commands.iter().any(|cmd| cmd == c) {
+        c.to_owned()
+    } else {
+        format!("{FEATURE_COMMAND} {c}")
+    })
 }
 
 /// Pull one task out of a full [`describe_json`] document by its command path,
@@ -1930,6 +1933,7 @@ fn feature_config_setter(feat: &dyn FeatureLike<'_>) -> String {
 /// clap's next-line layout (name where a flag's long name starts, every
 /// non-blank line of its help indented below it), closed by how
 /// `.aspect/config.axl` sets them.
+///
 /// Current values are not shown: they would need the repo's config evaluated.
 /// It goes in through `after_help`, which clap writes verbatim (a `{` in the
 /// help is not template-parsed) and strips of ANSI when stdout is not a
@@ -3747,6 +3751,44 @@ mod tests {
         }
         for miss in ["artifact-upload", "featureartifact-upload", "feature nope"] {
             assert!(select_feature(&doc, miss).is_none(), "{miss:?}");
+        }
+    }
+
+    #[test]
+    fn describe_suggests_a_task_or_the_feature_command() {
+        let doc = serde_json::json!({
+            "tasks": [
+                {"command": "aspect check"},
+                {"command": "aspect consul"},
+                {"command": "aspect lint"},
+            ],
+            "features": [{"name": "console"}, {"name": "lint"}, {"name": "tips"}],
+        });
+        for (want, expected) in [
+            ("chekc", Some("check")),
+            ("feature consle", Some("feature console")),
+            ("console", Some("feature console")),
+            ("tips", Some("feature tips")),
+            ("consle", Some("feature console")),
+            ("consull", Some("consul")),
+            ("lnt", Some("lint")),
+            ("tip", Some("feature tips")),
+            ("ti", None),
+            ("nonesuch", None),
+        ] {
+            assert_eq!(
+                describe_suggestion(&doc, want).as_deref(),
+                expected,
+                "{want:?}"
+            );
+            if let Some(name) = expected {
+                assert!(
+                    select_task(&doc, name)
+                        .or_else(|| select_feature(&doc, name))
+                        .is_some(),
+                    "{name:?} is suggested but not accepted"
+                );
+            }
         }
     }
 
