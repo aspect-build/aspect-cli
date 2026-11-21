@@ -258,12 +258,13 @@ impl History {
         Some(slot)
     }
 
-    /// Up to `limit` records that `keep` takes, the most recently started
-    /// first, with their entries' folders; unreadable ones skipped.
+    /// Up to `limit` records that `keep` takes (given each one's entry folder
+    /// and record), the most recently started first, with their entries'
+    /// folders; unreadable ones skipped.
     pub fn records(
         &self,
         limit: usize,
-        keep: impl Fn(&TaskRecord) -> bool,
+        keep: impl Fn(&Path, &TaskRecord) -> bool,
     ) -> Vec<(PathBuf, TaskRecord)> {
         let Ok(read) = fs::read_dir(&self.root) else {
             return vec![];
@@ -280,7 +281,7 @@ impl History {
                 let record = task_record::read(&dir.join(task_record::FILE_NAME))?;
                 Some((dir, record))
             })
-            .filter(|(_, r)| keep(r))
+            .filter(|(dir, r)| keep(dir, r))
             .take(limit)
             .collect()
     }
