@@ -729,10 +729,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// templates frame the whole run. Without the feature the run gets the
     /// `full` layout; see [`console_value::from_feature_args`] for the rest,
     /// including the `agent` layout a coding agent gets. Color, Buildkite and
-    /// coding-agent detection come from the run's `Env` ([`Host::of`]), the
-    /// console's only view of its host. Also shows or hides detail lines for
-    /// the rest of the run ([`diag::set_verbose`]) as the resolved console
-    /// says.
+    /// coding-agent detection and the environment's verbose level come from
+    /// the run's `Env` ([`Host::of`], which fails on an invalid
+    /// `ASPECT_VERBOSE`), the console's only view of its host. Also sets the
+    /// verbose level for the rest of the run ([`diag::set_verbose`]) as the
+    /// resolved console says.
     pub fn resolve_console(
         &self,
         task_index: usize,
@@ -748,7 +749,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             name: task_name.to_owned(),
             path: task_command_path(task.group(), &task.kind()),
         };
-        let host = Host::of(&self.loader.env);
+        let host = Host::of(&self.loader.env).map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
         let console = match self
             .features()
             .into_iter()
@@ -763,7 +764,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };
-        diag::set_verbose(console.verbose());
+        diag::set_verbose(console.verbosity());
         Ok(Arc::new(console))
     }
 

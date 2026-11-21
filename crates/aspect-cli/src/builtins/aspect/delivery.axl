@@ -302,7 +302,7 @@ load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_mani
 load("./private/lib/delivery_scheduler.axl", "delivery_scheduler", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector")
 load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
-load("./private/lib/environment.axl", "detail", "error", "info", "sanitize_filename", "warn")
+load("./private/lib/environment.axl", "debug", "detail", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -971,7 +971,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
                 event = events.try_pop()
                 if event == None:
                     break
-                if process_event(data, event, bb_root):
+                if process_event(data, event, bb_root, std = ctx.std):
                     interesting = True
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)
@@ -1149,7 +1149,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
         getactionresult_count += 1
-        trace.log(entry)
+        debug(ctx.std, str(entry))
         entry_label = normalize_label(entry.metadata.target_id)
         mnemonic = entry.metadata.action_mnemonic
         if mnemonic == _DELIVERY_HASH_MNEMONIC:

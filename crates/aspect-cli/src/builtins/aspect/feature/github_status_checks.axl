@@ -452,8 +452,8 @@ def _github_status_checks(ctx: FeatureContext):
         current = _state.get("_gh_conclusion")
         if desired and desired != current:
             label = "early" if status == "failing" else "final"
-            _LOG.trace("setting conclusion=%s on run %s (%s)" %
-                       (desired, check_run_id, label))
+            _LOG.debug(ctx.std, "setting conclusion=%s on run %s (%s)" %
+                                (desired, check_run_id, label))
             if desired == "success":
                 result = github.status_checks.complete(ctx, token, owner, repo, check_run_id, output = output)
             elif desired == "neutral":
@@ -490,7 +490,7 @@ def _github_status_checks(ctx: FeatureContext):
         # has no .task; `make_render_ctx` reads it), then create the check run.
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
-        _LOG.trace("aspect/%s%s" % (ctx.task.name, subject_str))
+        _LOG.debug(ctx.std, "aspect/%s%s" % (ctx.task.name, subject_str))
         _state["_task_kind"] = ctx.task.kind
         _create_check_run(ctx)
 

@@ -925,7 +925,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            if process_event(data, event, bb_root):
+            if process_event(data, event, bb_root, std = ctx.std):
                 interesting = True
             if fix_produce and not fix_flag_rejected and event.kind == "progress":
                 fix_flag_rejected = fix_flag_load_error in bes_get(event.payload, "stderr", "")

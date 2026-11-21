@@ -61,7 +61,7 @@ def _fake_ctx(environment, recovery):
         bazel = struct(recover_poisoned_sandbox = lambda: recovery),
         defer = lambda fn: recorder["deferred"].append(fn),
         std = struct(
-            io = struct(stderr = struct(color = False)),
+            io = struct(stderr = struct(color = False), debug = False),
             fs = struct(exists = _exists),
             process = struct(command = _command),
         ),

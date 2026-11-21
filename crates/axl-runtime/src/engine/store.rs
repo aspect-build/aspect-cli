@@ -61,6 +61,11 @@ pub struct Env {
     /// read once when the `Env` is built. The process's own unless a test
     /// harness sets a snapshot.
     pub coding_agent: bool,
+    /// The level `ASPECT_VERBOSE` / `ASPECT_DEBUG` set
+    /// ([`crate::diag::Verbose::from_env`]), or why the value is invalid,
+    /// read once when the `Env` is built. The process's own unless a test
+    /// harness sets a snapshot.
+    pub verbose: Result<Option<crate::diag::Verbose>, String>,
 }
 
 impl Env {
@@ -85,6 +90,7 @@ impl Env {
             stream_color: StreamColor::of_process(),
             buildkite: crate::ci::buildkite_from(|name| std::env::var_os(name)),
             coding_agent: crate::agent::detected(|name| std::env::var_os(name)),
+            verbose: crate::diag::Verbose::from_env(|name| std::env::var_os(name)),
         }
     }
 

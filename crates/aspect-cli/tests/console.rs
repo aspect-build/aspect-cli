@@ -2,8 +2,9 @@
 //! prints around a task: task output, diagnostics, exit codes and the lifecycle
 //! events CI surfaces consume are the same under every layout.
 //!
-//! The one exception is `detail()` lines, which the preset (or `verbose`)
-//! shows or hides; `info()` lines print under every layout.
+//! The exceptions are `detail()` lines, which the preset (or `verbose`) shows
+//! or hides, and `debug()` lines, which only the `debug` verbose level shows;
+//! `info()` lines print under every layout.
 //!
 //! Spawns the real CLI so the feature's args, `config.axl` overrides, the
 //! runtime-rendered header and verdict, and the AXL-rendered phase and progress
@@ -16,13 +17,14 @@ use common::{aspect_cli, base_env};
 use std::process::{Command, Output};
 
 const TASKS: &str = r#"
-load("@aspect//private/lib/environment.axl", "buildkite_section", "detail", "info", "warn")
+load("@aspect//private/lib/environment.axl", "buildkite_section", "debug", "detail", "info", "warn")
 load("@aspect//private/lib/lifecycle.axl", "Phase", "Phases", "phases")
 
 def _impl(ctx):
     ctx.std.io.stdout.write("preset=%s\n" % ctx.console.template_preset)
     warn(ctx.std, "task warning")
     detail(ctx.std, "task detail")
+    debug(ctx.std, "task debug")
     info(ctx.std, "task info")
     ph = phases.new(ctx, {})
     ph.update("running", "phase progress", phase = Phase(name = "work"))
@@ -593,6 +595,49 @@ fn verbose_overrides_the_preset() {
     let hidden = "ctx.features[Console].args.verbose = False";
     assert!(!shown(hidden, &["check"]));
     assert!(shown(hidden, &["check", "--console:verbose=true"]));
+}
+
+/// A `debug()` line prints only at the `debug` level, however that is chosen,
+/// and once: `ASPECT_DEBUG=1` adds no raw log record beside it.
+#[test]
+fn debug_lines_print_only_at_the_debug_level() {
+    let count = |config: &str, args: &[&str], env: &[(&str, &str)]| {
+        let output = run_with_env(config, args, false, env);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        stderr(&output).matches("DEBUG: task debug").count()
+    };
+    assert_eq!(count("", &["check"], &[]), 0);
+    assert_eq!(count("", &["check", "--console:verbose"], &[]), 0);
+    assert_eq!(count("", &["check", "--console:verbose=debug"], &[]), 1);
+    assert_eq!(count("", &["check"], &[("ASPECT_VERBOSE", "debug")]), 1);
+    assert_eq!(count("", &["check"], &[("ASPECT_DEBUG", "1")]), 1);
+    let config = r#"ctx.features[Console].args.verbose = "debug""#;
+    assert_eq!(count(config, &["check"], &[]), 1);
+    assert_eq!(
+        count(config, &["check"], &[("ASPECT_VERBOSE", "false")]),
+        0,
+        "the environment beats config.axl"
+    );
+    assert_eq!(
+        count(
+            "",
+            &["check", "--console:verbose=false"],
+            &[("ASPECT_DEBUG", "1")]
+        ),
+        0,
+        "the command line beats the environment"
+    );
+}
+
+#[test]
+fn an_invalid_aspect_verbose_names_the_closest_value() {
+    let output = run_with_env("", &["check"], false, &[("ASPECT_VERBOSE", "debgu")]);
+    assert_ne!(output.status.code(), Some(0));
+    let err = stderr(&output);
+    assert!(
+        err.contains(r#"got "debgu"; did you mean "debug"?"#),
+        "{err}"
+    );
 }
 
 /// A task's exit message is its answer, so no preset hides it.

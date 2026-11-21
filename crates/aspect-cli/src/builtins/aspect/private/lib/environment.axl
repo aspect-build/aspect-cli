@@ -97,15 +97,22 @@ def bazel_misdetects_color(std) -> bool:
     return bool(env.var("GITHUB_ACTIONS") or env.var("CIRCLECI") or env.var("GITLAB_CI"))
 
 # Severity-prefixed output. Channels (increasing alarm):
-#   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
-#   print(msg)      — narrative beats every run produces (banners, tables, outcomes).
+#   debug(std, msg) - grey `DEBUG:`; internals a bug report needs. Always an
+#                     OTel log record; printed only at the `debug` verbose
+#                     level (`--console:verbose=debug`, `ASPECT_VERBOSE=debug`,
+#                     `ASPECT_DEBUG=1`). Never on a clean run.
+#   print(msg)      - narrative beats every run produces (banners, tables, outcomes).
 #   info(std, msg)  - cyan `INFO:`; conditional state a reader needs (a result,
 #                     a skip reason). Every preset prints it.
 #   detail(std, msg) - the same `INFO:` line for an aside a reader can do
 #                     without; the Console feature can hide these (`verbose`).
-#   warn(std, msg)  — yellow `WARNING:`; subsystem problem, task continues.
-#   error(std, msg) — red `ERROR:`; recoverable error, usually precedes non-zero exit.
-#   fail(msg)       — unrecoverable; aborts immediately.
+#   warn(std, msg)  - yellow `WARNING:`; subsystem problem, task continues.
+#   error(std, msg) - red `ERROR:`; recoverable error, usually precedes non-zero exit.
+#   fail(msg)       - unrecoverable; aborts immediately.
+#
+# `trace.log` / `trace.event` / spans are the raw telemetry API: they reach the
+# registered exporters and print nothing themselves. `debug` is `trace.log`
+# plus the `DEBUG:` line.
 #
 # print vs info: every successful run (predictable spot) → print; only when a
 #   branch fires (env/flag/fallback) → info.
@@ -115,7 +122,7 @@ def bazel_misdetects_color(std) -> bool:
 #   reader can do without (a timing, a filter count, an upload note) → detail.
 # Don't stack consecutive prefixed lines — collapse into one info()/warn().
 #
-# Message style (info/detail/warn/error + non-table print; NOT trace.log, which
+# Message style (info/detail/warn/error + non-table print; NOT debug, which
 # is terse lowercase): capitalize first word; end with terminal punctuation only
 # for full sentences (short noun-phrase status lines omit it); prefer a single
 # scannable sentence. Don't prefix with the task name (already `aspect <task>`).
@@ -124,7 +131,7 @@ def bazel_misdetects_color(std) -> bool:
 #   Feature prefixes use the human-readable prose label, not the CamelCase
 #   symbol, and still capitalize the body after the namespace colon. Declare the
 #   namespace once via `feature_logger(...)` rather than hand-spelling it.
-#   feature_logger wraps info/detail/warn/error only - features have no inline
+#   feature_logger wraps debug/info/detail/warn/error only - features have no inline
 #   print() in event-driven bodies (a bare print there reads as a task narrative
 #   beat); reach for info() or detail() instead. Narrow exception: features
 #   register display hooks firing at deterministic phases that render
@@ -137,6 +144,15 @@ def bazel_misdetects_color(std) -> bool:
 # uv/cargo (period only when it adds meaning). `std.io.stderr.color` gates the
 # ANSI, so the prefix degrades to plain INFO:/WARNING:/ERROR: in a non-rendering
 # log.
+
+def debug(std, msg):
+    """Emit `msg` as an OTel log record, as `trace.log` does, and print it as a
+    grey `DEBUG:` line when the verbose level is `debug` (`std.io.debug`).
+    With `std` None (a caller with no `std` handle, such as a unit test of a
+    pure helper) only the record is emitted."""
+    trace.log(msg)
+    if std != None and std.io.debug:
+        print(ansi.style("DEBUG", ansi.seq("0;90"), std.io.stderr.color) + ": " + msg)
 
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state. Every preset
@@ -165,22 +181,22 @@ def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
     print("--- " + ctx.console.render("section", icon = icon, title = title))
 
 def feature_logger(feature):
-    """(info, detail, warn, error, trace) bundle prepending `<feature>: ` to each message.
+    """(debug, info, detail, warn, error) bundle prepending `<feature>: ` to each message.
 
         _LOG = feature_logger("GitHub status comments")
         _LOG.info(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
 
-    info/detail/warn/error take `std` first (no std handle at module-load time).
-    trace is ASPECT_DEBUG-gated; for multi-line debug blocks use bare trace.log
-    to avoid the prefix. print() lines stay unwrapped.
+    Each member takes `std` first (no std handle at module-load time). For
+    multi-line debug blocks call `debug` directly to avoid the prefix. print()
+    lines stay unwrapped.
     """
     prefix = feature + ": "
     return struct(
+        debug = lambda std, msg: debug(std, prefix + msg),
         info = lambda std, msg: info(std, prefix + msg),
         detail = lambda std, msg: detail(std, prefix + msg),
         warn = lambda std, msg: warn(std, prefix + msg),
         error = lambda std, msg: error(std, prefix + msg),
-        trace = lambda msg: trace.log(prefix + msg),
     )
 
 # Reading environment

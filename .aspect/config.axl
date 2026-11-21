@@ -18,6 +18,7 @@ load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/circleci_test_results_test.axl", "circleci_test_results_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
+load("@aspect//private/feature/telemetry_test.axl", "telemetry_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/agent_test.axl", "agent_tests")
 load("@aspect//private/lib/artifacts_test.axl", "artifacts_tests")
@@ -563,6 +564,11 @@ def config(ctx: ConfigContext):
     # Shared text helpers (padding, pluralize, number formatting).
     # Run with: aspect dev test-text
     ctx.tasks.add(text_tests)
+
+    # Telemetry feature: console exporters from OTEL_<SIGNAL>_EXPORTER and
+    # ASPECT_DEBUG, and which signals the OTLP endpoint variables carry.
+    # Run with: aspect dev test-telemetry
+    ctx.tasks.add(telemetry_tests)
 
     # Adaptive rate-limit throttling: burn-rate, threshold ladder, two-bucket
     # independence, prefer_app_when_env_critical, watermark badge.

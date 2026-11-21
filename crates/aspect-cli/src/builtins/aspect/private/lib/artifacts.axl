@@ -43,7 +43,7 @@ load("./bazel_results.axl", "bes_get", "file_uri_to_path", "test_result_cached",
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
-load("./environment.axl", "detail", "detect_ci", "info", "warn")
+load("./environment.axl", "debug", "detail", "detect_ci", "info", "warn")
 load("./exit_status.axl", "exit_code_of")
 load("./github.axl", "github")
 load("./report.axl", "REPORT_ARTIFACT_KIND", "REPORT_ARTIFACT_NAME", "build_report")
@@ -868,31 +868,32 @@ testonly_upload_group_per_file = _upload_group_per_file
 testonly_new_upload_group = _new_upload_group
 
 def _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
-    """Optional per-task debug summary printed when `trace.enabled`."""
-    if not trace.enabled:
+    """Optional per-task debug summary, when an exporter takes it
+    (`trace.enabled`) or it prints (`std.io.debug`)."""
+    if not (trace.enabled or ctx.std.io.debug):
         return
-    trace.log("")
-    trace.log("------------------------------------")
-    trace.log("artifact upload debug summary:")
-    trace.log("uploader: " + ("active" if uploader_active else "none"))
-    trace.log("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
-    trace.log("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
-    trace.log("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
+    debug(ctx.std, "")
+    debug(ctx.std, "------------------------------------")
+    debug(ctx.std, "artifact upload debug summary:")
+    debug(ctx.std, "uploader: " + ("active" if uploader_active else "none"))
+    debug(ctx.std, "profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
+    debug(ctx.std, "execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
+    debug(ctx.std, "bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
     for channel in channels:
-        trace.log(channel.basename + " entries: " + str(len(channel.entries)))
+        debug(ctx.std, channel.basename + " entries: " + str(len(channel.entries)))
         for f in channel.entries:
-            trace.log("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+            debug(ctx.std, "  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
     if skipped_files:
-        trace.log("skipped files: " + str(len(skipped_files)))
+        debug(ctx.std, "skipped files: " + str(len(skipped_files)))
         for f in skipped_files:
-            trace.log("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
+            debug(ctx.std, "  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
     if not uploader_active:
-        trace.log("no CI detected, uploads skipped (dry run)")
-    trace.log("registered artifacts: " + str(len(items)))
+        debug(ctx.std, "no CI detected, uploads skipped (dry run)")
+    debug(ctx.std, "registered artifacts: " + str(len(items)))
     for a in items:
         suffix = " [" + a.label + "]" if a.label else ""
-        trace.log("  " + a.kind + suffix + " " + (a.name or "") + " -> " + a.url)
-    trace.log("------------------------------------")
+        debug(ctx.std, "  " + a.kind + suffix + " " + (a.name or "") + " -> " + a.url)
+    debug(ctx.std, "------------------------------------")
 
 # A collected-log stream (test logs, build logs). `collect` and `cleanup` are
 # closures bound to the owning task's `_artifact_upload_impl` state; the rest

@@ -80,7 +80,12 @@ pub struct EvalBuilder {
     signals: Option<Arc<Signals>>,
     exporting: bool,
     history: Option<PathBuf>,
-    host_env: Option<(StreamColor, bool, bool)>,
+    host_env: Option<(
+        StreamColor,
+        bool,
+        bool,
+        Result<Option<crate::diag::Verbose>, String>,
+    )>,
 }
 
 impl EvalBuilder {
@@ -135,8 +140,9 @@ impl EvalBuilder {
     /// rather than the process's own: whether stdout and stderr are terminals,
     /// and the only environment variables set. It decides color (the
     /// console's, and `std.io.stdout.color` / `std.io.stderr.color`),
-    /// whether the console runs as on Buildkite, and whether it runs under a
-    /// coding agent.
+    /// whether the console runs as on Buildkite, whether it runs under a
+    /// coding agent, and the verbose level `ASPECT_VERBOSE` / `ASPECT_DEBUG`
+    /// set.
     pub fn with_host_env(
         mut self,
         stdout_tty: bool,
@@ -148,6 +154,7 @@ impl EvalBuilder {
             StreamColor::from_snapshot(stdout_tty, stderr_tty, var),
             crate::ci::buildkite_from(var),
             crate::agent::detected(var),
+            crate::diag::Verbose::from_env(var),
         ));
         self
     }
@@ -292,10 +299,11 @@ impl EvalBuilder {
                 &modules,
             );
             loader.env.signals = signals.clone();
-            if let Some((color, buildkite, coding_agent)) = self.host_env {
+            if let Some((color, buildkite, coding_agent, verbose)) = self.host_env.clone() {
                 loader.env.stream_color = color;
                 loader.env.buildkite = buildkite;
                 loader.env.coding_agent = coding_agent;
+                loader.env.verbose = verbose;
             }
             if self.exporting {
                 loader.env.telemetry.export_everything();

@@ -38,7 +38,7 @@ def _announce_args(rc_phrase: str) -> dict:
             default = "auto",
             values = _ANNOUNCE_VALUES,
             long = "announce-bazel-rc",
-            description = "Print the resolved Bazel `.bazelrc` flags before running %s. %s ASPECT_DEBUG=1 logs the same disclosure regardless." % (rc_phrase, _ANNOUNCE_AUTO),
+            description = "Print the resolved Bazel `.bazelrc` flags before running %s. %s --console:verbose=debug (or ASPECT_DEBUG=1) logs the same disclosure regardless." % (rc_phrase, _ANNOUNCE_AUTO),
         ),
         "announce_bazel_version": args.string(
             default = "auto",

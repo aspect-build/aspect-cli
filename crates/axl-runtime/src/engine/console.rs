@@ -18,6 +18,8 @@ use crate::console::{
     AGENT_PRESET, Console as Surface, DEFAULT_PRESET, Host, Overrides, Slot, TaskIdentity,
 };
 
+use crate::diag::Verbose;
+
 use super::arguments::Arguments;
 use super::template::json_to_minijinja;
 
@@ -26,7 +28,11 @@ use super::template::json_to_minijinja;
 ///
 /// `template_preset` counts only when the command line or a `config.axl` set
 /// it; otherwise the base preset is `agent` when [`Host::coding_agent`] and
-/// `full` when not. A disabled feature gives the `full` layout. Fails on a
+/// `full` when not. The verbose level is the `verbose` arg when the command
+/// line set it, else [`Host::verbose`] (`ASPECT_DEBUG` / `ASPECT_VERBOSE`),
+/// else the arg from a `config.axl`, else the preset's; `auto` at any of these
+/// leaves it to the next. A disabled feature gives the `full` layout and the
+/// environment's level. Fails on a
 /// malformed `templates`, `task_presets`, `task_templates` or `verbose`
 /// value and on everything [`Surface::resolve`] refuses. The surface carries a
 /// warning for each `task_presets` / `task_templates` key that is a near miss
@@ -55,8 +61,14 @@ pub fn from_feature_args(
     if args.is_explicit_key("template_preset") {
         overrides.preset_from_cli();
     }
-    if let Some(show) = verbose(args)? {
-        overrides.set_verbose(show);
+    let verbose_arg = verbose(args)?;
+    let level = if args.is_explicit_key("verbose") {
+        verbose_arg.or(host.verbose)
+    } else {
+        host.verbose.or(verbose_arg)
+    };
+    if let Some(level) = level {
+        overrides.set_verbose(level);
     }
     let templates = string_dict(args, "templates")?;
     blocks_error(&templates)?;
@@ -97,25 +109,25 @@ pub fn from_feature_args(
 
 /// The `verbose` arg: `None` for `auto` or unset, so the preset decides.
 /// The CLI gives a string; a `config.axl` may assign a bool too.
-fn verbose(args: &Arguments<'_>) -> Result<Option<bool>, String> {
+fn verbose(args: &Arguments<'_>) -> Result<Option<Verbose>, String> {
     let Some(value) = args.get("verbose").filter(|v| !v.is_none()) else {
         return Ok(None);
     };
     if let Some(show) = value.unpack_bool() {
-        return Ok(Some(show));
+        return Ok(Some(if show { Verbose::On } else { Verbose::Off }));
     }
-    match value.unpack_str() {
-        Some("auto") => Ok(None),
-        Some("true") => Ok(Some(true)),
-        Some("false") => Ok(Some(false)),
-        given => Err(format!(
-            "Console verbose must be \"auto\", \"true\", \"false\" or a bool, got {}{}",
-            value.to_repr(),
-            given
-                .map(|g| crate::suggest::did_you_mean(g, ["auto", "true", "false"]))
-                .unwrap_or_default()
-        )),
-    }
+    let given = value.unpack_str();
+    given
+        .and_then(|name| Verbose::parse(name).ok())
+        .ok_or_else(|| {
+            format!(
+                "Console verbose must be \"auto\", \"true\", \"false\", \"debug\" or a bool, got {}{}",
+                value.to_repr(),
+                given
+                    .map(|g| crate::suggest::did_you_mean(g, Verbose::NAMES))
+                    .unwrap_or_default()
+            )
+        })
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -397,6 +409,20 @@ task_templates = {"check": {"progress": "mine"}}"#;
         extra: &str,
         coding_agent: bool,
     ) -> Result<Surface, String> {
+        resolve_on(preset, source, extra, "cli", coding_agent, None)
+    }
+
+    /// [`resolve_with`], with `verbose` marked as `verbose_source` set it
+    /// (as `source` does for `template_preset`) and `env` as the
+    /// environment's verbose level.
+    fn resolve_on(
+        preset: &str,
+        source: &str,
+        extra: &str,
+        verbose_source: &str,
+        coding_agent: bool,
+        env: Option<Verbose>,
+    ) -> Result<Surface, String> {
         let code = format!(
             "verbose = None\n{extra}\nargs = {{\"template_preset\": {preset:?}, \"verbose\": verbose}}"
         );
@@ -405,13 +431,16 @@ task_templates = {"check": {"progress": "mine"}}"#;
             for (name, value) in DictRef::from_value(bound).unwrap().iter() {
                 args.insert(name.unpack_str().unwrap().into(), value);
             }
-            match source {
-                "cli" => args.mark_explicit("template_preset".into()),
-                "config" => args.mark_configured("template_preset".into()),
-                _ => {}
+            for (key, source) in [("template_preset", source), ("verbose", verbose_source)] {
+                match source {
+                    "cli" => args.mark_explicit(key.into()),
+                    "config" => args.mark_configured(key.into()),
+                    _ => {}
+                }
             }
             let host = Host {
                 coding_agent,
+                verbose: env,
                 ..Host::default()
             };
             from_feature_args(&args, task(), host, &[])
@@ -452,6 +481,49 @@ task_templates = {"check": {"progress": "mine"}}"#;
         assert!(
             err.ends_with(r#"got "ture"; did you mean "true"?"#),
             "{err}"
+        );
+        let err = resolve_with("full", "cli", r#"verbose = "debgu""#, false).unwrap_err();
+        assert!(
+            err.ends_with(r#"got "debgu"; did you mean "debug"?"#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn verbose_takes_the_command_line_then_the_environment_then_config() {
+        let level = |extra, source, env| {
+            resolve_on("full", "cli", extra, source, false, env)
+                .unwrap()
+                .verbosity()
+        };
+        let debug = r#"verbose = "debug""#;
+        let off = "verbose = False";
+        assert_eq!(level(debug, "cli", None), Verbose::Debug);
+        assert_eq!(
+            level(off, "cli", Some(Verbose::Debug)),
+            Verbose::Off,
+            "CLI > env"
+        );
+        assert_eq!(
+            level(off, "config", Some(Verbose::Debug)),
+            Verbose::Debug,
+            "env > config"
+        );
+        assert_eq!(
+            level(debug, "config", None),
+            Verbose::Debug,
+            "config > preset"
+        );
+        assert_eq!(
+            level("", "", Some(Verbose::Debug)),
+            Verbose::Debug,
+            "env > preset"
+        );
+        assert_eq!(level("", "", None), Verbose::On, "the preset's");
+        assert_eq!(
+            level(r#"verbose = "auto""#, "cli", Some(Verbose::Off)),
+            Verbose::Off,
+            "auto on the CLI leaves it to the environment"
         );
     }
 

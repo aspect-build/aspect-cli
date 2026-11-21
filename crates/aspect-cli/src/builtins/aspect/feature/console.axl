@@ -32,9 +32,15 @@ The preset also decides whether detail lines print: the `INFO:` asides a
 reader can do without, which `detail` in `lib/environment.axl` prints (timings,
 filter counts, uploaded-artifact notes). `full` and `plain` show them,
 `compact`, `agent` and `silent` hide them, and `verbose` forces them on or off
-whatever the preset. `info` lines, which carry a task's result or why it did
-nothing (`No files to format`), always print, as do `WARNING:` and `ERROR:`
-lines, a task's own exit message (`TaskConclusion(message = ...)`,
+whatever the preset. `verbose = "debug"` also prints the `DEBUG:` lines of
+`debug` in `lib/environment.axl`, the internals a bug report needs. The level
+comes from the first of: `--console:verbose` on the command line, the
+environment (`ASPECT_DEBUG=1` means `debug`, else `ASPECT_VERBOSE`, which takes
+the same values), `verbose` set in a `config.axl`, the preset.
+
+Levels, quietest first: `debug`, `detail`, `info`, `warn`, `error`. `info`
+lines, which carry a task's result or why it did nothing (`No files to
+format`), always print, as do `WARNING:` and `ERROR:` lines, a task's own exit message (`TaskConclusion(message = ...)`,
 `ctx.std.process.exit`), the `announce_bazel_*` disclosures, which have their
 own flags, and the `aspect worktree` report.
 
@@ -91,14 +97,16 @@ Console = feature(
         ),
         "verbose": args.string(
             default = "auto",
-            values = ["auto", "true", "false"],
+            values = ["auto", "true", "false", "debug"],
             bare = "true",
             description = "Whether detail lines print: the INFO asides a reader can do without, " +
                           "such as timings and filter counts. 'auto' (default) leaves it to the " +
                           "task's preset: shown under 'full' and 'plain', hidden under 'compact', " +
                           "'agent' and 'silent'. 'true' (or a bare --console:verbose) and 'false' " +
-                          "force them on or off; config.axl may also assign True or False. Other " +
-                          "INFO lines, and WARNING and ERROR lines, always print.",
+                          "force them on or off, and 'debug' also prints DEBUG lines; config.axl " +
+                          "may also assign True or False. ASPECT_VERBOSE takes the same values and " +
+                          "beats config.axl but not the command line; ASPECT_DEBUG=1 means " +
+                          "'debug'. Other INFO lines, and WARNING and ERROR lines, always print.",
         ),
     } | task_template_args("silent", "verdict"),
 )

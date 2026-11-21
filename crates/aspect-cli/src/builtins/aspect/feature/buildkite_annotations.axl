@@ -256,8 +256,8 @@ def _write_annotation(ctx, style, body, context_id):
     if len(body) > _ANNOTATION_SIZE_LIMIT:
         body = body[:_ANNOTATION_SIZE_LIMIT - 64] + "\n\n_… annotation truncated (1 MiB limit)._"
 
-    _LOG.trace("invoking buildkite-agent annotate --style %s --context %s --scope=job (body=%d bytes)" %
-               (style, context_id, len(body)))
+    _LOG.debug(ctx.std, "invoking buildkite-agent annotate --style %s --context %s --scope=job (body=%d bytes)" %
+                        (style, context_id, len(body)))
 
     child = ctx.std.process.command("buildkite-agent") \
         .args(["annotate", "--style", style, "--context", context_id, "--scope=job"]) \
@@ -289,8 +289,8 @@ def _write_annotation(ctx, style, body, context_id):
         _LOG.warn(ctx.std, "Annotation failed (ctx=%s style=%s): code=%s stderr=%r stdout=%r body_written=%d/%d" %
                            (context_id, style, str(exit_code_of(out.status)), stderr, stdout, written, len(body)))
         return
-    _LOG.trace("annotation ok (ctx=%s wrote=%d/%d bytes)" %
-               (context_id, written, len(body)))
+    _LOG.debug(ctx.std, "annotation ok (ctx=%s wrote=%d/%d bytes)" %
+                        (context_id, written, len(body)))
 
 def _remove_annotation(ctx, context_id):
     """Invoke `buildkite-agent annotation remove` for this task's annotation.
@@ -302,7 +302,7 @@ def _remove_annotation(ctx, context_id):
     isn't there, which is expected whenever the hook removed before the first
     write went out. Nothing downstream depends on the removal succeeding.
     """
-    _LOG.trace("invoking buildkite-agent annotation remove --context %s --scope=job" % context_id)
+    _LOG.debug(ctx.std, "invoking buildkite-agent annotation remove --context %s --scope=job" % context_id)
 
     out = ctx.std.process.command("buildkite-agent") \
         .args(["annotation", "remove", "--context", context_id, "--scope=job"]) \
@@ -312,10 +312,10 @@ def _remove_annotation(ctx, context_id):
         .wait_with_output()
 
     if not out.status.success:
-        _LOG.trace("annotation remove failed (ctx=%s code=%s stderr=%r) — already absent?" %
-                   (context_id, str(exit_code_of(out.status)), (out.stderr or "").strip()))
+        _LOG.debug(ctx.std, "annotation remove failed (ctx=%s code=%s stderr=%r) - already absent?" %
+                            (context_id, str(exit_code_of(out.status)), (out.stderr or "").strip()))
         return
-    _LOG.trace("annotation removed (ctx=%s)" % context_id)
+    _LOG.debug(ctx.std, "annotation removed (ctx=%s)" % context_id)
 
 # ─── Feature implementation ───────────────────────────────────────────────────
 
@@ -328,14 +328,14 @@ def _buildkite_annotations(ctx: FeatureContext):
     mode = ctx.args.mode
     is_bk = bool(ctx.std.env.var("BUILDKITE"))
 
-    _LOG.trace("starting (mode=%s BUILDKITE=%r is_bk=%s)" %
-               (mode, ctx.std.env.var("BUILDKITE") or "", is_bk))
+    _LOG.debug(ctx.std, "starting (mode=%s BUILDKITE=%r is_bk=%s)" %
+                        (mode, ctx.std.env.var("BUILDKITE") or "", is_bk))
 
     if mode == "ci-only" and not is_bk:
-        _LOG.trace("skipping — mode=ci-only and BUILDKITE not set")
+        _LOG.debug(ctx.std, "skipping - mode=ci-only and BUILDKITE not set")
         return
     if mode == "local-only" and is_bk:
-        _LOG.trace("skipping — mode=local-only and BUILDKITE is set")
+        _LOG.debug(ctx.std, "skipping - mode=local-only and BUILDKITE is set")
         return
 
     # mode == "always" falls through
@@ -357,7 +357,7 @@ def _buildkite_annotations(ctx: FeatureContext):
         _LOG.warn(ctx.std, "`buildkite-agent --version` returned code=%s; skipping." %
                            str(exit_code_of(probe)))
         return
-    _LOG.trace("buildkite-agent probe ok")
+    _LOG.debug(ctx.std, "buildkite-agent probe ok")
 
     # Sub-1-second cadences would spawn `buildkite-agent annotate` faster
     # than it can finish — clamp to 1s floor.
@@ -396,8 +396,8 @@ def _buildkite_annotations(ctx: FeatureContext):
 
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
-        _LOG.trace("aspect/%s%s (ctx=%s)" %
-                   (ctx.task.name, subject_str, _state["_context_id"]))
+        _LOG.debug(ctx.std, "aspect/%s%s (ctx=%s)" %
+                            (ctx.task.name, subject_str, _state["_context_id"]))
 
     def _task_update(ctx, update):
         # Latch the subject before init/render: `phases.setup` sets it on the
@@ -431,13 +431,13 @@ def _buildkite_annotations(ctx: FeatureContext):
 
         context_id = _state.get("_context_id", "")
         if not context_id:
-            _LOG.trace("task_update fired but no context_id; ignoring (kind=%s status=%s)" %
-                       (update.kind, status))
+            _LOG.debug(ctx.std, "task_update fired but no context_id; ignoring (kind=%s status=%s)" %
+                                (update.kind, status))
             return
 
         renderer = renderer_for_kind(update.kind)
         if renderer == None:
-            _LOG.trace("no renderer for kind=%r; ignoring" % update.kind)
+            _LOG.debug(ctx.std, "no renderer for kind=%r; ignoring" % update.kind)
             return
         data = update.data if update.data else renderer.init()
 
@@ -479,7 +479,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""), final = final),
         )
         if decision.action == StatusSurfaceAction("remove"):
-            _LOG.trace("hook removed %s (status=%s final=%s)" % (context_id, status, final))
+            _LOG.debug(ctx.std, "hook removed %s (status=%s final=%s)" % (context_id, status, final))
             _remove_annotation(ctx, context_id)
             _state["_removed"] = True
             return
@@ -487,11 +487,11 @@ def _buildkite_annotations(ctx: FeatureContext):
         body = decision.body
         style = decision.style
         if final:
-            _LOG.trace("completing %s (style=%s len=%d)" %
-                       (context_id, style, len(body)))
+            _LOG.debug(ctx.std, "completing %s (style=%s len=%d)" %
+                                (context_id, style, len(body)))
         elif first_failing:
-            _LOG.trace("early-failing %s (style=%s len=%d)" %
-                       (context_id, style, len(body)))
+            _LOG.debug(ctx.std, "early-failing %s (style=%s len=%d)" %
+                                (context_id, style, len(body)))
         _write_annotation(ctx, style, body, context_id)
 
     lifecycle.task_update.append(_task_update)

@@ -54,6 +54,7 @@ load("./ci.axl", "detect_ci_host", "resolve_build_url")
 load(
     "./environment.axl",
     "build_aspect_runner_rows",
+    "debug",
     "display_cloud_provider",
     "feature_logger",
     "is_aspect_workflows_runner",
@@ -634,7 +635,7 @@ def init_data():
         },
     }
 
-def process_event(data, event, bb_root):
+def process_event(data, event, bb_root, std = None):
     """Update data in-place from a single build event.
 
     Whether the build was ABORTED is decided by Bazel's exit code, read off
@@ -642,7 +643,8 @@ def process_event(data, event, bb_root):
     `Aborted` payload's reason. See that arm for why.
 
     All field access goes through bes_get() (guards AttributeError on schema
-    mismatch). Missing-field warnings go through `trace` (ASPECT_DEBUG / OTel only).
+    mismatch). Missing-field warnings go through `debug` (an OTel log record,
+    printed only at the `debug` verbose level).
 
     Args:
         data:    dict from init_data(), mutated in place
@@ -651,6 +653,8 @@ def process_event(data, event, bb_root):
                  decides how test log and action stderr URIs map to local paths
                  (see `local_output_path`); None (no mount) falls back to the
                  output tree.
+        std:     the task's `ctx.std`, for the `DEBUG:` lines; None emits
+                 only their records.
 
     Returns:
         True when the change warrants a status check update.
@@ -670,7 +674,7 @@ def process_event(data, event, bb_root):
         payload = event.payload
         uuid = bes_get(payload, "uuid", "") or ""
         if not uuid:
-            trace.log("warning: BES build_started event missing expected field 'uuid'")
+            debug(std, "warning: BES build_started event missing expected field 'uuid'")
         data["bazel"]["invocation_id"] = uuid
         data["bazel"]["build_tool_version"] = bes_get(payload, "build_tool_version", "") or ""
         data["bazel"]["build_command"] = bes_get(payload, "command", "") or ""
@@ -696,7 +700,7 @@ def process_event(data, event, bb_root):
                             val = bes_get(opt, "option_value", "") or ""
                             if val:
                                 data["bazel"]["bes_results_url"] = val
-                                trace.log("debug: captured bes_results_url=" + val)
+                                debug(std, "captured bes_results_url=" + val)
                             break
         return False
 
@@ -716,9 +720,9 @@ def process_event(data, event, bb_root):
                     if arg.startswith("--bes_results_url="):
                         data["bazel"]["bes_results_url"] = arg[len("--bes_results_url="):]
                         break
-            trace.log("debug: options_parsed explicit=" + str(len(data["bazel"]["options_parsed"]["explicit_cmd_line"])) +
-                      " startup=" + str(len(data["bazel"]["options_parsed"]["startup_options"])) +
-                      " cmd=" + str(len(data["bazel"]["options_parsed"]["cmd_line"])))
+            debug(std, "options_parsed explicit=" + str(len(data["bazel"]["options_parsed"]["explicit_cmd_line"])) +
+                       " startup=" + str(len(data["bazel"]["options_parsed"]["startup_options"])) +
+                       " cmd=" + str(len(data["bazel"]["options_parsed"]["cmd_line"])))
 
         # Live update — command-line detail blocks come entirely from this event.
         return True
@@ -760,7 +764,7 @@ def process_event(data, event, bb_root):
         # incrementals.
         mnemonic = bes_get(payload, "type", "") or ""
         if success == None:
-            trace.log("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
+            debug(std, "warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
             data["bazel"]["failed_actions_total"] += 1
 
@@ -855,7 +859,7 @@ def process_event(data, event, bb_root):
 
         success = bes_get(payload, "success", None)
         if success == None:
-            trace.log("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
+            debug(std, "warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
             data["bazel"]["failed_targets"].append({"label": label, "kind": target_kind})
             return True
@@ -919,9 +923,9 @@ def process_event(data, event, bb_root):
         # whether the test ran or was served from cache.
         duration_ms = bes_get(payload, "total_run_duration_millis", 0) or 0
         if not status:
-            trace.log("warning: BES test_summary event missing expected field 'overall_status' (label=" + label + ")")
+            debug(std, "warning: BES test_summary event missing expected field 'overall_status' (label=" + label + ")")
         if not label:
-            trace.log("warning: BES test_summary event missing expected field 'id.label'")
+            debug(std, "warning: BES test_summary event missing expected field 'id.label'")
         cached = num_cached > 0
         if cached:
             if duration_ms:
@@ -1026,7 +1030,7 @@ def process_event(data, event, bb_root):
             if per_runner:
                 data["bazel"]["runner_counts"] = per_runner
         else:
-            trace.log("warning: BES build_metrics event missing expected field 'action_summary'")
+            debug(std, "warning: BES build_metrics event missing expected field 'action_summary'")
         timing_metrics = bes_get(payload, "timing_metrics", None)
         if timing_metrics:
             wall_time = bes_get(timing_metrics, "wall_time_in_ms", 0) or 0
@@ -1098,10 +1102,10 @@ def process_event(data, event, bb_root):
                         md_list.append({"reason": reason, "count": count})
             if md_list:
                 data["bazel"]["action_cache_stats"]["miss_details"] = md_list
-        trace.log("debug: build_metrics wall_time_ms=" + str(data["bazel"]["wall_time_ms"]) +
-                  " cpu_time_ms=" + str(data["bazel"]["cpu_time_ms"]) +
-                  " targets_configured=" + str(data["bazel"]["targets_configured"]) +
-                  " packages_loaded=" + str(data["bazel"]["packages_loaded"]))
+        debug(std, "build_metrics wall_time_ms=" + str(data["bazel"]["wall_time_ms"]) +
+                   " cpu_time_ms=" + str(data["bazel"]["cpu_time_ms"]) +
+                   " targets_configured=" + str(data["bazel"]["targets_configured"]) +
+                   " packages_loaded=" + str(data["bazel"]["packages_loaded"]))
         return True
 
     elif kind == "build_finished":
@@ -4791,34 +4795,34 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     # re-render dozens of times per task — too noisy for the standard stream).
     debug_render = bool(ctx.std.env.var("_ASPECT_DEBUG_STATUS_RENDER_CHECK"))
     if debug_render:
-        trace.log("debug [render_check_output] status=" + status)
-        trace.log("debug [render_check_output]   invocation_id=" + (data["bazel"].get("invocation_id") or ""))
-        trace.log("debug [render_check_output]   wall_time_ms=" + str(data["bazel"].get("wall_time_ms", 0)))
-        trace.log("debug [render_check_output]   targets_total=" + str(data["bazel"].get("targets_total", 0)))
-        trace.log("debug [render_check_output]   built_targets=" + str(len(data["bazel"].get("built_targets", []))))
-        trace.log("debug [render_check_output]   passed_test_total=" + str(data["bazel"].get("passed_test_total", 0)))
-        trace.log("debug [render_check_output]   passed_tests=" + str(len(data["bazel"].get("passed_tests", []))))
-        trace.log("debug [render_check_output]   failed_test_total=" + str(data["bazel"].get("failed_test_total", 0)))
-        trace.log("debug [render_check_output]   flaky_test_total=" + str(data["bazel"].get("flaky_test_total", 0)))
-        trace.log("debug [render_check_output]   actions_total=" + str(data["bazel"].get("actions_total", 0)))
+        debug(ctx.std, "[render_check_output] status=" + status)
+        debug(ctx.std, "[render_check_output]   invocation_id=" + (data["bazel"].get("invocation_id") or ""))
+        debug(ctx.std, "[render_check_output]   wall_time_ms=" + str(data["bazel"].get("wall_time_ms", 0)))
+        debug(ctx.std, "[render_check_output]   targets_total=" + str(data["bazel"].get("targets_total", 0)))
+        debug(ctx.std, "[render_check_output]   built_targets=" + str(len(data["bazel"].get("built_targets", []))))
+        debug(ctx.std, "[render_check_output]   passed_test_total=" + str(data["bazel"].get("passed_test_total", 0)))
+        debug(ctx.std, "[render_check_output]   passed_tests=" + str(len(data["bazel"].get("passed_tests", []))))
+        debug(ctx.std, "[render_check_output]   failed_test_total=" + str(data["bazel"].get("failed_test_total", 0)))
+        debug(ctx.std, "[render_check_output]   flaky_test_total=" + str(data["bazel"].get("flaky_test_total", 0)))
+        debug(ctx.std, "[render_check_output]   actions_total=" + str(data["bazel"].get("actions_total", 0)))
         op = data["bazel"].get("options_parsed") or {}
-        trace.log("debug [render_check_output]   options_parsed explicit=" + str(len(op.get("explicit_cmd_line", []))) +
-                  " startup=" + str(len(op.get("startup_options", []))) +
-                  " cmd=" + str(len(op.get("cmd_line", []))))
+        debug(ctx.std, "[render_check_output]   options_parsed explicit=" + str(len(op.get("explicit_cmd_line", []))) +
+                       " startup=" + str(len(op.get("startup_options", []))) +
+                       " cmd=" + str(len(op.get("cmd_line", []))))
         ws = data["bazel"].get("workspace_status") or {}
         if ws:
-            trace.log("debug [render_check_output]   workspace_status=" + str(ws))
+            debug(ctx.std, "[render_check_output]   workspace_status=" + str(ws))
         meta = data["bazel"].get("metadata") or {}
         if meta:
-            trace.log("debug [render_check_output]   metadata=" + str(meta))
+            debug(ctx.std, "[render_check_output]   metadata=" + str(meta))
         passed = data["bazel"].get("passed_tests") or []
         if passed:
             sample = [t.get("label", "") for t in passed[:5]]
-            trace.log("debug [render_check_output]   passed_tests sample=" + str(sample))
+            debug(ctx.std, "[render_check_output]   passed_tests sample=" + str(sample))
         built = data["bazel"].get("built_targets") or []
         if built:
             sample = [t.get("label", "") for t in built[:3]]
-            trace.log("debug [render_check_output]   built_targets sample=" + str(sample))
+            debug(ctx.std, "[render_check_output]   built_targets sample=" + str(sample))
 
     # GitHub hard limit for check run output.text is 65535 bytes; 65000 leaves
     # encoding headroom.
@@ -4848,19 +4852,19 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     )
 
     if debug_render:
-        trace.log("debug [render_check_output]   summary target_pattern=" + summary_data.get("target_pattern", ""))
-        trace.log("debug [render_check_output]   summary branch=" + summary_data.get("branch", ""))
-        trace.log("debug [render_check_output]   summary short_sha=" + summary_data.get("short_sha", ""))
-        trace.log("debug [render_check_output]   summary detail_rows count=" + str(len(summary_data.get("detail_rows", []))))
-        trace.log("debug [render_check_output]   details startup_options=" + str(len(details_data.get("startup_options", []))) +
-                  " cmd_line_options=" + str(len(details_data.get("cmd_line_options", []))) +
-                  " explicit=" + str(bool(details_data.get("explicit_command_line", ""))))
-        trace.log("debug [render_check_output]   run_date=" + run_date)
-        trace.log("debug [render_check_output]   cpu_arch=" + str(data["bazel"].get("cpu_arch", "")))
-        trace.log("debug [render_check_output]   compilation_mode=" + str(data["bazel"].get("compilation_mode", "")))
-        trace.log("debug [render_check_output]   build_tool_version=" + str(data["bazel"].get("build_tool_version", "")))
-        trace.log("debug [render_check_output]   targets_configured=" + str(data["bazel"].get("targets_configured", 0)))
-        trace.log("debug [render_check_output]   packages_loaded=" + str(data["bazel"].get("packages_loaded", 0)))
+        debug(ctx.std, "[render_check_output]   summary target_pattern=" + summary_data.get("target_pattern", ""))
+        debug(ctx.std, "[render_check_output]   summary branch=" + summary_data.get("branch", ""))
+        debug(ctx.std, "[render_check_output]   summary short_sha=" + summary_data.get("short_sha", ""))
+        debug(ctx.std, "[render_check_output]   summary detail_rows count=" + str(len(summary_data.get("detail_rows", []))))
+        debug(ctx.std, "[render_check_output]   details startup_options=" + str(len(details_data.get("startup_options", []))) +
+                       " cmd_line_options=" + str(len(details_data.get("cmd_line_options", []))) +
+                       " explicit=" + str(bool(details_data.get("explicit_command_line", ""))))
+        debug(ctx.std, "[render_check_output]   run_date=" + run_date)
+        debug(ctx.std, "[render_check_output]   cpu_arch=" + str(data["bazel"].get("cpu_arch", "")))
+        debug(ctx.std, "[render_check_output]   compilation_mode=" + str(data["bazel"].get("compilation_mode", "")))
+        debug(ctx.std, "[render_check_output]   build_tool_version=" + str(data["bazel"].get("build_tool_version", "")))
+        debug(ctx.std, "[render_check_output]   targets_configured=" + str(data["bazel"].get("targets_configured", 0)))
+        debug(ctx.std, "[render_check_output]   packages_loaded=" + str(data["bazel"].get("packages_loaded", 0)))
 
     details_tmpl = t.get("details") or DETAILS_TEMPLATE
     (summary_text, _summary_ok) = render_summary_or_fallback(ctx, t.get("summary") or SUMMARY_TEMPLATE, summary_data, surface = "build/test")
@@ -4895,58 +4899,58 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 
     if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
         if debug_render:
-            trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
-                      "), dropping inline snippet bodies from secondary failure buckets")
+            debug(ctx.std, "[render_check_output]   OVER LIMIT (" + str(len(details_text)) +
+                           "), dropping inline snippet bodies from secondary failure buckets")
         _drop_snippets(details_data.get("failed_tests_snippets", []))
         _drop_snippets(details_data.get("timeout_tests_snippets", []))
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
         if debug_render:
-            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping all inline snippet bodies")
+            debug(ctx.std, "[render_check_output]   still OVER (" + str(len(details_text)) +
+                           "), dropping all inline snippet bodies")
         _drop_snippets(details_data.get("build_failures_snippets", []))
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
-            trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
-                      "), dropping build_metadata sub-block from Bazel details")
+            debug(ctx.std, "[render_check_output]   OVER LIMIT (" + str(len(details_text)) +
+                           "), dropping build_metadata sub-block from Bazel details")
         details_data["build_metadata_rows"] = []
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
-            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping workspace_status sub-block from Bazel details")
+            debug(ctx.std, "[render_check_output]   still OVER (" + str(len(details_text)) +
+                           "), dropping workspace_status sub-block from Bazel details")
         details_data["workspace_status_rows"] = []
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
-            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping invocation sub-block from Bazel details")
+            debug(ctx.std, "[render_check_output]   still OVER (" + str(len(details_text)) +
+                           "), dropping invocation sub-block from Bazel details")
         details_data["invocation_rows"] = []
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
-            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping Runner metadata section")
+            debug(ctx.std, "[render_check_output]   still OVER (" + str(len(details_text)) +
+                           "), dropping Runner metadata section")
         details_data["aspect_runner_rows"] = []
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
-            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping Performance")
+            debug(ctx.std, "[render_check_output]   still OVER (" + str(len(details_text)) +
+                           "), dropping Performance")
         details_data["invocation_stats"] = None
         details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
-            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping parsed-options lists")
+            debug(ctx.std, "[render_check_output]   still OVER (" + str(len(details_text)) +
+                           "), dropping parsed-options lists")
         details_data["startup_options"] = []
         details_data["cmd_line_options"] = []
         details_text = _render_details()
@@ -4965,8 +4969,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             details_data["built_targets_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = _render_details()
         if debug_render:
-            trace.log("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
-                      " built_targets=" + str(len(built)))
+            debug(ctx.std, "[render_check_output]   after target trim: details len=" + str(len(details_text)) +
+                           " built_targets=" + str(len(built)))
 
     if len(details_text) > _DETAILS_LIMIT:
         passed = details_data.get("passed_tests", [])
@@ -4980,8 +4984,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             details_data["passed_tests_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = _render_details()
         if debug_render:
-            trace.log("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
-                      " passed_tests=" + str(len(passed)))
+            debug(ctx.std, "[render_check_output]   after test trim: details len=" + str(len(details_text)) +
+                           " passed_tests=" + str(len(passed)))
 
     if len(details_text) > _DETAILS_LIMIT:
         skipped = details_data.get("skipped_targets", [])
@@ -4995,8 +4999,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             details_data["skipped_targets_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = _render_details()
         if debug_render:
-            trace.log("debug [render_check_output]   after skipped trim: details len=" + str(len(details_text)) +
-                      " skipped_targets=" + str(len(skipped)))
+            debug(ctx.std, "[render_check_output]   after skipped trim: details len=" + str(len(details_text)) +
+                           " skipped_targets=" + str(len(skipped)))
 
     if len(details_text) > _DETAILS_LIMIT:
         # Last resort.
@@ -5004,12 +5008,12 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         details_text = _render_details()
 
     if debug_render:
-        trace.log("debug [render_check_output]   summary len=" + str(len(summary_text)))
-        trace.log("debug [render_check_output]   details len=" + str(len(details_text)))
-        trace.log("debug [render_check_output] --- summary ---")
-        trace.log(summary_text)
-        trace.log("debug [render_check_output] --- details (first 5000 chars) ---")
-        trace.log(details_text[:5000])
+        debug(ctx.std, "[render_check_output]   summary len=" + str(len(summary_text)))
+        debug(ctx.std, "[render_check_output]   details len=" + str(len(details_text)))
+        debug(ctx.std, "[render_check_output] --- summary ---")
+        debug(ctx.std, summary_text)
+        debug(ctx.std, "[render_check_output] --- details (first 5000 chars) ---")
+        debug(ctx.std, details_text[:5000])
 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
@@ -5291,7 +5295,7 @@ def _results_new(ctx, command, report_uploader = None):
 
     def process(event):
         # `event` is a BuildEvent, or None on a quiet heartbeat tick.
-        interesting = process_event(data, event, bb_root) if event != None else False
+        interesting = process_event(data, event, bb_root, std = ctx.std) if event != None else False
         heartbeat = _elapsed_ms(m["last_monotonic"]) >= MIN_HEARTBEAT_INTERVAL_MS
         if not (interesting or heartbeat):
             return

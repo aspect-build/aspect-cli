@@ -16,27 +16,109 @@
 //! `stream_color`, which the console ([`crate::console::Host`]) and AXL's
 //! `std.io.stderr.color` read.
 //!
-//! [`detail`] and the AXL `detail` helper follow [`verbose`], which the
-//! `Console` feature sets for the running task when the console resolves; lines
-//! printed before that, early in start-up, always show. Everything else prints
-//! under every preset: [`info`], `WARNING:` and `ERROR:` lines, and [`emit`],
-//! which carries a task's own exit message.
+//! Levels, quietest first: debug, detail, info, warning, error. [`detail`] and
+//! the AXL `detail` helper follow [`verbose`], and the AXL `debug` helper's
+//! `DEBUG:` line follows [`verbosity`] being [`Verbose::Debug`]. The `Console`
+//! feature sets the level for the running task when the console resolves;
+//! before that, early in start-up, it is [`Verbose::On`] unless the CLI set it
+//! from `ASPECT_VERBOSE` / `ASPECT_DEBUG`. Everything else prints under every
+//! preset: [`info`], `WARNING:` and `ERROR:` lines, and [`emit`], which
+//! carries a task's own exit message.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::errln;
 
-/// Whether detail lines print. True until the console resolves.
-static VERBOSE: AtomicBool = AtomicBool::new(true);
+/// How much of the optional output prints: the `--console:verbose` setting
+/// once `auto` is resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Verbose {
+    /// Detail lines hidden (`false`).
+    Off,
+    /// Detail lines shown (`true`).
+    #[default]
+    On,
+    /// Detail lines and debug lines shown (`debug`).
+    Debug,
+}
 
-/// Show or hide detail lines for the rest of the run, from Rust and AXL alike.
-pub fn set_verbose(show: bool) {
-    VERBOSE.store(show, Ordering::Relaxed);
+impl Verbose {
+    /// Every value `--console:verbose` and `ASPECT_VERBOSE` take, `auto`
+    /// (the preset decides) first.
+    pub const NAMES: [&'static str; 4] = ["auto", "true", "false", "debug"];
+
+    /// `name` as a level, `Ok(None)` for `auto`, or `Err` for a name that is
+    /// none of [`Self::NAMES`].
+    pub fn parse(name: &str) -> Result<Option<Verbose>, ()> {
+        match name {
+            "auto" => Ok(None),
+            "true" => Ok(Some(Verbose::On)),
+            "false" => Ok(Some(Verbose::Off)),
+            "debug" => Ok(Some(Verbose::Debug)),
+            _ => Err(()),
+        }
+    }
+
+    /// The level the environment `var` sets: `debug` for a non-empty
+    /// `ASPECT_DEBUG`, else `ASPECT_VERBOSE` (unset, empty or `auto` set
+    /// none). Fails on any other `ASPECT_VERBOSE` value, naming the closest.
+    pub fn from_env(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Option<Verbose>, String> {
+        if var("ASPECT_DEBUG").is_some_and(|v| !v.is_empty()) {
+            return Ok(Some(Verbose::Debug));
+        }
+        let Some(value) = var("ASPECT_VERBOSE").filter(|v| !v.is_empty()) else {
+            return Ok(None);
+        };
+        let value = value.to_string_lossy();
+        Verbose::parse(&value).map_err(|()| {
+            format!(
+                "ASPECT_VERBOSE must be one of {}, got {value:?}{}",
+                Verbose::NAMES.join(", "),
+                crate::suggest::did_you_mean(&value, Verbose::NAMES)
+            )
+        })
+    }
+
+    fn index(self) -> u8 {
+        match self {
+            Verbose::Off => 0,
+            Verbose::On => 1,
+            Verbose::Debug => 2,
+        }
+    }
+
+    fn from_index(index: u8) -> Verbose {
+        match index {
+            0 => Verbose::Off,
+            2 => Verbose::Debug,
+            _ => Verbose::On,
+        }
+    }
+
+    /// Whether detail lines print at this level.
+    pub fn shows_detail(self) -> bool {
+        self != Verbose::Off
+    }
+}
+
+/// The run's [`Verbose`] level. [`Verbose::On`] until set.
+static VERBOSE: AtomicU8 = AtomicU8::new(1);
+
+/// Set the level for the rest of the run, from Rust and AXL alike.
+pub fn set_verbose(level: Verbose) {
+    VERBOSE.store(level.index(), Ordering::Relaxed);
+}
+
+/// The run's level; see [`set_verbose`].
+pub fn verbosity() -> Verbose {
+    Verbose::from_index(VERBOSE.load(Ordering::Relaxed))
 }
 
 /// Whether detail lines print; see [`set_verbose`].
 pub fn verbose() -> bool {
-    VERBOSE.load(Ordering::Relaxed)
+    verbosity().shows_detail()
 }
 
 /// Severity of a diagnostic line, carrying its label and color.
@@ -144,6 +226,47 @@ mod tests {
         assert_eq!(
             format_line(Severity::Error, true, "hello"),
             "\x1b[0;31mERROR\x1b[0m: hello"
+        );
+    }
+
+    #[test]
+    fn verbose_parses_every_name_and_suggests_the_closest() {
+        assert_eq!(Verbose::parse("auto"), Ok(None));
+        assert_eq!(Verbose::parse("true"), Ok(Some(Verbose::On)));
+        assert_eq!(Verbose::parse("false"), Ok(Some(Verbose::Off)));
+        assert_eq!(Verbose::parse("debug"), Ok(Some(Verbose::Debug)));
+        assert_eq!(Verbose::parse("on"), Err(()));
+        for level in [Verbose::Off, Verbose::On, Verbose::Debug] {
+            assert_eq!(Verbose::from_index(level.index()), level);
+        }
+    }
+
+    #[test]
+    fn the_environment_sets_the_level_and_aspect_debug_wins() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            Verbose::from_env(move |name| {
+                vars.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).into())
+            })
+        };
+        assert_eq!(env(&[]), Ok(None));
+        assert_eq!(env(&[("ASPECT_VERBOSE", "")]), Ok(None));
+        assert_eq!(env(&[("ASPECT_VERBOSE", "auto")]), Ok(None));
+        assert_eq!(env(&[("ASPECT_VERBOSE", "false")]), Ok(Some(Verbose::Off)));
+        assert_eq!(
+            env(&[("ASPECT_VERBOSE", "debug")]),
+            Ok(Some(Verbose::Debug))
+        );
+        assert_eq!(env(&[("ASPECT_DEBUG", "1")]), Ok(Some(Verbose::Debug)));
+        assert_eq!(
+            env(&[("ASPECT_DEBUG", "1"), ("ASPECT_VERBOSE", "false")]),
+            Ok(Some(Verbose::Debug))
+        );
+        assert_eq!(env(&[("ASPECT_DEBUG", "")]), Ok(None));
+        assert_eq!(
+            env(&[("ASPECT_VERBOSE", "debgu")]),
+            Err(r#"ASPECT_VERBOSE must be one of auto, true, false, debug, got "debgu"; did you mean "debug"?"#.to_owned())
         );
     }
 

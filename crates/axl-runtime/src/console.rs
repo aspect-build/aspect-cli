@@ -47,14 +47,18 @@
 //!
 //! The preset a task renders with also decides whether detail lines (the
 //! `INFO:` asides AXL's `detail()` prints) show (see [`crate::diag::verbose`]),
-//! unless the feature's `verbose` arg says otherwise. Other `INFO:` lines and
+//! unless a verbose level overrides it. The level is the first of these set:
+//! the feature's `verbose` arg typed on the command line, `ASPECT_DEBUG` or
+//! `ASPECT_VERBOSE` ([`Host::verbose`]), the arg set in a `config.axl`. Only
+//! the `debug` level shows AXL's `DEBUG:` lines. Other `INFO:` lines and
 //! `WARNING:` and `ERROR:` lines always print.
 //!
 //! Overrides are compiled when the console is resolved, so a syntax error fails
 //! the run before the task starts rather than mid-task.
 //!
 //! A console never reads the process: whether it colors, whether it opens
-//! Buildkite sections and whether a coding agent runs it come from the
+//! Buildkite sections, whether a coding agent runs it and the environment's
+//! verbose level come from the
 //! [`Host`] it is built with, which a run takes from its [`Env`]
 //! ([`Host::of`]) and a test spells out.
 
@@ -63,6 +67,7 @@ use std::sync::Mutex;
 
 use minijinja::{Environment, Value as JinjaValue};
 
+use crate::diag::Verbose;
 use crate::engine::store::Env;
 use crate::suggest;
 
@@ -318,8 +323,9 @@ pub struct Overrides {
     /// The feature's preset came from the command line, so it beats
     /// `task_presets`.
     preset_from_cli: bool,
-    /// The `verbose` arg, when it overrides the preset.
-    verbose: Option<bool>,
+    /// The verbose level, when the command line, the environment or a
+    /// `config.axl` overrides the preset's.
+    verbose: Option<Verbose>,
 }
 
 impl Overrides {
@@ -358,9 +364,9 @@ impl Overrides {
         self.preset_from_cli = true;
     }
 
-    /// Show (`true`) or hide detail lines whatever the preset.
-    pub fn set_verbose(&mut self, show: bool) {
-        self.verbose = Some(show);
+    /// Set the verbose level whatever the preset.
+    pub fn set_verbose(&mut self, level: Verbose) {
+        self.verbose = Some(level);
     }
 
     /// Every override with the arg path naming it.
@@ -473,18 +479,23 @@ pub struct Host {
     /// Whether a coding agent runs the process ([`crate::agent`]), so the
     /// base preset is [`AGENT_PRESET`] when nothing chooses one.
     pub coding_agent: bool,
+    /// The level `ASPECT_VERBOSE` / `ASPECT_DEBUG` set, which beats a
+    /// `config.axl`'s `verbose` and loses to the command line's.
+    pub verbose: Option<Verbose>,
 }
 
 impl Host {
     /// The host of the run `env` describes: its stderr color, its Buildkite
-    /// snapshot and whether a coding agent runs it, all resolved once for the
-    /// run (the process's own, or a test harness's).
-    pub fn of(env: &Env) -> Host {
-        Host {
+    /// snapshot, whether a coding agent runs it and the verbose level its
+    /// environment sets, all resolved once for the run (the process's own, or
+    /// a test harness's). Fails on an invalid `ASPECT_VERBOSE`.
+    pub fn of(env: &Env) -> Result<Host, String> {
+        Ok(Host {
             color: env.stream_color.stderr,
             buildkite: env.buildkite,
             coding_agent: env.coding_agent,
-        }
+            verbose: env.verbose.clone()?,
+        })
     }
 }
 
@@ -494,8 +505,8 @@ pub struct Console {
     preset: &'static Preset,
     overrides: BTreeMap<Slot, String>,
     host: Host,
-    /// Whether detail lines print: the `verbose` arg, else the preset's.
-    verbose: bool,
+    /// The verbose level: the overridden one, else the preset's.
+    verbose: Verbose,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
     /// Config warnings, printed under the header; see [`Console::warnings`].
@@ -512,7 +523,7 @@ impl Console {
     /// The `full` layout with no overrides, on `host`: what a run without the
     /// `Console` feature (or with it disabled) prints.
     pub fn builtin(task: TaskIdentity, host: Host) -> Console {
-        Console::new(&FULL, BTreeMap::new(), None, task, host)
+        Console::new(&FULL, BTreeMap::new(), host.verbose, task, host)
     }
 
     /// Resolve `preset_name` plus `overrides` for `task`, on `host`.
@@ -550,7 +561,7 @@ impl Console {
     fn new(
         preset: &'static Preset,
         overrides: BTreeMap<Slot, String>,
-        verbose: Option<bool>,
+        verbose: Option<Verbose>,
         task: TaskIdentity,
         host: Host,
     ) -> Console {
@@ -558,7 +569,11 @@ impl Console {
             preset,
             overrides,
             host,
-            verbose: verbose.unwrap_or(preset.verbose),
+            verbose: verbose.unwrap_or(if preset.verbose {
+                Verbose::On
+            } else {
+                Verbose::Off
+            }),
             task,
             warned: Mutex::new(HashSet::new()),
             warnings: Vec::new(),
@@ -597,6 +612,12 @@ impl Console {
 
     /// Whether detail lines print for this task.
     pub fn verbose(&self) -> bool {
+        self.verbose.shows_detail()
+    }
+
+    /// The verbose level for this task, which also says whether debug lines
+    /// print.
+    pub fn verbosity(&self) -> Verbose {
         self.verbose
     }
 
@@ -967,10 +988,12 @@ mod tests {
         ] {
             let c = console(preset, &Overrides::default(), false);
             assert_eq!(c.verbose(), shown, "{preset}");
-            for show in [true, false] {
+            for level in [Verbose::Off, Verbose::On, Verbose::Debug] {
                 let mut o = Overrides::default();
-                o.set_verbose(show);
-                assert_eq!(console(preset, &o, false).verbose(), show, "{preset}");
+                o.set_verbose(level);
+                let c = console(preset, &o, false);
+                assert_eq!(c.verbosity(), level, "{preset}");
+                assert_eq!(c.verbose(), level != Verbose::Off, "{preset}");
             }
         }
         let mut o = Overrides::default();
@@ -980,6 +1003,15 @@ mod tests {
             "the task's own preset decides"
         );
         assert!(Console::builtin(task(), Host::default()).verbose());
+        let host = Host {
+            verbose: Some(Verbose::Debug),
+            ..Host::default()
+        };
+        assert_eq!(
+            Console::builtin(task(), host).verbosity(),
+            Verbose::Debug,
+            "a disabled feature keeps the environment's level"
+        );
     }
 
     #[test]

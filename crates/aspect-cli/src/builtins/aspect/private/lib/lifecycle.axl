@@ -365,7 +365,7 @@ def _refuse(ctx, update: StatusSurfaceUpdate, msg: str):
     if update.final:
         _LOG.warn(ctx.std, full)
     else:
-        _LOG.trace(full)
+        _LOG.debug(ctx.std, full)
 
 def _threaded(ctx, update: StatusSurfaceUpdate, decision: StatusSurfaceDecision) -> StatusSurfaceUpdate:
     """`update` with the decision's style/body applied, for the next handler.

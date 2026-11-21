@@ -550,7 +550,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            if process_event(data, event, bb_root):
+            if process_event(data, event, bb_root, std = ctx.std):
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
