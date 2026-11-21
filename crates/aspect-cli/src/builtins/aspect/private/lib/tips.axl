@@ -40,6 +40,7 @@ need to probe — the data flow just goes quiet.
 """
 
 load("./ansi.axl", "ansi")
+load("./text.axl", "did_you_mean")
 
 # ── Severity constants ───────────────────────────────────────────────
 
@@ -379,13 +380,13 @@ def add_tip(
     tests can pass a stub context. See the public `@aspect//tips.axl`
     `add_tip` for the full contract."""
     if severity not in _SEVERITY_ORDER:
-        fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
+        fail("unknown tip severity %r; valid: %s%s" % (severity, ", ".join(_SEVERITY_ORDER.keys()), did_you_mean(severity, _SEVERITY_ORDER.keys())))
     if type not in _VALID_TEMPLATE_TYPES:
-        fail("unknown tip template type %r; valid: %s" % (type, ", ".join(_VALID_TEMPLATE_TYPES)))
+        fail("unknown tip template type %r; valid: %s%s" % (type, ", ".join(_VALID_TEMPLATE_TYPES), did_you_mean(type, _VALID_TEMPLATE_TYPES)))
     surfaces_list = list(surfaces) if surfaces else []
     for s in surfaces_list:
         if s not in _VALID_SURFACES:
-            fail("unknown tip surface %r; valid: %s" % (s, ", ".join(_VALID_SURFACES)))
+            fail("unknown tip surface %r; valid: %s%s" % (s, ", ".join(_VALID_SURFACES), did_you_mean(s, _VALID_SURFACES)))
     vars = dict(vars or {})
     accumulate = dict(accumulate or {})
     collision = [name for name in accumulate if name in vars]

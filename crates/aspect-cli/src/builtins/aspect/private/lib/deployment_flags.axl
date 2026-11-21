@@ -99,6 +99,7 @@ load("./aspect_endpoint_auth.axl", "can_authenticate", "credential_helper_covers
 load("./aspect_flags.axl", "add_task_flags", "endpoint_flags", "history_exec_log_flags")
 load("./deployment_rc.axl", "credential_helper_flag")
 load("./environment.axl", "detect_ci", "env_names_deployment", "info")
+load("./text.axl", "did_you_mean")
 
 REMOTE_REFUSED_BY_ENV = (
     "--remote would wire a configured deployment, but the ASPECT_WORKFLOWS_* environment already names this machine's deployment, " +
@@ -323,8 +324,8 @@ def parse_remote(value: str) -> RemoteSpec:
         negated = token.startswith("no-")
         capability = token[len("no-"):] if negated else token
         if capability not in REMOTE_CAPABILITIES:
-            fail("--remote: unknown capability '%s'. Expected %s (each also as no-<capability>), or none." %
-                 (token, ", ".join(REMOTE_CAPABILITIES)))
+            fail("--remote: unknown capability '%s'%s. Expected %s (each also as no-<capability>), or none." %
+                 (token, did_you_mean(token, REMOTE_CAPABILITIES + ["no-" + c for c in REMOTE_CAPABILITIES] + ["none"]), ", ".join(REMOTE_CAPABILITIES)))
         on[capability] = not negated
         if not negated and capability not in named:
             named.append(capability)

@@ -1316,8 +1316,9 @@ impl std::str::FromStr for TimingMode {
             "short" => Ok(TimingMode::Short),
             "detailed" => Ok(TimingMode::Detailed),
             other => Err(format!(
-                "invalid timing mode {:?}; expected one of: none, total, short, detailed",
-                other
+                "invalid timing mode {:?}; expected one of: none, total, short, detailed{}",
+                other,
+                crate::suggest::did_you_mean(other, ["none", "total", "short", "detailed"])
             )),
         }
     }
@@ -1514,6 +1515,14 @@ mod tests {
     /// the flags are missing from the command line we would run, and an
     /// unclaimed startup option means we would even be talking to the wrong
     /// server. Finding that out after a build costs the whole build.
+    #[test]
+    fn a_near_miss_timing_mode_is_suggested() {
+        let err = "shrot".parse::<TimingMode>().unwrap_err();
+        assert!(err.ends_with(r#"; did you mean "short"?"#), "{err}");
+        let err = "verbose".parse::<TimingMode>().unwrap_err();
+        assert!(!err.contains("did you mean"), "{err}");
+    }
+
     #[test]
     fn reaching_bazel_without_claiming_fails_before_the_spawn() {
         for call in [

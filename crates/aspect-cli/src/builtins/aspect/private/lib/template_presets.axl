@@ -54,9 +54,11 @@ the path winning. A task with its own preset starts from that preset alone,
 without `templates`; `task_templates` beat both. A `template_preset` typed on
 the command line applies to every task, over `task_presets`. `config`
 validates the four when the feature loads and `resolve` applies them per
-task. A key that names no task here is inert, so a user-level config can name
-tasks only some repos have; `config` warns about one that is a near miss of a
-task here (`"tset"`), by the rule the `Console` feature applies. The comment
+task. An unknown slot or preset fails, naming the near miss when there is
+one (`did_you_mean` in `text.axl`). A key that names no task here is inert,
+so a user-level config can name tasks only some repos have; `config` warns
+about one that is a near miss of a task here (`"tset"`), by the rule the
+`Console` feature applies. The comment
 surfaces aggregate every task, so they take only `template_preset` and
 `templates`, which `comment_body` validates.
 
@@ -80,7 +82,7 @@ load(
 load("./environment.axl", "warn")
 load("./task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 load("./template_preset_default.axl", "DEFAULT_TEMPLATES")
-load("./text.axl", "edit_distance")
+load("./text.axl", "closest", "did_you_mean")
 
 TemplatePreset = record(
     name = field(str),
@@ -205,7 +207,7 @@ _NAMES = _validate(_PRESETS, _DEFAULT)
 def _templates(name: str) -> dict:
     """The template overrides `name` contributes, shaped as a `resolve_templates` layer."""
     if name not in _PRESETS:
-        fail("unknown template preset {!r}; known presets: {}".format(name, ", ".join(_NAMES)))
+        fail("unknown template preset {!r}; known presets: {}{}".format(name, ", ".join(_NAMES), did_you_mean(name, _NAMES)))
     return _PRESETS[name].templates
 
 def _command_path(task) -> str:
@@ -258,10 +260,11 @@ def _slot_map_errors(label: str, value) -> list[str]:
     errors = []
     for slot in sorted(value.keys(), key = _key_order):
         if slot not in RENDERER_TEMPLATE_SLOTS:
-            errors.append("{}: {!r} is not a slot; expected one of {}".format(
+            errors.append("{}: {!r} is not a slot; expected one of {}{}".format(
                 label,
                 slot,
                 ", ".join(RENDERER_TEMPLATE_SLOTS),
+                did_you_mean(slot, RENDERER_TEMPLATE_SLOTS),
             ))
         else:
             errors.extend(_template_errors("{}[{!r}]".format(label, slot), value[slot], slot))
@@ -350,11 +353,12 @@ def _config_errors(feature: str, args) -> list[str]:
         errors.extend(_task_key_errors(label, key))
         name = task_presets[key]
         if type(name) != "string" or name not in _PRESETS:
-            errors.append("{}[{!r}]: unknown template preset {!r}; known presets: {}".format(
+            errors.append("{}[{!r}]: unknown template preset {!r}; known presets: {}{}".format(
                 label,
                 key,
                 name,
                 ", ".join(_NAMES),
+                did_you_mean(name, _NAMES),
             ))
     task_templates = _dict_arg(errors, feature + " task_templates", args.task_templates)
     for key in sorted(task_templates.keys(), key = _key_order):
@@ -364,29 +368,15 @@ def _config_errors(feature: str, args) -> list[str]:
 
 def _closest_task_key(key: str, task_paths: list[str]) -> str:
     """The task key `key` is most likely a typo of, given the command path of
-    every task here (`worktree add`), or "".
-
-    A task key is a kind (a path's last word) or a command path. `key` is a
-    near miss when it is no task key itself, is at least three characters (so
-    a short key isn't a couple of edits from everything), and is within two
-    edits of a task key while changing at most half of it. The fewest edits
-    win, then the first key in sorted order: the rule `Console` applies in
+    every task here (`worktree add`), or "": `closest` over every task key, a
+    kind (a path's last word) or a command path. The rule `Console` applies in
     `crates/axl-runtime/src/console.rs`.
     """
     known = {}
     for path in task_paths:
         known[path] = True
         known[path.split(" ")[-1]] = True
-    if key in known or len(key) < 3:
-        return ""
-    best = ""
-    best_distance = 3
-    for candidate in sorted(known.keys()):
-        distance = edit_distance(key, candidate)
-        if distance < best_distance and 2 * distance <= len(candidate):
-            best = candidate
-            best_distance = distance
-    return best
+    return closest(key, known.keys())
 
 def _near_miss_warnings(feature: str, args, task_paths: list[str]) -> list[str]:
     """A warning for each `task_presets` / `task_templates` key that is a near

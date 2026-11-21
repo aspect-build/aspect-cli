@@ -3,7 +3,9 @@
 //! Used as `ctx.tasks` in ConfigContext (mutable) and exposed for iteration.
 //! Supports `ctx.tasks["group/name"]` for read access and `ctx.tasks.add(task)`
 //! for adding tasks dynamically from `config.axl`. The values themselves carry
-//! their own interior mutability for config.axl overrides.
+//! their own interior mutability for config.axl overrides. A key naming no
+//! task fails, naming the task path it is most likely a typo of
+//! ([`crate::suggest`]).
 
 use std::cell::RefCell;
 use std::fmt::{self, Display};
@@ -42,6 +44,23 @@ fn task_key_of(value: Value<'_>) -> Option<String> {
             .downcast_ref::<FrozenTask>()
             .map(|t| task_key(&t.group, &t.kind))
     }
+}
+
+/// `ctx.tasks[key]`, from `values`, or the error naming `key` and the task
+/// path it is most likely a typo of.
+fn lookup<'v>(key: &str, values: impl Iterator<Item = Value<'v>>) -> starlark::Result<Value<'v>> {
+    let mut keys = Vec::new();
+    for v in values {
+        let path = task_key_of(v);
+        if path.as_deref() == Some(key) {
+            return Ok(v);
+        }
+        keys.extend(path);
+    }
+    Err(starlark::Error::new_other(anyhow!(
+        "no task found at path {key:?}{}",
+        crate::suggest::did_you_mean(key, keys.iter().map(String::as_str))
+    )))
 }
 
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
@@ -119,15 +138,7 @@ impl<'v> StarlarkValue<'v> for TaskMap<'v> {
                 index.get_type()
             ))
         })?;
-        for v in self.entries.borrow().iter() {
-            if task_key_of(*v).as_deref() == Some(key) {
-                return Ok(*v);
-            }
-        }
-        Err(starlark::Error::new_other(anyhow!(
-            "no task found at path {:?}",
-            key
-        )))
+        lookup(key, self.entries.borrow().iter().copied())
     }
 
     fn get_methods() -> Option<&'static Methods> {
@@ -234,14 +245,6 @@ impl<'v> StarlarkValue<'v> for FrozenTaskMap {
                 index.get_type()
             ))
         })?;
-        for fv in self.entries.iter() {
-            if task_key_of(fv.to_value()).as_deref() == Some(key) {
-                return Ok(fv.to_value());
-            }
-        }
-        Err(starlark::Error::new_other(anyhow!(
-            "no task found at path {:?}",
-            key
-        )))
+        lookup(key, self.entries.iter().map(|fv| fv.to_value()))
     }
 }

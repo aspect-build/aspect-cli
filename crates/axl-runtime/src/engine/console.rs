@@ -202,8 +202,12 @@ fn console_methods(registry: &mut MethodsBuilder) {
         #[starlark(kwargs)] context: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<String> {
         let console = downcast(this)?;
-        let slot = Slot::from_name(slot)
-            .ok_or_else(|| anyhow::anyhow!("console.render: unknown slot {slot:?}"))?;
+        let slot = Slot::from_name(slot).ok_or_else(|| {
+            anyhow::anyhow!(
+                "console.render: unknown slot {slot:?}{}",
+                crate::suggest::did_you_mean(slot, Slot::ALL.map(Slot::name))
+            )
+        })?;
         let mut json = serde_json::Map::new();
         for (k, v) in context {
             json.insert(k, v.to_json_value()?);
@@ -469,7 +473,7 @@ check = task(implementation = _impl)
 "#;
         let err = crate::test::eval(code).run_task(0).unwrap_err();
         assert!(
-            format!("{err:?}").contains("unknown slot \"verdcit\""),
+            format!("{err:?}").contains(r#"unknown slot "verdcit"; did you mean "verdict"?"#),
             "{err:?}"
         );
     }

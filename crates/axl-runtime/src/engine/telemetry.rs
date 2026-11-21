@@ -199,8 +199,9 @@ impl FileFormat {
             "compact" => Ok(FileFormat::Compact),
             "jsonl" | "json" => Ok(FileFormat::Jsonl),
             other => Err(anyhow::anyhow!(
-                "unknown file format {:?} (expected \"compact\" or \"jsonl\")",
-                other
+                "unknown file format {:?} (expected \"compact\" or \"jsonl\"){}",
+                other,
+                crate::suggest::did_you_mean(other, ["compact", "jsonl"])
             )),
         }
     }
@@ -248,7 +249,12 @@ impl SourcePolicy {
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, p)| *p)
-            .ok_or_else(|| anyhow::anyhow!("expected one of auto, always, off; got {name:?}"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "expected one of auto, always, off; got {name:?}{}",
+                    crate::suggest::did_you_mean(name, Self::NAMES.map(|(n, _)| n))
+                )
+            })
     }
 
     pub fn name(self) -> &'static str {
@@ -882,6 +888,12 @@ mod tests {
             assert_eq!(policy.name(), name);
         }
         assert!(SourcePolicy::parse("on").is_err());
+        let err = SourcePolicy::parse("alwyas").unwrap_err().to_string();
+        assert!(err.ends_with(r#"; did you mean "always"?"#), "{err}");
+        let err = FileFormat::parse("compcat").unwrap_err().to_string();
+        assert!(err.ends_with(r#"; did you mean "compact"?"#), "{err}");
+        let err = FileFormat::parse("protobuf").unwrap_err().to_string();
+        assert!(!err.contains("did you mean"), "{err}");
         let sources = TelemetrySources::default();
         assert_eq!(sources.build_events(), SourcePolicy::Auto);
         assert_eq!(sources.execution_log(), SourcePolicy::Auto);

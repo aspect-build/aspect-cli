@@ -862,6 +862,23 @@ def _assert_task_args():
             fail("no error contains %r in:\n  %s" % (want, "\n  ".join(errors)))
     _eq("twelve problems", len(errors), 12)
 
+    # A closed set names its near miss: a slot, a preset.
+    errors = template_presets.config_errors("F", _args(
+        templates = {"sumary": "S", "ttl": "T"},
+        task_presets = {"lint": "defualt", "test": "loud", "build": "fl"},
+        task_templates = {"build": {"detail": "D"}},
+    ))
+    for want in [
+        """F templates: "sumary" is not a slot; expected one of details, summary, title; did you mean "summary"?""",
+        """F templates: "ttl" is not a slot; expected one of details, summary, title; did you mean "title"?""",
+        """F task_presets["lint"]: unknown template preset "defualt"; known presets: default, full; did you mean "default"?""",
+        """F task_presets["test"]: unknown template preset "loud"; known presets: default, full""",
+        """F task_presets["build"]: unknown template preset "fl"; known presets: default, full""",
+        """F task_templates["build"]: "detail" is not a slot; expected one of details, summary, title; did you mean "details"?""",
+    ]:
+        if want not in errors:
+            fail("no error is %r in:\n  %s" % (want, "\n  ".join(errors)))
+
     # Blocks in `templates` get one error spelling out their `task_templates`:
     # a renderer block reaches each built-in kind it draws, and a task's own
     # block overlays it.

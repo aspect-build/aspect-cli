@@ -24,7 +24,9 @@
 //!
 //! A key that names no task here is inert, so a user-level `config.axl` can
 //! name tasks only some repos have; one that is a near miss of a task here
-//! (`tset`) gets a warning naming the task it likely meant.
+//! (`tset`) gets a warning naming the task it likely meant. Slots and presets
+//! are closed sets, so an unknown one fails, naming the near miss when there
+//! is one (see [`crate::suggest`]).
 //!
 //! Two rules keep a template from costing the reader the task's outcome or the
 //! log's structure:
@@ -50,6 +52,7 @@ use std::sync::Mutex;
 use minijinja::{Environment, Value as JinjaValue};
 
 use crate::engine::store::Env;
+use crate::suggest;
 
 /// One line-shaped piece of the terminal surface.
 ///
@@ -122,8 +125,9 @@ impl Slot {
     fn parse(name: &str, at: &str) -> Result<Slot, String> {
         Slot::from_name(name).ok_or_else(|| {
             format!(
-                "Console {at}: {name:?} is not a slot; expected one of {}",
-                Slot::ALL.map(Slot::name).join(", ")
+                "Console {at}: {name:?} is not a slot; expected one of {}{}",
+                Slot::ALL.map(Slot::name).join(", "),
+                suggest::did_you_mean(name, Slot::ALL.map(Slot::name)),
             )
         })
     }
@@ -608,56 +612,24 @@ fn task_key(key: &str, label: &str) -> Result<(), String> {
 }
 
 /// The task key `key` is most likely a typo of, given the command path of
-/// every task here (`worktree add`), or `None`.
-///
-/// A task key is a kind (a path's last word) or a command path. `key` is a
-/// near miss when it is no task key itself, is at least three characters (so
-/// a short key isn't a couple of edits from everything), and is within two
-/// edits of a task key while changing at most half of it. The fewest edits
-/// win, then the first key in sorted order. `template_presets.axl` applies
-/// the same rule on the CI surfaces.
+/// every task here (`worktree add`), or `None`: [`suggest::closest`] over
+/// every task key, a kind (a path's last word) or a command path.
+/// `template_presets.axl` applies the same rule on the CI surfaces.
 fn closest_task_key(key: &str, task_paths: &[String]) -> Option<String> {
     let known: BTreeSet<&str> = task_paths
         .iter()
         .flat_map(|path| [path.as_str(), path.rsplit(' ').next().unwrap_or(path)])
         .collect();
-    if known.contains(key) || key.chars().count() < 3 {
-        return None;
-    }
-    known
-        .into_iter()
-        .filter_map(|candidate| {
-            let distance = edit_distance(key, candidate);
-            (distance <= 2 && 2 * distance <= candidate.chars().count())
-                .then_some((distance, candidate))
-        })
-        .min()
-        .map(|(_, candidate)| candidate.to_owned())
-}
-
-/// Levenshtein distance between `a` and `b`, in characters.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut current = vec![i + 1; b.len() + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != *cb);
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(previous[j] + cost);
-        }
-        previous = current;
-    }
-    previous[b.len()]
+    suggest::closest(key, known).map(str::to_owned)
 }
 
 /// The built-in preset `name`, or an error naming where it was asked for.
 fn preset_named(name: &str, at: &str) -> Result<&'static Preset, String> {
     PRESETS.into_iter().find(|p| p.name == name).ok_or_else(|| {
         format!(
-            "Console {at}: unknown template preset {name:?}; expected one of {}",
-            PRESETS.map(|p| p.name).join(", ")
+            "Console {at}: unknown template preset {name:?}; expected one of {}{}",
+            PRESETS.map(|p| p.name).join(", "),
+            suggest::did_you_mean(name, PRESETS.map(|p| p.name)),
         )
     })
 }
@@ -1123,6 +1095,27 @@ mod tests {
     }
 
     #[test]
+    fn a_near_miss_slot_or_preset_is_suggested() {
+        let slot = |name: &str| Overrides::default().set(name, "x".into()).unwrap_err();
+        assert!(slot("verdcit").ends_with(r#"; did you mean "verdict"?"#));
+        assert!(
+            slot("summary").ends_with("section"),
+            "far miss: {}",
+            slot("summary")
+        );
+        assert!(!slot("ph").contains("did you mean"));
+
+        let preset = |name: &str| {
+            Console::resolve(name, &Overrides::default(), task(), Host::default())
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert!(preset("plian").ends_with(r#"; did you mean "plain"?"#));
+        assert!(!preset("loud").contains("did you mean"));
+        assert!(!preset("fl").contains("did you mean"));
+    }
+
+    #[test]
     fn every_preset_template_compiles_and_the_default_is_listed() {
         let env = Environment::new();
         for p in PRESETS {
@@ -1150,20 +1143,6 @@ mod tests {
         ]
         .map(String::from)
         .to_vec()
-    }
-
-    /// The cases `text_test.axl` checks AXL's `edit_distance` on.
-    #[test]
-    fn edit_distance_counts_characters() {
-        for (a, b, expected) in [
-            ("test", "test", 0),
-            ("lnt", "lint", 1),
-            ("tset", "test", 2),
-            ("", "add", 3),
-            ("tést", "test", 1),
-        ] {
-            assert_eq!(edit_distance(a, b), expected, "{a} → {b}");
-        }
     }
 
     #[test]

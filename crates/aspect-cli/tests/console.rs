@@ -293,7 +293,7 @@ fn a_misnamed_slot_is_refused() {
     let err = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(
-        err.contains(r#"task_templates["check"]: "verdcit" is not a slot"#),
+        err.contains(r#"task_templates["check"]: "verdcit" is not a slot; expected one of banner, header, phase, progress, verdict, section; did you mean "verdict"?"#),
         "{err}"
     );
 }

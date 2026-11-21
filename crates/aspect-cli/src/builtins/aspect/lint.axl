@@ -36,7 +36,7 @@ load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "ac
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
-load("./private/lib/text.axl", "pluralize")
+load("./private/lib/text.axl", "did_you_mean", "pluralize")
 load("./private/lib/tips.axl", "tips")
 
 # Poll budget for pending lint files after build.wait(): remote downloads are
@@ -330,8 +330,8 @@ def validate_findings_destination(value):
     """Return value if it's a recognised findings_destination, else fail."""
     if value not in FINDINGS_DESTINATIONS:
         fail(
-            "lint: invalid LintTrait.findings_destination=%r — expected one of %s" %
-            (value, ", ".join(FINDINGS_DESTINATIONS)),
+            "lint: invalid LintTrait.findings_destination=%r - expected one of %s%s" %
+            (value, ", ".join(FINDINGS_DESTINATIONS), did_you_mean(value, FINDINGS_DESTINATIONS)),
         )
     return value
 

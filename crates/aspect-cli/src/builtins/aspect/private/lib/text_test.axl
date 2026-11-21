@@ -6,6 +6,8 @@ Run with:
 
 load(
     "./text.axl",
+    "closest",
+    "did_you_mean",
     "display_width",
     "edit_distance",
     "format_bytes_iec",
@@ -70,6 +72,35 @@ def _test_edit_distance(ctx):
     _eq("from empty", edit_distance("", "add"), 3)
     _eq("counts characters", edit_distance("tést", "test"), 1)
 
+# The candidates and cases `crates/axl-runtime/src/suggest.rs` checks Rust's
+# `closest` on.
+_CANDIDATES = ["build", "test", "lint", "format", "buildifier", "deploy", "worktree add", "worktree release", "add", "release"]
+
+def _test_closest(ctx):
+    for key, expected in [
+        ("tset", "test"),
+        ("bulid", "build"),
+        ("lnt", "lint"),
+        ("worktree ad", "worktree add"),
+        ("relase", "release"),
+        ("buildifer", "buildifier"),
+        ("deplyo", "deploy"),
+        ("tost", "test"),
+        ("test", ""),
+        ("add", ""),
+        ("worktree add", ""),
+        ("release-notes", ""),
+        ("fmt", ""),
+        ("abc", ""),
+        ("ad", ""),
+        ("tt", ""),
+    ]:
+        _eq("closest to %r" % key, closest(key, _CANDIDATES), expected)
+    _eq("ties go to sorted order", closest("bat", ["cat", "bar"]), "bar")
+    _eq("suffix", did_you_mean("tset", _CANDIDATES), '; did you mean "test"?')
+    _eq("far miss, no suffix", did_you_mean("release-notes", _CANDIDATES), "")
+    _eq("no string, no suffix", did_you_mean(3, _CANDIDATES), "")
+
 def _test_unsafe_characters(ctx):
     """What a terminal acts on or hides is caught, and shown escaped."""
     _eq("plain text is safe", has_unsafe_chars("sess-1 é ﾃｽﾄ"), False)
@@ -94,6 +125,7 @@ _UNIT_TESTS = [
     _test_format_numbers,
     _test_strings,
     _test_edit_distance,
+    _test_closest,
 ]
 
 def _impl(ctx):

@@ -156,6 +156,21 @@ impl<'v> StarlarkValue<'v> for Arguments<'v> {
         self.args.borrow().get(key).cloned()
     }
 
+    /// The names Starlark suggests from when an attribute read misses: the
+    /// args set here and, on the config-time store, every declared one.
+    fn dir_attr(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.args.borrow().keys().cloned().collect();
+        if let Some(valid) = &self.valid_keys {
+            names.extend(
+                valid
+                    .keys()
+                    .filter(|k| !self.args.borrow().contains_key(*k))
+                    .cloned(),
+            );
+        }
+        names
+    }
+
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
         if let Some(valid) = &self.valid_keys {
             if !valid.contains_key(attribute) {
@@ -167,7 +182,8 @@ impl<'v> StarlarkValue<'v> for Arguments<'v> {
                     names.join(", ")
                 };
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "no such arg `{attribute}`; valid args are: {known}"
+                    "no such arg `{attribute}`; valid args are: {known}{}",
+                    crate::suggest::did_you_mean(attribute, names)
                 )));
             }
         }
@@ -236,6 +252,10 @@ impl<'v> StarlarkValue<'v> for FrozenArguments {
 
     fn get_attr(&self, key: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         self.args.get(key).map(|v| v.to_value())
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        self.args.keys().cloned().collect()
     }
 
     fn get_methods() -> Option<&'static Methods> {
@@ -378,6 +398,12 @@ mod tests {
                 "names the bad key: {msg}"
             );
             assert!(msg.contains("warn_not_runnable"), "lists valid args: {msg}");
+            assert!(
+                msg.ends_with(r#"; did you mean "warn_not_runnable"?"#),
+                "suggests the near miss: {msg}"
+            );
+            let far = args.set_attr("verbose", v).unwrap_err().to_string();
+            assert!(!far.contains("did you mean"), "{far}");
             assert!(
                 !args.contains_key("warm_not_runnable"),
                 "junk key not written"
