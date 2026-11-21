@@ -288,11 +288,14 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     None => {
                         let commands = describe_commands(&full);
                         let want = name.trim().trim_start_matches("aspect ").trim();
-                        let closest = suggest::closest(want, commands.iter().copied())
-                            .map(|c| format!("; did you mean {c:?}?"))
-                            .unwrap_or_else(|| ".".to_owned());
                         errln!(
-                            "error: no task {name:?}{closest} Run `aspect describe` for the list of commands."
+                            "error: no task {name:?}{}",
+                            suggest::did_you_mean_then(
+                                want,
+                                commands.iter().copied(),
+                                ". ",
+                                "Run `aspect describe` for the list of commands."
+                            )
                         );
                         return ExitCode::FAILURE;
                     }
@@ -342,9 +345,13 @@ impl<'a, 'v> Cmd<'a, 'v> {
                         ("", "")
                     };
                     errln!(
-                        "{red}error:{reset} unknown feature {name:?}. Valid features: {}{}",
-                        valid.join(", "),
-                        suggest::did_you_mean(name, valid.iter().map(String::as_str))
+                        "{red}error:{reset} unknown feature {name:?}{}",
+                        suggest::did_you_mean_then(
+                            name,
+                            valid.iter().map(String::as_str),
+                            ". ",
+                            &format!("Valid features: {}", valid.join(", "))
+                        )
                     );
                     ExitCode::from(2)
                 }

@@ -21,7 +21,8 @@ check = task(
 "#;
 
 /// Run `aspect <args>` in a scratch workspace with `tasks.axl` and a
-/// `config.axl` whose `config(ctx)` runs `config_body`.
+/// `config.axl` whose `config(ctx)` runs `config_body`, under an empty `$HOME`
+/// so no user-level `config.axl` applies.
 fn run(config_body: &str, args: &[&str]) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
@@ -48,6 +49,7 @@ def config(ctx):
         .env_clear()
         .envs(base_env())
         .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
+        .env("HOME", dir.path().join("home"))
         .output()
         .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")));
     dir.close().expect("removing temp dir");
@@ -83,7 +85,7 @@ fn a_task_path_near_miss_is_suggested() {
 fn an_arg_near_miss_is_suggested() {
     assert_fails_with(
         &run(r#"ctx.tasks["check"].args.mdoe = "y""#, &["check"]),
-        r#"no such arg `mdoe`; valid args are: mode; did you mean "mode"?"#,
+        r#"no such arg `mdoe`; did you mean "mode"? Valid args are: mode"#,
     );
     assert_fails_with(
         &run(
@@ -106,7 +108,10 @@ fn an_arg_near_miss_is_suggested() {
 fn a_feature_near_miss_is_suggested() {
     let output = run("", &["feature", "consle"]);
     assert_eq!(output.status.code(), Some(2));
-    assert_fails_with(&output, r#"; did you mean "console"?"#);
+    assert_fails_with(
+        &output,
+        r#"unknown feature "consle"; did you mean "console"? Valid features: "#,
+    );
     assert_fails_with(
         &run("", &["feature", "nonesuch"]),
         r#"unknown feature "nonesuch". Valid features: "#,
@@ -134,7 +139,7 @@ fn an_unknown_status_badge_fails_when_the_feature_loads() {
                 &["check"],
             ),
             &format!(
-                r#"{feature} status_badges: "pased" is not a badge; expected one of aborted, failed, passed, running, warning; did you mean "passed"?"#
+                r#"{feature} status_badges: "pased" is not a badge; did you mean "passed"? Expected one of aborted, failed, passed, running, warning"#
             ),
         );
     }

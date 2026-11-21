@@ -4,8 +4,10 @@
 //!
 //! - **Closed sets**, where every valid name is known: features, task paths
 //!   (`ctx.tasks["build"]`), args, slots, presets, `status_badges` keys. A
-//!   wrong name fails, and the error ends with `; did you mean "X"?` when
-//!   [`closest`] finds a near miss. A far miss keeps the error as it was.
+//!   wrong name fails, and when [`closest`] finds a near miss the error
+//!   names it right after the wrong name, `; did you mean "X"?`, ahead of any
+//!   list of the valid names ([`did_you_mean_then`]). A far miss keeps the
+//!   error as it was.
 //! - **Open sets**, where an unknown name is allowed on purpose: only the task
 //!   keys of `task_presets` / `task_templates`, since a user-level
 //!   `config.axl` can name tasks only some repos define. An unknown key is
@@ -54,6 +56,28 @@ where
     closest(key, candidates)
         .map(|c| format!("; did you mean {c:?}?"))
         .unwrap_or_default()
+}
+
+/// The part of a closed-set error after the wrong `key`: `{sep}{rest}` as it
+/// was, or, for a near miss, `; did you mean "X"? {Rest}`, so the suggestion
+/// is read before a long `rest` such as the list of valid names.
+pub fn did_you_mean_then<'a, I>(key: &str, candidates: I, sep: &str, rest: &str) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    match closest(key, candidates) {
+        Some(c) => {
+            let mut chars = rest.chars();
+            let rest: String = chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+            format!("; did you mean {c:?}? {rest}")
+                .trim_end()
+                .to_owned()
+        }
+        None => format!("{sep}{rest}"),
+    }
 }
 
 /// Levenshtein distance between `a` and `b`, in characters.
@@ -144,5 +168,20 @@ mod tests {
         );
         assert_eq!(did_you_mean("release-notes", CANDIDATES), "");
         assert_eq!(did_you_mean("tt", CANDIDATES), "");
+    }
+
+    #[test]
+    fn the_suggestion_goes_before_the_rest() {
+        let then = |key| did_you_mean_then(key, CANDIDATES, "; ", "expected one of a, b");
+        assert_eq!(
+            then("tset"),
+            r#"; did you mean "test"? Expected one of a, b"#
+        );
+        assert_eq!(then("release-notes"), "; expected one of a, b");
+        assert_eq!(then("tt"), "; expected one of a, b");
+        assert_eq!(
+            did_you_mean_then("tset", CANDIDATES, ". ", ""),
+            r#"; did you mean "test"?"#
+        );
     }
 }

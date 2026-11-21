@@ -1316,9 +1316,14 @@ impl std::str::FromStr for TimingMode {
             "short" => Ok(TimingMode::Short),
             "detailed" => Ok(TimingMode::Detailed),
             other => Err(format!(
-                "invalid timing mode {:?}; expected one of: none, total, short, detailed{}",
+                "invalid timing mode {:?}{}",
                 other,
-                crate::suggest::did_you_mean(other, ["none", "total", "short", "detailed"])
+                crate::suggest::did_you_mean_then(
+                    other,
+                    ["none", "total", "short", "detailed"],
+                    "; ",
+                    "expected one of: none, total, short, detailed"
+                )
             )),
         }
     }
@@ -1507,6 +1512,19 @@ mod tests {
     use starlark::values::ValueLike;
     use std::time::Duration;
 
+    #[test]
+    fn a_near_miss_timing_mode_is_suggested() {
+        let err = "shrot".parse::<TimingMode>().unwrap_err();
+        assert!(
+            err.ends_with(
+                r#"; did you mean "short"? Expected one of: none, total, short, detailed"#
+            ),
+            "{err}"
+        );
+        let err = "verbose".parse::<TimingMode>().unwrap_err();
+        assert!(!err.contains("did you mean"), "{err}");
+    }
+
     /// A task declaring an `args.passthrough()` bucket promises to act on what
     /// the CLI routes into it. These four pin the whole contract: the task gets
     /// to run first (it may want to inspect the flags), a claim satisfies the
@@ -1515,14 +1533,6 @@ mod tests {
     /// the flags are missing from the command line we would run, and an
     /// unclaimed startup option means we would even be talking to the wrong
     /// server. Finding that out after a build costs the whole build.
-    #[test]
-    fn a_near_miss_timing_mode_is_suggested() {
-        let err = "shrot".parse::<TimingMode>().unwrap_err();
-        assert!(err.ends_with(r#"; did you mean "short"?"#), "{err}");
-        let err = "verbose".parse::<TimingMode>().unwrap_err();
-        assert!(!err.contains("did you mean"), "{err}");
-    }
-
     #[test]
     fn reaching_bazel_without_claiming_fails_before_the_spawn() {
         for call in [

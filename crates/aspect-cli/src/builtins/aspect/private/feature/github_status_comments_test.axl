@@ -617,7 +617,7 @@ def _check_status_badges():
     _eq(
         "a near miss is suggested",
         status_badge_errors("C", {"pased": "x"}),
-        ['C status_badges: "pased" is not a badge; expected one of aborted, failed, passed, running, warning; did you mean "passed"?'],
+        ['C status_badges: "pased" is not a badge; did you mean "passed"? Expected one of aborted, failed, passed, running, warning'],
     )
     _eq(
         "a far miss is refused alone",

@@ -8,6 +8,7 @@ load(
     "./text.axl",
     "closest",
     "did_you_mean",
+    "did_you_mean_then",
     "display_width",
     "edit_distance",
     "format_bytes_iec",
@@ -100,6 +101,11 @@ def _test_closest(ctx):
     _eq("suffix", did_you_mean("tset", _CANDIDATES), '; did you mean "test"?')
     _eq("far miss, no suffix", did_you_mean("release-notes", _CANDIDATES), "")
     _eq("no string, no suffix", did_you_mean(3, _CANDIDATES), "")
+    _eq("suggestion first", did_you_mean_then("tset", _CANDIDATES, "; ", "expected one of a, b"), '; did you mean "test"? Expected one of a, b')
+    _eq("far miss keeps the rest", did_you_mean_then("release-notes", _CANDIDATES, "; ", "expected one of a, b"), "; expected one of a, b")
+    _eq("short key keeps the rest", did_you_mean_then("tt", _CANDIDATES, "; ", "expected one of a, b"), "; expected one of a, b")
+    _eq("nothing after", did_you_mean_then("tset", _CANDIDATES, ". ", ""), '; did you mean "test"?')
+    _eq("no string keeps the rest", did_you_mean_then(3, _CANDIDATES, "; ", "x"), "; x")
 
 def _test_unsafe_characters(ctx):
     """What a terminal acts on or hides is caught, and shown escaped."""

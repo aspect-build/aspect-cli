@@ -74,7 +74,8 @@ const EVENTS: &str = "event:running:False\nevent:running:False\n";
 
 /// Run `aspect <args>` in a scratch workspace with `tasks.axl` and a
 /// `config.axl` of `OBSERVE` followed by `config_body` (statements run inside
-/// `config(ctx)`).
+/// `config(ctx)`), under an empty `$HOME` so no user-level `config.axl`
+/// applies.
 fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
@@ -94,7 +95,8 @@ fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
         .current_dir(dir.path())
         .env_clear()
         .envs(base_env())
-        .env("ASPECT_CLI_CACHE", dir.path().join("cache"));
+        .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
+        .env("HOME", dir.path().join("home"));
     if buildkite {
         cmd.env("BUILDKITE", "true");
     }
@@ -293,7 +295,7 @@ fn a_misnamed_slot_is_refused() {
     let err = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(
-        err.contains(r#"task_templates["check"]: "verdcit" is not a slot; expected one of banner, header, phase, progress, verdict, section; did you mean "verdict"?"#),
+        err.contains(r#"task_templates["check"]: "verdcit" is not a slot; did you mean "verdict"? Expected one of banner, header, phase, progress, verdict, section"#),
         "{err}"
     );
 }

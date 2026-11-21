@@ -869,12 +869,12 @@ def _assert_task_args():
         task_templates = {"build": {"detail": "D"}},
     ))
     for want in [
-        """F templates: "sumary" is not a slot; expected one of details, summary, title; did you mean "summary"?""",
-        """F templates: "ttl" is not a slot; expected one of details, summary, title; did you mean "title"?""",
-        """F task_presets["lint"]: unknown template preset "defualt"; known presets: default, full; did you mean "default"?""",
+        """F templates: "sumary" is not a slot; did you mean "summary"? Expected one of details, summary, title""",
+        """F templates: "ttl" is not a slot; did you mean "title"? Expected one of details, summary, title""",
+        """F task_presets["lint"]: unknown template preset "defualt"; did you mean "default"? Known presets: default, full""",
         """F task_presets["test"]: unknown template preset "loud"; known presets: default, full""",
         """F task_presets["build"]: unknown template preset "fl"; known presets: default, full""",
-        """F task_templates["build"]: "detail" is not a slot; expected one of details, summary, title; did you mean "details"?""",
+        """F task_templates["build"]: "detail" is not a slot; did you mean "details"? Expected one of details, summary, title""",
     ]:
         if want not in errors:
             fail("no error is %r in:\n  %s" % (want, "\n  ".join(errors)))

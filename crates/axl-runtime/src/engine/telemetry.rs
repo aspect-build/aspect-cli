@@ -199,9 +199,14 @@ impl FileFormat {
             "compact" => Ok(FileFormat::Compact),
             "jsonl" | "json" => Ok(FileFormat::Jsonl),
             other => Err(anyhow::anyhow!(
-                "unknown file format {:?} (expected \"compact\" or \"jsonl\"){}",
+                "unknown file format {:?}{}",
                 other,
-                crate::suggest::did_you_mean(other, ["compact", "jsonl"])
+                crate::suggest::did_you_mean_then(
+                    other,
+                    ["compact", "jsonl"],
+                    " ",
+                    "(expected \"compact\" or \"jsonl\")"
+                )
             )),
         }
     }
@@ -619,8 +624,14 @@ fn parse_signals(list: UnpackList<String>) -> anyhow::Result<Signals> {
             "metrics" => s.metrics = true,
             other => {
                 return Err(anyhow::anyhow!(
-                    "unknown signal {:?} (expected \"traces\", \"logs\", or \"metrics\")",
-                    other
+                    "unknown signal {:?}{}",
+                    other,
+                    crate::suggest::did_you_mean_then(
+                        other,
+                        ["traces", "logs", "metrics"],
+                        " ",
+                        "(expected \"traces\", \"logs\", or \"metrics\")"
+                    )
                 ));
             }
         }
@@ -891,9 +902,25 @@ mod tests {
         let err = SourcePolicy::parse("alwyas").unwrap_err().to_string();
         assert!(err.ends_with(r#"; did you mean "always"?"#), "{err}");
         let err = FileFormat::parse("compcat").unwrap_err().to_string();
-        assert!(err.ends_with(r#"; did you mean "compact"?"#), "{err}");
+        assert!(
+            err.ends_with(r#""compcat"; did you mean "compact"? (expected "compact" or "jsonl")"#),
+            "{err}"
+        );
         let err = FileFormat::parse("protobuf").unwrap_err().to_string();
         assert!(!err.contains("did you mean"), "{err}");
+        let signals = |name: &str| {
+            parse_signals(UnpackList {
+                items: vec![name.to_owned()],
+            })
+            .unwrap_err()
+            .to_string()
+        };
+        let err = signals("trace");
+        assert!(
+            err.starts_with(r#"unknown signal "trace"; did you mean "traces"? (expected "#),
+            "{err}"
+        );
+        assert!(!signals("spans").contains("did you mean"));
         let sources = TelemetrySources::default();
         assert_eq!(sources.build_events(), SourcePolicy::Auto);
         assert_eq!(sources.execution_log(), SourcePolicy::Auto);

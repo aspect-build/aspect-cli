@@ -125,9 +125,13 @@ impl Slot {
     fn parse(name: &str, at: &str) -> Result<Slot, String> {
         Slot::from_name(name).ok_or_else(|| {
             format!(
-                "Console {at}: {name:?} is not a slot; expected one of {}{}",
-                Slot::ALL.map(Slot::name).join(", "),
-                suggest::did_you_mean(name, Slot::ALL.map(Slot::name)),
+                "Console {at}: {name:?} is not a slot{}",
+                suggest::did_you_mean_then(
+                    name,
+                    Slot::ALL.map(Slot::name),
+                    "; ",
+                    &format!("expected one of {}", Slot::ALL.map(Slot::name).join(", ")),
+                ),
             )
         })
     }
@@ -627,9 +631,13 @@ fn closest_task_key(key: &str, task_paths: &[String]) -> Option<String> {
 fn preset_named(name: &str, at: &str) -> Result<&'static Preset, String> {
     PRESETS.into_iter().find(|p| p.name == name).ok_or_else(|| {
         format!(
-            "Console {at}: unknown template preset {name:?}; expected one of {}{}",
-            PRESETS.map(|p| p.name).join(", "),
-            suggest::did_you_mean(name, PRESETS.map(|p| p.name)),
+            "Console {at}: unknown template preset {name:?}{}",
+            suggest::did_you_mean_then(
+                name,
+                PRESETS.map(|p| p.name),
+                "; ",
+                &format!("expected one of {}", PRESETS.map(|p| p.name).join(", ")),
+            ),
         )
     })
 }
@@ -1097,7 +1105,11 @@ mod tests {
     #[test]
     fn a_near_miss_slot_or_preset_is_suggested() {
         let slot = |name: &str| Overrides::default().set(name, "x".into()).unwrap_err();
-        assert!(slot("verdcit").ends_with(r#"; did you mean "verdict"?"#));
+        assert!(
+            slot("verdcit").ends_with(r#""verdcit" is not a slot; did you mean "verdict"? Expected one of banner, header, phase, progress, verdict, section"#),
+            "{}",
+            slot("verdcit")
+        );
         assert!(
             slot("summary").ends_with("section"),
             "far miss: {}",
@@ -1110,7 +1122,7 @@ mod tests {
                 .map(|_| ())
                 .unwrap_err()
         };
-        assert!(preset("plian").ends_with(r#"; did you mean "plain"?"#));
+        assert!(preset("plian").contains(r#""plian"; did you mean "plain"? Expected one of "#));
         assert!(!preset("loud").contains("did you mean"));
         assert!(!preset("fl").contains("did you mean"));
     }

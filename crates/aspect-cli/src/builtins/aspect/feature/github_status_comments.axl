@@ -122,7 +122,7 @@ load(
 load("../private/lib/repro_commands.axl", "dedup_and_attribute", "rehydrate_commands")
 load("../private/lib/result_text.axl", "severity_for_status")
 load("../private/lib/template_presets.axl", "template_presets")
-load("../private/lib/text.axl", "did_you_mean")
+load("../private/lib/text.axl", "did_you_mean_then")
 load(
     "../private/lib/tips.axl",
     "SURFACE_GITHUB_PR_SUMMARY",
@@ -2461,11 +2461,10 @@ def _status_badge_errors(feature: str, overrides) -> list[str]:
         return ["{} status_badges must be a dict, got {!r}".format(feature, overrides)]
     badges = sorted(_DEFAULT_STATUS_BADGES.keys())
     return [
-        "{} status_badges: {!r} is not a badge; expected one of {}{}".format(
+        "{} status_badges: {!r} is not a badge{}".format(
             feature,
             key,
-            ", ".join(badges),
-            did_you_mean(key, badges),
+            did_you_mean_then(key, badges, "; ", "expected one of " + ", ".join(badges)),
         )
         for key in sorted(overrides.keys(), key = repr)
         if key not in _DEFAULT_STATUS_BADGES

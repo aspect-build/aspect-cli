@@ -182,8 +182,13 @@ impl<'v> StarlarkValue<'v> for Arguments<'v> {
                     names.join(", ")
                 };
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "no such arg `{attribute}`; valid args are: {known}{}",
-                    crate::suggest::did_you_mean(attribute, names)
+                    "no such arg `{attribute}`{}",
+                    crate::suggest::did_you_mean_then(
+                        attribute,
+                        names,
+                        "; ",
+                        &format!("valid args are: {known}")
+                    )
                 )));
             }
         }
@@ -399,7 +404,7 @@ mod tests {
             );
             assert!(msg.contains("warn_not_runnable"), "lists valid args: {msg}");
             assert!(
-                msg.ends_with(r#"; did you mean "warn_not_runnable"?"#),
+                msg.contains(r#"; did you mean "warn_not_runnable"? Valid args are: "#),
                 "suggests the near miss: {msg}"
             );
             let far = args.set_attr("verbose", v).unwrap_err().to_string();

@@ -17,9 +17,10 @@ Currently:
     rewrite what a terminal shows, text with them escaped, and the escape a
     shell reads back.
   - `edit_distance(a, b)` / `closest(key, candidates)` /
-    `did_you_mean(key, candidates)` - the near miss a mistyped name is most
-    likely a typo of, and the `; did you mean "X"?` a closed-set error ends
-    with. The rule, and which sets are closed, is documented on `closest`.
+    `did_you_mean(key, candidates)` / `did_you_mean_then(key, candidates,
+    sep, rest)` - the near miss a mistyped name is most likely a typo of, and
+    the `; did you mean "X"?` a closed-set error names it with. The rule, and
+    which sets are closed, is documented on `closest`.
 
 All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
@@ -298,8 +299,9 @@ def closest(key: str, candidates) -> str:
     as `crates/axl-runtime/src/suggest.rs`, checked on the same table.
 
     A closed set, where every valid name is known (slots, presets,
-    `status_badges` keys), fails on a wrong name and ends the error with
-    `did_you_mean`. The task keys of `task_presets` / `task_templates` are an
+    `status_badges` keys), fails on a wrong name and names the near miss
+    right after it: `did_you_mean` when nothing follows, `did_you_mean_then`
+    ahead of a list of the valid names. The task keys of `task_presets` / `task_templates` are an
     open set: a user-level config may name tasks only some repos define, so a
     near miss there warns instead.
     """
@@ -327,3 +329,14 @@ def did_you_mean(key, candidates) -> str:
         return ""
     found = closest(key, candidates)
     return "; did you mean %r?" % found if found else ""
+
+def did_you_mean_then(key, candidates, sep: str, rest: str) -> str:
+    """The part of a closed-set error after the wrong `key`: `sep + rest` as it
+    was, or, for a near miss, `; did you mean "X"? Rest`, so the suggestion is
+    read before a long `rest` such as the list of valid names."""
+    found = closest(key, candidates) if type(key) == "string" else ""
+    if not found:
+        return sep + rest
+    if not rest:
+        return "; did you mean %r?" % found
+    return "; did you mean %r? %s%s" % (found, rest[0].upper(), rest[1:])

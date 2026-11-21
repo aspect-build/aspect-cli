@@ -50,7 +50,7 @@ load(
     "record_token_budget",
 )
 load("./tar.axl", "zip_create")
-load("./text.axl", "did_you_mean", "pluralize")
+load("./text.axl", "did_you_mean_then", "pluralize")
 load(
     "./tips.axl",
     "AspectApiTokenHost",
@@ -492,7 +492,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     if roles:
         for role in roles:
             if not validate_role(role):
-                msg = "unknown role %r, valid roles: %s%s" % (role, ", ".join(VALID_ROLES), did_you_mean(role, VALID_ROLES))
+                msg = "unknown role %r%s" % (role, did_you_mean_then(role, VALID_ROLES, ", ", "valid roles: " + ", ".join(VALID_ROLES)))
                 fail(msg)
 
     explicit = _explicit_token(ctx.std.env)
