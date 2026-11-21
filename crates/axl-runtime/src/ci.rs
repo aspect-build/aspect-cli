@@ -39,6 +39,13 @@ pub(crate) fn renders_ansi(set: impl Fn(&str) -> bool) -> bool {
     ANSI_RENDERING_CI.iter().any(|var| set(var))
 }
 
+/// True on Buildkite: `BUILDKITE` set to a non-empty value, where `var` reads
+/// one environment variable. [`crate::engine::store::Env`] resolves it once
+/// per run over the process environment, or a test's snapshot.
+pub fn buildkite_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    var("BUILDKITE").is_some_and(|v| !v.is_empty())
+}
+
 // ── Auto task names from the CI job ──────────────────────────────────────────
 //
 // When `--task:name` is unset, the CLI derives one. On a recognized CI host the

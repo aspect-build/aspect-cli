@@ -11,8 +11,10 @@
 //! `tracing` (and the `ASPECT_DEBUG`-gated ad-hoc logging some subsystems keep).
 //!
 //! Both write to stderr and color by the same answer,
-//! [`crate::color::console_supports_color`], which AXL reads as
-//! `std.io.stderr.color`.
+//! [`crate::color::console_supports_color`]: the process's memoized
+//! [`crate::color::StreamColor`], the one value a run's `Env` carries as
+//! `stream_color`, which the console ([`crate::console::Host`]) and AXL's
+//! `std.io.stderr.color` read.
 
 use crate::errln;
 
@@ -66,7 +68,8 @@ fn format_line(sev: Severity, colorize: bool, msg: &str) -> String {
 }
 
 /// Whether to emit ANSI color: [`crate::color::console_supports_color`], the
-/// check every line the runtime prints to stderr uses.
+/// single memoized answer every line the runtime prints to stderr uses, the
+/// console's included.
 fn colorize() -> bool {
     crate::color::console_supports_color()
 }

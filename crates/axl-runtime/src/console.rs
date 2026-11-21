@@ -35,11 +35,17 @@
 //!
 //! Overrides are compiled when the console is resolved, so a syntax error fails
 //! the run before the task starts rather than mid-task.
+//!
+//! A console never reads the process: whether it colors and whether it opens
+//! Buildkite sections come from the [`Host`] it is built with, which a run
+//! takes from its [`Env`] ([`Host::of`]) and a test spells out.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
 use minijinja::{Environment, Value as JinjaValue};
+
+use crate::engine::store::Env;
 
 /// One line-shaped piece of the terminal surface.
 ///
@@ -359,16 +365,36 @@ impl TaskIdentity {
     }
 }
 
+/// What the console takes from the host it runs on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Host {
+    /// Whether the console lines may carry ANSI color: the run's
+    /// `std.io.stderr.color`, so every slot, whether the runtime or AXL
+    /// renders it, agrees with AXL's own stderr lines.
+    pub color: bool,
+    /// Whether the run is on Buildkite, where the section slots open log
+    /// sections.
+    pub buildkite: bool,
+}
+
+impl Host {
+    /// The host of the run `env` describes: its stderr color and its
+    /// Buildkite snapshot, both resolved once for the run (the process's
+    /// own, or a test harness's).
+    pub fn of(env: &Env) -> Host {
+        Host {
+            color: env.stream_color.stderr,
+            buildkite: env.buildkite,
+        }
+    }
+}
+
 /// The resolved surface for one task run.
 #[derive(Debug)]
 pub struct Console {
     preset: &'static Preset,
     overrides: BTreeMap<Slot, String>,
-    buildkite: bool,
-    /// [`crate::color::console_supports_color`], resolved once so every slot,
-    /// whether the runtime or AXL renders it, agrees on color. A run's
-    /// console takes the run's `std.io.stderr.color` (`set_color`).
-    color: bool,
+    host: Host,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
 }
@@ -380,13 +406,13 @@ impl std::fmt::Debug for Preset {
 }
 
 impl Console {
-    /// The `full` layout with no overrides: what a run without the `Console`
-    /// feature (or with it disabled) prints.
-    pub fn builtin(task: TaskIdentity) -> Console {
-        Console::new(&FULL, BTreeMap::new(), task)
+    /// The `full` layout with no overrides, on `host`: what a run without the
+    /// `Console` feature (or with it disabled) prints.
+    pub fn builtin(task: TaskIdentity, host: Host) -> Console {
+        Console::new(&FULL, BTreeMap::new(), task, host)
     }
 
-    /// Resolve `preset_name` plus `overrides` for `task`.
+    /// Resolve `preset_name` plus `overrides` for `task`, on `host`.
     ///
     /// Fails on an unknown preset or an override that does not compile,
     /// wherever it is scoped. An entry for a task this repo lacks is checked but
@@ -396,6 +422,7 @@ impl Console {
         preset_name: &str,
         overrides: &Overrides,
         task: TaskIdentity,
+        host: Host,
     ) -> Result<Console, String> {
         for (key, name) in &overrides.task_presets {
             preset_named(name, &format!("task_presets[{key:?}]"))?;
@@ -407,19 +434,19 @@ impl Console {
             env.template_from_str(template)
                 .map_err(|e| format!("Console {at} does not compile: {e}"))?;
         }
-        Ok(Console::new(preset, resolved, task))
+        Ok(Console::new(preset, resolved, task, host))
     }
 
     fn new(
         preset: &'static Preset,
         overrides: BTreeMap<Slot, String>,
         task: TaskIdentity,
+        host: Host,
     ) -> Console {
         Console {
             preset,
             overrides,
-            buildkite: std::env::var_os("BUILDKITE").is_some_and(|v| !v.is_empty()),
-            color: crate::color::console_supports_color(),
+            host,
             task,
             warned: Mutex::new(HashSet::new()),
         }
@@ -430,19 +457,14 @@ impl Console {
         self.preset.name
     }
 
+    /// Whether the section slots open Buildkite log sections ([`Host::buildkite`]).
     pub fn buildkite(&self) -> bool {
-        self.buildkite
+        self.host.buildkite
     }
 
-    /// Whether the console lines carry ANSI color.
+    /// Whether the console lines carry ANSI color ([`Host::color`]).
     pub fn color(&self) -> bool {
-        self.color
-    }
-
-    /// Replace the resolved color with the run's `std.io.stderr.color`, so the
-    /// console and AXL's own stderr lines agree, a test snapshot included.
-    pub(crate) fn set_color(&mut self, color: bool) {
-        self.color = color;
+        self.host.color
     }
 
     /// Render `slot` with `context`, plus the shared `buildkite` and `task`
@@ -450,7 +472,7 @@ impl Console {
     /// Buildkite needs the line to open a section.
     pub fn render(&self, slot: Slot, context: JinjaValue) -> String {
         let context = minijinja::context! {
-            buildkite => self.buildkite,
+            buildkite => self.host.buildkite,
             task => JinjaValue::from_serialize(&self.task),
             ..context
         };
@@ -461,7 +483,7 @@ impl Console {
                 render_builtin(self.preset, slot, &context)
             }),
         };
-        if self.buildkite && slot.opens_buildkite_section() {
+        if self.host.buildkite && slot.opens_buildkite_section() {
             return self.section_title(slot, &rendered, &context);
         }
         rendered
@@ -503,7 +525,7 @@ impl Console {
     /// slot opens a collapsed (`---`) section; see [`Console::emit_section`]
     /// for another marker.
     pub fn emit(&self, slot: Slot, context: JinjaValue) {
-        if self.buildkite && slot.opens_buildkite_section() {
+        if self.host.buildkite && slot.opens_buildkite_section() {
             return self.emit_section("---", slot, context);
         }
         let text = self.render(slot, context);
@@ -564,9 +586,11 @@ mod tests {
     }
 
     fn console(preset: &str, overrides: &Overrides, buildkite: bool) -> Console {
-        let mut c = Console::resolve(preset, overrides, task()).unwrap();
-        c.buildkite = buildkite;
-        c
+        let host = Host {
+            color: false,
+            buildkite,
+        };
+        Console::resolve(preset, overrides, task(), host).unwrap()
     }
 
     fn verdict(failed: bool) -> JinjaValue {
@@ -834,9 +858,7 @@ mod tests {
     }
 
     fn resolved(preset: &str, o: &Overrides, task: TaskIdentity) -> Console {
-        let mut c = Console::resolve(preset, o, task).unwrap();
-        c.buildkite = false;
-        c
+        Console::resolve(preset, o, task, Host::default()).unwrap()
     }
 
     #[test]
@@ -919,7 +941,7 @@ mod tests {
     fn an_unknown_task_preset_is_refused_for_every_task() {
         let mut o = Overrides::default();
         o.set_preset_for_task("lint", "loud".into()).unwrap();
-        let err = Console::resolve("full", &o, task())
+        let err = Console::resolve("full", &o, task(), Host::default())
             .map(|_| ())
             .unwrap_err();
         assert!(
@@ -959,7 +981,9 @@ mod tests {
     #[test]
     fn resolve_refuses_what_could_never_render() {
         let resolve = |preset: &str, o: &Overrides| {
-            Console::resolve(preset, o, task()).map(|_| ()).unwrap_err()
+            Console::resolve(preset, o, task(), Host::default())
+                .map(|_| ())
+                .unwrap_err()
         };
         assert!(
             resolve("loud", &Overrides::default()).contains("unknown template preset \"loud\"")

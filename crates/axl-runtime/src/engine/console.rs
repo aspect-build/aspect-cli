@@ -1,6 +1,6 @@
 //! The Starlark side of [`crate::console`]: reading the `Console` feature's
-//! args into a resolved surface, and `ctx.console`, through which AXL renders
-//! the `phase` and `progress` lines.
+//! args into a resolved surface for a given [`Host`], and `ctx.console`,
+//! through which AXL renders the `phase` and `progress` lines.
 
 use std::sync::Arc;
 
@@ -14,23 +14,28 @@ use starlark::values::{
 };
 use starlark::{starlark_module, starlark_simple_value};
 
-use crate::console::{Console as Surface, DEFAULT_PRESET, Overrides, Slot, TaskIdentity};
+use crate::console::{Console as Surface, DEFAULT_PRESET, Host, Overrides, Slot, TaskIdentity};
 
 use super::arguments::Arguments;
 use super::template::json_to_minijinja;
 
-/// Resolve the surface for `task` from the `Console` feature's merged `args`.
+/// Resolve the surface for `task` on `host` from the `Console` feature's
+/// merged `args`.
 ///
 /// A disabled feature gives the `full` layout. Fails on a malformed
 /// `templates`, `task_presets` or `task_templates` value and on everything
 /// [`Surface::resolve`] refuses.
-pub fn from_feature_args(args: &Arguments<'_>, task: TaskIdentity) -> Result<Surface, String> {
+pub fn from_feature_args(
+    args: &Arguments<'_>,
+    task: TaskIdentity,
+    host: Host,
+) -> Result<Surface, String> {
     if !args
         .get("enabled")
         .and_then(|v| v.unpack_bool())
         .unwrap_or(true)
     {
-        return Ok(Surface::builtin(task));
+        return Ok(Surface::builtin(task, host));
     }
     let preset = args.get("template_preset").and_then(|v| v.unpack_str());
     let mut overrides = Overrides::default();
@@ -70,7 +75,7 @@ pub fn from_feature_args(args: &Arguments<'_>, task: TaskIdentity) -> Result<Sur
             overrides.set_for_task(task_key, slot, template)?;
         }
     }
-    Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task)
+    Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -236,7 +241,7 @@ args = {{"templates": templates, "task_presets": task_presets, "task_templates":
             for (name, value) in DictRef::from_value(bound).unwrap().iter() {
                 args.insert(name.unpack_str().unwrap().into(), value);
             }
-            let surface = from_feature_args(&args, task())?;
+            let surface = from_feature_args(&args, task(), Host::default())?;
             Ok(surface.render(slot, minijinja::context! { text => "x" }))
         })
     }
@@ -331,10 +336,10 @@ task_templates = {"check": {"progress": "mine"}}"#;
         crate::test::eval("enabled = False").with_value("enabled", |enabled| {
             let args = Arguments::new();
             args.insert("enabled".into(), enabled);
-            let surface = from_feature_args(&args, task()).unwrap();
+            let surface = from_feature_args(&args, task(), Host::default()).unwrap();
             assert_eq!(surface.preset(), "full");
         });
-        let surface = from_feature_args(&Arguments::new(), task()).unwrap();
+        let surface = from_feature_args(&Arguments::new(), task(), Host::default()).unwrap();
         assert_eq!(surface.preset(), DEFAULT_PRESET);
     }
 
@@ -365,7 +370,7 @@ check = task(implementation = _impl)
 "#;
         let color = |stdout_tty, stderr_tty, vars: &[(&str, &str)]| {
             crate::test::eval(code)
-                .with_color_env(stdout_tty, stderr_tty, vars)
+                .with_host_env(stdout_tty, stderr_tty, vars)
                 .run_task(0)
                 .unwrap()
         };
@@ -381,6 +386,26 @@ check = task(implementation = _impl)
             Some(0),
             "NO_COLOR"
         );
+    }
+
+    #[test]
+    fn a_buildkite_snapshot_opens_sections() {
+        let code = r#"
+def _impl(ctx):
+    line = ctx.console.render("phase", title = "Build", emoji = "", highlight_style = "", highlight_reset = "", text = "")
+    return 1 if line.startswith(":aspect:") else 0
+
+check = task(implementation = _impl)
+"#;
+        let on = |vars: &[(&str, &str)]| {
+            crate::test::eval(code)
+                .with_host_env(false, false, vars)
+                .run_task(0)
+                .unwrap()
+        };
+        assert_eq!(on(&[("BUILDKITE", "true")]), Some(1), "Buildkite");
+        assert_eq!(on(&[("BUILDKITE", "")]), Some(0), "an empty BUILDKITE");
+        assert_eq!(on(&[]), Some(0), "elsewhere");
     }
 
     #[test]
@@ -400,7 +425,7 @@ check = task(implementation = _impl)
             path = path.to_str().unwrap()
         );
         let got = crate::test::eval(&code)
-            .with_color_env(true, true, &[])
+            .with_host_env(true, true, &[])
             .run_task(0)
             .unwrap();
         assert_eq!(got, Some(0));

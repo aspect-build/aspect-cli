@@ -53,6 +53,10 @@ pub struct Env {
     /// `std.io.<stream>.color`. The process's own unless a test harness sets
     /// a snapshot.
     pub stream_color: StreamColor,
+    /// Whether the run is on Buildkite ([`crate::ci::buildkite_from`]), read
+    /// once when the `Env` is built. The process's own unless a test harness
+    /// sets a snapshot.
+    pub buildkite: bool,
 }
 
 impl Env {
@@ -75,6 +79,7 @@ impl Env {
             telemetry: Arc::default(),
             history: Arc::new(History::at(History::default_root(), Retention::default())),
             stream_color: StreamColor::of_process(),
+            buildkite: crate::ci::buildkite_from(|name| std::env::var_os(name)),
         }
     }
 

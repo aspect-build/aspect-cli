@@ -66,7 +66,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         signals: None,
         exporting: false,
         history: None,
-        color_env: None,
+        host_env: None,
     }
 }
 
@@ -80,7 +80,7 @@ pub struct EvalBuilder {
     signals: Option<Arc<Signals>>,
     exporting: bool,
     history: Option<PathBuf>,
-    color_env: Option<StreamColor>,
+    host_env: Option<(StreamColor, bool)>,
 }
 
 impl EvalBuilder {
@@ -131,19 +131,22 @@ impl EvalBuilder {
         self
     }
 
-    /// Resolve color in [`EvalBuilder::run_task`] (the console's, and
-    /// `std.io.stdout.color` / `std.io.stderr.color`) from this snapshot rather
-    /// than the process's own: whether stdout and stderr are terminals, and the
-    /// only environment variables set.
-    pub fn with_color_env(
+    /// Resolve the run's host in [`EvalBuilder::run_task`] from this snapshot
+    /// rather than the process's own: whether stdout and stderr are terminals,
+    /// and the only environment variables set. It decides color (the
+    /// console's, and `std.io.stdout.color` / `std.io.stderr.color`) and
+    /// whether the console runs as on Buildkite.
+    pub fn with_host_env(
         mut self,
         stdout_tty: bool,
         stderr_tty: bool,
         vars: &[(&str, &str)],
     ) -> Self {
-        self.color_env = Some(StreamColor::from_snapshot(stdout_tty, stderr_tty, |name| {
-            vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.into())
-        }));
+        let var = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.into());
+        self.host_env = Some((
+            StreamColor::from_snapshot(stdout_tty, stderr_tty, var),
+            crate::ci::buildkite_from(var),
+        ));
         self
     }
 
@@ -287,8 +290,9 @@ impl EvalBuilder {
                 &modules,
             );
             loader.env.signals = signals.clone();
-            if let Some(color) = self.color_env {
+            if let Some((color, buildkite)) = self.host_env {
                 loader.env.stream_color = color;
+                loader.env.buildkite = buildkite;
             }
             if self.exporting {
                 loader.env.telemetry.export_everything();
