@@ -366,7 +366,8 @@ pub struct Console {
     overrides: BTreeMap<Slot, String>,
     buildkite: bool,
     /// [`crate::color::console_supports_color`], resolved once so every slot,
-    /// whether the runtime or AXL renders it, agrees on color.
+    /// whether the runtime or AXL renders it, agrees on color. A run's
+    /// console takes the run's `std.io.stderr.color` (`set_color`).
     color: bool,
     task: TaskIdentity,
     warned: Mutex<HashSet<Slot>>,
@@ -438,9 +439,8 @@ impl Console {
         self.color
     }
 
-    /// Replace the resolved color, so a test decides it rather than the
-    /// process's terminal and environment.
-    #[cfg(test)]
+    /// Replace the resolved color with the run's `std.io.stderr.color`, so the
+    /// console and AXL's own stderr lines agree, a test snapshot included.
     pub(crate) fn set_color(&mut self, color: bool) {
         self.color = color;
     }

@@ -59,7 +59,6 @@ commands without opening the status surface.
 """
 
 load("./ansi.axl", "ansi")
-load("./environment.axl", "color_enabled")
 load("./lifecycle.axl", "ReproFixCommand")
 
 # Install docs URL surfaced in the small-text hint at the bottom of each
@@ -759,7 +758,7 @@ def print_repro_and_fix(std, data, status):
     """
     repros = data.get("repro_commands", []) or []
     fixes = data.get("fix_commands", []) or []
-    color = color_enabled(std)
+    color = std.io.stderr.color
     on_ci = bool(std.env.var("CI"))
 
     # Repro block is CI-only (locally you're already staring at the failure).
@@ -795,8 +794,8 @@ def _install_hint_line(color):
     """Grey-formatted install hint printed under each repro/fix block.
 
     Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
-    Actions' log viewer silently drops SGR 2, and `color_enabled` is
-    true under GHA, so the hint would render at full weight on CI even
+    Actions' log viewer silently drops SGR 2, and `std.io.stderr.color`
+    is true under GHA, so the hint would render at full weight on CI even
     though the styling was applied.
     """
     return ansi.style(ASPECT_CLI_INSTALL_HINT, ansi.GREY, color)

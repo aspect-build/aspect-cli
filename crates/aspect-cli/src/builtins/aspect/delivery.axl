@@ -1588,7 +1588,7 @@ def _delivery_impl(ctx):
     data["delivery"]["dry_run_build"] = dry_run_build
     data["delivery"]["track_state"] = bool(ctx.args.track_state)
 
-    color = ctx.console.color
+    color = ctx.std.io.stderr.color
 
     # Requested targets feed phases.setup's `subject` (rendered in the status
     # check's "Explicit command line"). Often empty for query-based delivery —

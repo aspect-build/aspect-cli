@@ -645,6 +645,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.telemetry_value,
             self.hooks_value,
             self.loader.env.signals.clone(),
+            self.loader.env.stream_color,
         ));
 
         let mut out = PhaseFailures::default();
@@ -728,7 +729,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             name: task_name.to_owned(),
             path: task_command_path(task.group(), &task.kind()),
         };
-        let console = match self
+        let mut console = match self
             .features()
             .into_iter()
             .find(|f| f.name() == CONSOLE_FEATURE)
@@ -739,6 +740,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                     .map_err(|e| EvalError::UnknownError(anyhow!(e)))?
             }
         };
+        console.set_color(self.loader.env.stream_color.stderr);
         Ok(Arc::new(console))
     }
 
@@ -815,6 +817,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 self.telemetry_value,
                 self.hooks_value,
                 self.loader.env.signals.clone(),
+                self.loader.env.stream_color,
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
@@ -961,6 +964,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             bazel,
             self.hooks_value,
             self.loader.env.signals.clone(),
+            self.loader.env.stream_color,
             console.clone(),
         ));
 

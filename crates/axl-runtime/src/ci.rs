@@ -29,8 +29,7 @@ fn is_ci_from(present: impl Fn(&str) -> bool) -> bool {
 
 /// CI hosts whose log viewer renders ANSI color although the job writes to a
 /// pipe. Narrower than [`CI_MARKERS`]: a host that sets only `CI` may show the
-/// escapes as text. The same list as `ci_renders_ansi` in
-/// `lib/environment.axl`, so AXL's output and the runtime's agree.
+/// escapes as text. AXL reads the answer as `std.io.stderr.color`.
 const ANSI_RENDERING_CI: &[&str] = &["BUILDKITE", "GITHUB_ACTIONS", "CIRCLECI", "GITLAB_CI"];
 
 /// True on a CI host in [`ANSI_RENDERING_CI`], set to a non-empty value as AXL

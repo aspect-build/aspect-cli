@@ -18,7 +18,7 @@ load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_repro
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
 load("@aspect//private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_init_data = "init_data")
-load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
+load("@aspect//private/lib/environment.axl", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
     "@aspect//private/lib/gazelle_results.axl",
     "dedupe_subtrees",
@@ -1782,7 +1782,7 @@ rename to new.txt
     _clear_pr_env(env)
     return tc
 
-# lib/environment.axl (color_enabled)
+# lib/environment.axl
 
 def test_parse_git_url_name(tc: int) -> int:
     """Coverage for environment.parse_git_url_name."""
@@ -3385,25 +3385,6 @@ def test_json_try_decode(tc: int) -> int:
 
     return tc
 
-def test_color_enabled(ctx: TaskContext, tc: int) -> int:
-    """color_enabled: should return True on a TTY OR a recognized CI host."""
-    env = ctx.std.env
-
-    # Clear all CI vars first so we're testing the predicate cleanly.
-    for k in ["GITHUB_ACTIONS", "BUILDKITE", "CIRCLECI", "GITLAB_CI"]:
-        env.remove_var(k)
-
-    # Without any CI env, the result depends on whether stdout is a TTY,
-    # which we can't reliably control in the test harness — skip the
-    # "no env" case and only test that each CI env flips it on.
-
-    for ci_env in ["GITHUB_ACTIONS", "BUILDKITE", "CIRCLECI", "GITLAB_CI"]:
-        env.set_var(ci_env, "true")
-        tc = test_case(tc, color_enabled(ctx.std), "color_enabled: %s=true → True" % ci_env)
-        env.remove_var(ci_env)
-
-    return tc
-
 # lib/sarif.axl
 
 def test_detect_github_repo(ctx: TaskContext, tc: int) -> int:
@@ -4306,7 +4287,6 @@ def impl(ctx: TaskContext) -> int:
     tc = test_template_rendering(ctx, tc)
     tc = test_path_glob(tc)
     tc = test_github_lib(ctx, tc)
-    tc = test_color_enabled(ctx, tc)
     tc = test_detect_github_repo(ctx, tc)
     tc = test_detect_build_url(ctx, tc)
     tc = test_detect_ci(ctx, tc)

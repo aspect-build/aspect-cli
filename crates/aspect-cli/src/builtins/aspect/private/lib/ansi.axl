@@ -1,8 +1,8 @@
 """Shared ANSI/SGR sequences and helpers — the single source for terminal styling.
 
-Callers decide whether to emit color (gate on `ctx.console.color`, or
-`environment.color_enabled(std)` where no `TaskContext` is at hand); this only
-builds the sequences.
+Callers decide whether to emit color (gate on the `color` of the stream they
+write to: `std.io.stderr.color` for `print` and the console lines,
+`std.io.stdout.color` for stdout); this only builds the sequences.
 """
 
 _CSI = "\x1b["
@@ -26,9 +26,8 @@ _DEFAULT_HIGHLIGHT_COLOR = "1;36"
 def _highlight_style(std, enabled: bool = True) -> str:
     """SGR prefix for a styled highlight label (phase headers, …), or "" when
     color is off. Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR params); unset →
-    bold cyan, empty → no color. Like `style`, the caller gates `enabled`:
-    `ctx.console.color` for a console line, else `color_enabled(std)` (kept out
-    of `ansi` to avoid an env import cycle)."""
+    bold cyan, empty → no color. Like `style`, the caller gates `enabled`,
+    on `std.io.stderr.color` for a console line."""
     if not enabled:
         return ""
     color_arg = std.env.var("ASPECT_CLI_HIGHLIGHT_COLOR")

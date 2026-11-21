@@ -8,11 +8,44 @@
 //! agent capturing output.
 //!
 //! A non-empty `NO_COLOR` (<https://no-color.org>) turns color off on every
-//! surface, CI hosts whose logs render ANSI included. `color_enabled` in
-//! `lib/environment.axl` applies the same rule to AXL's own stderr lines.
+//! surface, CI hosts whose logs render ANSI included.
+//!
+//! AXL asks the same rules through the std streams: `std.io.stderr.color` and
+//! `std.io.stdout.color` report the [`StreamColor`] the run resolved.
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
+
+/// Whether each of the process's console streams may carry ANSI color,
+/// resolved once per run and reported to AXL as `std.io.<stream>.color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamColor {
+    pub stdout: bool,
+    pub stderr: bool,
+}
+
+impl StreamColor {
+    /// [`stdout_supports_color`] and [`console_supports_color`].
+    pub fn of_process() -> Self {
+        Self {
+            stdout: stdout_supports_color(),
+            stderr: console_supports_color(),
+        }
+    }
+
+    /// The same rules over a snapshot: whether each stream is a terminal, and
+    /// `var` reading one environment variable.
+    pub fn from_snapshot(
+        stdout_tty: bool,
+        stderr_tty: bool,
+        var: impl Fn(&str) -> Option<OsString>,
+    ) -> Self {
+        Self {
+            stdout: stdout_color_from(stdout_tty, &var),
+            stderr: console_color_from(stderr_tty, &var),
+        }
+    }
+}
 
 /// Whether stdout may carry ANSI color: [`stdout_color_from`] over the process.
 pub fn stdout_supports_color() -> bool {
@@ -22,7 +55,7 @@ pub fn stdout_supports_color() -> bool {
 /// Whether the lines the runtime prints to stderr (the console slots, `WARNING:`
 /// and other severity prefixes, the grey Bazel trace line) may carry ANSI
 /// color: [`console_color_from`] over the process. The console resolves it once
-/// for every slot; AXL reads it as `ctx.console.color`.
+/// for every slot; AXL reads it as `std.io.stderr.color`.
 pub fn console_supports_color() -> bool {
     console_color_from(std::io::stderr().is_terminal(), process_env)
 }
@@ -36,7 +69,7 @@ fn stdout_color_from(stdout_tty: bool, var: impl Fn(&str) -> Option<OsString>) -
 /// The stderr rule over a snapshot: on an interactive stderr, or on a CI host
 /// whose log viewer renders ANSI ([`crate::ci::ci_renders_ansi`]), and never
 /// under a non-empty `NO_COLOR`. `var` reads one environment variable.
-pub(crate) fn console_color_from(stderr_tty: bool, var: impl Fn(&str) -> Option<OsString>) -> bool {
+fn console_color_from(stderr_tty: bool, var: impl Fn(&str) -> Option<OsString>) -> bool {
     let renders = stderr_tty || crate::ci::renders_ansi_from(|name| non_empty(var(name)));
     renders && !no_color(&var)
 }
@@ -86,6 +119,26 @@ mod tests {
         assert!(console_color_from(false, env(&[("BUILDKITE", "true")])));
         assert!(!console_color_from(false, env(&[("CI", "1")])));
         assert!(!console_color_from(false, env(&[("GITHUB_ACTIONS", "")])));
+    }
+
+    #[test]
+    fn a_snapshot_resolves_each_stream_by_its_own_rule() {
+        let on_ci = StreamColor::from_snapshot(false, false, env(&[("GITHUB_ACTIONS", "true")]));
+        assert_eq!(
+            on_ci,
+            StreamColor {
+                stdout: false,
+                stderr: true
+            }
+        );
+        let tty = StreamColor::from_snapshot(true, true, env(&[("NO_COLOR", "1")]));
+        assert_eq!(
+            tty,
+            StreamColor {
+                stdout: false,
+                stderr: false
+            }
+        );
     }
 
     #[test]

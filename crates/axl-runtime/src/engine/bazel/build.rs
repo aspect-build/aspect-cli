@@ -108,13 +108,13 @@ fn subscriber<T: Send + Clone>(
 pub fn writable_to_stdio(w: &Writable) -> io::Result<Stdio> {
     let closed = || io::Error::other("writable stream is closed");
     match w {
-        Writable::Stdout(arc) => {
+        Writable::Stdout(arc, _) => {
             let guard = arc.lock().unwrap();
             let borrowed = guard.borrow();
             let s = borrowed.as_ref().ok_or_else(closed)?;
             dup_fd(s)
         }
-        Writable::Stderr(arc) => {
+        Writable::Stderr(arc, _) => {
             let guard = arc.lock().unwrap();
             let borrowed = guard.borrow();
             let s = borrowed.as_ref().ok_or_else(closed)?;

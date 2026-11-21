@@ -27,6 +27,7 @@ use super::http::Http;
 use super::std::Std;
 use super::template;
 use super::wasm::Wasm;
+use crate::color::StreamColor;
 
 use super::task_map::TaskMap;
 
@@ -46,6 +47,10 @@ pub struct ConfigContext<'v> {
     #[allocative(skip)]
     #[trace(static)]
     signals: Arc<Signals>,
+    /// What `std.io.<stream>.color` reports.
+    #[allocative(skip)]
+    #[trace(static)]
+    stream_color: StreamColor,
 }
 
 impl<'v> ConfigContext<'v> {
@@ -58,6 +63,7 @@ impl<'v> ConfigContext<'v> {
         telemetry: values::Value<'v>,
         hooks: values::Value<'v>,
         signals: Arc<Signals>,
+        stream_color: StreamColor,
     ) -> Self {
         Self {
             tasks,
@@ -66,6 +72,7 @@ impl<'v> ConfigContext<'v> {
             telemetry,
             hooks,
             signals,
+            stream_color,
         }
     }
 
@@ -111,6 +118,7 @@ impl<'v> Freeze for ConfigContext<'v> {
             telemetry: self.telemetry.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
             signals: self.signals,
+            stream_color: self.stream_color,
         })
     }
 }
@@ -131,6 +139,9 @@ pub struct FrozenConfigContext {
     hooks: FrozenValue,
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// What `std.io.<stream>.color` reports.
+    #[allocative(skip)]
+    stream_color: StreamColor,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenConfigContext {
@@ -150,10 +161,10 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(this: values::Value<'v>) -> anyhow::Result<Std> {
         if let Some(c) = this.downcast_ref::<ConfigContext>() {
-            return Ok(Std::new(c.signals.clone()));
+            return Ok(Std::new(c.signals.clone(), c.stream_color));
         }
         if let Some(c) = this.downcast_ref::<FrozenConfigContext>() {
-            return Ok(Std::new(c.signals.clone()));
+            return Ok(Std::new(c.signals.clone(), c.stream_color));
         }
         Err(anyhow::anyhow!("expected ConfigContext"))
     }

@@ -34,6 +34,7 @@ use super::std::Std;
 use super::task_info::TaskInfo;
 use super::template::Template;
 use super::trait_map::{FrozenTraitMap, TraitMap};
+use crate::color::StreamColor;
 use crate::console::Console as Surface;
 
 use super::wasm::Wasm;
@@ -69,6 +70,9 @@ pub struct TaskContext<'v> {
     /// The run's cancellation state, behind `ctx.cancellation`.
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// What `std.io.<stream>.color` reports.
+    #[allocative(skip)]
+    stream_color: StreamColor,
     /// The resolved terminal surface, behind `ctx.console`.
     #[allocative(skip)]
     console: Arc<Surface>,
@@ -97,6 +101,7 @@ impl<'v> TaskContext<'v> {
         bazel: values::Value<'v>,
         hooks: values::Value<'v>,
         signals: Arc<Signals>,
+        stream_color: StreamColor,
         console: Arc<Surface>,
     ) -> Self {
         Self {
@@ -106,6 +111,7 @@ impl<'v> TaskContext<'v> {
             bazel,
             hooks,
             signals,
+            stream_color,
             console,
             defers: RefCell::new(Vec::new()),
         }
@@ -144,6 +150,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
             bazel: self.bazel.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
             signals: self.signals,
+            stream_color: self.stream_color,
             console: self.console,
         })
     }
@@ -163,7 +170,7 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(this: values::Value<'v>) -> starlark::Result<Std> {
         let ctx = this.downcast_ref_err::<TaskContext>()?;
-        Ok(Std::new(ctx.signals.clone()))
+        Ok(Std::new(ctx.signals.clone(), ctx.stream_color))
     }
 
     /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels
@@ -279,6 +286,9 @@ pub struct FrozenTaskContext {
     hooks: values::FrozenValue,
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// What `std.io.<stream>.color` reports.
+    #[allocative(skip)]
+    stream_color: StreamColor,
     #[allocative(skip)]
     console: Arc<Surface>,
 }
@@ -310,7 +320,7 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(this: values::Value<'v>) -> starlark::Result<Std> {
         let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
-        Ok(Std::new(ctx.signals.clone()))
+        Ok(Std::new(ctx.signals.clone(), ctx.stream_color))
     }
 
     /// Cancellation tokens: `ctx.cancellation.root` is what Ctrl+C cancels

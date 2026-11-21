@@ -1217,12 +1217,12 @@ def _fake_auth_ctx(access_token = "", owned_hosts = [], bazel_version = "8.4.2")
     """Stand-in `ctx` for the auth path: `deployment_for_host` reports a host as
     owned iff it is in `owned_hosts`, `credentials` returns a fake login (or None
     when no token), Bazel reports `bazel_version`, the CLI runs from `_EXE`, and
-    `std` reports non-TTY so `warn` stays quiet-but-valid."""
+    `std` reports no color so `warn` stays quiet-but-valid."""
     creds = struct(access_token = access_token) if access_token else None
     owned = {h: h for h in owned_hosts}
     return struct(
         std = struct(
-            io = struct(stdout = struct(is_tty = False), stderr = struct(is_tty = False)),
+            io = struct(stdout = struct(is_tty = False, color = False), stderr = struct(color = False)),
             env = struct(var = lambda name: None, current_exe = lambda: _EXE),
         ),
         bazel = struct(version = lambda: bazel_version),

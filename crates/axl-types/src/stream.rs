@@ -129,8 +129,16 @@ pub enum Readable {
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Writable {
     ChildStdin(#[allocative(skip)] Arc<Mutex<RefCell<Option<ChildStdin>>>>),
-    Stdout(#[allocative(skip)] Arc<Mutex<RefCell<Option<Stdout>>>>),
-    Stderr(#[allocative(skip)] Arc<Mutex<RefCell<Option<Stderr>>>>),
+    /// The process's stdout, and whether it may carry ANSI color.
+    Stdout(
+        #[allocative(skip)] Arc<Mutex<RefCell<Option<Stdout>>>>,
+        bool,
+    ),
+    /// The process's stderr, and whether it may carry ANSI color.
+    Stderr(
+        #[allocative(skip)] Arc<Mutex<RefCell<Option<Stderr>>>>,
+        bool,
+    ),
     File(#[allocative(skip)] Arc<Mutex<Option<std::fs::File>>>),
 }
 
@@ -149,8 +157,8 @@ impl Display for Writable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChildStdin(_) => write!(f, "stream<child_stdin>"),
-            Self::Stderr(_) => write!(f, "stream<stderr>"),
-            Self::Stdout(_) => write!(f, "stream<stdout>"),
+            Self::Stderr(..) => write!(f, "stream<stderr>"),
+            Self::Stdout(..) => write!(f, "stream<stdout>"),
             Self::File(_) => write!(f, "stream<file>"),
         }
     }
@@ -190,15 +198,17 @@ impl From<ChildStdin> for Writable {
     }
 }
 
-impl From<Stdout> for Writable {
-    fn from(stdout: Stdout) -> Self {
-        Self::Stdout(Arc::new(Mutex::new(RefCell::new(Some(stdout)))))
+impl Writable {
+    /// The process's stdout. `color` is whether it may carry ANSI color, as
+    /// the runtime decides it; the stream reports it as `color`.
+    pub fn stdout(stdout: Stdout, color: bool) -> Self {
+        Self::Stdout(Arc::new(Mutex::new(RefCell::new(Some(stdout)))), color)
     }
-}
 
-impl From<Stderr> for Writable {
-    fn from(stderr: Stderr) -> Self {
-        Self::Stderr(Arc::new(Mutex::new(RefCell::new(Some(stderr)))))
+    /// The process's stderr. `color` is whether it may carry ANSI color, as
+    /// the runtime decides it; the stream reports it as `color`.
+    pub fn stderr(stderr: Stderr, color: bool) -> Self {
+        Self::Stderr(Arc::new(Mutex::new(RefCell::new(Some(stderr)))), color)
     }
 }
 
@@ -408,17 +418,31 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
         Ok(match &*io {
             Writable::ChildStdin(_) => false,
-            Writable::Stdout(out) => {
+            Writable::Stdout(out, _) => {
                 let guard = out.lock().unwrap();
                 let borrowed = guard.borrow();
                 borrowed.as_ref().map(|s| s.is_terminal()).unwrap_or(false)
             }
-            Writable::Stderr(err) => {
+            Writable::Stderr(err, _) => {
                 let guard = err.lock().unwrap();
                 let borrowed = guard.borrow();
                 borrowed.as_ref().map(|s| s.is_terminal()).unwrap_or(false)
             }
             Writable::File(_) => false,
+        })
+    }
+
+    /// Whether lines written here may carry ANSI color. On `std.io.stderr`:
+    /// an interactive stderr, or a CI host whose log renders ANSI (GitHub
+    /// Actions, Buildkite, CircleCI, GitLab CI). On `std.io.stdout`: an
+    /// interactive stdout. Never under a non-empty `NO_COLOR`, and never on
+    /// any other stream (files, a child's stdin).
+    #[starlark(attribute)]
+    fn color<'v>(this: values::Value) -> anyhow::Result<bool> {
+        let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
+        Ok(match &*io {
+            Writable::Stdout(_, color) | Writable::Stderr(_, color) => *color,
+            Writable::ChildStdin(_) | Writable::File(_) => false,
         })
     }
 
@@ -447,7 +471,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .map(|f| f as u32)
                     .map_err(|err| anyhow!(err))
             }
-            Writable::Stdout(stdout) => {
+            Writable::Stdout(stdout, _) => {
                 let guard = stdout.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 let inner = borrowed
@@ -462,7 +486,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     Err(err) => Err(anyhow!(err)),
                 }
             }
-            Writable::Stderr(stderr) => {
+            Writable::Stderr(stderr, _) => {
                 let guard = stderr.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 let inner = borrowed
@@ -500,14 +524,14 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     inner.flush()?;
                 }
             }
-            Writable::Stdout(stdout) => {
+            Writable::Stdout(stdout, _) => {
                 let guard = stdout.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
                     ignore_broken_pipe(inner.lock().flush())?;
                 }
             }
-            Writable::Stderr(stderr) => {
+            Writable::Stderr(stderr, _) => {
                 let guard = stderr.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
@@ -536,7 +560,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .take()
                     .ok_or_else(|| anyhow!("stream is already closed"))?;
             }
-            Writable::Stdout(stdout) => {
+            Writable::Stdout(stdout, _) => {
                 stdout
                     .lock()
                     .unwrap()
@@ -544,7 +568,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .take()
                     .ok_or_else(|| anyhow!("stream is already closed"))?;
             }
-            Writable::Stderr(stderr) => {
+            Writable::Stderr(stderr, _) => {
                 stderr
                     .lock()
                     .unwrap()

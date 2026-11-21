@@ -1798,7 +1798,7 @@ def print_changed_files_listing(ctx, detect_result):
         print("Scope detection unavailable: %s" % detect_result["source"])
         return
     print("Detecting changed files via %s" % detect_result["source"])
-    color = ctx.console.color
+    color = ctx.std.io.stderr.color
     green = ansi.GREEN if color else ""
     red = ansi.RED if color else ""
     reset = ansi.RESET if color else ""

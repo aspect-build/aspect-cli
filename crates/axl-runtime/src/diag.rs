@@ -11,9 +11,9 @@
 //! `tracing` (and the `ASPECT_DEBUG`-gated ad-hoc logging some subsystems keep).
 //!
 //! Both write to stderr and color by the same rule,
-//! [`crate::color::console_supports_color`], which AXL's `color_enabled`
-//! mirrors. Rust callers have no Starlark `std` handle, so the predicate here
-//! reads the process environment and stderr's TTY directly.
+//! [`crate::color::console_supports_color`], which AXL reads as
+//! `std.io.stderr.color`. Rust callers have no Starlark `std` handle, so the
+//! predicate here reads the process environment and stderr's TTY directly.
 
 use crate::errln;
 

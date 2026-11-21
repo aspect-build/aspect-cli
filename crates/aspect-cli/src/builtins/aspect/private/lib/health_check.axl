@@ -388,7 +388,7 @@ def agent_health_check(ctx, environment):
     job_history = environment.runner.runner_job_history
 
     environment = _wait_for_warming(ctx.std, environment)
-    color = ctx.console.color
+    color = ctx.std.io.stderr.color
     _display_runner_health(environment, job_history, color)
     _display_warming(environment, color)
     assert_ctx_bazel_ready_for_health_check(ctx, environment)

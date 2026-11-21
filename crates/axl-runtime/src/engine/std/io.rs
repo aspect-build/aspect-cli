@@ -19,6 +19,7 @@ use starlark::values::starlark_value;
 use std::sync::Arc;
 
 use super::stream;
+use crate::color::StreamColor;
 use crate::engine::cancellation::Signals;
 
 #[derive(Debug, Display, Clone, ProvidesStaticType, NoSerialize, Allocative)]
@@ -39,10 +40,11 @@ impl<'v> UnpackValue<'v> for Stdio {
 }
 
 impl Stdio {
-    /// The process's streams. A blocking read of stdin is a safe point: it
-    /// ends with the task's exit once the root token is cancelled, so a
-    /// cancelled run is not stuck behind a prompt.
-    pub fn new(signals: Arc<Signals>) -> Self {
+    /// The process's streams, stdout and stderr reporting `color` as their
+    /// `color`. A blocking read of stdin is a safe point: it ends with the
+    /// task's exit once the root token is cancelled, so a cancelled run is not
+    /// stuck behind a prompt.
+    pub fn new(signals: Arc<Signals>, color: StreamColor) -> Self {
         let stdin = stream::Readable::from(std::io::stdin());
         stdin.set_stdin_interrupt(Arc::new(move || {
             signals
@@ -50,8 +52,8 @@ impl Stdio {
                 .then(|| std::io::Error::other(signals.exit_for()))
         }));
         Self {
-            stdout: stream::Writable::from(std::io::stdout()),
-            stderr: stream::Writable::from(std::io::stderr()),
+            stdout: stream::Writable::stdout(std::io::stdout(), color.stdout),
+            stderr: stream::Writable::stderr(std::io::stderr(), color.stderr),
             stdin,
         }
     }

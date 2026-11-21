@@ -74,7 +74,7 @@ load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/bazel_paths.axl", "output_user_root")
 load("./private/lib/confirm.axl", "confirm")
 load("./private/lib/duration.axl", "compact_ms", "phrase_ms")
-load("./private/lib/environment.axl", "info", "no_color", "warn")
+load("./private/lib/environment.axl", "info", "warn")
 load("./private/lib/output_bases.axl", "output_bases")
 load("./private/lib/table.axl", "Column", "render", "tilde")
 load("./private/lib/text.axl", "display_width", "has_unsafe_chars", "pad_right", "pluralize", "printable", "utf8_len")
@@ -175,9 +175,9 @@ def _warn(std, message: str) -> None:
 
 def _color(std) -> bool:
     """Whether the text report may be styled. It is written to stderr, so that
-    is the stream asked — stdout carries `--output=json` and `path` — and never
-    under a non-empty `NO_COLOR` (`environment.no_color`)."""
-    return std.io.stderr.is_tty and not no_color(std.env)
+    is the stream asked (stdout carries `--output=json` and `path`): on a
+    terminal only, not on a CI log, and as `std.io.stderr.color` allows."""
+    return std.io.stderr.is_tty and std.io.stderr.color
 
 def _styled(std, text: str, code: str) -> str:
     """`text` escaped as `_print` escapes it, then styled with `code` when

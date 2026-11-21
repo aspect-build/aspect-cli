@@ -180,16 +180,6 @@ fn console_methods(registry: &mut MethodsBuilder) {
         Ok(downcast(this)?.0.preset())
     }
 
-    /// Whether the console lines carry ANSI color: on an interactive stderr, or
-    /// on GitHub Actions, Buildkite, CircleCI or GitLab CI, whose logs render
-    /// it; never under a non-empty `NO_COLOR`. The runtime's own lines follow
-    /// it; AXL that renders a slot gates the `highlight_style` it passes on it,
-    /// as `lib/lifecycle.axl` does.
-    #[starlark(attribute)]
-    fn color<'v>(this: Value<'v>) -> anyhow::Result<bool> {
-        Ok(downcast(this)?.0.color())
-    }
-
     /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict` or
     /// `section`) with the kwargs as its context. Returns `""` when the
     /// layout leaves the slot blank; print nothing then. On Buildkite the
@@ -357,27 +347,39 @@ def _impl(ctx):
     line = ctx.console.render("progress", text = "x", title = "Build", emoji = "", highlight_style = "", highlight_reset = "")
     if line != "→ Build · x":
         fail("rendered: " + repr(line))
-    return 1 if ctx.console.color else 0
+    return 0
 
 check = task(implementation = _impl)
 "#;
-        let color = |stderr_tty, vars: &[(&str, &str)]| {
+        assert_eq!(crate::test::eval(code).run_task(0).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn std_streams_report_the_run_color() {
+        let code = r#"
+def _impl(ctx):
+    io = ctx.std.io
+    return (2 if io.stderr.color else 0) + (1 if io.stdout.color else 0)
+
+check = task(implementation = _impl)
+"#;
+        let color = |stdout_tty, stderr_tty, vars: &[(&str, &str)]| {
             crate::test::eval(code)
-                .with_console_env(stderr_tty, vars)
+                .with_color_env(stdout_tty, stderr_tty, vars)
                 .run_task(0)
                 .unwrap()
         };
-        assert_eq!(color(true, &[]), Some(1), "a terminal stderr");
+        assert_eq!(color(true, true, &[]), Some(3), "terminals");
         assert_eq!(
-            color(false, &[("GITHUB_ACTIONS", "true")]),
-            Some(1),
-            "an ANSI-rendering CI host"
+            color(false, false, &[("GITHUB_ACTIONS", "true")]),
+            Some(2),
+            "an ANSI-rendering CI host colors stderr only"
         );
-        assert_eq!(color(false, &[]), Some(0), "a piped stderr");
+        assert_eq!(color(false, false, &[]), Some(0), "pipes");
         assert_eq!(
-            color(false, &[("BUILDKITE", "true"), ("NO_COLOR", "1")]),
+            color(true, false, &[("BUILDKITE", "true"), ("NO_COLOR", "1")]),
             Some(0),
-            "NO_COLOR on CI"
+            "NO_COLOR"
         );
     }
 

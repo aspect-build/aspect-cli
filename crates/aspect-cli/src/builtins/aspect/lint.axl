@@ -373,7 +373,7 @@ def _print_linters_run(ctx, tools_run):
     """Print a one-line summary of the linters that fired. No-op when none ran."""
     if not tools_run:
         return
-    color = ctx.console.color
+    color = ctx.std.io.stderr.color
     bold = ansi.BOLD if color else ""
     reset = ansi.RESET if color else ""
     print("")
@@ -387,7 +387,7 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     """
     if not relevant:
         return
-    color = ctx.console.color
+    color = ctx.std.io.stderr.color
     bold = ansi.BOLD if color else ""
     reset = ansi.RESET if color else ""
     print("")

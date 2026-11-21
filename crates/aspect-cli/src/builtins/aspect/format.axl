@@ -293,7 +293,6 @@ def _emit_final(ph, exit_code):
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
-    ansi = ctx.console.color
 
     # Resolve --run-in up front: a bad value must fail before phases.setup opens
     # status surfaces and the build spends time.
