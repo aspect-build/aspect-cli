@@ -75,7 +75,7 @@ pub enum Arg {
         /// [`Arg::config_only`].
         config_only: bool,
         /// Its value is a secret (`args.string(secret = True)`): redacted
-        /// wherever the CLI shows or keeps a command line. See [`Arg::secret`].
+        /// from the task history's record of the run. See [`Arg::secret`].
         secret: bool,
     },
     Boolean {
@@ -252,8 +252,7 @@ impl Arg {
     }
 
     /// Whether this arg's value is a secret (`args.string(secret = True)`), to
-    /// redact from a command line the CLI shows or keeps, such as the task
-    /// history's record of the run.
+    /// redact from the task history's record of the run.
     pub fn secret(&self) -> bool {
         matches!(self, Self::String { secret: true, .. })
     }

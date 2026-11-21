@@ -14,10 +14,13 @@
 //! redacts it first ([`redact_argv`]): the header and env-passthrough rules
 //! the build event stream gets, and each flag the task or a feature declared
 //! secret (`args.string(secret = True)`), whose spellings are kept beside it
-//! (`secret_flags`). A Bazel invocation's flags are kept redacted. Once a
-//! prune removes the entry's other files ([`TaskRecord::evict`]), the
-//! command line is redacted in place, so a secret outlives the run's files
-//! by no more than they did.
+//! (`secret_flags`), with the values those were given scrubbed from the
+//! rest of the command line, the error and the line the task ended on. A
+//! Bazel invocation's flags are kept redacted. Once a prune removes the
+//! entry's other files ([`TaskRecord::evict`]), the command line is
+//! redacted in place, so a secret outlives the run's files by no more than
+//! they did; a run that kept no files keeps it as typed until its record
+//! goes, after 90 days at most (see `Retention::record_age`).
 //!
 //! Schema version [`SCHEMA`]; a reader skips a record with a newer one.
 
@@ -153,12 +156,11 @@ pub struct BazelRecord {
 }
 
 impl TaskRecord {
-    /// Forget the run's files: the command line redacted, the time noted.
+    /// Forget the run's files: the command line redacted (as
+    /// [`redacted`](Self::redacted) shows it), the logs' paths dropped, the
+    /// time noted.
     pub fn evict(&mut self, at: SystemTime) {
-        if !self.argv_redacted {
-            self.argv = redact_argv(&self.argv, &self.secret_flags, &self.value_shorts);
-            self.argv_redacted = true;
-        }
+        self.redact();
         for b in &mut self.bazel {
             if let Some(s) = b.summary.as_mut() {
                 for f in &mut s.failures {
@@ -169,14 +171,23 @@ impl TaskRecord {
         self.evicted = Some(timestamp(at));
     }
 
-    /// The record as shown: its command line redacted.
+    /// The record as shown: its command line redacted, and its secrets'
+    /// values scrubbed from the error and the line it ended on.
     pub fn redacted(&self) -> TaskRecord {
         let mut shown = self.clone();
-        if !shown.argv_redacted {
-            shown.argv = redact_argv(&shown.argv, &shown.secret_flags, &shown.value_shorts);
-            shown.argv_redacted = true;
-        }
+        shown.redact();
         shown
+    }
+
+    fn redact(&mut self) {
+        if self.argv_redacted {
+            return;
+        }
+        let values = secret_values(&self.argv, &self.secret_flags, &self.value_shorts);
+        self.argv = redact_argv(&self.argv, &self.secret_flags, &self.value_shorts);
+        let text = scrub(&[self.error.clone(), self.conclusion.clone()], &values);
+        (self.error, self.conclusion) = (text[0].clone(), text[1].clone());
+        self.argv_redacted = true;
     }
 }
 
@@ -238,8 +249,9 @@ pub fn scrub(args: &[String], values: &[String]) -> Vec<String> {
 /// `argv` with the values of `secret_flags` replaced, and those values. A
 /// spelling ending in `=` (a flag that may be given bare) takes its value
 /// only after `=`, never from the next argument. `value_shorts` are the
-/// other short flags that take a value (`-m`): in a cluster, one takes the
-/// rest of it, as the parser reads it, so no secret flag follows it there.
+/// other short flags that take a value (`-m`, or `-m=` for one that may be
+/// bare): in a cluster, one takes the rest of it, as the parser reads it
+/// (one that may be bare only after `=`), so no secret flag follows it there.
 fn split_secrets(
     argv: &[String],
     secret_flags: &[String],
@@ -306,13 +318,20 @@ fn split_secrets(
                 .take_while(|(_, c)| c.is_ascii_alphanumeric())
                 // Up to and including the first that takes a value: the rest
                 // is its value.
+                // (one that may be bare, spelled `-m=`, only when `=`
+                // follows it: else it is bare, and the next letter a flag).
                 .scan(false, |past_value, (at, c)| {
                     if *past_value {
                         return None;
                     }
-                    *past_value = value_shorts
-                        .iter()
-                        .any(|v| v.strip_prefix('-') == Some(c.encode_utf8(&mut [0; 4])));
+                    let after = &cluster[at + c.len_utf8()..];
+                    let mut buf = [0; 4];
+                    let letter = c.encode_utf8(&mut buf);
+                    *past_value = value_shorts.iter().any(|v| match v.strip_prefix('-') {
+                        Some(v) if v == letter => true,
+                        Some(v) => v.strip_suffix('=') == Some(letter) && after.starts_with('='),
+                        None => false,
+                    });
                     Some((at, c))
                 })
                 .find_map(|(at, c)| {
@@ -847,6 +866,35 @@ mod tests {
             ),
             vec!["deploy".to_string(), "-mtest-release".into(), "-vmt".into()],
             "a value-taking short flag takes the rest of its cluster"
+        );
+        assert_eq!(
+            redact_argv(
+                &s(&["deploy", "-ot", "S3CRET", "-o=xtyz"]),
+                &secrets,
+                &s(&["-o="])
+            ),
+            vec![
+                "deploy".to_string(),
+                "-ot".into(),
+                r.into(),
+                "-o=xtyz".into()
+            ],
+            "one that may be bare takes a value only after `=`"
+        );
+        let failed = TaskRecord {
+            argv: s(&["aspect", "--token=S3CRET"]),
+            secret_flags: s(&["--token"]),
+            error: "fail: token S3CRET rejected".into(),
+            conclusion: "Rejected S3CRET".into(),
+            ..Default::default()
+        };
+        let shown = failed.redacted();
+        assert_eq!(
+            (shown.error.as_str(), shown.conclusion.as_str()),
+            (
+                format!("fail: token {r} rejected").as_str(),
+                format!("Rejected {r}").as_str()
+            )
         );
         assert_eq!(
             scrub(&s(&["--define=K=abcd", "a=abc"]), &s(&["abcd", "abc"])),

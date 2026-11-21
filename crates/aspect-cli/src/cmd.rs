@@ -252,7 +252,8 @@ impl<'a, 'v> Cmd<'a, 'v> {
     }
 
     /// The short flags on task `task_id`'s command line that take a value
-    /// and are not secrets (`-m`): its own args' and every feature's. In a
+    /// and are not secrets (`-m`, or `-m=` for one that may go bare, which
+    /// takes one only after `=`): its own args' and every feature's. In a
     /// cluster one takes the rest of it, which [`Cmd::secret_flags`]'s
     /// redaction needs to know.
     pub fn value_short_flags(&self, task_id: usize) -> Vec<String> {
@@ -270,8 +271,14 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 | Arg::UIntList { short, .. } => short,
                 _ => return,
             };
+            // One that may go bare takes a value only after `=`.
+            let eq = if matches!(arg, Arg::String { bare: Some(_), .. }) {
+                "="
+            } else {
+                ""
+            };
             if let Some(short) = short {
-                flags.push(format!("-{short}"));
+                flags.push(format!("-{short}{eq}"));
             }
         };
         if let Some(task) = self.tasks.get(task_id) {
@@ -3324,6 +3331,7 @@ mod tests {
         args.insert("api_token".to_owned(), with(Some("t"), None, true));
         args.insert("key".to_owned(), with(None, Some("default"), true));
         args.insert("message".to_owned(), with(Some("m"), None, false));
+        args.insert("mode".to_owned(), with(Some("o"), Some("x"), false));
         let t = stub_task("deploy", &[], args);
         let cmd = Cmd {
             tasks: vec![&t],
@@ -3332,7 +3340,7 @@ mod tests {
             modules: &[],
         };
         assert_eq!(cmd.secret_flags(0), ["--api-token", "--key=", "-t"]);
-        assert_eq!(cmd.value_short_flags(0), ["-m"]);
+        assert_eq!(cmd.value_short_flags(0), ["-m", "-o="]);
     }
 
     #[test]
