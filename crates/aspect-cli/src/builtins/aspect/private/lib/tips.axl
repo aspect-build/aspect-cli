@@ -838,7 +838,8 @@ def add_tip(
         fail("tip %r: max_shown must be >= 0 (0: no limit), got %d" % (id, max_shown))
     for name, a in (aggregates or {}).items():
         if not hasattr(a, "get") or a.get("kind") not in _AGG_KINDS:
-            fail("tip %r: aggregate %r must be a dict with a `kind` from %s" % (id, name, ", ".join(_AGG_KINDS)))
+            kind = a.get("kind") if hasattr(a, "get") else None
+            fail("tip %r: aggregate %r must be a dict with a `kind`%s" % (id, name, did_you_mean_then(kind, _AGG_KINDS, " from ", ", ".join(_AGG_KINDS))))
     if aggregates and type != TIP_TEMPLATE_JINJA2:
         fail("tip %r: aggregates need TIP_TEMPLATE_JINJA2" % id)
     surfaces_list = list(surfaces) if surfaces else []
@@ -1114,7 +1115,8 @@ def _surface_overrides(ctx, entries):
         wanted = [n.strip() for n in names.split(",") if n.strip()]
         bad = [n for n in wanted if n not in _VALID_SURFACES]
         if not eq or not id or not wanted or bad:
-            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s\n" % (e, ", ".join(_VALID_SURFACES)))
+            hint = did_you_mean_then(bad[0], _VALID_SURFACES, "", "") if bad else ""
+            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored%s: expected <id>=<surface>[,<surface>] with surfaces from %s\n" % (e, hint, ", ".join(_VALID_SURFACES)))
             continue
         out[id] = wanted
     return out

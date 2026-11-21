@@ -124,9 +124,18 @@ fn aggregation(
         "last" => A::Last {
             capture: capture()?,
         },
-        other => anyhow::bail!(
-            "aggregation {name:?}: unknown kind {other:?}; valid: count, unique, all, count_distinct, count_by, first, last"
-        ),
+        other => {
+            const KINDS: &str = "count, unique, all, count_distinct, count_by, first, last";
+            anyhow::bail!(
+                "aggregation {name:?}: unknown kind {other:?}{}",
+                crate::suggest::did_you_mean_then(
+                    other,
+                    KINDS.split(", "),
+                    "; ",
+                    &format!("valid: {KINDS}")
+                )
+            )
+        }
     })
 }
 
@@ -533,8 +542,13 @@ impl DisplayMode {
             "lines" => DisplayMode::Lines,
             "none" => DisplayMode::None,
             other => anyhow::bail!(
-                "unknown console display {other:?}; expected one of {}",
-                DisplayMode::NAMES
+                "unknown console display {other:?}{}",
+                crate::suggest::did_you_mean_then(
+                    other,
+                    DisplayMode::NAMES.split(", "),
+                    "; ",
+                    &format!("expected one of {}", DisplayMode::NAMES)
+                )
             ),
         })
     }

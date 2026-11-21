@@ -41,7 +41,7 @@ def _test_a_bad_setting_is_reported_not_raised(_):
     got = default_stages("humane", disable = ["relativize_path"], collapse = ["("], drop = ["[", "ok"])
     _eq("valid stages kept", _names(got.stages), ["relativize_paths", "drop", "collapse_similar", "recap_errors"])
     _eq("one problem each", len(got.problems), 4)
-    _eq("names the stages", "relativize_paths" in got.problems[0], True)
+    _eq("names the stages", "the stages are relativize_paths" in default_stages("human", disable = ["bogus"]).problems[0], True)
     _eq("drop has no default to leave out", len(default_stages("human", disable = ["drop"]).problems), 1)
     near = default_stages("humn", disable = ["recap_error"]).problems
     _eq("a near miss is named", ('did you mean "recap_errors"?' in near[0], 'did you mean "human"?' in near[1]), (True, True))
