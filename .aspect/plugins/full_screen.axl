@@ -219,18 +219,19 @@ def _count(word: str) -> int:
 def action_counts(progress: list):
     """`(running, started)` from Bazel's status line: `[n / m] 300 actions
     running` (300 of each), or `[n / m] 400 actions, 300 running` with some
-    started but not yet running (remote execution, a full local pool); -1 for
+    started but not yet running (remote execution, a full local pool), each
+    word perhaps followed by `,` or `;` (`… 15 running; last test: …`); -1 for
     what the line does not name. Bazel lists only `--ui_actions_shown` of the
     running ones under it, 8 by default."""
     if not progress or "] " not in progress[0]:
         return (-1, -1)
-    words = progress[0].partition("] ")[2].split()
+    words = [w.rstrip(",;") for w in progress[0].partition("] ")[2].split()]
     running, started = -1, -1
     for i in range(len(words) - 1):
         n = _count(words[i])
         if n < 0:
             continue
-        after = words[i + 1].rstrip(",")
+        after = words[i + 1]
         if after.startswith("action"):
             started = n
             if i + 2 < len(words) and words[i + 2] == "running":

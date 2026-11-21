@@ -195,6 +195,8 @@ def _impl(ctx: TaskContext) -> int:
         ("[1 / 9] 300 actions running", (300, 300)),
         ("[1,204 / 9,000] 400 actions, 300 running", (300, 400)),
         ("[1 / 9] 16 actions, 8 running", (8, 16)),
+        ("[10,797 / 18,453] 14 / 39 tests; 16 actions, 15 running; last test: //a:b", (15, 16)),
+        ("[5 / 9] 3 / 9 tests; 4 actions running; last test: //a:b", (4, 4)),
         ("[1 / 9,000] 2,400 actions, 1,200 running", (1200, 2400)),
         ("[5 / 9] 1 action running", (1, 1)),
         ("[5 / 9] Compiling a.cc; 3s remote", (-1, -1)),
