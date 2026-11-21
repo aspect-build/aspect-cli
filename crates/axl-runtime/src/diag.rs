@@ -1,11 +1,11 @@
 //! Severity-prefixed user-facing diagnostics for the Rust side of the CLI.
 //!
-//! The Rust counterpart of the `debug` / `info` / `detail` / `warn` / `error`
-//! std helpers in `lib/environment.axl`: the same `DEBUG:` / `INFO:` /
-//! `WARNING:` / `ERROR:` prefix
-//! style (mirroring Bazel's uppercase severity labels), the same ANSI colors,
-//! and the same "degrade to plain text when color is off" behavior — so a line
-//! printed from Rust is indistinguishable from one printed by an AXL task.
+//! The Rust counterpart of the `debug` / `info` / `warn` / `error` std helpers
+//! in `lib/environment.axl`: the same `DEBUG:` / `INFO:` / `WARNING:` /
+//! `ERROR:` prefix style (mirroring Bazel's uppercase severity labels), the
+//! same ANSI colors, and the same "degrade to plain text when color is off"
+//! behavior - so a line printed from Rust is indistinguishable from one printed
+//! by an AXL task.
 //!
 //! Use this for user-facing subsystem messages (a backend became unreachable,
 //! a fallback fired). It is **not** the structured channel - that is
@@ -18,15 +18,15 @@
 //! `stream_color`, which the console ([`crate::console::Host`]) and AXL's
 //! `std.io.stderr.color` read.
 //!
-//! Levels, quietest first: debug, detail, info, warning, error. [`detail`] and
-//! the AXL `detail` helper follow [`verbose`], and [`debug`] (which the
-//! runtime's `trace!` macro calls) and the AXL `debug` helper print their
-//! `DEBUG:` line only when [`debugging`]. The `Console`
-//! feature sets the level for the running task when the console resolves;
-//! before that, early in start-up, it is [`Verbose::On`] unless the CLI set it
-//! from `ASPECT_VERBOSE` / `ASPECT_DEBUG`. Everything else prints under every
-//! preset: [`info`], `WARNING:` and `ERROR:` lines, and [`emit`], which
-//! carries a task's own exit message.
+//! Levels, quietest first: debug, detail, info, warning, error. The AXL
+//! `detail` helper follows [`verbose`], and [`debug`] (which the runtime's
+//! `trace!` macro calls) and the AXL `debug` helper print their `DEBUG:` line
+//! only when [`debugging`]. The `Console` feature sets the level for the
+//! running task when the console resolves; before that, early in start-up, it
+//! is [`Verbose::On`] unless the CLI set it from `ASPECT_VERBOSE` /
+//! `ASPECT_DEBUG`. Everything else prints under every preset: [`info`],
+//! `WARNING:` and `ERROR:` lines, and [`emit`], which carries a task's own exit
+//! message.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -207,14 +207,6 @@ pub fn debug(msg: &str) {
 /// Print a cyan `INFO:` line for a notable runtime branch.
 pub fn info(msg: &str) {
     emit(Severity::Info, msg);
-}
-
-/// Print [`info`]'s line for an aside a reader can do without, unless
-/// [`verbose`] hides detail lines.
-pub fn detail(msg: &str) {
-    if verbose() {
-        info(msg);
-    }
 }
 
 /// Print a yellow `WARNING:` line for a non-fatal subsystem failure.
