@@ -1018,7 +1018,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.loader.env.history.end_task(
                 None,
                 String::new(),
-                error.lines().next().unwrap_or("").to_owned(),
+                crate::engine::task_record::error_line(&error),
                 cancelled,
             );
             return Err(e.into());

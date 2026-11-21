@@ -46,30 +46,13 @@ starlark_simple_value!(History);
 fn shown(dir: &std::path::Path, record: &TaskRecord) -> serde_json::Value {
     let mut value = serde_json::to_value(record.redacted()).unwrap_or_default();
     value["dir"] = dir.to_string_lossy().into_owned().into();
-    if record.status == "running" && record.pid != std::process::id() && !alive(record.pid) {
+    if record.status == "running"
+        && record.pid != std::process::id()
+        && !crate::engine::task_record::alive(record.pid)
+    {
         value["status"] = "abandoned".into();
     }
     value
-}
-
-/// Whether a process `pid` is alive (one this user may not signal counts).
-fn alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let Ok(pid) = i32::try_from(pid) else {
-            return false;
-        };
-        // Signal 0 checks for the process without sending anything.
-        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-            Ok(()) | Err(nix::errno::Errno::EPERM) => true,
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
 }
 
 #[starlark_module]

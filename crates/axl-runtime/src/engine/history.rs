@@ -319,8 +319,19 @@ impl History {
         for slot in self.slots.lock().unwrap().drain(..) {
             slot.summarize(true);
         }
-        if let Some(file) = self.task_record.lock().unwrap().take() {
-            file.end(exit_code, conclusion, error, cancelled);
+        let Some(file) = self.task_record.lock().unwrap().take() else {
+            return;
+        };
+        file.end(exit_code, conclusion, error, cancelled);
+        // A run that started no prune (it kept no build's files) still caps
+        // the records, which runs like it add, unless one did within
+        // `every`: a walk of the root's names, cheap beside a prune.
+        let pruned = self.pruning.lock().unwrap().is_some();
+        if !pruned
+            && let Some(current) = file.path().parent()
+            && claim_marker(&self.root, RECORDS_PRUNED_MARKER, self.retention.every)
+        {
+            prune_records(&self.root, self.retention, current);
         }
     }
 
@@ -453,6 +464,9 @@ impl History {
 /// Marks the last prune of the history, by its modification time.
 const PRUNED_MARKER: &str = ".pruned";
 
+/// Marks the last capping of the records by a run that pruned nothing else.
+const RECORDS_PRUNED_MARKER: &str = ".pruned-records";
+
 /// The sizes of settled invocations; see [`prune`].
 const SIZES_INDEX: &str = ".sizes";
 
@@ -462,7 +476,12 @@ const SIZES_INDEX: &str = ".sizes";
 /// pruning, though two can; a marker that cannot be written prunes anyway, as
 /// on a full disk, where pruning is what frees space.
 fn claim_prune(root: &Path, every: Duration) -> bool {
-    let marker = root.join(PRUNED_MARKER);
+    claim_marker(root, PRUNED_MARKER, every)
+}
+
+/// [`claim_prune`]'s claim, of the marker `name`.
+fn claim_marker(root: &Path, name: &str, every: Duration) -> bool {
+    let marker = root.join(name);
     let recent = fs::metadata(&marker)
         .and_then(|m| m.modified())
         .is_ok_and(|t| !idle_for(t, every) && t <= SystemTime::now());
@@ -579,6 +598,8 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
         }
         // Gone either way, a concurrent prune having got there first.
         match evict(entry) {
+            // A run still going is left whole, its files counted.
+            Ok(false) => {}
             // Part of it may be gone, so it is measured again next time.
             Err(e) if e.kind() != io::ErrorKind::NotFound => {}
             _ => total -= size,
@@ -598,11 +619,21 @@ fn holds_files(dir: &Path) -> bool {
 
 /// Remove an entry's files but its record, which is kept, its command line
 /// redacted ([`TaskRecord::evict`]); one of a newer schema is kept as it is,
-/// and an entry with no record goes whole.
-fn evict(entry: &Path) -> io::Result<()> {
+/// and an entry with no record goes whole. Whether it was evicted: a run
+/// whose record says it is running, in a process still alive, is left whole
+/// (false), since that process would write its record over the eviction's.
+fn evict(entry: &Path) -> io::Result<bool> {
     let record_path = entry.join(task_record::FILE_NAME);
     if !record_path.is_file() {
-        return fs::remove_dir_all(entry);
+        return fs::remove_dir_all(entry).map(|()| true);
+    }
+    let record = task_record::read(&record_path);
+    // Its process would write its record over the eviction's at its end.
+    if record
+        .as_ref()
+        .is_some_and(|r| r.status == "running" && task_record::alive(r.pid))
+    {
+        return Ok(false);
     }
     for e in fs::read_dir(entry)?.filter_map(|e| e.ok()) {
         if e.file_name() == task_record::FILE_NAME {
@@ -620,12 +651,12 @@ fn evict(entry: &Path) -> io::Result<()> {
         }
     }
     // A record this CLI cannot read (a newer one's) is left as it is.
-    let Some(mut record) = task_record::read(&record_path) else {
-        return Ok(());
+    let Some(mut record) = record else {
+        return Ok(true);
     };
     record.evict(SystemTime::now());
     let bytes = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
-    task_record::write_private(&record_path, &bytes)
+    task_record::write_private(&record_path, &bytes).map(|()| true)
 }
 
 /// Remove the records of runs with no files past [`Retention::records`] of
@@ -871,6 +902,54 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, [std::ffi::OsString::from(task_record::FILE_NAME)]);
+    }
+
+    /// A run whose record says it is running, in a live process, keeps its
+    /// files: that process would write its record over the eviction's.
+    #[test]
+    fn a_live_run_is_not_evicted() {
+        let root = tempfile::tempdir().unwrap();
+        let live = entry(root.path(), 1, 1000, OLD);
+        let record = TaskRecord {
+            schema: task_record::SCHEMA,
+            status: "running".into(),
+            pid: std::process::id(),
+            ..Default::default()
+        };
+        fs::write(
+            live.join(task_record::FILE_NAME),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        for p in [live.join(task_record::FILE_NAME), live.clone()] {
+            fs::File::open(&p)
+                .unwrap()
+                .set_modified(SystemTime::now() - OLD)
+                .unwrap();
+        }
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(live.join(BAZEL_DIR).exists());
+    }
+
+    /// A run that builds nothing still caps the records at its end.
+    #[test]
+    fn a_run_without_a_build_caps_the_records() {
+        let root = tempfile::tempdir().unwrap();
+        for n in 1..=3 {
+            with_record(&root.path().join(name(n)), OLD);
+        }
+        let mut h = history(root.path(), 1 << 30, 0);
+        h.retention.records = 1;
+        h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
+        h.begin_task(&id(99), TaskStart::default());
+        h.end_task(Some(0), String::new(), String::new(), false);
+        let kept: Vec<bool> = (1..=3)
+            .map(|n| root.path().join(name(n)).exists())
+            .collect();
+        assert_eq!(kept, [false, false, true]);
+        assert!(h.root().join(RECORDS_PRUNED_MARKER).exists());
     }
 
     /// A record this CLI cannot read, a newer one's, is kept as it is.

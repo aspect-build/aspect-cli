@@ -212,19 +212,27 @@ impl<'a, 'v> Cmd<'a, 'v> {
     /// The flag spellings whose values are secrets (`args.string(secret =
     /// True)`) on task `task_id`'s command line: its own args' and every
     /// feature's, long and short, as the parser takes them, for redacting a
-    /// command line the CLI keeps.
+    /// command line the CLI keeps. One that may be given bare ends in `=`: it
+    /// takes a value only so.
     pub fn secret_flags(&self, task_id: usize) -> Vec<String> {
         let mut flags = vec![];
         let mut add = |scope: Scope<'_>, name: &str, arg: &Arg| {
             if !arg.secret() || !arg.is_cli_exposed() {
                 return;
             }
-            flags.push(format!("--{}", long_flag(scope, name, arg)));
+            // A flag that may go bare takes a value only with `=`: so
+            // spelled, it never takes the next argument as its value.
+            let eq = if matches!(arg, Arg::String { bare: Some(_), .. }) {
+                "="
+            } else {
+                ""
+            };
+            flags.push(format!("--{}{eq}", long_flag(scope, name, arg)));
             if let Arg::String {
                 short: Some(short), ..
             } = arg
             {
-                flags.push(format!("-{short}"));
+                flags.push(format!("-{short}{eq}"));
             }
         };
         if let Some(task) = self.tasks.get(task_id) {

@@ -182,7 +182,9 @@ const MIN_SCRUBBED: usize = 4;
 
 /// `argv` with secrets redacted: the value of each of `secret_flags`, as
 /// `--flag=value`, `--flag value`, `-f value`, `-fvalue`, or in a cluster of
-/// short flags (`-vf value`, `-vfvalue`); each such value anywhere else in it
+/// short flags (`-vf value`, `-vfvalue`); only `--flag=value` and `-f=value`
+/// for one spelled with a trailing `=`, a flag that may be given bare; each
+/// such value anywhere else in it
 /// too ([`scrub`]), as when a task passes it on in another flag; then
 /// everything by the build event stream's rules (`bazel::bes::redact`). After
 /// a bare `--` only the scrub and those rules apply.
@@ -221,21 +223,25 @@ pub fn scrub(args: &[String], values: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// `argv` with the values of `secret_flags` replaced, and those values.
+/// `argv` with the values of `secret_flags` replaced, and those values. A
+/// spelling ending in `=` (a flag that may be given bare) takes its value
+/// only after `=`, never from the next argument.
 fn split_secrets(argv: &[String], secret_flags: &[String]) -> (Vec<String>, Vec<String>) {
     let redacted = bazel::bes::redact::REDACTED;
-    let long: Vec<&str> = secret_flags
+    let spelled = |f: &String| (f.trim_end_matches('=').to_owned(), !f.ends_with('='));
+    let long: Vec<(String, bool)> = secret_flags
         .iter()
-        .map(String::as_str)
         .filter(|f| f.starts_with("--"))
+        .map(spelled)
         .collect();
-    let short: Vec<char> = secret_flags
+    let short: Vec<(char, bool)> = secret_flags
         .iter()
         .filter(|f| !f.starts_with("--"))
         .filter_map(|f| {
-            let mut c = f.strip_prefix('-')?.chars();
+            let (flag, next) = spelled(f);
+            let mut c = flag.strip_prefix('-')?.chars();
             let only = c.next()?;
-            c.next().is_none().then_some(only)
+            c.next().is_none().then_some((only, next))
         })
         .collect();
     let mut out = Vec::with_capacity(argv.len());
@@ -254,47 +260,93 @@ fn split_secrets(argv: &[String], secret_flags: &[String]) -> (Vec<String>, Vec<
             out.push(arg.clone());
             continue;
         }
-        if let Some(flag) = long.iter().find(|f| arg == **f) {
-            takes_value = true;
-            out.push((*flag).to_string());
+        if let Some((_, next)) = long.iter().find(|(f, _)| arg == f) {
+            takes_value = *next;
+            out.push(arg.clone());
             continue;
         }
-        if let Some((flag, value)) = long.iter().find_map(|f| {
-            arg.strip_prefix(*f)
+        let with_eq = long.iter().find_map(|(f, _)| {
+            arg.strip_prefix(f.as_str())
                 .and_then(|r| r.strip_prefix('='))
                 .map(|v| (f, v))
-        }) {
+        });
+        if let Some((flag, value)) = with_eq {
             values.push(value.to_owned());
             out.push(format!("{flag}={redacted}"));
             continue;
         }
-        // A cluster of short flags: the first secret one takes the rest of
-        // the token as its value (an `=` before it dropped), or, at the end,
-        // the next token.
-        if let Some(cluster) = arg
+        // A cluster of short flags (letters and digits up to the secret one,
+        // so a negative pattern like `-//pkg/test:all` is none): the first
+        // secret one takes the rest of the token as its value (an `=` before
+        // it dropped), or, at the end, the next token.
+        let cluster = arg
             .strip_prefix('-')
-            .filter(|c| !c.is_empty() && !c.starts_with('-'))
-        {
-            if let Some((at, c)) = cluster.char_indices().find(|(_, c)| short.contains(c)) {
-                let head = &arg[..1 + at + c.len_utf8()];
-                let rest = &cluster[at + c.len_utf8()..];
-                if rest.is_empty() {
-                    takes_value = true;
-                    out.push(arg.clone());
-                } else {
-                    let (eq, value) = match rest.strip_prefix('=') {
-                        Some(v) => ("=", v),
-                        None => ("", rest),
-                    };
-                    values.push(value.to_owned());
-                    out.push(format!("{head}{eq}{redacted}"));
-                }
-                continue;
+            .filter(|c| !c.is_empty() && !c.starts_with('-'));
+        let found = cluster.and_then(|cluster| {
+            cluster
+                .char_indices()
+                .take_while(|(_, c)| c.is_ascii_alphanumeric())
+                .find_map(|(at, c)| {
+                    short
+                        .iter()
+                        .find(|(s, _)| *s == c)
+                        .map(|(_, next)| (cluster, at, c, *next))
+                })
+        });
+        if let Some((cluster, at, c, next)) = found {
+            let head = &arg[..1 + at + c.len_utf8()];
+            let rest = &cluster[at + c.len_utf8()..];
+            if rest.is_empty() {
+                takes_value = next;
+                out.push(arg.clone());
+            } else if !next && !rest.starts_with('=') {
+                // One that may be bare: the letters after it are other flags.
+                out.push(arg.clone());
+            } else {
+                let (eq, value) = match rest.strip_prefix('=') {
+                    Some(v) => ("=", v),
+                    None => ("", rest),
+                };
+                values.push(value.to_owned());
+                out.push(format!("{head}{eq}{redacted}"));
             }
+            continue;
         }
         out.push(arg.clone());
     }
     (out, values)
+}
+
+/// Whether a process `pid` is alive on this machine (one this user may not
+/// signal counts).
+pub fn alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        // Signal 0 checks for the process without sending anything.
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+            Ok(()) | Err(nix::errno::Errno::EPERM) => true,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// The message of an error a task ended with, without the traceback its
+/// display leads with: its `error: ` line, else its first.
+pub fn error_line(text: &str) -> String {
+    text.lines()
+        .find_map(|l| l.strip_prefix("error: "))
+        .or_else(|| text.lines().find(|l| !l.trim().is_empty()))
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 /// `time` as RFC 3339 in UTC, to the millisecond.
@@ -712,6 +764,34 @@ mod tests {
             ["abcd", "efgh"]
         );
         assert_eq!(
+            secret_values(&s(&["-//pkg/test:all", "--", "-tx"]), &secrets),
+            Vec::<String>::new(),
+            "a negative pattern is no cluster, and nothing after `--` is a flag"
+        );
+        let bare = s(&["--token=", "-t="]);
+        assert_eq!(
+            redact_argv(
+                &s(&[
+                    "x",
+                    "--token",
+                    "//app:all",
+                    "--token=abcd",
+                    "-tv",
+                    "-t=efgh"
+                ]),
+                &bare
+            ),
+            vec![
+                "x".to_string(),
+                "--token".into(),
+                "//app:all".into(),
+                format!("--token={r}"),
+                "-tv".into(),
+                format!("-t={r}"),
+            ],
+            "a flag that may be bare takes a value only after `=`"
+        );
+        assert_eq!(
             scrub(&s(&["--define=K=abcd", "a=abc"]), &s(&["abcd", "abc"])),
             vec![format!("--define=K={r}"), "a=abc".into()],
             "too short a value is left alone"
@@ -752,6 +832,13 @@ mod tests {
             let mode = fs::metadata(file.path()).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn an_error_is_its_message_not_its_traceback() {
+        let text = "Traceback (most recent call last):\n  * a.axl:3, in _impl\nerror: fail: boom\n --> a.axl:3:5\n";
+        assert_eq!(error_line(text), "fail: boom");
+        assert_eq!(error_line("plain\nmore"), "plain");
     }
 
     #[test]
