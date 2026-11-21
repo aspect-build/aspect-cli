@@ -1,7 +1,7 @@
 """`aspect history`: the tasks run on this machine, from the task history's
 records (`ctx.std.history`), newest first.
 
-    aspect history list [--kind=build] [--limit=20] [--output=json]
+    aspect history list [--kind=build] [--outcome=failed] [--branch=main] [--limit=20] [--output=json]
     aspect history show <task-id> [--output=json]
 
 `list` gives a run a line: the start of its task ID (enough for `show`),
@@ -138,7 +138,12 @@ def show_lines(record) -> list:
 def _list_impl(ctx: TaskContext) -> int:
     records = [
         r
-        for r in ctx.std.history.list(limit = ctx.args.limit + 1, kind = ctx.args.kind or None)
+        for r in ctx.std.history.list(
+            limit = ctx.args.limit + 1,
+            kind = ctx.args.kind or None,
+            outcome = None if ctx.args.outcome == "all" else ctx.args.outcome,
+            branch = ctx.args.branch or None,
+        )
         if r.get("task", {}).get("id") != ctx.task.id
     ][:ctx.args.limit]
     out = ctx.std.io.stdout
@@ -180,6 +185,12 @@ history_list = task(
     implementation = _list_impl,
     args = {
         "kind": args.string(default = "", description = "Only runs of this task kind (`build`, `test`)."),
+        "outcome": args.string(
+            default = "all",
+            values = ["all", "ok", "failed", "error", "cancelled", "running", "abandoned"],
+            description = "Only runs that ended so (`all` by default): `ok`, `failed` (a non-zero exit), `error`, `cancelled`, `running`, or `abandoned` (its process gone without writing its end).",
+        ),
+        "branch": args.string(default = "", description = "Only runs on this git branch."),
         "limit": args.uint(default = 20, description = "The most runs listed."),
         "output": _OUTPUT,
     },
