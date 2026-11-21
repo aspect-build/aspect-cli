@@ -2026,6 +2026,12 @@ def _test_strip_url_creds_handles_several_urls(ctx):
         "a=https://<REDACTED>@one.example b=grpcs://bob:<REDACTED>@two.example",
     )
 
+def _test_strip_url_creds_stops_at_the_authority(ctx):
+    """An `@` in the path, query or fragment is not a login's."""
+    for url in ["https://ci.example.com?user=me@corp.com", "https://h.example/a@b", "https://h.example#a@b"]:
+        _eq("unchanged: " + url, strip_url_creds(url), url)
+    _eq("a login before a query", strip_url_creds("https://u:p@h.example?x=1"), "https://u:<REDACTED>@h.example?x=1")
+
 def _test_strip_url_creds_stops_at_whitespace(ctx):
     """An `@` in a later word does not belong to this URL's userinfo, so a
     whitespace-terminated authority must not be treated as one."""
@@ -2460,6 +2466,7 @@ _UNIT_TESTS = [
     _test_strip_url_creds_leaves_urls_without_userinfo,
     _test_strip_url_creds_handles_several_urls,
     _test_strip_url_creds_stops_at_whitespace,
+    _test_strip_url_creds_stops_at_the_authority,
     _test_truncate_label_short_label_unchanged,
     _test_truncate_label_keeps_target_name,
     _test_truncate_label_long_target_name_falls_back_to_tail_cut,

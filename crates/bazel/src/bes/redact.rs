@@ -609,7 +609,9 @@ pub fn strip_url_creds(s: &str) -> Cow<'_, str> {
     // Look for `user[:pass]@` between `scheme://` and the next `/` (authority section).
     let authority_start = scheme_end + 3;
     let rest = &s[authority_start..];
-    let authority_end = rest.find('/').unwrap_or(rest.len());
+    // The authority ends at the path, the query or the fragment, so an `@`
+    // in a query (`?user=me@corp.com`) is not taken for a login's.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let Some(at) = authority.find('@') else {
         return Cow::Borrowed(s);
@@ -1096,6 +1098,24 @@ mod tests {
             redact_command_args(["build", "--remote_header"]),
             vec!["build", "--remote_header"],
             "a flag at the end, its value missing"
+        );
+    }
+
+    /// The authority ends at the path, query or fragment: an `@` past it is
+    /// no login.
+    #[test]
+    fn url_creds_are_only_in_the_authority() {
+        assert_eq!(
+            strip_url_creds("https://ci.example.com?user=me@corp.com"),
+            "https://ci.example.com?user=me@corp.com"
+        );
+        assert_eq!(
+            strip_url_creds("https://h.example#a@b"),
+            "https://h.example#a@b"
+        );
+        assert_eq!(
+            strip_url_creds("https://u:p@h.example?x=1"),
+            format!("https://{REDACTED}@h.example?x=1")
         );
     }
 
