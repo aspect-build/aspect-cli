@@ -303,7 +303,7 @@ def _resolve_effective_dirs(ph):
     # Positionals given but none survived: refuse to widen to whole-repo. A
     # typo/stale path shouldn't rewrite unrelated BUILD files.
     if raw_user_dirs and not user_dirs:
-        answer(ctx.std, "All supplied directories were missing — skipping gazelle to avoid widening to a whole-repo run.")
+        answer(ctx.std, "All supplied directories were missing - skipping gazelle to avoid widening to a whole-repo run.")
         return [], True
 
     if ctx.args.scope == "all":
@@ -364,7 +364,7 @@ def _resolve_effective_dirs(ph):
     effective = dedupe_subtrees(effective)
 
     if not effective:
-        answer(ctx.std, "No changed directories — skipping gazelle.")
+        answer(ctx.std, "No changed directories - skipping gazelle.")
         return [], True
 
     return effective, False

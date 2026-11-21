@@ -533,7 +533,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int | TaskConclusion:
 
     shown = lambda path: _relative(path, base, home_mode)
     if chain_to_repo:
-        answer(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on — nothing here restates them." %
+        answer(ctx.std, "%s %s: enabled %s. The endpoints are this checkout's own %s, which this rc only turns on - nothing here restates them." %
                         (verb, shown(paths.output), ", ".join(enabled), "%workspace%/" + GENERATED_RC))
         return 0
     if env_deployment:
