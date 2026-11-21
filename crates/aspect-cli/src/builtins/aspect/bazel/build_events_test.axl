@@ -14,9 +14,9 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
-    """Stand-in for `ctx`. `info(ctx.std, …)` reads `std.io.stdout.is_tty` and
-    `std.env.var` to decide on color, and the collect helpers read the
-    `--bes-backend` / `--bes-header` args.
+    """Stand-in for `ctx`. `info(ctx.std, …)` reads `std.io.stderr.color`,
+    and the collect helpers read `std.env.var` and the `--bes-backend` /
+    `--bes-header` args.
 
     `aspect.auth.deployment_for_host` returns None throughout: these tests cover
     endpoint matching, not the JWT attachment `aspect_endpoint_auth_test.axl`
@@ -25,7 +25,7 @@ def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
     fake accepts and drops it."""
     return struct(
         std = struct(
-            io = struct(stdout = struct(is_tty = False)),
+            io = struct(stdout = struct(is_tty = False, color = False), stderr = struct(color = False)),
             env = struct(var = lambda name: env.get(name)),
         ),
         args = struct(bes_backends = bes_backends, bes_headers = bes_headers),

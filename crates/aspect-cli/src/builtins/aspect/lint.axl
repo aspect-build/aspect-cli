@@ -28,7 +28,7 @@ load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "local_output_path", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
+load("./private/lib/environment.axl", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -373,7 +373,7 @@ def _print_linters_run(ctx, tools_run):
     """Print a one-line summary of the linters that fired. No-op when none ran."""
     if not tools_run:
         return
-    color = color_enabled(ctx.std)
+    color = ctx.std.io.stderr.color
     bold = ansi.BOLD if color else ""
     reset = ansi.RESET if color else ""
     print("")
@@ -387,7 +387,7 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     """
     if not relevant:
         return
-    color = color_enabled(ctx.std)
+    color = ctx.std.io.stderr.color
     bold = ansi.BOLD if color else ""
     reset = ansi.RESET if color else ""
     print("")

@@ -18,6 +18,7 @@ use starlark::{
 
 use std::sync::Arc;
 
+use crate::color::StreamColor;
 use crate::engine::cancellation::Signals;
 use crate::engine::error::{IoError, NativeError};
 use starlark::StarlarkResultExt;
@@ -37,11 +38,14 @@ pub struct Std {
     /// The run's cancellation state, for the members that block.
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// What `std.io.stdout.color` and `std.io.stderr.color` report.
+    #[allocative(skip)]
+    color: StreamColor,
 }
 
 impl Std {
-    pub fn new(signals: Arc<Signals>) -> Self {
-        Self { signals }
+    pub fn new(signals: Arc<Signals>, color: StreamColor) -> Self {
+        Self { signals, color }
     }
 }
 
@@ -65,7 +69,7 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn io<'v>(this: values::Value<'v>) -> anyhow::Result<io::Stdio> {
         let this = this.downcast_ref_err::<Std>().into_anyhow_result()?;
-        Ok(io::Stdio::new(this.signals.clone()))
+        Ok(io::Stdio::new(this.signals.clone(), this.color))
     }
 
     #[starlark(attribute)]

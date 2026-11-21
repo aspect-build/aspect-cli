@@ -25,6 +25,7 @@ use starlark::syntax::AstModule;
 use starlark::values::Value;
 use tokio::runtime::Runtime;
 
+use crate::color::StreamColor;
 use crate::engine::arguments::Arguments;
 use crate::engine::cancellation::Signals;
 use crate::engine::history::{History, Retention};
@@ -65,6 +66,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         signals: None,
         exporting: false,
         history: None,
+        host_env: None,
     }
 }
 
@@ -78,6 +80,7 @@ pub struct EvalBuilder {
     signals: Option<Arc<Signals>>,
     exporting: bool,
     history: Option<PathBuf>,
+    host_env: Option<(StreamColor, bool)>,
 }
 
 impl EvalBuilder {
@@ -125,6 +128,25 @@ impl EvalBuilder {
     /// inspects it, rather than in a directory of the run's own.
     pub fn with_history(mut self, root: PathBuf) -> Self {
         self.history = Some(root);
+        self
+    }
+
+    /// Resolve the run's host in [`EvalBuilder::run_task`] from this snapshot
+    /// rather than the process's own: whether stdout and stderr are terminals,
+    /// and the only environment variables set. It decides color (the
+    /// console's, and `std.io.stdout.color` / `std.io.stderr.color`) and
+    /// whether the console runs as on Buildkite.
+    pub fn with_host_env(
+        mut self,
+        stdout_tty: bool,
+        stderr_tty: bool,
+        vars: &[(&str, &str)],
+    ) -> Self {
+        let var = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.into());
+        self.host_env = Some((
+            StreamColor::from_snapshot(stdout_tty, stderr_tty, var),
+            crate::ci::buildkite_from(var),
+        ));
         self
     }
 
@@ -268,6 +290,10 @@ impl EvalBuilder {
                 &modules,
             );
             loader.env.signals = signals.clone();
+            if let Some((color, buildkite)) = self.host_env {
+                loader.env.stream_color = color;
+                loader.env.buildkite = buildkite;
+            }
             if self.exporting {
                 loader.env.telemetry.export_everything();
             }

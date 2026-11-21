@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::banner;
 use crate::ci::on_recognized_ci;
-use crate::console::{Console, Slot, TaskIdentity};
+use crate::console::{Console, Host, Slot, TaskIdentity};
 use crate::diag;
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::{Bazel, ClaimCheck};
@@ -645,6 +645,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.telemetry_value,
             self.hooks_value,
             self.loader.env.signals.clone(),
+            self.loader.env.stream_color,
         ));
 
         let mut out = PhaseFailures::default();
@@ -713,6 +714,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Runs after `execute_configs` and before the header, so a config's
     /// templates frame the whole run. Without the feature the run gets the
     /// `full` layout; see [`console_value::from_feature_args`] for the rest.
+    /// Color and Buildkite come from the run's `Env` ([`Host::of`]), the
+    /// console's only view of its host.
     pub fn resolve_console(
         &self,
         task_index: usize,
@@ -728,16 +731,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             name: task_name.to_owned(),
             path: task_command_path(task.group(), &task.kind()),
         };
+        let host = Host::of(&self.loader.env);
         let console = match self
             .features()
             .into_iter()
             .find(|f| f.name() == CONSOLE_FEATURE)
         {
-            None => Console::builtin(identity),
-            Some(feature) => {
-                console_value::from_feature_args(&args_builder(feature, self.heap()), identity)
-                    .map_err(|e| EvalError::UnknownError(anyhow!(e)))?
-            }
+            None => Console::builtin(identity, host),
+            Some(feature) => console_value::from_feature_args(
+                &args_builder(feature, self.heap()),
+                identity,
+                host,
+            )
+            .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };
         Ok(Arc::new(console))
     }
@@ -815,6 +821,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 self.telemetry_value,
                 self.hooks_value,
                 self.loader.env.signals.clone(),
+                self.loader.env.stream_color,
             ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
@@ -961,6 +968,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             bazel,
             self.hooks_value,
             self.loader.env.signals.clone(),
+            self.loader.env.stream_color,
             console.clone(),
         ));
 

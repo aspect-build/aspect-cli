@@ -2,8 +2,9 @@
 (`endpoint_flags`), the `env_flags` / `runner_flags` /
 `runner_diagnostics_flags` compositions and the runner pieces the rc groups are
 assembled from, `apply_output_base_suffix`, the opt-out (`omit_flags`,
-`protected_omissions`), and how a task takes them (`add_task_flags`,
-`unset_flags`).
+`protected_omissions`), how a task takes them (`add_task_flags`,
+`unset_flags`), and `bazel_misdetects_color` beside them in
+`environment.axl`.
 
 Version-gating of `(flag, constraint)` tuples is the bazelrc runtime's job; these
 assert the tuples carry the right constraints. Run with: aspect dev test-aspect-flags
@@ -313,14 +314,20 @@ def _test_color_flags(_ctx):
 
     # Forced only where a viewer renders ANSI but Bazel sees no TTY. Buildkite
     # gives the job a PTY, so Bazel colors unaided and it is left out.
-    def env(**vars):
-        return struct(var = lambda k: vars.get(k, ""))
+    def std(color = True, **vars):
+        return struct(
+            io = struct(stderr = struct(color = color)),
+            env = struct(var = lambda k: vars.get(k, "")),
+        )
 
-    _eq("github", bazel_misdetects_color(env(GITHUB_ACTIONS = "true")), True)
-    _eq("circleci", bazel_misdetects_color(env(CIRCLECI = "true")), True)
-    _eq("gitlab", bazel_misdetects_color(env(GITLAB_CI = "true")), True)
-    _eq("buildkite", bazel_misdetects_color(env(BUILDKITE = "true")), False)
-    _eq("plain CI", bazel_misdetects_color(env(CI = "1")), False)
+    _eq("github", bazel_misdetects_color(std(GITHUB_ACTIONS = "true")), True)
+    _eq("circleci", bazel_misdetects_color(std(CIRCLECI = "true")), True)
+    _eq("gitlab", bazel_misdetects_color(std(GITLAB_CI = "true")), True)
+    _eq("buildkite", bazel_misdetects_color(std(BUILDKITE = "true")), False)
+    _eq("plain CI", bazel_misdetects_color(std(CI = "1")), False)
+
+    # Color off (a non-empty NO_COLOR) leaves Bazel's own choice alone.
+    _eq("color off", bazel_misdetects_color(std(color = False, GITHUB_ACTIONS = "true")), False)
 
 def _test_exec_log_flags(_ctx):
     # Shared by the runner diagnostics, the rc's exec-log group, and `--remote`.

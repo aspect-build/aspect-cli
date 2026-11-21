@@ -14,6 +14,7 @@ use std::sync::Arc;
 use super::cancellation::{Cancellation, Signals};
 use super::http::Http;
 use super::std::Std;
+use crate::color::StreamColor;
 
 /// Context passed to a feature's `implementation` function.
 ///
@@ -38,6 +39,9 @@ pub struct FeatureContext<'v> {
     /// The run's cancellation state, behind `ctx.cancellation`.
     #[allocative(skip)]
     pub(crate) signals: Arc<Signals>,
+    /// What `std.io.<stream>.color` reports.
+    #[allocative(skip)]
+    pub(crate) stream_color: StreamColor,
 }
 
 unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
@@ -56,6 +60,7 @@ impl<'v> FeatureContext<'v> {
         telemetry: Value<'v>,
         hooks: Value<'v>,
         signals: Arc<Signals>,
+        stream_color: StreamColor,
     ) -> Self {
         Self {
             args,
@@ -63,6 +68,7 @@ impl<'v> FeatureContext<'v> {
             telemetry,
             hooks,
             signals,
+            stream_color,
         }
     }
 }
@@ -83,6 +89,7 @@ impl<'v> Freeze for FeatureContext<'v> {
             telemetry: self.telemetry.freeze(freezer)?,
             hooks: self.hooks.freeze(freezer)?,
             signals: self.signals,
+            stream_color: self.stream_color,
         })
     }
 }
@@ -109,6 +116,9 @@ pub struct FrozenFeatureContext {
     hooks: FrozenValue,
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// What `std.io.<stream>.color` reports.
+    #[allocative(skip)]
+    stream_color: StreamColor,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenFeatureContext {
@@ -151,10 +161,10 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(this: Value<'v>) -> anyhow::Result<Std> {
         if let Some(c) = this.downcast_ref::<FeatureContext>() {
-            return Ok(Std::new(c.signals.clone()));
+            return Ok(Std::new(c.signals.clone(), c.stream_color));
         }
         if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
-            return Ok(Std::new(c.signals.clone()));
+            return Ok(Std::new(c.signals.clone(), c.stream_color));
         }
         Err(anyhow::anyhow!("expected FeatureContext"))
     }

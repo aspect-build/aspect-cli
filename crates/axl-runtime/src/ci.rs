@@ -2,7 +2,8 @@
 //!
 //! A single source of truth so the several places that change behavior on CI
 //! (cancellation strategy, task-header formatting, auto task naming) agree on
-//! what "on CI" means. Color asks the narrower [`ci_renders_ansi`].
+//! what "on CI" means. Color asks the narrower [`renders_ansi`], and the
+//! console's Buildkite log sections ask [`buildkite_from`].
 
 use std::path::PathBuf;
 
@@ -29,19 +30,21 @@ fn is_ci_from(present: impl Fn(&str) -> bool) -> bool {
 
 /// CI hosts whose log viewer renders ANSI color although the job writes to a
 /// pipe. Narrower than [`CI_MARKERS`]: a host that sets only `CI` may show the
-/// escapes as text. The same list as `ci_renders_ansi` in
-/// `lib/environment.axl`, so AXL's output and the runtime's agree.
+/// escapes as text. AXL reads the answer as `std.io.stderr.color`.
 const ANSI_RENDERING_CI: &[&str] = &["BUILDKITE", "GITHUB_ACTIONS", "CIRCLECI", "GITLAB_CI"];
 
-/// True on a CI host in [`ANSI_RENDERING_CI`], set to a non-empty value as AXL
-/// reads it.
-pub fn ci_renders_ansi() -> bool {
-    renders_ansi_from(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+/// True on a CI host in [`ANSI_RENDERING_CI`]; `set` says whether one variable
+/// is set to a non-empty value. [`crate::color`] resolves it over the process
+/// environment, or a test's snapshot.
+pub(crate) fn renders_ansi(set: impl Fn(&str) -> bool) -> bool {
+    ANSI_RENDERING_CI.iter().any(|var| set(var))
 }
 
-/// Pure core of [`ci_renders_ansi`].
-fn renders_ansi_from(set: impl Fn(&str) -> bool) -> bool {
-    ANSI_RENDERING_CI.iter().any(|var| set(var))
+/// True on Buildkite: `BUILDKITE` set to a non-empty value, where `var` reads
+/// one environment variable. [`crate::engine::store::Env`] resolves it once
+/// per run over the process environment, or a test's snapshot.
+pub(crate) fn buildkite_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    var("BUILDKITE").is_some_and(|v| !v.is_empty())
 }
 
 // ── Auto task names from the CI job ──────────────────────────────────────────
@@ -315,10 +318,10 @@ mod tests {
     #[test]
     fn only_named_hosts_render_ansi() {
         for host in ANSI_RENDERING_CI {
-            assert!(renders_ansi_from(|var| var == *host), "{host}");
+            assert!(renders_ansi(|var| var == *host), "{host}");
         }
         assert!(
-            !renders_ansi_from(|var| var == "CI"),
+            !renders_ansi(|var| var == "CI"),
             "a generic CI host may not render ANSI"
         );
     }

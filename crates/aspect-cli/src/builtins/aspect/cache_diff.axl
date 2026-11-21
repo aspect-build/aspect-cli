@@ -70,7 +70,7 @@ load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/cache_selection.axl", "attribution_rc", "select_tests")
-load("./private/lib/environment.axl", "color_enabled", "warn")
+load("./private/lib/environment.axl", "warn")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/runnable.axl", "normalize_label")
 
@@ -364,7 +364,7 @@ def _emit_json(ctx: TaskContext, mode: str, test_targets: list, affected: list, 
     ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
 
 def _impl(ctx: TaskContext) -> int:
-    color = color_enabled(ctx.std)
+    color = ctx.std.io.stderr.color
     patterns = list(ctx.args.targets)
     mode = ctx.args.mode
     timing = {}  # seconds per phase — split bazel work vs our analysis at the end

@@ -378,7 +378,7 @@ def _default_deployment(deployments: list):
 
 def _groups(ctx: TaskContext, environment, on_runner: bool, machine_rc: bool, remote_on: dict, auth: dict, exec_log_path: str) -> (list, list):
     """`rc_groups` for this host: every group defined, and the names enabled."""
-    return rc_groups(environment, on_runner, bazel_misdetects_color(ctx.std.env), exec_log_path, machine_rc, remote_on, auth)
+    return rc_groups(environment, on_runner, bazel_misdetects_color(ctx.std), exec_log_path, machine_rc, remote_on, auth)
 
 def _credential_helper(ctx: TaskContext) -> str:
     """What the sections hand Bazel as the credential helper: `aspect`, which

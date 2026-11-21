@@ -40,7 +40,6 @@ need to probe — the data flow just goes quiet.
 """
 
 load("./ansi.axl", "ansi")
-load("./environment.axl", "color_enabled")
 
 # ── Severity constants ───────────────────────────────────────────────
 
@@ -520,7 +519,7 @@ def _print_tip(std, id, severity, title, body):
     footer are prefixed with a colored `│ ` so the tip boundary is visible in
     a stream of WARN/INFO lines. Code fences are stripped."""
     code = _TERMINAL_TIP_COLOR.get(severity, "1;36")  # default to INFO's cyan for unknown severities
-    color_on = color_enabled(std)
+    color_on = std.io.stderr.color
 
     prefix = "%s %s:" % (severity_emoji(severity), severity_label(severity).upper())
     if color_on:

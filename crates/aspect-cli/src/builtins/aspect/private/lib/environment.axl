@@ -82,30 +82,18 @@ WorkflowsEnvironment = record(
     ci = field(CI | None, default = None),
 )
 
-# Terminal / ANSI detection
+# Bazel color
 
-def ci_renders_ansi(env) -> bool:
-    """Whether this is a CI host whose log viewer renders ANSI color despite a
-    non-TTY pipe: GitHub Actions, Buildkite, CircleCI, GitLab. Broader than
-    `CI.supports_curses`: curses cursor control breaks line-oriented log viewers,
-    but plain ANSI color renders fine."""
-    return bool(
-        env.var("GITHUB_ACTIONS") or
-        env.var("BUILDKITE") or
-        env.var("CIRCLECI") or
-        env.var("GITLAB_CI"),
-    )
-
-def color_enabled(std):
-    """Should ANSI color be emitted to stdout? True on a real TTY, or on a CI
-    host that renders ANSI (`ci_renders_ansi`)."""
-    return std.io.stdout.is_tty or ci_renders_ansi(std.env)
-
-def bazel_misdetects_color(env) -> bool:
+def bazel_misdetects_color(std) -> bool:
     """Whether Bazel's `--color=auto` would wrongly decide against color here: a
     CI host whose log viewer renders ANSI but which runs the job with no TTY for
-    Bazel to see — GitHub Actions, CircleCI, GitLab. Buildkite renders ANSI too
-    but gives the job a PTY, so Bazel gets it right unaided and is left out."""
+    Bazel to see - GitHub Actions, CircleCI, GitLab. Buildkite renders ANSI too
+    but gives the job a PTY, so Bazel gets it right unaided and is left out.
+    Never when `std.io.stderr.color` is off (a non-empty `NO_COLOR`): Bazel's
+    own choice stands then, unforced."""
+    if not std.io.stderr.color:
+        return False
+    env = std.env
     return bool(env.var("GITHUB_ACTIONS") or env.var("CIRCLECI") or env.var("GITLAB_CI"))
 
 # Severity-prefixed output. Channels (increasing alarm):
@@ -140,20 +128,21 @@ def bazel_misdetects_color(env) -> bool:
 #
 # Prefix style mirrors Bazel's uppercase ERROR:/WARNING:
 # (https://bazel.build/run/scripts#parsing-output); punctuation follows
-# uv/cargo (period only when it adds meaning). color_enabled gates the ANSI, so
-# the prefix degrades to plain INFO:/WARNING:/ERROR: in a non-rendering log.
+# uv/cargo (period only when it adds meaning). `std.io.stderr.color` gates the
+# ANSI, so the prefix degrades to plain INFO:/WARNING:/ERROR: in a non-rendering
+# log.
 
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state."""
-    print(ansi.style("INFO", ansi.seq("1;36"), color_enabled(std)) + ": " + msg)
+    print(ansi.style("INFO", ansi.seq("1;36"), std.io.stderr.color) + ": " + msg)
 
 def warn(std, msg):
     """Print a yellow `WARNING:` line for non-fatal subsystem failures."""
-    print(ansi.style("WARNING", ansi.seq("0;33"), color_enabled(std)) + ": " + msg)
+    print(ansi.style("WARNING", ansi.seq("0;33"), std.io.stderr.color) + ": " + msg)
 
 def error(std, msg):
     """Print a red `ERROR:` line for recoverable errors preceding non-zero exit."""
-    print(ansi.style("ERROR", ansi.seq("0;31"), color_enabled(std)) + ": " + msg)
+    print(ansi.style("ERROR", ansi.seq("0;31"), std.io.stderr.color) + ": " + msg)
 
 def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
     """Open a collapsed Buildkite log section, titled by the console's
@@ -503,7 +492,7 @@ def print_environment_info(ctx: TaskContext, env: WorkflowsEnvironment) -> None:
         buildkite_section(ctx, ":rocket:", "Workflows runner metadata")
 
     std = ctx.std
-    color = color_enabled(std)
+    color = ctx.std.io.stderr.color
 
     # Bold+underline+blue title mirrors `_display_runner_health` in
     # health_check.axl so the two setup-phase sections match.

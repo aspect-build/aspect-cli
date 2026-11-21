@@ -28,7 +28,7 @@ def _workflows_impl(ctx: FeatureContext):
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
 
-    bazel_trait.extra_flags.extend(color_flags(bazel_misdetects_color(ctx.std.env)))
+    bazel_trait.extra_flags.extend(color_flags(bazel_misdetects_color(ctx.std)))
 
     if ctx.args.remote_exec:
         executor_flags = runner_executor_flags(environment)

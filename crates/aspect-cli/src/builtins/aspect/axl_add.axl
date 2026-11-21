@@ -12,21 +12,23 @@ load("@std//hash.axl", "sha512")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/environment.axl", "error")
 
-def progress_bar(current: int, total: int, width: int = 30) -> str:
-    """Generate an orange progress bar string."""
+def progress_bar(current: int, total: int, width: int = 30, color: bool = True) -> str:
+    """Generate a progress bar string, orange when `color`."""
     filled = int(width * current / total)
     bar = "▪" * filled + "▫" * (width - filled)
     percent = int(100 * current / total)
-    return ansi.ORANGE + "[" + bar + "]" + ansi.RESET + " " + str(percent) + "%"
+    return ansi.style("[" + bar + "]", ansi.ORANGE, color) + " " + str(percent) + "%"
 
 def show_phase(ctx: TaskContext, phases: list, current: int):
-    """Display phases with checkmarks and progress bar."""
+    """Display phases with checkmarks and progress bar, on a terminal stdout
+    only, colored as `std.io.stdout.color` allows."""
     if not ctx.std.io.stdout.is_tty:
         # Non-TTY: just print current phase
         print(phases[current] + "...")
         return
 
     io = ctx.std.io
+    color = io.stdout.color
 
     # Move up and clear previous output (on update calls)
     if current > 0:
@@ -42,15 +44,15 @@ def show_phase(ctx: TaskContext, phases: list, current: int):
     lines = []
     for i, phase in enumerate(phases):
         if i < current:
-            lines.append(ansi.GREEN + "✓" + ansi.RESET + " " + phase)
+            lines.append(ansi.style("✓", ansi.GREEN, color) + " " + phase)
         elif i == current:
             lines.append("  " + phase + "...")
         else:
-            lines.append(ansi.DIM + "  " + phase + ansi.RESET)
+            lines.append(ansi.style("  " + phase, ansi.DIM, color))
 
     # Write phases and progress bar
     output = "\n".join(lines) + "\n"
-    output += progress_bar(current + 1, len(phases))
+    output += progress_bar(current + 1, len(phases), color = color)
     io.stdout.write(output)
     io.stdout.flush()
 
@@ -315,15 +317,16 @@ def _impl(ctx: TaskContext) -> int:
 
     # Confirmation (only for latest version, unless --yes flag is set)
     if version == "latest" and not ctx.args.yes:
+        color = ctx.std.io.stderr.color
         print("")
-        print(ansi.BOLD + ansi.ORANGE + "📦 Release" + ansi.RESET)
-        print(ansi.DIM + "   ─────────────────────────────────────" + ansi.RESET)
-        print(ansi.DIM + "   Version   " + ansi.RESET + ansi.BOLD + tag_name + ansi.RESET)
-        print(ansi.DIM + "   Author    " + ansi.RESET + author_login + (ansi.CYAN + " <" + author_url + ">" + ansi.RESET if author_url else ""))
-        print(ansi.DIM + "   Integrity " + ansi.RESET + ansi.DIM + integrity + ansi.RESET)
+        print(ansi.style("📦 Release", ansi.BOLD + ansi.ORANGE, color))
+        print(ansi.style("   ─────────────────────────────────────", ansi.DIM, color))
+        print(ansi.style("   Version   ", ansi.DIM, color) + ansi.style(tag_name, ansi.BOLD, color))
+        print(ansi.style("   Author    ", ansi.DIM, color) + author_login + (ansi.style(" <" + author_url + ">", ansi.CYAN, color) if author_url else ""))
+        print(ansi.style("   Integrity ", ansi.DIM, color) + ansi.style(integrity, ansi.DIM, color))
         print("")
-        if not confirm(ctx, ansi.YELLOW + "?" + ansi.RESET + " Add this dependency to MODULE.aspect"):
-            print(ansi.DIM + "Cancelled." + ansi.RESET)
+        if not confirm(ctx, ansi.style("?", ansi.YELLOW, ctx.std.io.stdout.color) + " Add this dependency to MODULE.aspect"):
+            print(ansi.style("Cancelled.", ansi.DIM, color))
             return 1
 
     # Phase 3: Add to MODULE.aspect

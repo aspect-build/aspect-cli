@@ -50,9 +50,9 @@ not queued behind each other's `git worktree add`. See
 how the pool is bounded.
 
 The text reports go to stderr, and are styled only when stderr is a terminal
-and `NO_COLOR` is unset (`_color`): headings bold, labels, column headers,
-comments and hints dimmed. Text from outside is escaped before any style is
-added (`_styled`), and the layout reads the same without color.
+and `NO_COLOR` is unset or empty (`_color`): headings bold, labels, column
+headers, comments and hints dimmed. Text from outside is escaped before any
+style is added (`_styled`), and the layout reads the same without color.
 """
 
 load("@std//time.axl", "time")
@@ -165,8 +165,8 @@ def _info(std, message: str) -> None:
 def _info_shown(std, shown: str) -> None:
     """An `INFO:` line whose text is already escaped, and may be styled.
 
-    Not `environment.info`, whose prefix follows stdout and ignores `NO_COLOR`:
-    this report is written to stderr, and styled as `_color` says."""
+    Not `environment.info`, which also colors on CI hosts: this report is
+    styled only as `_color` says."""
     print(_styled(std, "INFO", ansi.seq("1;36")) + ": " + shown)
 
 def _warn(std, message: str) -> None:
@@ -175,9 +175,9 @@ def _warn(std, message: str) -> None:
 
 def _color(std) -> bool:
     """Whether the text report may be styled. It is written to stderr, so that
-    is the stream asked — stdout carries `--output=json` and `path` — and never
-    under `NO_COLOR`."""
-    return std.io.stderr.is_tty and not std.env.var("NO_COLOR")
+    is the stream asked (stdout carries `--output=json` and `path`): on a
+    terminal only, not on a CI log, and as `std.io.stderr.color` allows."""
+    return std.io.stderr.is_tty and std.io.stderr.color
 
 def _styled(std, text: str, code: str) -> str:
     """`text` escaped as `_print` escapes it, then styled with `code` when
