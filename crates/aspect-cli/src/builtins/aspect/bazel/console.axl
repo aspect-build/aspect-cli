@@ -197,7 +197,7 @@ def start_stages(ctx, trait) -> list:
         stages.extend(hook(ctx) or [])
     return stages
 
-def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], curses = None, colour = None):
+def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], curses = None, color = None):
     """The `bazel.output.processor` for `trait.output_stages` and `extra`
     (the `output_start` hooks' stages, `start_stages`), or None, leaving
     Bazel's stderr inherited, when there are no stages and the trait neither
@@ -209,7 +209,7 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     does (`curses` or `lines`); else, for `auto`, when the task's stdout and
     stderr are both terminals, since Bazel decides colour and its live UI for
     both. Plain lines carry Bazel's status line every few seconds unless
-    `trait.output_progress` is False. Colour shows as `colour`, the user's own
+    `trait.output_progress` is False. Colour shows as `color`, the user's own
     `--color`, says; else on a terminal, without a non-empty `NO_COLOR`.
     Bazel itself is asked for curses and colour either way: see
     `bazel.output.processor`."""
@@ -227,7 +227,7 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     return bazel.output.processor(
         stages = stages,
         display = display,
-        show_colour = colour,
+        show_color = color,
         progress = trait.output_progress,
     )
 

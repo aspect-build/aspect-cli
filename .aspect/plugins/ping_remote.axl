@@ -19,8 +19,10 @@ How it works:
 
 Each executor is checked once per task, so a retried build does not wait
 again. Executors it cannot check over TCP, such as `unix:` sockets, are left
-alone. Only the executor is cleared, so an rc that also asks for a `remote`
-strategy fails the build instead.
+alone. Only `--remote_executor` is cleared, so an rc that also asks for a
+`remote` strategy fails the build instead. With no `--remote_cache`, Bazel
+uses the executor as the cache too, so clearing it also turns off that
+cache: the same endpoint that did not answer.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")

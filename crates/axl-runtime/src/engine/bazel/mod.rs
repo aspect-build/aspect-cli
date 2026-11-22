@@ -58,8 +58,9 @@ use wrappers::ExecLogSink;
 /// output as it wired it. What is shown follows the user's own `--curses`
 /// and `--color` in `flags` (the call's, or an active rc's; with no rc
 /// active, Bazel's own rc files are not read for them), when they gave one.
-/// An `output` the call gives is used as it is: its flags, which the call
-/// passes, were made from it.
+/// An `output` the call gives is used as it is, its flags appended after
+/// `flags` too (unless the call already ends with them), as it was made for
+/// them.
 /// A processor with an `intercept` stage needs `BazelTrait.output_intercept`
 /// hooks to answer its lines.
 fn console_for<'v>(
@@ -71,7 +72,17 @@ fn console_for<'v>(
 ) -> anyhow::Result<Option<bazel::console::Config>> {
     let from_trait = output::TraitConsole::of(eval);
     let config = match (output, &from_trait) {
-        (Some(config), _) => Some(config),
+        (Some(config), _) => {
+            let extra: Vec<String> = config
+                .bazel_flags()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            if !flags.ends_with(&extra) {
+                flags.extend(extra);
+            }
+            Some(config)
+        }
         (None, Some(t)) if stderr_free && stdout_inherited => {
             let mut stages = t.stages.clone();
             stages.extend(t.started(eval)?);

@@ -233,17 +233,30 @@ pub const RECAP_AFTER_RECORDS: usize = 40;
 /// [`RecapErrors`]' `max` by default.
 pub const RECAP_MAX: usize = 10;
 
+/// How many lines of an error's body (a failed action's output under it) a
+/// recap repeats with it.
+pub const RECAP_BODY_LINES: usize = 5;
+
+/// A failed action's error header up to its exit code: what follows (the
+/// tool that failed, its whole command line) the recap leaves out.
+static EXIT_TAIL: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^(.*? failed: \(Exit [^)]*\)): .+$").unwrap());
+
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
 /// draws do not count, so curses and plain lines count alike), enough to
 /// have scrolled it away. Its header says whether there were more than it
-/// repeats, never how many: in a pipe some are not recognized.
+/// repeats, never how many: in a pipe some are not recognized. Each comes
+/// with the first [`RECAP_BODY_LINES`] lines of its body (what says what
+/// went wrong, for a failed action), its header cut after the exit code.
 pub struct RecapErrors {
     max: usize,
     after: usize,
     style: Style,
     given: Given,
-    errors: Vec<String>,
+    errors: Vec<(String, Vec<String>)>,
+    /// The error whose body the lines now coming are, while they are.
+    body: Option<usize>,
     distinct: HashSet<String>,
     after_first: usize,
 }
@@ -256,6 +269,7 @@ impl RecapErrors {
             style,
             given: Given::default(),
             errors: vec![],
+            body: None,
             distinct: HashSet::new(),
             after_first: 0,
         }
@@ -276,11 +290,25 @@ impl LineProcessor for RecapErrors {
         // A header only: a tool's coloured `ERROR:` is not bazel's. In a pipe
         // an error right after a failed action's output is not one until
         // bazel's next progress line, so a recap may miss it, never invent one.
+        let body = self.body.take();
         if line.kind == Kind::Header && text.starts_with("ERROR: ") && !BOILERPLATE.is_match(text) {
-            let quoted = quote(text);
+            let short = EXIT_TAIL
+                .captures(text)
+                .map_or(text, |c| c.get(1).unwrap().as_str());
+            let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
-                self.errors.push(quoted);
+                self.errors.push((quoted, vec![]));
+                self.body = Some(self.errors.len() - 1);
             }
+        } else if let Some(i) = body
+            && matches!(line.kind, Kind::Other | Kind::Blank)
+            && !line.drawn
+        {
+            if line.kind == Kind::Other && self.errors[i].1.len() < RECAP_BODY_LINES {
+                self.errors[i].1.push(quote(text));
+            }
+            self.body = Some(i);
+            self.after_first += usize::from(line.kind == Kind::Other);
         } else if !self.distinct.is_empty()
             && matches!(line.kind, Kind::Header | Kind::Other)
             && !line.drawn
@@ -309,8 +337,11 @@ impl LineProcessor for RecapErrors {
             "INFO: Errors Bazel reported:".to_string()
         };
         self.style.line(&mut out, &header);
-        for e in &self.errors {
+        for (e, body) in &self.errors {
             out.extend_from_slice(format!("  {e}\n").as_bytes());
+            for b in body {
+                out.extend_from_slice(format!("    {b}\n").as_bytes());
+            }
         }
         Some(out)
     }
@@ -474,6 +505,27 @@ mod tests {
             "INFO: The first 2 errors Bazel reported:\n  \
              ERROR: /ws/BUILD:1:1: Compiling a.cc failed\n  \
              ERROR: /ws/BUILD:2:1: Compiling b.cc failed\n"
+        );
+    }
+
+    #[test]
+    fn recap_repeats_an_errors_body_and_cuts_its_command() {
+        let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::default());
+        let mut records = vec![
+            "\x1b[31mERROR: \x1b[0m/ws/BUILD:1:1: Executing genrule //dep:bad failed: (Exit 3): bash failed: error executing Genrule command /bin/bash -c 'echo boom; exit 3'",
+            "boom",
+            "",
+            "app/x.cc:3: error: what went wrong",
+        ];
+        records.extend(std::iter::repeat_n("more output", RECAP_BODY_LINES));
+        records.push("\x1b[32m[1 / 9]\x1b[0m running");
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        assert_eq!(
+            feed(&mut p, &records),
+            "INFO: Errors Bazel reported:\n  \
+             ERROR: /ws/BUILD:1:1: Executing genrule //dep:bad failed: (Exit 3)\n    \
+             boom\n    app/x.cc:3: error: what went wrong\n    more output\n    \
+             more output\n    more output\n"
         );
     }
 

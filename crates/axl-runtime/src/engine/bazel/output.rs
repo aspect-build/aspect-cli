@@ -185,7 +185,7 @@ impl<'v> values::StarlarkValue<'v> for OutputProcessor {
             // lines for the `BazelTrait.output_intercept` hooks.
             "intercepts" => Some(Value::new_bool(self.config.intercepts())),
             // Whether `flags` asks bazel for colour itself.
-            "colour" => Some(Value::new_bool(self.config.colour)),
+            "color" => Some(Value::new_bool(self.config.colour)),
             // The stage names, in the order they run.
             "stages" => Some(
                 heap.alloc(
@@ -203,7 +203,7 @@ impl<'v> values::StarlarkValue<'v> for OutputProcessor {
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         matches!(
             attribute,
-            "display" | "flags" | "intercepts" | "stages" | "colour"
+            "display" | "flags" | "intercepts" | "stages" | "color"
         )
     }
 }
@@ -624,19 +624,17 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// it has any.
     ///
     /// Bazel is always asked for its curses UI (`--curses=yes`), and for
-    /// colour unless `colour = False`:
+    /// colour unless `color = False`:
     /// its redraw after every message is what ends an action's output, and
     /// its colour is what tells its messages from the output, so the stages
     /// can tell them apart in any build. What is shown then follows the
     /// destination: the curses UI as Bazel drew it, or plain lines,
     /// the progress area it drew and erased left out (with `progress`, its
-    /// status line every few seconds). Colour shows as `show_colour` says.
-    /// The build must carry `processor.flags` after the user's own, so they
-    /// win (`--isatty`, `--curses=yes`, `--color=yes` unless `colour =
-    /// False`; they assume the
-    /// build's stdout is inherited); the user's `--curses` and `--color` are
-    /// what `display` and `show_colour` are for. The `bazel_invocation` handles
-    /// and a build without `output =` or a redirect do this themselves.
+    /// status line every few seconds). Colour shows as `show_color` says.
+    /// A build given it appends `processor.flags` after its own, so they win
+    /// (`--isatty`, `--curses=yes`, `--color=yes` unless `color = False`;
+    /// they assume the build's stdout is inherited); the user's `--curses`
+    /// and `--color` are what `display` and `show_color` are for.
     ///
     /// Stages run in a fixed order of kinds, whatever order they are listed
     /// in, and in list order within a kind: `observe`/`aggregate`/`fatal`, then
@@ -671,11 +669,11 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///   nothing is shown, otherwise a pipe. The processor's own `display` is
     ///   the resolved `curses`, `lines` or `none`.
     /// * `stages` - `bazel.output.<stage>(...)` values.
-    /// * `colour` - Ask Bazel for colour (`--color=yes` in `flags`). Default
+    /// * `color` - Ask Bazel for colour (`--color=yes` in `flags`). Default
     ///   True; for a build whose stdout is not inherited, pass False and
     ///   `display = "lines"`: nothing strips colour from that stdout, and a PTY
     ///   would have Bazel colour it too.
-    /// * `show_colour` - Whether what is shown keeps colour: the user's own
+    /// * `show_color` - Whether what is shown keeps colour: the user's own
     ///   `--color`, when they gave one. Defaults to whether stderr (and, for
     ///   a separate stdout, stdout) is a terminal, and never under a
     ///   non-empty `NO_COLOR`.
@@ -690,7 +688,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///     bazel.output.collapse_similar(),
     ///     bazel.output.fatal([r"Server terminated abruptly"]),
     /// ])
-    /// build = ctx.bazel.build("//...", output = processor, flags = processor.flags)
+    /// build = ctx.bazel.build("//...", output = processor)
     /// status = build.wait()
     /// if build.output_fatal:
     ///     print("bazel server died: " + build.output_fatal_line)
@@ -700,15 +698,15 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] stages: UnpackList<
             OutputStage,
         >,
-        #[starlark(require = named, default = NoneOr::None)] colour: NoneOr<bool>,
-        #[starlark(require = named, default = NoneOr::None)] show_colour: NoneOr<bool>,
+        #[starlark(require = named, default = NoneOr::None)] color: NoneOr<bool>,
+        #[starlark(require = named, default = NoneOr::None)] show_color: NoneOr<bool>,
         #[starlark(require = named, default = true)] progress: bool,
     ) -> anyhow::Result<OutputProcessor> {
         let config = processor_config(ProcessorSettings {
             display: DisplayMode::parse(display)?,
             stages: stages.items.into_iter().map(|s| s.stage).collect(),
-            colour: colour.into_option(),
-            show_colour: show_colour.into_option(),
+            colour: color.into_option(),
+            show_colour: show_color.into_option(),
             progress,
         });
         Ok(OutputProcessor { config })
@@ -1017,7 +1015,7 @@ BazelTrait = trait(
     lines = bazel.output.processor(display = "lines")
     if shown.display != "curses" or "--curses=yes" not in shown.flags: fail("shown %r %r" % (shown.display, shown.flags))
     if lines.display != "lines" or lines.flags != ["--isatty=0", "--curses=yes", "--color=yes"]: fail("flags %r" % (lines.flags,))
-    if "--color=yes" in bazel.output.processor(colour = False).flags: return 5
+    if "--color=yes" in bazel.output.processor(color = False).flags: return 5
     if lines.intercepts: return 3
     if not bazel.output.processor(stages = [bazel.output.intercept({"s": "x"})]).intercepts: return 4
     return 0"#)

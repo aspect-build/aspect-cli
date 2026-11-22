@@ -185,7 +185,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         ctx.std.io.stderr.is_tty,
         extra = extra,
         curses = rc.bool_flag("--curses", command = command),
-        colour = rc.bool_flag("--color", command = command),
+        color = rc.bool_flag("--color", command = command),
     )
 
     (announce_version, announce_command) = bazel_announce.resolve(ctx)
