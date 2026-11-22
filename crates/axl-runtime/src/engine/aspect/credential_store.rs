@@ -69,7 +69,13 @@ impl CredentialStore {
     /// backend; otherwise prefer the keyring when it has a store
     /// ([`keyring_available`]), else fall back to the default file path.
     pub(crate) fn resolve() -> anyhow::Result<Self> {
-        if let Some(path) = std::env::var_os(CREDENTIALS_FILE_ENV) {
+        Self::resolve_with(std::env::var_os(CREDENTIALS_FILE_ENV))
+    }
+
+    /// [`resolve`](Self::resolve) with the `$ASPECT_CREDENTIALS_FILE` value
+    /// passed in.
+    fn resolve_with(file_override: Option<std::ffi::OsString>) -> anyhow::Result<Self> {
+        if let Some(path) = file_override {
             return Ok(Self::File(PathBuf::from(path)));
         }
         if keyring_available() {
@@ -354,12 +360,9 @@ mod tests {
 
     #[test]
     fn env_override_forces_file_backend() {
-        // SAFETY: single-threaded test; var removed before returning.
-        unsafe { std::env::set_var(CREDENTIALS_FILE_ENV, "/tmp/aspect-forced.json") };
-        let store = CredentialStore::resolve().unwrap();
+        let store = CredentialStore::resolve_with(Some("/tmp/aspect-forced.json".into())).unwrap();
         assert!(
             matches!(store, CredentialStore::File(p) if p == PathBuf::from("/tmp/aspect-forced.json"))
         );
-        unsafe { std::env::remove_var(CREDENTIALS_FILE_ENV) };
     }
 }
