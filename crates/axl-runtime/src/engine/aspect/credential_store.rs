@@ -22,8 +22,8 @@
 //!
 //! Backend selection (`CredentialStore::resolve`): `$ASPECT_CREDENTIALS_FILE`
 //! forces the file backend at that path; otherwise the keyring is used when its
-//! secret service is reachable ([`keyring_available`]), else the file backend at
-//! the default path.
+//! store exists ([`keyring_available`], probed once per process), else the file
+//! backend at the default path.
 //!
 //! Read/write semantics: an absent entry/file reads as "no credentials". A
 //! genuine read failure — the secret service unreachable, or a file that can't be
@@ -118,22 +118,40 @@ fn keyring_entry() -> anyhow::Result<keyring::Entry> {
 /// Whether the OS secret service can hold credentials, probed once per process.
 ///
 /// Opening the entry fails where no service exists at all (Linux opens the
-/// session keyring up front, so a container without one fails here). macOS opens
-/// lazily, so a missing default keychain only shows on first access: one read
-/// is made, and [`keyring_usable`] judges it.
+/// session keyring up front, so a container without one fails here). Other
+/// platforms open lazily, so a missing store only shows on first access:
+/// [`store_present`] makes that access and [`keyring_usable`] judges it.
 fn keyring_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE
-        .get_or_init(|| keyring_entry().is_ok_and(|entry| keyring_usable(&entry.get_password())))
+    *AVAILABLE.get_or_init(|| keyring_entry().is_ok_and(|entry| store_present(&entry)))
 }
 
-/// Whether a probe `read` leaves the keyring usable. Only a missing store rules
+/// Whether the user's default keychain exists. Looks the keychain up the way
+/// keyring does before every access, without reading the entry, so the probe
+/// never raises a keychain access or unlock prompt.
+#[cfg(target_os = "macos")]
+fn store_present(_: &keyring::Entry) -> bool {
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+    keyring_usable(
+        &SecKeychain::default_for_domain(SecPreferencesDomain::User)
+            .map_err(keyring::macos::decode_error),
+    )
+}
+
+/// Whether a read of the entry finds a store (Windows reports a missing logon
+/// session only on access).
+#[cfg(not(target_os = "macos"))]
+fn store_present(entry: &keyring::Entry) -> bool {
+    keyring_usable(&entry.get_password())
+}
+
+/// Whether a keyring access leaves the keyring usable. Only a missing store rules
 /// it out (`NoStorageAccess`, or macOS's "no default keychain", which keyring
 /// reports as a `PlatformFailure`): there is nothing stored there to lose. Any
 /// other failure keeps the keyring, so [`CredentialStore::load_all`] reports it
 /// instead of reading an empty file over credentials it holds.
-fn keyring_usable(read: &keyring::Result<String>) -> bool {
-    match read {
+fn keyring_usable<T>(access: &keyring::Result<T>) -> bool {
+    match access {
         Err(keyring::Error::NoStorageAccess(_)) => false,
         Err(keyring::Error::PlatformFailure(e)) => !no_default_keychain(e.as_ref()),
         _ => true,
@@ -304,32 +322,34 @@ mod tests {
     #[test]
     fn only_a_missing_store_rules_the_keyring_out() {
         let platform = || Box::new(std::io::Error::other("platform")) as _;
-        assert!(keyring_usable(&Ok("{}".into())));
-        assert!(keyring_usable(&Err(keyring::Error::NoEntry)));
-        assert!(keyring_usable(&Err(keyring::Error::PlatformFailure(
+        assert!(keyring_usable(&Ok("{}")));
+        assert!(keyring_usable::<()>(&Err(keyring::Error::NoEntry)));
+        assert!(keyring_usable::<()>(&Err(keyring::Error::PlatformFailure(
             platform()
         ))));
-        assert!(!keyring_usable(&Err(keyring::Error::NoStorageAccess(
-            platform()
-        ))));
+        assert!(!keyring_usable::<()>(&Err(
+            keyring::Error::NoStorageAccess(platform())
+        )));
     }
 
+    /// Goes through keyring's own `decode_error`, which also pins our
+    /// `security-framework` to keyring's: a mismatch fails to compile rather than
+    /// silently missing the downcast.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_missing_default_keychain_rules_the_keyring_out() {
         let status = |code| {
-            keyring::Error::PlatformFailure(Box::new(security_framework::base::Error::from_code(
-                code,
-            )))
+            Err::<(), _>(keyring::macos::decode_error(
+                security_framework::base::Error::from_code(code),
+            ))
         };
+        assert!(!keyring_usable(&status(-25307)), "errSecNoDefaultKeychain");
+        assert!(!keyring_usable(&status(-25294)), "errSecNoSuchKeychain");
         assert!(
-            !keyring_usable(&Err(status(-25307))),
-            "errSecNoDefaultKeychain"
-        );
-        assert!(
-            keyring_usable(&Err(status(-25308))),
+            keyring_usable(&status(-25308)),
             "errSecInteractionNotAllowed: a locked keychain"
         );
+        assert!(keyring_usable(&status(-25300)), "errSecItemNotFound");
     }
 
     #[test]

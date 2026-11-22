@@ -90,8 +90,8 @@ tracing = "0.1.41"
 uuid = { version = "1.18.1", features = ["v4"] }
 rmcp = { version = "3.1.4", features = ["server", "transport-io"] }
 
-# keyring's own macOS backend, named here only to read the OSStatus behind a
-# keychain failure (credential_store.rs).
+# keyring's own macOS backend (the version must match keyring's), used to look up
+# the default keychain and read the OSStatus behind a failure (credential_store.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 
