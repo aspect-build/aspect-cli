@@ -90,6 +90,11 @@ tracing = "0.1.41"
 uuid = { version = "1.18.1", features = ["v4"] }
 rmcp = { version = "3.1.4", features = ["server", "transport-io"] }
 
+# keyring's own macOS backend, named here only to read the OSStatus behind a
+# keychain failure (credential_store.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 

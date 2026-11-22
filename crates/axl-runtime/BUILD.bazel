@@ -77,7 +77,10 @@ rust_library(
         "@crates//:wasmi",
         "@crates//:wasmi_wasi",
         "@crates//:zstd",
-    ],
+    ] + select({
+        "@platforms//os:macos": ["@crates//:security-framework"],
+        "//conditions:default": [],
+    }),
 )
 
 rust_test(

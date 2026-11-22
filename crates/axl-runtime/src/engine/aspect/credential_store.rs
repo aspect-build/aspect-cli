@@ -10,7 +10,8 @@
 //!   Windows Credential Manager), holding the whole map as one entry. The default
 //!   on developer machines.
 //! - **file** — a `0600` JSON file. The fallback where no secret service is
-//!   available (headless CI has no D-Bus keyring), or when forced via
+//!   available (a CI container with no session keyring, a macOS daemon or
+//!   fresh `HOME` with no default keychain), or when forced via
 //!   `$ASPECT_CREDENTIALS_FILE`.
 //!
 //! CI relies on the file backend: `aspect auth login --with-api-token` persists
@@ -21,7 +22,8 @@
 //!
 //! Backend selection (`CredentialStore::resolve`): `$ASPECT_CREDENTIALS_FILE`
 //! forces the file backend at that path; otherwise the keyring is used when its
-//! secret service is reachable, else the file backend at the default path.
+//! secret service is reachable ([`keyring_available`]), else the file backend at
+//! the default path.
 //!
 //! Read/write semantics: an absent entry/file reads as "no credentials". A
 //! genuine read failure — the secret service unreachable, or a file that can't be
@@ -34,6 +36,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -112,11 +115,43 @@ fn keyring_entry() -> anyhow::Result<keyring::Entry> {
         .map_err(|e| anyhow::anyhow!("failed to open keyring entry: {e}"))
 }
 
-/// Whether the OS secret service is reachable — probed by opening (not reading)
-/// the entry. `keyring::Entry::new` fails when no backend is compiled in or the
-/// platform service is missing, which is our signal to use the file backend.
+/// Whether the OS secret service can hold credentials, probed once per process.
+///
+/// Opening the entry fails where no service exists at all (Linux opens the
+/// session keyring up front, so a container without one fails here). macOS opens
+/// lazily, so a missing default keychain only shows on first access: one read
+/// is made, and [`keyring_usable`] judges it.
 fn keyring_available() -> bool {
-    keyring_entry().is_ok()
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE
+        .get_or_init(|| keyring_entry().is_ok_and(|entry| keyring_usable(&entry.get_password())))
+}
+
+/// Whether a probe `read` leaves the keyring usable. Only a missing store rules
+/// it out (`NoStorageAccess`, or macOS's "no default keychain", which keyring
+/// reports as a `PlatformFailure`): there is nothing stored there to lose. Any
+/// other failure keeps the keyring, so [`CredentialStore::load_all`] reports it
+/// instead of reading an empty file over credentials it holds.
+fn keyring_usable(read: &keyring::Result<String>) -> bool {
+    match read {
+        Err(keyring::Error::NoStorageAccess(_)) => false,
+        Err(keyring::Error::PlatformFailure(e)) => !no_default_keychain(e.as_ref()),
+        _ => true,
+    }
+}
+
+/// Whether `err` is macOS's `errSecNoDefaultKeychain`: the user has no default
+/// keychain, as under a daemon or a fresh `HOME`.
+#[cfg(target_os = "macos")]
+fn no_default_keychain(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    const ERR_SEC_NO_DEFAULT_KEYCHAIN: i32 = -25307;
+    err.downcast_ref::<security_framework::base::Error>()
+        .is_some_and(|e| e.code() == ERR_SEC_NO_DEFAULT_KEYCHAIN)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn no_default_keychain(_: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    false
 }
 
 /// Parse a stored `{ profile: T }` blob, treating an unparseable one (a corrupt or
@@ -264,6 +299,37 @@ mod tests {
         let loaded: HashMap<String, FakeEntry> = file_load_all(&path).unwrap();
         assert!(loaded.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_missing_store_rules_the_keyring_out() {
+        let platform = || Box::new(std::io::Error::other("platform")) as _;
+        assert!(keyring_usable(&Ok("{}".into())));
+        assert!(keyring_usable(&Err(keyring::Error::NoEntry)));
+        assert!(keyring_usable(&Err(keyring::Error::PlatformFailure(
+            platform()
+        ))));
+        assert!(!keyring_usable(&Err(keyring::Error::NoStorageAccess(
+            platform()
+        ))));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_default_keychain_rules_the_keyring_out() {
+        let status = |code| {
+            keyring::Error::PlatformFailure(Box::new(security_framework::base::Error::from_code(
+                code,
+            )))
+        };
+        assert!(
+            !keyring_usable(&Err(status(-25307))),
+            "errSecNoDefaultKeychain"
+        );
+        assert!(
+            keyring_usable(&Err(status(-25308))),
+            "errSecInteractionNotAllowed: a locked keychain"
+        );
     }
 
     #[test]
