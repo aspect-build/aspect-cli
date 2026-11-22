@@ -16,8 +16,8 @@
 //! stream is [`Done::Ended`]. A writer that keeps writing is cut off by the
 //! gate's `linger` (R5), [`LINGER`] for a console.
 //!
-//! The fd is nonblocking and every wait is one [`TICK`] of `poll`, so a read
-//! never parks in the kernel past that decision.
+//! The fd is nonblocking and every wait is one [`TICK`](super::TICK) of
+//! `poll`, so a read never parks in the kernel past that decision.
 
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
