@@ -145,6 +145,18 @@ mod tests {
             env(&[("TERM", "dumb"), ("CLICOLOR", "1")])
         ));
         assert!(stdout_color_from(true, env(&[("CI", "")])));
+        assert!(stdout_color_from(true, env(&[("TERM", "")])), "empty TERM");
+        assert!(
+            stdout_color_from(true, env(&[("TERM", "dumb"), ("CLICOLOR", "")])),
+            "empty CLICOLOR is set, not 0"
+        );
+    }
+
+    #[test]
+    fn clicolor_and_ci_never_color_a_pipe() {
+        assert!(!stdout_color_from(false, env(&[TERM, ("CLICOLOR", "1")])));
+        assert!(!stdout_color_from(false, env(&[TERM, ("CI", "true")])));
+        assert!(!console_color_from(false, env(&[TERM, ("CLICOLOR", "1")])));
     }
 
     #[test]

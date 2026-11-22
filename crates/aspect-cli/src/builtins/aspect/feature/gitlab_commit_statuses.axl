@@ -86,7 +86,7 @@ slot ("title", "summary", "details") to template for every task;
         ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
 
 Only the rendered `title` is posted (or `summary` when the title renders
-empty), as the status's `description`, truncated to GitLab's 255-char cap.
+blank), as the status's `description`, truncated to GitLab's 255-char cap.
 `details` never reaches a commit status; the rolling MR note is
 `GitlabStatusComments`' own, rendered from that feature's `templates`.
 """
@@ -143,10 +143,10 @@ def _truncate_description(text):
 
 def _status_description(output):
     """The commit status's `description` from a renderer's output: the
-    rendered `title`, or `summary` when the title is empty, truncated.
+    rendered `title`, or `summary` when the title is blank, truncated.
     `details` is never used."""
     output = output or {}
-    return _truncate_description(output.get("title", "") or output.get("summary", ""))
+    return _truncate_description(output.get("title")) or _truncate_description(output.get("summary"))
 
 def _collect_ci_links(ctx, results_base_url):
     host = detect_ci_host(ctx.std.env)
@@ -510,7 +510,7 @@ GitlabCommitStatuses = feature(
             dict,
             default = {},
             description = template_presets.templates_description("the rendered status output") +
-                          " Only the rendered `title` (or `summary` when the title is empty) " +
+                          " Only the rendered `title` (or `summary` when the title is blank) " +
                           "lands on the commit status, as its `description`, truncated to " +
                           "255 chars; `details` is never posted, and the MR note's body is " +
                           "GitlabStatusComments' own `templates`.",

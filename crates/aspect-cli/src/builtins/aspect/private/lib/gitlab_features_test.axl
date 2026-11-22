@@ -364,6 +364,7 @@ def _test_impl(ctx):
 
     _eq("description / title", status_description({"title": "T", "summary": "S", "details": "D"}), "T")
     _eq("description / summary when title empty", status_description({"title": "", "summary": "S", "details": "D"}), "S")
+    _eq("description / summary when title blank", status_description({"title": "\n  ", "summary": "S"}), "S")
     _eq("description / never details", status_description({"details": "D"}), "")
     _eq("description / no output", status_description(None), "")
     _eq("description / truncated", len(status_description({"title": "x" * (DESCRIPTION_MAX + 1)})), DESCRIPTION_MAX)
