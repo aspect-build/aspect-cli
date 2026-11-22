@@ -326,7 +326,7 @@ def _test_color_flags(_ctx):
     _eq("buildkite", bazel_misdetects_color(std(BUILDKITE = "true")), False)
     _eq("plain CI", bazel_misdetects_color(std(CI = "1")), False)
 
-    # Color off (a non-empty NO_COLOR) leaves Bazel's own choice alone.
+    # Color off (`std.io.stderr.color`) leaves Bazel's own choice alone.
     _eq("color off", bazel_misdetects_color(std(color = False, GITHUB_ACTIONS = "true")), False)
 
 def _test_exec_log_flags(_ctx):

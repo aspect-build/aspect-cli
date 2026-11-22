@@ -432,11 +432,13 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// Whether lines written here may carry ANSI color. On `std.io.stderr`:
-    /// an interactive stderr, or a CI host whose log renders ANSI (GitHub
-    /// Actions, Buildkite, CircleCI, GitLab CI). On `std.io.stdout`: an
-    /// interactive stdout. Never under a non-empty `NO_COLOR`, and never on
-    /// any other stream (files, a child's stdin).
+    /// Whether lines written here may carry ANSI color, by the rules clap
+    /// colors `--help` with: never under a non-empty `NO_COLOR`, always under
+    /// a non-empty `CLICOLOR_FORCE`, never under `CLICOLOR=0`, and otherwise
+    /// on a terminal whose `TERM` is not `dumb` (and, off Windows, is set), or
+    /// with `CLICOLOR` or `CI` set. `std.io.stderr` also colors on a CI host
+    /// whose log renders ANSI (GitHub Actions, Buildkite, CircleCI, GitLab
+    /// CI). Never on any other stream (files, a child's stdin).
     #[starlark(attribute)]
     fn color<'v>(this: values::Value) -> anyhow::Result<bool> {
         let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;

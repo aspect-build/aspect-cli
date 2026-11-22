@@ -1,14 +1,19 @@
 //! Whether hand-rendered output may carry ANSI color.
 //!
-//! Clap strips the escapes baked into our `--help` templates when it renders to
-//! a non-terminal, so help output is already safe. The surfaces that print their
-//! own layout (`aspect feature`, the console lines around a task, and anything
-//! else assembling SGR sequences by hand) have no such protection and would
-//! otherwise emit raw escapes into a pipe — a log file, a `| grep`, or an AI
-//! agent capturing output.
+//! Clap decides for itself whether `--help` and its errors carry color. The
+//! surfaces that print their own layout (`aspect feature`, the console lines
+//! around a task, and anything else assembling SGR sequences by hand) ask here,
+//! so they must agree with clap: the rules below are clap's (anstream's), in
+//! its order, with one addition for stderr on CI hosts whose logs render ANSI.
 //!
-//! A non-empty `NO_COLOR` (<https://no-color.org>) turns color off on every
-//! surface, CI hosts whose logs render ANSI included.
+//! 1. A non-empty `NO_COLOR` (<https://no-color.org>) turns color off.
+//! 2. A non-empty `CLICOLOR_FORCE` (<https://bixense.com/clicolors>) turns it on.
+//! 3. `CLICOLOR=0` turns it off.
+//! 4. A terminal gets color when `TERM` is not `dumb` (and, off Windows, is
+//!    set), or when `CLICOLOR` or `CI` is set. Stderr also gets it on a CI
+//!    host whose log viewer renders ANSI ([`crate::ci::renders_ansi`]).
+//!    Anything else, such as a log file, a `| grep` or an AI agent capturing
+//!    output, stays plain.
 //!
 //! The process's answer is resolved once, on first use, so every surface agrees
 //! for the whole run even if a task later edits its environment. AXL reads it
@@ -68,24 +73,36 @@ pub fn console_supports_color() -> bool {
     StreamColor::of_process().stderr
 }
 
-/// The stdout rule over a snapshot: only on an interactive stdout, and never
-/// under a non-empty `NO_COLOR`. `var` reads one environment variable.
+/// The stdout rule over a snapshot (see the module docs). `var` reads one
+/// environment variable.
 fn stdout_color_from(stdout_tty: bool, var: impl Fn(&str) -> Option<OsString>) -> bool {
-    stdout_tty && !no_color(&var)
+    color_from(stdout_tty, false, &var)
 }
 
-/// The stderr rule over a snapshot: on an interactive stderr, or on a CI host
-/// whose log viewer renders ANSI ([`crate::ci::renders_ansi`]), and never
-/// under a non-empty `NO_COLOR`. `var` reads one environment variable.
+/// The stderr rule over a snapshot (see the module docs): the stdout rule,
+/// plus a CI host whose log viewer renders ANSI. `var` reads one environment
+/// variable.
 fn console_color_from(stderr_tty: bool, var: impl Fn(&str) -> Option<OsString>) -> bool {
-    let renders = stderr_tty || crate::ci::renders_ansi(|name| non_empty(var(name)));
-    renders && !no_color(&var)
+    let ci_renders = crate::ci::renders_ansi(|name| non_empty(var(name)));
+    color_from(stderr_tty, ci_renders, &var)
 }
 
-/// Whether `NO_COLOR` asks for no color: set to a non-empty value, as the
-/// no-color.org spec reads it.
-fn no_color(var: &impl Fn(&str) -> Option<OsString>) -> bool {
-    non_empty(var("NO_COLOR"))
+/// The module's rules in order, for a stream that is a terminal (`tty`) or
+/// whose reader renders ANSI anyway (`renders_ansi`).
+fn color_from(tty: bool, renders_ansi: bool, var: &impl Fn(&str) -> Option<OsString>) -> bool {
+    if non_empty(var("NO_COLOR")) {
+        return false;
+    }
+    if non_empty(var("CLICOLOR_FORCE")) {
+        return true;
+    }
+    let clicolor = var("CLICOLOR");
+    if clicolor.as_deref().is_some_and(|v| v == "0") {
+        return false;
+    }
+    let term_colors = var("TERM").map_or(cfg!(windows), |t| t != "dumb");
+    let tty_colors = tty && (term_colors || clicolor.is_some() || var("CI").is_some());
+    tty_colors || renders_ansi
 }
 
 fn non_empty(value: Option<OsString>) -> bool {
@@ -104,21 +121,67 @@ mod tests {
         move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
     }
 
+    const TERM: (&str, &str) = ("TERM", "xterm-256color");
+
     #[test]
-    fn stdout_color_only_on_a_tty_without_no_color() {
-        assert!(stdout_color_from(true, env(&[])));
-        assert!(!stdout_color_from(false, env(&[])));
+    fn stdout_color_only_on_a_color_terminal_without_no_color() {
+        assert!(stdout_color_from(true, env(&[TERM])));
+        assert!(!stdout_color_from(false, env(&[TERM])));
         assert!(!stdout_color_from(
             false,
-            env(&[("GITHUB_ACTIONS", "true")])
+            env(&[TERM, ("GITHUB_ACTIONS", "true")])
         ));
-        assert!(!stdout_color_from(true, env(&[("NO_COLOR", "1")])));
-        assert!(stdout_color_from(true, env(&[("NO_COLOR", "")])));
+        assert!(!stdout_color_from(true, env(&[TERM, ("NO_COLOR", "1")])));
+        assert!(stdout_color_from(true, env(&[TERM, ("NO_COLOR", "")])));
+    }
+
+    #[test]
+    fn a_terminal_needs_a_color_term_clicolor_or_ci() {
+        assert_eq!(stdout_color_from(true, env(&[])), cfg!(windows), "no TERM");
+        assert!(!stdout_color_from(true, env(&[("TERM", "dumb")])));
+        assert!(!console_color_from(true, env(&[("TERM", "dumb")])));
+        assert!(stdout_color_from(
+            true,
+            env(&[("TERM", "dumb"), ("CLICOLOR", "1")])
+        ));
+        assert!(stdout_color_from(true, env(&[("CI", "")])));
+        assert!(stdout_color_from(true, env(&[("TERM", "")])), "empty TERM");
+        assert!(
+            stdout_color_from(true, env(&[("TERM", "dumb"), ("CLICOLOR", "")])),
+            "empty CLICOLOR is set, not 0"
+        );
+    }
+
+    #[test]
+    fn clicolor_and_ci_never_color_a_pipe() {
+        assert!(!stdout_color_from(false, env(&[TERM, ("CLICOLOR", "1")])));
+        assert!(!stdout_color_from(false, env(&[TERM, ("CI", "true")])));
+        assert!(!console_color_from(false, env(&[TERM, ("CLICOLOR", "1")])));
+    }
+
+    #[test]
+    fn clicolor_force_and_clicolor_zero() {
+        assert!(stdout_color_from(false, env(&[("CLICOLOR_FORCE", "1")])));
+        assert!(console_color_from(false, env(&[("CLICOLOR_FORCE", "1")])));
+        assert!(!stdout_color_from(false, env(&[("CLICOLOR_FORCE", "")])));
+        assert!(!stdout_color_from(
+            false,
+            env(&[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")])
+        ));
+        assert!(stdout_color_from(
+            true,
+            env(&[TERM, ("CLICOLOR_FORCE", "1"), ("CLICOLOR", "0")])
+        ));
+        assert!(!stdout_color_from(true, env(&[TERM, ("CLICOLOR", "0")])));
+        assert!(!console_color_from(
+            false,
+            env(&[("BUILDKITE", "true"), ("CLICOLOR", "0")])
+        ));
     }
 
     #[test]
     fn console_color_on_a_tty_or_an_ansi_rendering_ci_host() {
-        assert!(console_color_from(true, env(&[])));
+        assert!(console_color_from(true, env(&[TERM])));
         assert!(!console_color_from(false, env(&[])));
         assert!(console_color_from(false, env(&[("BUILDKITE", "true")])));
         assert!(!console_color_from(false, env(&[("CI", "1")])));
@@ -135,7 +198,7 @@ mod tests {
                 stderr: true
             }
         );
-        let tty = StreamColor::from_snapshot(true, true, env(&[("NO_COLOR", "1")]));
+        let tty = StreamColor::from_snapshot(true, true, env(&[TERM, ("NO_COLOR", "1")]));
         assert_eq!(
             tty,
             StreamColor {
@@ -147,12 +210,12 @@ mod tests {
 
     #[test]
     fn a_non_empty_no_color_wins_on_ci_too() {
-        assert!(!console_color_from(true, env(&[("NO_COLOR", "1")])));
+        assert!(!console_color_from(true, env(&[TERM, ("NO_COLOR", "1")])));
         assert!(!console_color_from(
             false,
             env(&[("GITHUB_ACTIONS", "true"), ("NO_COLOR", "0")])
         ));
-        assert!(console_color_from(true, env(&[("NO_COLOR", "")])));
+        assert!(console_color_from(true, env(&[TERM, ("NO_COLOR", "")])));
         assert!(console_color_from(
             false,
             env(&[("GITLAB_CI", "true"), ("NO_COLOR", "")])

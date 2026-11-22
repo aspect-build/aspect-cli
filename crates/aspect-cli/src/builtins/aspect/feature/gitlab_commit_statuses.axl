@@ -77,17 +77,18 @@ slot ("title", "summary", "details") to template for every task;
 
     def config(ctx: ConfigContext):
         ctx.features[GitlabCommitStatuses].args.templates = {
-            "summary": my_shared_summary_template,
+            "title": my_shared_title_template,
         }
         ctx.features[GitlabCommitStatuses].args.task_presets = {"format": "full"}
         ctx.features[GitlabCommitStatuses].args.task_templates = {
-            "lint": {"details": my_lint_details_template},
+            "lint": {"title": my_lint_title_template},
         }
         ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
 
-Only the rendered `title` is posted, truncated to GitLab's 255-char
-`description` cap; the rolling MR note is `GitlabStatusComments`' own,
-rendered from that feature's `templates`.
+Only the rendered `title` is posted (or `summary` when the title renders
+blank), as the status's `description`, truncated to GitLab's 255-char cap.
+`details` never reaches a commit status; the rolling MR note is
+`GitlabStatusComments`' own, rendered from that feature's `templates`.
 """
 
 load(
@@ -139,6 +140,13 @@ def _truncate_description(text):
     if len(s) <= _DESCRIPTION_MAX:
         return s
     return s[:_DESCRIPTION_MAX - 1] + "…"
+
+def _status_description(output):
+    """The commit status's `description` from a renderer's output: the
+    rendered `title`, or `summary` when the title is blank, truncated.
+    `details` is never used."""
+    output = output or {}
+    return _truncate_description(output.get("title")) or _truncate_description(output.get("summary"))
 
 def _collect_ci_links(ctx, results_base_url):
     host = detect_ci_host(ctx.std.env)
@@ -261,9 +269,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         `remove` is unreachable here — `resolve_surface_update` downgrades it for
         surfaces that can't retract.
         """
-        description = _truncate_description(
-            (output or {}).get("title", "") or (output or {}).get("summary", ""),
-        )
+        description = _status_description(output)
         decision = resolve_surface_update(
             ctx,
             lifecycle,
@@ -475,6 +481,10 @@ def truncate_description(text):
     """Public test hook; see `_truncate_description`."""
     return _truncate_description(text)
 
+def status_description(output):
+    """Public test hook; see `_status_description`."""
+    return _status_description(output)
+
 DESCRIPTION_MAX = _DESCRIPTION_MAX
 
 GitlabCommitStatuses = feature(
@@ -500,8 +510,9 @@ GitlabCommitStatuses = feature(
             dict,
             default = {},
             description = template_presets.templates_description("the rendered status output") +
-                          " Only the rendered `title` lands on the commit status, as its " +
-                          "`description`, truncated to 255 chars; the MR note's body is " +
+                          " Only the rendered `title` (or `summary` when the title is blank) " +
+                          "lands on the commit status, as its `description`, truncated to " +
+                          "255 chars; `details` is never posted, and the MR note's body is " +
                           "GitlabStatusComments' own `templates`.",
         ),
         "metadata_keys": args.string_list(

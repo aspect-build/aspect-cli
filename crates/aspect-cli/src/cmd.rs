@@ -1938,8 +1938,8 @@ fn feature_config_setter(feat: &dyn FeatureLike<'_>) -> String {
 ///
 /// Current values are not shown: they would need the repo's config evaluated.
 /// It goes in through `after_help`, which clap writes verbatim (a `{` in the
-/// help is not template-parsed) and strips of ANSI when stdout is not a
-/// terminal or `NO_COLOR` is non-empty.
+/// help is not template-parsed) and strips of ANSI by the same rules as
+/// [`color::stdout_supports_color`].
 fn config_args_section<'a>(
     setter: &str,
     config_args: impl IntoIterator<Item = (&'a str, &'a Arg)>,

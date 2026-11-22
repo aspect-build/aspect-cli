@@ -814,9 +814,8 @@ pub(super) fn announce_spawn(
 ///
 /// Colored as every runtime line on stderr is, by the process's single memoized
 /// [`crate::color::console_supports_color`] (the console's [`crate::console::Host`]
-/// color too): on a terminal or an ANSI-rendering
-/// CI host, never under a non-empty `NO_COLOR`; empty strings otherwise, so
-/// file-captured / piped output stays plain.
+/// color too), whose rules are clap's plus ANSI-rendering CI hosts; empty
+/// strings otherwise, so file-captured / piped output stays plain.
 ///
 /// Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
 /// Actions' log viewer silently drops SGR 2. 256-color escapes are rendered by

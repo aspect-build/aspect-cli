@@ -36,9 +36,10 @@ pub fn line(version: &str) -> String {
 /// [`line`], with the grey wrapper applied only when `color` is set.
 ///
 /// Call sites that print the banner themselves (rather than handing it to clap,
-/// which strips escapes off a non-terminal) pass whether their stream takes
-/// color — [`crate::color::stdout_supports_color`] for stdout, the console's
-/// color for the runtime banner — so a piped run stays plain text.
+/// which strips escapes by the rules [`crate::color`] follows) pass whether
+/// their stream takes color — [`crate::color::stdout_supports_color`] for
+/// stdout, the console's color for the runtime banner — so a piped run stays
+/// plain text.
 pub fn line_colored(version: &str, color: bool) -> String {
     let debug = if is_debug_build() {
         " (debug build)"
