@@ -1,6 +1,7 @@
 //! The Starlark side of [`crate::console`]: reading the `Console` feature's
 //! args into a resolved surface for a given [`Host`], and `ctx.console`,
-//! through which AXL renders the `phase` and `progress` lines.
+//! through which AXL renders the `phase` and `progress` lines and asks whether
+//! the run opens Buildkite log sections.
 
 use std::sync::Arc;
 
@@ -237,6 +238,14 @@ fn console_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn template_preset<'v>(this: Value<'v>) -> anyhow::Result<&'static str> {
         Ok(downcast(this)?.0.preset())
+    }
+
+    /// Whether this run is on Buildkite, where the console opens log sections
+    /// (`--- <title>`): the value the templates see as `buildkite`, resolved
+    /// once for the run. Ask it before printing a section header of your own.
+    #[starlark(attribute)]
+    fn buildkite<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(downcast(this)?.0.buildkite())
     }
 
     /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict` or
@@ -619,6 +628,26 @@ check = task(implementation = _impl)
                 .unwrap()
         };
         assert_eq!(on(&[("BUILDKITE", "true")]), Some(1), "Buildkite");
+        assert_eq!(on(&[("BUILDKITE", "")]), Some(0), "an empty BUILDKITE");
+        assert_eq!(on(&[]), Some(0), "elsewhere");
+    }
+
+    #[test]
+    fn ctx_console_buildkite_is_the_snapshot_the_templates_see() {
+        let code = r#"
+def _impl(ctx):
+    line = ctx.console.render("phase", title = "Build", emoji = "", highlight_style = "", highlight_reset = "", text = "")
+    return (2 if ctx.console.buildkite else 0) + (1 if line.startswith(":aspect:") else 0)
+
+check = task(implementation = _impl)
+"#;
+        let on = |vars: &[(&str, &str)]| {
+            crate::test::eval(code)
+                .with_host_env(false, false, vars)
+                .run_task(0)
+                .unwrap()
+        };
+        assert_eq!(on(&[("BUILDKITE", "true")]), Some(3), "Buildkite");
         assert_eq!(on(&[("BUILDKITE", "")]), Some(0), "an empty BUILDKITE");
         assert_eq!(on(&[]), Some(0), "elsewhere");
     }
