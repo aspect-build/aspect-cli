@@ -809,7 +809,7 @@ fn install_signal_watcher() {
         };
         let signals = Signals::global();
         signals.record(first, origin);
-        errln!("aspect-cli: {}ed, stopping…", first.name());
+        errln!("aspect-cli: {}, stopping…", first.message());
 
         let grace = if signals.has_live_children() {
             body_grace()

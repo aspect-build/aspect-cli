@@ -59,19 +59,12 @@ impl Kind {
         }
     }
 
-    /// The `ERROR:` line the default ending prints.
+    /// The request in the past tense, for the stop line and the `ERROR:`
+    /// line the default ending prints.
     pub fn message(self) -> &'static str {
         match self {
             Kind::Interrupt => "interrupted",
             Kind::Terminate => "terminated",
-        }
-    }
-
-    /// How the one stderr line names the request.
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::Interrupt => "interrupt",
-            Kind::Terminate => "terminate",
         }
     }
 }
