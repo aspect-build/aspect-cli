@@ -507,12 +507,13 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
         }
     };
     // Colour lets the stages tell bazel's messages from tool output; what is
-    // shown keeps it as the user asked, else on a terminal without NO_COLOR.
+    // shown keeps it as the user asked, else as the CLI's own lines do
+    // (`crate::color`).
     config.colour = s.colour.unwrap_or(true);
     config.user_colour = s.show_colour;
     config.strip_colour = !s
         .show_colour
-        .unwrap_or(stderr_tty && crate::color::console_supports_color());
+        .unwrap_or_else(crate::color::console_supports_color);
     config.links = stderr_tty;
     config
 }
@@ -674,9 +675,10 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///   `display = "lines"`: nothing strips colour from that stdout, and a PTY
     ///   would have Bazel colour it too.
     /// * `show_color` - Whether what is shown keeps colour: the user's own
-    ///   `--color`, when they gave one. Defaults to whether stderr (and, for
-    ///   a separate stdout, stdout) is a terminal, and never under a
-    ///   non-empty `NO_COLOR`.
+    ///   `--color`, when they gave one. Defaults to whether the CLI's own
+    ///   lines on stderr (and, for a separate stdout, on stdout) carry
+    ///   colour: `NO_COLOR`, `CLICOLOR_FORCE`, `CLICOLOR` and `TERM` as
+    ///   clap reads them, on a terminal or a CI log that renders it.
     /// * `progress` - In plain lines, show Bazel's status line (`[n / m] …`)
     ///   every few seconds. Default True; the agent profile passes False.
     ///

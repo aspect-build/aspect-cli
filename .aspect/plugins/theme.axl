@@ -11,9 +11,9 @@ of Bazel's live progress area too; in plain lines there are none. A
 rewritten row stays one row: under a PTY a row made wider than Bazel drew it
 is cut to that many terminal columns, so a running action's marker takes the
 place of three of its indent's spaces. Colour is added only where stderr
-takes it (`std.io.stderr.color`: a terminal or a CI log that renders it,
-without `NO_COLOR`); where the console shows none, what a stage adds is
-stripped with Bazel's own.
+takes it (`std.io.stderr.color`: a terminal or a CI log that renders it, as
+`NO_COLOR` and the rest allow); where the console shows none, what a stage
+adds is stripped with Bazel's own.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")

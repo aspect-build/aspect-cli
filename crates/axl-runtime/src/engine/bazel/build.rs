@@ -945,13 +945,12 @@ impl Console {
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
                 let after = forwarder.ordered_after(Box::new(std::io::stdout()), probe.into());
                 // Colour asked for the stages' sake is shown as the user
-                // asked, else only on a terminal without NO_COLOR, as it is
-                // for stderr.
+                // asked, else as the CLI's own stdout would carry it, as it
+                // is for stderr.
                 let shape = bazel::console::forward::Shape {
-                    strip_colour: !config.user_colour.unwrap_or_else(|| {
-                        std::io::IsTerminal::is_terminal(&std::io::stdout())
-                            && crate::color::stdout_supports_color()
-                    }),
+                    strip_colour: !config
+                        .user_colour
+                        .unwrap_or_else(|| crate::color::stdout_supports_color()),
                     // A stdout of its own is the program's output, not the
                     // console UI: shown as written even when nothing else is.
                     ..Default::default()

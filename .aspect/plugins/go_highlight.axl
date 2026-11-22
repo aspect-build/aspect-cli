@@ -7,7 +7,7 @@ TypeScript's `file.ts(line,col):` is rewritten to `file.ts:line:col:` so an
 editor's terminal can open it at that spot. Compiler errors are action
 output, which every `rewrite` reaches. Colour only goes where stderr takes
 it (`std.io.stderr.color`: a terminal or a CI log that renders it,
-without `NO_COLOR`).
+as `NO_COLOR` and the rest allow).
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
