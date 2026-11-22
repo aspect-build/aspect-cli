@@ -12,7 +12,7 @@ load("@aspect//helpers.axl", "file_uri_to_path")
 load("../private/lib/artifacts.axl", "should_collect_test", "testlog_dest_dir")
 load("../private/lib/bazel_results.axl", "bes_get", "test_result_cached")
 load("../private/lib/circleci.axl", "circleci")
-load("../private/lib/environment.axl", "detect_ci", "info", "warn")
+load("../private/lib/environment.axl", "detail", "detect_ci", "warn")
 load("../private/lib/tar.axl", "tar_create")
 
 def collect_test_xml(ctx, event, strategy: str, entries: dict, upload_failed_attempts: bool) -> None:
@@ -107,7 +107,7 @@ def _circleci_test_results_impl(ctx: FeatureContext) -> None:
         ctx.std.fs.remove_dir_all(staging)
 
         if result.success:
-            info(ctx.std, "Uploaded %d JUnit file(s) to CircleCI test results (step_id=%s, %d bytes)." % (
+            detail(ctx.std, "Uploaded %d JUnit file(s) to CircleCI test results (step_id=%s, %d bytes)." % (
                 result.file_count,
                 str(result.step_id),
                 result.total_bytes,

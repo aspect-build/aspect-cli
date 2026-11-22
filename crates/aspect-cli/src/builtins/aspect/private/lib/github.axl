@@ -32,7 +32,7 @@ load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ansi.axl", "ansi")
 load("./aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
-load("./environment.axl", "info", "warn")
+load("./environment.axl", "detail", "info", "warn")
 load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load("./http_headers.axl", "retryable_status")
@@ -130,7 +130,7 @@ def _format_http_failure_detail(status, error):
     message; shared by `_warn_http_failure` and the quiet-log path."""
     if status == 0:
         return error if error else "transport error"
-    detail = "HTTP %d" % status
+    text = "HTTP %d" % status
     if error:
         extra = error if type(error) == "string" else str(error)
 
@@ -138,8 +138,8 @@ def _format_http_failure_detail(status, error):
         extra = extra.replace("\n", " ")
         if len(extra) > 200:
             extra = extra[:200] + "..."
-        detail = detail + ": " + extra
-    return detail
+        text = text + ": " + extra
+    return text
 
 def _warn_http_failure(ctx, label, attempts, status, error):
     """Emit one WARNING line for a terminal HTTP failure. `label` is a
@@ -152,7 +152,7 @@ def _info_http_failure(ctx, label, attempts, status, error):
     (e.g. a `DeleteArtifact` 404 in the eventual-consistency window).
     Same one-line shape so log grep matches both."""
     suffix = " after %d attempts" % attempts if attempts > 1 else ""
-    info(ctx.std, "%s failed%s (benign): %s" % (label, suffix, _format_http_failure_detail(status, error)))
+    detail(ctx.std, "%s failed%s (benign): %s" % (label, suffix, _format_http_failure_detail(status, error)))
 
 def _do_request_once(ctx, method, url, token, payload = None, token_class = BUCKET_APP):
     """Single HTTP attempt (failure contract: see file docstring).

@@ -179,6 +179,11 @@ fn evict_stale_dir(final_dir: &Path) {
 #[cfg(test)]
 mod exec_log_wiring;
 
+/// `lib/agent.axl` and the runtime detect a coding agent from the same
+/// variables.
+#[cfg(test)]
+mod agent_env_vars;
+
 #[cfg(test)]
 mod tests {
     use super::*;

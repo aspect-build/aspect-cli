@@ -17,6 +17,7 @@ load(
     "require_arg",
 )
 load("@aspect//bazel/trait.axl", "BazelTrait")
+load("../private/lib/environment.axl", "debug")
 
 def _parse(ctx, startup_flags: list, base_flags: list) -> tuple:
     """Parse the workspace `.bazelrc` under `startup_flags` and the task's
@@ -50,7 +51,7 @@ def _setup(ctx, command: str, base_flags: list = []):
     require_arg(ctx, "announce_bazel_rc")
     if announce_value(ctx, ctx.args.announce_bazel_rc):
         print(ctx.bazel.announce_rc(rc, command = command, ansi = ctx.std.io.stderr.color))
-    trace.log(ctx.bazel.announce_rc(rc, command = command, ansi = False))
+    debug(ctx.std, ctx.bazel.announce_rc(rc, command = command, ansi = False))
 
     return rc
 

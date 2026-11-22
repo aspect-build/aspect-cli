@@ -156,7 +156,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
     mr, reason = detect_gitlab_mr(ctx.std)
     if mr == None:
-        _LOG.trace("No GitLab MR context — skipping. (%s)" % reason)
+        _LOG.debug(ctx.std, "No GitLab MR context - skipping. (%s)" % reason)
         return
 
     project_path = mr["project_path"]
@@ -190,7 +190,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
         # synthetic run_id is fine — it's only used as a slot key, not
         # dereferenced against GL.
         run_id = "local-mr-%d" % mr_iid
-        _LOG.trace("No CI_PIPELINE_ID; using synthetic run_id=%s for local-sim coordination" % run_id)
+        _LOG.debug(ctx.std, "No CI_PIPELINE_ID; using synthetic run_id=%s for local-sim coordination" % run_id)
 
     ci_run_url = _ci_run_url(env)
 
@@ -339,7 +339,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 auth_kind = _state["_auth_kind"],
             )
             if not del_res["success"]:
-                _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % loser_id)
+                _LOG.debug(ctx.std, "Cleanup of duplicate note %s failed; will retry next cycle" % loser_id)
         return False
 
     def _absorb_duplicates(ctx, token, survivor_id, survivor_body, duplicate_bodies):
@@ -457,11 +457,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
         result = github.status_comment_contribute(ctx, request)
         if not result.get("success") and contribute_rejected(result):
             _state["_coordinator"] = False
-            _LOG.info(ctx.std, coordination_declined_message(result, "note"))
+            _LOG.detail(ctx.std, coordination_declined_message(result, "note"))
             _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
             return
         if not result.get("success"):
-            _LOG.trace("status-comment API unavailable (%s); using note-state fallback" % result.get("error", ""))
+            _LOG.debug(ctx.std, "status-comment API unavailable (%s); using note-state fallback" % result.get("error", ""))
             _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
             return
 
@@ -514,7 +514,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             if body != None and row_landed(parse_state(body), head_sha, own_entry):
                 return
             _note_state_cycle(ctx, token, own_entry, epoch_now_s(ctx.std), True, force = True)
-        _LOG.trace("final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
+        _LOG.debug(ctx.std, "final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
 
     def _note_state_cycle(ctx, token, own_entry, now_epoch, final, force = False):
         """One read-merge-write of the note's state block. Returns True when
@@ -553,7 +553,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             return False
 
         if superseded(parsed, head_sha, run_id):
-            _LOG.trace("Pipeline %s is older than the note's, on another SHA; skipping the state-block post." % run_id)
+            _LOG.debug(ctx.std, "Pipeline %s is older than the note's, on another SHA; skipping the state-block post." % run_id)
             return False
         new_state = merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
         return _post(ctx, token, new_state, now_epoch, force = force)

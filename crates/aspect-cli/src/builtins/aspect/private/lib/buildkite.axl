@@ -1,5 +1,6 @@
 """Buildkite artifact upload library."""
 
+load("./environment.axl", "debug")
 load("./exit_status.axl", "exit_code_of")
 
 def _upload_artifact(ctx, path, name):
@@ -80,10 +81,10 @@ def _resolve_artifact_url(ctx, name):
         .stderr("piped") \
         .spawn() \
         .wait_with_output()
-    trace.log("artifact search: query=" + name +
-              " exit=" + str(exit_code_of(out.status)) +
-              " stdout=" + repr(out.stdout or "") +
-              " stderr=" + repr(out.stderr or ""))
+    debug(ctx.std, "artifact search: query=" + name +
+                   " exit=" + str(exit_code_of(out.status)) +
+                   " stdout=" + repr(out.stdout or "") +
+                   " stderr=" + repr(out.stderr or ""))
 
     if out.status.code != 0:
         return ""

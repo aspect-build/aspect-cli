@@ -1219,11 +1219,13 @@ fn merge_args<'v>(
         }
     }
 
-    // Layer config.axl overrides for keys the user did NOT pass on the CLI.
+    // Layer config.axl overrides for keys the user did NOT pass on the CLI,
+    // recording every key config assigned for `is_configured_key`.
     let Some(overrides) = overrides_value.downcast_ref::<Arguments>() else {
         return args;
     };
     for (k, v) in overrides.entries() {
+        args.mark_configured(k.clone());
         let user_explicit = schema
             .get(&k)
             .filter(|a| a.is_cli_exposed())

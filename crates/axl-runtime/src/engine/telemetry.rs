@@ -11,8 +11,12 @@
 //! - **OTLP**: `add(url=..., protocol=..., headers=..., signals=..., resource_attributes=...)`
 //!   ships traces/logs/metrics to an OTel collector over gRPC or HTTP/protobuf.
 //! - **File**: `add(file=..., format=..., signals=..., resource_attributes=...)`
-//!   writes locally to stderr, stdout, or a file path. Used (among other things)
-//!   to express `ASPECT_DEBUG=1` as ordinary user-space configuration.
+//!   writes AXL log records and span events locally to stderr, stdout, or a
+//!   file path.
+//! - **Console**: `add(console=True, signals=...)` prints to stderr: spans as
+//!   they end, metric data points at each export, log records and span events
+//!   as they happen. What `OTEL_<SIGNAL>_EXPORTER=console` and `ASPECT_DEBUG=1`
+//!   register through the Telemetry feature.
 //!
 //! `ctx.telemetry.build_events` and `ctx.telemetry.execution_log` set when a
 //! Bazel build's stream becomes telemetry: a [`SourcePolicy`] each, held in
@@ -47,6 +51,7 @@ use starlark::values::{
 pub enum ExporterSpec {
     Otlp(#[allocative(skip)] OtlpSpec),
     File(#[allocative(skip)] FileSpec),
+    Console(#[allocative(skip)] ConsoleSpec),
 }
 
 #[derive(Clone, Debug)]
@@ -66,18 +71,26 @@ pub struct FileSpec {
     pub resource_attributes: BTreeMap<String, String>,
 }
 
+/// A stderr exporter for the named signals; see the module docs.
+#[derive(Clone, Debug)]
+pub struct ConsoleSpec {
+    pub signals: Signals,
+}
+
 impl ExporterSpec {
     fn signals(&self) -> Signals {
         match self {
             ExporterSpec::Otlp(o) => o.signals,
             ExporterSpec::File(f) => f.signals,
+            ExporterSpec::Console(c) => c.signals,
         }
     }
 
-    fn resource_attributes(&self) -> &BTreeMap<String, String> {
+    fn resource_attributes(&self) -> BTreeMap<String, String> {
         match self {
-            ExporterSpec::Otlp(o) => &o.resource_attributes,
-            ExporterSpec::File(f) => &f.resource_attributes,
+            ExporterSpec::Otlp(o) => o.resource_attributes.clone(),
+            ExporterSpec::File(f) => f.resource_attributes.clone(),
+            ExporterSpec::Console(_) => BTreeMap::new(),
         }
     }
 }
@@ -97,11 +110,12 @@ impl<'v> StarlarkValue<'v> for ExporterSpec {
                 return Some(heap.alloc(match self {
                     ExporterSpec::Otlp(_) => "otlp",
                     ExporterSpec::File(_) => "file",
+                    ExporterSpec::Console(_) => "console",
                 }));
             }
             "signals" => return Some(signals_to_starlark(self.signals(), heap)),
             "resource_attributes" => {
-                return Some(string_map_to_starlark(self.resource_attributes(), heap));
+                return Some(string_map_to_starlark(&self.resource_attributes(), heap));
             }
             _ => {}
         }
@@ -128,6 +142,7 @@ impl<'v> StarlarkValue<'v> for ExporterSpec {
                 })),
                 _ => None,
             },
+            ExporterSpec::Console(_) => None,
         }
     }
 
@@ -144,6 +159,7 @@ impl<'v> StarlarkValue<'v> for ExporterSpec {
             ExporterSpec::File(_) => {
                 v.extend(["file", "format"].map(String::from));
             }
+            ExporterSpec::Console(_) => {}
         }
         v
     }
@@ -290,8 +306,9 @@ pub struct TelemetrySources {
 }
 
 impl TelemetrySources {
-    /// Whether an OTLP exporter takes traces. File exporters (such as
-    /// `ASPECT_DEBUG=1`'s) print AXL logs and events and take no spans.
+    /// Whether an OTLP exporter takes traces. File and console exporters
+    /// (such as `ASPECT_DEBUG=1`'s) are local debugging aids and don't count:
+    /// a build's spawn spans would flood the terminal.
     pub fn traces(&self) -> bool {
         self.traces.load(Ordering::Relaxed)
     }
@@ -311,7 +328,7 @@ impl TelemetrySources {
         let otlp = || {
             specs.iter().filter_map(|s| match s {
                 ExporterSpec::Otlp(o) => Some(o.signals),
-                ExporterSpec::File(_) => None,
+                ExporterSpec::File(_) | ExporterSpec::Console(_) => None,
             })
         };
         self.traces
@@ -675,18 +692,24 @@ fn exporters_methods(builder: &mut MethodsBuilder) {
     /// Register an exporter. The runtime builds the corresponding sink after
     /// phase 3 and replays any buffered spans/logs into it.
     ///
-    /// Exactly one of `url` (OTLP exporter) or `file` (local file/stderr/stdout
-    /// exporter) must be provided.
+    /// Exactly one of `url` (OTLP exporter), `file` (local file/stderr/stdout
+    /// exporter) or `console = True` (stderr exporter) must be provided.
     ///
     /// Args (OTLP shape):
     ///   url: OTLP collector URL
     ///   protocol: "grpc" (default) or "http/protobuf"
     ///   headers: optional dict[str,str] for auth/tenant routing
     ///
-    /// Args (file shape):
+    /// Args (file shape), for AXL log records and span events:
     ///   file: filesystem path, or "stderr" / "stdout"
     ///   format: "compact" (default, one human-readable line per record) or
     ///           "jsonl" (one JSON object per line, machine-parseable)
+    ///
+    /// Args (console shape):
+    ///   console: True for a stderr exporter of every signal it names: a
+    ///            line per span as it ends, per metric data point at each
+    ///            export, and per log record and span event as it happens.
+    ///            Takes `signals` only.
     ///
     /// Common args:
     ///   signals: optional list, subset of ["traces", "logs", "metrics"];
@@ -701,6 +724,7 @@ fn exporters_methods(builder: &mut MethodsBuilder) {
         this: ValueTyped<'v, Exporters>,
         #[starlark(require = named, default = NoneOr::None)] url: NoneOr<&'v str>,
         #[starlark(require = named, default = NoneOr::None)] file: NoneOr<&'v str>,
+        #[starlark(require = named, default = false)] console: bool,
         #[starlark(require = named, default = NoneOr::None)] protocol: NoneOr<&'v str>,
         #[starlark(require = named, default = NoneOr::None)] format: NoneOr<&'v str>,
         #[starlark(require = named, default = UnpackDictEntries::default())]
@@ -714,9 +738,15 @@ fn exporters_methods(builder: &mut MethodsBuilder) {
         let protocol = protocol.into_option();
         let format = format.into_option();
 
-        if url.is_some() == file.is_some() {
+        if [url.is_some(), file.is_some(), console]
+            .iter()
+            .filter(|set| **set)
+            .count()
+            != 1
+        {
             return Err(anyhow::anyhow!(
-                "exporters.add: exactly one of `url` (OTLP) or `file` (local sink) must be set"
+                "exporters.add: exactly one of `url` (OTLP), `file` (local sink) or \
+                 `console = True` (stderr) must be set"
             ));
         }
 
@@ -727,7 +757,18 @@ fn exporters_methods(builder: &mut MethodsBuilder) {
         };
         let resource_attributes = collect_str_dict(resource_attributes);
 
-        let spec = if let Some(url) = url {
+        let spec = if console {
+            if protocol.is_some()
+                || format.is_some()
+                || !headers.entries.is_empty()
+                || !resource_attributes.is_empty()
+            {
+                return Err(anyhow::anyhow!(
+                    "exporters.add: `console = True` takes only `signals`"
+                ));
+            }
+            ExporterSpec::Console(ConsoleSpec { signals: sig })
+        } else if let Some(url) = url {
             if url.is_empty() {
                 return Err(anyhow::anyhow!("exporters.add: url must not be empty"));
             }
@@ -805,6 +846,7 @@ impl Display for ExporterSpec {
                 FileDestination::Stdout => write!(f, "file:stdout@{:?}", s.format),
                 FileDestination::Path(p) => write!(f, "file:{}@{:?}", p.display(), s.format),
             },
+            ExporterSpec::Console(_) => write!(f, "console"),
         }
     }
 }
@@ -871,6 +913,10 @@ mod tests {
         };
         assert!(!exporting(&[]));
         assert!(!exporting(std::slice::from_ref(&file)), "file only");
+        let console = ExporterSpec::Console(ConsoleSpec {
+            signals: Signals::all(),
+        });
+        assert!(!exporting(&[console]), "console only");
         assert!(exporting(&[otlp(true, false)]), "traces only");
         assert!(exporting(&[otlp(false, true)]), "metrics only");
         assert_eq!(exported(&[]), (false, false));

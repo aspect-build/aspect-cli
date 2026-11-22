@@ -14,7 +14,7 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
-    """Stand-in for `ctx`. `info(ctx.std, …)` reads `std.io.stderr.color`,
+    """Stand-in for `ctx`. `detail(ctx.std, …)` reads `std.io.stderr.color`,
     and the collect helpers read `std.env.var` and the `--bes-backend` /
     `--bes-header` args.
 
@@ -25,7 +25,7 @@ def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
     fake accepts and drops it."""
     return struct(
         std = struct(
-            io = struct(stdout = struct(is_tty = False, color = False), stderr = struct(color = False)),
+            io = struct(stdout = struct(is_tty = False, color = False), stderr = struct(color = False), debug = False),
             env = struct(var = lambda name: env.get(name)),
         ),
         args = struct(bes_backends = bes_backends, bes_headers = bes_headers),

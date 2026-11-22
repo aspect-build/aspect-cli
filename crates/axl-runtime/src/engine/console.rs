@@ -14,7 +14,11 @@ use starlark::values::{
 };
 use starlark::{starlark_module, starlark_simple_value};
 
-use crate::console::{Console as Surface, DEFAULT_PRESET, Host, Overrides, Slot, TaskIdentity};
+use crate::console::{
+    AGENT_PRESET, Console as Surface, DEFAULT_PRESET, Host, Overrides, Slot, TaskIdentity,
+};
+
+use crate::diag::Verbose;
 
 use super::arguments::Arguments;
 use super::template::json_to_minijinja;
@@ -22,11 +26,18 @@ use super::template::json_to_minijinja;
 /// Resolve the surface for `task` on `host` from the `Console` feature's
 /// merged `args`.
 ///
-/// A disabled feature gives the `full` layout. Fails on a malformed
-/// `templates`, `task_presets` or `task_templates` value and on everything
-/// [`Surface::resolve`] refuses. The surface carries a warning for each
-/// `task_presets` / `task_templates` key that is a near miss of one of
-/// `task_paths`, the command paths of the repo's tasks.
+/// `template_preset` counts only when the command line or a `config.axl` set
+/// it; otherwise the base preset is `agent` when [`Host::coding_agent`] and
+/// `full` when not. The verbose level is the `verbose` arg when the command
+/// line set it, else [`Host::verbose`] (`ASPECT_DEBUG` / `ASPECT_VERBOSE`),
+/// else the arg from a `config.axl`, else the preset's. `auto` leaves it to
+/// the next, except that `auto` on the command line replaces the arg a
+/// `config.axl` set, so it skips to the preset when the environment sets
+/// none. A disabled feature gives the `full` layout and the environment's
+/// level. Fails on a malformed `templates`, `task_presets`, `task_templates`
+/// or `verbose` value and on everything [`Surface::resolve`] refuses. The surface carries a
+/// warning for each `task_presets` / `task_templates` key that is a near miss
+/// of one of `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
     args: &Arguments<'_>,
     task: TaskIdentity,
@@ -40,10 +51,25 @@ pub fn from_feature_args(
     {
         return Ok(Surface::builtin(task, host));
     }
-    let preset = args.get("template_preset").and_then(|v| v.unpack_str());
+    let chosen =
+        args.is_explicit_key("template_preset") || args.is_configured_key("template_preset");
+    let preset = match args.get("template_preset").and_then(|v| v.unpack_str()) {
+        Some(name) if chosen => name,
+        _ if host.coding_agent => AGENT_PRESET,
+        _ => DEFAULT_PRESET,
+    };
     let mut overrides = Overrides::default();
     if args.is_explicit_key("template_preset") {
         overrides.preset_from_cli();
+    }
+    let verbose_arg = verbose(args)?;
+    let level = if args.is_explicit_key("verbose") {
+        verbose_arg.or(host.verbose)
+    } else {
+        host.verbose.or(verbose_arg)
+    };
+    if let Some(level) = level {
+        overrides.set_verbose(level);
     }
     let templates = string_dict(args, "templates")?;
     blocks_error(&templates)?;
@@ -78,10 +104,31 @@ pub fn from_feature_args(
             overrides.set_for_task(task_key, slot, template)?;
         }
     }
-    Ok(
-        Surface::resolve(preset.unwrap_or(DEFAULT_PRESET), &overrides, task, host)?
-            .with_warnings(overrides.near_miss_warnings(task_paths)),
-    )
+    Ok(Surface::resolve(preset, &overrides, task, host)?
+        .with_warnings(overrides.near_miss_warnings(task_paths)))
+}
+
+/// The `verbose` arg: `None` for `auto` or unset, so the preset decides.
+/// The CLI gives a string; a `config.axl` may assign a bool too.
+fn verbose(args: &Arguments<'_>) -> Result<Option<Verbose>, String> {
+    let Some(value) = args.get("verbose").filter(|v| !v.is_none()) else {
+        return Ok(None);
+    };
+    if let Some(show) = value.unpack_bool() {
+        return Ok(Some(if show { Verbose::On } else { Verbose::Off }));
+    }
+    let given = value.unpack_str();
+    given
+        .and_then(|name| Verbose::parse(name).ok())
+        .ok_or_else(|| {
+            format!(
+                "Console verbose must be \"auto\", \"true\", \"false\", \"debug\" or a bool, got {}{}",
+                value.to_repr(),
+                given
+                    .map(|g| crate::suggest::did_you_mean(g, Verbose::NAMES))
+                    .unwrap_or_default()
+            )
+        })
 }
 
 /// Refuse the blocks in `templates` (dict values keyed by a task rather than a
@@ -182,10 +229,11 @@ starlark_simple_value!(Console);
 
 #[starlark_module]
 fn console_methods(registry: &mut MethodsBuilder) {
-    /// The preset this task renders with (`full`, `plain`, `compact` or
-    /// `silent`): its `task_presets` entry, else the `Console` feature's
-    /// `template_preset`, which wins outright when typed on the command line.
-    /// For task output that should follow it.
+    /// The preset this task renders with (`full`, `plain`, `compact`,
+    /// `agent` or `silent`): its `task_presets` entry, else the `Console`
+    /// feature's `template_preset`, which wins outright when typed on the
+    /// command line. With neither set, `agent` under a coding agent and `full`
+    /// otherwise. For task output that should follow it.
     #[starlark(attribute)]
     fn template_preset<'v>(this: Value<'v>) -> anyhow::Result<&'static str> {
         Ok(downcast(this)?.0.preset())
@@ -353,6 +401,138 @@ task_templates = {"check": {"progress": "mine"}}"#;
         assert_eq!(surface.preset(), DEFAULT_PRESET);
     }
 
+    /// Resolve with `template_preset` bound to `preset`, marked as `source`
+    /// set it (`"cli"`, `"config"`, or `""` for the schema default), plus
+    /// `extra` bindings.
+    fn resolve_with(
+        preset: &str,
+        source: &str,
+        extra: &str,
+        coding_agent: bool,
+    ) -> Result<Surface, String> {
+        resolve_on(preset, source, extra, "cli", coding_agent, None)
+    }
+
+    /// [`resolve_with`], with `verbose` marked as `verbose_source` set it
+    /// (as `source` does for `template_preset`) and `env` as the
+    /// environment's verbose level.
+    fn resolve_on(
+        preset: &str,
+        source: &str,
+        extra: &str,
+        verbose_source: &str,
+        coding_agent: bool,
+        env: Option<Verbose>,
+    ) -> Result<Surface, String> {
+        let code = format!(
+            "verbose = None\n{extra}\nargs = {{\"template_preset\": {preset:?}, \"verbose\": verbose}}"
+        );
+        crate::test::eval(&code).with_value("args", |bound| {
+            let args = Arguments::new();
+            for (name, value) in DictRef::from_value(bound).unwrap().iter() {
+                args.insert(name.unpack_str().unwrap().into(), value);
+            }
+            for (key, source) in [("template_preset", source), ("verbose", verbose_source)] {
+                match source {
+                    "cli" => args.mark_explicit(key.into()),
+                    "config" => args.mark_configured(key.into()),
+                    _ => {}
+                }
+            }
+            let host = Host {
+                coding_agent,
+                verbose: env,
+                ..Host::default()
+            };
+            from_feature_args(&args, task(), host, &[])
+        })
+    }
+
+    #[test]
+    fn a_coding_agent_gets_agent_unless_a_preset_was_chosen() {
+        let preset = |name, source, agent| resolve_with(name, source, "", agent).unwrap().preset();
+        assert_eq!(preset("full", "", true), "agent");
+        assert_eq!(preset("full", "", false), "full");
+        assert_eq!(
+            preset("full", "config", true),
+            "full",
+            "config beats detection"
+        );
+        assert_eq!(
+            preset("plain", "cli", true),
+            "plain",
+            "the CLI beats detection"
+        );
+        assert_eq!(preset("compact", "config", false), "compact");
+    }
+
+    #[test]
+    fn verbose_overrides_the_preset() {
+        let shown = |extra, preset| resolve_with(preset, "cli", extra, false).unwrap().verbose();
+        assert!(shown("", "full"));
+        assert!(!shown("", "agent"));
+        assert!(!shown(r#"verbose = "auto""#, "compact"));
+        assert!(shown(r#"verbose = "true""#, "compact"));
+        assert!(shown("verbose = True", "silent"));
+        assert!(!shown(r#"verbose = "false""#, "full"));
+        assert!(!shown("verbose = False", "plain"));
+        let err = resolve_with("full", "cli", "verbose = 1", false).unwrap_err();
+        assert!(err.contains("verbose must be"), "{err}");
+        let err = resolve_with("full", "cli", r#"verbose = "ture""#, false).unwrap_err();
+        assert!(
+            err.ends_with(r#"got "ture"; did you mean "true"?"#),
+            "{err}"
+        );
+        let err = resolve_with("full", "cli", r#"verbose = "debgu""#, false).unwrap_err();
+        assert!(
+            err.ends_with(r#"got "debgu"; did you mean "debug"?"#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn verbose_takes_the_command_line_then_the_environment_then_config() {
+        let level = |extra, source, env| {
+            resolve_on("full", "cli", extra, source, false, env)
+                .unwrap()
+                .verbosity()
+        };
+        let debug = r#"verbose = "debug""#;
+        let off = "verbose = False";
+        assert_eq!(level(debug, "cli", None), Verbose::Debug);
+        assert_eq!(
+            level(off, "cli", Some(Verbose::Debug)),
+            Verbose::Off,
+            "CLI > env"
+        );
+        assert_eq!(
+            level(off, "config", Some(Verbose::Debug)),
+            Verbose::Debug,
+            "env > config"
+        );
+        assert_eq!(
+            level(debug, "config", None),
+            Verbose::Debug,
+            "config > preset"
+        );
+        assert_eq!(
+            level("", "", Some(Verbose::Debug)),
+            Verbose::Debug,
+            "env > preset"
+        );
+        assert_eq!(level("", "", None), Verbose::On, "the preset's");
+        assert_eq!(
+            level(r#"verbose = "auto""#, "cli", Some(Verbose::Off)),
+            Verbose::Off,
+            "auto on the CLI leaves it to the environment"
+        );
+        assert_eq!(
+            level(r#"verbose = "auto""#, "cli", None),
+            Verbose::On,
+            "auto on the CLI, which replaced config's arg, leaves it to the preset"
+        );
+    }
+
     #[test]
     fn the_surface_carries_near_miss_warnings() {
         crate::test::eval(r#"task_presets = {"chek": "silent", "release-notes": "silent"}"#)
@@ -437,6 +617,33 @@ check = task(implementation = _impl)
         assert_eq!(on(&[("BUILDKITE", "true")]), Some(1), "Buildkite");
         assert_eq!(on(&[("BUILDKITE", "")]), Some(0), "an empty BUILDKITE");
         assert_eq!(on(&[]), Some(0), "elsewhere");
+    }
+
+    #[test]
+    fn an_agent_snapshot_picks_the_agent_preset() {
+        let code = r#"
+def _feature(ctx):
+    pass
+
+def _impl(ctx):
+    return 1 if ctx.console.template_preset == "agent" else 0
+
+Console = feature(
+    implementation = _feature,
+    args = {"template_preset": args.string(default = "full")},
+)
+check = task(implementation = _impl)
+"#;
+        let on = |vars: &[(&str, &str)]| {
+            crate::test::eval(code)
+                .with_features(&["Console"])
+                .with_host_env(false, false, vars)
+                .run_task(0)
+                .unwrap()
+        };
+        assert_eq!(on(&[("CLAUDECODE", "1")]), Some(1), "Claude Code");
+        assert_eq!(on(&[("AI_AGENT", "")]), Some(0), "an empty AI_AGENT");
+        assert_eq!(on(&[]), Some(0), "no agent");
     }
 
     #[test]

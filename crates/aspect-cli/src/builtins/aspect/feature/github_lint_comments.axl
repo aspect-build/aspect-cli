@@ -47,7 +47,7 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 """
 
 load("@aspect//lint.axl", "LintTrait")
-load("../private/lib/environment.axl", "feature_logger")
+load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
@@ -927,26 +927,26 @@ def _github_lint_impl(ctx: FeatureContext):
         else:
             outcome = "skipped — no GitHub token (see `inactive reason` above)"
 
-        if trace.enabled:
-            trace.log("github lint comment summary:")
+        if trace.enabled or ctx.std.io.debug:
+            debug(ctx.std, "github lint comment summary:")
             if gh["auth_failure"]:
-                trace.log("inactive reason:  authentication failed: %s" % gh["auth_failure"])
-            trace.log("found comments:   %s" % state["all_comments_count"])
-            trace.log("git prefix:       %r" % gh["prefix"])
+                debug(ctx.std, "inactive reason:  authentication failed: %s" % gh["auth_failure"])
+            debug(ctx.std, "found comments:   %s" % state["all_comments_count"])
+            debug(ctx.std, "git prefix:       %r" % gh["prefix"])
             lines_by_path = gh["window"].lines_by_path
             changed_line_count = 0
             for v in lines_by_path.values():
                 changed_line_count += len(v)
-            trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(lines_by_path)))
-            trace.log("destination:      %s" % destination)
-            trace.log("posted comments:  %s" % state["posted"])
+            debug(ctx.std, "changed lines:    %s across %s file(s)" % (changed_line_count, len(lines_by_path)))
+            debug(ctx.std, "destination:      %s" % destination)
+            debug(ctx.std, "posted comments:  %s" % state["posted"])
             if outcome:
-                trace.log("outcome:          %s" % outcome)
+                debug(ctx.std, "outcome:          %s" % outcome)
             for e in state["errors"]:
-                trace.log("  post error: %s" % e)
+                debug(ctx.std, "  post error: %s" % e)
             for c in state["all_comments"]:
                 lines = c["body"].split("\n")
-                trace.log("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
+                debug(ctx.std, "  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
 
     lint_trait.lint_start.append(_lint_start)
     lint_trait.lint_report.append(_lint_report)

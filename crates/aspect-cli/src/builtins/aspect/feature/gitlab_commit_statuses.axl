@@ -204,7 +204,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
 
     mr, reason = detect_gitlab_mr(ctx.std)
     if mr == None:
-        _LOG.trace("No GitLab MR context — skipping. (%s)" % reason)
+        _LOG.debug(ctx.std, "No GitLab MR context - skipping. (%s)" % reason)
         return
 
     project_path = mr["project_path"]
@@ -336,7 +336,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # `ctx` is a TaskContext here, so `ctx.task` is in scope.
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
-        _LOG.trace("aspect/%s%s" % (ctx.task.name, subject_str))
+        _LOG.debug(ctx.std, "aspect/%s%s" % (ctx.task.name, subject_str))
         _state["_task_kind"] = ctx.task.kind
 
         # Per-invocation name shown in the MR's status badge column; unique

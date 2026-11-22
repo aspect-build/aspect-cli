@@ -28,7 +28,7 @@
 
 mod common;
 
-use common::aspect_cli;
+use common::{aspect_cli, without_coding_agent};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -88,10 +88,11 @@ fn stub_bazel_dir() -> &'static Path {
     .as_path()
 }
 
-/// `cmd` with the stub ahead of whatever `bazel` the host has.
+/// `cmd` with the stub ahead of whatever `bazel` the host has, and the
+/// `full` console a person gets.
 fn with_stub_bazel(cmd: &mut Command) -> &mut Command {
     let path = std::env::var("PATH").unwrap_or_default();
-    cmd.env("PATH", format!("{}:{}", stub_bazel_dir().display(), path))
+    without_coding_agent(cmd).env("PATH", format!("{}:{}", stub_bazel_dir().display(), path))
 }
 
 fn assert_success(output: &Output) {

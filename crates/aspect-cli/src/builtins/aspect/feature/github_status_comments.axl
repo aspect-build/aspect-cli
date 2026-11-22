@@ -2017,7 +2017,7 @@ def _github_status_comments(ctx: FeatureContext):
         result, sel = _contribute(ctx, own_entry, final)
         if sel == None and contribute_rejected(result):
             _state["_coordinator"] = False
-            _LOG.info(ctx.std, coordination_declined_message(result, "comment"))
+            _LOG.detail(ctx.std, coordination_declined_message(result, "comment"))
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
             return (TERMINAL_DONE, 0)
         if sel == None:
@@ -2027,7 +2027,7 @@ def _github_status_comments(ctx: FeatureContext):
                     result.get("error", ""),
                 ))
             else:
-                _LOG.trace("status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
+                _LOG.debug(ctx.std, "status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
             return (TERMINAL_DONE, 0)
 
@@ -2081,7 +2081,7 @@ def _github_status_comments(ctx: FeatureContext):
         now_epoch = epoch_now_s(ctx.std)
         result, sel = _contribute(ctx, own_entry, False)
         if sel == None:
-            _LOG.trace("status-comment release failed (%s); the grant lapses on its lease" % result.get("error", ""))
+            _LOG.debug(ctx.std, "status-comment release failed (%s); the grant lapses on its lease" % result.get("error", ""))
             return None
         bodies = _render_comment(ctx, result["state"], sel, now_epoch)
         if bodies[0] == _state.get("_last_stable_body"):
@@ -2110,7 +2110,7 @@ def _github_status_comments(ctx: FeatureContext):
             if body != None and row_landed(_parse_state(body), head_sha, own_entry):
                 return
             _comment_state_cycle(ctx, token, own_entry, epoch_now_s(ctx.std), True, force = True)
-        _LOG.trace("final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
+        _LOG.debug(ctx.std, "final row unconfirmed after %d re-reads" % _FINAL_VERIFY_ROUNDS)
 
     def _comment_state_cycle(ctx, token, own_entry, now_epoch, final, force = False):
         """One read-merge-write of the comment's state block. Returns True when
@@ -2153,7 +2153,7 @@ def _github_status_comments(ctx: FeatureContext):
             return False
 
         if _superseded(parsed, head_sha, run_id):
-            _LOG.trace("Run %s is older than the comment's, on another SHA; skipping the state-block post." % run_id)
+            _LOG.debug(ctx.std, "Run %s is older than the comment's, on another SHA; skipping the state-block post." % run_id)
             return False
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
         stable_body, final_body = _render_state(ctx, parsed, new_state, now_epoch)

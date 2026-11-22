@@ -1,0 +1,84 @@
+"""Tests for `feature/telemetry.axl`: which signals get a console exporter
+which the `OTEL_EXPORTER_OTLP_*` endpoints carry, and which exporter names
+draw a warning, from an injected environment.
+
+Run with:
+  aspect dev test-telemetry
+"""
+
+load("@aspect//feature/telemetry.axl", "console_signals", "env_endpoint_signals", "unsupported_exporters")
+
+def _env(**vars):
+    return struct(var = lambda name: vars.get(name))
+
+def _test_no_variables_mean_no_console_and_every_endpoint_signal(ctx):
+    env = _env()
+    if console_signals(env) != []:
+        fail("console_signals(): %r" % console_signals(env))
+    if env_endpoint_signals(env) != ["traces", "logs", "metrics"]:
+        fail("env_endpoint_signals(): %r" % env_endpoint_signals(env))
+
+def _test_each_signal_names_its_own_console(ctx):
+    for name, want in [
+        ("OTEL_TRACES_EXPORTER", ["traces"]),
+        ("OTEL_LOGS_EXPORTER", ["logs"]),
+        ("OTEL_METRICS_EXPORTER", ["metrics"]),
+    ]:
+        got = console_signals(_env(**{name: "console"}))
+        if got != want:
+            fail("%s=console: %r, want %r" % (name, got, want))
+
+def _test_a_list_and_its_spacing_and_case_are_read(ctx):
+    env = _env(OTEL_TRACES_EXPORTER = " otlp , Console ")
+    if console_signals(env) != ["traces"]:
+        fail("console_signals: %r" % console_signals(env))
+    if "traces" not in env_endpoint_signals(env):
+        fail("otlp in the list keeps the endpoint: %r" % env_endpoint_signals(env))
+
+def _test_none_or_console_alone_keeps_a_signal_off_the_endpoints(ctx):
+    env = _env(OTEL_TRACES_EXPORTER = "none", OTEL_METRICS_EXPORTER = "console")
+    if env_endpoint_signals(env) != ["logs"]:
+        fail("env_endpoint_signals: %r" % env_endpoint_signals(env))
+
+def _test_aspect_debug_adds_traces_and_metrics_not_logs(ctx):
+    if console_signals(_env(ASPECT_DEBUG = "1")) != ["traces", "metrics"]:
+        fail("ASPECT_DEBUG=1: %r" % console_signals(_env(ASPECT_DEBUG = "1")))
+    env = _env(ASPECT_DEBUG = "1", OTEL_LOGS_EXPORTER = "console")
+    if console_signals(env) != ["traces", "logs", "metrics"]:
+        fail("ASPECT_DEBUG=1 OTEL_LOGS_EXPORTER=console: %r" % console_signals(env))
+    if console_signals(_env(ASPECT_DEBUG = "")) != []:
+        fail("an empty ASPECT_DEBUG is unset")
+
+def _test_unsupported_names_are_listed_for_a_warning(ctx):
+    env = _env(OTEL_TRACES_EXPORTER = "otlp,Zipkin", OTEL_METRICS_EXPORTER = "prometheus", OTEL_LOGS_EXPORTER = "none")
+    got = unsupported_exporters(env)
+    want = [("OTEL_TRACES_EXPORTER", "zipkin"), ("OTEL_METRICS_EXPORTER", "prometheus")]
+    if got != want:
+        fail("unsupported_exporters: %r, want %r" % (got, want))
+    if env_endpoint_signals(env) != ["traces"]:
+        fail("zipkin beside otlp keeps the endpoint: %r" % env_endpoint_signals(env))
+    if unsupported_exporters(_env(OTEL_TRACES_EXPORTER = "console")) != []:
+        fail("console is supported")
+
+_UNIT_TESTS = [
+    _test_no_variables_mean_no_console_and_every_endpoint_signal,
+    _test_each_signal_names_its_own_console,
+    _test_a_list_and_its_spacing_and_case_are_read,
+    _test_none_or_console_alone_keeps_a_signal_off_the_endpoints,
+    _test_aspect_debug_adds_traces_and_metrics_not_logs,
+    _test_unsupported_names_are_listed_for_a_warning,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("telemetry.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+telemetry_tests = task(
+    summary = "Run the Telemetry feature AXL unit tests.",
+    kind = "test-telemetry",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -22,7 +22,7 @@ resolution. (The companion case — BES routed through Bazel via
 
 load("@std//time.axl", "monotonic")
 load("../private/lib/aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
-load("../private/lib/environment.axl", "info", "warn")
+load("../private/lib/environment.axl", "detail", "warn")
 load("../private/lib/text.axl", "join_url")
 
 def build_events_iterator(kinds = None, tick_ms = None):
@@ -207,7 +207,7 @@ def announce_dropped_bes_sinks(ctx, dropped: list[str], rc, command: str = "buil
     Call alongside the other spawn-time disclosures; a no-op when nothing was dropped."""
     bazel_backend = bazel_bes_backend(rc, command)
     for uri in dropped:
-        info(ctx.std, _DUPLICATE_MSG % (uri, bazel_backend))
+        detail(ctx.std, _DUPLICATE_MSG % (uri, bazel_backend))
 
 def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> list:
     """The CLI-streamed BES sinks from `--bes-backend` / `--bes-header`. Most
@@ -359,7 +359,7 @@ def announce_bes_sinks(ctx, sinks: list):
     The line ends on the URI with no full stop: GitHub Actions autolinks a bare
     URL in the log and swallows the trailing period into the href."""
     for sink in grpc_backends(sinks):
-        info(ctx.std, "Streaming build events to %s" % sink.uri)
+        detail(ctx.std, "Streaming build events to %s" % sink.uri)
 
 def bes_results_line(results_url: str, invocation_id: str) -> str:
     """The "Streaming build results to …" line for a CLI-streamed invocation, or `""`
@@ -383,7 +383,7 @@ def announce_bes_results_url(ctx, results_url: str, invocation_id: str):
     A no-op without both halves."""
     line = bes_results_line(results_url, invocation_id)
     if line:
-        info(ctx.std, line)
+        detail(ctx.std, line)
 
 def summarize_bes_upload(ctx, sinks: list):
     """Log one line per CLI-streamed BES backend summarizing how many build events
@@ -395,4 +395,4 @@ def summarize_bes_upload(ctx, sinks: list):
     runner's env-injected backend.
     """
     for sink in grpc_backends(sinks):
-        info(ctx.std, bes_upload_line(sink.uri, sink.events_sent, sink.events_acked, sink.failed))
+        detail(ctx.std, bes_upload_line(sink.uri, sink.events_sent, sink.events_acked, sink.failed))

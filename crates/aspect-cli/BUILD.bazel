@@ -93,6 +93,7 @@ rust_test(
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
+    deps = ["//crates/axl-runtime"],
 )
 
 rust_test(
@@ -117,7 +118,10 @@ rust_test(
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
-    deps = ["@crates//:tempfile"],
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:tempfile",
+    ],
 )
 
 rust_test(
@@ -129,6 +133,7 @@ rust_test(
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:libc",
     ],
 )
@@ -142,6 +147,7 @@ rust_test(
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:tempfile",
     ],
 )
@@ -155,6 +161,7 @@ rust_test(
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:serde_json",
         "@crates//:tempfile",
     ],
@@ -169,6 +176,7 @@ rust_test(
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:tempfile",
     ],
 )
@@ -182,6 +190,7 @@ rust_test(
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:tempfile",
     ],
 )
@@ -199,6 +208,7 @@ rust_test(
         "BASIL_BIN": "$(rootpath //crates/basil)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:libc",
         "@crates//:tempfile",
     ],
@@ -221,6 +231,7 @@ rust_test(
         "BASIL_BIN": "$(rootpath //crates/basil)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:tempfile",
     ],
 )
@@ -234,6 +245,7 @@ rust_test(
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:tempfile",
     ],
 )

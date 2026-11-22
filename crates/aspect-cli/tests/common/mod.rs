@@ -23,10 +23,12 @@ pub fn aspect_cli() -> String {
 /// The environment a spawned CLI runs under: the developer's own, minus everything
 /// that would make the result depend on where the test ran.
 ///
-/// `ASPECT_*` would override a fixture's config, and the CI identity
-/// variables steer the built-in tasks into their CI code paths (status checks,
-/// runner detection) — the same filtering `tools/cache-diff-integration.py`
-/// does for the same reason. `HOME` and `PATH` stay: the CLI resolves its
+/// `ASPECT_*` would override a fixture's config, the CI identity variables
+/// steer the built-in tasks into their CI code paths (status checks, runner
+/// detection) - the same filtering `tools/cache-diff-integration.py` does for
+/// the same reason - a coding agent's variables switch the console to its
+/// `agent` layout, and `OTEL_*` would register exporters that print to
+/// stderr or ship to a collector. `HOME` and `PATH` stay: the CLI resolves its
 /// builtins cache under `HOME`. The task history goes to a temp folder of the
 /// test process's own.
 #[allow(dead_code)]
@@ -39,10 +41,13 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
         "CIRCLE",
         "GITHUB_",
         "GITLAB_",
+        "OTEL_",
     ];
     let mut env: std::collections::HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| {
-            !DROP_NAMES.contains(&k.as_str()) && !DROP_PREFIXES.iter().any(|p| k.starts_with(p))
+            !DROP_NAMES.contains(&k.as_str())
+                && !axl_runtime::agent::ENV_VARS.contains(&k.as_str())
+                && !DROP_PREFIXES.iter().any(|p| k.starts_with(p))
         })
         .collect();
     // Every task keeps a record in the task history: the test's own, not the
@@ -55,6 +60,17 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
             .into_owned(),
     );
     env
+}
+
+/// `cmd` without a coding agent's variables, which would switch the console
+/// to its `agent` layout, for a test that otherwise keeps the developer's
+/// environment.
+#[allow(dead_code)]
+pub fn without_coding_agent(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    for var in axl_runtime::agent::ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 /// Locate basil, the fake `bazel` the CLI is pointed at.

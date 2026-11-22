@@ -85,7 +85,7 @@ def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version:
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            process_event(ph.data, event, bb_root)
+            process_event(ph.data, event, bb_root, std = ctx.std)
         if events.done:
             break
 
@@ -386,7 +386,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
                 break
             for handler in bazel_trait.build_event:
                 handler(ctx, event)
-            process_event(data, event, bb_root)
+            process_event(data, event, bb_root, std = ctx.std)
         if events.done:
             break
 

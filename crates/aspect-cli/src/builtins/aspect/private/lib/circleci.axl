@@ -36,7 +36,7 @@ call (`cache = None`) keeps the original fetch-per-call behavior.
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./ci.axl", "is_circleci_cloud_url")
-load("./environment.axl", "warn")
+load("./environment.axl", "debug", "warn")
 
 # Retry the S3 PUT this many times before giving up. A failed attempt
 # clears any cached session, so the next attempt re-mints fresh creds —
@@ -431,13 +431,15 @@ def _run_s3_put(ctx, curl_args, url):
 
     Returns `(ok, http_code, body, curl_err)`. `ok` is True only on a 2xx
     with a clean exit; `body` is the S3 response (the trailing `%{http_code}`
-    line stripped) for error diagnosis. When `trace.enabled`, runs curl `-v`
-    so the sent request headers — which reveal anything curl added beyond
-    what was signed — show in the trace; `curl_err` is redacted before being
-    returned so a transport-error detail built from it can't leak the SigV4
-    `Authorization` / `x-amz-security-token` that `-v` echoes.
+    line stripped) for error diagnosis. When `trace.enabled` or
+    `std.io.debug`, runs curl `-v` so the sent request headers - which reveal
+    anything curl added beyond what was signed - show in the debug line;
+    `curl_err` is redacted before being returned so a transport-error detail
+    built from it can't leak the SigV4 `Authorization` /
+    `x-amz-security-token` that `-v` echoes.
     """
-    args = curl_args + (["-v"] if trace.enabled else [])
+    verbose = trace.enabled or ctx.std.io.debug
+    args = curl_args + (["-v"] if verbose else [])
 
     # Per-file uploads can run thousands of times; this closes both pipes
     # promptly instead of leaving read_to_string() streams open until AXL GC.
@@ -457,8 +459,8 @@ def _run_s3_put(ctx, curl_args, url):
         body, http_code = "", parts[0].strip()
 
     ok = status.code == 0 and http_code.startswith("2")
-    if not ok and trace.enabled:
-        trace.log("curl PUT failed (http=%s):\n%s" % (http_code, curl_err))
+    if not ok and verbose:
+        debug(ctx.std, "curl PUT failed (http=%s):\n%s" % (http_code, curl_err))
     return (ok, http_code, body, curl_err)
 
 def _s3_put(ctx, session, path, name):
