@@ -1,7 +1,8 @@
 //! The stages that observe or answer lines, and the repeat collapser:
 //!
-//! * [`LineMatcher`], which observes every record as bazel wrote it and feeds
-//!   [`Observations`]: fatal-pattern latching and match recording.
+//! * [`LineMatcher`], which observes every record as it is shown (after the
+//!   rewrites), and feeds [`Observations`]: fatal-pattern latching and match
+//!   recording.
 //! * [`Aggregator`], which feeds every record's message text to one of the
 //!   [`Observations`]' [`Tally`]s. It and [`LineMatcher`] (the `observe`
 //!   and `fatal` stages) never see a row of Bazel's progress UI

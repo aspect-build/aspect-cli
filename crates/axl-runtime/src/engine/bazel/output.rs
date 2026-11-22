@@ -633,16 +633,19 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// the progress area it drew and erased left out (with `progress`, its
     /// status line every few seconds). Colour shows as `show_color` says.
     /// A build given it appends `processor.flags` after its own, so they win
-    /// (`--isatty`, `--curses=yes`, `--color=yes` unless `color = False`;
+    /// (`--isatty`, `--curses=yes`, `--color=yes` unless `color = False`,
+    /// `--show_progress`;
     /// they assume the build's stdout is inherited); the user's `--curses`
     /// and `--color` are what `display` and `show_color` are for.
     ///
     /// Stages run in a fixed order of kinds, whatever order they are listed
-    /// in, and in list order within a kind: `observe`/`aggregate`/`fatal`, then
-    /// `intercept`, then `rewrite`/`relativize_paths`, then `drop`, then
-    /// `recap_errors`, then `collapse_similar`, then
-    /// `collapse_repeats`. Observers so see every line as Bazel wrote it, and
-    /// a collapser folds what is left to show. Patterns use
+    /// in, and in list order within a kind: `intercept`, then
+    /// `rewrite`/`relativize_paths`, then `observe`/`aggregate`/`fatal`, then
+    /// `drop`, then `recap_errors`, then `collapse_similar`, then
+    /// `collapse_repeats`. Intercept hooks so answer each line as Bazel
+    /// wrote it; observers (and the tip rules on them) see every line as it
+    /// is shown, redacted, before anything is hidden; and a collapser folds
+    /// what is left to show. Patterns use
     /// [regex](https://docs.rs/regex) syntax and match a line's text with
     /// escape sequences and a `--show_timestamps` prefix stripped.
     ///
@@ -1016,7 +1019,7 @@ BazelTrait = trait(
     shown = bazel.output.processor(display = "curses")
     lines = bazel.output.processor(display = "lines")
     if shown.display != "curses" or "--curses=yes" not in shown.flags: fail("shown %r %r" % (shown.display, shown.flags))
-    if lines.display != "lines" or lines.flags != ["--isatty=0", "--curses=yes", "--color=yes"]: fail("flags %r" % (lines.flags,))
+    if lines.display != "lines" or lines.flags != ["--isatty=0", "--curses=yes", "--color=yes", "--show_progress"]: fail("flags %r" % (lines.flags,))
     if "--color=yes" in bazel.output.processor(color = False).flags: return 5
     if lines.intercepts: return 3
     if not bazel.output.processor(stages = [bazel.output.intercept({"s": "x"})]).intercepts: return 4
@@ -1195,6 +1198,26 @@ BazelTrait = trait(
         );
     }
 
+    /// An observer (and so a tip rule) sees a line as a rewrite left it: what
+    /// the rewrite masked is never matched or kept.
+    #[test]
+    fn an_observer_sees_a_line_as_a_rewrite_left_it() {
+        let exit = run(r#"
+    o = bazel.output
+    processor = o.processor(display = "lines", stages = [
+        o.observe({"secret": "password"}),
+        o.rewrite(r"password=\S+", "password=<redacted>"),
+    ])
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"], output = processor)
+    if not build.wait().success: return 1
+    matches = [text for _, text in build.output_matches()]
+    if not [t for t in matches if "password=<redacted>" in t]: return 2
+    if [t for t in matches if "hunter2" in t]: return 3
+    return 0"#)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
     /// Listed in any order, stages run by kind.
     #[test]
     fn a_processor_runs_its_stages_in_phase_order() {
@@ -1206,7 +1229,7 @@ BazelTrait = trait(
         o.recap_errors(),
     ])
     if processor.stages != [
-        "fatal", "observe", "intercept", "relativize_paths", "rewrite", "drop",
+        "intercept", "relativize_paths", "rewrite", "fatal", "observe", "drop",
         "recap_errors", "collapse_similar",
     ]: return 1
     if o.drop(["x"]).name != "drop": return 2

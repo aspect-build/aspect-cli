@@ -177,8 +177,9 @@ def _resolve(ctx, command: str) -> _Invocation:
     # use_rc drives the health check (in results.setup) and every spawn below.
     rc = bazel_rc.setup(ctx, command, base_flags = base_flags)
 
-    # The capture asks Bazel for curses and colour, after the user's flags;
-    # the user's own `--curses` and `--color` decide what is shown.
+    # The capture asks Bazel for curses, colour and progress, after the
+    # user's flags; the user's own `--curses`, `--color` and
+    # `--show_progress` decide what is shown.
     processor = bazel_console.processor_for(
         trait,
         ctx.std.io.stdout.is_tty,
@@ -186,6 +187,7 @@ def _resolve(ctx, command: str) -> _Invocation:
         extra = extra,
         curses = rc.bool_flag("--curses", command = command),
         color = rc.bool_flag("--color", command = command),
+        show_progress = rc.bool_flag("--show_progress", command = command),
     )
 
     (announce_version, announce_command) = bazel_announce.resolve(ctx)

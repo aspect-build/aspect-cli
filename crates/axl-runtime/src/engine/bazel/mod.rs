@@ -97,7 +97,8 @@ fn console_for<'v>(
                     stages,
                     colour: None,
                     show_colour: output::user_choice(flags, "color"),
-                    progress: t.progress,
+                    progress: t.progress
+                        && output::user_choice(flags, "show_progress") != Some(false),
                 });
                 flags.extend(config.bazel_flags().into_iter().map(str::to_string));
                 Some(config)

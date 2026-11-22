@@ -154,12 +154,14 @@ fn compile_all(patterns: impl IntoIterator<Item = String>) -> Result<Vec<Regex>,
 /// When a [`Stage`] runs, earliest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Phase {
-    /// See every line as bazel wrote it.
-    Observe,
     /// Answer held lines, before anything else changes them.
     Intercept,
     /// Edit lines in place.
     Rewrite,
+    /// See every line as it is shown, redacted (after the rewrites), before
+    /// anything is hidden: a tip that quotes a line never shows what a
+    /// rewrite masked.
+    Observe,
     /// Hide lines by pattern.
     Drop,
     /// See what the stages before have left, for a report at the end. A line
@@ -364,8 +366,8 @@ impl Config {
     }
 
     /// The bazel flags the capture needs, to go after the user's: whether it
-    /// writes to a terminal, curses for [`Mode::Pty`], and `--color=yes`
-    /// with [`Config::colour`].
+    /// writes to a terminal, curses for [`Mode::Pty`], `--color=yes` with
+    /// [`Config::colour`], and `--show_progress`.
     pub fn bazel_flags(&self) -> Vec<&'static str> {
         let mut flags = match (self.mode, self.pty) {
             (Mode::Pipe, _) => vec!["--isatty=0", "--curses=no"],
@@ -375,6 +377,11 @@ impl Config {
         if self.colour {
             flags.push("--color=yes");
         }
+        // Its redraws are what end an action's output: without progress
+        // (an rc's `--noshow_progress`) nothing would, and every message
+        // after the first action's output would read as output too. The
+        // user's flag still decides whether plain lines show it.
+        flags.push("--show_progress");
         flags
     }
 
@@ -605,7 +612,7 @@ mod tests {
             Style::default(),
         );
         let names: Vec<_> = config.stages().iter().map(|s| s.name()).collect();
-        assert_eq!(names, ["observe", "fatal", "intercept", "collapse_repeats"]);
+        assert_eq!(names, ["intercept", "observe", "fatal", "collapse_repeats"]);
 
         let input = b"WARNING: flaky\nWARNING: flaky\nWARNING: flaky\npassword=hunter2\n\
                       password=hunter2\nServer terminated abruptly\n";
@@ -788,12 +795,23 @@ mod tests {
         config.colour = true;
         assert_eq!(
             config.bazel_flags(),
-            ["--isatty=0", "--curses=no", "--color=yes"]
+            [
+                "--isatty=0",
+                "--curses=no",
+                "--color=yes",
+                "--show_progress"
+            ]
         );
         let mut config = Config::new(Mode::Pty, vec![], Style::default());
-        assert_eq!(config.bazel_flags(), ["--isatty=1", "--curses=yes"]);
+        assert_eq!(
+            config.bazel_flags(),
+            ["--isatty=1", "--curses=yes", "--show_progress"]
+        );
         config.pty = false;
-        assert_eq!(config.bazel_flags(), ["--isatty=0", "--curses=yes"]);
+        assert_eq!(
+            config.bazel_flags(),
+            ["--isatty=0", "--curses=yes", "--show_progress"]
+        );
     }
 
     /// Real bazel 9 consoles, recorded under a PTY and through a pipe with a

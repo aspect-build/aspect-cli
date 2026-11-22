@@ -109,7 +109,7 @@ def _test_processor_follows_the_trait(ctx):
     _eq("a redirected stderr gets lines", bazel_console.processor_for(trait, True, False).display, "lines")
     lines = bazel_console.processor_for(trait, False, False)
     _eq("lines run repeats", lines.stages, ["collapse_repeats"])
-    _eq("always curses and colour", ("--curses=yes" in lines.flags, lines.color, lines.flags[-1]), (True, True, "--color=yes"))
+    _eq("always curses, colour and progress", ("--curses=yes" in lines.flags, lines.color, lines.flags[-2:]), (True, True, ["--color=yes", "--show_progress"]))
     _eq("the user's --color is what shows", "--color=yes" in bazel_console.processor_for(trait, False, False, color = False).flags, True)
 
 def _test_impl(ctx: TaskContext) -> int:
