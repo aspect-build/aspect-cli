@@ -612,28 +612,10 @@ check = task(implementation = _impl)
         );
     }
 
+    /// `ctx.console.buildkite` and the section titles follow the same host
+    /// snapshot.
     #[test]
     fn a_buildkite_snapshot_opens_sections() {
-        let code = r#"
-def _impl(ctx):
-    line = ctx.console.render("phase", title = "Build", emoji = "", highlight_style = "", highlight_reset = "", text = "")
-    return 1 if line.startswith(":aspect:") else 0
-
-check = task(implementation = _impl)
-"#;
-        let on = |vars: &[(&str, &str)]| {
-            crate::test::eval(code)
-                .with_host_env(false, false, vars)
-                .run_task(0)
-                .unwrap()
-        };
-        assert_eq!(on(&[("BUILDKITE", "true")]), Some(1), "Buildkite");
-        assert_eq!(on(&[("BUILDKITE", "")]), Some(0), "an empty BUILDKITE");
-        assert_eq!(on(&[]), Some(0), "elsewhere");
-    }
-
-    #[test]
-    fn ctx_console_buildkite_is_the_snapshot_the_templates_see() {
         let code = r#"
 def _impl(ctx):
     line = ctx.console.render("phase", title = "Build", emoji = "", highlight_style = "", highlight_reset = "", text = "")
