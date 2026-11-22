@@ -89,6 +89,8 @@ fn reports_follow_the_color_rule_on_a_pipe_and_stdout_stays_plain() {
     for (vars, want) in [
         (&[][..], false),
         (&[FORCE][..], true),
+        // The marker alone: `detect_ci` still says "not CI", so no CI-only
+        // feature runs (`--remote` auto-wiring would read the keyring).
         (&[("CIRCLECI", "true")][..], true),
         (&[FORCE, ("NO_COLOR", "1")][..], false),
     ] {

@@ -161,11 +161,7 @@ def _print(line: str = "") -> None:
 
 def _info(std, message: str) -> None:
     """`info`, through `_shown`."""
-    _info_shown(std, _shown(message))
-
-def _info_shown(std, shown: str) -> None:
-    """`info` for text that is already escaped, and may carry `_styled` pieces."""
-    info(std, shown)
+    info(std, _shown(message))
 
 def _warn(std, message: str) -> None:
     """`warn`, through `_shown`."""
@@ -2908,7 +2904,7 @@ def _report_slot(
 
     # Abbreviated as `list` abbreviates, so the two commands do not describe one
     # directory two ways. The machine-readable outputs above carry it in full.
-    _info_shown(ctx.std, _shown("worktree ready: ") + _styled(ctx.std, tilde(path, ctx.std.env.home_dir()), ansi.BOLD))
+    info(ctx.std, _shown("worktree ready: ") + _styled(ctx.std, tilde(path, ctx.std.env.home_dir()), ansi.BOLD))
     if detached:
         _print("  detached at %s (%s), on no branch: commits made here need one before release — git switch -c <branch>" % (detached, _short(head)))
     elif created:
