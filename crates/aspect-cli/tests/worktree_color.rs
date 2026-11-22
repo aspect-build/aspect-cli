@@ -1,5 +1,6 @@
 //! `aspect worktree` styles its stderr report on a pipe whenever the CLI's
-//! color rule allows it, as the console lines around it do, and never styles
+//! color rule allows it (`CLICOLOR_FORCE`, a CI host whose log renders ANSI),
+//! as the console lines around it do, and never styles
 //! what it writes to stdout (`--output=json`, `--output=path`).
 //!
 //! Spawns the real CLI and git in a scratch clone with their own `HOME`, no
@@ -88,6 +89,7 @@ fn reports_follow_the_color_rule_on_a_pipe_and_stdout_stays_plain() {
     for (vars, want) in [
         (&[][..], false),
         (&[FORCE][..], true),
+        (&[("CIRCLECI", "true")][..], true),
         (&[FORCE, ("NO_COLOR", "1")][..], false),
     ] {
         let stderr = aspect(dir.path(), &["worktree", "list"], vars).stderr;
