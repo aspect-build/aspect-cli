@@ -178,8 +178,10 @@ def error(std, msg):
 
 def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
     """Open a collapsed Buildkite log section, titled by the console's
-    `section` slot so a layout can drop the `icon` shortcode."""
-    print("--- " + ctx.console.render("section", icon = icon, title = title))
+    `section` slot so a layout can drop the `icon` shortcode. Prints nothing
+    off Buildkite (`ctx.console.buildkite`)."""
+    if ctx.console.buildkite:
+        print("--- " + ctx.console.render("section", icon = icon, title = title))
 
 def feature_logger(feature):
     """(debug, info, detail, warn, error) bundle prepending `<feature>: ` to each message.
@@ -519,10 +521,9 @@ def print_environment_info(ctx: TaskContext, env: WorkflowsEnvironment) -> None:
     if runner == None:
         return
 
-    if env.ci and env.ci.host == "buildkite":
-        # `:rocket:` mirrors the status-surface "🚀 Workflows runner metadata"
-        # so the same identifier appears on CLI logs and rendered checks.
-        buildkite_section(ctx, ":rocket:", "Workflows runner metadata")
+    # `:rocket:` mirrors the status-surface "🚀 Workflows runner metadata"
+    # so the same identifier appears on CLI logs and rendered checks.
+    buildkite_section(ctx, ":rocket:", "Workflows runner metadata")
 
     std = ctx.std
     color = ctx.std.io.stderr.color

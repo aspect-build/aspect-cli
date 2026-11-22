@@ -474,7 +474,7 @@ ctx.features[Console].args.template_preset = "silent""#,
 }
 
 /// The Workflows runner sections open through `buildkite_section`, so `plain`
-/// reaches them too.
+/// reaches them too, and off Buildkite they print nothing.
 #[test]
 fn a_task_owned_buildkite_section_follows_the_preset() {
     for (preset, title) in [
@@ -487,6 +487,11 @@ fn a_task_owned_buildkite_section_follows_the_preset() {
         assert_eq!(output.status.code(), Some(0), "{err}");
         assert!(err.lines().any(|l| l == title), "{preset}: {err}");
     }
+
+    let output = run("", &["section"], false);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert!(!err.contains("Runner metadata"), "off Buildkite: {err}");
 }
 
 /// `task_presets` picks one task's preset, and a command-path entry tells a

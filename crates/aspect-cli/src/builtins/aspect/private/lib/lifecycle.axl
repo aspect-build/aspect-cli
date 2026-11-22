@@ -728,15 +728,19 @@ def _emit_bk_phase_section(ctx, phase, progress_styles):
     this phase — either `Phase.expanded` or a `--buildkite-annotations:expand-phase`
     entry — else `---` (collapsed). Note BK only auto-expands the last collapsed
     `---` group when no group is explicitly expanded, so a `+++` here suppresses
-    that auto-expansion of a later section (e.g. the closing bookend)."""
-    if not ctx.std.env.var("BUILDKITE"):
-        return
+    that auto-expansion of a later section (e.g. the closing bookend).
+
+    Prints nothing off Buildkite (`ctx.console.buildkite`). Returns whether it
+    printed the header."""
+    if not ctx.console.buildkite:
+        return False
     title = ctx.console.render(
         "phase",
         text = progress_styles.stream or progress_styles.body,
         **_phase_line_context(ctx, phase)
     )
     print(_bk_phase_section_marker(ctx, phase) + " " + title)
+    return True
 
 def _phase_line_context(ctx: TaskContext, phase: Phase) -> dict:
     """The `title`, `emoji`, `highlight_style` and `highlight_reset` keys of a
@@ -827,8 +831,7 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
             display_name = phase.display_name,
         )
         if phase.name != prev_phase:
-            _emit_bk_phase_section(ctx, phase, progress_styles)
-            bk_section_emitted = bool(ctx.std.env.var("BUILDKITE"))
+            bk_section_emitted = _emit_bk_phase_section(ctx, phase, progress_styles)
             phase_change = True
 
     # Off BK a phase-tagged update is a `phase` line; on BK the section header
@@ -836,7 +839,7 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
     cli_text = progress_styles.stream
     if cli_text and not bk_section_emitted:
         phase_context = _phase_line_context(ctx, phase) if phase != None else {}
-        slot = "phase" if phase != None and not ctx.std.env.var("BUILDKITE") else "progress"
+        slot = "phase" if phase != None and not ctx.console.buildkite else "progress"
         line = ctx.console.render(slot, text = cli_text, **phase_context)
         if line:
             print(line)
