@@ -869,8 +869,9 @@ async fn another_signal(first: SignalKind) -> SignalKind {
 /// in, the kernel leaves it zero, which for SIGINT and SIGTERM means the
 /// terminal. (`si_code` would be the textbook field, but macOS reports 0 for
 /// `kill(2)` too, so it cannot tell the two apart.) A hangup is always from a
-/// `Process`: the kernel sends it to the session leader alone, not our
-/// group, so nothing can be assumed to have reached the children.
+/// `Process`: which processes it reached depends on the shell and the
+/// kernel (a session leader alone, or the old foreground group as the
+/// leader exits), so nothing can be assumed to have reached the children.
 #[cfg(unix)]
 async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
     use std::sync::OnceLock;
