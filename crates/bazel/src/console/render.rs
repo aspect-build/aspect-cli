@@ -510,9 +510,11 @@ impl Screen {
             self.rows.resize(self.row + 1, Pending::default());
         }
         if text.is_empty() {
-            // A blank row is classified too, so early settling can pass it.
+            // A blank row is classified too, so early settling can pass it:
+            // as what wrote it last when nothing is left on it, not as the
+            // progress row that was erased from it.
             if let Some(row) = self.rows.get_mut(self.row)
-                && row.line.is_none()
+                && (row.line.is_none() || row.cells.iter().all(|c| *c == blank()))
             {
                 row.line = line.cloned();
             }

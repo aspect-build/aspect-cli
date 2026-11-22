@@ -1714,6 +1714,64 @@ mod tests {
         }
     }
 
+    /// The recap of a recorded console, in curses (as written) and in
+    /// plain lines: each recapped error with the body Bazel wrote under it.
+    #[test]
+    fn a_recorded_consoles_recap_keeps_each_errors_body_in_either_output() {
+        let cases: &[(&str, &[u8], &[&str])] = &[
+            (
+                "pty_keep_going",
+                include_bytes!("testdata/pty_keep_going.txt"),
+                &["err0", "err1", "err3"],
+            ),
+            (
+                "pty_action_error_text",
+                include_bytes!("testdata/pty_action_error_text.txt"),
+                &["unused import \"os\"", "unused import \"sys\""],
+            ),
+        ];
+        for &(name, input, body) in cases {
+            for lines in [false, true] {
+                let mut config = Config::new(
+                    Mode::Pty,
+                    vec![Stage::RecapErrors {
+                        max: report::RECAP_MAX,
+                        after: 0,
+                    }],
+                    Style::default(),
+                );
+                if lines {
+                    config.output = Output::Lines { status_every: None };
+                }
+                let mut pipeline = config.pipeline();
+                let sink = SharedSink::default();
+                let mut forwarder = Forwarder::spawn(
+                    Box::new(std::io::Cursor::new(input.to_vec())),
+                    Box::new(sink.clone()),
+                    std::mem::take(&mut pipeline.chain),
+                )
+                .unwrap();
+                forwarder.join().unwrap();
+                let after = ansi::text(&sink.bytes());
+                let at = after
+                    .find("INFO: Errors Bazel reported")
+                    .or_else(|| after.find("INFO: The first"))
+                    .unwrap_or_else(|| panic!("{name} (lines: {lines}): no recap in\n{after}"));
+                let recap = &after[at..];
+                for line in body {
+                    assert!(
+                        recap.contains(line),
+                        "{name} (lines: {lines}): {line:?} not in the recap\n{recap}"
+                    );
+                }
+                assert!(
+                    !recap.contains("Use --sandbox_debug"),
+                    "{name} (lines: {lines}): the sandbox hint in\n{recap}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn recorded_consoles_keep_all_action_and_test_output() {
         for &(name, mode, input) in RECORDED {

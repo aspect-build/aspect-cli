@@ -242,11 +242,9 @@ pub const RECAP_BODY_LINES: usize = 5;
 static EXIT_TAIL: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^(.*? failed: \(Exit [^)]*\)): .+$").unwrap());
 
-/// A line that starts a message of bazel's own, which ends the body before
-/// it even where the classifier takes it for output (the first message after
-/// an action's, in plain lines, where no redraw is left to end the output).
-static SEVERITY: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^(?:ERROR|WARNING|INFO|DEBUG|FATAL): ").unwrap());
+/// Bazel's hint under every sandboxed failure, which a recapped body leaves
+/// out for a line of the tool's own.
+const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the sandbox";
 
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
@@ -255,8 +253,10 @@ static SEVERITY: std::sync::LazyLock<Regex> =
 /// repeats, never how many: in a pipe some are not recognized. Each comes
 /// with its body (what says what went wrong, for a failed action), up to
 /// [`RECAP_BODY_LINES`] lines: the first ones, and the last (a Starlark
-/// traceback's error comes after its frames), the rest counted between; its
-/// header is cut after the exit code.
+/// traceback's error comes after its frames), the rest counted between,
+/// Bazel's sandbox hint left out. The body ends at Bazel's next redraw (a
+/// record that is `fresh`, in plain lines as under a PTY), so a tool's own
+/// `WARNING:` lines are kept in it. Its header is cut after the exit code.
 pub struct RecapErrors {
     max: usize,
     after: usize,
@@ -334,9 +334,9 @@ impl LineProcessor for RecapErrors {
         } else if let Some(i) = body
             && matches!(line.kind, Kind::Other | Kind::Blank)
             && !line.drawn
-            && !SEVERITY.is_match(text)
+            && !line.fresh
         {
-            if line.kind == Kind::Other {
+            if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
                 self.errors[i].body_line(quote(text));
             }
             self.body = Some(i);
@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recapped_body_ends_at_bazels_next_message_and_keeps_its_last_line() {
+    fn a_recapped_body_ends_at_bazels_redraw_and_keeps_its_last_line() {
         let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::default());
         let mut records = vec![
             "ERROR: Traceback (most recent call last):",
@@ -579,8 +579,9 @@ mod tests {
             "\tFile \"/ws/d.bzl\", line 4",
             "\tFile \"/ws/e.bzl\", line 5",
             "Error in fail: the real reason",
-            // In plain lines nothing erased is left to end the body.
-            "WARNING: Remote Cache: UNAVAILABLE",
+            // Bazel's next message comes after its redraw, which ends the
+            // body; a tool's own `WARNING:` line in it does not.
+            "\x1b[1A\x1b[KWARNING: Remote Cache: UNAVAILABLE",
         ];
         records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
         assert_eq!(
