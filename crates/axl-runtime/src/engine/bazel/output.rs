@@ -572,11 +572,17 @@ impl DisplayMode {
         }
     }
 
-    /// The user's own `--curses`, when `flags` give one, else `self`. Not
-    /// for `None`: a feature drawing the screen itself has it.
+    /// The user's own `--curses`, when `flags` give one, else `self`; plain
+    /// lines whatever it says when they turned progress off
+    /// (`--noshow_progress`), as the capture asks Bazel for it and its
+    /// curses UI would show what they turned off. Not for `None`: a feature
+    /// drawing the screen itself has it.
     pub(crate) fn unless_user_chose(self, flags: &[String]) -> DisplayMode {
         if self == DisplayMode::None {
             return self;
+        }
+        if user_choice(flags, "show_progress") == Some(false) {
+            return DisplayMode::Lines;
         }
         match user_choice(flags, "curses") {
             Some(true) => DisplayMode::Curses,
@@ -644,7 +650,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// `drop`, then `recap_errors`, then `collapse_similar`, then
     /// `collapse_repeats`. Intercept hooks so answer each line as Bazel
     /// wrote it; observers (and the tip rules on them) see every line as it
-    /// is shown, redacted, before anything is hidden; and a collapser folds
+    /// is shown, redacted, before `drop` or a collapser hides any (a line an
+    /// intercept hook drops is gone before they run); and a collapser folds
     /// what is left to show. Patterns use
     /// [regex](https://docs.rs/regex) syntax and match a line's text with
     /// escape sequences and a `--show_timestamps` prefix stripped.
@@ -1182,6 +1189,17 @@ BazelTrait = trait(
         );
         assert_eq!(
             DisplayMode::None.unless_user_chose(&flags("--curses=yes")),
+            DisplayMode::None
+        );
+        // No progress wanted: plain lines, as Bazel's curses UI would draw it.
+        let mut no_progress = flags("--curses=yes");
+        no_progress.extend(flags("--noshow_progress"));
+        assert_eq!(
+            DisplayMode::Auto.unless_user_chose(&no_progress),
+            DisplayMode::Lines
+        );
+        assert_eq!(
+            DisplayMode::None.unless_user_chose(&no_progress),
             DisplayMode::None
         );
     }

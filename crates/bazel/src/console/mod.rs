@@ -159,8 +159,8 @@ pub enum Phase {
     /// Edit lines in place.
     Rewrite,
     /// See every line as it is shown, redacted (after the rewrites), before
-    /// anything is hidden: a tip that quotes a line never shows what a
-    /// rewrite masked.
+    /// `drop` or a collapser hides any: a tip that quotes a line never shows
+    /// what a rewrite masked. A line an intercept answer drops is gone.
     Observe,
     /// Hide lines by pattern.
     Drop,
@@ -592,9 +592,9 @@ mod tests {
         )
     }
 
-    /// Listed out of order: observers still see every line as bazel wrote
-    /// it, repeats and secrets included, the interceptor still answers before
-    /// the collapser folds.
+    /// Listed out of order: the interceptor answers first, observers see
+    /// every line it keeps (repeats included), and the collapser folds
+    /// last.
     #[test]
     fn stages_run_in_phase_order_whatever_order_they_are_listed_in() {
         let config = Config::new(

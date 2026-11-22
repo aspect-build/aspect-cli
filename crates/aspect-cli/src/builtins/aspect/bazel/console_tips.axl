@@ -14,7 +14,9 @@ To add one, append a `tip_rule` to `CONSOLE_TIP_RULES`:
   `surfaces`  where it shows; None is the terminal only.
   `show`      `TIP_SHOW_FIRST` for advice that is the same whatever line
               fired it; the default prints a tip per matching line.
-  `example`   a real line it must match, as Bazel or the tool printed it.
+  `example`   a real line it must match, as Bazel or the tool printed it;
+              rules see it after the rewrites, so with workspace paths
+              shortened as the console shows them.
 
 `tip_rule` also takes `group_by`, `aggregate`, `max_shown`, `emit`, `only_if`
 and `combine_across_tasks`; see "Tip rules" in `private/lib/tips.axl`.

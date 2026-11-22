@@ -210,7 +210,7 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     stderr are both terminals, since Bazel decides colour and its live UI for
     both. Plain lines carry Bazel's status line every few seconds unless
     `trait.output_progress` is False, or `show_progress`, the user's own
-    `--show_progress`, is. Colour shows as `color`, the user's own
+    `--show_progress`, is, which shows plain lines in place of curses too. Colour shows as `color`, the user's own
     `--color`, says; else as the CLI's own lines do (`std.io.stderr.color`).
     Bazel itself is asked for curses, colour and progress either way: see
     `bazel.output.processor`."""
@@ -225,6 +225,11 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
         display = trait.output_display
     else:
         display = "curses" if stdout_is_tty and stderr_is_tty else "lines"
+
+    # Progress turned off: the capture still asks Bazel for it, so its curses
+    # UI would show it; plain lines leave it out.
+    if show_progress == False and display == "curses":
+        display = "lines"
     return bazel.output.processor(
         stages = stages,
         display = display,
