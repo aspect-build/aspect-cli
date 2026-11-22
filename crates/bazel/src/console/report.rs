@@ -242,23 +242,49 @@ pub const RECAP_BODY_LINES: usize = 5;
 static EXIT_TAIL: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^(.*? failed: \(Exit [^)]*\)): .+$").unwrap());
 
+/// A line that starts a message of bazel's own, which ends the body before
+/// it even where the classifier takes it for output (the first message after
+/// an action's, in plain lines, where no redraw is left to end the output).
+static SEVERITY: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^(?:ERROR|WARNING|INFO|DEBUG|FATAL): ").unwrap());
+
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
 /// draws do not count, so curses and plain lines count alike), enough to
 /// have scrolled it away. Its header says whether there were more than it
 /// repeats, never how many: in a pipe some are not recognized. Each comes
-/// with the first [`RECAP_BODY_LINES`] lines of its body (what says what
-/// went wrong, for a failed action), its header cut after the exit code.
+/// with its body (what says what went wrong, for a failed action), up to
+/// [`RECAP_BODY_LINES`] lines: the first ones, and the last (a Starlark
+/// traceback's error comes after its frames), the rest counted between; its
+/// header is cut after the exit code.
 pub struct RecapErrors {
     max: usize,
     after: usize,
     style: Style,
     given: Given,
-    errors: Vec<(String, Vec<String>)>,
+    errors: Vec<Recapped>,
     /// The error whose body the lines now coming are, while they are.
     body: Option<usize>,
     distinct: HashSet<String>,
     after_first: usize,
+}
+
+/// One error a recap repeats: its header, and what it keeps of its body.
+struct Recapped {
+    header: String,
+    head: Vec<String>,
+    last: Option<String>,
+    skipped: usize,
+}
+
+impl Recapped {
+    fn body_line(&mut self, text: String) {
+        if self.head.len() < RECAP_BODY_LINES - 1 {
+            self.head.push(text);
+        } else if self.last.replace(text).is_some() {
+            self.skipped += 1;
+        }
+    }
 }
 
 impl RecapErrors {
@@ -297,15 +323,21 @@ impl LineProcessor for RecapErrors {
                 .map_or(text, |c| c.get(1).unwrap().as_str());
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
-                self.errors.push((quoted, vec![]));
+                self.errors.push(Recapped {
+                    header: quoted,
+                    head: vec![],
+                    last: None,
+                    skipped: 0,
+                });
                 self.body = Some(self.errors.len() - 1);
             }
         } else if let Some(i) = body
             && matches!(line.kind, Kind::Other | Kind::Blank)
             && !line.drawn
+            && !SEVERITY.is_match(text)
         {
-            if line.kind == Kind::Other && self.errors[i].1.len() < RECAP_BODY_LINES {
-                self.errors[i].1.push(quote(text));
+            if line.kind == Kind::Other {
+                self.errors[i].body_line(quote(text));
             }
             self.body = Some(i);
             self.after_first += usize::from(line.kind == Kind::Other);
@@ -337,10 +369,17 @@ impl LineProcessor for RecapErrors {
             "INFO: Errors Bazel reported:".to_string()
         };
         self.style.line(&mut out, &header);
-        for (e, body) in &self.errors {
-            out.extend_from_slice(format!("  {e}\n").as_bytes());
-            for b in body {
+        for e in &self.errors {
+            out.extend_from_slice(format!("  {}\n", e.header).as_bytes());
+            for b in &e.head {
                 out.extend_from_slice(format!("    {b}\n").as_bytes());
+            }
+            if e.skipped > 0 {
+                let s = if e.skipped == 1 { "" } else { "s" };
+                out.extend_from_slice(format!("    … {} more line{s}\n", e.skipped).as_bytes());
+            }
+            if let Some(last) = &e.last {
+                out.extend_from_slice(format!("    {last}\n").as_bytes());
             }
         }
         Some(out)
@@ -525,7 +564,32 @@ mod tests {
             "INFO: Errors Bazel reported:\n  \
              ERROR: /ws/BUILD:1:1: Executing genrule //dep:bad failed: (Exit 3)\n    \
              boom\n    app/x.cc:3: error: what went wrong\n    more output\n    \
-             more output\n    more output\n"
+             more output\n    … 2 more lines\n    more output\n"
+        );
+    }
+
+    #[test]
+    fn a_recapped_body_ends_at_bazels_next_message_and_keeps_its_last_line() {
+        let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::default());
+        let mut records = vec![
+            "ERROR: Traceback (most recent call last):",
+            "\tFile \"/ws/a.bzl\", line 1",
+            "\tFile \"/ws/b.bzl\", line 2",
+            "\tFile \"/ws/c.bzl\", line 3",
+            "\tFile \"/ws/d.bzl\", line 4",
+            "\tFile \"/ws/e.bzl\", line 5",
+            "Error in fail: the real reason",
+            // In plain lines nothing erased is left to end the body.
+            "WARNING: Remote Cache: UNAVAILABLE",
+        ];
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        assert_eq!(
+            feed(&mut p, &records),
+            "INFO: Errors Bazel reported:\n  \
+             ERROR: Traceback (most recent call last):\n    \
+             \tFile \"/ws/a.bzl\", line 1\n    \tFile \"/ws/b.bzl\", line 2\n    \
+             \tFile \"/ws/c.bzl\", line 3\n    \tFile \"/ws/d.bzl\", line 4\n    \
+             … 1 more line\n    Error in fail: the real reason\n"
         );
     }
 

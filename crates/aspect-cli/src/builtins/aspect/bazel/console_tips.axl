@@ -42,7 +42,9 @@ CONSOLE_TIP_RULES = [
     ),
     tip_rule(
         id = "disk_full",
-        when = on_console_line(r"^(?:ERROR|FATAL): .*No space left on device"),
+        # Bazel's own error, or its crash's Java exception: not a tool's
+        # output that merely mentions a full disk.
+        when = on_console_line(r"^(?:(?:ERROR|FATAL): .*|.*java\.io\.IOException: )No space left on device"),
         severity = TIP_WARNING,
         title = "The disk is full",
         body = "`aspect gc` prunes idle output bases and Bazel's download cache.",

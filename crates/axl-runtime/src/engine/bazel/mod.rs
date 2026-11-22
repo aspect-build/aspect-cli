@@ -59,7 +59,7 @@ use wrappers::ExecLogSink;
 /// and `--color` in `flags` (the call's, or an active rc's; with no rc
 /// active, Bazel's own rc files are not read for them), when they gave one.
 /// An `output` the call gives is used as it is, its flags appended after
-/// `flags` too (unless the call already ends with them), as it was made for
+/// `flags` too (unless the call already carries them), as it was made for
 /// them.
 /// A processor with an `intercept` stage needs `BazelTrait.output_intercept`
 /// hooks to answer its lines.
@@ -78,7 +78,7 @@ fn console_for<'v>(
                 .into_iter()
                 .map(str::to_string)
                 .collect();
-            if !flags.ends_with(&extra) {
+            if !flags.windows(extra.len()).any(|w| w == extra.as_slice()) {
                 flags.extend(extra);
             }
             Some(config)
@@ -632,9 +632,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   stderr (a terminal, `2>&1`), forwarded to stdout as it is otherwise,
     ///   except that the colour the capture asked for is stripped from a
     ///   stdout that is not a terminal.
-    ///   Cannot be combined with `stderr`/`stdio`. Pass the processor's
-    ///   `flags` too. Read the results from the returned build's `output_*`
-    ///   attributes and methods.
+    ///   Cannot be combined with `stderr`/`stdio`. Its `flags` are appended
+    ///   after the call's. Read the results from the returned build's
+    ///   `output_*` attributes and methods.
     /// * `directory` - Working directory for the Bazel invocation; selects
     ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
@@ -835,9 +835,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   stderr (a terminal, `2>&1`), forwarded to stdout as it is otherwise,
     ///   except that the colour the capture asked for is stripped from a
     ///   stdout that is not a terminal.
-    ///   Cannot be combined with `stderr`/`stdio`. Pass the processor's
-    ///   `flags` too. Read the results from the returned build's `output_*`
-    ///   attributes and methods.
+    ///   Cannot be combined with `stderr`/`stdio`. Its `flags` are appended
+    ///   after the call's. Read the results from the returned build's
+    ///   `output_*` attributes and methods.
     /// * `directory` - Working directory for the Bazel invocation; selects
     ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
