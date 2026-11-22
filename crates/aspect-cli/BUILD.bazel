@@ -118,7 +118,10 @@ rust_test(
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
-    deps = ["@crates//:tempfile"],
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:tempfile",
+    ],
 )
 
 rust_test(
