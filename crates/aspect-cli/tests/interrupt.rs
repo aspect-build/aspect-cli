@@ -36,21 +36,38 @@ impl Run {
     /// Start `task` from `source` and wait for its `ready` line. The line may
     /// carry `pid=<n>`, the child the task spawned.
     fn start(source: &str, task: &str) -> Self {
-        Self::launch(source, task, Stdio::null())
+        Self::launch(source, task, Stdio::null(), false)
+    }
+
+    /// As [`Run::start`], with SIGHUP inherited ignored, as `nohup` starts a
+    /// program.
+    fn start_ignoring_hangup(source: &str, task: &str) -> Self {
+        Self::launch(source, task, Stdio::null(), true)
     }
 
     /// [`Run::start`] with stdin an open pipe nothing ever writes to.
     fn start_with_stdin(source: &str, task: &str) -> Self {
-        Self::launch(source, task, Stdio::piped())
+        Self::launch(source, task, Stdio::piped(), false)
     }
 
-    fn launch(source: &str, task: &str, stdin: Stdio) -> Self {
+    fn launch(source: &str, task: &str, stdin: Stdio, ignore_hangup: bool) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
         let aspect = dir.path().join(".aspect");
         std::fs::create_dir(&aspect).expect(".aspect");
         std::fs::write(aspect.join("fixture.axl"), source).expect("fixture");
-        let mut child = Command::new(aspect_cli())
+        let mut command = Command::new(aspect_cli());
+        if ignore_hangup {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: signal is async-signal-safe.
+            unsafe {
+                command.pre_exec(|| {
+                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = command
             .arg(task)
             .current_dir(dir.path())
             .env(
@@ -367,6 +384,49 @@ shell = task(summary = "Test fixture.", implementation = _impl)
     assert!(
         wait_gone(sleep_pid, Duration::from_secs(5)),
         "`sleep 600` survived"
+    );
+}
+
+/// A task waiting on a `sleep 600` in a process group of its own, which a
+/// hangup of the terminal never reaches by itself.
+const SLEEPER: &str = r#"
+def _impl(ctx):
+    child = ctx.std.process.command("sleep").args(["600"]).process_group(0).spawn()
+    print("ready pid=%d" % child.id)
+    child.wait()
+    return 0
+
+sleeper = task(summary = "Test fixture.", implementation = _impl)
+"#;
+
+/// The terminal closed (SIGHUP): the run ends as on SIGTERM, its child in a
+/// group of its own stopped rather than left running.
+#[test]
+fn a_hangup_stops_the_run_and_its_children() {
+    let run = Run::start(SLEEPER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    assert!(alive(sleep_pid));
+    run.signal(libc::SIGHUP);
+    let (_, stderr) = run.finish();
+    assert!(
+        wait_gone(sleep_pid, Duration::from_secs(5)),
+        "`sleep 600` survived the hangup:\n{stderr}"
+    );
+}
+
+/// Under `nohup` (SIGHUP inherited ignored) a hangup changes nothing.
+#[test]
+fn a_hangup_under_nohup_is_ignored() {
+    let run = Run::start_ignoring_hangup(SLEEPER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    run.signal(libc::SIGHUP);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(alive(sleep_pid), "the hangup stopped a run under nohup");
+    run.signal(libc::SIGTERM);
+    let (_, stderr) = run.finish();
+    assert!(
+        wait_gone(sleep_pid, Duration::from_secs(5)),
+        "`sleep 600` survived SIGTERM:\n{stderr}"
     );
 }
 

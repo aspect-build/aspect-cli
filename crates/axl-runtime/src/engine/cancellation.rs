@@ -44,8 +44,9 @@ use crate::eval::TaskExit;
 pub enum Kind {
     /// SIGINT, Ctrl+C or Ctrl+Break: someone at the console.
     Interrupt,
-    /// SIGTERM, or a console close, logoff or shutdown: an orchestrator that
-    /// expects a bounded wind-down.
+    /// SIGTERM, a hangup (SIGHUP), or a console close, logoff or shutdown:
+    /// an orchestrator, or a terminal gone, that expects a bounded
+    /// wind-down.
     Terminate,
 }
 

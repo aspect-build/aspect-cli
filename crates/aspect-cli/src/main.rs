@@ -848,7 +848,9 @@ async fn another_signal(first: SignalKind) -> SignalKind {
 }
 
 /// The next OS request to stop, as the kind the runtime understands, and
-/// where it came from. `None` only if no handler could be installed at all.
+/// where it came from: SIGINT, SIGTERM, or SIGHUP (the terminal closed),
+/// which is a Terminate, as a console close is on Windows, unless it was
+/// inherited ignored. `None` only if no handler could be installed at all.
 ///
 /// The origin matters because a terminal delivers Ctrl+C to the whole
 /// foreground process group, children included, while `kill(2)` from a CI
@@ -873,8 +875,8 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
         // which is zero for a kernel-generated signal; the BSDs expose it as
         // a field.
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        // SAFETY: `si_pid` is valid to read for SIGINT and SIGTERM, whose
-        // siginfo carries the kill layout (or is zeroed by the kernel).
+        // SAFETY: `si_pid` is valid to read for SIGINT, SIGTERM and SIGHUP,
+        // whose siginfo carries the kill layout (or is zeroed by the kernel).
         unsafe {
             info.si_pid()
         }
@@ -882,10 +884,28 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
         info.si_pid
     }
 
+    /// Whether `signo` was inherited ignored (`nohup` ignores SIGHUP), which a
+    /// handler would undo.
+    fn ignored(signo: libc::c_int) -> bool {
+        // SAFETY: a null new action only reads the current one into `old`.
+        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(signo, std::ptr::null(), &mut old) == 0
+                && old.sa_sigaction == libc::SIG_IGN
+        }
+    }
+
     // Installed once and kept for the life of the process (see above).
-    static STREAMS: OnceLock<Mutex<(Option<Signal>, Option<Signal>)>> = OnceLock::new();
+    static STREAMS: OnceLock<Mutex<(Option<Signal>, Option<Signal>, Option<Signal>)>> =
+        OnceLock::new();
     let streams = STREAMS.get_or_init(|| {
-        for signo in [libc::SIGINT, libc::SIGTERM] {
+        // A hangup (the terminal closed) ends the run as SIGTERM does, so its
+        // children are stopped rather than left running; not under `nohup`.
+        let hangup_wanted = !ignored(libc::SIGHUP);
+        for signo in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            if signo == libc::SIGHUP && !hangup_wanted {
+                continue;
+            }
             // SAFETY: the action only stores an integer into an atomic, which
             // is async-signal-safe.
             let registered = unsafe {
@@ -904,24 +924,32 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
         let terminate = signal(Unix::terminate())
             .map_err(|e| tracing::warn!("failed to install the SIGTERM handler: {e}"))
             .ok();
-        Mutex::new((interrupt, terminate))
+        let hangup = hangup_wanted
+            .then(|| {
+                signal(Unix::hangup())
+                    .map_err(|e| tracing::warn!("failed to install the SIGHUP handler: {e}"))
+                    .ok()
+            })
+            .flatten();
+        Mutex::new((interrupt, terminate, hangup))
     });
     let mut guard = streams.lock().await;
-    let (interrupt, terminate) = &mut *guard;
-    let kind = match (interrupt.as_mut(), terminate.as_mut()) {
-        (Some(int), Some(term)) => tokio::select! {
-            _ = int.recv() => SignalKind::Interrupt,
-            _ = term.recv() => SignalKind::Terminate,
-        },
-        (Some(int), None) => {
-            int.recv().await;
-            SignalKind::Interrupt
+    let (interrupt, terminate, hangup) = &mut *guard;
+    if interrupt.is_none() && terminate.is_none() && hangup.is_none() {
+        return None;
+    }
+    async fn recv(stream: &mut Option<Signal>) {
+        match stream {
+            Some(s) => {
+                s.recv().await;
+            }
+            None => std::future::pending().await,
         }
-        (None, Some(term)) => {
-            term.recv().await;
-            SignalKind::Terminate
-        }
-        (None, None) => return None,
+    }
+    let kind = tokio::select! {
+        _ = recv(interrupt) => SignalKind::Interrupt,
+        _ = recv(terminate) => SignalKind::Terminate,
+        _ = recv(hangup) => SignalKind::Terminate,
     };
     let origin = if LAST_SENDER.load(Ordering::SeqCst) != 0 {
         SignalOrigin::Process
