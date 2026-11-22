@@ -6,10 +6,10 @@
 //! know. What it owns is backend selection, whole-map read/write, and the
 //! tolerance rules below.
 //!
-//! - **keyring** — the OS secret service (macOS Keychain, the Linux kernel's
+//! - **keyring** - the OS secret service (macOS Keychain, the Linux kernel's
 //!   session keyring, Windows Credential Manager), holding the whole map as one
 //!   entry. The default on developer machines.
-//! - **file** — a `0600` JSON file. The fallback where no secret service is
+//! - **file** - a `0600` JSON file. The fallback where no secret service is
 //!   available (a CI container with no session keyring, a macOS daemon or
 //!   fresh `HOME` with no default keychain), or when forced via
 //!   `$ASPECT_CREDENTIALS_FILE`.
