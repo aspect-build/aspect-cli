@@ -295,6 +295,7 @@ rust_test(
         "BASIL_BIN": "$(rootpath //crates/basil)",
     },
     deps = [
+        "//crates/axl-runtime",
         "@crates//:libc",
         "@crates//:tempfile",
     ],
