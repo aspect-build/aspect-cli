@@ -119,8 +119,8 @@ impl State {
 /// A line as written (`raw`, its newline gone) made drawable in one row:
 /// escape sequences stripped, then every control character but a tab
 /// dropped (C0, DEL and C1, a backspace removed rather than applied), as a
-/// screen drawing it would be thrown out by them. A redraw's carriage return was resolved as it was written
-/// ([`Feed::write`]).
+/// screen drawing it would be thrown out by them. A redraw's carriage return
+/// was resolved as it was written ([`Feed::write`]).
 pub fn plain_line(raw: &[u8]) -> String {
     String::from_utf8_lossy(&ansi::strip(raw))
         .chars()
