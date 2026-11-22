@@ -9,10 +9,11 @@
 //! 1. A non-empty `NO_COLOR` (<https://no-color.org>) turns color off.
 //! 2. A non-empty `CLICOLOR_FORCE` (<https://bixense.com/clicolors>) turns it on.
 //! 3. `CLICOLOR=0` turns it off.
-//! 4. A terminal gets color when `TERM` is set and not `dumb`, or when
-//!    `CLICOLOR` or `CI` is set. Stderr also gets it on a CI host whose log
-//!    viewer renders ANSI ([`crate::ci::renders_ansi`]). Anything else, such as
-//!    a log file, a `| grep` or an AI agent capturing output, stays plain.
+//! 4. A terminal gets color when `TERM` is not `dumb` (and, off Windows, is
+//!    set), or when `CLICOLOR` or `CI` is set. Stderr also gets it on a CI
+//!    host whose log viewer renders ANSI ([`crate::ci::renders_ansi`]).
+//!    Anything else, such as a log file, a `| grep` or an AI agent capturing
+//!    output, stays plain.
 //!
 //! The process's answer is resolved once, on first use, so every surface agrees
 //! for the whole run even if a task later edits its environment. AXL reads it
@@ -99,7 +100,7 @@ fn color_from(tty: bool, renders_ansi: bool, var: &impl Fn(&str) -> Option<OsStr
     if clicolor.as_deref().is_some_and(|v| v == "0") {
         return false;
     }
-    let term_colors = var("TERM").is_some_and(|t| t != "dumb");
+    let term_colors = var("TERM").map_or(cfg!(windows), |t| t != "dumb");
     let tty_colors = tty && (term_colors || clicolor.is_some() || var("CI").is_some());
     tty_colors || renders_ansi
 }
@@ -136,7 +137,7 @@ mod tests {
 
     #[test]
     fn a_terminal_needs_a_color_term_clicolor_or_ci() {
-        assert!(!stdout_color_from(true, env(&[])), "no TERM");
+        assert_eq!(stdout_color_from(true, env(&[])), cfg!(windows), "no TERM");
         assert!(!stdout_color_from(true, env(&[("TERM", "dumb")])));
         assert!(!console_color_from(true, env(&[("TERM", "dumb")])));
         assert!(stdout_color_from(

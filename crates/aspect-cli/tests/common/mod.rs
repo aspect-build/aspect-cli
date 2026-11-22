@@ -28,9 +28,9 @@ pub fn aspect_cli() -> String {
 /// detection) - the same filtering `tools/cache-diff-integration.py` does for
 /// the same reason - a coding agent's variables switch the console to its
 /// `agent` layout, `CLICOLOR_FORCE` would color piped output, and `OTEL_*`
-/// would register exporters that print to stderr or ship to a collector. `HOME` and `PATH` stay: the CLI resolves its
-/// builtins cache under `HOME`. The task history goes to a temp folder of the
-/// test process's own.
+/// would register exporters that print to stderr or ship to a collector.
+/// `HOME` and `PATH` stay: the CLI resolves its builtins cache under `HOME`.
+/// The task history goes to a temp folder of the test process's own.
 #[allow(dead_code)]
 pub fn base_env() -> std::collections::HashMap<String, String> {
     const DROP_NAMES: &[&str] = &["BUILDKITE", "CI", "CLICOLOR_FORCE"];

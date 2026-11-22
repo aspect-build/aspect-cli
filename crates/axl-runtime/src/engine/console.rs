@@ -667,7 +667,7 @@ check = task(implementation = _impl)
             path = path.to_str().unwrap()
         );
         let got = crate::test::eval(&code)
-            .with_host_env(true, true, &[])
+            .with_host_env(true, true, &[("TERM", "xterm-256color")])
             .run_task(0)
             .unwrap();
         assert_eq!(got, Some(0));

@@ -18,6 +18,8 @@ What's GL-specific and tested below:
   * `truncate_description(text)` — GitLab's 255-char cap on the
     `description` field. Must collapse newlines, ellipsize, and pass
     short input through unchanged.
+  * `status_description(output)` - the rendered `title`, else
+    `summary`, never `details`, is what a commit status posts.
   * `MARKER_FMT` — the rolling note's marker format. `mr-<iid>` not
     `pr-<n>` (the GH marker shape) so notes from the two features
     can't conflict on a repo mirrored to both.
@@ -34,7 +36,7 @@ Run with:
 
 load("@aspect//bazel/trait.axl", "exit_codes")
 load("@aspect//feature/github_status_comments.axl", "parse_state")
-load("@aspect//feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
+load("@aspect//feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "status_description", "truncate_description")
 load("@aspect//feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
 load("./bazel_results.axl", "init_data", "pick_status", "process_event")
 
@@ -357,6 +359,14 @@ def _test_impl(ctx):
     # status string we haven't mapped yet.
     _eq("state_for / unknown status final", state_for("brand-new", True), None)
     _eq("state_for / unknown status live", state_for("brand-new", False), None)
+
+    # ── status_description ─────────────────────────────────────────
+
+    _eq("description / title", status_description({"title": "T", "summary": "S", "details": "D"}), "T")
+    _eq("description / summary when title empty", status_description({"title": "", "summary": "S", "details": "D"}), "S")
+    _eq("description / never details", status_description({"details": "D"}), "")
+    _eq("description / no output", status_description(None), "")
+    _eq("description / truncated", len(status_description({"title": "x" * (DESCRIPTION_MAX + 1)})), DESCRIPTION_MAX)
 
     # ── truncate_description ───────────────────────────────────────
 

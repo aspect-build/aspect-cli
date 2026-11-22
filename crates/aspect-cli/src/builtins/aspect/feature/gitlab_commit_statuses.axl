@@ -141,6 +141,13 @@ def _truncate_description(text):
         return s
     return s[:_DESCRIPTION_MAX - 1] + "…"
 
+def _status_description(output):
+    """The commit status's `description` from a renderer's output: the
+    rendered `title`, or `summary` when the title is empty, truncated.
+    `details` is never used."""
+    output = output or {}
+    return _truncate_description(output.get("title", "") or output.get("summary", ""))
+
 def _collect_ci_links(ctx, results_base_url):
     host = detect_ci_host(ctx.std.env)
     return {
@@ -262,9 +269,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         `remove` is unreachable here — `resolve_surface_update` downgrades it for
         surfaces that can't retract.
         """
-        description = _truncate_description(
-            (output or {}).get("title", "") or (output or {}).get("summary", ""),
-        )
+        description = _status_description(output)
         decision = resolve_surface_update(
             ctx,
             lifecycle,
@@ -475,6 +480,10 @@ def state_for(status, final):
 def truncate_description(text):
     """Public test hook; see `_truncate_description`."""
     return _truncate_description(text)
+
+def status_description(output):
+    """Public test hook; see `_status_description`."""
+    return _status_description(output)
 
 DESCRIPTION_MAX = _DESCRIPTION_MAX
 
