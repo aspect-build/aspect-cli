@@ -89,7 +89,7 @@ def bazel_misdetects_color(std) -> bool:
     CI host whose log viewer renders ANSI but which runs the job with no TTY for
     Bazel to see - GitHub Actions, CircleCI, GitLab. Buildkite renders ANSI too
     but gives the job a PTY, so Bazel gets it right unaided and is left out.
-    Never when `std.io.stderr.color` is off (a non-empty `NO_COLOR`): Bazel's
+    Never when `std.io.stderr.color` is off (`NO_COLOR`, `CLICOLOR=0`): Bazel's
     own choice stands then, unforced."""
     if not std.io.stderr.color:
         return False

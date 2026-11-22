@@ -77,17 +77,18 @@ slot ("title", "summary", "details") to template for every task;
 
     def config(ctx: ConfigContext):
         ctx.features[GitlabCommitStatuses].args.templates = {
-            "summary": my_shared_summary_template,
+            "title": my_shared_title_template,
         }
         ctx.features[GitlabCommitStatuses].args.task_presets = {"format": "full"}
         ctx.features[GitlabCommitStatuses].args.task_templates = {
-            "lint": {"details": my_lint_details_template},
+            "lint": {"title": my_lint_title_template},
         }
         ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
 
-Only the rendered `title` is posted, truncated to GitLab's 255-char
-`description` cap; the rolling MR note is `GitlabStatusComments`' own,
-rendered from that feature's `templates`.
+Only the rendered `title` is posted (or `summary` when the title renders
+empty), as the status's `description`, truncated to GitLab's 255-char cap.
+`details` never reaches a commit status; the rolling MR note is
+`GitlabStatusComments`' own, rendered from that feature's `templates`.
 """
 
 load(
@@ -500,8 +501,9 @@ GitlabCommitStatuses = feature(
             dict,
             default = {},
             description = template_presets.templates_description("the rendered status output") +
-                          " Only the rendered `title` lands on the commit status, as its " +
-                          "`description`, truncated to 255 chars; the MR note's body is " +
+                          " Only the rendered `title` (or `summary` when the title is empty) " +
+                          "lands on the commit status, as its `description`, truncated to " +
+                          "255 chars; `details` is never posted, and the MR note's body is " +
                           "GitlabStatusComments' own `templates`.",
         ),
         "metadata_keys": args.string_list(

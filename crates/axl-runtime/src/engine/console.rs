@@ -585,7 +585,11 @@ check = task(implementation = _impl)
                 .run_task(0)
                 .unwrap()
         };
-        assert_eq!(color(true, true, &[]), Some(3), "terminals");
+        assert_eq!(
+            color(true, true, &[("TERM", "xterm-256color")]),
+            Some(3),
+            "terminals"
+        );
         assert_eq!(
             color(false, false, &[("GITHUB_ACTIONS", "true")]),
             Some(2),
