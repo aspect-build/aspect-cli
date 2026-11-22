@@ -40,6 +40,7 @@ fn the_feature_list_and_a_feature_page_agree_on_color() {
         (&[("CLICOLOR", "1"), ("CI", "true")][..], false),
         (&[("CLICOLOR_FORCE", "1")][..], true),
         (&[("CLICOLOR_FORCE", "1"), ("CLICOLOR", "0")][..], true),
+        (&[("CLICOLOR_FORCE", "1"), ("TERM", "dumb")][..], true),
         (&[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")][..], false),
     ] {
         assert_eq!(colored(&["feature"], vars), want, "list under {vars:?}");
