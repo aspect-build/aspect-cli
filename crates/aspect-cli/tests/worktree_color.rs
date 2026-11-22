@@ -17,6 +17,9 @@ use std::process::{Command, Output};
 /// The dimmed column header of the `taken` table.
 const DIM_HEADER: &[u8] = b"\x1b[2m  slot";
 
+/// The bold cyan prefix of the `worktree ready:` line.
+const INFO_PREFIX: &[u8] = b"\x1b[1;36mINFO\x1b[0m: ";
+
 /// `cmd` run in `dir/repo` under the test's own git environment.
 fn isolated(mut cmd: Command, dir: &Path) -> Command {
     for (k, _) in std::env::vars_os() {
@@ -65,6 +68,10 @@ fn has_escape(bytes: &[u8]) -> bool {
     bytes.contains(&0x1b)
 }
 
+fn contains(bytes: &[u8], needle: &[u8]) -> bool {
+    bytes.windows(needle.len()).any(|w| w == needle)
+}
+
 #[test]
 fn reports_follow_the_color_rule_on_a_pipe_and_stdout_stays_plain() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -85,6 +92,11 @@ fn reports_follow_the_color_rule_on_a_pipe_and_stdout_stays_plain() {
         "--output=path styled: {:?}",
         String::from_utf8_lossy(&added.stdout)
     );
+    assert!(
+        contains(&added.stderr, INFO_PREFIX),
+        "`INFO:` prefix unstyled: {:?}",
+        String::from_utf8_lossy(&added.stderr)
+    );
 
     for (vars, want) in [
         (&[][..], false),
@@ -95,9 +107,8 @@ fn reports_follow_the_color_rule_on_a_pipe_and_stdout_stays_plain() {
         (&[FORCE, ("NO_COLOR", "1")][..], false),
     ] {
         let stderr = aspect(dir.path(), &["worktree", "list"], vars).stderr;
-        let styled = stderr.windows(DIM_HEADER.len()).any(|w| w == DIM_HEADER);
         assert_eq!(
-            styled,
+            contains(&stderr, DIM_HEADER),
             want,
             "under {vars:?}: {}",
             String::from_utf8_lossy(&stderr)
