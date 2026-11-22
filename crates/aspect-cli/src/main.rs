@@ -839,9 +839,9 @@ fn install_signal_watcher() {
 }
 
 /// A repeat of the request: recorded, and the backstop's cue. A hangup is
-/// never one: a single terminal close can deliver it twice (zsh sends it,
-/// then the kernel does as the shell exits), which is not a user asking
-/// again.
+/// never one: a single terminal close can deliver it twice (zsh sends two;
+/// bash on Linux one, then the kernel another as bash exits), which is not
+/// a user asking again.
 async fn another_signal(first: SignalKind) -> SignalKind {
     loop {
         let Some((kind, origin, hangup)) = next_signal().await else {

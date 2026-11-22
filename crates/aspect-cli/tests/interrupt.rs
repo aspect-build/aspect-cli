@@ -428,8 +428,8 @@ fn a_hangup_stops_the_run_and_its_children() {
     );
 }
 
-/// One terminal close can deliver SIGHUP twice (the shell, then the kernel
-/// as the shell exits): the second is no repeat, so the run still winds down
+/// One terminal close can deliver SIGHUP twice (zsh sends two; bash on
+/// Linux one, then the kernel another): the second is no repeat, so the run still winds down
 /// with its defers rather than being killed at once.
 #[test]
 fn a_second_hangup_is_no_repeat() {
