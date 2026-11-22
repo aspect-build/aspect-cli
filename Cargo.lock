@@ -389,6 +389,7 @@ dependencies = [
  "rmcp",
  "rustls",
  "rustls-native-certs",
+ "security-framework 3.3.0",
  "semver",
  "serde",
  "serde_json",
