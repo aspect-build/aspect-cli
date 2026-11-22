@@ -391,6 +391,7 @@ shell = task(summary = "Test fixture.", implementation = _impl)
 /// hangup of the terminal never reaches by itself.
 const SLEEPER: &str = r#"
 def _impl(ctx):
+    ctx.defer(print, "deferred cleanup ran")
     child = ctx.std.process.command("sleep").args(["600"]).process_group(0).spawn()
     print("ready pid=%d" % child.id)
     child.wait()
@@ -398,6 +399,19 @@ def _impl(ctx):
 
 sleeper = task(summary = "Test fixture.", implementation = _impl)
 "#;
+
+/// Checks `sleep_pid` went before draining the run's stderr, which the
+/// `sleep` inherited: one left running would hold the drain open; it is
+/// killed so the failure is reported.
+fn assert_stopped(run: Run, sleep_pid: i32, why: &str) -> String {
+    let gone = wait_gone(sleep_pid, Duration::from_secs(10));
+    if !gone {
+        unsafe { libc::kill(sleep_pid, libc::SIGKILL) };
+    }
+    let (_, stderr) = run.finish();
+    assert!(gone, "`sleep 600` survived {why}:\n{stderr}");
+    stderr
+}
 
 /// The terminal closed (SIGHUP): the run ends as on SIGTERM, its child in a
 /// group of its own stopped rather than left running.
@@ -407,10 +421,45 @@ fn a_hangup_stops_the_run_and_its_children() {
     let sleep_pid = run.announced_pid();
     assert!(alive(sleep_pid));
     run.signal(libc::SIGHUP);
-    let (_, stderr) = run.finish();
+    let stderr = assert_stopped(run, sleep_pid, "the hangup");
     assert!(
-        wait_gone(sleep_pid, Duration::from_secs(5)),
-        "`sleep 600` survived the hangup:\n{stderr}"
+        stderr.contains("deferred cleanup ran"),
+        "the defer did not run:\n{stderr}"
+    );
+}
+
+/// One terminal close can deliver SIGHUP twice (the shell, then the kernel
+/// as the shell exits): the second is no repeat, so the run still winds down
+/// with its defers rather than being killed at once.
+#[test]
+fn a_second_hangup_is_no_repeat() {
+    // A defer still at work when the second hangup comes.
+    const SLOW_DEFER: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _cleanup():
+    sleep(1500)
+    print("deferred cleanup ran")
+
+def _impl(ctx):
+    ctx.defer(_cleanup)
+    child = ctx.std.process.command("sleep").args(["600"]).process_group(0).spawn()
+    print("ready pid=%d" % child.id)
+    child.wait()
+    return 0
+
+sleeper = task(summary = "Test fixture.", implementation = _impl)
+"#;
+    let run = Run::start(SLOW_DEFER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    run.signal(libc::SIGHUP);
+    // Apart, or the two merge into one pending signal.
+    std::thread::sleep(Duration::from_millis(500));
+    run.signal(libc::SIGHUP);
+    let stderr = assert_stopped(run, sleep_pid, "two hangups");
+    assert!(
+        stderr.contains("deferred cleanup ran"),
+        "the defer did not run:\n{stderr}"
     );
 }
 
@@ -423,11 +472,7 @@ fn a_hangup_under_nohup_is_ignored() {
     std::thread::sleep(Duration::from_millis(1500));
     assert!(alive(sleep_pid), "the hangup stopped a run under nohup");
     run.signal(libc::SIGTERM);
-    let (_, stderr) = run.finish();
-    assert!(
-        wait_gone(sleep_pid, Duration::from_secs(5)),
-        "`sleep 600` survived SIGTERM:\n{stderr}"
-    );
+    assert_stopped(run, sleep_pid, "SIGTERM");
 }
 
 /// A prompt nobody will answer: a task blocked reading stdin still ends on the

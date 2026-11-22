@@ -804,7 +804,7 @@ fn exit_drain() -> Duration {
 /// listener, and aspect-cli unkillable except by SIGKILL.
 fn install_signal_watcher() {
     tokio::spawn(async {
-        let Some((first, origin)) = next_signal().await else {
+        let Some((first, origin, _)) = next_signal().await else {
             return;
         };
         let signals = Signals::global();
@@ -838,30 +838,41 @@ fn install_signal_watcher() {
     });
 }
 
-/// A repeat of the request: recorded, and the backstop's cue.
+/// A repeat of the request: recorded, and the backstop's cue. A hangup is
+/// never one: a single terminal close can deliver it twice (zsh sends it,
+/// then the kernel does as the shell exits), which is not a user asking
+/// again.
 async fn another_signal(first: SignalKind) -> SignalKind {
-    let (kind, origin) = next_signal()
-        .await
-        .unwrap_or((first, SignalOrigin::Process));
-    Signals::global().record(kind, origin);
-    kind
+    loop {
+        let Some((kind, origin, hangup)) = next_signal().await else {
+            return first;
+        };
+        if hangup {
+            continue;
+        }
+        Signals::global().record(kind, origin);
+        return kind;
+    }
 }
 
-/// The next OS request to stop, as the kind the runtime understands, and
-/// where it came from: SIGINT, SIGTERM, or SIGHUP (the terminal closed),
-/// which is a Terminate, as a console close is on Windows, unless it was
-/// inherited ignored. `None` only if no handler could be installed at all.
+/// The next OS request to stop, as the kind the runtime understands, where it
+/// came from, and whether it was a hangup: SIGINT, SIGTERM, or SIGHUP (the
+/// terminal closed), which is a Terminate, as a console close is on Windows,
+/// unless it was inherited ignored. `None` only if no handler could be
+/// installed at all.
 ///
 /// The origin matters because a terminal delivers Ctrl+C to the whole
 /// foreground process group, children included, while `kill(2)` from a CI
 /// runner reaches this process alone. tokio's streams do not expose the
 /// `siginfo`, so a sigaction hook registered beside them (signal-hook chains
 /// the handlers) records each signal's `si_pid`: a sending process fills it
-/// in, the kernel leaves it zero, which for these two signals means the
+/// in, the kernel leaves it zero, which for SIGINT and SIGTERM means the
 /// terminal. (`si_code` would be the textbook field, but macOS reports 0 for
-/// `kill(2)` too, so it cannot tell the two apart.)
+/// `kill(2)` too, so it cannot tell the two apart.) A hangup is always from a
+/// `Process`: the kernel sends it to the session leader alone, not our
+/// group, so nothing can be assumed to have reached the children.
 #[cfg(unix)]
-async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
+async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicI32, Ordering};
     use tokio::signal::unix::{Signal, SignalKind as Unix, signal};
@@ -875,7 +886,7 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
         // which is zero for a kernel-generated signal; the BSDs expose it as
         // a field.
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        // SAFETY: `si_pid` is valid to read for SIGINT, SIGTERM and SIGHUP,
+        // SAFETY: `si_pid` is valid to read for SIGINT and SIGTERM,
         // whose siginfo carries the kill layout (or is zeroed by the kernel).
         unsafe {
             info.si_pid()
@@ -902,10 +913,7 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
         // A hangup (the terminal closed) ends the run as SIGTERM does, so its
         // children are stopped rather than left running; not under `nohup`.
         let hangup_wanted = !ignored(libc::SIGHUP);
-        for signo in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            if signo == libc::SIGHUP && !hangup_wanted {
-                continue;
-            }
+        for signo in [libc::SIGINT, libc::SIGTERM] {
             // SAFETY: the action only stores an integer into an atomic, which
             // is async-signal-safe.
             let registered = unsafe {
@@ -946,23 +954,23 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
             None => std::future::pending().await,
         }
     }
-    let kind = tokio::select! {
-        _ = recv(interrupt) => SignalKind::Interrupt,
-        _ = recv(terminate) => SignalKind::Terminate,
-        _ = recv(hangup) => SignalKind::Terminate,
+    let (kind, hangup) = tokio::select! {
+        _ = recv(interrupt) => (SignalKind::Interrupt, false),
+        _ = recv(terminate) => (SignalKind::Terminate, false),
+        _ = recv(hangup) => (SignalKind::Terminate, true),
     };
-    let origin = if LAST_SENDER.load(Ordering::SeqCst) != 0 {
+    let origin = if hangup || LAST_SENDER.load(Ordering::SeqCst) != 0 {
         SignalOrigin::Process
     } else {
         SignalOrigin::Terminal
     };
-    Some((kind, origin))
+    Some((kind, origin, hangup))
 }
 
 /// Console events never reach a child spawned with `CREATE_NEW_PROCESS_GROUP`,
 /// so on Windows the runtime is always the only one signalling children.
 #[cfg(windows)]
-async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
+async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
     use std::sync::OnceLock;
     use tokio::signal::windows::{
         CtrlBreak, CtrlC, CtrlClose, CtrlLogoff, CtrlShutdown, ctrl_break, ctrl_c, ctrl_close,
@@ -999,15 +1007,15 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
         _ = async { match logoff.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Terminate,
         _ = async { match shutdown.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } } => SignalKind::Terminate,
     };
-    Some((kind, SignalOrigin::Process))
+    Some((kind, SignalOrigin::Process, false))
 }
 
 #[cfg(not(any(unix, windows)))]
-async fn next_signal() -> Option<(SignalKind, SignalOrigin)> {
+async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
     tokio::signal::ctrl_c()
         .await
         .ok()
-        .map(|_| (SignalKind::Interrupt, SignalOrigin::Process))
+        .map(|_| (SignalKind::Interrupt, SignalOrigin::Process, false))
 }
 
 #[cfg(test)]
