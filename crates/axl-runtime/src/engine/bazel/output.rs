@@ -593,8 +593,9 @@ impl DisplayMode {
 }
 
 /// The user's own choice of a tri-state flag such as `--curses` or `--color`
-/// in `flags`, the last one given: `yes`/`true`/`1` or the bare flag, `no`/
-/// `false`/`0` or `--no<name>`; None when unset or `auto`.
+/// in `flags`, the last one given: the bare flag, `--no<name>`, or a value
+/// as Bazel's converter reads it ([`bazel::rc::parse_bool`]); None when
+/// unset or `auto`.
 pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
     let mut choice = None;
     for f in flags {
@@ -606,11 +607,7 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
         } else if rest.strip_prefix("no") == Some(name) {
             choice = Some(false);
         } else if let Some(v) = rest.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
-            choice = match v.to_ascii_lowercase().as_str() {
-                "yes" | "true" | "1" => Some(true),
-                "no" | "false" | "0" => Some(false),
-                _ => None,
-            };
+            choice = bazel::rc::parse_bool(v);
         }
     }
     choice
@@ -1172,7 +1169,7 @@ BazelTrait = trait(
 
     /// The user's `--curses` picks what is shown, but not over `none`.
     #[test]
-    fn the_users_curses_wins_over_all_but_none() {
+    fn the_users_curses_wins_over_all_but_none_and_noshow_progress_over_it() {
         let flags = |f: &str| vec![f.to_string()];
         use crate::engine::bazel::output::DisplayMode;
         assert_eq!(
@@ -1190,6 +1187,15 @@ BazelTrait = trait(
         assert_eq!(
             DisplayMode::None.unless_user_chose(&flags("--curses=yes")),
             DisplayMode::None
+        );
+        // Bazel's own spellings of a boolean.
+        assert_eq!(
+            super::user_choice(&flags("--show_progress=f"), "show_progress"),
+            Some(false)
+        );
+        assert_eq!(
+            super::user_choice(&flags("--curses=Y"), "curses"),
+            Some(true)
         );
         // No progress wanted: plain lines, as Bazel's curses UI would draw it.
         let mut no_progress = flags("--curses=yes");

@@ -6,9 +6,10 @@
 //! ([`plain_line`]: escape sequences stripped once the line has ended, so
 //! one split across writes is still whole; a carriage return's redraw
 //! resolved as a terminal would, keeping its newest state; other control
-//! characters dropped), up to [`MAX_LINES`] between drains; older ones are
-//! counted in [`Drained::dropped`] instead. The progress area is replaced on every
-//! redraw, so only the latest is kept.
+//! characters, a backspace among them, removed), up to [`MAX_LINES`]
+//! between drains; older ones are counted in [`Drained::dropped`] instead.
+//! The progress area is replaced on every redraw, so only the latest is
+//! kept.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -115,10 +116,10 @@ impl State {
     }
 }
 
-/// A line as written (`raw`, its newline gone) as a terminal would leave it
-/// on one row: escape sequences stripped, then every control character but a
-/// tab dropped (C0, DEL and C1), as a screen drawing it would be thrown out
-/// by them. A redraw's carriage return was resolved as it was written
+/// A line as written (`raw`, its newline gone) made drawable in one row:
+/// escape sequences stripped, then every control character but a tab
+/// dropped (C0, DEL and C1, a backspace removed rather than applied), as a
+/// screen drawing it would be thrown out by them. A redraw's carriage return was resolved as it was written
 /// ([`Feed::write`]).
 pub fn plain_line(raw: &[u8]) -> String {
     String::from_utf8_lossy(&ansi::strip(raw))

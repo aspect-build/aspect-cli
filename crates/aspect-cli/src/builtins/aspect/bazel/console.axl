@@ -27,7 +27,8 @@ or the user's `--curses=no`), the console is rendered to plain lines and the
 stages run on those; Bazel's status line comes through every few seconds.
 The `agent` profile, for a coding agent reading the console, shows plain
 lines whatever the terminal, and no status line. A user's `--curses=yes`
-still shows curses.
+still shows curses, unless their `--noshow_progress` turned progress off:
+then plain lines, without the status line, whatever the profile.
 
 ## Tips
 

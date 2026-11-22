@@ -2040,7 +2040,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// What the console showed since the last call, for a build whose
     /// processor shows nothing itself (`display = "none"`), as a dict:
-    /// `lines`, the lines the stages passed, escape sequences stripped;
+    /// `lines`, the lines the stages passed, each drawable in one row:
+    /// escape sequences stripped, a carriage return's redraw kept at its
+    /// newest state, and other control characters but a tab removed (a
+    /// backspace too, not applied);
     /// `dropped`, how many older lines were let go to keep at most 10000
     /// between calls; and `progress`, the rows of Bazel's progress area as it
     /// was before its latest redraw (at most one redraw behind), its status

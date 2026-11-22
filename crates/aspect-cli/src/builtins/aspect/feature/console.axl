@@ -120,7 +120,9 @@ stages where each action's output ends; a terminal shows it, and anything
 else gets plain lines with Bazel's status line every few seconds. The agent
 profile shows plain lines on a terminal too, and no status line, since an
 agent reads the console rather than watching it. Your own `--curses` (in an
-rc or `--bazel-flag`) decides what is shown, under either profile.
+rc or `--bazel-flag`) decides what is shown, under either profile, unless
+you turned progress off (`--noshow_progress`), which shows plain lines
+without the status line.
 
 Only messages Bazel colours can be told from the output of the actions it
 runs, so Bazel is always asked for colour too, and what is shown keeps it as
@@ -246,7 +248,7 @@ Console = feature(
         "profile": args.string(
             default = "auto",
             values = ["auto"] + PROFILES,
-            description = "How Bazel's console is shown: `human`; `agent`, for a coding agent reading the console, which shows plain lines without Bazel's progress rather than its live UI; or `auto` (the default), `agent` when a coding agent's environment variables are set. Your own `--curses` decides under either.",
+            description = "How Bazel's console is shown: `human`; `agent`, for a coding agent reading the console, which shows plain lines without Bazel's progress rather than its live UI; or `auto` (the default), `agent` when a coding agent's environment variables are set. Your own `--curses` decides under either, unless `--noshow_progress` asks for plain lines.",
         ),
         "disable": args.string_list(
             description = "A default console stage to leave out: " + ", ".join(STAGE_NAMES) + ". Repeat for several.",
