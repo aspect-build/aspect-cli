@@ -49,10 +49,11 @@ not queued behind each other's `git worktree add`. See
 `private/lib/worktree.axl` for the pool model, why slots have fixed paths, and
 how the pool is bounded.
 
-The text reports go to stderr, and are styled only when stderr is a terminal
-and `std.io.stderr.color` allows it (`_color`): headings bold, labels, column
-headers, comments and hints dimmed. Text from outside is escaped before any
-style is added (`_styled`), and the layout reads the same without color.
+The text reports go to stderr, and are styled whenever `std.io.stderr.color`
+allows it (`_color`: a color terminal, a CI log that renders ANSI,
+`CLICOLOR_FORCE`): headings bold, labels, column headers, comments and hints
+dimmed. Text from outside is escaped before any style is added (`_styled`), and
+the layout reads the same without color.
 """
 
 load("@std//time.axl", "time")
@@ -160,24 +161,17 @@ def _print(line: str = "") -> None:
 
 def _info(std, message: str) -> None:
     """`info`, through `_shown`."""
-    _info_shown(std, _shown(message))
-
-def _info_shown(std, shown: str) -> None:
-    """An `INFO:` line whose text is already escaped, and may be styled.
-
-    Not `environment.info`, which also colors on CI hosts: this report is
-    styled only as `_color` says."""
-    print(_styled(std, "INFO", ansi.seq("1;36")) + ": " + shown)
+    info(std, _shown(message))
 
 def _warn(std, message: str) -> None:
-    """A `WARNING:` line, through `_shown`, its prefix styled as `_info_shown`'s."""
-    print(_styled(std, "WARNING", ansi.seq("0;33")) + ": " + _shown(message))
+    """`warn`, through `_shown`."""
+    warn(std, _shown(message))
 
 def _color(std) -> bool:
-    """Whether the text report may be styled. It is written to stderr, so that
-    is the stream asked (stdout carries `--output=json` and `path`): on a
-    terminal only, not on a CI log, and as `std.io.stderr.color` allows."""
-    return std.io.stderr.is_tty and std.io.stderr.color
+    """Whether the text report may be styled: it is written to stderr, so that
+    is the stream asked (stdout carries `--output=json` and `path`). Plain
+    when `std` is None, as a unit test of a renderer passes it."""
+    return std != None and std.io.stderr.color
 
 def _styled(std, text: str, code: str) -> str:
     """`text` escaped as `_print` escapes it, then styled with `code` when
@@ -186,7 +180,7 @@ def _styled(std, text: str, code: str) -> str:
     with plain `print`, never `_print`. An empty `code` or `text` leaves it
     plain."""
     shown = _shown(text)
-    return ansi.style(shown, code, True) if code and shown and std != None and _color(std) else shown
+    return ansi.style(shown, code, True) if code and shown and _color(std) else shown
 
 def _print_styled(std, line: str, code: str) -> None:
     """`line` through `_styled`, printed."""
@@ -206,7 +200,7 @@ def _table(std, rows: list[dict], columns: list, indent: str = "") -> list[str]:
     out of line, nor fake one; the lines are printed with plain `print`."""
     rows = [{k: (printable(v) if type(v) == "string" else v) for k, v in r.items()} for r in rows]
     lines = render(rows, columns)
-    color = std != None and _color(std)
+    color = _color(std)
     return [indent + ansi.style(lines[0], ansi.DIM, color)] + [indent + line for line in lines[1:]]
 
 def _command_line(std, indent: str, command: str, comment: str = "") -> str:
@@ -2910,7 +2904,7 @@ def _report_slot(
 
     # Abbreviated as `list` abbreviates, so the two commands do not describe one
     # directory two ways. The machine-readable outputs above carry it in full.
-    _info_shown(ctx.std, _shown("worktree ready: ") + _styled(ctx.std, tilde(path, ctx.std.env.home_dir()), ansi.BOLD))
+    info(ctx.std, _shown("worktree ready: ") + _styled(ctx.std, tilde(path, ctx.std.env.home_dir()), ansi.BOLD))
     if detached:
         _print("  detached at %s (%s), on no branch: commits made here need one before release — git switch -c <branch>" % (detached, _short(head)))
     elif created:
@@ -5051,7 +5045,7 @@ def _render_slot_tables(cells: list, std = None) -> list[str]:
     highlighted and the column headers under it are dimmed. Styling goes on
     whole lines after padding, since `render` measures with `len`.
     """
-    color = std != None and _color(std)
+    color = _color(std)
     out = []
     for free, header, columns in [
         (False, "taken", _TAKEN_COLUMNS),
