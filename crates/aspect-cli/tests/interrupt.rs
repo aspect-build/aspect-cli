@@ -36,21 +36,38 @@ impl Run {
     /// Start `task` from `source` and wait for its `ready` line. The line may
     /// carry `pid=<n>`, the child the task spawned.
     fn start(source: &str, task: &str) -> Self {
-        Self::launch(source, task, Stdio::null())
+        Self::launch(source, task, Stdio::null(), false)
+    }
+
+    /// As [`Run::start`], with SIGHUP inherited ignored, as `nohup` starts a
+    /// program.
+    fn start_ignoring_hangup(source: &str, task: &str) -> Self {
+        Self::launch(source, task, Stdio::null(), true)
     }
 
     /// [`Run::start`] with stdin an open pipe nothing ever writes to.
     fn start_with_stdin(source: &str, task: &str) -> Self {
-        Self::launch(source, task, Stdio::piped())
+        Self::launch(source, task, Stdio::piped(), false)
     }
 
-    fn launch(source: &str, task: &str, stdin: Stdio) -> Self {
+    fn launch(source: &str, task: &str, stdin: Stdio, ignore_hangup: bool) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
         let aspect = dir.path().join(".aspect");
         std::fs::create_dir(&aspect).expect(".aspect");
         std::fs::write(aspect.join("fixture.axl"), source).expect("fixture");
-        let mut child = Command::new(aspect_cli())
+        let mut command = Command::new(aspect_cli());
+        if ignore_hangup {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: signal is async-signal-safe.
+            unsafe {
+                command.pre_exec(|| {
+                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = command
             .arg(task)
             .current_dir(dir.path())
             .env(
@@ -368,6 +385,94 @@ shell = task(summary = "Test fixture.", implementation = _impl)
         wait_gone(sleep_pid, Duration::from_secs(5)),
         "`sleep 600` survived"
     );
+}
+
+/// A task waiting on a `sleep 600` in a process group of its own, which a
+/// hangup of the terminal never reaches by itself.
+const SLEEPER: &str = r#"
+def _impl(ctx):
+    ctx.defer(print, "deferred cleanup ran")
+    child = ctx.std.process.command("sleep").args(["600"]).process_group(0).spawn()
+    print("ready pid=%d" % child.id)
+    child.wait()
+    return 0
+
+sleeper = task(summary = "Test fixture.", implementation = _impl)
+"#;
+
+/// Checks `sleep_pid` went before draining the run's stderr, which the
+/// `sleep` inherited: one left running would hold the drain open; it is
+/// killed so the failure is reported.
+fn assert_stopped(run: Run, sleep_pid: i32, why: &str) -> String {
+    let gone = wait_gone(sleep_pid, Duration::from_secs(10));
+    if !gone {
+        unsafe { libc::kill(sleep_pid, libc::SIGKILL) };
+    }
+    let (_, stderr) = run.finish();
+    assert!(gone, "`sleep 600` survived {why}:\n{stderr}");
+    stderr
+}
+
+/// The terminal closed (SIGHUP): the run ends as on SIGTERM, its child in a
+/// group of its own stopped rather than left running.
+#[test]
+fn a_hangup_stops_the_run_and_its_children() {
+    let run = Run::start(SLEEPER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    assert!(alive(sleep_pid));
+    run.signal(libc::SIGHUP);
+    let stderr = assert_stopped(run, sleep_pid, "the hangup");
+    assert!(
+        stderr.contains("deferred cleanup ran"),
+        "the defer did not run:\n{stderr}"
+    );
+}
+
+/// One terminal close can deliver SIGHUP twice (zsh sends two; bash on
+/// Linux one, then the kernel another): the second is no repeat, so the run still winds down
+/// with its defers rather than being killed at once.
+#[test]
+fn a_second_hangup_is_no_repeat() {
+    // A defer still at work when the second hangup comes.
+    const SLOW_DEFER: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _cleanup():
+    sleep(1500)
+    print("deferred cleanup ran")
+
+def _impl(ctx):
+    ctx.defer(_cleanup)
+    child = ctx.std.process.command("sleep").args(["600"]).process_group(0).spawn()
+    print("ready pid=%d" % child.id)
+    child.wait()
+    return 0
+
+sleeper = task(summary = "Test fixture.", implementation = _impl)
+"#;
+    let run = Run::start(SLOW_DEFER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    run.signal(libc::SIGHUP);
+    // Apart, or the two merge into one pending signal.
+    std::thread::sleep(Duration::from_millis(500));
+    run.signal(libc::SIGHUP);
+    let stderr = assert_stopped(run, sleep_pid, "two hangups");
+    assert!(
+        stderr.contains("deferred cleanup ran"),
+        "the defer did not run:\n{stderr}"
+    );
+}
+
+/// Under `nohup` (SIGHUP inherited ignored) a hangup changes nothing.
+#[test]
+fn a_hangup_under_nohup_is_ignored() {
+    let run = Run::start_ignoring_hangup(SLEEPER, "sleeper");
+    let sleep_pid = run.announced_pid();
+    run.signal(libc::SIGHUP);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(alive(sleep_pid), "the hangup stopped a run under nohup");
+    run.signal(libc::SIGTERM);
+    assert_stopped(run, sleep_pid, "SIGTERM");
 }
 
 /// A prompt nobody will answer: a task blocked reading stdin still ends on the

@@ -44,8 +44,9 @@ use crate::eval::TaskExit;
 pub enum Kind {
     /// SIGINT, Ctrl+C or Ctrl+Break: someone at the console.
     Interrupt,
-    /// SIGTERM, or a console close, logoff or shutdown: an orchestrator that
-    /// expects a bounded wind-down.
+    /// SIGTERM, a hangup (SIGHUP), or a console close, logoff or shutdown:
+    /// an orchestrator, or a terminal gone, that expects a bounded
+    /// wind-down.
     Terminate,
 }
 
@@ -58,19 +59,12 @@ impl Kind {
         }
     }
 
-    /// The `ERROR:` line the default ending prints.
+    /// The request in the past tense, for the stop line and the `ERROR:`
+    /// line the default ending prints.
     pub fn message(self) -> &'static str {
         match self {
             Kind::Interrupt => "interrupted",
             Kind::Terminate => "terminated",
-        }
-    }
-
-    /// How the one stderr line names the request.
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::Interrupt => "interrupt",
-            Kind::Terminate => "terminate",
         }
     }
 }
