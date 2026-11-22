@@ -6,9 +6,9 @@
 //! know. What it owns is backend selection, whole-map read/write, and the
 //! tolerance rules below.
 //!
-//! - **keyring** — the OS secret service (macOS Keychain, Linux Secret Service,
-//!   Windows Credential Manager), holding the whole map as one entry. The default
-//!   on developer machines.
+//! - **keyring** — the OS secret service (macOS Keychain, the Linux kernel's
+//!   session keyring, Windows Credential Manager), holding the whole map as one
+//!   entry. The default on developer machines.
 //! - **file** — a `0600` JSON file. The fallback where no secret service is
 //!   available (a CI container with no session keyring, a macOS daemon or
 //!   fresh `HOME` with no default keychain), or when forced via
@@ -66,8 +66,8 @@ pub(crate) enum CredentialStore {
 
 impl CredentialStore {
     /// Resolve the active backend: `$ASPECT_CREDENTIALS_FILE` forces the file
-    /// backend; otherwise prefer the keyring when its service is reachable, else
-    /// fall back to the default file path.
+    /// backend; otherwise prefer the keyring when it has a store
+    /// ([`keyring_available`]), else fall back to the default file path.
     pub(crate) fn resolve() -> anyhow::Result<Self> {
         if let Some(path) = std::env::var_os(CREDENTIALS_FILE_ENV) {
             return Ok(Self::File(PathBuf::from(path)));
@@ -120,7 +120,7 @@ fn keyring_entry() -> anyhow::Result<keyring::Entry> {
 /// Opening the entry fails where no service exists at all (Linux opens the
 /// session keyring up front, so a container without one fails here). Other
 /// platforms open lazily, so a missing store only shows on first access:
-/// [`store_present`] makes that access and [`keyring_usable`] judges it.
+/// [`store_present`] checks for one and [`keyring_usable`] judges the result.
 fn keyring_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| keyring_entry().is_ok_and(|entry| store_present(&entry)))
