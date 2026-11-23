@@ -432,7 +432,8 @@ impl RelativizePaths {
         let mut out = Vec::with_capacity(hay.len());
         let mut i = 0;
         while i < hay.len() {
-            if hay[i] == OPEN
+            if self.link.is_some()
+                && hay[i] == OPEN
                 && let Some(len) = hay[i..].iter().position(|&b| b == CLOSE)
             {
                 out.extend_from_slice(&hay[i..=i + len]);
@@ -1227,6 +1228,26 @@ mod tests {
             "argfile @/o/execroot/_main/bazel-out/bin/x.params"
         );
         assert_eq!(run(&mut p, "file:///ws/a stays"), "file:///ws/a stays");
+    }
+
+    #[test]
+    fn shift_bytes_in_a_tools_output_hide_no_path() {
+        let line = "so \x0e /ws/pkg/BUILD.bazel \x10 and /ws/pkg/BUILD.bazel";
+        let want = "so \x0e pkg/BUILD.bazel \x10 and pkg/BUILD.bazel";
+        let mut plain = RelativizePaths::new(Some("/ws".into()), None);
+        assert_eq!(
+            String::from_utf8(plain.process(line.as_bytes()).unwrap()).unwrap(),
+            want
+        );
+        let mut linking = RelativizePaths::new(Some("/ws".into()), None).linking(Some(LinkTo {
+            host: String::new(),
+            workspace: "/ws".into(),
+        }));
+        assert_eq!(
+            String::from_utf8(linking.process(line.as_bytes()).unwrap()).unwrap(),
+            want,
+            "made relative without links"
+        );
     }
 
     #[test]

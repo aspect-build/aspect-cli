@@ -891,7 +891,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// is written relative to `cwd` (default `root`), or absolute when `cwd`
     /// is outside the workspace. An execroot path into `bazel-out/` or
     /// `external/` stays absolute, since that is where it exists. On a
-    /// terminal each path made relative is a link to the file it names.
+    /// terminal each path made relative is a link to the file it names,
+    /// when that exists.
     fn relativize_paths(
         #[starlark(require = named, default = NoneOr::None)] root: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] cwd: NoneOr<String>,

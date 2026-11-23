@@ -22,7 +22,7 @@ use super::ansi;
 use super::filters::Collapsed;
 use super::forward::LineProcessor;
 use super::line::{self, Given, Kind, Line};
-use super::links::{Linker, file_link, links_in};
+use super::links::{Known, Linker, file_link, links_in};
 use super::log::{self, Cut, RawLog};
 
 /// The longest line a report quotes.
@@ -336,8 +336,8 @@ pub struct RecapErrors {
     linker: Option<Linker>,
 }
 
-/// The links a line went by with, `(shown, url)`, for its quoted text.
-type LineLinks = Vec<(Vec<u8>, String)>;
+/// The links a line went by with, placed in its quoted text.
+type LineLinks = Vec<Known>;
 
 /// One error a recap repeats: its header, and what it keeps of its body,
 /// each line with the links it went by with.
@@ -349,10 +349,10 @@ struct Recapped {
 }
 
 impl Recapped {
-    fn body_line(&mut self, text: String, hints: LineLinks) {
+    fn body_line(&mut self, text: String, links: LineLinks) {
         if self.head.len() < RECAP_BODY_LINES - 1 {
-            self.head.push((text, hints));
-        } else if self.last.replace((text, hints)).is_some() {
+            self.head.push((text, links));
+        } else if self.last.replace((text, links)).is_some() {
             self.skipped += 1;
         }
     }
@@ -383,13 +383,22 @@ impl RecapErrors {
 
 impl RecapErrors {
     /// The links the stages before put in `record` (`relativize_paths`'),
-    /// for its quoted text, which has no escapes, when linking.
-    fn links(&self, record: &[u8]) -> LineLinks {
-        if self.linker.is_some() {
-            links_in(record)
-        } else {
-            Vec::new()
+    /// placed in `quoted`, the start of its message text as the recap
+    /// quotes it, when linking: a link the quote cut off is left out.
+    fn links(&self, record: &[u8], quoted: &str) -> LineLinks {
+        if self.linker.is_none() {
+            return Vec::new();
         }
+        let text = ansi::text(record);
+        let start = text.len() - line::message(&text).len();
+        let kept = quoted.strip_suffix('…').unwrap_or(quoted).len();
+        links_in(record)
+            .into_iter()
+            .filter_map(|k| {
+                let at = k.at.checked_sub(start)?;
+                (at + k.shown.len() <= kept).then_some(Known { at, ..k })
+            })
+            .collect()
     }
 }
 
@@ -414,9 +423,9 @@ impl LineProcessor for RecapErrors {
                 .map_or(text, |c| c.get(1).unwrap().as_str());
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
-                let hints = self.links(record);
+                let links = self.links(record, &quoted);
                 self.errors.push(Recapped {
-                    header: (quoted, hints),
+                    header: (quoted, links),
                     head: vec![],
                     last: None,
                     skipped: 0,
@@ -429,8 +438,9 @@ impl LineProcessor for RecapErrors {
             && !line.fresh
         {
             if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
-                let hints = self.links(record);
-                self.errors[i].body_line(quote(text), hints);
+                let quoted = quote(text);
+                let links = self.links(record, &quoted);
+                self.errors[i].body_line(quoted, links);
             }
             self.body = Some(i);
             self.after_first += usize::from(line.kind == Kind::Other);
@@ -462,8 +472,8 @@ impl LineProcessor for RecapErrors {
             "INFO: Errors Bazel reported:".to_string()
         };
         self.style.line(&mut out, &header);
-        let mut line = |text: &str, hints: &[(Vec<u8>, String)]| match self.linker.as_mut() {
-            Some(l) => l.link_with(text.as_bytes(), hints),
+        let mut line = |text: &str, links: &[Known]| match self.linker.as_mut() {
+            Some(l) => l.link_with(text.as_bytes(), links),
             None => text.as_bytes().to_vec(),
         };
         for e in &self.errors {
@@ -474,19 +484,19 @@ impl LineProcessor for RecapErrors {
                     .chain(line(&e.header.0, &e.header.1))
                     .chain(*b"\n"),
             );
-            for (b, hints) in &e.head {
-                out.extend(b"    ".iter().copied().chain(line(b, hints)).chain(*b"\n"));
+            for (b, links) in &e.head {
+                out.extend(b"    ".iter().copied().chain(line(b, links)).chain(*b"\n"));
             }
             if e.skipped > 0 {
                 let s = if e.skipped == 1 { "" } else { "s" };
                 out.extend_from_slice(format!("    … {} more line{s}\n", e.skipped).as_bytes());
             }
-            if let Some((last, hints)) = &e.last {
+            if let Some((last, links)) = &e.last {
                 out.extend(
                     b"    "
                         .iter()
                         .copied()
-                        .chain(line(last, hints))
+                        .chain(line(last, links))
                         .chain(*b"\n"),
                 );
             }
@@ -860,6 +870,60 @@ mod tests {
         assert!(
             second.contains(&format!("{pkg}\x1b\\")),
             "the link it had: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_recapped_link_goes_back_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["src/a.ts", "pkg/src/a.ts", "pkg/BUILD.bazel"] {
+            let at = dir.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()]);
+        linker.host = String::new();
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(linker));
+        let link = |rel: &str, shown: &str| {
+            format!(
+                "\x1b]8;;file://{}/{rel}\x1b\\{shown}\x1b]8;;\x1b\\",
+                dir.path().display()
+            )
+        };
+        let header = format!(
+            "\x1b[31mERROR: \x1b[0m{}:3:1: Compiling src/a.ts failed: (Exit 1): tsc {}",
+            link("pkg/BUILD.bazel", "BUILD.bazel"),
+            link("pkg/src/a.ts", "src/a.ts")
+        );
+        let stale = format!(
+            "src/a.ts:9: stale; see {}:1:1",
+            link("pkg/src/a.ts", "src/a.ts")
+        );
+        let srcs = format!(
+            "in srcs:{}; also src/a.ts",
+            link("pkg/src/a.ts", "src/a.ts")
+        );
+        let out = feed(&mut p, &[&header, &stale, &srcs]);
+        let ws = link("src/a.ts", "src/a.ts");
+        let pkg = link("pkg/src/a.ts", "src/a.ts");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[1],
+            format!(
+                "  ERROR: {}:3:1: Compiling {ws} failed: (Exit 1)",
+                link("pkg/BUILD.bazel", "BUILD.bazel")
+            ),
+            "the command line's link, cut off, goes to no other path"
+        );
+        assert_eq!(
+            lines[2],
+            format!("    {ws}:9: stale; see {pkg}:1:1"),
+            "each where it was"
+        );
+        assert_eq!(
+            lines[3],
+            format!("    in srcs:{pkg}; also {ws}"),
+            "a link after `:` too"
         );
     }
 

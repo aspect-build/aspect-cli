@@ -58,7 +58,7 @@ pub struct Linker {
     /// Where a relative path may be from, in the order tried.
     bases: Vec<PathBuf>,
     /// The host a `file://` URL names.
-    host: String,
+    pub(crate) host: String,
     /// What each path looked up names, by the path as written: the file, or
     /// None for nothing as of when it was looked up.
     resolved: HashMap<Vec<u8>, (Option<PathBuf>, std::time::Instant)>,
@@ -81,38 +81,43 @@ impl Linker {
         self.link_with(record, &[])
     }
 
-    /// [`Linker::link`], a path `known` names, `(shown, url)`, linked to its
-    /// URL, each once, the first shown as it says.
-    pub fn link_with(&mut self, record: &[u8], known: &[(Vec<u8>, String)]) -> Vec<u8> {
+    /// [`Linker::link`], with `known` links put back where they were: each
+    /// at its byte offset among `record`'s text (its escapes not counted),
+    /// whatever its text would otherwise link to.
+    pub fn link_with(&mut self, record: &[u8], known: &[Known]) -> Vec<u8> {
         if record.len() > MAX_RECORD || !contains(record, b"/") && !contains(record, b".") {
             return record.to_vec();
         }
-        let mut used = vec![false; known.len()];
         let mut out = Vec::with_capacity(record.len());
         let mut inside = false;
+        let mut at = 0;
         for (escape, seg) in ansi::segments(record) {
             if escape {
                 if let Some(url) = osc8_url(seg) {
                     inside = !url.is_empty();
                 }
                 out.extend_from_slice(seg);
-            } else if inside {
+                continue;
+            }
+            if inside {
                 out.extend_from_slice(seg);
             } else {
-                out.extend(self.text(seg, known, &mut used));
+                out.extend(self.text(seg, at, known));
             }
+            at += seg.len();
         }
         out
     }
 
-    fn text(&mut self, text: &[u8], known: &[(Vec<u8>, String)], used: &mut [bool]) -> Vec<u8> {
+    /// `text`, at byte `base` among its record's text, linked.
+    fn text(&mut self, text: &[u8], base: usize, known: &[Known]) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         let mut urls = URL.find_iter(text).peekable();
         while at < text.len() {
             let next_url = urls.peek().map(|m| m.start());
             let stop = next_url.unwrap_or(text.len());
-            self.paths(&text[at..stop], known, used, &mut out);
+            self.paths(&text[at..stop], base + at, known, &mut out);
             at = stop;
             if let Some(m) = urls.next() {
                 let end = m.start() + url_end(m.as_bytes());
@@ -121,23 +126,32 @@ impl Linker {
                     &text[m.start()..end],
                 ));
                 // What was trimmed from the URL's end is text again.
-                self.paths(&text[end..m.end()], known, used, &mut out);
+                self.paths(&text[end..m.end()], base + end, known, &mut out);
                 at = m.end();
             }
         }
         out
     }
 
-    /// `text`, holding no URL, onto `out` with its paths linked.
-    fn paths(
-        &mut self,
-        text: &[u8],
-        known: &[(Vec<u8>, String)],
-        used: &mut [bool],
-        out: &mut Vec<u8>,
-    ) {
+    /// `text`, at byte `base` among its record's text and holding no URL,
+    /// onto `out` with its paths linked.
+    fn paths(&mut self, text: &[u8], base: usize, known: &[Known], out: &mut Vec<u8>) {
         let mut at = 0;
         for m in PATH.find_iter(text) {
+            if m.start() < at {
+                continue;
+            }
+            // A link put back here, or after a response file's `@`.
+            let put = [m.start(), m.start() + 1].into_iter().find_map(|start| {
+                let k = known.iter().find(|k| k.at == base + start)?;
+                text[start..].starts_with(&k.shown).then_some((start, k))
+            });
+            if let Some((start, k)) = put {
+                out.extend_from_slice(&text[at..start]);
+                out.extend(osc8(&k.url, &k.shown));
+                at = start + k.shown.len();
+                continue;
+            }
             let (mut start, mut end) = (m.start(), m.end());
             // A sentence's full stop, or `..` after a path, is not part of it.
             while end > start && text[end - 1] == b'.' {
@@ -152,41 +166,26 @@ impl Linker {
             if text[end..].starts_with(ELLIPSIS) || end == start {
                 continue;
             }
-            let mut url = self.url_of(&text[start..end], known, used);
+            let mut file = self.resolve(&text[start..end]);
             // A response file (`@pkg/x.params`), not a scoped package's
             // directory (`@types/x`) or a label (`@repo//pkg`).
-            if url.is_none()
+            if file.is_none()
                 && text[start] == b'@'
                 && !text[start..end].windows(2).any(|w| w == b"//")
             {
-                url = self.url_of(&text[start + 1..end], known, used);
-                if url.is_some() {
+                file = self.resolve(&text[start + 1..end]);
+                if file.is_some() {
                     start += 1;
                 }
             }
-            let Some(url) = url else {
+            let Some(file) = file else {
                 continue;
             };
             out.extend_from_slice(&text[at..start]);
-            out.extend(osc8(&url, &text[start..end]));
+            out.extend(osc8(&file_url(&self.host, &file), &text[start..end]));
             at = end;
         }
         out.extend_from_slice(&text[at..]);
-    }
-
-    /// The URL `path` links to: one `known` gives it, else its file's.
-    fn url_of(
-        &mut self,
-        path: &[u8],
-        known: &[(Vec<u8>, String)],
-        used: &mut [bool],
-    ) -> Option<String> {
-        if let Some(i) = (0..known.len()).find(|&i| !used[i] && known[i].0 == path) {
-            used[i] = true;
-            return Some(known[i].1.clone());
-        }
-        let file = self.resolve(path)?;
-        Some(file_url(&self.host, &file))
     }
 
     /// The file `path` names, when it could name one and does: it has a `/`
@@ -246,26 +245,41 @@ fn osc8_url(seq: &[u8]) -> Option<&[u8]> {
     Some(&uri[..end])
 }
 
-/// The `(shown, url)` of each link in `record`, for a stage that quotes its
-/// text without its escapes and links it again.
-pub fn links_in(record: &[u8]) -> Vec<(Vec<u8>, String)> {
+/// A link in a record: its URL and the text it shows, at a byte offset
+/// among the record's text (escapes not counted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Known {
+    pub at: usize,
+    pub shown: Vec<u8>,
+    pub url: String,
+}
+
+/// Each link in `record`, for a stage that quotes its text without its
+/// escapes and links it again where it was.
+pub fn links_in(record: &[u8]) -> Vec<Known> {
     let mut found = Vec::new();
-    let mut open: Option<(String, Vec<u8>)> = None;
+    let mut open: Option<Known> = None;
+    let mut at = 0;
     for (escape, seg) in ansi::segments(record) {
         if escape {
             if let Some(url) = osc8_url(seg) {
-                if let Some((url, shown)) = open.take() {
-                    found.push((shown, url));
-                }
+                found.extend(open.take().filter(|k| !k.shown.is_empty()));
                 if !url.is_empty() {
-                    open = Some((String::from_utf8_lossy(url).into_owned(), Vec::new()));
+                    open = Some(Known {
+                        at,
+                        shown: Vec::new(),
+                        url: String::from_utf8_lossy(url).into_owned(),
+                    });
                 }
             }
-        } else if let Some((_, shown)) = &mut open {
-            shown.extend_from_slice(seg);
+            continue;
         }
+        if let Some(k) = &mut open {
+            k.shown.extend_from_slice(seg);
+        }
+        at += seg.len();
     }
-    found.extend(open.map(|(url, shown)| (shown, url)));
+    found.extend(open.filter(|k| !k.shown.is_empty()));
     found
 }
 
