@@ -139,8 +139,7 @@ def add_tip(
         💡 TIP[<id>]: <title>
           <body, indented>
 
-    Once the task ends, a line per id counts what was not printed, and a
-    last line says how to silence the tips shown.
+    Once the task ends, a line per id counts what was not printed.
 
     The single entry point for tips.
 

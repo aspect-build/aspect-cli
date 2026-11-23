@@ -559,9 +559,11 @@ impl Summary {
         }
     }
 
-    fn path(&self, path: &Path) -> String {
+    /// `path`, linked when files are; `restore` is the style of the text
+    /// around it, taken up again after a styled written URL.
+    fn path(&self, path: &Path, restore: &str) -> String {
         match &self.links {
-            Some(files) => file_link(files, path, &self.style.open),
+            Some(files) => file_link(files, path, restore),
             None => path.display().to_string(),
         }
     }
@@ -581,7 +583,11 @@ impl LineProcessor for Summary {
                     Cut::None => "",
                     Cut::Failed => INCOMPLETE,
                 };
-                Some(format!("the raw console{cut} is in {}", self.path(path)))
+                // On the `INFO:` line, whose text is unstyled.
+                Some(format!(
+                    "the raw console{cut} is in {}",
+                    self.path(path, "")
+                ))
             }
             RawLogState::Failed => Some("the raw console could not be saved".to_string()),
             RawLogState::Off => None,
@@ -614,7 +620,7 @@ impl LineProcessor for Summary {
                     &format!(
                         "    all {} in {}{incomplete}",
                         k.hidden + 1,
-                        self.path(file)
+                        self.path(file, &self.style.open)
                     ),
                 );
             }
@@ -991,6 +997,25 @@ mod tests {
             ]);
         }
         assert_eq!(feed(&mut p, &records), "");
+    }
+
+    #[test]
+    fn a_written_url_on_the_info_line_leaves_no_style_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        std::fs::write(&log, "").unwrap();
+        let links = crate::console::links::FileLinks::file()
+            .written(true)
+            .styled(true);
+        let mut p = Summary::new(
+            Arc::new(Stats::default()),
+            RawLogState::Kept(log, Default::default()),
+            Style::dim(),
+            Some(links),
+        );
+        let out = feed(&mut p, &[]);
+        let line = out.lines().find(|l| l.contains("The raw console")).unwrap();
+        assert!(line.ends_with(">\x1b[0m"), "{line:?}");
     }
 
     #[test]
