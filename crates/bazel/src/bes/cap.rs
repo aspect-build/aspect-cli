@@ -10,6 +10,11 @@
 //! [`cap_event`] drops arguments from the end of such a command line until the
 //! event fits in [`MAX_EVENT_BYTES`]. An event over the limit for any other
 //! reason is passed on as it is. Either way it says so, for the caller to warn.
+//!
+//! The limit is on the encoded `BuildEvent`, without a length prefix. A gRPC
+//! sink sends it packed in an `Any` inside a `PublishBuildToolEventStreamRequest`
+//! (see [`super::client::build_tool::bazel_event_encoded`]), so the limit
+//! leaves [`REQUEST_HEADROOM`] under the 4 MiB receive limit for that wrapper.
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -18,8 +23,15 @@ use prost::encoding::{encoded_len_varint, key_len};
 
 use super::kind::payload_name;
 
+/// gRPC's default receive limit, which the publish request must fit in.
+pub const MAX_REQUEST_BYTES: usize = 4 << 20;
+
+/// Room left in [`MAX_REQUEST_BYTES`] for the request wrapping an event: about
+/// 170 bytes with UUID build and invocation ids.
+pub const REQUEST_HEADROOM: usize = 4 << 10;
+
 /// The largest event passed on whole, in encoded bytes.
-pub const MAX_EVENT_BYTES: usize = 4 << 20;
+pub const MAX_EVENT_BYTES: usize = MAX_REQUEST_BYTES - REQUEST_HEADROOM;
 
 /// `ActionExecuted.command_line`'s field number.
 const COMMAND_LINE_FIELD: u32 = 9;
@@ -71,7 +83,7 @@ impl Capped {
                 msg
             }
             Self::Oversize { kind, bytes } => format!(
-                "a {kind} build event is {}, over the {} limit for build events; \
+                "a build event of kind {kind} is {}, over the {} limit for build events; \
                  BES backends may refuse it",
                 mib(*bytes),
                 mib(MAX_EVENT_BYTES),
@@ -82,6 +94,10 @@ impl Capped {
 
 /// Fit `event`, `len` bytes encoded, in [`MAX_EVENT_BYTES`] where its command
 /// line is what can give; `None` when it fits already.
+///
+/// Arguments go from the end, each counted at its key, length and bytes. The
+/// enclosing length prefixes only shrink as they go, so the event that results
+/// fits, with at most one argument more removed than strictly needed.
 pub fn cap_event(event: &mut BuildEvent, len: usize) -> Option<Capped> {
     if len <= MAX_EVENT_BYTES {
         return None;
@@ -95,8 +111,6 @@ pub fn cap_event(event: &mut BuildEvent, len: usize) -> Option<Capped> {
         Some(Payload::Action(action)) if !action.command_line.is_empty() => action,
         _ => return Some(Capped::Oversize { kind, bytes: len }),
     };
-    // Each argument costs its key, its length and its bytes. The enclosing
-    // length prefixes only shrink as arguments go, so this is an upper bound.
     let total = action.command_line.len();
     let mut over = len - MAX_EVENT_BYTES;
     while over > 0
@@ -164,6 +178,72 @@ mod tests {
             None
         );
         assert_eq!(event, before);
+    }
+
+    /// A failed action `bytes` long encoded, its last argument the padding.
+    fn action_of(bytes: usize) -> BuildEvent {
+        let mut event = failed_action(10, 10);
+        let Some(Payload::Action(action)) = &mut event.payload else {
+            unreachable!()
+        };
+        action.command_line.push(String::new());
+        let mut pad = bytes - event.encoded_len();
+        loop {
+            let Some(Payload::Action(action)) = &mut event.payload else {
+                unreachable!()
+            };
+            *action.command_line.last_mut().unwrap() = "p".repeat(pad);
+            match event.encoded_len() {
+                n if n == bytes => return event,
+                n => pad = pad + bytes - n,
+            }
+        }
+    }
+
+    #[test]
+    fn an_event_exactly_at_the_limit_is_left_alone() {
+        let mut event = action_of(MAX_EVENT_BYTES);
+        let before = event.clone();
+        assert_eq!(cap_event(&mut event, MAX_EVENT_BYTES), None);
+        assert_eq!(event, before);
+    }
+
+    #[test]
+    fn an_event_a_byte_over_loses_only_its_last_argument() {
+        let mut event = action_of(MAX_EVENT_BYTES + 1);
+        let capped = cap_event(&mut event, MAX_EVENT_BYTES + 1).unwrap();
+        assert!(
+            matches!(
+                capped,
+                Capped::CommandLine {
+                    kept: 10,
+                    total: 11,
+                    ..
+                }
+            ),
+            "{capped:?}"
+        );
+        assert!(event.encoded_len() <= MAX_EVENT_BYTES);
+    }
+
+    /// The publish request a gRPC sink wraps an event at the limit in fits in
+    /// gRPC's default receive limit, even with ids far longer than UUIDs.
+    #[test]
+    fn an_event_at_the_limit_fits_in_a_publish_request() {
+        let encoded = action_of(MAX_EVENT_BYTES).encode_to_vec();
+        for id_len in [36, 1024] {
+            let req = crate::bes::client::build_tool::bazel_event_encoded(
+                "b".repeat(id_len),
+                "i".repeat(id_len),
+                i64::MAX,
+                encoded.clone().into(),
+                prost_types::Timestamp {
+                    seconds: i64::MAX,
+                    nanos: i32::MAX,
+                },
+            );
+            assert!(req.encoded_len() <= MAX_REQUEST_BYTES, "{id_len}");
+        }
     }
 
     #[test]
@@ -262,7 +342,7 @@ mod tests {
         assert!(!capped.changed());
         assert_eq!(
             capped.warning(),
-            "a progress build event is 4.0 MiB, over the 4.0 MiB limit for build events; \
+            "a build event of kind progress is 4.0 MiB, over the 4.0 MiB limit for build events; \
              BES backends may refuse it"
         );
     }
