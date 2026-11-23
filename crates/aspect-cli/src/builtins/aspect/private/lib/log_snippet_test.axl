@@ -122,6 +122,11 @@ def _test_a_stdout_cut_inside_an_escape_keeps_stderr(ctx):
     _eq("stderr kept", r.text.split("\n")[-2:], ["src/x.ts:1:1 - error TS1: bad", "Target //:a failed to build"])
     _eq("the cut said", "… stdout cut at 200 bytes" in r.text, True)
 
+    # The cut on the `ESC` of the link's own terminator.
+    ctx.std.fs.write(d + "/stdout", "x" * 183 + "\x1b]8;;http://e.co\x1b\\link\x1b]8;;\x1b\\\n")
+    r = extract_action_snippet(ctx.std, d + "/stdout", d + "/stderr", SnippetOptions(max_read_bytes = 200, max_lines = 6))
+    _eq("stderr kept at the terminator", r.text.split("\n")[-2:], ["src/x.ts:1:1 - error TS1: bad", "Target //:a failed to build"])
+
 def _test_a_cut_is_seen_in_non_ascii_text(ctx):
     """A file bigger than the bound is cut, whatever its text: a character
     can be more than one byte."""

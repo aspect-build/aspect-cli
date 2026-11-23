@@ -315,13 +315,14 @@ _ESC_INTERMEDIATES = " !\"#$%&'()*+,-./"
 def _closed(text):
     """`text`, cut by the read bound, with any escape the cut left open
     closed: an OSC 8 link would otherwise run on through the lines after it
-    when they are cleaned. A cut in an `ESC` escape's intermediate bytes
-    (`ESC (`) is dropped, as the terminator would end it short and leave its
-    `\\`; otherwise `ESC \\` (ST) closes a string escape, ends a CSI cut short
-    at its `ESC`, and with none open is an escape of its own, cleaned away."""
+    when they are cleaned. An `ESC` the cut left last, alone or with only
+    intermediate bytes after it (`ESC (`, or the first half of an `ESC \\`),
+    is dropped first, as the terminator would end it short and leave its
+    `\\`; then `ESC \\` (ST) closes a string escape, ends a CSI cut short at
+    its `ESC`, and with none open is an escape of its own, cleaned away."""
     at = text.rfind("\x1b")
     if at >= 0 and all([c in _ESC_INTERMEDIATES for c in text[at + 1:].elems()]):
-        return text[:at]
+        text = text[:at]
     return text + "\x1b\\"
 
 def extract_action_snippet(std, stdout_path, stderr_path, options = None):

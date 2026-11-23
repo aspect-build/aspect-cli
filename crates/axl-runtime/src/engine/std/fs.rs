@@ -413,9 +413,9 @@ fn lossy_prefix(bytes: &[u8]) -> String {
     for back in 1..=3.min(bytes.len()) {
         let b = bytes[bytes.len() - back];
         let needs = match b {
-            0xc0..=0xdf => 2,
+            0xc2..=0xdf => 2,
             0xe0..=0xef => 3,
-            0xf0..=0xf7 => 4,
+            0xf0..=0xf4 => 4,
             0x80..=0xbf => continue,
             _ => break,
         };
@@ -1089,6 +1089,11 @@ mod tests {
             super::lossy_prefix(b"ab\xff"),
             "ab\u{FFFD}",
             "a bad last byte is not a split one"
+        );
+        assert_eq!(
+            super::lossy_prefix(b"ab\xc0"),
+            "ab\u{FFFD}",
+            "never a lead byte"
         );
         assert_eq!(super::lossy_prefix(b""), "");
     }
