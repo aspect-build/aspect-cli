@@ -431,13 +431,12 @@ impl Bazelrc {
         home: Option<&Path>,
         redact: impl Fn(&str) -> String,
     ) -> String {
-        // `d` uses 256-color grey rather than SGR 2 (faint) because GitHub
+        // `d` is grey (bright black) rather than SGR 2 (faint) because GitHub
         // Actions' log viewer silently drops SGR 2 — the section keys would
-        // render at full weight on GHA even though the gate fired. Matches
-        // the styling aspect-cli's runtime announce lines and `tools/bazel`
-        // already use for grey output.
+        // render at full weight on GHA even though the gate fired. It is the
+        // CLI's one grey.
         let (b, d, y, r) = if ansi {
-            ("\x1b[1m", "\x1b[38;5;244m", "\x1b[33m", "\x1b[0m")
+            ("\x1b[1m", "\x1b[90m", "\x1b[33m", "\x1b[0m")
         } else {
             ("", "", "", "")
         };

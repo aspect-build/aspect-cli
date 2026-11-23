@@ -14,8 +14,8 @@ use aspect_telemetry::{cargo_pkg_short_version, is_debug_build};
 
 use crate::ci::on_recognized_ci;
 
-/// SGR sequence for the banner's grey (256-color 244).
-const GREY: &str = "\x1b[38;5;244m";
+/// SGR sequence for the banner's grey, the CLI's one grey (bright black).
+const GREY: &str = "\x1b[90m";
 /// SGR reset.
 const RESET: &str = "\x1b[0m";
 

@@ -791,7 +791,7 @@ def _repro_header(color, label):
 def _install_hint_line(color):
     """Grey-formatted install hint printed under each repro/fix block.
 
-    Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
+    Uses grey (bright black, `ansi.GREY`) rather than SGR 2 (faint): GitHub
     Actions' log viewer silently drops SGR 2, and `std.io.stderr.color`
     is true under GHA, so the hint would render at full weight on CI even
     though the styling was applied.

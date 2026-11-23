@@ -132,13 +132,13 @@ pub fn debugging() -> bool {
 /// Severity of a diagnostic line, carrying its label and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Severity {
-    /// Grey `DEBUG:` - internals a bug report needs.
+    /// Bold grey `DEBUG:` - internals a bug report needs.
     Debug,
     /// Cyan `INFO:` — a notable but expected runtime branch fired.
     Info,
-    /// Yellow `WARNING:` — a subsystem problem; the task continues.
+    /// Bold yellow `WARNING:` — a subsystem problem; the task continues.
     Warning,
-    /// Red `ERROR:` — a recoverable error, usually preceding a non-zero exit.
+    /// Bold red `ERROR:` — a recoverable error, usually preceding a non-zero exit.
     Error,
 }
 
@@ -153,14 +153,15 @@ impl Severity {
         }
     }
 
-    /// The SGR color-open sequence for the label, matching the AXL helpers
-    /// (`DEBUG` grey, `INFO` bold cyan, `WARNING`/`ERROR` plain yellow/red).
+    /// The SGR color-open sequence for the label, matching the AXL helpers:
+    /// every label bold, `DEBUG` grey, `INFO` cyan, `WARNING` yellow, `ERROR`
+    /// red.
     fn color(self) -> &'static str {
         match self {
-            Severity::Debug => "\x1b[0;90m",
+            Severity::Debug => "\x1b[1;90m",
             Severity::Info => "\x1b[1;36m",
-            Severity::Warning => "\x1b[0;33m",
-            Severity::Error => "\x1b[0;31m",
+            Severity::Warning => "\x1b[1;33m",
+            Severity::Error => "\x1b[1;31m",
         }
     }
 }
@@ -196,7 +197,7 @@ pub(crate) fn emit(sev: Severity, msg: &str) {
     errln!("{}", format_line(sev, colorize(), msg));
 }
 
-/// Print a grey `DEBUG:` line when [`debugging`]. The `trace!` macro calls
+/// Print a bold grey `DEBUG:` line when [`debugging`]. The `trace!` macro calls
 /// it beside the log record it emits.
 pub fn debug(msg: &str) {
     if debugging() {
@@ -233,11 +234,11 @@ mod tests {
         );
         assert_eq!(
             format_line(Severity::Warning, true, "hello"),
-            "\x1b[0;33mWARNING\x1b[0m: hello"
+            "\x1b[1;33mWARNING\x1b[0m: hello"
         );
         assert_eq!(
             format_line(Severity::Error, true, "hello"),
-            "\x1b[0;31mERROR\x1b[0m: hello"
+            "\x1b[1;31mERROR\x1b[0m: hello"
         );
     }
 

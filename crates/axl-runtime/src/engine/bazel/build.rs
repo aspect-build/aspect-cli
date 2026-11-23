@@ -823,13 +823,11 @@ pub(super) fn announce_spawn(
 /// color too), whose rules are clap's plus ANSI-rendering CI hosts; empty
 /// strings otherwise, so file-captured / piped output stays plain.
 ///
-/// Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
-/// Actions' log viewer silently drops SGR 2. 256-color escapes are rendered by
-/// GHA, Buildkite, and every TTY we ship to, and match the grey `tools/bazel`
-/// itself uses for its `[tools/bazel]` trace line.
+/// Uses grey (bright black, `90`), the CLI's one grey, rather than SGR 2
+/// (faint): GitHub Actions' log viewer silently drops SGR 2.
 fn grey_style() -> (&'static str, &'static str) {
     if crate::color::console_supports_color() {
-        ("\x1b[38;5;244m", "\x1b[0m")
+        ("\x1b[90m", "\x1b[0m")
     } else {
         ("", "")
     }

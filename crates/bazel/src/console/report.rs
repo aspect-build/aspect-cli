@@ -240,7 +240,7 @@ impl Style {
     /// it, which every terminal and CI log viewer we ship to renders.
     pub fn dim() -> Style {
         Style {
-            open: "\x1b[38;5;244m".into(),
+            open: "\x1b[90m".into(),
             close: "\x1b[0m".into(),
             info: "\x1b[1;36m".into(),
         }
@@ -692,7 +692,7 @@ mod tests {
         Style::dim().line(&mut out, "  3 more like: x");
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "\x1b[1;36mINFO\x1b[0m: Errors Bazel reported:\n\x1b[38;5;244m  3 more like: x\x1b[0m\n"
+            "\x1b[1;36mINFO\x1b[0m: Errors Bazel reported:\n\x1b[90m  3 more like: x\x1b[0m\n"
         );
     }
 
