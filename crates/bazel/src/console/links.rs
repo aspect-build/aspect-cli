@@ -9,8 +9,8 @@
 //! console those are the workspace the build runs in, which Bazel's own
 //! paths are relative to, then the directory the task runs from. A path
 //! `relativize_paths` made relative it links itself, as only it knows the
-//! file (`BUILD.bazel` from a package directory is that package's): the
-//! linker leaves text already linked alone. A response file's path
+//! file (`BUILD.bazel` from a package directory is that package's), even
+//! one that does not exist: the linker leaves text already linked alone. A response file's path
 //! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not a
 //! `:line:col` after it. A path to nothing (a sandbox gone with its action, a
 //! label, prose) or cut short (`src/a.c…`) is left alone. A URL ends before
@@ -85,7 +85,9 @@ impl Linker {
     /// at its byte offset among `record`'s text (its escapes not counted),
     /// whatever its text would otherwise link to.
     pub fn link_with(&mut self, record: &[u8], known: &[Known]) -> Vec<u8> {
-        if record.len() > MAX_RECORD || !contains(record, b"/") && !contains(record, b".") {
+        if record.len() > MAX_RECORD
+            || known.is_empty() && !contains(record, b"/") && !contains(record, b".")
+        {
             return record.to_vec();
         }
         let mut out = Vec::with_capacity(record.len());
@@ -753,6 +755,32 @@ mod tests {
                 "ERROR: {}:1: x",
                 file(dir.path(), "pkg/BUILD.bazel", "BUILD.bazel")
             )
+        );
+    }
+
+    #[test]
+    fn a_shortened_path_to_nothing_links_the_file_it_named_not_anothers() {
+        let (dir, mut run) = console(&["MODULE.bazel"], &[("$T", Some("$T/pkg"))], None);
+        assert_eq!(
+            run("ERROR: $T/pkg/MODULE.bazel:1:1: no such file"),
+            format!(
+                "ERROR: {}:1:1: no such file",
+                file(dir.path(), "pkg/MODULE.bazel", "MODULE.bazel")
+            )
+        );
+    }
+
+    #[test]
+    fn a_known_link_goes_back_in_a_line_with_no_path_of_its_own() {
+        let (_dir, mut l) = linker();
+        let known = [Known {
+            at: 7,
+            shown: b"packages".to_vec(),
+            url: "file:///ws/packages".into(),
+        }];
+        assert_eq!(
+            String::from_utf8(l.link_with(b"ERROR: packages: bad", &known)).unwrap(),
+            "ERROR: \x1b]8;;file:///ws/packages\x1b\\packages\x1b]8;;\x1b\\: bad"
         );
     }
 

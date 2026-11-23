@@ -284,9 +284,9 @@ impl RelativizePaths {
     }
 
     /// This stage writing each path it makes relative as an OSC 8 link to
-    /// the file it names, when that exists, for a terminal: the shown text
-    /// alone no longer tells which file (`BUILD.bazel` from a package
-    /// directory is that package's).
+    /// the file it names, for a terminal, whether or not that exists: the
+    /// shown text alone no longer tells which file (`BUILD.bazel` from a
+    /// package directory is that package's).
     pub fn linking(mut self, link: Option<LinkTo>) -> Self {
         self.link = link;
         self
@@ -484,7 +484,7 @@ impl RelativizePaths {
     }
 
     /// `out` with each path [`RelativizePaths::shown`] wrapped written as an
-    /// OSC 8 link to its file, or as shown when that does not exist.
+    /// OSC 8 link to its file.
     fn linked(&self, out: &[u8]) -> Vec<u8> {
         let Some(link) = &self.link else {
             return out.to_vec();
@@ -508,16 +508,14 @@ impl RelativizePaths {
                 i += 1;
                 continue;
             };
+            // Whether or not it exists: this is the file the path named, and
+            // a later stage would take the shown text for another's.
             let file = std::path::Path::new(std::ffi::OsStr::from_bytes(&out[i + 1..mid]));
             let shown = &out[mid + 1..close];
-            if file.exists() {
-                linked.extend(super::links::osc8(
-                    &super::links::file_url(&link.host, file),
-                    shown,
-                ));
-            } else {
-                linked.extend_from_slice(shown);
-            }
+            linked.extend(super::links::osc8(
+                &super::links::file_url(&link.host, file),
+                shown,
+            ));
             i = close + 1;
         }
         linked

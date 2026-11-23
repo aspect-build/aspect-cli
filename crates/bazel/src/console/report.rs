@@ -389,13 +389,17 @@ impl RecapErrors {
         if self.linker.is_none() {
             return Vec::new();
         }
-        let text = ansi::text(record);
+        let stripped = ansi::strip(record);
+        let text = String::from_utf8_lossy(&stripped);
         let start = text.len() - line::message(&text).len();
         let kept = quoted.strip_suffix('…').unwrap_or(quoted).len();
         links_in(record)
             .into_iter()
             .filter_map(|k| {
-                let at = k.at.checked_sub(start)?;
+                // Where the link is in the text as decoded, a byte not UTF-8
+                // before it decoded longer.
+                let decoded = String::from_utf8_lossy(stripped.get(..k.at)?).len();
+                let at = decoded.checked_sub(start)?;
                 (at + k.shown.len() <= kept).then_some(Known { at, ..k })
             })
             .collect()
@@ -925,6 +929,29 @@ mod tests {
             format!("    in srcs:{pkg}; also {ws}"),
             "a link after `:` too"
         );
+    }
+
+    #[test]
+    fn a_byte_not_utf8_before_a_link_moves_it_not() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["src/a.ts", "pkg/src/a.ts"] {
+            let at = dir.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()]);
+        linker.host = String::new();
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(linker));
+        let pkg = format!(
+            "\x1b]8;;file://{}/pkg/src/a.ts\x1b\\src/a.ts\x1b]8;;\x1b\\",
+            dir.path().display()
+        );
+        let mut record = b"\x1b[31mERROR: \x1b[0mcaf\xe9 ".to_vec();
+        record.extend_from_slice(pkg.as_bytes());
+        record.extend_from_slice(b":1:1: bad");
+        assert_eq!(p.process(&record).as_deref(), Some(record.as_slice()));
+        let out = String::from_utf8(p.report().unwrap()).unwrap();
+        assert!(out.contains(&pkg), "{out:?}");
     }
 
     #[test]
