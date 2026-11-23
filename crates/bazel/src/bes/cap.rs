@@ -169,11 +169,13 @@ fn describe_action(event: &BuildEvent) -> String {
     }
 }
 
-/// `bytes` in MiB, or in KiB under 1 MiB, so a small configured limit does
-/// not read as `0.1 MiB`.
+/// `bytes` in MiB, or in KiB when that rounds to under 1 MiB, so a small
+/// configured limit does not read as `0.1 MiB` and a size just under 1 MiB
+/// does not read as `1024.0 KiB`.
 fn size(bytes: usize) -> String {
-    if bytes < 1 << 20 {
-        format!("{:.1} KiB", bytes as f64 / (1 << 10) as f64)
+    let kib = format!("{:.1}", bytes as f64 / (1 << 10) as f64);
+    if bytes < 1 << 20 && kib != "1024.0" {
+        format!("{kib} KiB")
     } else {
         format!("{:.1} MiB", bytes as f64 / (1 << 20) as f64)
     }
@@ -438,5 +440,14 @@ mod tests {
             "{}",
             capped.warning()
         );
+    }
+
+    #[test]
+    fn sizes_read_in_one_unit_across_the_mib_boundary() {
+        assert_eq!(size(60 << 10), "60.0 KiB");
+        assert_eq!(size((1 << 20) - 52), "1023.9 KiB");
+        assert_eq!(size((1 << 20) - 1), "1.0 MiB");
+        assert_eq!(size(1 << 20), "1.0 MiB");
+        assert_eq!(size(MAX_EVENT_BYTES), "4.0 MiB");
     }
 }
