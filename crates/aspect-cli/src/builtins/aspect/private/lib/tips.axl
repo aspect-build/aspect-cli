@@ -1342,6 +1342,11 @@ def _tips_impl(ctx):
             # Not printed, or hidden when it was and since made visible.
             unprinted = [t for t in tips_for if printed[id].get(t.get("key", "")) == None and _visible(task_ctx, t)]
             occurrences, lost = dropped.get(id, 0), dropped_tips.get(id, 0)
+
+            # What was never emitted counts only for an id something of
+            # which its template shows.
+            if not [t for t in tips_for if _visible(task_ctx, t)]:
+                occurrences, lost = 0, 0
             if show == TIP_SHOW_EACH:
                 # Occurrences: a dropped group's matches are among `dropped`
                 # when the rule reported them, so its tips count only when
@@ -1349,17 +1354,17 @@ def _tips_impl(ctx):
                 # is still on the terminal.
                 held = more[id] + occurrences + (0 if occurrences else lost)
                 key = held_last[id].get("key", "") if id in held_last else None
-                now = [t for t in tips_for if t.get("key", "") == key]
+                now = [t for t in tips_for if t.get("key", "") == key and _visible(task_ctx, t)]
                 latest = now[0] if now else None
             else:
                 held = len(unprinted) + lost
                 latest = unprinted[-1] if unprinted else None
             if held:
-                line = terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))
+                line = terminal_more_line(id, (latest or last[id])["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))
                 if line:
                     _print([line])
             elif show == TIP_SHOW_FIRST:
-                now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])]]
+                now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])] and _visible(task_ctx, t)]
                 if now:
                     line = terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on, _console(task_ctx))
                     if line:
