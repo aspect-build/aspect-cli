@@ -101,9 +101,10 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     /// `max_lines`. `text` is cleaned first (escapes removed, a line redrawn
     /// in place only as last drawn, a run of the same line once).
     ///
-    /// Returns `{"lines": [...], "cut_head": bool, "cut_tail": bool}`: the
-    /// lines, with `… N more lines` where lines between two spans are left
-    /// out, and whether lines before the first or after the last are.
+    /// Returns `{"lines": [...], "cut_head": bool, "cut_tail": bool,
+    /// "cut_between": bool}`: at most `max_lines` lines of the output, plus a
+    /// `… N more lines` line where lines between two spans are left out; and
+    /// whether lines before the first, after the last, or between are.
     fn excerpt<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] text: &str,
@@ -139,10 +140,12 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
         }
         let cut_head = spans.first().is_some_and(|s| s.start > 0);
         let cut_tail = spans.last().is_some_and(|s| s.end < lines.len());
+        let cut_between = spans.len() > 1;
         Ok(heap.alloc(starlark::values::dict::AllocDict([
             ("lines", heap.alloc(starlark::values::list::AllocList(out))),
             ("cut_head", heap.alloc(cut_head)),
             ("cut_tail", heap.alloc(cut_tail)),
+            ("cut_between", heap.alloc(cut_between)),
         ])))
     }
 }

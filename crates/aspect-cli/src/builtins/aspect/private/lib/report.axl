@@ -141,9 +141,9 @@ def build_report(data, status, command = "", targets = None, aspect_url = "", ta
             "server_pid": bz.get("server_pid", ""),
         },
 
-        # Uncapped where the surfaces cap. `failed_actions[].stderr_path` and
-        # `test_details[].log_path` / `.xml_path` are collected today and reach
-        # no template — for an agent on the runner they are the highest-value
+        # Uncapped where the surfaces cap. `failed_actions[].stdout_path` /
+        # `.stderr_path` and `test_details[].log_path` / `.xml_path` reach no
+        # template; for an agent on the runner they are the highest-value
         # fields in the file.
         "failures": {
             "failed_actions": failed_actions,

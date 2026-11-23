@@ -30,7 +30,8 @@ unit-testable without a filesystem; the wrappers read the path and degrade to
 """
 
 SnippetOptions = record(
-    # Max lines kept in the emitted snippet body.
+    # Max lines of the output kept in the snippet body, which also carries a
+    # `… N more lines` line where lines between two kept runs are left out.
     max_lines = field(int, default = 20),
     # Hard cap on bytes/chars read from disk; a larger file is sliced to this
     # prefix and flagged truncated.
@@ -49,10 +50,10 @@ SnippetSource = enum("xml", "log", "none")
 SnippetResult = record(
     # Cleaned snippet body, newline-joined, no code fence. "" when source=none.
     text = field(str, default = ""),
-    # True when lines were elided (windowed/over max_lines) or the read hit the
-    # byte cap. `truncated` is the OR of the two below (back-compat); `trunc_head`
-    # / `trunc_tail` say which end was cut, so the renderer places a `…` marker
-    # only on the side that lost content.
+    # True when any lines were left out (at either end, or between two kept
+    # runs) or the read hit the byte cap. `trunc_head` / `trunc_tail` say which
+    # end was cut, so the renderer places a `…` marker only on the side that
+    # lost content; a gap between runs is shown inline as `… N more lines`.
     truncated = field(bool, default = False),
     trunc_head = field(bool, default = False),
     trunc_tail = field(bool, default = False),
@@ -90,7 +91,7 @@ def code_fence_for(text):
 
 def _excerpt(std, text, options):
     """`text`'s lines as `std.excerpt` picks them, as `(lines, trunc_head,
-    trunc_tail)`."""
+    trunc_tail, cut_between)`."""
     picked = std.excerpt(
         text,
         max_lines = options.max_lines,
@@ -98,14 +99,14 @@ def _excerpt(std, text, options):
         after = options.context_after,
         tail = options.tail,
     )
-    return (picked["lines"], picked["cut_head"], picked["cut_tail"])
+    return (picked["lines"], picked["cut_head"], picked["cut_tail"], picked["cut_between"])
 
 def extract_snippet_from_text(std, text, hit_cap, options):
     """Turn raw log `text` into a SnippetResult of the lines `std.excerpt`
     picks. `hit_cap` is True when `text` was already byte-capped upstream."""
     if not text:
         return _EMPTY
-    window, trunc_head, trunc_tail = _excerpt(std, text, options)
+    window, trunc_head, trunc_tail, cut_between = _excerpt(std, text, options)
     if not window:
         return _EMPTY
 
@@ -113,7 +114,7 @@ def extract_snippet_from_text(std, text, hit_cap, options):
     trunc_tail = trunc_tail or hit_cap
     return SnippetResult(
         text = "\n".join(window),
-        truncated = trunc_head or trunc_tail,
+        truncated = trunc_head or trunc_tail or cut_between,
         trunc_head = trunc_head,
         trunc_tail = trunc_tail,
         source = SnippetSource("log"),
@@ -270,12 +271,12 @@ def extract_junit_failure_from_text(std, xml, options):
     if not parts:
         return _EMPTY
 
-    window, trunc_head, trunc_tail = _excerpt(std, "\n".join(parts), options)
+    window, trunc_head, trunc_tail, cut_between = _excerpt(std, "\n".join(parts), options)
     if not window:
         return _EMPTY
     return SnippetResult(
         text = "\n".join(window),
-        truncated = trunc_head or trunc_tail,
+        truncated = trunc_head or trunc_tail or cut_between,
         trunc_head = trunc_head,
         trunc_tail = trunc_tail,
         source = SnippetSource("xml"),
@@ -304,6 +305,17 @@ def extract_snippet(std, path, options = None):
     opts = options or SnippetOptions()
     text, hit_cap = _read_bounded(std, path, opts.max_read_bytes)
     return extract_snippet_from_text(std, text, hit_cap, opts)
+
+def extract_action_snippet(std, stdout_path, stderr_path, options = None):
+    """I/O wrapper for a failed action: its stdout then its stderr (as Bazel's
+    console prints them), each read bounded, windowed together. Some tools
+    write their errors to stdout (tsc), leaving stderr a wrapper's line. `none`
+    when neither is readable."""
+    opts = options or SnippetOptions()
+    out, out_cap = _read_bounded(std, stdout_path, opts.max_read_bytes)
+    err, err_cap = _read_bounded(std, stderr_path, opts.max_read_bytes)
+    text = "\n".join([t.rstrip("\n") for t in [out, err] if t])
+    return extract_snippet_from_text(std, text, out_cap or err_cap, opts)
 
 def extract_junit_failure(std, xml_path, options = None):
     """I/O wrapper: read a JUnit `test.xml` (bounded) and emit its first failure.

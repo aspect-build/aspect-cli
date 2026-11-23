@@ -4,7 +4,7 @@ Run with:
   aspect dev test-log-snippet
 """
 
-load("./log_snippet.axl", "SnippetOptions", "extract_junit_failure_from_text", "extract_snippet_from_text")
+load("./log_snippet.axl", "SnippetOptions", "extract_action_snippet", "extract_junit_failure_from_text", "extract_snippet_from_text")
 
 def _eq(label, got, want):
     if got != want:
@@ -69,7 +69,7 @@ def _test_the_first_error_and_the_end_are_kept(ctx):
         "  note: context 29",
         "ERROR: remote action failed",
     ])
-    _eq("ends", (r.trunc_head, r.trunc_tail), (False, False))
+    _eq("ends kept, the middle cut", (r.trunc_head, r.trunc_tail, r.truncated), (False, False, True))
 
 def _test_bazels_sandbox_hint_is_not_the_error(ctx):
     """Bazel's `--sandbox_debug` hint reads as an error but says only how to
@@ -84,7 +84,21 @@ def _test_bazels_sandbox_hint_is_not_the_error(ctx):
     _eq("anchor", r.text.split("\n")[:2], ["panic: the real one", "ok after 0"])
     _eq("cut head", r.trunc_head, True)
 
+def _test_an_actions_stdout_comes_before_its_stderr(ctx):
+    """A tool that writes its errors to stdout (tsc) leaves stderr a wrapper's
+    line; the snippet reads both, stdout first, as Bazel's console does."""
+    d = ctx.std.env.temp_dir() + "/log_snippet_action_test"
+    ctx.std.fs.create_dir_all(d)
+    ctx.std.fs.write(d + "/stdout", "src/a.ts(3,4): error TS2322: Type 'x' is not assignable\n")
+    ctx.std.fs.write(d + "/stderr", "Target //:a failed to build\n")
+    r = extract_action_snippet(ctx.std, d + "/stdout", d + "/stderr", SnippetOptions())
+    _eq("both, stdout first", r.text, "src/a.ts(3,4): error TS2322: Type 'x' is not assignable\nTarget //:a failed to build")
+    r = extract_action_snippet(ctx.std, "", d + "/stderr", SnippetOptions())
+    _eq("stderr alone", r.text, "Target //:a failed to build")
+    _eq("neither", extract_action_snippet(ctx.std, "", d + "/missing", SnippetOptions()).source.value, "none")
+
 _UNIT_TESTS = [
+    _test_an_actions_stdout_comes_before_its_stderr,
     _test_the_first_error_and_the_end_are_kept,
     _test_bazels_sandbox_hint_is_not_the_error,
     _test_go_junit_char_refs_decode,
