@@ -16,7 +16,8 @@
 //! inside it, and the destination is flushed once per read rather than per
 //! record (the kernel already batches what one read returns). The exception
 //! is a `\r\n` a read splits: the `\r` goes out with its record, and the
-//! `\n` with the next read.
+//! `\n` with the next read; but a record with no text waits, with its `\r`,
+//! for the next read, which says whether it is a blank line.
 //!
 //! A record a stage hides still forwards its escape sequences
 //! ([`super::ansi::controls`]): where curses is shown they are curses moving
@@ -318,10 +319,11 @@ const AFTER_POLL: Duration = Duration::from_millis(1);
 /// one: a PTY writes every newline that way, and the record goes out with
 /// both in one write. When a read ends between the two, the `\r` is forwarded
 /// with its record straight away, since a bare one is how curses redraws, and
-/// the `\n` arriving next is forwarded only if that record was; but a `\r`
-/// with nothing before it waits for the next read, which says whether it is
-/// half of a blank line or a bare one: a stage tells the two apart
-/// ([`Line::returns`]), and there is nothing to show meanwhile. A hidden
+/// the `\n` arriving next is forwarded only if that record was; but a record
+/// with no text (nothing, an escape, spaces) waits with its `\r` for the
+/// next read, which says whether it is a blank line or a bare `\r`: a stage
+/// tells the two apart ([`Line::returns`]), and there is nothing to show
+/// meanwhile. A hidden
 /// record forwards neither, only its escape sequences.
 struct Splitter {
     carry: Vec<u8>,
@@ -330,7 +332,8 @@ struct Splitter {
     out: Destination,
     /// Set after a record ending in `\r`: whether that record was dropped.
     after_cr: Option<bool>,
-    /// The carry is a `\r` with nothing before it, held for the next read.
+    /// The carry is a record with no text and its `\r`, held for the next
+    /// read.
     held_cr: bool,
     /// Rendering curses output to plain lines ([`Screen`]) ahead of the
     /// stages, which then run on the rows it settles.
@@ -361,8 +364,8 @@ impl Splitter {
     /// incomplete one (up to [`MAX_CARRY_BYTES`]), then flush.
     fn feed(&mut self, bytes: &[u8]) {
         let mut carry = std::mem::take(&mut self.carry);
-        // The carry holds no boundary but a held `\r`, so only it and the new
-        // bytes need scanning.
+        // The carry holds no boundary but a held record's `\r`, so only it and
+        // the new bytes need scanning.
         let scanned = if std::mem::take(&mut self.held_cr) {
             0
         } else {
@@ -387,7 +390,10 @@ impl Splitter {
                 self.after_cr = None;
                 i += 1;
                 start = i + 1;
-            } else if b == b'\r' && start == i && i + 1 == carry.len() {
+            } else if b == b'\r'
+                && i + 1 == carry.len()
+                && super::line::message_of(&carry[start..i]).trim().is_empty()
+            {
                 self.held_cr = true;
                 break;
             } else if b == b'\n' || b == b'\r' {
@@ -435,8 +441,8 @@ impl Splitter {
     /// Forward the incomplete record, with no boundary.
     fn flush_carry(&mut self) {
         if std::mem::take(&mut self.held_cr) {
-            self.carry.clear();
-            self.emit(b"", b"\r");
+            let record = std::mem::take(&mut self.carry);
+            self.emit(&record[..record.len() - 1], b"\r");
         } else if !self.carry.is_empty() {
             let record = std::mem::take(&mut self.carry);
             self.emit(&record, b"");
@@ -989,6 +995,21 @@ mod tests {
             String::from_utf8_lossy(&out),
             "wait\r\n(last line repeated 2 more times)\n\r\nwait\r\n"
         );
+    }
+
+    /// So does one whose line has only an escape or spaces on it.
+    #[test]
+    fn a_blank_lines_half_with_an_escape_waits_too() {
+        for blank in ["\x1b[0m", "\x1b[K", "  "] {
+            let repeats = super::super::processors::CollapseRepeats::default().under_pty(true);
+            let first = format!("wait\r\nwait\r\nwait\r\n{blank}\r");
+            let out = run_chunks(&[first.as_bytes(), b"\nwait\r\n"], vec![Box::new(repeats)]);
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                format!("wait\r\n(last line repeated 2 more times)\n{blank}\r\nwait\r\n"),
+                "{blank:?}"
+            );
+        }
     }
 
     #[test]
