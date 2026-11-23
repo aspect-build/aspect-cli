@@ -1,4 +1,3 @@
-load("@aspect//bazel/build_events.axl", "refuse_below", "refuse_non_duration")
 load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load(
@@ -19,7 +18,6 @@ load(
     "info",
     "print_environment_info",
     "sanitize_filename",
-    "warn",
 )
 load("../private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
 load("../private/lib/sandbox_recovery.axl", "sandbox_recovery")
@@ -106,61 +104,15 @@ def _workflows_impl(ctx: FeatureContext):
         if environment.build_events and environment.build_events.backend:
             bazel_trait.bes_runner_backends.append(environment.build_events.backend)
 
-    _apply_deprecated_bes_args(ctx, bazel_trait)
-
     if environment.ci and environment.ci.host == "github":
         # Prevent github actions from reaping the JVM server at the end of a job.
         ctx.std.env.set_var("RUNNER_TRACKING_ID", "")
-
-def _deprecated(ctx, arg: str, option: str):
-    warn(ctx.std, "--workflows:%s is deprecated; use --build-events:%s." % (arg, option))
-
-def _apply_deprecated_bes_args(ctx, bazel_trait):
-    """Write each `bes_*` arg that is set to the BazelTrait field its BuildEvents
-    option sets, with a warning naming that option. Like those options, they
-    apply to every backend the CLI streams to, are refused as they are before
-    the task runs, and are overwritten by the BuildEvents feature, registered
-    after this one, when it is also given them. A count of -1 or a buffer
-    budget of 0 or less reads as unset."""
-    if ctx.args.bes_max_retries != -1:
-        _deprecated(ctx, "bes-max-retries", "max-retries")
-        refuse_below("--workflows:bes-max-retries", ctx.args.bes_max_retries, 0)
-        bazel_trait.bes_max_retries = ctx.args.bes_max_retries
-    if ctx.args.bes_retry_min_delay:
-        _deprecated(ctx, "bes-retry-min-delay", "retry-min-delay")
-        refuse_non_duration("--workflows:bes-retry-min-delay", ctx.args.bes_retry_min_delay, "retry_min_delay")
-        bazel_trait.bes_retry_min_delay = ctx.args.bes_retry_min_delay
-    if ctx.args.bes_retry_max_buffer_bytes > 0:
-        _deprecated(ctx, "bes-retry-max-buffer-bytes", "retry-max-buffer-bytes")
-        bazel_trait.bes_retry_max_buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
-    if ctx.args.bes_timeout:
-        _deprecated(ctx, "bes-timeout", "timeout")
-        refuse_non_duration("--workflows:bes-timeout", ctx.args.bes_timeout, "timeout")
-        bazel_trait.bes_timeout = ctx.args.bes_timeout
 
 Workflows = feature(
     display_name = "Aspect Workflows",
     summary = "CI-aware Bazel configuration for Aspect Workflows runners.",
     implementation = _workflows_impl,
     args = {
-        # Deprecated: the BuildEvents feature's options, which they set when
-        # given (see `_apply_deprecated_bes_args`).
-        "bes_max_retries": args.int(
-            default = -1,
-            description = "Deprecated: use --build-events:max-retries.",
-        ),
-        "bes_retry_min_delay": args.string(
-            default = "",
-            description = "Deprecated: use --build-events:retry-min-delay.",
-        ),
-        "bes_retry_max_buffer_bytes": args.int(
-            default = 0,
-            description = "Deprecated: use --build-events:retry-max-buffer-bytes.",
-        ),
-        "bes_timeout": args.string(
-            default = "",
-            description = "Deprecated: use --build-events:timeout.",
-        ),
         "remote_exec": args.boolean(
             default = False,
             description = "Run actions on the remote executor the runner environment names " +

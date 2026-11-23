@@ -14,16 +14,12 @@ the build. That command line is cut from the end to fit; any other event over
 the limit is passed on unchanged. Either way the CLI warns.
 
 Each option is written to `BazelTrait` only when it differs from its default,
-so a value `config.axl` put on the trait directly is kept otherwise, and so is
-a deprecated `--workflows:bes-*` spelling's: the feature runs after Workflows,
-so an option set here to other than its default outranks that spelling, and
-one set to its default does not.
+so a value `config.axl` put on the trait directly is kept otherwise.
 
 A negative count, a malformed duration or a `max_event_bytes` under 64 KiB is
 refused, without a traceback, before the task runs.
 """
 
-load("@aspect//bazel/build_events.axl", "refuse_below", "refuse_non_duration")
 load("@aspect//bazel.axl", "BazelTrait")
 
 _MAX_RETRIES = 4
@@ -32,12 +28,30 @@ _TIMEOUT = "0s"
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
 _MIN_MAX_EVENT_BYTES = 64 * 1024
 
+_UsageError = error.type(traceback = False)
+
+def _refuse_below(flag: str, value: int, least: int, note: str = ""):
+    """Fail the task, without a traceback, when `flag`'s `value` is under `least`."""
+    if value < least:
+        fail(_UsageError("%s must be at least %d%s, got %d" % (flag, least, note, value)))
+
+def _refuse_non_duration(flag: str, value: str, kwarg: str):
+    """Fail the task, without a traceback, when `flag`'s `value` is not a
+    duration `bazel.build_events.grpc` takes as `kwarg`, so a bad option is
+    refused before the task runs rather than when a sink is first built from
+    it. The sink is never bound, so nothing is dialed; a buffer budget is given
+    so `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` is not read, and warned about,
+    in a task that streams nowhere."""
+    err, _ = catch(lambda: bazel.build_events.grpc(uri = "grpc://localhost", retry_max_buffer_bytes = 1, **{kwarg: value}))
+    if err != None:
+        fail(_UsageError("%s must be a duration such as '500ms', '2s' or '1m', got '%s'" % (flag, value)))
+
 def _build_events_impl(ctx: FeatureContext):
-    refuse_below("--build-events:max-retries", ctx.args.max_retries, 0)
-    refuse_below("--build-events:retry-max-buffer-bytes", ctx.args.retry_max_buffer_bytes, 0)
-    refuse_below("--build-events:max-event-bytes", ctx.args.max_event_bytes, _MIN_MAX_EVENT_BYTES, " (64 KiB)")
-    refuse_non_duration("--build-events:retry-min-delay", ctx.args.retry_min_delay, "retry_min_delay")
-    refuse_non_duration("--build-events:timeout", ctx.args.timeout, "timeout")
+    _refuse_below("--build-events:max-retries", ctx.args.max_retries, 0)
+    _refuse_below("--build-events:retry-max-buffer-bytes", ctx.args.retry_max_buffer_bytes, 0)
+    _refuse_below("--build-events:max-event-bytes", ctx.args.max_event_bytes, _MIN_MAX_EVENT_BYTES, " (64 KiB)")
+    _refuse_non_duration("--build-events:retry-min-delay", ctx.args.retry_min_delay, "retry_min_delay")
+    _refuse_non_duration("--build-events:timeout", ctx.args.timeout, "timeout")
     t = ctx.traits[BazelTrait]
     if ctx.args.max_retries != _MAX_RETRIES:
         t.bes_max_retries = ctx.args.max_retries

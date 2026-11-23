@@ -37,6 +37,7 @@ use_task("runner_health_check.axl", "runner_health_check")
 
 use_feature("feature/artifacts.axl", "ArtifactUpload")
 use_feature("feature/bazel_flags.axl", "BazelFlags")
+use_feature("feature/build_events.axl", "BuildEvents")
 use_feature("feature/circleci_test_results.axl", "CircleCITestResults")
 use_feature("feature/console.axl", "Console")
 use_feature("feature/deployment.axl", "Deployment")
@@ -50,8 +51,6 @@ use_feature("feature/history.axl", "History")
 use_feature("feature/telemetry.axl", "Telemetry")
 use_feature("feature/workflows.axl", "Workflows")
 
-# After Workflows, so its options outrank the deprecated --workflows:bes-* ones.
-use_feature("feature/build_events.axl", "BuildEvents")
 
 use_feature("feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 use_feature("feature/tips.axl", "Tips")
