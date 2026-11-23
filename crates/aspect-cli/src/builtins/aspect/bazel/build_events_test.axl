@@ -186,6 +186,17 @@ def _test_dropped_bes_backends(_):
         ["grpcs://bes.runner"],
     )
 
+    _eq(
+        "named in several spellings, reported once under the first",
+        dropped_bes_backends(
+            _fake_ctx(bes_backends = [duplicate + ":443"]),
+            _fake_trait([struct(uri = duplicate)], backends = ["GRPCS://BES.ACME.ASPECT.BUILD"], runner_backends = [duplicate + "/"]),
+            rc,
+            "build",
+        ),
+        [duplicate + ":443"],
+    )
+
     _eq("bazel uploads elsewhere → nothing dropped", dropped_bes_backends(ctx, trait, _fake_rc({"--bes_backend": "grpcs://bes.third"}), "build"), [])
     _eq("bazel not uploading → nothing dropped", dropped_bes_backends(ctx, trait, _fake_rc({}), "build"), [])
 
@@ -234,6 +245,19 @@ def _test_collect_drops_duplicate_backends(_):
     _eq("different port kept", uris(duplicate + ":8980"), [duplicate, other])
     _eq("no bazel backend is a no-op", uris(""), [duplicate, other])
     _eq("no backends", uris(duplicate, backends = []), [])
+
+def _test_backends_dedup_by_endpoint(_):
+    """Backends naming one endpoint stream once, under the first spelling:
+    case, a default port written out, a trailing slash or a path do not make
+    another endpoint, while another port or a scheme with another default port
+    does."""
+    h = "grpcs://bes.example.com"
+    uris = lambda backends: [s.uri for s in collect_bes_from_args(_fake_ctx(bes_backends = backends))]
+    _eq("spellings of one endpoint", uris([h, h + ":443", "GRPCS://BES.example.com", h + "/", h + "/x"]), [h])
+    _eq("first spelling kept", uris([h + ":443", h]), [h + ":443"])
+    _eq("another port", uris([h, h + ":8980"]), [h, h + ":8980"])
+    _eq("grpc's default port is not grpcs'", uris([h, "grpc://bes.example.com"]), [h, "grpc://bes.example.com"])
+    _eq("empties skipped", uris(["", h, ""]), [h])
 
 def _fails(f):
     """Whether calling `f` fails."""
@@ -506,6 +530,7 @@ _UNIT_TESTS = [
     _test_bazel_bes_backend,
     _test_collect_drops_duplicate_backends,
     _test_collect_bes_sinks,
+    _test_backends_dedup_by_endpoint,
     _test_runner_backends_stream_after_the_tasks_own,
     _test_grpc_sinks_take_the_traits_options,
     _test_trait_backends_are_collected,

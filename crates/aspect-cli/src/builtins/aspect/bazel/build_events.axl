@@ -124,7 +124,7 @@ def _distinct_endpoints(uris: list, exclude: list = []) -> list:
     `grpcs://h` and `grpcs://h:443` stream once, under the first spelling."""
     kept = []
     for uri in uris:
-        if uri and not [u for u in list(exclude) + kept if same_bes_endpoint(uri, u)]:
+        if uri and not any([same_bes_endpoint(uri, u) for u in list(exclude) + kept]):
             kept.append(uri)
     return kept
 
@@ -153,9 +153,11 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     splices them into `build_events`: those built from `--bes-backend` /
     `--bes-header`, the backends features injected on `BazelTrait.bes_backends`
     (the deployment `--remote` wired) and `extra_backends`, then one for each of
-    `BazelTrait.bes_runner_backends` (a Workflows runner's env-injected
-    backend) whose endpoint is not already named one of those ways, then the ones features
-    already pushed onto `BazelTrait.build_event_sinks` (a `--bep-file` dump).
+    `BazelTrait.bes_runner_backends` (a Workflows runner's env-injected backend)
+    whose endpoint is not already named one of those ways, then the ones
+    features already pushed onto `BazelTrait.build_event_sinks` (a `--bep-file`
+    dump). The backends named those first three ways stream each endpoint once,
+    under the first spelling it was named by; a prebuilt sink is kept as it is.
     Every gRPC sink built here takes the trait's retry, buffer and timeout
     options (`grpc_sink`).
 
@@ -213,8 +215,9 @@ def bes_link_data(bazel_trait, rc, sinks: list, command: str = "build") -> dict:
     }
 
 def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list[str]:
-    """The BES endpoints `collect_bes_sinks` skipped because Bazel uploads to them
-    itself, deduped. Same inputs as that call.
+    """The backend `collect_bes_sinks` skipped because Bazel uploads there
+    itself, under the first spelling it was named by: every candidate names
+    Bazel's one endpoint, so the list holds at most one. Same inputs as that call.
 
     Separate so the "Not streaming …" notice lands with the spawn it describes rather
     than during collection, which happens while the setup phase is still on screen."""
@@ -224,11 +227,7 @@ def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_bac
 
     candidates = (list(ctx.args.bes_backends) + _backends_to_stream(bazel_trait, extra_backends) +
                   list(bazel_trait.bes_runner_backends) + [s.uri for s in bazel_trait.build_event_sinks])
-    dropped = []
-    for uri in candidates:
-        if uri and same_bes_endpoint(uri, bazel_backend) and uri not in dropped:
-            dropped.append(uri)
-    return dropped
+    return _distinct_endpoints([uri for uri in candidates if uri and same_bes_endpoint(uri, bazel_backend)])
 
 def announce_dropped_bes_sinks(ctx, dropped: list[str], rc, command: str = "build"):
     """Announce, one line per endpoint, that the CLI is *not* streaming there because
