@@ -12,6 +12,11 @@
 # parallel jobs without keeping a list of which suite runs where. Every suite
 # lands in exactly one shard. Omit it to run them all.
 #
+# A handful of suites take minutes where the rest take seconds. They are moved
+# to the front of the list, slowest first, so the round-robin deals them to
+# different shards; otherwise they can all land in one shard and decide CI's
+# wall time. A name here that no longer exists is skipped.
+#
 # Run: ./tools/run-axl-suites.sh [path-to-aspect] [SHARD/TOTAL]
 set -euo pipefail
 
@@ -34,6 +39,20 @@ trap 'rm -f "$SUITES"' EXIT
 "$ASPECT" dev --help |
     sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' |
     awk '/^Tasks:/ { in_tasks = 1; next } in_tasks && /^  test-/ { print $1 }' >"$SUITES"
+
+SLOW_SUITES=(
+    test-cache-selection
+    test-github-features
+    test-gitlab-features
+    test-worktree
+)
+{
+    for slow in "${SLOW_SUITES[@]}"; do
+        grep -Fx -- "$slow" "$SUITES" || true
+    done
+    grep -Fxv -f <(printf '%s\n' "${SLOW_SUITES[@]}") "$SUITES" || true
+} >"$SUITES.ordered"
+mv "$SUITES.ordered" "$SUITES"
 
 count="$(wc -l <"$SUITES" | tr -d ' ')"
 if [[ "$count" -eq 0 ]]; then
