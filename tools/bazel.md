@@ -63,7 +63,7 @@ The wrapper's presence means the org wants devs on aspect, so if a command would
 curl -fsSL https://install.aspect.build | bash
 ```
 
-…or see <https://aspect.build/docs/cli/install>. If the verb is also a real Bazel command (`build`/`test`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
+…or see <https://aspect.build/go/install>. If the verb is also a real Bazel command (`build`/`test`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
 
 ## How flags are handled
 

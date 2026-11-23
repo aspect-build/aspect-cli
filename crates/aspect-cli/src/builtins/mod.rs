@@ -429,6 +429,8 @@ mod tests {
     /// Printed text links to the docsite only through `aspect.build/go/<slug>`
     /// permalinks (`private/lib/links.axl`), which follow a page when it moves.
     /// A module docstring is never printed, so it may link a page directly.
+    /// Covers the embedded AXL builtins only; the Rust sources keep their links
+    /// in `axl_runtime::links`.
     #[test]
     fn printed_docs_links_use_go_permalinks() {
         use include_dir::{Dir, include_dir};
@@ -444,7 +446,7 @@ mod tests {
                 .and_then(|rest| rest.find("\"\"\""))
                 .map_or(0, |end| contents[..end + 6].lines().count());
             for (n, line) in contents.lines().enumerate().skip(docstring_lines) {
-                if line.contains("aspect.build/docs/") {
+                if line.contains("aspect.build/docs") {
                     violations.push(format!("{}:{}: {}", f.path().display(), n + 1, line.trim()));
                 }
             }
