@@ -284,7 +284,8 @@ impl RelativizePaths {
     }
 
     /// This stage writing each path it makes relative as an OSC 8 link to
-    /// the file it names, for a terminal, whether or not that exists: the
+    /// the file it names as `link`'s format says (plain under `none`), for a
+    /// terminal, whether or not that exists: the
     /// shown text alone no longer tells which file (`BUILD.bazel` from a
     /// package directory is that package's).
     pub fn linking(mut self, link: Option<LinkTo>) -> Self {
@@ -513,10 +514,9 @@ impl RelativizePaths {
             // not linked, as shown.
             let file = std::path::Path::new(std::ffi::OsStr::from_bytes(&out[i + 1..mid]));
             let shown = &out[mid + 1..close];
-            match link
-                .files
-                .url(file, super::links::position(&out[close + 1..]))
-            {
+            // The line after it, though colour sets it apart.
+            let after = ansi::strip(&out[close + 1..]);
+            match link.files.url(file, super::links::position(&after)) {
                 Some(url) => linked.extend(super::links::osc8(&url, shown)),
                 None => linked.extend_from_slice(shown),
             }

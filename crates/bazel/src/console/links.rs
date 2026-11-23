@@ -3,8 +3,8 @@
 //! its width.
 //!
 //! [`Linker::link`] links each `http://` or `https://` URL to itself, and
-//! each path to a file or directory that exists to it as a `file://` URL: an
-//! absolute path as written, a relative one (`src/a.cc:3:4`, `BUILD.bazel`)
+//! each path to a file or directory that exists to it as its [`LinkFormat`]
+//! says (plain under `none`): an absolute path as written, a relative one (`src/a.cc:3:4`, `BUILD.bazel`)
 //! from the first of the linker's directories it exists under. For Bazel's
 //! console those are the workspace the build runs in, which Bazel's own
 //! paths are relative to, then the directory the task runs from. A path
@@ -80,6 +80,7 @@ impl LinkFormat {
             "vscode-insiders://file{path}:{line}:{column}",
         ),
         ("cursor", "cursor://file{path}:{line}:{column}"),
+        ("vscodium", "vscodium://file{path}:{line}:{column}"),
         (
             "macvim",
             "mvim://open?url=file://{path}&line={line}&column={column}",
@@ -99,42 +100,56 @@ impl LinkFormat {
         if let Some((_, template)) = Self::ALIASES.iter().find(|(name, _)| *name == value) {
             return Ok(LinkFormat::Template(template.to_string()));
         }
-        if value.contains("{path}") {
+        if value.contains("{path}") && value.contains("://") {
             return Ok(LinkFormat::Template(value.to_string()));
         }
         let names: Vec<&str> = std::iter::once("none")
             .chain(Self::ALIASES.iter().map(|(name, _)| *name))
             .collect();
         Err(format!(
-            "{value:?} is not a hyperlink format: expected auto, {}, or a template naming {{path}}",
+            "{value:?} is not a hyperlink format: expected auto, {}, or a URL template naming {{path}}",
             names.join(", ")
         ))
     }
 
     /// The format for a terminal that says nothing of its own: the editor's
-    /// whose integrated terminal this is, VS Code's or a fork's, as each
-    /// sets `TERM_PROGRAM=vscode` and names its own app in the paths it
-    /// gives the shell; files unlinked anywhere else, since a `file://`
+    /// whose integrated terminal this is, told by the app its terminal
+    /// names in the paths it gives the shell, as VS Code and each of its
+    /// forks set `TERM_PROGRAM=vscode` (Cursor, VSCodium, VS Code
+    /// Insiders, or VS Code itself); files unlinked anywhere else, in an
+    /// editor not known, and on a remote machine (SSH, a dev container,
+    /// Codespaces), whose paths a local editor cannot open. A `file://`
     /// link opens whatever the system picks, at no line.
     pub fn auto(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> LinkFormat {
-        let is =
+        let has =
             |name: &str, want: &str| var(name).is_some_and(|v| v.to_string_lossy().contains(want));
-        let cursor = is("TERM_PROGRAM", "Cursor")
-            || var("CURSOR_TRACE_ID").is_some()
-            || is("VSCODE_GIT_ASKPASS_NODE", "Cursor")
-            || is("VSCODE_IPC_HOOK_CLI", "Cursor");
-        if cursor {
-            return Self::parse("cursor").expect("an alias");
+        let alias = |name: &str| Self::parse(name).expect("an alias");
+        if ["SSH_CONNECTION", "REMOTE_CONTAINERS", "CODESPACES"]
+            .iter()
+            .any(|v| var(v).is_some())
+        {
+            return LinkFormat::None;
         }
-        if is("TERM_PROGRAM", "vscode") {
-            let insiders =
-                is("TERM_PROGRAM_VERSION", "insider") || is("VSCODE_GIT_ASKPASS_NODE", "Insiders");
-            return Self::parse(if insiders {
-                "vscode-insiders"
-            } else {
-                "vscode"
-            })
-            .expect("an alias");
+        let app =
+            |want: &str| has("VSCODE_GIT_ASKPASS_NODE", want) || has("VSCODE_IPC_HOOK_CLI", want);
+        if has("TERM_PROGRAM", "Cursor") || var("CURSOR_TRACE_ID").is_some() || app("Cursor") {
+            return alias("cursor");
+        }
+        if !has("TERM_PROGRAM", "vscode") {
+            return LinkFormat::None;
+        }
+        if app("VSCodium") {
+            return alias("vscodium");
+        }
+        if app("Insiders") || has("TERM_PROGRAM_VERSION", "insider") {
+            return alias("vscode-insiders");
+        }
+        // VS Code's own helper, or no app named at all (its git extension
+        // off); another fork names an app of its own and gets none.
+        let named =
+            var("VSCODE_GIT_ASKPASS_NODE").is_some() || var("VSCODE_IPC_HOOK_CLI").is_some();
+        if !named || app("Visual Studio Code") || app("Code Helper") || app("/code") {
+            return alias("vscode");
         }
         LinkFormat::None
     }
@@ -161,11 +176,15 @@ impl FileLinks {
     }
 
     /// The URL a link to `path` opens, at `at` (line, column) when the text
-    /// says, or None when files are not linked.
+    /// says, or None when files are not linked, or for a directory in an
+    /// editor, which would open it as a folder.
     pub fn url(&self, path: &Path, at: (Option<u32>, Option<u32>)) -> Option<String> {
         let LinkFormat::Template(template) = &self.format else {
             return None;
         };
+        if !template.starts_with("file://") && path.is_dir() {
+            return None;
+        }
         Some(
             template
                 .replace("{host}", &self.host)
@@ -176,14 +195,21 @@ impl FileLinks {
     }
 }
 
-/// Where in a file the text after its path points: `:12:3`, `:12`,
-/// `(12,3)` or `(12)`.
+/// Where in a file the text after its path, escapes removed, points:
+/// `:12:3`, `:12`, `(12,3)`, `(12, 3)` or `(12)`, a number not running on
+/// into a word (`:12abc`).
 pub fn position(after: &[u8]) -> (Option<u32>, Option<u32>) {
     static AT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^(?::(\d+)(?::(\d+))?|\((\d+)(?:,(\d+))?\))").unwrap());
+        LazyLock::new(|| Regex::new(r"^(?::(\d+)(?::(\d+))?|\((\d+)(?:, ?(\d+))?\))").unwrap());
     let Some(c) = AT.captures(after) else {
         return (None, None);
     };
+    if after
+        .get(c.get(0).unwrap().end())
+        .is_some_and(u8::is_ascii_alphanumeric)
+    {
+        return (None, None);
+    }
     let num = |i: usize| {
         c.get(i)
             .and_then(|m| std::str::from_utf8(m.as_bytes()).ok()?.parse().ok())
@@ -239,6 +265,9 @@ impl Linker {
         {
             return record.to_vec();
         }
+        // The record's text, escapes removed, where a path's line is read
+        // though colour sets it apart (`src/a.ts` `:` `12`).
+        let plain = ansi::strip(record);
         let mut out = Vec::with_capacity(record.len());
         let mut inside = false;
         let mut at = 0;
@@ -253,7 +282,7 @@ impl Linker {
             if inside {
                 out.extend_from_slice(seg);
             } else {
-                out.extend(self.text(seg, at, known));
+                out.extend(self.text(seg, at, known, &plain));
             }
             at += seg.len();
         }
@@ -261,14 +290,14 @@ impl Linker {
     }
 
     /// `text`, at byte `base` among its record's text, linked.
-    fn text(&mut self, text: &[u8], base: usize, known: &[Known]) -> Vec<u8> {
+    fn text(&mut self, text: &[u8], base: usize, known: &[Known], plain: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         let mut urls = URL.find_iter(text).peekable();
         while at < text.len() {
             let next_url = urls.peek().map(|m| m.start());
             let stop = next_url.unwrap_or(text.len());
-            self.paths(&text[at..stop], base + at, known, &mut out);
+            self.paths(&text[at..stop], base + at, known, plain, &mut out);
             at = stop;
             if let Some(m) = urls.next() {
                 let end = m.start() + url_end(m.as_bytes());
@@ -277,7 +306,7 @@ impl Linker {
                     &text[m.start()..end],
                 ));
                 // What was trimmed from the URL's end is text again.
-                self.paths(&text[end..m.end()], base + end, known, &mut out);
+                self.paths(&text[end..m.end()], base + end, known, plain, &mut out);
                 at = m.end();
             }
         }
@@ -286,7 +315,14 @@ impl Linker {
 
     /// `text`, at byte `base` among its record's text and holding no URL,
     /// onto `out` with its paths linked.
-    fn paths(&mut self, text: &[u8], base: usize, known: &[Known], out: &mut Vec<u8>) {
+    fn paths(
+        &mut self,
+        text: &[u8],
+        base: usize,
+        known: &[Known],
+        plain: &[u8],
+        out: &mut Vec<u8>,
+    ) {
         let mut at = 0;
         for m in PATH.find_iter(text) {
             if m.start() < at {
@@ -329,7 +365,8 @@ impl Linker {
                     start += 1;
                 }
             }
-            let Some(url) = file.and_then(|f| self.files.url(&f, position(&text[end..]))) else {
+            let after = plain.get(base + end..).unwrap_or_default();
+            let Some(url) = file.and_then(|f| self.files.url(&f, position(after))) else {
                 continue;
             };
             out.extend_from_slice(&text[at..start]);
@@ -1041,6 +1078,86 @@ mod tests {
             String::from_utf8(l.link(b"src/a.cc:3:4 at https://x.test")).unwrap(),
             "src/a.cc:3:4 at \x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\",
             "URLs linked whatever it says"
+        );
+    }
+
+    #[test]
+    fn auto_names_vs_code_and_forks_it_knows_on_this_machine() {
+        let auto = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            LinkFormat::auto(|k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()))
+        };
+        let code =
+            "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/x";
+        assert_eq!(
+            auto(&[
+                ("TERM_PROGRAM", "vscode"),
+                ("VSCODE_GIT_ASKPASS_NODE", code)
+            ]),
+            LinkFormat::parse("vscode").unwrap()
+        );
+        assert_eq!(
+            auto(&[
+                ("TERM_PROGRAM", "vscode"),
+                (
+                    "VSCODE_GIT_ASKPASS_NODE",
+                    "/Applications/VSCodium.app/Contents/Frameworks/x"
+                )
+            ]),
+            LinkFormat::parse("vscodium").unwrap()
+        );
+        assert_eq!(
+            auto(&[
+                ("TERM_PROGRAM", "vscode"),
+                ("VSCODE_GIT_ASKPASS_NODE", "/Applications/SomeFork.app/x")
+            ]),
+            LinkFormat::None,
+            "a fork not known links no files"
+        );
+        assert_eq!(
+            auto(&[
+                ("TERM_PROGRAM", "vscode"),
+                ("VSCODE_GIT_ASKPASS_NODE", code),
+                ("SSH_CONNECTION", "1 2 3 4")
+            ]),
+            LinkFormat::None,
+            "a remote machine's paths are not this one's"
+        );
+        assert!(
+            LinkFormat::parse("{path}").is_err(),
+            "a template names a scheme"
+        );
+    }
+
+    #[test]
+    fn a_line_is_read_through_colour_and_a_directory_is_no_editor_link() {
+        assert_eq!(position(b"(12, 3): error"), (Some(12), Some(3)));
+        assert_eq!(position(b":12abc"), (None, None));
+        let (_dir, mut l) = linker();
+        l.set_format(LinkFormat::parse("vscode").unwrap());
+        let pretty = String::from_utf8(
+            l.link(b"\x1b[96msrc/a.cc\x1b[0m:\x1b[93m12\x1b[0m:\x1b[93m3\x1b[0m - error"),
+        )
+        .unwrap();
+        assert!(
+            pretty.contains("/src/a.cc:12:3\x1b\\"),
+            "a line in its own colour: {pretty:?}"
+        );
+        assert!(
+            !String::from_utf8(l.link(b"see src/ there"))
+                .unwrap()
+                .contains("\x1b]8"),
+            "no editor link to a directory"
+        );
+        l.set_format(LinkFormat::parse("file").unwrap());
+        assert!(
+            String::from_utf8(l.link(b"see src/ there"))
+                .unwrap()
+                .contains("\x1b]8"),
+            "a file link to one"
         );
     }
 
