@@ -399,7 +399,9 @@ def config(ctx: ConfigContext):
     let stderr = std::fs::read_to_string(&log).unwrap();
     assert!(status.success(), "{stderr}");
     assert!(
-        stderr.contains("TIP[analysis] 💡 suggestion: 3 targets failed analysis\n  //:g0, //:g1, //:g2"),
+        stderr.contains(
+            "TIP[analysis] 💡 suggestion: 3 targets failed analysis\n  //:g0, //:g1, //:g2"
+        ),
         "{stderr}"
     );
     assert_eq!(stderr.matches("TIP[analysis]").count(), 1, "{stderr}");

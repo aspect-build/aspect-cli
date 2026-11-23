@@ -1360,7 +1360,12 @@ def _tips_impl(ctx):
                 held = len(unprinted) + lost
                 latest = unprinted[-1] if unprinted else None
             if held:
-                line = terminal_more_line(id, (latest or last[id])["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))
+                # The severity of what is counted: the tip named, else the
+                # occurrence held as it was emitted, else the id's last
+                # visible tip.
+                visible = [t for t in tips_for if _visible(task_ctx, t)]
+                counted = latest or (held_last.get(id) if show == TIP_SHOW_EACH else None) or (visible[-1] if visible else last[id])
+                line = terminal_more_line(id, counted["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))
                 if line:
                     _print([line])
             elif show == TIP_SHOW_FIRST:
