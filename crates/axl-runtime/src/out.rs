@@ -97,7 +97,9 @@ static LINK_FORMAT: std::sync::RwLock<Option<bazel::console::links::LinkFormat>>
 /// CLI's own lines; `None` for `auto`.
 pub(crate) fn set_link_format(format: Option<bazel::console::links::LinkFormat>) {
     if let Ok(mut slot) = LINK_FORMAT.write() {
-        *slot = format;
+        // `auto` is resolved now: an explicit `auto` is a choice made, not
+        // one left to the environment.
+        *slot = Some(format.unwrap_or_else(|| AUTO_LINK_FORMAT.clone()));
     }
 }
 
@@ -162,7 +164,8 @@ pub(crate) fn linked(line: &str) -> String {
     match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
         Some(mut linker) => {
             linker.set_format(link_format());
-            String::from_utf8(linker.link(line.as_bytes())).unwrap_or_else(|_| line.to_string())
+            String::from_utf8(linker.link_written(line.as_bytes()))
+                .unwrap_or_else(|_| line.to_string())
         }
         None => line.to_string(),
     }
@@ -174,7 +177,7 @@ impl starlark::PrintHandler for TolerantPrintHandler {
             Some(mut linker) => {
                 use std::io::Write as _;
                 linker.set_format(link_format());
-                let mut line = linker.link(text.as_bytes());
+                let mut line = linker.link_written(text.as_bytes());
                 line.push(b'\n');
                 let _ = std::io::stderr().write_all(&line);
             }

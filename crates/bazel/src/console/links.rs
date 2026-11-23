@@ -220,18 +220,30 @@ impl LinkFormat {
 }
 
 /// The file name of the program a `$VISUAL`/`$EDITOR` value starts, read
-/// as a shell would: quotes taken off (`"/Applications/Visual Studio
-/// Code.app/…/bin/code" --wait`), and `env` and `NAME=value` before it
-/// passed over (`env FOO=1 code`).
+/// as a shell would: quotes and backslashes taken off (`"/Applications/Visual
+/// Studio Code.app/…/bin/code" --wait`, `Visual\ Studio\ Code.app`), and
+/// `env` and `NAME=value` before it passed over (`env FOO=1 code`).
 fn editor_command(value: &str) -> Option<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
     let mut quoted = false;
+    let mut escaped = false;
     for c in value.chars() {
+        if escaped {
+            word.push(c);
+            escaped = false;
+            continue;
+        }
         match quote {
             Some(q) if c == q => quote = None,
+            // A backslash keeps the next character, but in single quotes.
+            Some('"') if c == '\\' => escaped = true,
             Some(_) => word.push(c),
+            None if c == '\\' => {
+                escaped = true;
+                quoted = true;
+            }
             None if c == '"' || c == '\'' => {
                 quote = Some(c);
                 quoted = true;
@@ -390,6 +402,17 @@ impl Linker {
     /// Make files' links in `format` from now on.
     pub fn set_format(&mut self, format: LinkFormat) {
         self.files.format = format;
+    }
+
+    /// [`Linker::link`], and where its files say so (Terminal.app), each
+    /// link's URL written beside it ([`written_urls`]).
+    pub fn link_written(&mut self, record: &[u8]) -> Vec<u8> {
+        let linked = self.link(record);
+        if self.files.text {
+            written_urls(&linked)
+        } else {
+            linked
+        }
     }
 
     /// `record` with each URL and each path to something that exists
@@ -600,6 +623,9 @@ impl LineProcessor for Links {
 /// OSC 8 link but opens a URL written out. A URL's own link
 /// (`https://…`) shows it already.
 pub fn written_urls(record: &[u8]) -> Vec<u8> {
+    if !contains(record, b"\x1b]8;") {
+        return record.to_vec();
+    }
     let plain = ansi::strip(record);
     // Where in `record` each byte of `plain` starts.
     let mut starts = Vec::with_capacity(plain.len() + 1);
@@ -1603,6 +1629,39 @@ mod tests {
         let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
         assert_eq!(out.matches("\x1b]8;;idea:").count(), 1, "{out:?}");
         assert_eq!(out.matches(" <idea://").count(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn a_backslash_keeps_a_space_in_an_editor_path() {
+        assert_eq!(
+            editor_command(
+                "/Applications/Visual\\ Studio\\ Code.app/Contents/Resources/app/bin/code --wait"
+            )
+            .as_deref(),
+            Some("code")
+        );
+        assert_eq!(
+            editor_command("'/a\\ b/zed'").as_deref(),
+            Some("zed"),
+            "kept in single quotes"
+        );
+    }
+
+    #[test]
+    fn a_linker_writes_urls_beside_its_links_where_its_files_say() {
+        let (_dir, mut l) = linker();
+        l.files.format = LinkFormat::parse("vscode").unwrap();
+        assert!(
+            !String::from_utf8(l.link_written(b"src/a.cc:3:4 bad"))
+                .unwrap()
+                .contains(" <vscode://")
+        );
+        l.files.text = true;
+        let out = String::from_utf8(l.link_written(b"src/a.cc:3:4 bad")).unwrap();
+        assert!(
+            out.contains(":3:4 <vscode://file/") && out.ends_with("> bad"),
+            "{out:?}"
+        );
     }
 
     #[test]
