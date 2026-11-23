@@ -950,6 +950,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         build = ctx.bazel.build(
             flags = phase1_flags,
             build_events = [events] + build_events,
+            max_event_bytes = bazel_trait.max_build_event_bytes,
             execution_log = phase1_execlog_sinks,
             announce_version = announce_version,
             announce_command = announce_command,
@@ -1084,6 +1085,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         rc = rc,
         aspects = [hashsum_aspect],
         build_events = [phase2_events],
+        max_event_bytes = bazel_trait.max_build_event_bytes,
         stdout = None,
         stderr = ctx.std.fs.create(phase2_log_path),
         announce_version = announce_version,
@@ -2121,6 +2123,7 @@ def _delivery_impl(ctx):
             delivery_targets,
             rc = release_rc,
             build_events = [phase3_events],
+            max_event_bytes = bazel_trait.max_build_event_bytes,
             execution_log = phase3_execution_log,
             stdout = None,
             stderr = ctx.std.fs.create(phase3_log_path),

@@ -562,6 +562,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
     ///   (attempts this build ran, not cached) or `all`. Copied.
+    /// * `max_event_bytes` - The largest message the build's BES backends
+    ///   accept, at least 64 KiB; unset, 4 MiB, gRPC's default. Every build
+    ///   event is held to it, less 4 KiB for the request wrapping the event: a
+    ///   failed action's command line is cut from the end to fit, and any other
+    ///   event over it is passed on unchanged. Either way with a warning.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -625,9 +630,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = "none")] keep_action_logs: &str,
         #[starlark(require = named, default = "none")] keep_test_logs: &str,
+        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let keep_logs = keep_logs(keep_action_logs, keep_test_logs)?;
+        let max_event_bytes = max_event_bytes_arg(max_event_bytes)?;
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
@@ -662,6 +669,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             env.rt.clone(),
             &env.history,
             keep_logs,
+            max_event_bytes,
         )?;
         Ok(build)
     }
@@ -731,6 +739,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
     ///   (attempts this build ran, not cached) or `all`. Copied.
+    /// * `max_event_bytes` - The largest message the build's BES backends
+    ///   accept, at least 64 KiB; unset, 4 MiB, gRPC's default. Every build
+    ///   event is held to it, less 4 KiB for the request wrapping the event: a
+    ///   failed action's command line is cut from the end to fit, and any other
+    ///   event over it is passed on unchanged. Either way with a warning.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -792,9 +805,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = "none")] keep_action_logs: &str,
         #[starlark(require = named, default = "none")] keep_test_logs: &str,
+        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let keep_logs = keep_logs(keep_action_logs, keep_test_logs)?;
+        let max_event_bytes = max_event_bytes_arg(max_event_bytes)?;
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
@@ -830,6 +845,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             env.rt.clone(),
             &env.history,
             keep_logs,
+            max_event_bytes,
         )?;
         Ok(test)
     }
@@ -1706,6 +1722,19 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         run::register_run_types(globals);
         run::register_run_errors(globals);
     });
+}
+
+/// The `max_event_bytes` of `ctx.bazel.build`, `test`, `run` and `run_all`:
+/// the largest message the build's BES backends accept, None for the default.
+pub(crate) fn max_event_bytes_arg(max_event_bytes: NoneOr<i64>) -> anyhow::Result<Option<usize>> {
+    use bazel::bes::cap::MIN_MAX_MESSAGE_BYTES;
+    match max_event_bytes {
+        NoneOr::None => Ok(None),
+        NoneOr::Other(n) if n < MIN_MAX_MESSAGE_BYTES as i64 => anyhow::bail!(
+            "max_event_bytes must be at least {MIN_MAX_MESSAGE_BYTES} (64 KiB), got {n}"
+        ),
+        NoneOr::Other(n) => Ok(Some(n as usize)),
+    }
 }
 
 /// The `keep_action_logs` and `keep_test_logs` of `ctx.bazel.build`/`test`.

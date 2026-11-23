@@ -166,6 +166,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         flags = ["--nobuild"] + endpoint_auth_flags,
         build_events = build_events,
+        max_event_bytes = bazel_trait.max_build_event_bytes,
         execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,

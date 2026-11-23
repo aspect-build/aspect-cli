@@ -12,6 +12,12 @@ once rather than twice. Because that can leave no sink at all — and the Aspect
 Web UI link keys on an id only a sink mints — a task pairs the collect call with
 `bes_streamed_by_bazel`, which redirects the link to Bazel's invocation id.
 
+Every gRPC sink built here takes the retry, buffer and timeout options the
+BuildEvents feature puts on `BazelTrait` (`grpc_sink`), whichever way its
+backend was named: `--bes-backend`, a feature's `BazelTrait.bes_backends`, or a
+Workflows runner's `BazelTrait.bes_runner_backends`. The feature refuses a bad
+option before the task runs, so building a sink from them does not fail.
+
 The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
 the user has not supplied their own `authorization` header — see
 `aspect_endpoint_auth.axl` for the host gate and best-effort credential
@@ -113,34 +119,62 @@ def bes_streamed_by_bazel(sources: list[(str, str)], rc, command: str = "build")
         return False
     return any([same_bes_endpoint(backend, bazel_backend) for (backend, _) in sources])
 
+def _distinct_endpoints(uris: list, exclude: list = []) -> list:
+    """`uris` without empties or any naming the same endpoint
+    (`same_bes_endpoint`) as one in `exclude` or earlier in `uris`, so
+    `grpcs://h` and `grpcs://h:443` stream once, under the first spelling."""
+    kept = []
+    for uri in uris:
+        if uri and not any([same_bes_endpoint(uri, u) for u in list(exclude) + kept]):
+            kept.append(uri)
+    return kept
+
 def _backends_to_stream(bazel_trait, extra_backends: list) -> list:
     """The backend URIs to stream to: the ones features injected on the trait
-    (`--remote`'s deployment BES, a Workflows runner's), then the caller's own,
-    each listed once."""
-    seen = []
-    for uri in list(bazel_trait.bes_backends) + list(extra_backends):
-        if uri and uri not in seen:
-            seen.append(uri)
-    return seen
+    (`--remote`'s deployment BES), then the caller's own, each endpoint once."""
+    return _distinct_endpoints(list(bazel_trait.bes_backends) + list(extra_backends))
+
+def grpc_sink(bazel_trait, uri: str, metadata = {}):
+    """A gRPC sink streaming to `uri` with `metadata` as headers, under the
+    retry, buffer and timeout options on `bazel_trait` (the BuildEvents
+    feature's); the runtime's defaults when `bazel_trait` is None."""
+    if bazel_trait == None:
+        return bazel.build_events.grpc(uri = uri, metadata = metadata)
+    return bazel.build_events.grpc(
+        uri = uri,
+        metadata = metadata,
+        max_retries = bazel_trait.bes_max_retries,
+        retry_min_delay = bazel_trait.bes_retry_min_delay,
+        retry_max_buffer_bytes = bazel_trait.bes_retry_max_buffer_bytes,
+        timeout = bazel_trait.bes_timeout,
+    )
 
 def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list:
     """Every CLI-streamed BES sink for one bazel spawn, in the order a task
     splices them into `build_events`: those built from `--bes-backend` /
     `--bes-header`, the backends features injected on `BazelTrait.bes_backends`
-    (the deployment `--remote` wired) and `extra_backends`, then the ones
-    features already pushed onto `BazelTrait.build_event_sinks` (a Workflows
-    runner's env-injected backend, a `--bep-file` dump).
+    (the deployment `--remote` wired) and `extra_backends`, then one for each of
+    `BazelTrait.bes_runner_backends` (a Workflows runner's env-injected backend)
+    whose endpoint is not already named one of those ways, then the ones
+    features already pushed onto `BazelTrait.build_event_sinks` (a `--bep-file`
+    dump). The backends named those first three ways stream each endpoint once,
+    under the first spelling it was named by; a prebuilt sink is kept as it is.
+    Every gRPC sink built here takes the trait's retry, buffer and timeout
+    options (`grpc_sink`).
 
     Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
-    both groups so the invocation is streamed once — see `_drop_bazel_streamed`.
+    every group so the invocation is streamed once — see `_drop_bazel_streamed`.
 
     The one call a bazel-spawning task makes; pair it with `bes_link_data` for
     the keys the results surface needs. The caller `wait()`s the returned sinks
     after the build.
     """
     bazel_backend = bazel_bes_backend(rc, command)
+    backends = _backends_to_stream(bazel_trait, extra_backends)
+    runner_backends = _distinct_endpoints(list(bazel_trait.bes_runner_backends), list(ctx.args.bes_backends) + backends)
     sinks = (
-        collect_bes_from_args(ctx, extra_backends = _backends_to_stream(bazel_trait, extra_backends), bazel_backend = bazel_backend) +
+        collect_bes_from_args(ctx, extra_backends = backends, bazel_backend = bazel_backend, bazel_trait = bazel_trait) +
+        [grpc_sink(bazel_trait, uri) for uri in _drop_bazel_streamed(runner_backends, lambda b: b, bazel_backend)] +
         _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
     ctx.defer(drain_bes_sinks, ctx, sinks)
@@ -182,8 +216,9 @@ def bes_link_data(bazel_trait, rc, sinks: list, command: str = "build") -> dict:
     }
 
 def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list[str]:
-    """The BES endpoints `collect_bes_sinks` skipped because Bazel uploads to them
-    itself, deduped. Same inputs as that call.
+    """The backend `collect_bes_sinks` skipped because Bazel uploads there
+    itself, under the first spelling it was named by: every candidate names
+    Bazel's one endpoint, so the list holds at most one. Same inputs as that call.
 
     Separate so the "Not streaming …" notice lands with the spawn it describes rather
     than during collection, which happens while the setup phase is still on screen."""
@@ -192,12 +227,8 @@ def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_bac
         return []
 
     candidates = (list(ctx.args.bes_backends) + _backends_to_stream(bazel_trait, extra_backends) +
-                  [s.uri for s in bazel_trait.build_event_sinks])
-    dropped = []
-    for uri in candidates:
-        if uri and same_bes_endpoint(uri, bazel_backend) and uri not in dropped:
-            dropped.append(uri)
-    return dropped
+                  list(bazel_trait.bes_runner_backends) + [s.uri for s in bazel_trait.build_event_sinks])
+    return _distinct_endpoints([uri for uri in candidates if uri and same_bes_endpoint(uri, bazel_backend)])
 
 def announce_dropped_bes_sinks(ctx, dropped: list[str], rc, command: str = "build"):
     """Announce, one line per endpoint, that the CLI is *not* streaming there because
@@ -209,7 +240,7 @@ def announce_dropped_bes_sinks(ctx, dropped: list[str], rc, command: str = "buil
     for uri in dropped:
         detail(ctx.std, _DUPLICATE_MSG % (uri, bazel_backend))
 
-def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> list:
+def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "", bazel_trait = None) -> list:
     """The CLI-streamed BES sinks from `--bes-backend` / `--bes-header`. Most
     callers want `collect_bes_sinks`, which also covers the trait's own sinks.
 
@@ -220,11 +251,14 @@ def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> 
     warns and streams unauthenticated rather than failing.
 
     `extra_backends` are additional BES backend URIs to stream to (e.g. the BES
-    host `--deployment` wires up), unioned with `--bes-backend` and deduped so a
-    URI passed both ways yields one sink.
+    host `--deployment` wires up), unioned with `--bes-backend` so an endpoint
+    named more than once, in any spelling, yields one sink.
 
     `bazel_backend` is the endpoint Bazel uploads to itself (`""` when it does
     not); a backend naming it is dropped rather than streamed twice.
+
+    The sinks take `bazel_trait`'s retry, buffer and timeout options, or the
+    runtime's defaults without one (see `grpc_sink`).
     """
     metadata = {}
     for bes_header in ctx.args.bes_headers:
@@ -238,12 +272,7 @@ def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> 
     # print a duplicate warning.
     bearer_by_host = {}
 
-    backends = list(ctx.args.bes_backends)
-    for b in extra_backends:
-        if b not in backends:
-            backends.append(b)
-
-    backends = _drop_bazel_streamed(backends, lambda b: b, bazel_backend)
+    backends = _drop_bazel_streamed(_distinct_endpoints(list(ctx.args.bes_backends) + list(extra_backends)), lambda b: b, bazel_backend)
 
     sinks = []
     for bes_backend in backends:
@@ -256,12 +285,7 @@ def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> 
             if bearer:
                 backend_metadata["Authorization"] = bearer
 
-        sinks.append(
-            bazel.build_events.grpc(
-                uri = bes_backend,
-                metadata = backend_metadata,
-            ),
-        )
+        sinks.append(grpc_sink(bazel_trait, bes_backend, backend_metadata))
     return sinks
 
 def advertised_results_url(sources: list[(str, str)], rc, bes_sinks: list, command: str = "build") -> str:

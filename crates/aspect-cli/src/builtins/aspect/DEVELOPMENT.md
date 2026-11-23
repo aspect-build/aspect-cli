@@ -183,7 +183,7 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 
 | Trait                        | Defined in                                                                | Slots                                                                                                       | Status / Purpose |
 |------------------------------|---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|------------------|
-| **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `exec_log_event`, `build_end`, `build_retry`, `bazel_attempt_end`, `build_event_sinks`, `keep_action_logs`, `keep_test_logs`, `task_flags`, `rc_flags`, `flags`, `startup_flags`, `base_flags`, `extra_flags`, `extra_build_flags`, `extra_test_flags`, `extra_query_flags`, `extra_info_flags`, `extra_startup_flags`, `bes_backends`, `bes_results_sources`, `execution_log_sinks` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. `exec_log_event` is the only hook list a task does not iterate itself — see [Execution log hooks](#execution-log-hooks). |
+| **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `exec_log_event`, `build_end`, `build_retry`, `bazel_attempt_end`, `build_event_sinks`, `keep_action_logs`, `keep_test_logs`, `task_flags`, `rc_flags`, `flags`, `startup_flags`, `base_flags`, `extra_flags`, `extra_build_flags`, `extra_test_flags`, `extra_query_flags`, `extra_info_flags`, `extra_startup_flags`, `bes_backends`, `bes_runner_backends`, `bes_max_retries`, `bes_retry_min_delay`, `bes_retry_max_buffer_bytes`, `bes_timeout`, `max_build_event_bytes`, `bes_results_sources`, `execution_log_sinks` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. `exec_log_event` is the only hook list a task does not iterate itself — see [Execution log hooks](#execution-log-hooks). |
 | **`HealthCheckTrait`**       | [private/lib/health_check.axl](private/lib/health_check.axl)                              | `health_check`                                                                                              | ✅ Clean. Hook lists only. |
 | **`Phases`**     | [private/lib/lifecycle.axl](private/lib/lifecycle.axl)                                    | `task_update`, `repro_fix_suggestion`                                                                       | ✅ Clean. Hook lists only. `task_update` drives status surfaces (first update inits, `final=True` concludes — see lifecycle section above). `repro_fix_suggestion` lets a user `config.axl` accept / reject / modify repro & fix command suggestions — see [Customizing repro & fix suggestions](#customizing-repro--fix-suggestions). |
 | **`DeliveryTrait`**          | [delivery.axl](delivery.axl)                                              | `delivery_start`, `delivery_target`, `delivery_end`, `delivery_manifest`, `render_manifest_file`, `upload_manifest` | ✅ Clean. Hook callables only. |
@@ -863,16 +863,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     #    (None for a non-Bazel task). See `setup_phase` in private/lib/lifecycle.axl.
     flags = setup_phase(ctx, lifecycle, data["target_pattern"], "<task>_results", data, hc_trait, bazel_trait, "build")
 
-    # 2. Pass build_event_sinks (gRPC sinks the runtime registers BEFORE
-    #    `Build::spawn` returns) so BES events reach the Aspect backend and
-    #    the "Aspect Workflows" link resolves to a real invocation. The iter
-    #    handle subscribes pre-spawn — no late-subscribe race.
+    # 2. Pass the CLI-streamed BES sinks (`collect_bes_sinks`: --bes-backend,
+    #    the trait's backends and prebuilt sinks, a Workflows runner's backend;
+    #    the runtime registers them BEFORE `Build::spawn` returns) so BES events
+    #    reach the Aspect backend and the "Aspect Workflows" link resolves to a
+    #    real invocation. The iter handle subscribes pre-spawn — no
+    #    late-subscribe race.
     #    `tick_ms` is what keeps the drain loop below answering signals while
     #    BES is quiet: a no-tick iterator blocks in `recv()` until bazel emits
     #    something, and nothing — a Ctrl+C, a CI cancel, a heartbeat — gets a
     #    turn until it does.
     events = bazel.build_events.iterator(tick_ms = 250)
-    build_events = [events] + list(bazel_trait.build_event_sinks)
+    build_events = [events] + collect_bes_sinks(ctx, bazel_trait, rc)  # rc: the task's Bazelrc
 
     # 3. Fire build_start hooks BEFORE spawning Bazel. The `Workflows`
     #    feature registers the `--- :bazel: Running bazel <task> [<key>]
@@ -889,6 +891,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     xl = bazel_exec_log.open(bazel_trait)
 
     build = ctx.bazel.build(flags = flags, build_events = build_events,
+                            max_event_bytes = bazel_trait.max_build_event_bytes,
                             execution_log = xl.sinks or False, *ctx.args.targets)
 
     # 4. Capture sink_invocation_id (the runtime mints it inside Build::spawn

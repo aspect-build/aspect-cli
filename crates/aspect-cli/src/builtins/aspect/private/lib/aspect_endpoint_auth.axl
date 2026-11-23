@@ -110,7 +110,9 @@ def same_bes_endpoint(a: str, b: str) -> bool:
     Compares normalized authorities (see `endpoint_authority`), so a default port
     written out explicitly still matches. Scheme is deliberately ignored: one
     endpoint reached as `grpcs://h:443` and `https://h` is still one endpoint, so
-    streaming to both spellings would duplicate the invocation.
+    streaming to both spellings would duplicate the invocation. Path is ignored
+    too: a gRPC client dials the authority alone, so `grpcs://h/a` and
+    `grpcs://h/b` reach the same service.
     """
     return bool(a) and bool(b) and endpoint_authority(a) == endpoint_authority(b)
 

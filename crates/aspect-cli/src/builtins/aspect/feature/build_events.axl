@@ -1,0 +1,93 @@
+"""How the CLI streams a build's events to BES backends.
+
+The retry, buffer and timeout options apply to every backend the CLI streams to
+itself: a task's `--bes-backend`, the deployment `--remote` wires, and a
+Workflows runner's own. A backend Bazel uploads to through its `--bes_backend`
+is Bazel's, and these leave it alone.
+
+`max_event_bytes` holds every event of the build to what fits in a message of
+that size, for every consumer: BES backends, a `--build_event_binary_file`, the
+task history and AXL event iterators. Bazel writes a failed action's whole
+command line into its event, params file expanded, so a large action makes an
+event past a backend's receive limit, which refuses it and loses the rest of
+the build. That command line is cut from the end to fit; any other event over
+the limit is passed on unchanged. Either way the CLI warns.
+
+Each option is written to `BazelTrait` only when it differs from its default,
+so a value `config.axl` put on the trait directly is kept otherwise.
+
+A negative count, a malformed duration or a `max_event_bytes` under 64 KiB is
+refused, without a traceback, before the task runs.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+_MAX_RETRIES = 4
+_RETRY_MIN_DELAY = "1s"
+_TIMEOUT = "0s"
+_MAX_EVENT_BYTES = 4 * 1024 * 1024
+_MIN_MAX_EVENT_BYTES = 64 * 1024
+
+_UsageError = error.type(traceback = False)
+
+def _refuse_below(flag: str, value: int, least: int, note: str = ""):
+    """Fail the task, without a traceback, when `flag`'s `value` is under `least`."""
+    if value < least:
+        fail(_UsageError("%s must be at least %d%s, got %d" % (flag, least, note, value)))
+
+def _refuse_non_duration(flag: str, value: str, kwarg: str):
+    """Fail the task, without a traceback, when `flag`'s `value` is not a
+    duration `bazel.build_events.grpc` takes as `kwarg`, so a bad option is
+    refused before the task runs rather than when a sink is first built from
+    it. The sink is never bound, so nothing is dialed; a buffer budget is given
+    so `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` is not read, and warned about,
+    in a task that streams nowhere."""
+    err, _ = catch(lambda: bazel.build_events.grpc(uri = "grpc://localhost", retry_max_buffer_bytes = 1, **{kwarg: value}))
+    if err != None:
+        fail(_UsageError("%s must be a duration such as '500ms', '2s' or '1m', got '%s'" % (flag, value)))
+
+def _build_events_impl(ctx: FeatureContext):
+    _refuse_below("--build-events:max-retries", ctx.args.max_retries, 0)
+    _refuse_below("--build-events:retry-max-buffer-bytes", ctx.args.retry_max_buffer_bytes, 0)
+    _refuse_below("--build-events:max-event-bytes", ctx.args.max_event_bytes, _MIN_MAX_EVENT_BYTES, " (64 KiB)")
+    _refuse_non_duration("--build-events:retry-min-delay", ctx.args.retry_min_delay, "retry_min_delay")
+    _refuse_non_duration("--build-events:timeout", ctx.args.timeout, "timeout")
+    t = ctx.traits[BazelTrait]
+    if ctx.args.max_retries != _MAX_RETRIES:
+        t.bes_max_retries = ctx.args.max_retries
+    if ctx.args.retry_min_delay != _RETRY_MIN_DELAY:
+        t.bes_retry_min_delay = ctx.args.retry_min_delay
+    if ctx.args.retry_max_buffer_bytes > 0:
+        t.bes_retry_max_buffer_bytes = ctx.args.retry_max_buffer_bytes
+    if ctx.args.timeout != _TIMEOUT:
+        t.bes_timeout = ctx.args.timeout
+    if ctx.args.max_event_bytes != _MAX_EVENT_BYTES:
+        t.max_build_event_bytes = ctx.args.max_event_bytes
+
+BuildEvents = feature(
+    display_name = "Build events",
+    summary = "Retries, buffering, timeout and the event size limit for the build events the CLI streams.",
+    implementation = _build_events_impl,
+    args = {
+        "max_retries": args.int(
+            default = _MAX_RETRIES,
+            description = "Reconnect attempts after a transient BES error before a backend is given up on. 0 disables retry; a backend never fails the build either way.",
+        ),
+        "retry_min_delay": args.string(
+            default = _RETRY_MIN_DELAY,
+            description = "Base delay of the full-jitter exponential backoff between reconnects, as a duration ('500ms', '2s', '1m').",
+        ),
+        "retry_max_buffer_bytes": args.int(
+            default = 0,
+            description = "Byte budget for the events a backend has not acknowledged yet, kept for replay after a reconnect. Past it the oldest are dropped, so a later reconnect replays an incomplete range; the upload itself goes on. 0 (the default) uses ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES, or 256 MiB when that is unset.",
+        ),
+        "timeout": args.string(
+            default = _TIMEOUT,
+            description = "Overall deadline for each backend's upload, as a duration; '0s' (the default) sets none. Mirrors Bazel's --bes_timeout.",
+        ),
+        "max_event_bytes": args.int(
+            default = _MAX_EVENT_BYTES,
+            description = "The largest message the BES backends accept, at least 64 KiB; 4 MiB (the default) is gRPC's. Every build event is held to it, less 4 KiB for the request wrapping the event: a failed action's command line is cut from the end to fit, and any other event over it is passed on unchanged, with a warning either way.",
+        ),
+    },
+)
