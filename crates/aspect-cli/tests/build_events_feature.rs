@@ -175,6 +175,13 @@ fn a_config_value_at_the_runtime_bound_reaches_the_trait() {
         "2147483647|1s|None|0s|None"
     );
     assert_eq!(
+        fields(&show_configured(
+            "retry_max_buffer_bytes",
+            "9223372036854775807"
+        )),
+        "4|1s|9223372036854775807|0s|None"
+    );
+    assert_eq!(
         fields(&show_configured("max_event_bytes", "9223372036854775807")),
         "4|1s|None|0s|9223372036854775807"
     );
