@@ -582,6 +582,7 @@ def config(ctx: ConfigContext):
     # ASPECT_DEBUG, and which signals the OTLP endpoint variables carry.
     # Run with: aspect dev test-telemetry
     ctx.tasks.add(telemetry_tests)
+
     # `--output=json` document: redaction, bounded fields, truncation flags.
     # Run with: aspect dev test-results-json
     ctx.tasks.add(results_json_tests)

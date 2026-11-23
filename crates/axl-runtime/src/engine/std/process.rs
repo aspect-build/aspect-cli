@@ -264,13 +264,13 @@ pub(crate) fn stdio_from<'v>(
 pub(crate) fn writable_to_stdio(w: &stream::Writable) -> io::Result<Stdio> {
     let closed = || io::Error::other("writable stream is closed");
     match w {
-        stream::Writable::Stdout(arc) => {
+        stream::Writable::Stdout(arc, _) => {
             let guard = arc.lock().unwrap();
             let borrowed = guard.borrow();
             let s = borrowed.as_ref().ok_or_else(closed)?;
             dup_fd(s)
         }
-        stream::Writable::Stderr(arc) => {
+        stream::Writable::Stderr(arc, _) => {
             let guard = arc.lock().unwrap();
             let borrowed = guard.borrow();
             let s = borrowed.as_ref().ok_or_else(closed)?;
