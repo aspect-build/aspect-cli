@@ -29,8 +29,9 @@ _TIMEOUT = "0s"
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
 _MIN_MAX_EVENT_BYTES = 64 * 1024
 
-# The largest values the runtime takes: a 32-bit retry count, 64-bit byte sizes.
-# A command-line flag cannot exceed the first, but a `config.axl` value can.
+# The largest values the runtime takes: `bazel.build_events.grpc` reads
+# `max_retries` as an i32, and the byte sizes are read as i64. A command-line
+# flag is held to i32 by its parser; a `config.axl` value is not.
 _MAX_INT32 = 2147483647
 _MAX_INT64 = 9223372036854775807
 
