@@ -336,6 +336,9 @@ pub struct FileLinks {
     pub host: String,
     pub format: LinkFormat,
     pub text: bool,
+    /// Whether a URL written out is styled as a link: grey and underlined,
+    /// and a URL's own link underlined, where colour is shown.
+    pub styled: bool,
 }
 
 impl FileLinks {
@@ -349,6 +352,7 @@ impl FileLinks {
             host: hostname(),
             format,
             text: false,
+            styled: false,
         }
     }
 
@@ -358,13 +362,18 @@ impl FileLinks {
         self
     }
 
-    /// A link to `url` showing `shown`, then `said` (the `:12:3` after it),
-    /// then, when written out, ` <url>`.
-    pub fn link(&self, url: &str, shown: &[u8], said: &[u8]) -> Vec<u8> {
+    /// These links' written URLs styled as links, when `styled`.
+    pub fn styled(mut self, styled: bool) -> FileLinks {
+        self.styled = styled;
+        self
+    }
+
+    /// A link to `url` showing `shown`, then, when written out, ` <url>`,
+    /// and `restore`, the style around it, after a styled one.
+    pub fn link(&self, url: &str, shown: &[u8], restore: &[u8]) -> Vec<u8> {
         let mut out = osc8(url, shown);
-        out.extend_from_slice(said);
         if self.text {
-            out.extend_from_slice(format!(" <{url}>").as_bytes());
+            out.extend(written_url(url, self.styled, restore));
         }
         out
     }
@@ -459,7 +468,7 @@ impl Linker {
     pub fn link_written(&mut self, record: &[u8]) -> Vec<u8> {
         let linked = self.link(record);
         if self.files.text {
-            written_urls(&linked)
+            written_urls(&linked, self.files.styled)
         } else {
             linked
         }
@@ -661,7 +670,7 @@ impl LineProcessor for Links {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
         let linked = self.linker.link(record);
         if self.linker.files.text && !(self.pty && self.drawn) {
-            return Some(written_urls(&linked));
+            return Some(written_urls(&linked, self.linker.files.styled));
         }
         Some(linked)
     }
@@ -672,7 +681,11 @@ impl LineProcessor for Links {
 /// escapes removed (`src/a.ts` `:9:4` <url>): for a terminal that shows no
 /// OSC 8 link but opens a URL written out. A URL's own link
 /// (`https://…`) shows it already.
-pub fn written_urls(record: &[u8]) -> Vec<u8> {
+///
+/// When `styled`, each written URL is grey and underlined
+/// ([`written_url`]), the record's own style taken up again after it, and
+/// the text of a URL's own link is underlined, so both read as links.
+pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
     if !contains(record, b"\x1b]8;") {
         return record.to_vec();
     }
@@ -682,12 +695,21 @@ pub fn written_urls(record: &[u8]) -> Vec<u8> {
     let mut ends = Vec::new();
     let mut open: Option<String> = None;
     let mut at = 0;
+    // Underlines for the text of URLs' own links, by where they go.
+    let mut underlines: Vec<(usize, Vec<u8>)> = Vec::new();
     for (escape, seg) in ansi::segments(record) {
         if escape {
             if let Some(url) = osc8_url(seg) {
+                if styled && open.as_deref().is_some_and(is_web) {
+                    underlines.push((at, b"\x1b[24m".to_vec()));
+                }
                 ends.extend(open.take().map(|url| (starts.len(), url)));
                 if !url.is_empty() {
-                    open = Some(String::from_utf8_lossy(url).into_owned());
+                    let url = String::from_utf8_lossy(url).into_owned();
+                    if styled && is_web(&url) {
+                        underlines.push((at + seg.len(), b"\x1b[4m".to_vec()));
+                    }
+                    open = Some(url);
                 }
             }
         } else {
@@ -695,26 +717,72 @@ pub fn written_urls(record: &[u8]) -> Vec<u8> {
         }
         at += seg.len();
     }
+    if styled && open.as_deref().is_some_and(is_web) {
+        underlines.push((record.len(), b"\x1b[24m".to_vec()));
+    }
     ends.extend(open.map(|url| (starts.len(), url)));
-    let mut inserts: Vec<(usize, String)> = ends
+    let mut inserts: Vec<(usize, Vec<u8>)> = ends
         .into_iter()
-        .filter(|(_, url)| !url.starts_with("http://") && !url.starts_with("https://"))
+        .filter(|(_, url)| !is_web(url))
         .map(|(end, url)| {
             let said = located(&plain[end..]).map_or(0, |(.., len)| len);
             let at = starts.get(end + said).copied().unwrap_or(record.len());
-            (at, url)
+            (at, written_url(&url, styled, &active_style(&record[..at])))
         })
         .collect();
+    inserts.extend(underlines);
     inserts.sort_by_key(|(at, _)| *at);
+    if inserts.is_empty() {
+        return record.to_vec();
+    }
     let mut out = Vec::with_capacity(record.len() + inserts.len() * 64);
     let mut from = 0;
-    for (at, url) in inserts {
+    for (at, bytes) in inserts {
         out.extend_from_slice(&record[from..at]);
-        out.extend_from_slice(format!(" <{url}>").as_bytes());
+        out.extend_from_slice(&bytes);
         from = at;
     }
     out.extend_from_slice(&record[from..]);
     out
+}
+
+fn is_web(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// ` <url>`, a URL written beside its link; when `styled`, grey with the
+/// URL underlined, then `restore` to take up the style around it again.
+fn written_url(url: &str, styled: bool, restore: &[u8]) -> Vec<u8> {
+    if !styled {
+        return format!(" <{url}>").into_bytes();
+    }
+    let mut out = format!(" \x1b[90m<\x1b[4m{url}\x1b[24m>\x1b[0m").into_bytes();
+    out.extend_from_slice(restore);
+    out
+}
+
+/// The SGR sequences that set the style `text` ends in: those since the
+/// last that resets it all, which said again after a reset set it again.
+fn active_style(text: &[u8]) -> Vec<u8> {
+    let mut style = Vec::new();
+    for (escape, seg) in ansi::segments(text) {
+        let Some(params) = seg
+            .strip_prefix(b"\x1b[")
+            .and_then(|p| p.strip_suffix(b"m"))
+            .filter(|_| escape)
+        else {
+            continue;
+        };
+        if params.is_empty() || params == b"0" {
+            style.clear();
+            continue;
+        }
+        if params.starts_with(b"0;") {
+            style.clear();
+        }
+        style.extend_from_slice(seg);
+    }
+    style
 }
 
 /// The URL an OSC 8 sequence links to, empty for the one that ends a link,
@@ -846,11 +914,13 @@ fn encoded_path(path: &Path) -> String {
 }
 
 /// `path` as an OSC 8 hyperlink to it as `files` says, its text the path
-/// itself; just the path when files are not linked.
-pub fn file_link(files: &FileLinks, path: &Path) -> String {
+/// itself; just the path when files are not linked. `restore` is the style
+/// of the text around it, taken up again after a styled written URL.
+pub fn file_link(files: &FileLinks, path: &Path, restore: &str) -> String {
     let shown = path.display().to_string();
     match files.url(path, (None, None)) {
-        Some(url) => String::from_utf8(files.link(&url, shown.as_bytes(), b"")).unwrap_or(shown),
+        Some(url) => String::from_utf8(files.link(&url, shown.as_bytes(), restore.as_bytes()))
+            .unwrap_or(shown),
         None => shown,
     }
 }
@@ -1086,6 +1156,7 @@ mod tests {
                         host: String::new(),
                         format: LinkFormat::parse("file").unwrap(),
                         text: false,
+                        styled: false,
                     },
                     workspace: ws.clone(),
                 }))
@@ -1293,6 +1364,7 @@ mod tests {
                 host: "h".into(),
                 format: LinkFormat::parse(f).unwrap(),
                 text: false,
+                styled: false,
             }
             .url(Path::new("/w/a b.ts"), at)
         };
@@ -1664,6 +1736,56 @@ mod tests {
     }
 
     #[test]
+    fn a_styled_written_url_is_grey_and_underlined_and_the_line_keeps_its_colour() {
+        let url = "vscode://file/w/src/a.cc:3:4";
+        let record =
+            format!("\x1b[31mERROR: \x1b]8;;{url}\x1b\\src/a.cc\x1b]8;;\x1b\\:3:4: bad\x1b[0m");
+        let out = String::from_utf8(written_urls(record.as_bytes(), true)).unwrap();
+        assert!(
+            out.contains(&format!(
+                ":3:4 \x1b[90m<\x1b[4m{url}\x1b[24m>\x1b[0m\x1b[31m: bad"
+            )),
+            "{out:?}"
+        );
+        let plain = String::from_utf8(written_urls(record.as_bytes(), false)).unwrap();
+        assert!(plain.contains(&format!(":3:4 <{url}>: bad")), "{plain:?}");
+    }
+
+    #[test]
+    fn a_styled_file_link_takes_up_the_style_around_it_again() {
+        let files = FileLinks::file().written(true).styled(true);
+        let link = file_link(&files, Path::new("/tmp/a.log"), "\x1b[38;5;244m");
+        assert!(link.ends_with("\x1b[24m>\x1b[0m\x1b[38;5;244m"), "{link:?}");
+        let plain = file_link(
+            &FileLinks::file().written(true),
+            Path::new("/tmp/a.log"),
+            "\x1b[2m",
+        );
+        assert!(plain.ends_with("/tmp/a.log>"), "{plain:?}");
+    }
+
+    #[test]
+    fn a_web_link_is_underlined_only_when_styled() {
+        let record = b"see \x1b]8;;https://x.test/a\x1b\\https://x.test/a\x1b]8;;\x1b\\ now";
+        let out = String::from_utf8(written_urls(record, true)).unwrap();
+        assert_eq!(
+            out,
+            "see \x1b]8;;https://x.test/a\x1b\\\x1b[4mhttps://x.test/a\x1b[24m\x1b]8;;\x1b\\ now"
+        );
+        assert_eq!(written_urls(record, false), record.to_vec());
+    }
+
+    #[test]
+    fn the_active_style_starts_again_at_each_reset() {
+        assert_eq!(
+            active_style(b"\x1b[1mA\x1b[0m\x1b[31mB\x1b[2m"),
+            b"\x1b[31m\x1b[2m"
+        );
+        assert_eq!(active_style(b"\x1b[1m\x1b[0;33mB"), b"\x1b[0;33m");
+        assert_eq!(active_style(b"plain"), b"");
+    }
+
+    #[test]
     fn a_progress_row_gets_no_written_url_under_a_pty() {
         use crate::console::forward::LineProcessor as _;
         let (_dir, mut links) = written("vscode");
@@ -1699,6 +1821,7 @@ mod tests {
             host: String::new(),
             format: LinkFormat::parse("idea").unwrap(),
             text: true,
+            styled: false,
         };
         let mut rel = RelativizePaths::new(Some(ws.clone()), None).linking(Some(LinkTo {
             files: files.clone(),

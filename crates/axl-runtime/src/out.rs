@@ -153,8 +153,11 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
         }
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(
-            bazel::console::links::Linker::new(vec![base])
-                .with_files(bazel::console::links::FileLinks::file().written(links_as_text())),
+            bazel::console::links::Linker::new(vec![base]).with_files(
+                bazel::console::links::FileLinks::file()
+                    .written(links_as_text())
+                    .styled(crate::color::console_supports_color()),
+            ),
         ))
     });
 

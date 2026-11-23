@@ -93,7 +93,8 @@ below, or `ASPECT_HYPERLINK_FORMAT=cursor` in your shell's profile): by
 default, your editor at the line, the one whose terminal this is, else the
 one `$VISUAL` or `$EDITOR` starts, else one installed; none on a remote
 machine (SSH, a dev container, Codespaces). In Terminal.app,
-which cannot show such a link, its URL is written beside the path.
+which cannot show such a link, its URL is written beside the path, grey
+and underlined where colour is shown, and `https://` URLs are underlined.
 
     load("@aspect//feature/console.axl", "Console")
 
@@ -271,7 +272,8 @@ Console = feature(
                           "values and beats config.axl but not the command line, and is what config.axl's " +
                           "own lines follow. A directory links only under a file:// format. In Terminal.app, " +
                           "which shows no such link, the link's URL is written after the path and its line, " +
-                          "to open by Cmd+double-click, but in a progress row Bazel redraws. URLs are links " +
+                          "grey and underlined where colour is shown, to open by Cmd+double-click or " +
+                          "Control+click, but in a progress row Bazel redraws. URLs are links " +
                           "whatever it says.",
         ),
         "profile": args.string(

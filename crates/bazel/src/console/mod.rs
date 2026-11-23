@@ -391,7 +391,9 @@ impl Config {
 
     /// How this pipeline's links to files are made.
     fn files(&self) -> links::FileLinks {
-        links::FileLinks::new(self.link_format.clone()).written(self.link_text)
+        links::FileLinks::new(self.link_format.clone())
+            .written(self.link_text)
+            .styled(!self.strip_colour)
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a

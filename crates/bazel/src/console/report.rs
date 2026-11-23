@@ -478,7 +478,7 @@ impl LineProcessor for RecapErrors {
         self.style.line(&mut out, &header);
         let mut line = |text: &str, links: &[Known]| match self.linker.as_mut() {
             Some(l) if l.files.text => {
-                super::links::written_urls(&l.link_with(text.as_bytes(), links))
+                super::links::written_urls(&l.link_with(text.as_bytes(), links), l.files.styled)
             }
             Some(l) => l.link_with(text.as_bytes(), links),
             None => text.as_bytes().to_vec(),
@@ -561,7 +561,7 @@ impl Summary {
 
     fn path(&self, path: &Path) -> String {
         match &self.links {
-            Some(files) => file_link(files, path),
+            Some(files) => file_link(files, path, &self.style.open),
             None => path.display().to_string(),
         }
     }
@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn a_link_names_the_path_it_shows() {
-        let link = file_link(&FileLinks::file(), Path::new("/tmp/a b.log"));
+        let link = file_link(&FileLinks::file(), Path::new("/tmp/a b.log"), "");
         assert!(link.starts_with("\x1b]8;;file://"), "{link:?}");
         assert!(
             link.contains("/tmp/a%20b.log\x1b\\/tmp/a b.log\x1b]8;;\x1b\\"),
