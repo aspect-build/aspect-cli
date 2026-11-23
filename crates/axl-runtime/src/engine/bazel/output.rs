@@ -522,7 +522,7 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
         .then(|| std::env::current_dir().ok())
         .flatten()
         .map(|cwd| {
-            let root = crate::project_root::find_bazel_root(&cwd);
+            let root = crate::project_root::find_bazel_root(&cwd).filter(|r| *r != cwd);
             root.into_iter().chain([cwd]).collect()
         });
     config

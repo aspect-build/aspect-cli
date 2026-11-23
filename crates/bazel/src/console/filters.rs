@@ -205,7 +205,7 @@ impl LineProcessor for Rewrite {
 
 /// Whether a path could go on through `b`.
 fn continues_path(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"/._-~+".contains(&b)
+    super::links::is_path_byte(b)
 }
 
 /// An absolute path through an execroot, a sandbox's included, up to the
@@ -262,7 +262,7 @@ impl RelativizePaths {
     }
 
     /// This stage telling `hints`, for each record, which file each path it
-    /// made relative names: the record's, every record replacing the last's.
+    /// made relative names, beside what another such stage before it told.
     pub fn hinting(mut self, hints: Option<super::links::Hints>) -> Self {
         self.hints = hints;
         self
@@ -446,8 +446,10 @@ impl LineProcessor for RelativizePaths {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
         let mut hints = Vec::new();
         let out = self.relativized(record, &mut hints);
-        if let Some(slot) = &self.hints {
-            slot.set(if out == record { Vec::new() } else { hints });
+        if let Some(slot) = &self.hints
+            && out != record
+        {
+            slot.extend(hints);
         }
         Some(out)
     }

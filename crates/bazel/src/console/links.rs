@@ -37,8 +37,9 @@ static URL: LazyLock<Regex> =
 /// A run of the bytes a path is written with.
 static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9._/~+@-]+").unwrap());
 
-/// Whether a path written as [`PATH`] matches can go on through `b`, for a
-/// stage that finds a path's end as the linker will (`node_modules/@types/…`).
+/// Whether a path written as [`PATH`] matches can go on through `b`, for
+/// `relativize_paths`, which finds where a path ends and what it is joined
+/// to as the linker will (`node_modules/@types/…`).
 pub(crate) fn is_path_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"._/~+@-".contains(&b)
 }
@@ -55,9 +56,10 @@ const REMEMBERED: usize = 4096;
 /// The longest record linked: a longer one (a command line) is left as it is.
 const MAX_RECORD: usize = 8192;
 
-/// What a record's paths made relative name, `(shown, file)`, which
-/// `relativize_paths` sets for each record it sees and the stages after it
-/// read: the record's own, every record replacing the last's.
+/// What a record's paths made relative name, `(shown, file)`, which each
+/// `relativize_paths` stage adds to as the record goes by, the stages after
+/// it read, and the last stage ([`Links`]) clears, whether it shows the
+/// record or a stage before it dropped it.
 #[derive(Debug, Clone, Default)]
 pub struct Hints(Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>);
 
@@ -65,6 +67,13 @@ impl Hints {
     pub fn set(&self, hints: Vec<(Vec<u8>, Vec<u8>)>) {
         if let Ok(mut slot) = self.0.lock() {
             *slot = hints;
+        }
+    }
+
+    /// Add `hints` to the current record's.
+    pub fn extend(&self, hints: Vec<(Vec<u8>, Vec<u8>)>) {
+        if let Ok(mut slot) = self.0.lock() {
+            slot.extend(hints);
         }
     }
 
@@ -237,6 +246,10 @@ impl LineProcessor for Links {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
         let hints = self.hints.take();
         Some(self.linker.link_with(record, &hints))
+    }
+
+    fn skipped(&mut self, _line: &crate::console::line::Line) {
+        self.hints.take();
     }
 }
 
@@ -622,6 +635,54 @@ mod tests {
         assert_eq!(
             link(&mut l, "made.txt here"),
             format!("{} here", file(dir.path(), "made.txt", "made.txt"))
+        );
+    }
+
+    #[test]
+    fn two_relativize_stages_keep_each_others_hints() {
+        let root = tempfile::tempdir().unwrap();
+        for f in ["BUILD.bazel", "pkg/BUILD.bazel", "pkg/@scope/foo/index.ts"] {
+            let at = root.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let ws = root.path().display().to_string();
+        let hints = Hints::default();
+        let mut first = crate::console::filters::RelativizePaths::new(
+            Some(ws.clone()),
+            Some(format!("{ws}/pkg")),
+        )
+        .hinting(Some(hints.clone()));
+        let mut second =
+            crate::console::filters::RelativizePaths::new(Some("/nonexistent/vendor".into()), None)
+                .hinting(Some(hints.clone()));
+        let mut links = Links {
+            linker: Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]),
+            hints: hints.clone(),
+        };
+        links.linker.host = String::new();
+        use crate::console::forward::LineProcessor as _;
+        let line = format!("ERROR: {ws}/pkg/BUILD.bazel:1:1: bad; {ws}/pkg/@scope/foo/index.ts:2");
+        let shown = second
+            .process(&first.process(line.as_bytes()).unwrap())
+            .unwrap();
+        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "ERROR: {}:1:1: bad; {}:2",
+                file(root.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
+                file(
+                    root.path(),
+                    "pkg/%40scope/foo/index.ts",
+                    "@scope/foo/index.ts"
+                )
+            ),
+            "the package's file, and `@scope` not shown as `.@scope`"
+        );
+        assert!(
+            hints.get().is_empty(),
+            "the last stage clears the record's hints"
         );
     }
 

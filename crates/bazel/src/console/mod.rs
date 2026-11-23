@@ -365,10 +365,11 @@ impl Config {
     }
 
     /// This config linking a relative path from `root`, the workspace a
-    /// build runs in, before the directory the task runs from.
+    /// build runs in, before the directory the task runs from (the last of
+    /// [`Config::links`]), each directory tried once.
     pub fn link_from(&mut self, root: std::path::PathBuf) {
         if let Some(bases) = &mut self.links {
-            let cwd = bases.pop();
+            let cwd = bases.pop().filter(|cwd| *cwd != root);
             *bases = std::iter::once(root).chain(cwd).collect();
         }
     }
