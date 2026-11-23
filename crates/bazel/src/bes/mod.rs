@@ -6,6 +6,7 @@ use axl_proto::build_event_stream::BuildEvent;
 use prost::bytes::Bytes;
 
 pub mod binary_file;
+pub mod cap;
 pub mod client;
 pub mod feed;
 pub mod kind;

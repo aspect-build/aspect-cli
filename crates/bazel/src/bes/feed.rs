@@ -1,6 +1,6 @@
 //! The build event stream of one bazel command: a reader thread follows
 //! `--build_event_binary_file` ([`super::binary_file`]), redacts each event,
-//! mirrors the raw bytes to file sinks and fans the events out to subscribers,
+//! caps its size ([`super::cap`]), mirrors the raw bytes to file sinks and fans the events out to subscribers,
 //! which bind between [`BuildEventStream::new`] and [`BuildEventStream::start`].
 
 use prost::Message;
@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use super::BuildEventEnvelope;
 use super::binary_file::{End, Reader};
+use super::cap::cap_event;
 use super::redact::redact_event;
 use crate::fanout::{Broadcaster, Subscriber, SubscriberFilter};
 use crate::stream::Gate;
@@ -198,8 +199,11 @@ impl BuildEventStream {
     ///
     /// Every event is redacted (see [`super::redact`]) before anything sees
     /// it: subscribers and file sinks read the same post-redact stream, so
-    /// secrets never leave this process. An event redaction leaves alone, the
-    /// common case, is mirrored as its original bytes without a re-encode.
+    /// secrets never leave this process. Then an event over
+    /// [`super::cap::MAX_EVENT_BYTES`] has its command line cut to fit, with a
+    /// warning, as does one over it for any other reason, passed on unchanged.
+    /// An event neither changes, the common case, is mirrored as its original
+    /// bytes without a re-encode.
     ///
     /// File sinks are written on the reader thread, so a slow sink slows the
     /// reader, though never bazel.
@@ -219,8 +223,8 @@ impl BuildEventStream {
         self.handle = Some(thread::spawn(move || {
             let broadcaster = thread_broadcaster;
             let mut mirrors = Mirrors::open(file_sinks);
-            // Reused for the rare event redaction changes; the common case
-            // mirrors the original bytes.
+            // Reused for the rare event redaction or the cap changes; the
+            // common case mirrors the original bytes.
             let mut reencode_buf: Vec<u8> = Vec::with_capacity(1024);
             let mut reader = Reader::new(file);
 
@@ -239,7 +243,17 @@ impl BuildEventStream {
 
                 let payload = frame.payload_bytes();
                 let mut event = frame.event;
-                let encoded = if redact_event(&mut event) {
+                let mut changed = redact_event(&mut event);
+                let len = if changed {
+                    event.encoded_len()
+                } else {
+                    payload.len()
+                };
+                if let Some(capped) = cap_event(&mut event, len) {
+                    super::sink::warn(&capped.warning());
+                    changed |= capped.changed();
+                }
+                let encoded = if changed {
                     reencode_buf.clear();
                     if let Err(err) = event.encode_length_delimited(&mut reencode_buf) {
                         mirrors.finish(Err(format!("BES encode error: {err}")));
@@ -1013,6 +1027,35 @@ mod tests {
         assert_eq!(
             take_sink(&sink),
             encoded_all(&[started(), build_finished(0, true)])
+        );
+    }
+
+    /// An action event over the size limit reaches subscribers and file sinks
+    /// with its command line cut to fit.
+    #[test]
+    fn an_oversized_action_event_reaches_every_consumer_capped() {
+        use axl_proto::build_event_stream::ActionExecuted;
+        let big = BuildEvent {
+            payload: Some(Payload::Action(ActionExecuted {
+                command_line: vec!["x".repeat(1000); 10_000],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut capped = big.clone();
+        let len = capped.encoded_len();
+        assert!(super::super::cap::cap_event(&mut capped, len).is_some_and(|c| c.changed()));
+        let client = sleeper();
+        let (sink, spec) = file_sink();
+        let rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
+        rig.attempt(&[big, build_finished(0, true)]);
+        let (joined, rest, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(rest, vec![capped.clone(), build_finished(0, true)]);
+        assert_eq!(
+            take_sink(&sink),
+            encoded_all(&[capped, build_finished(0, true)])
         );
     }
 
