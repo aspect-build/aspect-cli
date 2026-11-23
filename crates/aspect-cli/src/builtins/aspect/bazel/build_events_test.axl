@@ -262,6 +262,11 @@ def _test_runner_backends_stream_after_the_tasks_own(_):
         [s.uri for s in collect_bes_sinks(_fake_ctx(), _fake_trait([], backends = [runner], runner_backends = [runner]), _fake_rc({}))],
         [runner],
     )
+    _eq(
+        "named in another spelling",
+        [s.uri for s in collect_bes_sinks(_fake_ctx(bes_backends = [runner + ":443"]), _fake_trait([], backends = [runner], runner_backends = [runner, runner + ":443"]), _fake_rc({}))],
+        [runner + ":443"],
+    )
     rc = _fake_rc({"--bes_backend": runner})
     _eq(
         "dropped when bazel uploads there",
@@ -339,6 +344,11 @@ def _test_trait_backends_are_collected(_):
         "caller extras join the trait's, deduped",
         [s.uri for s in collect_bes_sinks(ctx, trait, rc, extra_backends = [deployment, "grpcs://bes.extra"])],
         [deployment, "grpcs://bes.extra"],
+    )
+    _eq(
+        "--bes-backend in another spelling keeps its own",
+        [s.uri for s in collect_bes_sinks(_fake_ctx(bes_backends = [deployment + ":443"]), trait, rc)],
+        [deployment + ":443"],
     )
 
     # Bazel uploading there itself still wins, and the drop is still reported.

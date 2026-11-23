@@ -1,7 +1,7 @@
 //! The BuildEvents feature's options reach `BazelTrait`, as do the deprecated
-//! `--workflows:bes-*` spellings, with a warning, unless the option is set
-//! too to other than its default; a negative count or a limit too small to hold a publish request is
-//! refused before the task runs.
+//! `--workflows:bes-*` spellings, with a warning, unless the option is also
+//! set to other than its default; a negative count or a limit too small to
+//! hold a publish request is refused before the task runs.
 //!
 //! A scratch workspace's `show` task prints the trait's fields, so nothing
 //! here runs Bazel.
