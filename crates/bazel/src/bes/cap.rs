@@ -88,13 +88,13 @@ impl Capped {
                 let mut msg = format!(
                     "the build event for {action} was {}, over the {} limit for build \
                      events; its command line was cut to the first {kept} of {total} arguments",
-                    mib(*before),
-                    mib(*limit),
+                    size(*before),
+                    size(*limit),
                 );
                 if after > limit {
                     msg.push_str(&format!(
                         ", and the event is still {}, which BES backends may refuse",
-                        mib(*after)
+                        size(*after)
                     ));
                 }
                 msg
@@ -102,8 +102,8 @@ impl Capped {
             Self::Oversize { kind, bytes, limit } => format!(
                 "a build event of kind {kind} is {}, over the {} limit for build events; \
                  BES backends may refuse it",
-                mib(*bytes),
-                mib(*limit),
+                size(*bytes),
+                size(*limit),
             ),
         }
     }
@@ -169,8 +169,14 @@ fn describe_action(event: &BuildEvent) -> String {
     }
 }
 
-fn mib(bytes: usize) -> String {
-    format!("{:.1} MiB", bytes as f64 / (1 << 20) as f64)
+/// `bytes` in MiB, or in KiB under 1 MiB, so a small configured limit does
+/// not read as `0.1 MiB`.
+fn size(bytes: usize) -> String {
+    if bytes < 1 << 20 {
+        format!("{:.1} KiB", bytes as f64 / (1 << 10) as f64)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1 << 20) as f64)
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +421,20 @@ mod tests {
         assert!(over.encoded_len() <= limit);
         assert!(
             capped.warning().contains("over the 16.0 MiB limit"),
+            "{}",
+            capped.warning()
+        );
+    }
+
+    #[test]
+    fn a_limit_under_a_mib_is_reported_in_kib() {
+        let limit = event_limit(MIN_MAX_MESSAGE_BYTES);
+        let mut over = action_of(100 << 10);
+        let capped = cap_event(&mut over, 100 << 10, limit).unwrap();
+        assert!(
+            capped
+                .warning()
+                .contains("was 100.0 KiB, over the 60.0 KiB limit"),
             "{}",
             capped.warning()
         );
