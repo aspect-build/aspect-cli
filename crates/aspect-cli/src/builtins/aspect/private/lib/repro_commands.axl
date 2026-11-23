@@ -808,7 +808,7 @@ def _print_repro_entry(color, entry):
     Description renders as a grey `# <description>` shell-comment line
     ABOVE the command — copy-paste still runs the command (bash ignores
     `#` lines), and the comment reads as a header explaining what's
-    coming. See `_install_hint_line` for why we use 256-color grey
+    coming. See `_install_hint_line` for why we use grey (`ansi.GREY`)
     instead of SGR 2 (faint).
     """
     if not entry.command:

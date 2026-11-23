@@ -2378,7 +2378,7 @@ impl Build {
                     if let Some(warning) =
                         bazel::bes::warning::incomplete_events(event_stream.end(), result.success())
                     {
-                        errln!("{warning}");
+                        crate::diag::warn(&warning);
                     }
                     None
                 }
