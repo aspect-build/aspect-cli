@@ -72,6 +72,8 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
 - paths are made relative;
 - the first warning of each kind is shown and the rest are counted at the end;
 - errors that scrolled away are repeated;
+- a run of identical lines, an action's output included, shows as its first
+  and a count, but never Bazel's progress or status lines;
 - a tip is given for failures we recognize: the tip rules of
   `@aspect//bazel/console_tips.axl` and `TipsTrait.rules`.
 
@@ -206,7 +208,7 @@ def _console_impl(ctx: FeatureContext):
 
 Console = feature(
     display_name = "Console",
-    summary = "Choose the lines Aspect prints around a task, and make Bazel's console easier to read: relative paths, collapsed warnings, recapped errors, tips for failures it recognizes.",
+    summary = "Choose the lines Aspect prints around a task, and make Bazel's console easier to read: relative paths, collapsed warnings and repeated lines, recapped errors, tips for failures it recognizes.",
     implementation = _console_impl,
     args = {
         "template_preset": args.string(

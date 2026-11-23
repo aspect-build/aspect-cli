@@ -209,10 +209,7 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
-    /// [`processors::CollapseRepeats`]; not where curses is shown, since its
-    /// annotation, inserted before the record after a run, would land inside
-    /// curses' redraw of its progress area: [`Config::stages`] leaves it out
-    /// there.
+    /// [`processors::CollapseRepeats`].
     CollapseRepeats,
     /// [`filters::CollapseSimilar`].
     CollapseSimilar {
@@ -444,14 +441,9 @@ impl Config {
         self.mode == Mode::Pty && self.output == Output::AsWritten
     }
 
-    /// The stages a pipeline runs: all, but [`Stage::CollapseRepeats`] where
-    /// [`Config::shows_curses`], whose annotation would land inside curses'
-    /// redraw of its progress area.
+    /// The stages a pipeline runs.
     pub fn stages(&self) -> Vec<&Stage> {
-        self.stages
-            .iter()
-            .filter(|s| !(self.shows_curses() && matches!(s, Stage::CollapseRepeats)))
-            .collect()
+        self.stages.iter().collect()
     }
 
     /// Whether a build holds lines for hooks to answer: it has an
@@ -534,7 +526,11 @@ impl Config {
                 Stage::RecapErrors { max, after } => Box::new(
                     RecapErrors::new(max, after, self.style.clone()).linking(self.linker()),
                 ),
-                Stage::CollapseRepeats => Box::<CollapseRepeats>::default(),
+                Stage::CollapseRepeats => Box::new(
+                    CollapseRepeats::default()
+                        .under_pty(pty)
+                        .styled(self.style.clone()),
+                ),
                 Stage::CollapseSimilar { severities, groups } => {
                     Box::new(CollapseSimilar::new(severities, groups, pty, stats.clone()))
                 }
@@ -799,23 +795,17 @@ mod tests {
     }
 
     #[test]
-    fn a_pty_capture_never_collapses_repeats() {
+    fn a_pty_capture_collapses_repeats_too() {
         let dir = tempfile::tempdir().unwrap();
-        let config = |mode| {
-            Config::new(mode, vec![Stage::CollapseRepeats], Style::default())
-                .with_log(log::Place::In(dir.path().to_path_buf()))
-        };
-        assert_eq!(
-            config(Mode::Pipe).pipeline().chain.len(),
-            2,
-            "the stage and the summary naming its log"
-        );
-        let pty = config(Mode::Pty);
-        assert!(pty.stages().is_empty());
-        assert!(
-            pty.pipeline().log.is_none(),
-            "nothing is altered, so no log"
-        );
+        for mode in [Mode::Pipe, Mode::Pty] {
+            let config = Config::new(mode, vec![Stage::CollapseRepeats], Style::default())
+                .with_log(log::Place::In(dir.path().to_path_buf()));
+            assert_eq!(
+                config.pipeline().chain.len(),
+                2,
+                "{mode:?}: the stage and the summary naming its log"
+            );
+        }
     }
 
     #[test]
@@ -1090,6 +1080,7 @@ mod tests {
                 max: report::RECAP_MAX,
                 after: report::RECAP_AFTER_RECORDS,
             },
+            Stage::CollapseRepeats,
         ]);
         Config::new(mode, stages, Style::default())
     }
@@ -1231,6 +1222,84 @@ mod tests {
             after.matches("stdout line one").count() < before.matches("stdout line one").count(),
             "a message line can still be dropped:\n{after}"
         );
+    }
+
+    /// A tool's spinner under a PTY, each frame ending in a bare `\r` the next
+    /// writes over, is never folded: the screen shows it as Bazel wrote it.
+    #[test]
+    fn a_pty_spinner_is_not_folded() {
+        let input: &[u8] = b"a\ra\ra\rdone\r\nnext\r\n";
+        let config = Config::new(Mode::Pty, vec![Stage::CollapseRepeats], Style::default());
+        let mut pipeline = config.pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&sink.bytes()),
+            String::from_utf8_lossy(input)
+        );
+    }
+
+    /// A real curses console with runs of repeated action output, each ending
+    /// just before Bazel redraws its progress area, shows on a terminal as it
+    /// would unfolded, with each run folded into its first line and the count:
+    /// curses' erase and redraw land where it expects.
+    #[test]
+    fn a_pty_console_shows_each_run_folded() {
+        let input: &[u8] = include_bytes!("testdata/pty_repeats.txt");
+        let config = Config::new(Mode::Pty, vec![Stage::CollapseRepeats], Style::default());
+        assert!(config.shows_curses());
+        let mut pipeline = config.pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let screen = |bytes: &[u8]| -> Vec<String> {
+            let mut screen = render::Screen::new(None);
+            let mut rows = screen.feed(bytes, None);
+            rows.extend(screen.finish());
+            ansi::text(&render::joined(&rows))
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        };
+        let (before, after) = (screen(input), screen(&sink.bytes()));
+        let mut folded: Vec<String> = Vec::new();
+        let mut repeats = 0;
+        for line in &before {
+            if !line.trim().is_empty() && folded.last() == Some(line) {
+                repeats += 1;
+                continue;
+            }
+            if repeats > 0 {
+                let s = if repeats == 1 { "" } else { "s" };
+                folded.push(format!("(last line repeated {repeats} more time{s})"));
+                repeats = 0;
+            }
+            folded.push(line.clone());
+        }
+        assert!(repeats == 0, "the recording ends on a run");
+        assert_eq!(after, folded, "before:\n{}", before.join("\n"));
+        for (line, more) in [("same repeated line", 24), ("boom", 9), ("slow tail", 1)] {
+            let at = after
+                .iter()
+                .position(|l| l == line)
+                .unwrap_or_else(|| panic!("{line}"));
+            let s = if more == 1 { "" } else { "s" };
+            assert_eq!(
+                after[at + 1],
+                format!("(last line repeated {more} more time{s})")
+            );
+        }
     }
 
     /// One macro's `print()` twice, the same first line over different
@@ -1846,7 +1915,14 @@ mod tests {
     fn recorded_consoles_keep_all_action_and_test_output() {
         for &(name, mode, input) in RECORDED {
             for agent in [false, true] {
-                let mut pipeline = defaults(mode, agent).pipeline();
+                // Folding counts a run's lines rather than losing them, so
+                // it is left out here; `a_pty_console_shows_each_run_folded`
+                // shows it on a screen.
+                let mut config = defaults(mode, agent);
+                config
+                    .stages
+                    .retain(|s| !matches!(s, Stage::CollapseRepeats));
+                let mut pipeline = config.pipeline();
                 let sink = SharedSink::default();
                 let mut forwarder = Forwarder::spawn(
                     Box::new(std::io::Cursor::new(input.to_vec())),

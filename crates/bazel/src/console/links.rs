@@ -1798,6 +1798,7 @@ mod tests {
             indented: false,
             opens_output: false,
             drawn: true,
+            returns: false,
         };
         links.see(&line);
         let out = links.process(row).unwrap();

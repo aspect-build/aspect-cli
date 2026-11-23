@@ -14,12 +14,17 @@ task processes its console with:
                       them. A debug message (a `print()`) is not collapsed.
   `recap_errors`      the first `recap_max` errors again at the end, once they
                       have scrolled away.
+  `collapse_repeats`  a run of identical lines, an action's output included,
+                      shown as its first and a count. Never Bazel's progress
+                      area or status line, so a stalled build still shows it
+                      is alive.
 
 Any of them but `drop`, which has no default, can be left out by name
-(`STAGE_NAMES`). They never collapse `INFO:` messages:
-`INFO: From <action>:` carries the action's output, a failing test's
-included, in its body. A caller's own `collapse` and `drop` patterns can
-match any severity. Every line hidden is in the raw log the summary names.
+(`STAGE_NAMES`). Apart from `collapse_repeats`, they never collapse `INFO:`
+messages: `INFO: From <action>:` carries the action's output, a failing
+test's included, in its body. A caller's own `collapse` and `drop` patterns
+can match any severity. Every line hidden is in the raw log the summary
+names.
 
 Bazel is always captured with its curses UI, which ends each action's output
 for the stages. Where curses is not shown (stdout or stderr not a terminal,
@@ -56,7 +61,7 @@ load("../private/lib/text.axl", "did_you_mean_then")
 load("../private/lib/tips.axl", "RULE_VARS", "all_tip_rules", "emit_rule_tips", "rule_aggregation")
 
 # The default stages, by the names `disable` takes.
-STAGE_NAMES = ["relativize_paths", "collapse_similar", "recap_errors"]
+STAGE_NAMES = ["relativize_paths", "collapse_similar", "recap_errors", "collapse_repeats"]
 
 PROFILES = ["human", "agent"]
 
@@ -189,6 +194,8 @@ def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = 
         else:
             problems.append("console recap_max %r is not a positive number; using %d" % (recap_max, RECAP_MAX))
             stages.append(o.recap_errors(max = RECAP_MAX))
+    if "collapse_repeats" not in disable:
+        stages.append(o.collapse_repeats())
     return struct(stages = stages, display = "lines" if agent else "auto", progress = not agent, problems = problems)
 
 def start_stages(ctx, trait) -> list:

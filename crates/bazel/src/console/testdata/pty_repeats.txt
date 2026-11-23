@@ -1,0 +1,112 @@
+Starting local Bazel server (8.4.2) and connecting to it...
+[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/rules_license/metadata.json
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mLoading:[0m 0 packages loaded
+    Fetching repository @@protobuf+; starting
+    Fetching repository @@rules_python+; starting
+    Fetching ...el_greg/76e0d53296f9dc7db12deeaf9fbeffdc/external/rules_python+; Extracting rules_python-0.40.0.tar.gz
+    Fetching .../var/tmp/_bazel_greg/76e0d53296f9dc7db12deeaf9fbeffdc/external/protobuf+; Extracting protobuf-29.0.zip
+    Fetching repository @@rules_java++compatibility_proxy+compatibility_proxy; starting
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mLoading:[0m 0 packages loaded
+    Fetching repository @@protobuf+; starting
+    Fetching .../var/tmp/_bazel_greg/76e0d53296f9dc7db12deeaf9fbeffdc/external/protobuf+; Extracting protobuf-29.0.zip
+    Fetching module extension @@rules_python+//python/private:internal_deps.bzl%internal_deps; starting
+[1A[K[1A[K[1A[K[1A[K[32mLoading:[0m 0 packages loaded
+    Fetching repository @@protobuf+; starting
+    Fetching .../var/tmp/_bazel_greg/76e0d53296f9dc7db12deeaf9fbeffdc/external/protobuf+; Extracting protobuf-29.0.zip
+[1A[K[1A[K[1A[K[32mAnalyzing:[0m 3 targets (1 packages loaded)
+[1A[K[32mAnalyzing:[0m 3 targets (1 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (1 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (6 packages loaded, 10 targets configured).
+[32m[1 / 3][0m checking cached actions
+[1A[K[32m[1 / 4][0m 3 actions running
+    Executing genrule //:loud; 0s darwin-sandbox
+    Executing genrule //:slow; 0s darwin-sandbox
+    Executing genrule //:fail; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32m[1 / 4][0m 3 actions running
+    Executing genrule //:loud; 1s darwin-sandbox
+    Executing genrule //:slow; 1s darwin-sandbox
+    Executing genrule //:fail; 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:loud:
+first distinct line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+same repeated line
+[32m[1 / 4][0m 3 actions running
+    Executing genrule //:loud; 2s darwin-sandbox
+    Executing genrule //:slow; 2s darwin-sandbox
+    Executing genrule //:fail; 2s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32m[2 / 4][0m 2 actions running
+    Executing genrule //:slow; 2s darwin-sandbox
+    Executing genrule //:fail; 2s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[2 / 4][0m 2 actions running
+    Executing genrule //:slow; 3s darwin-sandbox
+    Executing genrule //:fail; 3s darwin-sandbox
+[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //:slow:
+slow action output
+slow tail
+slow tail
+[32m[2 / 4][0m 2 actions running
+    Executing genrule //:slow; 4s darwin-sandbox
+    Executing genrule //:fail; 4s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[3 / 4][0m Executing genrule //:fail; 4s darwin-sandbox
+[1A[K[31m[1mERROR: [0m/private/tmp/claude-501/-Users-greg-aspect-aspect-cli/cb12bb20-a6ab-4327-90a5-7c8f36bcabbd/scratchpad/repeats_ws/BUILD:3:8: Executing genrule //:fail failed: (Exit 1): bash failed: error executing Genrule command (from target //:fail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; sleep 5; for i in $(seq 10); do echo boom >&2; done; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+boom
+boom
+boom
+boom
+boom
+boom
+boom
+boom
+boom
+boom
+[32m[3 / 4][0m Executing genrule //:fail; 5s darwin-sandbox
+[1A[K[32mINFO: [0mBuild succeeded for only 2 of 3 top-level targets
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0mFound 3 targets...
+[32m[4 / 4][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 9.595s, Critical Path: 5.04s
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0m4 processes: 2 internal, 2 darwin-sandbox.
+[32m[4 / 4][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[0m

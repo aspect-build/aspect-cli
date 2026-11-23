@@ -432,7 +432,7 @@ impl Splitter {
     /// sequences, without the boundary. The chain runs even once the
     /// destination has failed, so observers still see every line.
     fn emit(&mut self, record: &[u8], boundary: &[u8]) -> bool {
-        let line = self.lines.classify(record);
+        let mut line = self.lines.classify(record);
         if self.screen.is_some() {
             let mut bytes = record.to_vec();
             bytes.extend_from_slice(boundary);
@@ -440,6 +440,7 @@ impl Splitter {
             // Kept: a `\n` that follows a `\r` across reads goes to the screen.
             return true;
         }
+        line.returns = boundary == b"\r";
         self.chain(record, boundary, line)
     }
 

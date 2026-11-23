@@ -246,8 +246,13 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
     );
     assert_eq!(
         count("Analysis failed"),
-        3,
-        "a pipe marks no body, so an unindented line under a hidden warning stays: {stderr}"
+        2,
+        "a pipe marks no body, so an unindented line under a hidden warning stays, \
+         and the two in a row fold: {stderr}"
+    );
+    assert!(
+        stderr.contains("Analysis failed\n(last line repeated 1 more time)\n"),
+        "{stderr}"
     );
     for advice in [
         "canonical reproducible form",

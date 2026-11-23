@@ -944,10 +944,14 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
 
     /// Fold each run of identical lines into the first plus a `(last line
     /// repeated N more times)` line. Unlike the other hiding stages it folds
-    /// any line, an action's or a test's output included; it is not one of
-    /// the `Console` defaults. Plain lines only: where curses is shown the
-    /// annotation would land inside Bazel's redraw of its progress area, so
-    /// the stage is left out.
+    /// any line, an action's or a test's output included, comparing text
+    /// with colour and a `--show_timestamps` prefix left out. It never folds
+    /// a blank line, a row of Bazel's progress area or its status line (so a
+    /// stalled build still shows it is alive), nor a line a tool redraws in
+    /// place, nor, on a terminal, a spinner's frame. Where curses is shown,
+    /// the count goes just before the progress area curses draws after the
+    /// run, never inside the area or its erase; before a tool redrawing its
+    /// own line, the copies are written out instead.
     fn collapse_repeats() -> anyhow::Result<OutputStage> {
         Ok(OutputStage {
             stage: Stage::CollapseRepeats,

@@ -29,6 +29,7 @@ use super::aggregate::{Spec, Tally};
 use super::ansi;
 use super::forward::LineProcessor;
 use super::line;
+use super::report::Style;
 use super::report::cut;
 
 /// Hits kept by [`Observations`]; later hits still latch `fatal`.
@@ -37,38 +38,148 @@ pub const MAX_RECORDED_MATCHES: usize = 1024;
 /// The longest copy of a line [`Observations`] keeps.
 pub const MAX_RECORDED_LINE_BYTES: usize = 2048;
 
-/// Fold each run of identical records into its first occurrence, then a
-/// `(last line repeated N more times)` line before whatever follows the run
-/// (or at end of stream). The first occurrence is forwarded at once. Blank
-/// records are never folded; any other is, an action's output included.
+/// Fold each run of identical lines into its first occurrence, then a
+/// `(last line repeated N more times)` line (or one at end of stream). The
+/// first occurrence is forwarded at once. Lines are compared by their message
+/// text ([`line::message_of`]), so a colour or a `--show_timestamps` prefix
+/// does not tell two apart. Any line folds, an action's output included,
+/// except:
+///
+/// * a blank line;
+/// * a row of Bazel's progress area or its status line, which ends a run:
+///   during a stall the same status line coming through again is what shows
+///   the build is still alive;
+/// * a record that starts by moving the cursor up (a tool redrawing its own
+///   line), which overwrites the line before rather than repeating it;
+/// * under a PTY, a record that ends in a bare `\r` (a tool's spinner), which
+///   the next record writes over, and which ends a run.
+///
+/// The count goes just before the record that ends the run, which under a
+/// PTY ([`CollapseRepeats::under_pty`]) is normally the first row of the
+/// progress area curses draws after each burst of output: curses later moves
+/// up over the rows it drew, counting from below them, so a line written
+/// before the area leaves that count right. What curses' cursor movement does
+/// count, the erase of its area (blank records, then the start of the next
+/// line it writes), is never written into: the count waits for a record that
+/// does not start by moving the cursor, or for the cursor movement of
+/// curses' erase to be done. A tool redrawing its own line counts rows up
+/// from where it is, the folded copies among them, so before one the copies
+/// are written out as they came instead of a count. The count is styled as
+/// the console's detail lines ([`Style`]).
 #[derive(Default)]
 pub struct CollapseRepeats {
-    prev: Option<Vec<u8>>,
+    pty: bool,
+    style: Style,
+    given: line::Given,
+    prev: Option<String>,
     repeats: u64,
+    /// The last record folded, as it came, to write out again in place of
+    /// the count before a tool's redraw.
+    folded: Vec<u8>,
+    /// The last record with text was a row of Bazel's progress area, so a
+    /// record starting with cursor movement is curses erasing it.
+    after_area: bool,
 }
 
 impl CollapseRepeats {
+    /// For a PTY capture, where curses draws its progress area among the
+    /// records.
+    pub fn under_pty(mut self, pty: bool) -> Self {
+        self.pty = pty;
+        self
+    }
+
+    /// The count styled as `style`'s detail lines.
+    pub fn styled(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
     fn annotation(&mut self) -> Vec<u8> {
         let s = if self.repeats == 1 { "" } else { "s" };
-        let line = format!("(last line repeated {} more time{s})\n", self.repeats);
+        let line = format!(
+            "{}(last line repeated {} more time{s}){}\n",
+            self.style.open, self.repeats, self.style.close
+        );
         self.repeats = 0;
         line.into_bytes()
     }
+
+    /// The folded copies, each with the boundary it came with, in place of
+    /// the count.
+    fn unfolded(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..self.repeats {
+            out.extend_from_slice(&self.folded);
+            out.push(b'\n');
+        }
+        self.repeats = 0;
+        out
+    }
+
+    /// `record` with a pending count written `at` bytes in, or held for a
+    /// later record when `at` is `None`.
+    fn with_count(&mut self, record: &[u8], at: Option<usize>) -> Vec<u8> {
+        match at {
+            Some(at) if self.repeats > 0 => {
+                let mut out = record[..at].to_vec();
+                out.extend(self.annotation());
+                out.extend_from_slice(&record[at..]);
+                out
+            }
+            _ => record.to_vec(),
+        }
+    }
+}
+
+/// How many bytes of escape sequences that move the cursor or erase (not a
+/// colour) `record` starts with.
+fn movement_lead(record: &[u8]) -> usize {
+    ansi::segments(record)
+        .take_while(|(esc, s)| *esc && !s.ends_with(b"m"))
+        .map(|(_, s)| s.len())
+        .sum()
 }
 
 impl LineProcessor for CollapseRepeats {
+    fn see(&mut self, line: &line::Line) {
+        self.given.see(line);
+    }
+
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
-        if !record.is_empty() && self.prev.as_deref() == Some(record) {
+        let given = self.given.take(record);
+        let text = line::message_of(record);
+        let blank = text.trim().is_empty();
+        let progress = is_progress_row(Some(&given));
+        let foldable = !blank && !progress && !given.fresh && !given.returns;
+        if foldable && self.prev.as_ref() == Some(&text) {
             self.repeats += 1;
+            self.folded = record.to_vec();
             return None;
         }
-        let mut out = if self.repeats > 0 {
-            self.annotation()
+        if self.pty && given.fresh && !self.after_area && self.repeats > 0 {
+            // A tool's redraw: its cursor-up counts the copies.
+            let mut out = self.unfolded();
+            out.extend_from_slice(record);
+            self.prev = None;
+            return Some(out);
+        }
+        // Where a pending count can go in this record, if anywhere: never
+        // the blank record of curses' erase that comes before its cursor-up.
+        let at = if self.pty && blank && self.after_area {
+            None
+        } else if !self.pty || !given.fresh {
+            Some(0)
+        } else if !blank && !progress && self.after_area {
+            Some(movement_lead(record))
         } else {
-            Vec::new()
+            None
         };
-        out.extend_from_slice(record);
-        self.prev = Some(record.to_vec());
+        let out = self.with_count(record, at);
+        if !blank {
+            self.after_area = progress;
+        }
+        self.prev = (!blank && !progress && !given.returns).then_some(text);
         Some(out)
     }
 
@@ -407,6 +518,125 @@ mod tests {
         assert_eq!(
             feed(&mut p, &[b"x", b"x", b"x"]),
             b"x\n(last line repeated 2 more times)\n"
+        );
+    }
+
+    #[test]
+    fn collapse_repeats_never_folds_bazels_status_line() {
+        let status: &[u8] = b"[3 / 9] 2 actions running";
+        let mut p = CollapseRepeats::default();
+        assert_eq!(
+            feed(&mut p, &[b"a", b"a", status, status, b"a", b"a"]),
+            [
+                &b"a\n(last line repeated 1 more time)\n"[..],
+                status,
+                b"\n",
+                status,
+                b"\na\n(last line repeated 1 more time)\n",
+            ]
+            .concat()
+        );
+    }
+
+    fn pty_repeats() -> CollapseRepeats {
+        CollapseRepeats::default().under_pty(true)
+    }
+
+    const AREA: &[u8] = b"\x1b[32m[1 / 4]\x1b[0m 3 actions running";
+    const ERASE: &[u8] = b"\x1b[1A\x1b[K";
+
+    /// Under a PTY the count goes before the progress area curses draws after
+    /// the run, at once, rather than waiting for the next output.
+    #[test]
+    fn under_a_pty_the_count_goes_before_the_progress_area() {
+        let out = feed(&mut pty_repeats(), &[b"a", b"a", b"a", AREA]);
+        assert_eq!(
+            out,
+            [&b"a\n(last line repeated 2 more times)\n"[..], AREA, b"\n"].concat()
+        );
+    }
+
+    /// A count still held when curses redraws and erases its area in place
+    /// waits for the erase to be done, its blank record included, then goes
+    /// after the cursor movement the next line starts with.
+    #[test]
+    fn under_a_pty_a_held_count_waits_out_curses_erase() {
+        let area_in_place: &[u8] = &[ERASE, AREA].concat();
+        let next: &[u8] = &[ERASE, b"\x1b[32mINFO: \x1b[0mdone"].concat();
+        let mut p = pty_repeats();
+        let mut out = feed(&mut p, &[b"a", b"a", AREA]);
+        out.extend(feed(&mut p, &[area_in_place, b"\r", ERASE, next]));
+        assert_eq!(
+            out,
+            [
+                &b"a\n(last line repeated 1 more time)\n"[..],
+                AREA,
+                b"\n",
+                area_in_place,
+                b"\n\r\n",
+                ERASE,
+                b"\n",
+                next,
+                b"\n",
+            ]
+            .concat()
+        );
+        let mut p = pty_repeats();
+        p.process(AREA);
+        p.repeats = 1;
+        let erase_blank = p.process(b"\r").unwrap();
+        assert_eq!(
+            erase_blank, b"\r",
+            "no count in the blank record of curses' erase"
+        );
+        assert_eq!(
+            p.process(next).unwrap(),
+            [
+                ERASE,
+                b"(last line repeated 1 more time)\n\x1b[32mINFO: \x1b[0mdone"
+            ]
+            .concat(),
+            "after its cursor movement"
+        );
+    }
+
+    /// Before a tool redrawing its own line, whose cursor-up counts the
+    /// copies, they are written out as they came rather than counted.
+    #[test]
+    fn under_a_pty_a_tools_redraw_gets_the_copies_back() {
+        let redraw: &[u8] = &[ERASE, b"step 2"].concat();
+        let out = feed(
+            &mut pty_repeats(),
+            &[b"a", b"\x1b[1ma\x1b[0m", redraw, b"b"],
+        );
+        assert_eq!(
+            out,
+            [&b"a\n\x1b[1ma\x1b[0m\n"[..], redraw, b"\nb\n"].concat()
+        );
+    }
+
+    /// The first line curses writes after erasing its area starts a run, its
+    /// cursor movement notwithstanding.
+    #[test]
+    fn under_a_pty_a_line_after_curses_erase_starts_a_run() {
+        let first: &[u8] = &[ERASE, b"a"].concat();
+        let out = feed(&mut pty_repeats(), &[AREA, first, b"a", b"a"]);
+        assert_eq!(
+            out,
+            [AREA, b"\n", first, b"\n(last line repeated 2 more times)\n"].concat()
+        );
+    }
+
+    /// A colour or a `--show_timestamps` prefix does not tell two lines apart.
+    #[test]
+    fn collapse_repeats_compares_text() {
+        let out = feed(
+            &mut CollapseRepeats::default(),
+            &[b"\x1b[31ma\x1b[0m", b"a", b"(09:00:01) a", b"b"],
+        );
+        assert_eq!(
+            out,
+            b"\x1b[31ma\x1b[0m\n(last line repeated 2 more times)\nb\n"
         );
     }
 

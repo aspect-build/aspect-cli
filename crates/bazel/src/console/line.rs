@@ -212,6 +212,10 @@ pub struct Line {
     /// line, and the indented lines under them. Under a PTY no stage changes
     /// such a row's height; see [`super::filters`]. Errs toward true.
     pub drawn: bool,
+    /// Whether the record ended in a bare `\r` under a PTY, so what comes
+    /// next writes over it (a tool's spinner). Set by the splitter, which
+    /// sees the boundary.
+    pub returns: bool,
 }
 
 /// What a record is, for a stage: what the chain said it is
@@ -354,6 +358,7 @@ impl Classifier {
             indented,
             opens_output,
             drawn,
+            returns: false,
         }
     }
 }

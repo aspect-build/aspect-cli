@@ -39,7 +39,7 @@ def _test_default_stages_can_be_left_out(_):
 def _test_a_bad_setting_is_reported_not_raised(_):
     """The feature runs for every task, so a typo must not fail them all."""
     got = default_stages("humane", disable = ["relativize_path"], collapse = ["("], drop = ["[", "ok"])
-    _eq("valid stages kept", _names(got.stages), ["relativize_paths", "drop", "collapse_similar", "recap_errors"])
+    _eq("valid stages kept", _names(got.stages), ["relativize_paths", "drop", "collapse_similar", "recap_errors", "collapse_repeats"])
     _eq("one problem each", len(got.problems), 4)
     _eq("names the stages", "the stages are relativize_paths" in default_stages("human", disable = ["bogus"]).problems[0], True)
     _eq("drop has no default to leave out", len(default_stages("human", disable = ["drop"]).problems), 1)
@@ -84,7 +84,7 @@ def _test_processor_follows_the_trait(ctx):
     _eq("no stages, no capture", bazel_console.processor_for(BazelTrait(), True, True), None)
     trait = BazelTrait(output_stages = default_stages("human", root = "/ws").stages)
     processor = bazel_console.processor_for(trait, False, False)
-    _eq("in phase order", processor.stages, ["relativize_paths", "recap_errors", "collapse_similar"])
+    _eq("in phase order", processor.stages, ["relativize_paths", "recap_errors", "collapse_similar", "collapse_repeats"])
     _eq("nothing held", processor.intercepts, False)
     trait = BazelTrait(output_start = [lambda _ctx: [bazel.output.observe({"x": "x"})]])
     _eq("output_start alone adds nothing", bazel_console.processor_for(trait, False, False), None)
@@ -94,7 +94,7 @@ def _test_processor_follows_the_trait(ctx):
     _eq("output_display", bazel_console.processor_for(trait, True, True).display, "lines")
     _eq("the user's --curses wins", bazel_console.processor_for(trait, True, True, curses = True).display, "curses")
     trait = BazelTrait(output_stages = [bazel.output.collapse_repeats()], output_display = "curses")
-    _eq("curses shown leaves repeats alone", bazel_console.processor_for(trait, False, False).stages, [])
+    _eq("curses shown runs repeats too", bazel_console.processor_for(trait, False, False).stages, ["collapse_repeats"])
     _eq("--curses=no shows lines", bazel_console.processor_for(trait, False, False, curses = False).display, "lines")
     trait = BazelTrait(output_stages = [bazel.output.collapse_repeats()], output_display = "none")
     _eq("none shows nothing", bazel_console.processor_for(trait, True, True).display, "none")
