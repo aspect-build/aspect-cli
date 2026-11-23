@@ -364,6 +364,15 @@ impl Config {
         self
     }
 
+    /// This config linking a relative path from `root`, the workspace a
+    /// build runs in, before the directory the task runs from.
+    pub fn link_from(&mut self, root: std::path::PathBuf) {
+        if let Some(bases) = &mut self.links {
+            let cwd = bases.pop();
+            *bases = std::iter::once(root).chain(cwd).collect();
+        }
+    }
+
     /// A [`links::Linker`] for what is shown, when [`Config::links`] asks for
     /// one and something is shown.
     fn linker(&self) -> Option<links::Linker> {
@@ -456,6 +465,9 @@ impl Config {
             _ => None,
         };
         let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
+        // What `relativize_paths` says each path it made relative names, for
+        // the links, when there are any.
+        let hints = self.linker().map(|_| links::Hints::default());
         for stage in self.stages() {
             let stage: Box<dyn LineProcessor> = match stage.clone() {
                 Stage::Observe(patterns) => {
@@ -491,12 +503,15 @@ impl Config {
                 Stage::Rewrite { regex, replacement } => {
                     Box::new(Rewrite::new(regex, replacement).under_pty(pty))
                 }
-                Stage::RelativizePaths { root, cwd } => {
-                    Box::new(RelativizePaths::new(root, cwd).under_pty(pty))
-                }
+                Stage::RelativizePaths { root, cwd } => Box::new(
+                    RelativizePaths::new(root, cwd)
+                        .under_pty(pty)
+                        .hinting(hints.clone()),
+                ),
                 Stage::Drop(patterns) => Box::new(DropLines::new(patterns, pty, stats.clone())),
                 Stage::RecapErrors { max, after } => Box::new(
-                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker()),
+                    RecapErrors::new(max, after, self.style.clone())
+                        .linking(self.linker().zip(hints.clone())),
                 ),
                 Stage::CollapseRepeats => Box::<CollapseRepeats>::default(),
                 Stage::CollapseSimilar { severities, groups } => {
@@ -506,7 +521,10 @@ impl Config {
             chain.push(stage);
         }
         if let Some(linker) = self.linker() {
-            chain.push(Box::new(links::Links(linker)));
+            chain.push(Box::new(links::Links {
+                linker,
+                hints: hints.clone().unwrap_or_default(),
+            }));
         }
         if let Some(l) = &log {
             stats.keep_groups(l.path());

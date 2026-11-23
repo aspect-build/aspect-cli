@@ -69,12 +69,15 @@ pub struct TolerantPrintHandler;
 
 /// Whether this process's stderr is a person's terminal that shows links:
 /// a TTY with a `TERM` other than `dumb` (which writes an escape as text),
-/// and no coding agent reading it (its environment set, as the Console
-/// feature's `auto` profile checks), which gets each path once, plain.
+/// not a CI job's (a `file://` link names the runner's disk, and a log
+/// viewer may show the escape), and no coding agent reading it (its
+/// environment set, as the Console feature's `auto` profile checks), which
+/// gets each path once, plain.
 pub(crate) fn terminal_links() -> bool {
     use std::io::IsTerminal as _;
     std::io::stderr().is_terminal()
         && std::env::var_os("TERM").is_some_and(|t| !t.is_empty() && t != "dumb")
+        && !crate::ci::on_recognized_ci()
         && !crate::agent::detected(|v| std::env::var_os(v))
 }
 

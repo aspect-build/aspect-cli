@@ -1247,7 +1247,7 @@ fn writes_execution_log(asked: bool, recording: bool, version: Option<&semver::V
 /// The workspace a Bazel command run in `directory` (the CLI's own cwd when
 /// `None`) belongs to, found from where its client works: absolute, with
 /// symlinks resolved. See [`crate::project_root::find_bazel_root`].
-fn workspace_of(directory: Option<&str>) -> Option<PathBuf> {
+pub(crate) fn workspace_of(directory: Option<&str>) -> Option<PathBuf> {
     let dir = match directory {
         Some(dir) => std::env::current_dir().ok()?.join(dir),
         None => std::env::current_dir().ok()?,

@@ -22,7 +22,7 @@ use super::ansi;
 use super::filters::Collapsed;
 use super::forward::LineProcessor;
 use super::line::{self, Given, Kind, Line};
-use super::links::{Linker, file_link};
+use super::links::{Hints, Linker, file_link};
 use super::log::{self, Cut, RawLog};
 
 /// The longest line a report quotes.
@@ -331,8 +331,9 @@ pub struct RecapErrors {
     body: Option<usize>,
     distinct: HashSet<String>,
     after_first: usize,
-    /// Links what the repeated lines name, for a terminal.
-    linker: Option<Linker>,
+    /// Links what the repeated lines name, for a terminal, with what
+    /// `relativize_paths` said of each line's paths.
+    linker: Option<(Linker, Hints)>,
 }
 
 /// One error a recap repeats: its header, and what it keeps of its body.
@@ -341,6 +342,8 @@ struct Recapped {
     head: Vec<String>,
     last: Option<String>,
     skipped: usize,
+    /// What `relativize_paths` said its lines' paths name, for the links.
+    hints: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Recapped {
@@ -368,10 +371,21 @@ impl RecapErrors {
         }
     }
 
-    /// This recap with the paths and URLs it repeats linked ([`Linker`]).
-    pub fn linking(mut self, linker: Option<Linker>) -> Self {
+    /// This recap with the paths and URLs it repeats linked ([`Linker`]),
+    /// each line's paths as `hints` said when it went by.
+    pub fn linking(mut self, linker: Option<(Linker, Hints)>) -> Self {
         self.linker = linker;
         self
+    }
+}
+
+impl RecapErrors {
+    /// What `relativize_paths` said of the record going by, when linking.
+    fn hints(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.linker
+            .as_ref()
+            .map(|(_, h)| h.get())
+            .unwrap_or_default()
     }
 }
 
@@ -396,11 +410,13 @@ impl LineProcessor for RecapErrors {
                 .map_or(text, |c| c.get(1).unwrap().as_str());
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
+                let hints = self.hints();
                 self.errors.push(Recapped {
                     header: quoted,
                     head: vec![],
                     last: None,
                     skipped: 0,
+                    hints,
                 });
                 self.body = Some(self.errors.len() - 1);
             }
@@ -410,7 +426,9 @@ impl LineProcessor for RecapErrors {
             && !line.fresh
         {
             if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
+                let hints = self.hints();
                 self.errors[i].body_line(quote(text));
+                self.errors[i].hints.extend(hints);
             }
             self.body = Some(i);
             self.after_first += usize::from(line.kind == Kind::Other);
@@ -442,21 +460,39 @@ impl LineProcessor for RecapErrors {
             "INFO: Errors Bazel reported:".to_string()
         };
         self.style.line(&mut out, &header);
-        let mut line = |text: &str| match self.linker.as_mut() {
-            Some(l) => l.link(text.as_bytes()),
+        let mut line = |text: &str, hints: &[(Vec<u8>, Vec<u8>)]| match self.linker.as_mut() {
+            Some((l, _)) => l.link_with(text.as_bytes(), hints),
             None => text.as_bytes().to_vec(),
         };
         for e in &self.errors {
-            out.extend(b"  ".iter().copied().chain(line(&e.header)).chain(*b"\n"));
+            out.extend(
+                b"  "
+                    .iter()
+                    .copied()
+                    .chain(line(&e.header, &e.hints))
+                    .chain(*b"\n"),
+            );
             for b in &e.head {
-                out.extend(b"    ".iter().copied().chain(line(b)).chain(*b"\n"));
+                out.extend(
+                    b"    "
+                        .iter()
+                        .copied()
+                        .chain(line(b, &e.hints))
+                        .chain(*b"\n"),
+                );
             }
             if e.skipped > 0 {
                 let s = if e.skipped == 1 { "" } else { "s" };
                 out.extend_from_slice(format!("    … {} more line{s}\n", e.skipped).as_bytes());
             }
             if let Some(last) = &e.last {
-                out.extend(b"    ".iter().copied().chain(line(last)).chain(*b"\n"));
+                out.extend(
+                    b"    "
+                        .iter()
+                        .copied()
+                        .chain(line(last, &e.hints))
+                        .chain(*b"\n"),
+                );
             }
         }
         Some(out)
@@ -778,9 +814,10 @@ mod tests {
     fn a_linking_recap_links_what_its_errors_name() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
-        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some((
             super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
-        ));
+            Hints::default(),
+        )));
         let out = feed(&mut p, &["ERROR: BUILD.bazel:1:1: see https://x.test/why"]);
         assert!(
             out.starts_with("INFO: Errors Bazel reported:\n  ERROR: \x1b]8;;file://"),

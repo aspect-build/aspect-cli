@@ -741,13 +741,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &resolved_startup_flags,
         )?);
         let stdout_inherited = stdout.is_none() && stdio.is_none();
-        let console = console_for(
+        let directory = directory.into_option();
+        let mut console = console_for(
             output.into_option().map(|p| p.config().clone()),
             stderr.is_none() && stdio.is_none(),
             stdout_inherited,
             &mut resolved_flags,
             eval,
         )?;
+        // Bazel's own relative paths are the workspace's it runs in.
+        if let (Some(c), Some(root)) = (console.as_mut(), build::workspace_of(directory.as_deref()))
+        {
+            c.link_from(root);
+        }
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr, console.is_some())?;
         let build = build::Build::spawn(
@@ -762,7 +768,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             stderr,
             console,
             stdout_inherited,
-            directory.into_option(),
+            directory,
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
@@ -942,13 +948,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &resolved_startup_flags,
         )?);
         let stdout_inherited = stdout.is_none() && stdio.is_none();
-        let console = console_for(
+        let directory = directory.into_option();
+        let mut console = console_for(
             output.into_option().map(|p| p.config().clone()),
             stderr.is_none() && stdio.is_none(),
             stdout_inherited,
             &mut resolved_flags,
             eval,
         )?;
+        // Bazel's own relative paths are the workspace's it runs in.
+        if let (Some(c), Some(root)) = (console.as_mut(), build::workspace_of(directory.as_deref()))
+        {
+            c.link_from(root);
+        }
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr, console.is_some())?;
         let test = build::Build::spawn(
@@ -963,7 +975,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             stderr,
             console,
             stdout_inherited,
-            directory.into_option(),
+            directory,
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,

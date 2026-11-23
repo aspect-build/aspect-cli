@@ -234,6 +234,9 @@ static SANDBOX: LazyLock<BytesRegex> =
 /// hyperlink's target, say).
 pub struct RelativizePaths {
     root: Option<Vec<u8>>,
+    /// Where it tells [`super::links`] which file each path it made relative
+    /// names, as the shown text is no longer enough to tell.
+    hints: Option<super::links::Hints>,
     /// Where `cwd` is: the workspace root, below it (its directories under
     /// the root), or outside it.
     cwd: Cwd,
@@ -258,6 +261,13 @@ impl RelativizePaths {
         self
     }
 
+    /// This stage telling `hints`, for each record, which file each path it
+    /// made relative names: the record's, every record replacing the last's.
+    pub fn hinting(mut self, hints: Option<super::links::Hints>) -> Self {
+        self.hints = hints;
+        self
+    }
+
     /// `root` is the workspace directory and `cwd` the one paths are made
     /// relative to, `root` when None; trailing `/`s are ignored.
     pub fn new(root: Option<String>, cwd: Option<String>) -> Self {
@@ -276,6 +286,7 @@ impl RelativizePaths {
         };
         Self {
             root: root.map(|r| (r + "/").into_bytes()),
+            hints: None,
             cwd,
             pty: false,
             given: None,
@@ -313,7 +324,35 @@ impl RelativizePaths {
         (with, consumed)
     }
 
-    fn text(&self, text: &[u8]) -> Vec<u8> {
+    /// The file a path made relative names, for [`super::links`]: `with`
+    /// shown in place of everything up to `rest`, which `consumed` bytes of
+    /// `rest` also stand for, under `base`, the directory `rest` is in.
+    fn hint(
+        &self,
+        base: &[u8],
+        with: &[u8],
+        rest: &[u8],
+        consumed: usize,
+        hints: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
+        let mut end = rest
+            .iter()
+            .position(|&b| !continues_path(b))
+            .unwrap_or(rest.len());
+        while end > consumed && rest[end - 1] == b'.' {
+            end -= 1;
+        }
+        if end <= consumed && with == b"." {
+            return;
+        }
+        let mut shown = with.to_vec();
+        shown.extend_from_slice(&rest[consumed..end.max(consumed)]);
+        let mut file = base.to_vec();
+        file.extend_from_slice(&rest[..end]);
+        hints.push((shown, file));
+    }
+
+    fn text(&self, text: &[u8], hints: &mut Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         for found in EXECROOT.find_iter(text) {
@@ -334,13 +373,16 @@ impl RelativizePaths {
                 out.extend_from_slice(found.as_bytes());
             } else {
                 let (with, consumed) = self.relative(rest);
+                if let Some(root) = &self.root {
+                    self.hint(root, &with, rest, consumed, hints);
+                }
                 out.extend(with);
                 at += consumed;
             }
         }
         out.extend_from_slice(&text[at..]);
         match &self.root {
-            Some(root) if !matches!(self.cwd, Cwd::Outside) => self.replace_root(&out, root),
+            Some(root) if !matches!(self.cwd, Cwd::Outside) => self.replace_root(&out, root, hints),
             _ => out,
         }
     }
@@ -348,12 +390,18 @@ impl RelativizePaths {
     /// `hay` with each occurrence of `root` that starts a path made
     /// relative: one not preceded by a byte a path could continue through
     /// (`file:///ws/x` keeps its root).
-    fn replace_root(&self, hay: &[u8], root: &[u8]) -> Vec<u8> {
+    fn replace_root(
+        &self,
+        hay: &[u8],
+        root: &[u8],
+        hints: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Vec<u8> {
         let mut out = Vec::with_capacity(hay.len());
         let mut i = 0;
         while i < hay.len() {
             if hay[i..].starts_with(root) && (i == 0 || !continues_path(hay[i - 1])) {
                 let (with, consumed) = self.relative(&hay[i + root.len()..]);
+                self.hint(root, &with, &hay[i + root.len()..], consumed, hints);
                 out.extend(with);
                 i += root.len() + consumed;
             } else {
@@ -372,20 +420,33 @@ fn keeps_its_rows(record: &[u8], rewritten: &[u8]) -> bool {
     ansi::width(rewritten) <= ansi::width(record)
 }
 
+impl RelativizePaths {
+    /// `record` with its paths made relative, what each now shown names in
+    /// `hints`.
+    fn relativized(&mut self, record: &[u8], hints: &mut Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
+        let in_progress_area = self.given.take().is_some_and(|l| l.drawn);
+        let contains = |needle: &[u8]| record.windows(needle.len()).any(|w| w == needle);
+        if !contains(b"/execroot/") && !self.root.as_deref().is_some_and(contains) {
+            return record.to_vec();
+        }
+        let out = ansi::map_text(record, |text| self.text(text, hints));
+        if self.pty && in_progress_area && !keeps_its_rows(record, &out) {
+            return record.to_vec();
+        }
+        out
+    }
+}
+
 impl LineProcessor for RelativizePaths {
     fn see(&mut self, line: &Line) {
         self.given = Some(line.clone());
     }
 
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
-        let in_progress_area = self.given.take().is_some_and(|l| l.drawn);
-        let contains = |needle: &[u8]| record.windows(needle.len()).any(|w| w == needle);
-        if !contains(b"/execroot/") && !self.root.as_deref().is_some_and(contains) {
-            return Some(record.to_vec());
-        }
-        let out = ansi::map_text(record, |text| self.text(text));
-        if self.pty && in_progress_area && !keeps_its_rows(record, &out) {
-            return Some(record.to_vec());
+        let mut hints = Vec::new();
+        let out = self.relativized(record, &mut hints);
+        if let Some(slot) = &self.hints {
+            slot.set(if out == record { Vec::new() } else { hints });
         }
         Some(out)
     }

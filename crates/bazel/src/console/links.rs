@@ -7,7 +7,11 @@
 //! absolute path as written, a relative one (`src/a.cc:3:4`, `BUILD.bazel`)
 //! from the first of the linker's directories it exists under. For Bazel's
 //! console those are the workspace, which Bazel's own paths are relative to,
-//! then the directory `relativize_paths` writes paths from. Only the path is
+//! then the directory the task runs from. A path `relativize_paths` made
+//! relative links to the file it named, which that stage tells the linker
+//! through [`Hints`]: shown relative to a subdirectory, `BUILD.bazel` is
+//! that directory's, though the workspace has one too. A path cut short
+//! (`src/a.c…`) is left alone. Only the path is
 //! linked, not a `:line:col` after it. A path to nothing (a sandbox gone
 //! with its action, a label, prose) is left alone; a record that links
 //! anything itself is left whole. A URL ends before trailing punctuation, a
@@ -15,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use regex::bytes::Regex;
 
@@ -36,6 +40,33 @@ const REMEMBERED: usize = 4096;
 
 /// The longest record linked: a longer one (a command line) is left as it is.
 const MAX_RECORD: usize = 8192;
+
+/// What a record's paths made relative name, `(shown, file)`, which
+/// `relativize_paths` sets for each record it sees and the stages after it
+/// read: the record's own, every record replacing the last's.
+#[derive(Debug, Clone, Default)]
+pub struct Hints(Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>);
+
+impl Hints {
+    pub fn set(&self, hints: Vec<(Vec<u8>, Vec<u8>)>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = hints;
+        }
+    }
+
+    /// The current record's, left for the stages after.
+    pub fn get(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.0.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// The current record's, for the last stage to read them.
+    pub fn take(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.0
+            .lock()
+            .map(|mut s| std::mem::take(&mut *s))
+            .unwrap_or_default()
+    }
+}
 
 /// Links what a console record names; see the module docs.
 pub struct Linker {
@@ -62,23 +93,28 @@ impl Linker {
     /// `record` with each URL and each path to something that exists
     /// linked; escape sequences kept as they are.
     pub fn link(&mut self, record: &[u8]) -> Vec<u8> {
+        self.link_with(record, &[])
+    }
+
+    /// [`Linker::link`], a path `hints` names linked to its file.
+    pub fn link_with(&mut self, record: &[u8], hints: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         if record.len() > MAX_RECORD || contains(record, b"\x1b]8;") {
             return record.to_vec();
         }
         if !contains(record, b"/") && !contains(record, b".") {
             return record.to_vec();
         }
-        ansi::map_text(record, |text| self.text(text))
+        ansi::map_text(record, |text| self.text(text, hints))
     }
 
-    fn text(&mut self, text: &[u8]) -> Vec<u8> {
+    fn text(&mut self, text: &[u8], hints: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         let mut urls = URL.find_iter(text).peekable();
         while at < text.len() {
             let next_url = urls.peek().map(|m| m.start());
             let stop = next_url.unwrap_or(text.len());
-            self.paths(&text[at..stop], &mut out);
+            self.paths(&text[at..stop], hints, &mut out);
             at = stop;
             if let Some(m) = urls.next() {
                 let end = m.start() + url_end(m.as_bytes());
@@ -87,7 +123,7 @@ impl Linker {
                     &text[m.start()..end],
                 ));
                 // What was trimmed from the URL's end is text again.
-                self.paths(&text[end..m.end()], &mut out);
+                self.paths(&text[end..m.end()], hints, &mut out);
                 at = m.end();
             }
         }
@@ -95,7 +131,7 @@ impl Linker {
     }
 
     /// `text`, holding no URL, onto `out` with its paths linked.
-    fn paths(&mut self, text: &[u8], out: &mut Vec<u8>) {
+    fn paths(&mut self, text: &[u8], hints: &[(Vec<u8>, Vec<u8>)], out: &mut Vec<u8>) {
         let mut at = 0;
         for m in PATH.find_iter(text) {
             let (start, mut end) = (m.start(), m.end());
@@ -109,7 +145,21 @@ impl Linker {
             if start > 0 && text[start - 1] == b':' {
                 continue;
             }
-            let Some(file) = self.resolve(path) else {
+            // Cut short, it names some other file, if any.
+            if text[end..].starts_with(ELLIPSIS) {
+                continue;
+            }
+            let hinted = hints
+                .iter()
+                .find(|(shown, _)| shown == path)
+                .map(|(_, file)| {
+                    use std::os::unix::ffi::OsStrExt;
+                    PathBuf::from(std::ffi::OsStr::from_bytes(file))
+                });
+            let Some(file) = (match hinted {
+                Some(file) => file.exists().then_some(file),
+                None => self.resolve(path),
+            }) else {
                 continue;
             };
             out.extend_from_slice(&text[at..start]);
@@ -152,12 +202,16 @@ impl Linker {
 }
 
 /// The stage that links what Bazel's records name, last before the
-/// reports, for a terminal.
-pub struct Links(pub Linker);
+/// reports, for a terminal, with what `relativize_paths` said of each.
+pub struct Links {
+    pub linker: Linker,
+    pub hints: Hints,
+}
 
 impl LineProcessor for Links {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
-        Some(self.0.link(record))
+        let hints = self.hints.take();
+        Some(self.linker.link_with(record, &hints))
     }
 }
 
@@ -422,6 +476,53 @@ mod tests {
             format!("{}:1", file(root.path(), "pkg/only.ts", "only.ts")),
             "else the directory paths are relative to"
         );
+    }
+
+    #[test]
+    fn a_path_made_relative_links_to_the_file_it_named() {
+        let root = tempfile::tempdir().unwrap();
+        for f in ["BUILD.bazel", "pkg/BUILD.bazel", "src/a.ts"] {
+            let at = root.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let ws = root.path().display().to_string();
+        let mut rel = crate::console::filters::RelativizePaths::new(
+            Some(ws.clone()),
+            Some(format!("{ws}/pkg")),
+        );
+        let hints = Hints::default();
+        rel = rel.hinting(Some(hints.clone()));
+        let mut links = Links {
+            linker: Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]),
+            hints: hints.clone(),
+        };
+        links.linker.host = String::new();
+        use crate::console::forward::LineProcessor as _;
+        let shown = rel
+            .process(format!("ERROR: {ws}/pkg/BUILD.bazel:3:1: x; src/a.ts:1").as_bytes())
+            .unwrap();
+        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "ERROR: {}:3:1: x; {}:1",
+                file(root.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
+                file(root.path(), "src/a.ts", "src/a.ts")
+            ),
+            "the package's BUILD.bazel, though the workspace has one; a tool's path the workspace's"
+        );
+        assert!(
+            hints.get().is_empty(),
+            "the last stage takes the record's hints"
+        );
+    }
+
+    #[test]
+    fn a_path_cut_short_is_left_alone() {
+        let (_dir, mut l) = linker();
+        assert_eq!(link(&mut l, "see src/a.c…"), "see src/a.c…");
+        assert_eq!(link(&mut l, "see src…"), "see src…");
     }
 
     #[test]
