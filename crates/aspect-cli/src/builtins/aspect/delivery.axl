@@ -306,6 +306,7 @@ load("./private/lib/environment.axl", "debug", "detail", "error", "info", "sanit
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
+load("./private/lib/links.axl", "CLI_DELIVERY_STATE_URL")
 load("./private/lib/random.axl", "random_hex")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
@@ -2469,7 +2470,7 @@ delivery = task(
     summary = "Build and deliver binary targets. Targets are built with stamping; change detection skips targets whose outputs were already delivered.",
     description = """Build and deliver binary targets. Targets are built with stamping; change detection skips targets whose outputs were already delivered, unless forced: by default a target's latest delivery, or any delivery of its digest under `delivery:once_per_digest`.
 
-Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, and elsewhere in Aspect's delivery API, authenticated with `aspect auth login` or ASPECT_API_TOKEN. See https://aspect.build/docs/cli/guides/delivery-manifest.""",
+Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, and elsewhere in Aspect's delivery API, authenticated with `aspect auth login` or ASPECT_API_TOKEN. See """ + CLI_DELIVERY_STATE_URL + ".",
     args = {
         "ci_host": args.string(
             default = "bk",

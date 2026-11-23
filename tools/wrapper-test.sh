@@ -787,7 +787,7 @@ hint() {
 
     curl -fsSL https://install.aspect.build | bash
 
-  or see https://aspect.build/docs/cli/install' "$1"
+  or see https://aspect.build/go/install' "$1"
 }
 
 # Verb that is BOTH aspect-wrapped and a real bazel command (build): hint with

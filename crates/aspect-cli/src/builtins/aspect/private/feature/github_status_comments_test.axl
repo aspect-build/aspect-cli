@@ -1989,13 +1989,13 @@ def _check_footer(ctx):
         bucket_entries(prepared),
     )
     version = ctx.std.env.aspect_cli_version()
-    footer = ("<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install)" +
+    footer = ("<sub>Install `aspect`: [aspect.build/go/install](https://aspect.build/go/install)" +
               " · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli)" +
               (" (v%s)" % version if version else "") + "</sub>")
     _eq("body ends on the footer", body.endswith("\n---\n\n" + footer + "\n"), True)
     _eq("fix command rendered", "aspect lint --fix -- //..." in body, True)
     _eq("repro command rendered", "\naspect lint -- //...\n" in body, True)
-    _eq("install page named once", body.count("[aspect.build/docs/cli/install]"), 1)
+    _eq("install page named once", body.count("[aspect.build/go/install]"), 1)
 
 def _test_impl(ctx):
     _eq(

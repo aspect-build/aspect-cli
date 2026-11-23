@@ -1,6 +1,7 @@
 load("./private/lib/aspect_cloud_api.axl", "aspect_cloud_credentials", "aspect_cloud_error", "aspect_cloud_url")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/github.axl", "github")
+load("./private/lib/links.axl", "GITHUB_APP_LINK_URL")
 load("./private/lib/text.axl", "did_you_mean_then")
 
 def _token_impl(ctx: TaskContext) -> int:
@@ -47,7 +48,7 @@ def _token_impl(ctx: TaskContext) -> int:
         return 1
     if resp.status == 404:
         error(ctx.std, aspect_cloud_error(resp) or
-                       "GitHub App not linked to your Aspect account. See https://aspect.build/docs/cli/authentication")
+                       "GitHub App not linked to your Aspect account. See " + GITHUB_APP_LINK_URL)
         return 1
     if resp.status < 200 or resp.status >= 300:
         error(ctx.std, "API request failed (HTTP " + str(resp.status) + "): " + resp.body)

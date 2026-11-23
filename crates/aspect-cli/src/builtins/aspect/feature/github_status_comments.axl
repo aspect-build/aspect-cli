@@ -108,6 +108,7 @@ load("../private/lib/ci.axl", "ci_host_link_label", "ci_identity", "detect_ci_ho
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lifecycle.axl", "Phases")
+load("../private/lib/links.axl", "INSTALL_LINK_MARKDOWN")
 load("../private/lib/log_snippet.axl", "code_fence_for")
 load(
     "../private/lib/rate_limit.axl",
@@ -403,7 +404,7 @@ Reproduce with:
 {% endif %}
 ---
 
-<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install) · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>
+<sub>Install `aspect`: """ + INSTALL_LINK_MARKDOWN + """ · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>
 """
 
 # ─── Status → badge ───────────────────────────────────────────────────────────

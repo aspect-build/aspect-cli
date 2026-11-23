@@ -1,0 +1,21 @@
+"""Docsite links the builtins print, as `aspect.build/go/<slug>` permalinks.
+
+A shipped CLI keeps printing a link for good, and a posted PR comment keeps it
+too, so printed text never names a docs page directly. Each slug is a redirect
+in the docsite's `docs.json` that follows the page (and `#heading`) when it
+moves; the site's CI checks that each one lands on a public page and heading.
+A new slug lands on the site before the CLI change that prints it.
+
+`builtins::tests::printed_docs_links_use_go_permalinks` fails on a hard-coded
+`aspect.build/docs/` URL anywhere in the builtins outside a module docstring.
+"""
+
+_GO = "https://aspect.build/go/"
+
+INSTALL_URL = _GO + "install"
+INSTALL_LINK_MARKDOWN = "[aspect.build/go/install](" + INSTALL_URL + ")"
+CLI_LOGIN_URL = _GO + "cli-login"
+CLI_DELIVERY_STATE_URL = _GO + "cli-delivery-state"
+CI_API_TOKEN_URL = _GO + "ci-api-token"
+GITHUB_APP_LINK_URL = _GO + "github-app-link"
+GITLAB_APP_LINK_URL = _GO + "gitlab-app-link"

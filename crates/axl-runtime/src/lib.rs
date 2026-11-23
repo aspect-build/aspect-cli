@@ -14,6 +14,7 @@ pub mod diag;
 pub mod docs;
 pub mod engine;
 pub mod eval;
+pub mod links;
 pub mod module;
 pub mod out;
 pub mod project_root;

@@ -889,7 +889,7 @@ mod tests {
             console("full", &o, false).render(Slot::Banner, crate::banner::console_context(true));
         assert!(line.starts_with("\x1b[38;5;244maspect "), "{line:?}");
         assert!(
-            line.ends_with(" · https://aspect.build/docs/cli\x1b[0m"),
+            line.ends_with(" · https://aspect.build/go/cli\x1b[0m"),
             "{line:?}"
         );
         let full = console("full", &Overrides::default(), false)

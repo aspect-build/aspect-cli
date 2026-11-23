@@ -40,6 +40,7 @@ need to probe — the data flow just goes quiet.
 """
 
 load("./ansi.axl", "ansi")
+load("./links.axl", "CI_API_TOKEN_URL")
 load("./text.axl", "did_you_mean_then")
 
 # ── Severity constants ───────────────────────────────────────────────
@@ -330,7 +331,7 @@ def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
             "Without it, " + detail.degraded_features + " degrade. The task itself " +
             "completes regardless — only the GitHub-side surfaces are affected.\n\n" +
             "Issue an `ASPECT_API_TOKEN` from the Aspect Web UI " +
-            "(see the [authentication docs](https://aspect.build/docs/cli/authentication)). " +
+            "(see [Generate an Aspect API token](" + CI_API_TOKEN_URL + ")). " +
             detail.host_advice
         ),
     )

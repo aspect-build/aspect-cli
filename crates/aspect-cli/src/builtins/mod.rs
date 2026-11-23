@@ -426,6 +426,39 @@ mod tests {
         );
     }
 
+    /// Printed text links to the docsite only through `aspect.build/go/<slug>`
+    /// permalinks (`private/lib/links.axl`), which follow a page when it moves.
+    /// A module docstring is never printed, so it may link a page directly.
+    /// Covers the embedded AXL builtins only; the Rust sources keep their links
+    /// in `axl_runtime::links`.
+    #[test]
+    fn printed_docs_links_use_go_permalinks() {
+        use include_dir::{Dir, include_dir};
+        static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
+
+        let mut violations = Vec::new();
+        for f in ASPECT_DIR.find("**/*.axl").unwrap() {
+            let Some(contents) = f.as_file().and_then(|file| file.contents_utf8()) else {
+                continue;
+            };
+            let docstring_lines = contents
+                .strip_prefix("\"\"\"")
+                .and_then(|rest| rest.find("\"\"\""))
+                .map_or(0, |end| contents[..end + 6].lines().count());
+            for (n, line) in contents.lines().enumerate().skip(docstring_lines) {
+                if line.contains("aspect.build/docs") {
+                    violations.push(format!("{}:{}: {}", f.path().display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "link the docsite through an aspect.build/go/<slug> permalink from \
+             private/lib/links.axl (add the slug to the site's docs.json first). Offenders:\n  {}",
+            violations.join("\n  ")
+        );
+    }
+
     /// Resolve a load path to its module-relative target and return the
     /// canonical load string, or None for external namespaces (left as-is)
     /// or unparseable input.

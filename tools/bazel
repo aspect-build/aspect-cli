@@ -157,7 +157,7 @@ if ! command -v aspect >/dev/null 2>&1; then
 
     curl -fsSL https://install.aspect.build | bash
 
-  or see https://aspect.build/docs/cli/install
+  or see https://aspect.build/go/install
 EOF
     [[ -z "$shadow" ]] && exit 127
     echo "  Running it through vanilla bazel for now." >&2

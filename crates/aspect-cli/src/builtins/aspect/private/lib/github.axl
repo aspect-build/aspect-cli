@@ -36,6 +36,7 @@ load("./environment.axl", "detail", "info", "warn")
 load("./git_diff.axl", "run_git_diff")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load("./http_headers.axl", "retryable_status")
+load("./links.axl", "CI_API_TOKEN_URL", "CLI_LOGIN_URL", "GITHUB_APP_LINK_URL")
 load(
     "./rate_limit.axl",
     "BUCKET_APP",
@@ -310,7 +311,7 @@ _AUTH_KIND_API_HOST_MISMATCH = "api-host-mismatch"
 # fail because the *Aspect account* the CLI authenticated as has no
 # installation linked to it, which is the likelier of the two and the one a
 # reader cannot diagnose from "not installed".
-_APP_NOT_LINKED = "GitHub App not linked to your Aspect account (see https://aspect.build/docs/cli/authentication)"
+_APP_NOT_LINKED = "GitHub App not linked to your Aspect account (see " + GITHUB_APP_LINK_URL + ")"
 
 def _set_auth_reason(_reason, kind, msg):
     """Populate `_reason` with both the structured `kind` and the
@@ -327,7 +328,7 @@ def _classify_missing_credentials(ctx):
     stdin so the secret never lands in `GITHUB_ENV`); other CIs use raw
     `ASPECT_API_TOKEN` (no equivalent action yet).
     """
-    setup_url = "https://aspect.build/docs/cli/authentication"
+    setup_url = CI_API_TOKEN_URL
     if ctx.std.env.var("GITHUB_ACTIONS"):
         msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
         kind = _AUTH_KIND_NO_CREDENTIALS
@@ -340,6 +341,7 @@ def _classify_missing_credentials(ctx):
     else:
         msg = "not logged in — run `aspect auth login`"
         kind = _AUTH_KIND_NOT_LOGGED_IN
+        setup_url = CLI_LOGIN_URL
     return kind, msg + ". Setup guide: " + setup_url
 
 def _missing_credentials_reason(ctx):

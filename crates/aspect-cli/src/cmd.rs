@@ -2690,7 +2690,7 @@ mod tests {
         } else {
             ""
         };
-        let banner = format!("Aspect CLI v1.2.3{debug} — https://aspect.build/docs/cli");
+        let banner = format!("Aspect CLI v1.2.3{debug} — https://aspect.build/go/cli");
         let banner = banner.as_str();
         let rendered = |c: &mut Command| c.render_help().to_string();
 
