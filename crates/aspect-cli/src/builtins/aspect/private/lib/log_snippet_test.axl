@@ -4,7 +4,7 @@ Run with:
   aspect dev test-log-snippet
 """
 
-load("./log_snippet.axl", "SnippetOptions", "extract_action_snippet", "extract_junit_failure_from_text", "extract_snippet_from_text")
+load("./log_snippet.axl", "SnippetOptions", "extract_action_snippet", "extract_junit_failure_from_text", "extract_snippet", "extract_snippet_from_text")
 
 def _eq(label, got, want):
     if got != want:
@@ -111,7 +111,29 @@ def _test_a_cut_stdout_is_marked_where_it_was_cut(ctx):
     _eq("end not cut", r.trunc_tail, False)
     _eq("truncated", r.truncated, True)
 
+def _test_a_stdout_cut_inside_an_escape_keeps_stderr(ctx):
+    """A cut that lands inside a hyperlink's escape does not swallow the lines
+    after it: the marker and stderr are still shown."""
+    d = ctx.std.env.temp_dir() + "/log_snippet_osc_test"
+    ctx.std.fs.create_dir_all(d)
+    ctx.std.fs.write(d + "/stdout", "x" * 190 + "\x1b]8;;http://example.com/aaaaaaaaaaaaaaa\x1b\\link\x1b]8;;\x1b\\\n")
+    ctx.std.fs.write(d + "/stderr", "src/x.ts:1:1 - error TS1: bad\nTarget //:a failed to build\n")
+    r = extract_action_snippet(ctx.std, d + "/stdout", d + "/stderr", SnippetOptions(max_read_bytes = 200, max_lines = 6))
+    _eq("stderr kept", r.text.split("\n")[-2:], ["src/x.ts:1:1 - error TS1: bad", "Target //:a failed to build"])
+    _eq("the cut said", "… stdout cut at 200 bytes" in r.text, True)
+
+def _test_a_cut_is_seen_in_non_ascii_text(ctx):
+    """A file bigger than the bound is cut, whatever its text: a character
+    can be more than one byte."""
+    d = ctx.std.env.temp_dir() + "/log_snippet_utf8_test"
+    ctx.std.fs.create_dir_all(d)
+    ctx.std.fs.write(d + "/log", "é" * 150 + "\n")
+    r = extract_snippet(ctx.std, d + "/log", SnippetOptions(max_read_bytes = 200))
+    _eq("cut", (r.truncated, r.trunc_tail), (True, True))
+
 _UNIT_TESTS = [
+    _test_a_stdout_cut_inside_an_escape_keeps_stderr,
+    _test_a_cut_is_seen_in_non_ascii_text,
     _test_an_actions_stdout_comes_before_its_stderr,
     _test_a_cut_stdout_is_marked_where_it_was_cut,
     _test_the_first_error_and_the_end_are_kept,
