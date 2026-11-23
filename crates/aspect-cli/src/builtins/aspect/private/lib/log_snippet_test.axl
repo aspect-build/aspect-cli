@@ -131,7 +131,21 @@ def _test_a_cut_is_seen_in_non_ascii_text(ctx):
     r = extract_snippet(ctx.std, d + "/log", SnippetOptions(max_read_bytes = 200))
     _eq("cut", (r.truncated, r.trunc_tail), (True, True))
 
+def _test_a_stdout_cut_at_a_line_end_shows_no_blank_line(ctx):
+    """A cut on a line boundary, or just after an `ESC (`, adds nothing to the
+    lines shown: no blank line, no stray `\\`."""
+    d = ctx.std.env.temp_dir() + "/log_snippet_cut_edge_test"
+    ctx.std.fs.create_dir_all(d)
+    ctx.std.fs.write(d + "/stderr", "error: bad\nend\n")
+    ctx.std.fs.write(d + "/lines", "".join(["l%d\n" % (100 + i) for i in range(60)]))
+    r = extract_action_snippet(ctx.std, d + "/lines", d + "/stderr", SnippetOptions(max_read_bytes = 200, max_lines = 8))
+    _eq("no blank line", "" in r.text.split("\n"), False)
+    ctx.std.fs.write(d + "/charset", "x" * 198 + "\x1b(B" + "more\n")
+    r = extract_action_snippet(ctx.std, d + "/charset", d + "/stderr", SnippetOptions(max_read_bytes = 200, max_lines = 8))
+    _eq("no stray backslash", r.text.split("\n")[0], "x" * 198)
+
 _UNIT_TESTS = [
+    _test_a_stdout_cut_at_a_line_end_shows_no_blank_line,
     _test_a_stdout_cut_inside_an_escape_keeps_stderr,
     _test_a_cut_is_seen_in_non_ascii_text,
     _test_an_actions_stdout_comes_before_its_stderr,

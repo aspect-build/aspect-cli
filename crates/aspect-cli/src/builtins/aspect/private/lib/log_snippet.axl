@@ -20,9 +20,9 @@ Reads are bounded at the byte level. The historical "BES can inline 40+ MB of
 action stderr onto the Starlark heap" concern (see lib/bazel_results.axl) is
 about reading a BES `File.contents` oneof — NOT about reading a file by path.
 Here we read the on-disk file via `try_read_to_string_capped`, which pulls only
-the first `max_read_bytes` (+1, to detect truncation) into memory — never the
-whole file — so even a multi-MB log degrades to a truncated prefix without
-spiking the heap.
+the first `max_read_bytes` bytes into memory — never the whole file — so even a
+multi-MB log degrades to a truncated prefix without spiking the heap; the
+file's size says whether it was cut.
 
 The `*_from_text` functions take text rather than a path, so they are
 unit-testable without a filesystem; the wrappers read the path and degrade to
@@ -34,8 +34,8 @@ SnippetOptions = record(
     # Max lines of the output kept in the snippet body, which also carries a
     # `… N more lines` line where lines between two kept runs are left out.
     max_lines = field(int, default = 20),
-    # Hard cap on bytes/chars read from disk; a larger file is sliced to this
-    # prefix and flagged truncated.
+    # Hard cap on the bytes read from disk; a larger file (by its size) is read
+    # to this prefix and flagged truncated.
     max_read_bytes = field(int, default = 262144),
     # Lines of context kept before / after the first line that reads as an
     # error, and of the output's end kept with it.
@@ -309,6 +309,21 @@ def extract_snippet(std, path, options = None):
     text, hit_cap = _read_bounded(std, path, opts.max_read_bytes)
     return extract_snippet_from_text(std, text, hit_cap, opts)
 
+# The intermediate bytes of an `ESC` escape (`ESC (` before its charset).
+_ESC_INTERMEDIATES = " !\"#$%&'()*+,-./"
+
+def _closed(text):
+    """`text`, cut by the read bound, with any escape the cut left open
+    closed: an OSC 8 link would otherwise run on through the lines after it
+    when they are cleaned. A cut in an `ESC` escape's intermediate bytes
+    (`ESC (`) is dropped, as the terminator would end it short and leave its
+    `\\`; otherwise `ESC \\` (ST) closes a string escape, ends a CSI cut short
+    at its `ESC`, and with none open is an escape of its own, cleaned away."""
+    at = text.rfind("\x1b")
+    if at >= 0 and all([c in _ESC_INTERMEDIATES for c in text[at + 1:].elems()]):
+        return text[:at]
+    return text + "\x1b\\"
+
 def extract_action_snippet(std, stdout_path, stderr_path, options = None):
     """I/O wrapper for a failed action: its stdout then its stderr (as Bazel's
     console prints them), each read bounded, windowed together. Some tools
@@ -319,10 +334,7 @@ def extract_action_snippet(std, stdout_path, stderr_path, options = None):
     out, out_cap = _read_bounded(std, stdout_path, opts.max_read_bytes)
     err, err_cap = _read_bounded(std, stderr_path, opts.max_read_bytes)
     if out and out_cap:
-        # Closes an escape the cut left open (an OSC 8 link), which would
-        # otherwise run on through the lines after it when they are cleaned;
-        # with none open it is an escape of its own, and cleaned away.
-        out = out + "\x1b\\"
+        out = _closed(out.rstrip("\n"))
     parts = [out.rstrip("\n")] if out else []
     if out and out_cap and err:
         parts.append("… stdout cut at %d bytes" % opts.max_read_bytes)
