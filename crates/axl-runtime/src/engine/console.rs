@@ -128,8 +128,8 @@ fn hyperlink_format(
         return arg();
     }
     match crate::out::env_link_format() {
-        Some(Ok(None)) | None => arg(),
         Some(chosen) => chosen,
+        None => arg(),
     }
 }
 

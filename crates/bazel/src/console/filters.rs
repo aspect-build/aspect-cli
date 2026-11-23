@@ -514,24 +514,14 @@ impl RelativizePaths {
             // not linked, as shown.
             let file = std::path::Path::new(std::ffi::OsStr::from_bytes(&out[i + 1..mid]));
             let shown = &out[mid + 1..close];
-            // The line after it, though colour sets it apart; a URL written
-            // beside the link goes after it when it is said in plain text.
+            // The line after it, though colour sets it apart. The final
+            // stage writes its URL beside it where a terminal needs that.
             let after = ansi::strip(&out[close + 1..]);
-            let at = super::links::position(&after);
-            let said = super::links::said(&after).filter(|said| out[close + 1..].starts_with(said));
-            let said = said.map_or(0, <[u8]>::len);
-            match link.files.url(file, at) {
-                Some(url) => linked.extend(link.files.link(
-                    &url,
-                    shown,
-                    &out[close + 1..close + 1 + said],
-                )),
-                None => {
-                    linked.extend_from_slice(shown);
-                    linked.extend_from_slice(&out[close + 1..close + 1 + said]);
-                }
+            match link.files.url(file, super::links::position(&after)) {
+                Some(url) => linked.extend(super::links::osc8(&url, shown)),
+                None => linked.extend_from_slice(shown),
             }
-            i = close + 1 + said;
+            i = close + 1;
         }
         linked
     }

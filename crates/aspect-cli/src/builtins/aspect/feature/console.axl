@@ -263,12 +263,13 @@ Console = feature(
                           "(file://, what the system opens the file with, at no line), `none`, or a URL " +
                           "template over {path}, {line}, {column} and {host}. `auto` (the default) is, on " +
                           "this machine, the editor whose terminal this is (VS Code, VSCodium, Cursor), else " +
-                          "the one $VISUAL or $EDITOR starts, else the first installed of cursor, code, zed, " +
-                          "codium, idea, mvim and mate, else `none`. ASPECT_HYPERLINK_FORMAT takes the same " +
+                          "the one $VISUAL or $EDITOR starts, else the first installed of cursor, code, " +
+                          "code-insiders, zed, codium, idea, mvim and mate, else `none`. ASPECT_HYPERLINK_FORMAT takes the same " +
                           "values and beats config.axl but not the command line, and is what config.axl's " +
                           "own lines follow. A directory links only under a file:// format. In Terminal.app, " +
-                          "which shows no such link, the link's URL is written beside the path, to open by " +
-                          "Cmd+double-click. URLs are links whatever it says.",
+                          "which shows no such link, the link's URL is written after the path and its line, " +
+                          "to open by Cmd+double-click, but in a progress row Bazel redraws. URLs are links " +
+                          "whatever it says.",
         ),
         "profile": args.string(
             default = "auto",

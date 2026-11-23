@@ -540,7 +540,7 @@ impl Config {
             chain.push(stage);
         }
         if let Some(linker) = self.linker() {
-            chain.push(Box::new(links::Links(linker)));
+            chain.push(Box::new(links::Links::new(linker).under_pty(pty)));
         }
         if let Some(l) = &log {
             stats.keep_groups(l.path());

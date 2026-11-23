@@ -477,6 +477,9 @@ impl LineProcessor for RecapErrors {
         };
         self.style.line(&mut out, &header);
         let mut line = |text: &str, links: &[Known]| match self.linker.as_mut() {
+            Some(l) if l.files.text => {
+                super::links::written_urls(&l.link_with(text.as_bytes(), links))
+            }
             Some(l) => l.link_with(text.as_bytes(), links),
             None => text.as_bytes().to_vec(),
         };

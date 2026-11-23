@@ -86,8 +86,10 @@ pub(crate) fn terminal_links() -> bool {
 }
 
 /// What a link to a file opens, as the Console feature's `hyperlink_format`
-/// says once a task resolves it ([`set_link_format`]); until then, and for
-/// `auto`, the editor's whose terminal this is, else none.
+/// says once a task resolves it ([`set_link_format`]); until then
+/// `ASPECT_HYPERLINK_FORMAT`; and for `auto`, the editor
+/// `LinkFormat::auto` finds (its terminal's, `$VISUAL`/`$EDITOR`'s, one on
+/// `PATH`), else none.
 static LINK_FORMAT: std::sync::RwLock<Option<bazel::console::links::LinkFormat>> =
     std::sync::RwLock::new(None);
 
@@ -126,13 +128,15 @@ static AUTO_LINK_FORMAT: std::sync::LazyLock<bazel::console::links::LinkFormat> 
         )
     });
 
-/// `ASPECT_HYPERLINK_FORMAT`, when set: a format, `None` for `auto`, or why
-/// it is neither.
+/// `ASPECT_HYPERLINK_FORMAT`, when set and not empty: a format, `None` for
+/// `auto`, or why it is neither.
 pub(crate) fn env_link_format() -> Option<Result<Option<bazel::console::links::LinkFormat>, String>>
 {
-    let value = std::env::var("ASPECT_HYPERLINK_FORMAT").ok()?;
+    let value = std::env::var("ASPECT_HYPERLINK_FORMAT")
+        .ok()
+        .filter(|v| !v.is_empty())?;
     Some(match value.as_str() {
-        "" | "auto" => Ok(None),
+        "auto" => Ok(None),
         value => bazel::console::links::LinkFormat::parse(value)
             .map(Some)
             .map_err(|e| format!("ASPECT_HYPERLINK_FORMAT: {e}")),

@@ -203,10 +203,7 @@ impl LinkFormat {
             };
         }
         let chosen = ["VISUAL", "EDITOR"].iter().find_map(|name| {
-            let value = var(name)?;
-            let value = value.to_string_lossy();
-            let command = value.split_whitespace().next()?;
-            let command = command.rsplit('/').next().unwrap_or(command);
+            let command = editor_command(&var(name)?.to_string_lossy())?;
             Self::EDITORS
                 .iter()
                 .find(|(c, _)| *c == command)
@@ -220,6 +217,41 @@ impl LinkFormat {
             .find(|(command, _)| on_path(command))
             .map_or(LinkFormat::None, |(_, name)| alias(name))
     }
+}
+
+/// The file name of the program a `$VISUAL`/`$EDITOR` value starts, read
+/// as a shell would: quotes taken off (`"/Applications/Visual Studio
+/// Code.app/…/bin/code" --wait`), and `env` and `NAME=value` before it
+/// passed over (`env FOO=1 code`).
+fn editor_command(value: &str) -> Option<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut quoted = false;
+    for c in value.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                quoted = true;
+            }
+            None if c.is_whitespace() => {
+                if quoted || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                quoted = false;
+            }
+            None => word.push(c),
+        }
+    }
+    if quoted || !word.is_empty() {
+        words.push(word);
+    }
+    let command = words
+        .into_iter()
+        .find(|w| w != "env" && !(w.contains('=') && !w.starts_with('/')))?;
+    Some(command.rsplit('/').next().unwrap_or(&command).to_string())
 }
 
 /// Whether `command` is an executable file in a directory of `PATH`.
@@ -300,11 +332,6 @@ impl FileLinks {
 /// `", line 12, column 3`, a number not running on into a word (`:12abc`).
 pub fn position(after: &[u8]) -> (Option<u32>, Option<u32>) {
     located(after).map_or((None, None), |(line, column, _)| (line, column))
-}
-
-/// The start of `after` that says a [`position`], if it says one.
-pub fn said(after: &[u8]) -> Option<&[u8]> {
-    located(after).map(|(.., len)| &after[..len])
 }
 
 /// [`position`], and how many bytes of `after` say it.
@@ -484,18 +511,9 @@ impl Linker {
             let Some(url) = file.and_then(|f| self.files.url(&f, position(after))) else {
                 continue;
             };
-            // Where the position is said in this run of text, so a URL
-            // written beside the link goes after it.
-            let said = located(after)
-                .map(|(.., len)| &after[..len])
-                .filter(|said| text[end..].starts_with(said))
-                .map_or(0, <[u8]>::len);
             out.extend_from_slice(&text[at..start]);
-            out.extend(
-                self.files
-                    .link(&url, &text[start..end], &text[end..end + said]),
-            );
-            at = end + said;
+            out.extend(osc8(&url, &text[start..end]));
+            at = end;
         }
         out.extend_from_slice(&text[at..]);
     }
@@ -537,12 +555,90 @@ impl Linker {
 
 /// The stage that links what Bazel's records name, last before the
 /// reports, for a terminal.
-pub struct Links(pub Linker);
+pub struct Links {
+    pub linker: Linker,
+    /// See [`Links::under_pty`].
+    pty: bool,
+    /// Whether the record going by is a row curses draws.
+    drawn: bool,
+}
+
+impl Links {
+    pub fn new(linker: Linker) -> Self {
+        Links {
+            linker,
+            pty: false,
+            drawn: false,
+        }
+    }
+
+    /// For a PTY capture: a row of Bazel's progress area gets no URL
+    /// written beside its links, which would widen a row curses redraws.
+    pub fn under_pty(mut self, pty: bool) -> Self {
+        self.pty = pty;
+        self
+    }
+}
 
 impl LineProcessor for Links {
-    fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
-        Some(self.0.link(record))
+    fn see(&mut self, line: &crate::console::line::Line) {
+        self.drawn = line.drawn;
     }
+
+    fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
+        let linked = self.linker.link(record);
+        if self.linker.files.text && !(self.pty && self.drawn) {
+            return Some(written_urls(&linked));
+        }
+        Some(linked)
+    }
+}
+
+/// `record` with each link to a file's URL written beside it too, after
+/// the path and the position said after it, as the text reads with its
+/// escapes removed (`src/a.ts` `:9:4` <url>): for a terminal that shows no
+/// OSC 8 link but opens a URL written out. A URL's own link
+/// (`https://…`) shows it already.
+pub fn written_urls(record: &[u8]) -> Vec<u8> {
+    let plain = ansi::strip(record);
+    // Where in `record` each byte of `plain` starts.
+    let mut starts = Vec::with_capacity(plain.len() + 1);
+    let mut ends = Vec::new();
+    let mut open: Option<String> = None;
+    let mut at = 0;
+    for (escape, seg) in ansi::segments(record) {
+        if escape {
+            if let Some(url) = osc8_url(seg) {
+                ends.extend(open.take().map(|url| (starts.len(), url)));
+                if !url.is_empty() {
+                    open = Some(String::from_utf8_lossy(url).into_owned());
+                }
+            }
+        } else {
+            starts.extend(at..at + seg.len());
+        }
+        at += seg.len();
+    }
+    ends.extend(open.map(|url| (starts.len(), url)));
+    let mut inserts: Vec<(usize, String)> = ends
+        .into_iter()
+        .filter(|(_, url)| !url.starts_with("http://") && !url.starts_with("https://"))
+        .map(|(end, url)| {
+            let said = located(&plain[end..]).map_or(0, |(.., len)| len);
+            let at = starts.get(end + said).copied().unwrap_or(record.len());
+            (at, url)
+        })
+        .collect();
+    inserts.sort_by_key(|(at, _)| *at);
+    let mut out = Vec::with_capacity(record.len() + inserts.len() * 64);
+    let mut from = 0;
+    for (at, url) in inserts {
+        out.extend_from_slice(&record[from..at]);
+        out.extend_from_slice(format!(" <{url}>").as_bytes());
+        from = at;
+    }
+    out.extend_from_slice(&record[from..]);
+    out
 }
 
 /// The URL an OSC 8 sequence links to, empty for the one that ends a link,
@@ -921,7 +1017,7 @@ mod tests {
             .collect();
         let mut linker = Linker::new(vec![ws.clone(), dir.path().to_path_buf()]);
         linker.files.host = String::new();
-        let mut links = Links(linker);
+        let mut links = Links::new(linker);
         let run = move |line: &str| {
             let mut record = line.replace("$T", &top).into_bytes();
             for r in &mut rels {
@@ -1411,28 +1507,116 @@ mod tests {
     }
 
     #[test]
-    fn a_traceback_line_and_a_written_url() {
+    fn a_traceback_line_is_placed() {
         assert_eq!(
             position(b"\", line 12, column 3, in f"),
             (Some(12), Some(3))
         );
         assert_eq!(position(b"\", line 7"), (Some(7), None));
-        let (_dir, mut l) = linker();
-        l.files.format = LinkFormat::parse("vscode").unwrap();
+    }
+
+    /// The final stage in Terminal.app, `format` its files' links.
+    fn written(format: &str) -> (tempfile::TempDir, Links) {
+        let (dir, mut l) = linker();
+        l.files.format = LinkFormat::parse(format).unwrap();
         l.files.text = true;
-        let out = String::from_utf8(l.link(b"ERROR: src/a.cc:3:4: bad")).unwrap();
-        let url = out
-            .split("\x1b]8;;")
+        (dir, Links::new(l).under_pty(true))
+    }
+
+    fn url_in(out: &str) -> String {
+        out.split("\x1b]8;;")
             .nth(1)
             .unwrap()
             .split('\x1b')
             .next()
             .unwrap()
-            .to_string();
+            .to_string()
+    }
+
+    #[test]
+    fn a_written_url_goes_after_the_position_however_coloured() {
+        use crate::console::forward::LineProcessor as _;
+        let (_dir, mut links) = written("vscode");
+        let out = String::from_utf8(links.process(b"ERROR: src/a.cc:3:4: bad").unwrap()).unwrap();
         assert!(
-            out.ends_with(&format!("src/a.cc\x1b]8;;\x1b\\:3:4 <{url}>: bad")),
+            out.ends_with(&format!(
+                "src/a.cc\x1b]8;;\x1b\\:3:4 <{}>: bad",
+                url_in(&out)
+            )),
             "{out:?}"
         );
+        let out =
+            String::from_utf8(links.process(b"x src/a.cc\x1b[2m:\x1b[0m9:4 q").unwrap()).unwrap();
+        assert!(
+            out.ends_with(&format!("\x1b[2m:\x1b[0m9:4 <{}> q", url_in(&out))),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_progress_row_gets_no_written_url_under_a_pty() {
+        use crate::console::forward::LineProcessor as _;
+        let (_dir, mut links) = written("vscode");
+        let row = b"\x1b[32m[3 / 10]\x1b[0m Compiling src/a.cc; 2s darwin-sandbox";
+        let line = crate::console::line::Line {
+            kind: crate::console::line::Kind::Progress,
+            text: String::new(),
+            fresh: false,
+            coloured: true,
+            indented: false,
+            opens_output: false,
+            drawn: true,
+        };
+        links.see(&line);
+        let out = links.process(row).unwrap();
+        assert_eq!(
+            ansi::width(&out),
+            ansi::width(row),
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
+    fn a_written_url_is_not_linked_again() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/a.ts"), "").unwrap();
+        let ws = root.path().display().to_string();
+        use crate::console::filters::{LinkTo, RelativizePaths};
+        use crate::console::forward::LineProcessor as _;
+        let files = FileLinks {
+            host: String::new(),
+            format: LinkFormat::parse("idea").unwrap(),
+            text: true,
+        };
+        let mut rel = RelativizePaths::new(Some(ws.clone()), None).linking(Some(LinkTo {
+            files: files.clone(),
+            workspace: root.path().to_path_buf(),
+        }));
+        let mut linker = Linker::new(vec![root.path().to_path_buf()]);
+        linker.files = files;
+        let mut links = Links::new(linker);
+        let shown = rel
+            .process(format!("ERROR: {ws}/src/a.ts:3:4: bad").as_bytes())
+            .unwrap();
+        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+        assert_eq!(out.matches("\x1b]8;;idea:").count(), 1, "{out:?}");
+        assert_eq!(out.matches(" <idea://").count(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn an_editor_is_read_as_a_shell_would() {
+        assert_eq!(editor_command("code --wait").as_deref(), Some("code"));
+        assert_eq!(
+            editor_command(
+                "\"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code\" --wait"
+            )
+            .as_deref(),
+            Some("code")
+        );
+        assert_eq!(editor_command("env FOO=1 zed").as_deref(), Some("zed"));
+        assert_eq!(editor_command("  ").as_deref(), None);
     }
 
     #[test]
