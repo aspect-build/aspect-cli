@@ -84,6 +84,10 @@ terminal), with how many messages were hidden and, for each kind collapsed, a
 file beside the log holding all of them. They are kept and pruned with the
 rest of the history.
 
+On a terminal, the URLs in Bazel's console and the recap, and the paths that
+name a file or directory that exists (`src/a.cc:3:4` links to `src/a.cc`),
+are links too, unless a coding agent is reading it.
+
     load("@aspect//feature/console.axl", "Console")
 
     def config(ctx: ConfigContext):

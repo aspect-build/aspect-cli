@@ -514,10 +514,13 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     config.strip_colour = !s
         .show_colour
         .unwrap_or_else(crate::color::console_supports_color);
-    // Clickable paths for a person at a terminal; a coding agent reading the
-    // console (its environment set, as the Console feature's `auto` profile
-    // checks) gets each path once, plain.
-    config.links = stderr_tty && !crate::agent::detected(|v| std::env::var_os(v));
+    // Clickable paths and URLs for a person at a terminal, a relative path
+    // from where the task runs, as `relativize_paths` writes them; a coding
+    // agent reading the console (its environment set, as the Console
+    // feature's `auto` profile checks) gets each once, plain.
+    config.links = (stderr_tty && !crate::agent::detected(|v| std::env::var_os(v)))
+        .then(|| std::env::current_dir().ok())
+        .flatten();
     config
 }
 
@@ -661,8 +664,10 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// file) in a raw log (`build.output_log`), and ends the
     /// console with a summary naming it: how many lines were hidden, and for
     /// each kind `collapse_similar` folded, a file beside the log with every
-    /// message of that kind. On a terminal the paths are links, but for a
-    /// coding agent reading the console (its environment set). The log is
+    /// message of that kind. On a terminal those paths are links, as are
+    /// the URLs and the paths to files that exist in Bazel's lines and the
+    /// recap, but for a coding agent reading the console (its environment
+    /// set). The log is
     /// `console.log` in the Bazel invocation's folder in the task's history,
     /// with the folded kinds' `console.collapsed-<n>.log` beside it, kept and
     /// pruned as the rest of the history is (in the temp dir when no history

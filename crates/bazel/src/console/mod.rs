@@ -12,6 +12,7 @@
 //! * [`feed`]: what a hidden console would have shown, for a caller drawing
 //!   its own screen.
 //! * [`ansi`]: the escape sequences in a record.
+//! * [`links`]: paths and URLs made clickable, for a terminal.
 //!
 //! A caller configures a [`Config`] once and builds a fresh [`Pipeline`] from
 //! it per invocation, so one config serves every retry attempt.
@@ -58,6 +59,7 @@ pub mod feed;
 pub mod filters;
 pub mod forward;
 pub mod line;
+pub mod links;
 pub mod log;
 pub mod processors;
 pub mod render;
@@ -329,9 +331,10 @@ pub struct Config {
     /// messages from the output of the actions it runs ([`line`]). What is
     /// shown keeps it only as [`Config::strip_colour`] says.
     pub colour: bool,
-    /// Write the paths the summary names as OSC 8 hyperlinks: for a
-    /// terminal.
-    pub links: bool,
+    /// For a terminal: write the paths and URLs Bazel's lines and the
+    /// recap name, and the paths the summary names, as OSC 8 hyperlinks
+    /// ([`links`]), a relative path resolved from this directory.
+    pub links: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -348,7 +351,7 @@ impl Config {
             output: Output::AsWritten,
             strip_colour: false,
             user_colour: None,
-            links: false,
+            links: None,
             colour: false,
         }
     }
@@ -357,6 +360,13 @@ impl Config {
     pub fn with_log(mut self, place: log::Place) -> Self {
         self.log = Some(place);
         self
+    }
+
+    /// A [`links::Linker`] for what is shown, when [`Config::links`] asks for
+    /// one and something is shown.
+    fn linker(&self) -> Option<links::Linker> {
+        let base = self.links.clone()?;
+        (self.output != Output::Hidden).then(|| links::Linker::new(base))
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
@@ -483,15 +493,18 @@ impl Config {
                     Box::new(RelativizePaths::new(root, cwd).under_pty(pty))
                 }
                 Stage::Drop(patterns) => Box::new(DropLines::new(patterns, pty, stats.clone())),
-                Stage::RecapErrors { max, after } => {
-                    Box::new(RecapErrors::new(max, after, self.style.clone()))
-                }
+                Stage::RecapErrors { max, after } => Box::new(
+                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker()),
+                ),
                 Stage::CollapseRepeats => Box::<CollapseRepeats>::default(),
                 Stage::CollapseSimilar { severities, groups } => {
                     Box::new(CollapseSimilar::new(severities, groups, pty, stats.clone()))
                 }
             };
             chain.push(stage);
+        }
+        if let Some(linker) = self.linker() {
+            chain.push(Box::new(links::Links(linker)));
         }
         if let Some(l) = &log {
             stats.keep_groups(l.path());
@@ -507,7 +520,7 @@ impl Config {
                 stats,
                 state,
                 self.style.clone(),
-                self.links,
+                self.links.is_some(),
             )));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));

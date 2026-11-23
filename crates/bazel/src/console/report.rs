@@ -7,7 +7,8 @@
 //! line is styled with [`Style`] on a terminal or a recognized CI log, so it
 //! reads as aspect's rather than bazel's: an `INFO:` line as the CLI's own
 //! are (its label bold cyan, the text plain), the summary's detail lines
-//! under it dim; the recap's quoted errors stay as Bazel wrote them.
+//! under it dim; the recap's quoted errors stay as Bazel wrote them, with
+//! what they name linked on a terminal ([`super::links`]).
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -21,6 +22,7 @@ use super::ansi;
 use super::filters::Collapsed;
 use super::forward::LineProcessor;
 use super::line::{self, Given, Kind, Line};
+use super::links::{Linker, file_link};
 use super::log::{self, Cut, RawLog};
 
 /// The longest line a report quotes.
@@ -223,35 +225,6 @@ impl Stats {
     }
 }
 
-/// `path` as an OSC 8 hyperlink to it, its text the path itself.
-pub fn file_link(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
-    let shown = path.display().to_string();
-    let mut url = String::from("file://");
-    url.push_str(&hostname());
-    for &b in path.as_os_str().as_bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
-            url.push(b as char);
-        } else {
-            url.push_str(&format!("%{b:02X}"));
-        }
-    }
-    format!("\x1b]8;;{url}\x1b\\{shown}\x1b]8;;\x1b\\")
-}
-
-fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: `buf` is valid for its length; gethostname NUL-terminates what
-    // fits, and a failure leaves the name empty, a link to the local host.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
-    if ok {
-        String::from_utf8_lossy(&buf[..end]).into_owned()
-    } else {
-        String::new()
-    }
-}
-
 /// How report lines are set apart from bazel's: an `INFO:` line's label in
 /// `info`, as the CLI's own `INFO:` lines have it (`axl_runtime::diag`), a
 /// detail line wrapped in `open`/`close`.
@@ -358,6 +331,8 @@ pub struct RecapErrors {
     body: Option<usize>,
     distinct: HashSet<String>,
     after_first: usize,
+    /// Links what the repeated lines name, for a terminal.
+    linker: Option<Linker>,
 }
 
 /// One error a recap repeats: its header, and what it keeps of its body.
@@ -389,7 +364,14 @@ impl RecapErrors {
             body: None,
             distinct: HashSet::new(),
             after_first: 0,
+            linker: None,
         }
+    }
+
+    /// This recap with the paths and URLs it repeats linked ([`Linker`]).
+    pub fn linking(mut self, linker: Option<Linker>) -> Self {
+        self.linker = linker;
+        self
     }
 }
 
@@ -460,17 +442,21 @@ impl LineProcessor for RecapErrors {
             "INFO: Errors Bazel reported:".to_string()
         };
         self.style.line(&mut out, &header);
+        let mut line = |text: &str| match self.linker.as_mut() {
+            Some(l) => l.link(text.as_bytes()),
+            None => text.as_bytes().to_vec(),
+        };
         for e in &self.errors {
-            out.extend_from_slice(format!("  {}\n", e.header).as_bytes());
+            out.extend(b"  ".iter().copied().chain(line(&e.header)).chain(*b"\n"));
             for b in &e.head {
-                out.extend_from_slice(format!("    {b}\n").as_bytes());
+                out.extend(b"    ".iter().copied().chain(line(b)).chain(*b"\n"));
             }
             if e.skipped > 0 {
                 let s = if e.skipped == 1 { "" } else { "s" };
                 out.extend_from_slice(format!("    … {} more line{s}\n", e.skipped).as_bytes());
             }
             if let Some(last) = &e.last {
-                out.extend_from_slice(format!("    {last}\n").as_bytes());
+                out.extend(b"    ".iter().copied().chain(line(last)).chain(*b"\n"));
             }
         }
         Some(out)
@@ -781,6 +767,28 @@ mod tests {
             feed(&mut p, &[]),
             "INFO: aspect hid 6 console lines; the raw console is in /tmp/c.log\n  \
              3 more like: WARNING: many\n  1 more like: WARNING: few\n"
+        );
+    }
+
+    #[test]
+    fn a_linking_recap_links_what_its_errors_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
+            super::super::links::Linker::new(dir.path().to_path_buf()),
+        ));
+        let out = feed(&mut p, &["ERROR: BUILD.bazel:1:1: see https://x.test/why"]);
+        assert!(
+            out.starts_with("INFO: Errors Bazel reported:\n  ERROR: \x1b]8;;file://"),
+            "{out:?}"
+        );
+        assert!(
+            out.contains("/BUILD.bazel\x1b\\BUILD.bazel\x1b]8;;\x1b\\:1:1"),
+            "{out:?}"
+        );
+        assert!(
+            out.contains("\x1b]8;;https://x.test/why\x1b\\https://x.test/why\x1b]8;;\x1b\\\n"),
+            "{out:?}"
         );
     }
 
