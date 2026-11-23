@@ -117,7 +117,8 @@ def _deprecated(ctx, arg: str, option: str):
 def _apply_deprecated_bes_args(ctx, bazel_trait):
     """Write each `bes_*` arg that is set to the BazelTrait field its BuildEvents
     option sets, with a warning naming that option. Like those options, they
-    apply to every backend the CLI streams to."""
+    apply to every backend the CLI streams to, and the BuildEvents feature,
+    registered after this one, overwrites any it is also given."""
     if ctx.args.bes_max_retries >= 0:
         _deprecated(ctx, "bes-max-retries", "max-retries")
         bazel_trait.bes_max_retries = ctx.args.bes_max_retries

@@ -1,6 +1,7 @@
 //! The BuildEvents feature's options reach `BazelTrait`, as do the deprecated
-//! `--workflows:bes-*` spellings, with a warning, and a limit too small to hold
-//! a publish request is refused before the task runs.
+//! `--workflows:bes-*` spellings, with a warning, unless the option is given
+//! too; a negative count or a limit too small to hold a publish request is
+//! refused before the task runs.
 //!
 //! A scratch workspace's `show` task prints the trait's fields, so nothing
 //! here runs Bazel.
@@ -96,16 +97,42 @@ fn the_workflows_spellings_still_apply_and_warn() {
 }
 
 #[test]
-fn a_limit_below_64_kib_is_refused_before_the_task_runs() {
-    let out = show(&["--build-events:max-event-bytes=1000"]);
+fn an_option_outranks_its_workflows_spelling() {
+    let out = show(&[
+        "--workflows:bes-max-retries=2",
+        "--build-events:max-retries=7",
+        "--workflows:bes-timeout=5m",
+    ]);
+    assert_eq!(fields(&out), "7|1s|None|5m|None");
+}
+
+/// `aspect show <args>` fails before the task runs with `error`, and no
+/// traceback.
+fn assert_refused(args: &[&str], error: &str) {
+    let out = show(args);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(
-        stderr.contains(
-            "ERROR: --build-events:max-event-bytes must be at least 65536 (64 KiB), got 1000"
-        ),
-        "{stderr}"
-    );
+    assert!(stderr.contains(&format!("ERROR: {error}")), "{stderr}");
     assert!(!stderr.contains("fields:"), "the task ran:\n{stderr}");
     assert!(!stderr.contains("Traceback"), "{stderr}");
+}
+
+#[test]
+fn a_limit_below_64_kib_is_refused_before_the_task_runs() {
+    assert_refused(
+        &["--build-events:max-event-bytes=1000"],
+        "--build-events:max-event-bytes must be at least 65536 (64 KiB), got 1000",
+    );
+}
+
+#[test]
+fn negative_counts_are_refused_before_the_task_runs() {
+    assert_refused(
+        &["--build-events:max-retries=-1"],
+        "--build-events:max-retries must be at least 0, got -1",
+    );
+    assert_refused(
+        &["--build-events:retry-max-buffer-bytes=-1"],
+        "--build-events:retry-max-buffer-bytes must be at least 0, got -1",
+    );
 }

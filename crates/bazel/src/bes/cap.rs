@@ -263,7 +263,7 @@ mod tests {
     }
 
     /// The publish request a gRPC sink wraps an event at the limit in fits in
-    /// the message size, even with ids far longer than UUIDs.
+    /// [`DEFAULT_MAX_MESSAGE_BYTES`], even with ids far longer than UUIDs.
     #[test]
     fn an_event_at_the_limit_fits_in_a_publish_request() {
         let encoded = action_of(MAX_EVENT_BYTES).encode_to_vec();
