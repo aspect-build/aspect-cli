@@ -85,13 +85,14 @@ file beside the log holding all of them. They are kept and pruned with the
 rest of the history.
 
 On a terminal, the URLs in Bazel's console and the recap, and the paths that
-name a file or directory that exists (`src/a.cc:3:4` links to `src/a.cc` at
-line 3), are links too, unless a coding agent is reading it, it is a CI
+name a file that exists (`src/a.cc:3:4` links to `src/a.cc` at line 3; a
+directory too under `file`), are links too, unless a coding agent is reading it, it is a CI
 job's, or `TERM` is `dumb`. What a path's link opens is `hyperlink_format`
 (`ctx.features[Console].args.hyperlink_format = "cursor"` in the config
 below, or `ASPECT_HYPERLINK_FORMAT=cursor` in your shell's profile): by
 default, your editor at the line, the one whose terminal this is, else the
-one `$VISUAL` or `$EDITOR` starts, else one installed. In Terminal.app,
+one `$VISUAL` or `$EDITOR` starts, else one installed; none on a remote
+machine (SSH, a dev container, Codespaces). In Terminal.app,
 which cannot show such a link, its URL is written beside the path.
 
     load("@aspect//feature/console.axl", "Console")
@@ -261,8 +262,9 @@ Console = feature(
                           "an editor's scheme at the line after the path (`vscode`, `vscode-insiders`, " +
                           "`vscodium`, `cursor`, `zed`, `idea`, `macvim`, `textmate`, `kitty`), `file` " +
                           "(file://, what the system opens the file with, at no line), `none`, or a URL " +
-                          "template over {path}, {line}, {column} and {host}. `auto` (the default) is, on " +
-                          "this machine, the editor whose terminal this is (VS Code, VSCodium, Cursor), else " +
+                          "template over {path}, {line}, {column} and {host}. `auto` (the default) is `none` " +
+                          "on a remote machine (SSH, a dev container, Codespaces), else the editor whose " +
+                          "terminal this is (VS Code, VS Code Insiders, VSCodium, Cursor), else " +
                           "the one $VISUAL or $EDITOR starts, else the first installed of cursor, code, " +
                           "code-insiders, zed, codium, idea, mvim and mate, else `none`. ASPECT_HYPERLINK_FORMAT takes the same " +
                           "values and beats config.axl but not the command line, and is what config.axl's " +
