@@ -61,11 +61,36 @@ macro_rules! errln {
 /// Install with `eval.set_print_handler(&TOLERANT_PRINT_HANDLER)`. Discarding
 /// the write matches `outln!`/`errln!`: nobody is reading the output, and
 /// finishing the task matters more than the line nobody sees.
+///
+/// On a terminal, as Bazel's console is, a line's URLs and paths to files
+/// that exist are written as links ([`bazel::console::links`]), but for a
+/// coding agent reading it.
 pub struct TolerantPrintHandler;
+
+/// Links what the CLI's own lines name, when stderr is a person's terminal.
+static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console::links::Linker>>> =
+    std::sync::LazyLock::new(|| {
+        use std::io::IsTerminal as _;
+        if !std::io::stderr().is_terminal() || crate::agent::detected(|v| std::env::var_os(v)) {
+            return None;
+        }
+        let base = std::env::current_dir().ok()?;
+        Some(std::sync::Mutex::new(bazel::console::links::Linker::new(
+            base,
+        )))
+    });
 
 impl starlark::PrintHandler for TolerantPrintHandler {
     fn println(&self, text: &str) -> starlark::Result<()> {
-        errln!("{text}");
+        match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
+            Some(mut linker) => {
+                use std::io::Write as _;
+                let mut line = linker.link(text.as_bytes());
+                line.push(b'\n');
+                let _ = std::io::stderr().write_all(&line);
+            }
+            None => errln!("{text}"),
+        }
         Ok(())
     }
 }
