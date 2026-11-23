@@ -10,7 +10,7 @@
 //! under it dim; the recap's quoted errors stay as Bazel wrote them, with
 //! what they name linked on a terminal ([`super::links`]).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use regex::Regex;
 
 use super::ansi;
+use super::excerpt;
 use super::filters::Collapsed;
 use super::forward::LineProcessor;
 use super::line::{self, Given, Kind, Line};
@@ -298,8 +299,9 @@ pub const RECAP_AFTER_RECORDS: usize = 40;
 pub const RECAP_MAX: usize = 10;
 
 /// How many lines of an error's body (a failed action's output under it) a
-/// recap repeats with it.
-pub const RECAP_BODY_LINES: usize = 5;
+/// recap holds to choose what it repeats from: the first half, and the last
+/// half after them.
+const RECAP_BODY_HELD: usize = 400;
 
 /// A failed action's error header up to its exit code: what follows (the
 /// tool that failed, its whole command line) the recap leaves out.
@@ -315,10 +317,10 @@ const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the
 /// draws do not count, so curses and plain lines count alike), enough to
 /// have scrolled it away. Its header says whether there were more than it
 /// repeats, never how many: in a pipe some are not recognized. Each comes
-/// with its body (what says what went wrong, for a failed action), up to
-/// [`RECAP_BODY_LINES`] lines: the first ones, and the last (a Starlark
-/// traceback's error comes after its frames), the rest counted between,
-/// Bazel's sandbox hint left out. The body ends at Bazel's next redraw (a
+/// with its body (what says what went wrong, for a failed action): the lines
+/// the status surfaces' failure snippets would pick ([`excerpt::Shape::RECAP`]:
+/// the first that reads as an error, with context, and the last), the rest
+/// counted, Bazel's sandbox hint left out. The body ends at Bazel's next redraw (a
 /// record that is `fresh`, in plain lines as under a PTY), so a tool's own
 /// `WARNING:` lines are kept in it. Its header is cut after the exit code.
 pub struct RecapErrors {
@@ -339,22 +341,84 @@ pub struct RecapErrors {
 /// The links a line went by with, placed in its quoted text.
 type LineLinks = Vec<Known>;
 
-/// One error a recap repeats: its header, and what it keeps of its body,
-/// each line with the links it went by with.
+/// One error a recap repeats: its header, and what it holds of its body
+/// ([`RECAP_BODY_HELD`]), each line with the links it went by with.
 struct Recapped {
     header: (String, LineLinks),
-    head: Vec<(String, LineLinks)>,
-    last: Option<(String, LineLinks)>,
-    skipped: usize,
+    first: Vec<(String, LineLinks)>,
+    last: VecDeque<(String, LineLinks)>,
+    /// Lines between `first` and `last`, held by neither.
+    dropped: usize,
+}
+
+/// A part of a recapped body: a line it repeats, or a count of those it
+/// does not.
+enum Part<'a> {
+    Line(&'a (String, LineLinks)),
+    Gap(usize),
 }
 
 impl Recapped {
-    fn body_line(&mut self, text: String, links: LineLinks) {
-        if self.head.len() < RECAP_BODY_LINES - 1 {
-            self.head.push((text, links));
-        } else if self.last.replace((text, links)).is_some() {
-            self.skipped += 1;
+    fn new(header: (String, LineLinks)) -> Self {
+        Recapped {
+            header,
+            first: vec![],
+            last: VecDeque::new(),
+            dropped: 0,
         }
+    }
+
+    fn body_line(&mut self, text: String, links: LineLinks) {
+        if self.first.len() < RECAP_BODY_HELD / 2 {
+            self.first.push((text, links));
+            return;
+        }
+        self.last.push_back((text, links));
+        if self.last.len() > RECAP_BODY_HELD / 2 {
+            self.last.pop_front();
+            self.dropped += 1;
+        }
+    }
+
+    /// The body as the recap repeats it: [`excerpt::select`]'s lines, each
+    /// run of the others a count, those it did not hold among them.
+    fn excerpt(&self) -> Vec<Part<'_>> {
+        let held: Vec<&(String, LineLinks)> = self.first.iter().chain(&self.last).collect();
+        let texts: Vec<&str> = held.iter().map(|(t, _)| t.as_str()).collect();
+        // Where the lines not held were, between `first` and `last`.
+        let join = self.first.len();
+        let unheld = |from: usize, to: usize| {
+            if self.dropped > 0 && from <= join && join <= to {
+                self.dropped
+            } else {
+                0
+            }
+        };
+        let mut parts = vec![];
+        let mut at = 0;
+        for span in excerpt::select(&texts, excerpt::Shape::RECAP) {
+            let gap = span.start - at + unheld(at, span.start);
+            if gap > 0 {
+                parts.push(Part::Gap(gap));
+            }
+            for i in span.clone() {
+                if i == join && i > span.start && self.dropped > 0 {
+                    parts.push(Part::Gap(self.dropped));
+                }
+                parts.push(Part::Line(held[i]));
+            }
+            at = span.end;
+        }
+        let gap = held.len() - at
+            + if at < held.len() {
+                unheld(at, held.len())
+            } else {
+                0
+            };
+        if gap > 0 {
+            parts.push(Part::Gap(gap));
+        }
+        parts
     }
 }
 
@@ -428,12 +492,7 @@ impl LineProcessor for RecapErrors {
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
                 let links = self.links(record, &quoted);
-                self.errors.push(Recapped {
-                    header: (quoted, links),
-                    head: vec![],
-                    last: None,
-                    skipped: 0,
-                });
+                self.errors.push(Recapped::new((quoted, links)));
                 self.body = Some(self.errors.len() - 1);
             }
         } else if let Some(i) = body
@@ -491,21 +550,16 @@ impl LineProcessor for RecapErrors {
                     .chain(line(&e.header.0, &e.header.1))
                     .chain(*b"\n"),
             );
-            for (b, links) in &e.head {
-                out.extend(b"    ".iter().copied().chain(line(b, links)).chain(*b"\n"));
-            }
-            if e.skipped > 0 {
-                let s = if e.skipped == 1 { "" } else { "s" };
-                out.extend_from_slice(format!("    … {} more line{s}\n", e.skipped).as_bytes());
-            }
-            if let Some((last, links)) = &e.last {
-                out.extend(
-                    b"    "
-                        .iter()
-                        .copied()
-                        .chain(line(last, links))
-                        .chain(*b"\n"),
-                );
+            for part in e.excerpt() {
+                match part {
+                    Part::Line((b, links)) => {
+                        out.extend(b"    ".iter().copied().chain(line(b, links)).chain(*b"\n"));
+                    }
+                    Part::Gap(n) => {
+                        let s = if n == 1 { "" } else { "s" };
+                        out.extend_from_slice(format!("    … {n} more line{s}\n").as_bytes());
+                    }
+                }
             }
         }
         Some(out)
@@ -744,7 +798,7 @@ mod tests {
             "",
             "app/x.cc:3: error: what went wrong",
         ];
-        records.extend(std::iter::repeat_n("more output", RECAP_BODY_LINES));
+        records.extend(std::iter::repeat_n("more output", 5));
         records.push("\x1b[32m[1 / 9]\x1b[0m running");
         records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
         assert_eq!(
@@ -754,6 +808,65 @@ mod tests {
              boom\n    app/x.cc:3: error: what went wrong\n    more output\n    \
              more output\n    … 2 more lines\n    more output\n"
         );
+    }
+
+    #[test]
+    fn a_recapped_body_shows_its_first_error_however_far_down() {
+        let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::default());
+        let mut records =
+            vec!["ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1): clang failed"];
+        records.extend(std::iter::repeat_n("In file included from a.h:1:", 8));
+        records.push("a.cc:3:4: error: no member named 'x'");
+        records.extend(std::iter::repeat_n("note: here", 6));
+        records.push("1 error generated.");
+        records.push("\x1b[32m[1 / 9]\x1b[0m running");
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        assert_eq!(
+            feed(&mut p, &records),
+            "INFO: Errors Bazel reported:\n  \
+             ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)\n    \
+             … 7 more lines\n    In file included from a.h:1:\n    \
+             a.cc:3:4: error: no member named 'x'\n    note: here\n    \
+             note: here\n    … 4 more lines\n    1 error generated.\n"
+        );
+    }
+
+    #[test]
+    fn a_recapped_body_longer_than_it_holds_counts_every_line() {
+        let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::default());
+        let lines: Vec<String> = (0..1000)
+            .map(|i| {
+                if i == 100 {
+                    "error: deep".to_string()
+                } else {
+                    format!("line {i}")
+                }
+            })
+            .collect();
+        let mut records =
+            vec!["ERROR: /ws/BUILD:1:1: Executing genrule //:g failed: (Exit 1): bash failed"];
+        records.extend(lines.iter().map(String::as_str));
+        records.push("\x1b[32m[1 / 9]\x1b[0m running");
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        let out = feed(&mut p, &records);
+        let counted: usize = out
+            .lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix("… ")?
+                    .split(' ')
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .sum();
+        let shown = out
+            .lines()
+            .filter(|l| l.starts_with("    ") && !l.contains("more line"))
+            .count();
+        assert_eq!(counted + shown, 1000, "{out}");
+        assert!(out.contains("    error: deep\n"), "{out}");
+        assert!(out.ends_with("    line 999\n"), "{out}");
     }
 
     #[test]
@@ -776,9 +889,9 @@ mod tests {
             feed(&mut p, &records),
             "INFO: Errors Bazel reported:\n  \
              ERROR: Traceback (most recent call last):\n    \
-             \tFile \"/ws/a.bzl\", line 1\n    \tFile \"/ws/b.bzl\", line 2\n    \
+             … 1 more line\n    \tFile \"/ws/b.bzl\", line 2\n    \
              \tFile \"/ws/c.bzl\", line 3\n    \tFile \"/ws/d.bzl\", line 4\n    \
-             … 1 more line\n    Error in fail: the real reason\n"
+             \tFile \"/ws/e.bzl\", line 5\n    Error in fail: the real reason\n"
         );
     }
 

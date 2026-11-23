@@ -93,6 +93,58 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     fn history<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<history::History> {
         Ok(history::History::new())
     }
+
+    /// The lines of a failure's output that say what went wrong, as the
+    /// console's recap of an error picks them: the first line that reads as
+    /// an error, with `before` and `after` lines around it, and the last
+    /// `tail` lines, at most `max_lines` in all; with no such line, the last
+    /// `max_lines`. `text` is cleaned first (escapes removed, a line redrawn
+    /// in place only as last drawn, a run of the same line once).
+    ///
+    /// Returns `{"lines": [...], "cut_head": bool, "cut_tail": bool}`: the
+    /// lines, with `… N more lines` where lines between two spans are left
+    /// out, and whether lines before the first or after the last are.
+    fn excerpt<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] text: &str,
+        #[starlark(require = named, default = 20)] max_lines: u32,
+        #[starlark(require = named, default = 4)] before: u32,
+        #[starlark(require = named, default = 10)] after: u32,
+        #[starlark(require = named, default = 5)] tail: u32,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        use bazel::console::excerpt;
+        let lines = excerpt::clean_lines(text.as_bytes());
+        let spans = excerpt::select(
+            &lines,
+            excerpt::Shape {
+                max_lines: max_lines as usize,
+                before: before as usize,
+                after: after as usize,
+                tail: tail as usize,
+            },
+        );
+        let mut out: Vec<String> = Vec::new();
+        let mut at = None;
+        for span in &spans {
+            if let Some(end) = at
+                && span.start > end
+            {
+                let n = span.start - end;
+                let s = if n == 1 { "" } else { "s" };
+                out.push(format!("… {n} more line{s}"));
+            }
+            out.extend(lines[span.clone()].iter().cloned());
+            at = Some(span.end);
+        }
+        let cut_head = spans.first().is_some_and(|s| s.start > 0);
+        let cut_tail = spans.last().is_some_and(|s| s.end < lines.len());
+        Ok(heap.alloc(starlark::values::dict::AllocDict([
+            ("lines", heap.alloc(starlark::values::list::AllocList(out))),
+            ("cut_head", heap.alloc(cut_head)),
+            ("cut_tail", heap.alloc(cut_tail)),
+        ])))
+    }
 }
 
 #[starlark_module]

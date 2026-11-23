@@ -55,6 +55,7 @@ use regex::Regex;
 pub mod aggregate;
 pub mod ansi;
 pub mod capture;
+pub mod excerpt;
 pub mod feed;
 pub mod filters;
 pub mod forward;

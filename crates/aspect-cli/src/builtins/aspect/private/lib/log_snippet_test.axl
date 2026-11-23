@@ -4,14 +4,14 @@ Run with:
   aspect dev test-log-snippet
 """
 
-load("./log_snippet.axl", "SnippetOptions", "extract_junit_failure_from_text")
+load("./log_snippet.axl", "SnippetOptions", "extract_junit_failure_from_text", "extract_snippet_from_text")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _snippet(xml):
-    return extract_junit_failure_from_text(xml, SnippetOptions()).text
+def _snippet(ctx, xml):
+    return extract_junit_failure_from_text(ctx.std, xml, SnippetOptions()).text
 
 def _test_go_junit_char_refs_decode(ctx):
     """rules_go writes the failure body through Go's `encoding/xml`, which escapes
@@ -21,7 +21,7 @@ def _test_go_junit_char_refs_decode(ctx):
            "--- FAIL: TestCompare (0.00s)&#xA;    main_test.go:12: diff:&#xA;" +
            "        - &#x9;&#34;this&#34;,&#xA;        + &#x9;&#39;that&#39;," +
            "</failure></testcase>")
-    _eq("go body", _snippet(xml), "\n".join([
+    _eq("go body", _snippet(ctx, xml), "\n".join([
         "Failed",
         "--- FAIL: TestCompare (0.00s)",
         "    main_test.go:12: diff:",
@@ -30,24 +30,63 @@ def _test_go_junit_char_refs_decode(ctx):
     ]))
 
 def _test_named_and_decimal_refs_decode(ctx):
-    _eq("attrs", _snippet('<failure message="a &lt;b&gt; &amp; &#65;&#x42;"/>'), "a <b> & AB")
+    _eq("attrs", _snippet(ctx, '<failure message="a &lt;b&gt; &amp; &#65;&#x42;"/>'), "a <b> & AB")
 
 def _test_unescape_is_single_pass(ctx):
     """`&amp;lt;` is the text `&lt;`, not `<`: decoding twice would change what
     the test printed."""
-    _eq("double", _snippet('<failure message="&amp;lt;tag&amp;gt;"/>'), "&lt;tag&gt;")
+    _eq("double", _snippet(ctx, '<failure message="&amp;lt;tag&amp;gt;"/>'), "&lt;tag&gt;")
 
 def _test_malformed_refs_are_kept(ctx):
-    _eq("malformed", _snippet('<failure message="AT&amp;T &bogus; &#xZZ; &# a & b"/>'), "AT&T &bogus; &#xZZ; &# a & b")
+    _eq("malformed", _snippet(ctx, '<failure message="AT&amp;T &bogus; &#xZZ; &# a & b"/>'), "AT&T &bogus; &#xZZ; &# a & b")
 
 def _test_cdata_body_is_verbatim(ctx):
     """CDATA is how most Java reporters write stack traces. It may contain `</`
     and entity-like text, neither of which ends or decodes it."""
     xml = ('<failure message="boom"><![CDATA[expected </b> but got &amp;\n' +
            "\tat Foo.test(Foo.java:3)]]></failure>")
-    _eq("cdata", _snippet(xml), "boom\nexpected </b> but got &amp;\n\tat Foo.test(Foo.java:3)")
+    _eq("cdata", _snippet(ctx, xml), "boom\nexpected </b> but got &amp;\n\tat Foo.test(Foo.java:3)")
+
+def _test_the_first_error_and_the_end_are_kept(ctx):
+    """An action's own error near the top of its output is the snippet's
+    anchor, not a generic failure line a wrapper writes last; the end comes
+    with it, the lines between counted."""
+    log = "\n".join(
+        ["building"] +
+        ["src/a.cc:3:4: error: no member named 'x'"] +
+        ["  note: context %d" % i for i in range(30)] +
+        ["ERROR: remote action failed"],
+    )
+    r = extract_snippet_from_text(ctx.std, log, False, SnippetOptions(max_lines = 8, context_before = 1, context_after = 2, tail = 2))
+    _eq("lines", r.text.split("\n"), [
+        "building",
+        "src/a.cc:3:4: error: no member named 'x'",
+        "  note: context 0",
+        "  note: context 1",
+        "  note: context 2",
+        "  note: context 3",
+        "… 25 more lines",
+        "  note: context 29",
+        "ERROR: remote action failed",
+    ])
+    _eq("ends", (r.trunc_head, r.trunc_tail), (False, False))
+
+def _test_bazels_sandbox_hint_is_not_the_error(ctx):
+    """Bazel's `--sandbox_debug` hint reads as an error but says only how to
+    look closer; the tool's own error is the anchor."""
+    log = "\n".join(
+        ["Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging"] +
+        ["ok %d" % i for i in range(20)] +
+        ["panic: the real one"] +
+        ["ok after %d" % i for i in range(20)],
+    )
+    r = extract_snippet_from_text(ctx.std, log, False, SnippetOptions(max_lines = 4, context_before = 0, context_after = 1, tail = 1))
+    _eq("anchor", r.text.split("\n")[:2], ["panic: the real one", "ok after 0"])
+    _eq("cut head", r.trunc_head, True)
 
 _UNIT_TESTS = [
+    _test_the_first_error_and_the_end_are_kept,
+    _test_bazels_sandbox_hint_is_not_the_error,
     _test_go_junit_char_refs_decode,
     _test_named_and_decimal_refs_decode,
     _test_unescape_is_single_pass,
