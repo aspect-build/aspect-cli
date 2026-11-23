@@ -382,7 +382,7 @@ task_templates = {"check": {"progress": "mine"}}"#;
             ),
             (
                 r#"templates = {"lint": {"verdict": "v", "header": "h"}, "verdict": "V", "check": {"progress": "x"}}"#,
-                "Console templates takes slot keys only (banner, header, phase, progress, verdict, section); \
+                "Console templates takes slot keys only (banner, header, phase, progress, verdict, section, tip); \
                  a block keyed by a task goes in `task_templates`, keyed by task. For this config:\n    \
                  templates = {\"verdict\": ...}\n    task_templates = {\n        \
                  \"check\": {\"progress\": ...},\n        \"lint\": {\"header\": ..., \"verdict\": ...},\n    }",

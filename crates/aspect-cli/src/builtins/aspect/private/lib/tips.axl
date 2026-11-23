@@ -1013,49 +1013,81 @@ _TERMINAL_EMOJI = {
     TIP_NOTE: "💬",
 }
 
-def _tip_head(id, severity, title, color_on):
-    """`TIP[id] <emoji> severity: title`: `TIP` in the tips' own colour, the
-    id grey, the severity's emoji, then its word lowercase in its colour
-    (`_TERMINAL_TIP_COLOR`), the title plain. An unknown severity reads as a
-    note."""
+def _tip_head(id, severity, title, color_on, console = None):
+    """`TIP[id] <emoji> severity: title` as `console`'s `tip` slot renders it
+    (`full` carries the emoji, `compact` does not), or, with no console, as
+    `full` does: `TIP` in the tips' own colour, the id grey, the severity's
+    emoji, then its word lowercase in its colour (`_TERMINAL_TIP_COLOR`), the
+    title plain. Every style is empty unless `color_on`. An unknown severity
+    reads as a note."""
     if severity not in _TERMINAL_TIP_COLOR:
         severity = TIP_NOTE
-    head = ansi.style("TIP", ansi.seq(_TERMINAL_TIP_LABEL_COLOR), color_on)
-    head += ansi.style("[%s]" % id, ansi.seq(_TERMINAL_TIP_ID_COLOR), color_on)
-    head += " " + _TERMINAL_EMOJI[severity]
-    head += " " + ansi.style(severity_label(severity).lower(), ansi.seq(_TERMINAL_TIP_COLOR[severity]), color_on)
-    return head + ": " + title
+    style = lambda code: ansi.seq(code) if color_on else ""
+    context = {
+        "id": id,
+        "severity": severity_label(severity).lower(),
+        "emoji": _TERMINAL_EMOJI[severity],
+        "title": title,
+        "tip_style": style(_TERMINAL_TIP_LABEL_COLOR),
+        "id_style": style(_TERMINAL_TIP_ID_COLOR),
+        "highlight_style": style(_TERMINAL_TIP_COLOR[severity]),
+        "highlight_reset": ansi.RESET if color_on else "",
+    }
+    if console != None:
+        return console.render("tip", **context)
+    c = context
+    return "%sTIP%s%s[%s]%s %s %s%s%s: %s" % (
+        c["tip_style"],
+        c["highlight_reset"],
+        c["id_style"],
+        id,
+        c["highlight_reset"],
+        c["emoji"],
+        c["highlight_style"],
+        c["severity"],
+        c["highlight_reset"],
+        title,
+    )
 
-def terminal_tip_lines(id, severity, title, body, color_on = False):
+def terminal_tip_lines(id, severity, title, body, color_on = False, console = None):
     """A tip as the terminal shows it: its head (`_tip_head`), then its body
-    indented two spaces, code fences stripped."""
-    lines = [_tip_head(id, severity, title, color_on)]
+    indented two spaces, code fences stripped; nothing when the head renders
+    blank."""
+    head = _tip_head(id, severity, title, color_on, console)
+    if not head:
+        return []
+    lines = [head]
     cleaned = strip_code_fences(body)
     if cleaned:
         for line in cleaned.rstrip("\n").split("\n"):
             lines.append("  " + line if line else "")
     return lines
 
-def terminal_more_line(id, severity, title, more, color_on = False):
+def terminal_more_line(id, severity, title, more, color_on = False, console = None):
     """The end-of-task line for an id's `more` occurrences or tips not
     printed, and the title of the last of them, when there is one to name."""
     if title == None:
-        return _tip_head(id, severity, "%d more" % more, color_on)
-    return _tip_head(id, severity, "%d more; the last: %s" % (more, title), color_on)
+        return _tip_head(id, severity, "%d more" % more, color_on, console)
+    return _tip_head(id, severity, "%d more; the last: %s" % (more, title), color_on, console)
 
-def terminal_now_line(id, severity, title, color_on = False):
+def terminal_now_line(id, severity, title, color_on = False, console = None):
     """The end-of-task line for a `TIP_SHOW_FIRST` tip that changed after it
     printed: its title now."""
-    return _tip_head(id, severity, "now: " + title, color_on)
+    return _tip_head(id, severity, "now: " + title, color_on, console)
 
 # The id of the end-of-task line saying how to silence the tips shown.
 TIPS_HINT_ID = "tips_hint"
 
-def terminal_hint_lines(ids, color_on = False):
+def terminal_hint_lines(ids, color_on = False, console = None):
     """The end-of-task `tips_hint` tip, naming the ids shown and how to
     silence them, the docs under it."""
     title = "Silence a tip with `--tips:silence=<id>` (shown: %s)" % ", ".join(ids)
-    return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, CLI_TIPS_SILENCE_URL, color_on)
+    return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, CLI_TIPS_SILENCE_URL, color_on, console)
+
+def _console(ctx):
+    """`ctx`'s console, through whose `tip` slot a tip renders, or None for a
+    context without one."""
+    return ctx.console if hasattr(ctx, "console") else None
 
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
@@ -1231,7 +1263,8 @@ def _tips_impl(ctx):
 
     def _print(lines):
         for line in lines:
-            sink[0](line)
+            if line:
+                sink[0](line)
 
     def _on_emit(call_ctx, stored, changed, occurrence):
         """Print `stored` on the terminal, or count it for the end, as its
@@ -1264,10 +1297,12 @@ def _tips_impl(ctx):
             more[id] += 1
             held_last[id] = stored
 
-    def _print_stored(_call_ctx, stored, color_on):
+    def _print_stored(call_ctx, stored, color_on):
         id = stored["id"]
-        _print(terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on))
-        shown[id] += 1
+        lines = terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on, _console(call_ctx))
+        _print(lines)
+        if lines:
+            shown[id] += 1
         printed[id][stored.get("key", "")] = (stored["title"], stored["body"])
 
     def _finish(task_ctx):
@@ -1305,14 +1340,14 @@ def _tips_impl(ctx):
                 held = len(unprinted) + lost
                 latest = unprinted[-1] if unprinted else None
             if held:
-                _print([terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on)])
+                _print([terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))])
             elif show == TIP_SHOW_FIRST:
                 now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])]]
                 if now:
-                    _print([terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on)])
+                    _print([terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on, _console(task_ctx))])
         names = [id for id in order if shown[id]]
         if names and TIPS_HINT_ID not in silenced:
-            _print(terminal_hint_lines(names, color_on))
+            _print(terminal_hint_lines(names, color_on, _console(task_ctx)))
 
     def _add(call_ctx, tip):
         if tip["id"] in silenced:

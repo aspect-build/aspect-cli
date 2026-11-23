@@ -40,7 +40,14 @@ A task with its own preset starts from it alone, without `templates`;
 The runtime does the rendering: it reads these args after `config.axl` runs
 and before the header prints. Bazel's own output, warnings and errors, and
 stdout are never templated, and nor is the end of Bazel's console (the
-recap, what was hidden, the tips): it prints under every preset.
+recap and what was hidden): it prints under every preset. A tip's first
+line is the `tip` slot, `TIP[id] 💡 suggestion: title`; `full` and `silent`
+carry the emoji, `plain`, `compact` and `agent` leave it out, and a
+template that renders blank hides the tip:
+
+    ctx.features[Console].args.templates = {
+        "tip": "{{ highlight_style }}{{ severity }}{{ highlight_reset }} [{{ id }}] {{ title }}",
+    }
 
 Under a coding agent (any of the environment variables `lib/agent.axl` reads,
 such as `CLAUDECODE`, `CODEX_THREAD_ID` or `AI_AGENT`) the default is `agent`
@@ -234,9 +241,11 @@ Console = feature(
                           "(`verdict`, `glyph`, `shortcode`, `verb`, `label`, `exit_code`, `exit`, " +
                           "`elapsed`, `elapsed_ms`, `timing`, `conclusion`, `breakdown`, " +
                           "`plain_breakdown`, `phases`; `timing` and both breakdowns follow " +
-                          "--task:timing-summary), and \"section\" (`icon`, `title`), the title of " +
+                          "--task:timing-summary), \"section\" (`icon`, `title`), the title of " +
                           "a Buildkite section a task opens itself, such as the Workflows runner " +
-                          "metadata. Every slot also gets `buildkite` and `task` (`kind`, `group`, " +
+                          "metadata, and \"tip\" (`id`, `severity`, `emoji`, `title`, `tip_style`, " +
+                          "`id_style`), a tip's first line, its body printed under it; a blank " +
+                          "render hides the tip. Every slot also gets `buildkite` and `task` (`kind`, `group`, " +
                           "`name`, `path`); all but \"section\", and a \"progress\" update that " +
                           "names no phase, get `highlight_style` and `highlight_reset`, the ANSI " +
                           "codes around the line's highlight (empty when color is off). They apply to every task that renders with " +

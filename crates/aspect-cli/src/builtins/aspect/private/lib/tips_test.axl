@@ -718,12 +718,25 @@ def _test_auto_print_flag(ctx):
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "T", body = "B")
     _eq("auto_print False — tip still recorded", _ids(tips._inspect_for_test(ctx)), ["x"])
 
+# The emoji `full` puts after a tip's id, which a preset without emojis
+# (the `agent` one a coding agent's environment picks) leaves out.
+_EMOJI = ["🟡 ", "📌 ", "💡 ", "💬 "]
+
+def _plain_tip(line):
+    """`line` with its colour and its tip emoji gone, the same under every
+    preset."""
+    line = ansi.strip(line)
+    for e in _EMOJI:
+        line = line.replace("] " + e, "] ")
+    return line
+
 def _capture(ctx):
-    """Turn printing on and capture what the terminal would get, colour
-    stripped, into the returned list."""
+    """Turn printing on and capture what the terminal would get, colour and
+    tip emoji stripped, into the returned list: the task's console renders
+    the tips, under whatever preset the environment picks."""
     lines = []
     tips._set_auto_print_for_test(ctx, True)
-    tips._set_sink_for_test(ctx, lambda line: lines.append(ansi.strip(line)))
+    tips._set_sink_for_test(ctx, lambda line: lines.append(_plain_tip(line)))
     return lines
 
 def _test_terminal_format(_):
@@ -747,6 +760,23 @@ def _test_terminal_format(_):
         "  https://aspect.build/docs/cli/guides/tips#silencing-tips",
     ])
 
+def _test_terminal_colour_and_console(ctx):
+    """A tip's styles are empty without colour, so no escape reaches a log;
+    with colour, `TIP`, the id and the severity's word carry theirs. The
+    task's console renders the same line, its emoji as its preset says."""
+    plain = terminal_tip_lines("x", TIP_WARNING, "T", "B", False)
+    _eq("no colour, no escape", [l for l in plain if "\x1b" in l], [])
+    coloured = terminal_tip_lines("x", TIP_WARNING, "T", "B", True)[0]
+    _eq("colour opens TIP", coloured.startswith("\x1b["), True)
+    _eq("colour, stripped, is the plain line", ansi.strip(coloured), plain[0])
+    for color_on in [False, True]:
+        via = terminal_tip_lines("x", TIP_WARNING, "T", "B", color_on, ctx.console)
+        _eq("console, colour %s: escapes as asked" % color_on, ("\x1b" in via[0]), color_on)
+        _eq("console, colour %s: the line" % color_on, _plain_tip(via[0]), "TIP[x] warning: T")
+        _eq("console, colour %s: the body under it" % color_on, via[1:], ["  B"])
+    emoji = "🟡" in terminal_tip_lines("x", TIP_WARNING, "T", "", False, ctx.console)[0]
+    _eq("emoji as the preset says", emoji, ctx.console.template_preset in ["full", "silent"])
+
 def _test_show_each_with_a_cap(ctx):
     """Each changed emit prints up to `max_shown`; the rest are counted for
     one line at the end, then the hint names the ids printed."""
@@ -755,9 +785,9 @@ def _test_show_each_with_a_cap(ctx):
     for i in range(4):
         add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T%d" % i, body = "", max_shown = 2)
     add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T3", body = "", max_shown = 2)
-    _eq("two printed", lines, ["TIP[e] 🟡 warning: T0", "TIP[e] 🟡 warning: T1"])
+    _eq("two printed", lines, ["TIP[e] warning: T0", "TIP[e] warning: T1"])
     tips._finish_for_test(ctx)
-    _eq("then counted, and the hint", lines[2:4], ["TIP[e] 🟡 warning: 2 more; the last: T3", lines[3]])
+    _eq("then counted, and the hint", lines[2:4], ["TIP[e] warning: 2 more; the last: T3", lines[3]])
     _eq("hint names it", "(shown: e)" in lines[3], True)
     _reset(ctx)
 
@@ -771,14 +801,14 @@ def _test_show_first_and_end(ctx):
     add_tip(ctx, id = "n", severity = TIP_INFO, title = "a", body = "b", key = "1", show = TIP_SHOW_END, max_shown = 1)
     add_tip(ctx, id = "n", severity = TIP_INFO, title = "a2", body = "b", key = "1", show = TIP_SHOW_END, max_shown = 1)
     add_tip(ctx, id = "n", severity = TIP_INFO, title = "c", body = "", key = "2", show = TIP_SHOW_END, max_shown = 1)
-    _eq("only the first so far", lines, ["TIP[f] 💬 note: one"])
+    _eq("only the first so far", lines, ["TIP[f] note: one"])
     tips._finish_for_test(ctx)
     _eq("the end", lines[1:4], [
-        "TIP[f] 💬 note: now: two",
-        "TIP[n] 💬 note: a2",
+        "TIP[f] note: now: two",
+        "TIP[n] note: a2",
         "  b",
     ])
-    _eq("end's cap counts the rest", lines[4], "TIP[n] 💬 note: 1 more; the last: c")
+    _eq("end's cap counts the rest", lines[4], "TIP[n] note: 1 more; the last: c")
     _eq("hint", "(shown: f, n)" in lines[5], True)
     _reset(ctx)
 
@@ -791,26 +821,26 @@ def _test_quiet_reemits_and_silenced_hint(ctx):
     add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
     tips._set_silenced_for_test(ctx, ["tips_hint"])
     tips._finish_for_test(ctx)
-    _eq("printed once, no more line, no hint", lines, ["TIP[q] 💬 note: same"])
+    _eq("printed once, no more line, no hint", lines, ["TIP[q] note: same"])
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
     tips._finish_for_test(ctx)
-    _eq("an unchanged occurrence past the cap counts", lines[:2], ["TIP[o] 💬 note: same", "TIP[o] 💬 note: 1 more; the last: same"])
+    _eq("an unchanged occurrence past the cap counts", lines[:2], ["TIP[o] note: same", "TIP[o] note: 1 more; the last: same"])
     add_tip(ctx, id = "late", severity = TIP_INFO, title = "after", body = "", show = TIP_SHOW_END)
-    _eq("a tip after the end prints at once", lines[-1], "TIP[late] 💬 note: after")
+    _eq("a tip after the end prints at once", lines[-1], "TIP[late] note: after")
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "later", body = "", max_shown = 1)
-    _eq("even past its cap", lines[-1], "TIP[o] 💬 note: later")
+    _eq("even past its cap", lines[-1], "TIP[o] note: later")
     tips._finish_for_test(ctx)
-    _eq("the end runs once", lines[-1], "TIP[o] 💬 note: later")
+    _eq("the end runs once", lines[-1], "TIP[o] note: later")
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "A", body = "", max_shown = 1)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "B", body = "", key = "k2", max_shown = 1)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "A", body = "", max_shown = 1)
     tips._finish_for_test(ctx)
-    _eq("the last names what was held, not a refresh", lines[1], "TIP[x] 💬 note: 1 more; the last: B")
+    _eq("the last names what was held, not a refresh", lines[1], "TIP[x] note: 1 more; the last: B")
     _reset(ctx)
     lines = _capture(ctx)
     hooks = ctx.traits[TipsTrait].tip_suggestion
@@ -819,7 +849,7 @@ def _test_quiet_reemits_and_silenced_hint(ctx):
     add_tip(ctx, id = "r", severity = TIP_INFO, title = "gone", body = "", key = "foo", occurrence = True, unshown = 5)
     hooks.pop()
     tips._finish_for_test(ctx)
-    _eq("what a rejected emit stood for still counts", lines[1], "TIP[r] 💬 note: 5 more")
+    _eq("what a rejected emit stood for still counts", lines[1], "TIP[r] note: 5 more")
     _reset(ctx)
     add_tip(ctx, id = "broken", severity = TIP_INFO, title = "{{ x", body = "", type = TIP_TEMPLATE_JINJA2, vars = {"x": 1})
     _eq("a template that does not render is shown as written", tips._inspect_for_test(ctx)[0]["title"], "{{ x")
@@ -913,11 +943,11 @@ def _test_rule_tips_from_a_report(ctx):
     emit_rule_tips(ctx, each, report, None, "1")
     tips._finish_for_test(ctx)
     _eq("each match, then the rest counted", lines[:5], [
-        "TIP[each] 💬 note: t=//a",
+        "TIP[each] note: t=//a",
         "  L1",
-        "TIP[each] 💬 note: t=",
+        "TIP[each] note: t=",
         "  L2",
-        "TIP[each] 💬 note: 3 more; the last: t=//e",
+        "TIP[each] note: 3 more; the last: t=//e",
     ])
     _eq("the group stores its last match", tips._inspect_for_test(ctx)[0]["title"], "t=//e")
 
@@ -929,7 +959,7 @@ def _test_rule_tips_from_a_report(ctx):
         samples = [same, dict(same, seq = 2)],
     )
     emit_rule_tips(ctx, tip_rule(id = "twice", when = on_console_line("x"), severity = TIP_INFO, title = "same", body = ""), report, None, "1")
-    _eq("identical matches each print", lines, ["TIP[twice] 💬 note: same", "TIP[twice] 💬 note: same"])
+    _eq("identical matches each print", lines, ["TIP[twice] note: same", "TIP[twice] note: same"])
 
     _reset(ctx)
     lines = _capture(ctx)
@@ -940,7 +970,7 @@ def _test_rule_tips_from_a_report(ctx):
     emit_rule_tips(ctx, grouped, report, None, "1")
     emit_rule_tips(ctx, grouped, report, None, "2")
     tips._finish_for_test(ctx)
-    _eq("groups past max_groups count once, and no printed title is named", lines[:2], ["TIP[grp] 💬 note: a", "TIP[grp] 💬 note: 3 more"])
+    _eq("groups past max_groups count once, and no printed title is named", lines[:2], ["TIP[grp] note: a", "TIP[grp] note: 3 more"])
 
     _reset(ctx)
     guarded = tip_rule(id = "g", when = on_console_line("x"), severity = TIP_INFO, title = "t", body = "", only_if = lambda _ctx, _build: False)
@@ -994,13 +1024,14 @@ def _test_impl(ctx):
     _test_strip_code_fences(ctx)
     _test_auto_print_flag(ctx)
     _test_terminal_format(ctx)
+    _test_terminal_colour_and_console(ctx)
     _test_show_each_with_a_cap(ctx)
     _test_show_first_and_end(ctx)
     _test_quiet_reemits_and_silenced_hint(ctx)
     _test_merge_aggregate(ctx)
     _test_aggregates_merge_once_per_batch(ctx)
     _test_rule_tips_from_a_report(ctx)
-    print("tips.axl: OK (41 sections)")
+    print("tips.axl: OK (42 sections)")
     return 0
 
 tips_tests = task(
