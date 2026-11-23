@@ -188,7 +188,7 @@ impl EvalBuilder {
 
     /// Parse + evaluate, return `to_repr()` of the module's last value.
     pub fn repr(self) -> anyhow::Result<String> {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest_dir = manifest_dir();
         let rt = Runtime::new()?;
         let _g = rt.enter();
         let loader = Loader::new(
@@ -363,6 +363,16 @@ impl EvalBuilder {
     }
 }
 
+/// This crate's directory, read from the environment when the test runs: cargo
+/// sets `CARGO_MANIFEST_DIR` for test binaries, and a Bazel-run test falls back
+/// to its working directory. Never `env!`, which would embed the build path in
+/// the binary.
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().expect("current_dir"))
+}
+
 /// Locate the `basil` binary (the fake `bazel` used by tests that exercise
 /// `ctx.bazel.build`).
 ///
@@ -388,10 +398,9 @@ pub fn basil_bin() -> &'static str {
                 .into_owned();
         }
 
-        // CARGO is set by cargo for test binaries; CARGO_MANIFEST_DIR points
-        // at this crate's Cargo.toml.
+        // CARGO and CARGO_MANIFEST_DIR are set by cargo for test binaries.
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest_dir = manifest_dir();
         let workspace_root = manifest_dir
             .parent()
             .and_then(|p| p.parent())

@@ -27,7 +27,7 @@ aspect_gazelle(
 #
 # `tags = ["manual"]` is critical: without it, `aspect build //...`
 # walks into the binary and links it WITHOUT the `--config=pure_go`
-# the dedicated CI task passes, hitting the toolchains_llvm_bootstrapped
+# the dedicated CI task passes, hitting the `@llvm` toolchain's
 # `lld` PIC-relocation error on Linux. The manual tag excludes the
 # binary from wildcard patterns; explicit invocation
 # (`aspect build //tools/gazelle:gazelle_from_source_binary` or
