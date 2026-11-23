@@ -401,34 +401,34 @@ def _check_collect_tip_rows(ctx):
     if rows[0]["task_names"] != ["build-task", "lint-task"]:
         fail("collect_tip_rows attribution: expected [build-task, lint-task], got %r" % rows[0]["task_names"])
 
-    # Severity sort: important first, then warning, then suggestion, then info.
+    # Severity sort: warning first, then important, then suggestion, then note.
     rows = collect_tip_rows(ctx, [{"name": "t1", "tips": [
-        {"id": "i", "severity": "info", "title": "I", "body": ""},
+        {"id": "i", "severity": "note", "title": "I", "body": ""},
         {"id": "c", "severity": "important", "title": "C", "body": ""},
         {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
         {"id": "w", "severity": "warning", "title": "W", "body": ""},
     ]}])
     ids = [r["id"] for r in rows]
-    if ids != ["c", "w", "s", "i"]:
-        fail("collect_tip_rows severity sort: expected [c, w, s, i], got %r" % ids)
+    if ids != ["w", "c", "s", "i"]:
+        fail("collect_tip_rows severity sort: expected [w, c, s, i], got %r" % ids)
 
     # Cap: suggestion + info combined capped at 5; important + warning unbounded.
     big = (
         [{"id": "c%d" % i, "severity": "important", "title": "C", "body": ""} for i in range(3)] +
         [{"id": "w%d" % i, "severity": "warning", "title": "W", "body": ""} for i in range(4)] +
         [{"id": "s%d" % i, "severity": "suggestion", "title": "S", "body": ""} for i in range(4)] +
-        [{"id": "i%d" % i, "severity": "info", "title": "I", "body": ""} for i in range(4)]
+        [{"id": "i%d" % i, "severity": "note", "title": "I", "body": ""} for i in range(4)]
     )
     rows = collect_tip_rows(ctx, [{"name": "t1", "tips": big}])
     important_count = len([r for r in rows if r["severity_label"] == "Important"])
     warning_count = len([r for r in rows if r["severity_label"] == "Warning"])
-    subordinate_count = len([r for r in rows if r["severity_label"] in ("Tip", "Info")])
+    subordinate_count = len([r for r in rows if r["severity_label"] in ("Suggestion", "Note")])
     if important_count != 3:
         fail("collect_tip_rows cap: expected 3 important, got %d" % important_count)
     if warning_count != 4:
         fail("collect_tip_rows cap: expected 4 warning, got %d" % warning_count)
     if subordinate_count != 5:
-        fail("collect_tip_rows cap: expected 5 subordinate (suggestion+info), got %d" % subordinate_count)
+        fail("collect_tip_rows cap: expected 5 subordinate (suggestion+note), got %d" % subordinate_count)
 
     # silence_hint: non-empty whenever the tip has an id. The rendered
     # tip carries this `<sub>...</sub>` line as its silence-hint footer.
@@ -490,7 +490,7 @@ def _check_collect_tip_rows(ctx):
     rows = collect_tip_rows(ctx, [
         {"name": "build-task", "tips": [{
             "id": "task-only-tip",
-            "severity": "info",
+            "severity": "note",
             "title": "Only on task screens",
             "body": "...",
             "type": "raw",
@@ -502,7 +502,7 @@ def _check_collect_tip_rows(ctx):
 
     # An empty `surfaces` list means all surfaces — eligible for the rollup.
     rows = collect_tip_rows(ctx, [
-        {"name": "build-task", "tips": [{"id": "everywhere-tip", "severity": "info", "title": "Everywhere", "body": "b", "type": "raw", "surfaces": []}]},
+        {"name": "build-task", "tips": [{"id": "everywhere-tip", "severity": "note", "title": "Everywhere", "body": "b", "type": "raw", "surfaces": []}]},
     ])
     if len(rows) != 1:
         fail("surface gate: empty surfaces must be eligible, got %d rows" % len(rows))
@@ -510,8 +510,8 @@ def _check_collect_tip_rows(ctx):
     # combine=False (default), identical content across tasks → one row
     # attributed to both.
     rows = collect_tip_rows(ctx, [
-        {"name": "build-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
-        {"name": "test-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "static", "severity": "note", "title": "Same", "body": "Same body", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "static", "severity": "note", "title": "Same", "body": "Same body", "type": "raw"}]},
     ])
     if len(rows) != 1:
         fail("latest-identical: expected 1 row, got %d" % len(rows))
@@ -521,8 +521,8 @@ def _check_collect_tip_rows(ctx):
     # combine=False, divergent content across tasks → latest task's
     # content wins, attributed to that task.
     rows = collect_tip_rows(ctx, [
-        {"name": "build-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
-        {"name": "test-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "dyn", "severity": "note", "title": "Built //a", "body": "b1", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "dyn", "severity": "note", "title": "Built //b", "body": "b2", "type": "raw"}]},
     ])
     if len(rows) != 1:
         fail("latest-divergent: expected 1 row, got %d" % len(rows))
@@ -546,8 +546,8 @@ def _check_collect_tip_rows(ctx):
     # combine=False: same id, same key, different content from two tasks
     # collapses to ONE row (latest), not two — distinctness needs a key.
     rows = collect_tip_rows(ctx, [
-        {"name": "build-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
-        {"name": "test-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "nokey", "severity": "note", "title": "Built //a", "body": "b1", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "nokey", "severity": "note", "title": "Built //b", "body": "b2", "type": "raw"}]},
     ])
     if len(rows) != 1:
         fail("no-key-collapse: same (id, '') must be one row, got %d" % len(rows))
@@ -555,8 +555,8 @@ def _check_collect_tip_rows(ctx):
     # combine=True if ANY contributor opts in: the group merges into one
     # row even when another contributor left it False.
     rows = collect_tip_rows(ctx, [
-        {"name": "build-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
-        {"name": "test-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
+        {"name": "build-task", "tips": [{"id": "scope", "severity": "note", "title": "T", "body": "b", "type": "jinja2", "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
+        {"name": "test-task", "tips": [{"id": "scope", "severity": "note", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
     ])
     if len(rows) != 1 or rows[0]["task_names"] != ["build-task", "test-task"]:
         fail("combine-any: a single combine_across_tasks contributor must merge the group, got %r" % rows)
@@ -2774,10 +2774,10 @@ def _test_impl(ctx):
                         {"id": "sugg-1", "severity": "suggestion", "title": "Sugg 1", "body": "B1"},
                         {"id": "sugg-2", "severity": "suggestion", "title": "Sugg 2", "body": "B2"},
                         {"id": "sugg-3", "severity": "suggestion", "title": "Sugg 3", "body": "B3"},
-                        {"id": "info-1", "severity": "info", "title": "Info 1", "body": "I1"},
-                        {"id": "info-2", "severity": "info", "title": "Info 2", "body": "I2"},
-                        {"id": "info-3", "severity": "info", "title": "Info 3", "body": "I3"},
-                        {"id": "info-4", "severity": "info", "title": "Info 4", "body": "I4"},
+                        {"id": "info-1", "severity": "note", "title": "Info 1", "body": "I1"},
+                        {"id": "info-2", "severity": "note", "title": "Info 2", "body": "I2"},
+                        {"id": "info-3", "severity": "note", "title": "Info 3", "body": "I3"},
+                        {"id": "info-4", "severity": "note", "title": "Info 4", "body": "I4"},
                     ],
                 ),
             ],

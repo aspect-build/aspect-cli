@@ -270,8 +270,14 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("WARNING[server-crash]: The Bazel server crashed"),
+        stderr.contains("TIP[server-crash] 🟡 warning: The Bazel server crashed"),
         "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "TIP[tips_hint] 💬 note: Silence a tip with `--tips:silence=<id>` (shown: server-crash)"
+        ),
+        "the hint once, at the end, naming what was shown:\n{stderr}"
     );
     assert!(
         !stderr.contains("[1 / 2] Compiling"),
@@ -393,7 +399,7 @@ def config(ctx: ConfigContext):
     let stderr = std::fs::read_to_string(&log).unwrap();
     assert!(status.success(), "{stderr}");
     assert!(
-        stderr.contains("TIP[analysis]: 3 targets failed analysis\n  //:g0, //:g1, //:g2"),
+        stderr.contains("TIP[analysis] 💡 suggestion: 3 targets failed analysis\n  //:g0, //:g1, //:g2"),
         "{stderr}"
     );
     assert_eq!(stderr.matches("TIP[analysis]").count(), 1, "{stderr}");
@@ -429,7 +435,7 @@ fn a_silent_layout_keeps_the_end_of_bazels_console() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("WARNING[server-crash]: The Bazel server crashed"),
+        stderr.contains("TIP[server-crash] 🟡 warning: The Bazel server crashed"),
         "{stderr}"
     );
 }

@@ -8,7 +8,7 @@ To add one, append a `tip_rule` to `CONSOLE_TIP_RULES`:
   `when`      `on_console_line(pattern)`: a regex matched against every
               console line, an action's or a test's output included, with
               escape sequences stripped.
-  `severity`  `TIP_IMPORTANT`, `TIP_WARNING`, `TIP_SUGGESTION` or `TIP_INFO`.
+  `severity`  `TIP_WARNING`, `TIP_IMPORTANT`, `TIP_SUGGESTION` or `TIP_NOTE`.
   `title`, `body`  what to do about it, as Jinja2: `{{ line }}` is the line
               that matched, `{{ count }}` how many did.
   `surfaces`  where it shows; None is the terminal only.

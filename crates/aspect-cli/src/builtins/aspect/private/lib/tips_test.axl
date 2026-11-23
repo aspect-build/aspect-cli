@@ -49,6 +49,7 @@ load(
     "TIP_ACCEPT",
     "TIP_IMPORTANT",
     "TIP_INFO",
+    "TIP_NOTE",
     "TIP_REJECT",
     "TIP_SHOW_END",
     "TIP_SHOW_FIRST",
@@ -72,6 +73,7 @@ load(
     "severity_rank",
     "silence_hint_line",
     "strip_code_fences",
+    "terminal_hint_lines",
     "terminal_more_line",
     "terminal_now_line",
     "terminal_tip_lines",
@@ -343,9 +345,9 @@ def _test_collect_sorted_by_severity(ctx):
     add_tip(ctx, id = "important-2", severity = TIP_IMPORTANT, title = "T", body = "B")
     sorted_ids = _ids(collect_tips_sorted(ctx))
     _eq(
-        "sorted — important → warning → suggestion → info; stable within bucket",
+        "sorted — warning → important → suggestion → note; stable within bucket",
         sorted_ids,
-        ["important-1", "important-2", "warning-1", "suggestion-1", "info-1"],
+        ["warning-1", "important-1", "important-2", "suggestion-1", "info-1"],
     )
 
 def _test_collect_limit(ctx):
@@ -357,18 +359,19 @@ def _test_collect_limit(ctx):
     _eq("limit — 0 returns empty", len(collect_tips_sorted(ctx, limit = 0)), 0)
 
 def _test_severity_emoji(ctx):
-    _eq("emoji — important", severity_emoji(TIP_IMPORTANT), "🔥")
+    _eq("emoji — important", severity_emoji(TIP_IMPORTANT), "📌")
     _eq("emoji — warning", severity_emoji(TIP_WARNING), "⚠️")
     _eq("emoji — suggestion", severity_emoji(TIP_SUGGESTION), "💡")
-    _eq("emoji — info", severity_emoji(TIP_INFO), "ℹ️")
-    _eq("emoji — unknown defaults to info", severity_emoji("bogus"), "ℹ️")
+    _eq("emoji — note", severity_emoji(TIP_NOTE), "💬")
+    _eq("emoji — info is note", severity_emoji(TIP_INFO), "💬")
+    _eq("emoji — unknown defaults to note", severity_emoji("bogus"), "💬")
 
 def _test_severity_label(ctx):
     _eq("label — important", severity_label(TIP_IMPORTANT), "Important")
     _eq("label — warning", severity_label(TIP_WARNING), "Warning")
-    _eq("label — suggestion", severity_label(TIP_SUGGESTION), "Tip")
-    _eq("label — info", severity_label(TIP_INFO), "Info")
-    _eq("label — unknown defaults to info", severity_label("bogus"), "Info")
+    _eq("label — suggestion", severity_label(TIP_SUGGESTION), "Suggestion")
+    _eq("label — note", severity_label(TIP_NOTE), "Note")
+    _eq("label — unknown defaults to note", severity_label("bogus"), "Note")
 
 def _test_blockquote_body(ctx):
     _eq("blockquote — empty body", blockquote_body(""), "")
@@ -476,10 +479,10 @@ def _test_silence_hint_line(ctx):
         fail("silence_hint: must wrap in <sub>: %r" % line)
 
 def _test_severity_rank(ctx):
-    _eq("rank — important most urgent", severity_rank(TIP_IMPORTANT), 0)
-    _eq("rank — warning", severity_rank(TIP_WARNING), 1)
+    _eq("rank — warning most urgent", severity_rank(TIP_WARNING), 0)
+    _eq("rank — important", severity_rank(TIP_IMPORTANT), 1)
     _eq("rank — suggestion", severity_rank(TIP_SUGGESTION), 2)
-    _eq("rank — info least urgent", severity_rank(TIP_INFO), 3)
+    _eq("rank — note least urgent", severity_rank(TIP_NOTE), 3)
     if severity_rank("bogus") <= severity_rank(TIP_INFO):
         fail("rank — unknown severity must sort after info")
 
@@ -726,31 +729,36 @@ def _capture(ctx):
 def _test_terminal_format(_):
     """`SEVERITY[id]: title`, the body indented, no footer."""
     _eq("one line", terminal_tip_lines("disk-full", TIP_WARNING, "The disk is full", "`aspect gc` prunes."), [
-        "⚠️ WARNING[disk-full]: The disk is full",
+        "TIP[disk-full] 🟡 warning: The disk is full",
         "  `aspect gc` prunes.",
     ])
     _eq("multi-line, fences stripped", terminal_tip_lines("x", TIP_SUGGESTION, "T", "Run:\n\n```\naspect gc\n```\n"), [
-        "💡 TIP[x]: T",
+        "TIP[x] 💡 suggestion: T",
         "  Run:",
         "",
         "  aspect gc",
     ])
-    _eq("no body", terminal_tip_lines("x", TIP_INFO, "T", ""), ["ℹ️ INFO[x]: T"])
-    _eq("coloured", ansi.strip(terminal_tip_lines("x", TIP_IMPORTANT, "T", "", True)[0]), "🔥 IMPORTANT[x]: T")
-    _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "⚠️ WARNING[x]: 3 more; the last: T")
-    _eq("now", terminal_now_line("x", TIP_INFO, "T"), "ℹ️ INFO[x]: now: T")
+    _eq("no body", terminal_tip_lines("x", TIP_INFO, "T", ""), ["TIP[x] 💬 note: T"])
+    _eq("coloured", ansi.strip(terminal_tip_lines("x", TIP_IMPORTANT, "T", "", True)[0]), "TIP[x] 📌 important: T")
+    _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "TIP[x] 🟡 warning: 3 more; the last: T")
+    _eq("now", terminal_now_line("x", TIP_INFO, "T"), "TIP[x] 💬 note: now: T")
+    _eq("hint", terminal_hint_lines(["a", "b"]), [
+        "TIP[tips_hint] 💬 note: Silence a tip with `--tips:silence=<id>` (shown: a, b)",
+        "  https://aspect.build/docs/cli/guides/tips#silencing-tips",
+    ])
 
 def _test_show_each_with_a_cap(ctx):
     """Each changed emit prints up to `max_shown`; the rest are counted for
-    one line at the end."""
+    one line at the end, then the hint names the ids printed."""
     _reset(ctx)
     lines = _capture(ctx)
     for i in range(4):
         add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T%d" % i, body = "", max_shown = 2)
     add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T3", body = "", max_shown = 2)
-    _eq("two printed", lines, ["⚠️ WARNING[e]: T0", "⚠️ WARNING[e]: T1"])
+    _eq("two printed", lines, ["TIP[e] 🟡 warning: T0", "TIP[e] 🟡 warning: T1"])
     tips._finish_for_test(ctx)
-    _eq("then counted", lines[2:], ["⚠️ WARNING[e]: 2 more; the last: T3"])
+    _eq("then counted, and the hint", lines[2:4], ["TIP[e] 🟡 warning: 2 more; the last: T3", lines[3]])
+    _eq("hint names it", "(shown: e)" in lines[3], True)
     _reset(ctx)
 
 def _test_show_first_and_end(ctx):
@@ -763,44 +771,46 @@ def _test_show_first_and_end(ctx):
     add_tip(ctx, id = "n", severity = TIP_INFO, title = "a", body = "b", key = "1", show = TIP_SHOW_END, max_shown = 1)
     add_tip(ctx, id = "n", severity = TIP_INFO, title = "a2", body = "b", key = "1", show = TIP_SHOW_END, max_shown = 1)
     add_tip(ctx, id = "n", severity = TIP_INFO, title = "c", body = "", key = "2", show = TIP_SHOW_END, max_shown = 1)
-    _eq("only the first so far", lines, ["ℹ️ INFO[f]: one"])
+    _eq("only the first so far", lines, ["TIP[f] 💬 note: one"])
     tips._finish_for_test(ctx)
     _eq("the end", lines[1:4], [
-        "ℹ️ INFO[f]: now: two",
-        "ℹ️ INFO[n]: a2",
+        "TIP[f] 💬 note: now: two",
+        "TIP[n] 💬 note: a2",
         "  b",
     ])
-    _eq("end's cap counts the rest", lines[4], "ℹ️ INFO[n]: 1 more; the last: c")
-    _eq("nothing after", len(lines), 5)
+    _eq("end's cap counts the rest", lines[4], "TIP[n] 💬 note: 1 more; the last: c")
+    _eq("hint", "(shown: f, n)" in lines[5], True)
     _reset(ctx)
 
-def _test_quiet_reemits(ctx):
-    """An unchanged re-emit neither prints nor counts."""
+def _test_quiet_reemits_and_silenced_hint(ctx):
+    """An unchanged re-emit neither prints nor counts; the hint is silenced
+    by its own id, and absent when nothing printed."""
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
     add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
+    tips._set_silenced_for_test(ctx, ["tips_hint"])
     tips._finish_for_test(ctx)
-    _eq("printed once, no more line", lines, ["ℹ️ INFO[q]: same"])
+    _eq("printed once, no more line, no hint", lines, ["TIP[q] 💬 note: same"])
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
     tips._finish_for_test(ctx)
-    _eq("an unchanged occurrence past the cap counts", lines[:2], ["ℹ️ INFO[o]: same", "ℹ️ INFO[o]: 1 more; the last: same"])
+    _eq("an unchanged occurrence past the cap counts", lines[:2], ["TIP[o] 💬 note: same", "TIP[o] 💬 note: 1 more; the last: same"])
     add_tip(ctx, id = "late", severity = TIP_INFO, title = "after", body = "", show = TIP_SHOW_END)
-    _eq("a tip after the end prints at once", lines[-1], "ℹ️ INFO[late]: after")
+    _eq("a tip after the end prints at once", lines[-1], "TIP[late] 💬 note: after")
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "later", body = "", max_shown = 1)
-    _eq("even past its cap", lines[-1], "ℹ️ INFO[o]: later")
+    _eq("even past its cap", lines[-1], "TIP[o] 💬 note: later")
     tips._finish_for_test(ctx)
-    _eq("the end runs once", lines[-1], "ℹ️ INFO[o]: later")
+    _eq("the end runs once", lines[-1], "TIP[o] 💬 note: later")
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "A", body = "", max_shown = 1)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "B", body = "", key = "k2", max_shown = 1)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "A", body = "", max_shown = 1)
     tips._finish_for_test(ctx)
-    _eq("the last names what was held, not a refresh", lines[1], "ℹ️ INFO[x]: 1 more; the last: B")
+    _eq("the last names what was held, not a refresh", lines[1], "TIP[x] 💬 note: 1 more; the last: B")
     _reset(ctx)
     lines = _capture(ctx)
     hooks = ctx.traits[TipsTrait].tip_suggestion
@@ -809,7 +819,7 @@ def _test_quiet_reemits(ctx):
     add_tip(ctx, id = "r", severity = TIP_INFO, title = "gone", body = "", key = "foo", occurrence = True, unshown = 5)
     hooks.pop()
     tips._finish_for_test(ctx)
-    _eq("what a rejected emit stood for still counts", lines[1], "ℹ️ INFO[r]: 5 more")
+    _eq("what a rejected emit stood for still counts", lines[1], "TIP[r] 💬 note: 5 more")
     _reset(ctx)
     add_tip(ctx, id = "broken", severity = TIP_INFO, title = "{{ x", body = "", type = TIP_TEMPLATE_JINJA2, vars = {"x": 1})
     _eq("a template that does not render is shown as written", tips._inspect_for_test(ctx)[0]["title"], "{{ x")
@@ -903,11 +913,11 @@ def _test_rule_tips_from_a_report(ctx):
     emit_rule_tips(ctx, each, report, None, "1")
     tips._finish_for_test(ctx)
     _eq("each match, then the rest counted", lines[:5], [
-        "ℹ️ INFO[each]: t=//a",
+        "TIP[each] 💬 note: t=//a",
         "  L1",
-        "ℹ️ INFO[each]: t=",
+        "TIP[each] 💬 note: t=",
         "  L2",
-        "ℹ️ INFO[each]: 3 more; the last: t=//e",
+        "TIP[each] 💬 note: 3 more; the last: t=//e",
     ])
     _eq("the group stores its last match", tips._inspect_for_test(ctx)[0]["title"], "t=//e")
 
@@ -919,7 +929,7 @@ def _test_rule_tips_from_a_report(ctx):
         samples = [same, dict(same, seq = 2)],
     )
     emit_rule_tips(ctx, tip_rule(id = "twice", when = on_console_line("x"), severity = TIP_INFO, title = "same", body = ""), report, None, "1")
-    _eq("identical matches each print", lines, ["ℹ️ INFO[twice]: same", "ℹ️ INFO[twice]: same"])
+    _eq("identical matches each print", lines, ["TIP[twice] 💬 note: same", "TIP[twice] 💬 note: same"])
 
     _reset(ctx)
     lines = _capture(ctx)
@@ -930,7 +940,7 @@ def _test_rule_tips_from_a_report(ctx):
     emit_rule_tips(ctx, grouped, report, None, "1")
     emit_rule_tips(ctx, grouped, report, None, "2")
     tips._finish_for_test(ctx)
-    _eq("groups past max_groups count once, and no printed title is named", lines[:2], ["ℹ️ INFO[grp]: a", "ℹ️ INFO[grp]: 3 more"])
+    _eq("groups past max_groups count once, and no printed title is named", lines[:2], ["TIP[grp] 💬 note: a", "TIP[grp] 💬 note: 3 more"])
 
     _reset(ctx)
     guarded = tip_rule(id = "g", when = on_console_line("x"), severity = TIP_INFO, title = "t", body = "", only_if = lambda _ctx, _build: False)
@@ -986,7 +996,7 @@ def _test_impl(ctx):
     _test_terminal_format(ctx)
     _test_show_each_with_a_cap(ctx)
     _test_show_first_and_end(ctx)
-    _test_quiet_reemits(ctx)
+    _test_quiet_reemits_and_silenced_hint(ctx)
     _test_merge_aggregate(ctx)
     _test_aggregates_merge_once_per_batch(ctx)
     _test_rule_tips_from_a_report(ctx)

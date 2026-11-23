@@ -2279,7 +2279,7 @@ def _test_default_preset_renders_every_tip_severity(ctx):
         {"id": "t-important", "severity": "important", "title": "Important thing", "body": "b1"},
         {"id": "t-warning", "severity": "warning", "title": "Warning thing", "body": "b2"},
         {"id": "t-suggestion", "severity": "suggestion", "title": "Suggested thing", "body": "b3"},
-        {"id": "t-info", "severity": "info", "title": "Informational thing", "body": "b4"},
+        {"id": "t-info", "severity": "note", "title": "Informational thing", "body": "b4"},
     ]
     out = render_check_output(
         ctx,
