@@ -336,21 +336,23 @@ pub struct RecapErrors {
     linker: Option<(Linker, Hints)>,
 }
 
-/// One error a recap repeats: its header, and what it keeps of its body.
+/// What `relativize_paths` said a line's paths name, for its links.
+type LineHints = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// One error a recap repeats: its header, and what it keeps of its body,
+/// each line with its own hints.
 struct Recapped {
-    header: String,
-    head: Vec<String>,
-    last: Option<String>,
+    header: (String, LineHints),
+    head: Vec<(String, LineHints)>,
+    last: Option<(String, LineHints)>,
     skipped: usize,
-    /// What `relativize_paths` said its lines' paths name, for the links.
-    hints: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Recapped {
-    fn body_line(&mut self, text: String) {
+    fn body_line(&mut self, text: String, hints: LineHints) {
         if self.head.len() < RECAP_BODY_LINES - 1 {
-            self.head.push(text);
-        } else if self.last.replace(text).is_some() {
+            self.head.push((text, hints));
+        } else if self.last.replace((text, hints)).is_some() {
             self.skipped += 1;
         }
     }
@@ -412,11 +414,10 @@ impl LineProcessor for RecapErrors {
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
                 let hints = self.hints();
                 self.errors.push(Recapped {
-                    header: quoted,
+                    header: (quoted, hints),
                     head: vec![],
                     last: None,
                     skipped: 0,
-                    hints,
                 });
                 self.body = Some(self.errors.len() - 1);
             }
@@ -427,8 +428,7 @@ impl LineProcessor for RecapErrors {
         {
             if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
                 let hints = self.hints();
-                self.errors[i].body_line(quote(text));
-                self.errors[i].hints.extend(hints);
+                self.errors[i].body_line(quote(text), hints);
             }
             self.body = Some(i);
             self.after_first += usize::from(line.kind == Kind::Other);
@@ -469,28 +469,22 @@ impl LineProcessor for RecapErrors {
                 b"  "
                     .iter()
                     .copied()
-                    .chain(line(&e.header, &e.hints))
+                    .chain(line(&e.header.0, &e.header.1))
                     .chain(*b"\n"),
             );
-            for b in &e.head {
-                out.extend(
-                    b"    "
-                        .iter()
-                        .copied()
-                        .chain(line(b, &e.hints))
-                        .chain(*b"\n"),
-                );
+            for (b, hints) in &e.head {
+                out.extend(b"    ".iter().copied().chain(line(b, hints)).chain(*b"\n"));
             }
             if e.skipped > 0 {
                 let s = if e.skipped == 1 { "" } else { "s" };
                 out.extend_from_slice(format!("    … {} more line{s}\n", e.skipped).as_bytes());
             }
-            if let Some(last) = &e.last {
+            if let Some((last, hints)) = &e.last {
                 out.extend(
                     b"    "
                         .iter()
                         .copied()
-                        .chain(line(last, &e.hints))
+                        .chain(line(last, hints))
                         .chain(*b"\n"),
                 );
             }
@@ -830,6 +824,51 @@ mod tests {
         assert!(
             out.contains("\x1b]8;;https://x.test/why\x1b\\https://x.test/why\x1b]8;;\x1b\\\n"),
             "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_recapped_line_links_by_its_own_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["src/a.ts", "pkg/src/a.ts"] {
+            let at = dir.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let hints = Hints::default();
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some((
+            super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
+            hints.clone(),
+        )));
+        let pkg_file = dir
+            .path()
+            .join("pkg/src/a.ts")
+            .display()
+            .to_string()
+            .into_bytes();
+        for (record, hint) in [
+            ("ERROR: x failed: (Exit 1): tsc", vec![]),
+            ("src/a.ts(1,1): error", vec![]),
+            (
+                "src/a.ts:1: absolute",
+                vec![(b"src/a.ts".to_vec(), pkg_file.clone())],
+            ),
+        ] {
+            hints.set(hint);
+            feed(&mut p, &[record]);
+        }
+        let out = feed(&mut p, &[]);
+        let ws = dir.path().join("src/a.ts").display().to_string();
+        let pkg = dir.path().join("pkg/src/a.ts").display().to_string();
+        let first = out.lines().find(|l| l.contains("error")).unwrap();
+        let second = out.lines().find(|l| l.contains("absolute")).unwrap();
+        assert!(
+            first.contains(&format!("{ws}\x1b\\")),
+            "the workspace's: {first:?}"
+        );
+        assert!(
+            second.contains(&format!("{pkg}\x1b\\")),
+            "its own hint: {second:?}"
         );
     }
 

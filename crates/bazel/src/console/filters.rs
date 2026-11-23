@@ -326,7 +326,10 @@ impl RelativizePaths {
 
     /// The file a path made relative names, for [`super::links`]: `with`
     /// shown in place of everything up to `rest`, which `consumed` bytes of
-    /// `rest` also stand for, under `base`, the directory `rest` is in.
+    /// `rest` also stand for, under `base`, the directory `rest` is in; an
+    /// empty `base` leaves the file the workspace's (`src/a.cc`), for the
+    /// linker to place in the workspace the build runs in. Nothing for a
+    /// path that comes to no more than the directories it shares.
     fn hint(
         &self,
         base: &[u8],
@@ -342,7 +345,7 @@ impl RelativizePaths {
         while end > consumed && rest[end - 1] == b'.' {
             end -= 1;
         }
-        if end <= consumed && with == b"." {
+        if end <= consumed {
             return;
         }
         let mut shown = with.to_vec();
@@ -373,9 +376,7 @@ impl RelativizePaths {
                 out.extend_from_slice(found.as_bytes());
             } else {
                 let (with, consumed) = self.relative(rest);
-                if let Some(root) = &self.root {
-                    self.hint(root, &with, rest, consumed, hints);
-                }
+                self.hint(b"", &with, rest, consumed, hints);
                 out.extend(with);
                 at += consumed;
             }

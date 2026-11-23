@@ -671,7 +671,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// message of that kind. On a terminal those paths are links, as are
     /// the URLs and the paths to files that exist in Bazel's lines and the
     /// recap, but for a coding agent reading the console (its environment
-    /// set). The log is
+    /// set), a CI job, or `TERM=dumb`. The log is
     /// `console.log` in the Bazel invocation's folder in the task's history,
     /// with the folded kinds' `console.collapsed-<n>.log` beside it, kept and
     /// pruned as the rest of the history is (in the temp dir when no history

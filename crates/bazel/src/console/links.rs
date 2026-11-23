@@ -10,7 +10,10 @@
 //! then the directory the task runs from. A path `relativize_paths` made
 //! relative links to the file it named, which that stage tells the linker
 //! through [`Hints`]: shown relative to a subdirectory, `BUILD.bazel` is
-//! that directory's, though the workspace has one too. A path cut short
+//! that directory's, though the workspace has one too. A hinted file that is
+//! the workspace's (an execroot path's) is placed in the linker's first
+//! directory, the workspace the build runs in; one that does not exist
+//! resolves as any other path. A path cut short
 //! (`src/a.c…`) is left alone. Only the path is
 //! linked, not a `:line:col` after it. A path to nothing (a sandbox gone
 //! with its action, a label, prose) is left alone; a record that links
@@ -149,17 +152,15 @@ impl Linker {
             if text[end..].starts_with(ELLIPSIS) {
                 continue;
             }
+            if path.is_empty() {
+                continue;
+            }
             let hinted = hints
                 .iter()
                 .find(|(shown, _)| shown == path)
-                .map(|(_, file)| {
-                    use std::os::unix::ffi::OsStrExt;
-                    PathBuf::from(std::ffi::OsStr::from_bytes(file))
-                });
-            let Some(file) = (match hinted {
-                Some(file) => file.exists().then_some(file),
-                None => self.resolve(path),
-            }) else {
+                .map(|(_, file)| self.place(file))
+                .filter(|file| file.exists());
+            let Some(file) = hinted.or_else(|| self.resolve(path)) else {
                 continue;
             };
             out.extend_from_slice(&text[at..start]);
@@ -167,6 +168,16 @@ impl Linker {
             at = end;
         }
         out.extend_from_slice(&text[at..]);
+    }
+
+    /// A hinted file: as written when absolute, else in the first base.
+    fn place(&self, file: &[u8]) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let file = Path::new(std::ffi::OsStr::from_bytes(file));
+        match self.bases.first() {
+            Some(base) if file.is_relative() => base.join(file),
+            _ => file.to_path_buf(),
+        }
     }
 
     /// The file `path` names, when it could name one and does: it has a `/`
@@ -515,6 +526,40 @@ mod tests {
         assert!(
             hints.get().is_empty(),
             "the last stage takes the record's hints"
+        );
+    }
+
+    #[test]
+    fn a_hint_places_an_execroot_path_in_the_builds_workspace_and_dots_link_nothing() {
+        let top = tempfile::tempdir().unwrap();
+        let other = top.path().join("other");
+        for f in ["src/a.ts", "other/src/a.ts", "other/src/b.ts"] {
+            let at = top.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let ws = top.path().display().to_string();
+        let hints = Hints::default();
+        let mut rel = crate::console::filters::RelativizePaths::new(Some(ws.clone()), None)
+            .hinting(Some(hints.clone()));
+        let mut links = Links {
+            linker: Linker::new(vec![other.clone(), top.path().to_path_buf()]),
+            hints: hints.clone(),
+        };
+        links.linker.host = String::new();
+        use crate::console::forward::LineProcessor as _;
+        let shown = rel
+            .process(format!("/o/execroot/_main/src/b.ts:1 and /o/sandbox/x/3/execroot/_main/src/a.ts:2; {ws}/... retry ...").as_bytes())
+            .unwrap();
+        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "{}:1 and {}:2; ... retry ...",
+                file(&other, "src/b.ts", "src/b.ts"),
+                file(&other, "src/a.ts", "src/a.ts")
+            ),
+            "the build's workspace's files; nothing for dots"
         );
     }
 

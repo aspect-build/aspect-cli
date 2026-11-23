@@ -86,7 +86,8 @@ rest of the history.
 
 On a terminal, the URLs in Bazel's console and the recap, and the paths that
 name a file or directory that exists (`src/a.cc:3:4` links to `src/a.cc`),
-are links too, unless a coding agent is reading it or it is a CI job's.
+are links too, unless a coding agent is reading it, it is a CI job's, or
+`TERM` is `dumb`.
 
     load("@aspect//feature/console.axl", "Console")
 
