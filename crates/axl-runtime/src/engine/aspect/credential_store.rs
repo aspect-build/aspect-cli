@@ -380,6 +380,21 @@ mod tests {
         assert!(keyring_usable(&status(-25300)), "errSecItemNotFound");
     }
 
+    /// `SecKeychainOpen` does not check the path, so this is a reference to a
+    /// keychain file that is gone, as a stale default is.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_keychain_file_fails_its_status() {
+        use security_framework::os::macos::keychain::SecKeychain;
+        let dir = std::env::temp_dir().join(format!("aspect-cred-kc-{}", std::process::id()));
+        let keychain = SecKeychain::open(dir.join("gone.keychain-db")).unwrap();
+        let status = keychain_status(&keychain);
+        assert_eq!(status.unwrap_err().code(), -25294, "errSecNoSuchKeychain");
+        assert!(!keyring_usable(
+            &status.map_err(keyring::macos::decode_error)
+        ));
+    }
+
     #[test]
     fn env_override_forces_file_backend() {
         let store = CredentialStore::resolve_with(Some("/tmp/aspect-forced.json".into())).unwrap();
