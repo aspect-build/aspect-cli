@@ -77,7 +77,7 @@ _DOWNLOAD = """{% if artifacts_browse_url or artifact_links %}### Download
 {% endif %}"""
 
 # Attribution only; the operator's own links are on the summary.
-_FOOTER = """<sub>Install `aspect`: [aspect.build/docs/cli/install](https://aspect.build/docs/cli/install) · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>"""
+_FOOTER = """<sub>Install `aspect`: [aspect.build/go/cli-install](https://aspect.build/go/cli-install) · Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>"""
 
 _ABORT_NOTICE = """{% if aborted %}> ⚠️ **Task aborted**{% if abort_reason %} — {{ abort_reason }}{% endif %}
 

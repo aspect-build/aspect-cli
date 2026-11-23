@@ -38,10 +38,8 @@ use starlark::values::{self, NoSerialize, ProvidesStaticType, starlark_value};
 
 use super::auth;
 
-/// The customer docs page the version-gating error points at. Also where the
-/// `.mcp.json` snippet and the tool list are documented.
-const DOCS_URL: &str =
-    "https://aspect.build/docs/aspect-workflows/using-workflows/build-results-api";
+/// The customer docs page the version-gating error points at.
+const DOCS_URL: &str = crate::links::BUILD_RESULTS_API;
 
 /// RFC 9728 protected-resource metadata: the one unauthenticated path an
 /// API-enabled deployment serves on the web host, so it doubles as the "can
@@ -79,7 +77,8 @@ fn not_found_hint(tool: &str, deployment: &str) -> String {
         format!(
             " — deployment '{deployment}' does not expose /api/v1/action-history. \
              Ask your Workflows operator to upgrade to a release that includes action-history \
-             support, then retry. See {DOCS_URL}#action-performance-history"
+             support, then retry. See {}",
+            crate::links::BUILD_RESULTS_API_ACTION_HISTORY
         )
     } else {
         format!(" — no such resource on deployment '{deployment}'; ids come from list_invocations")

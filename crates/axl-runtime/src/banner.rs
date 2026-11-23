@@ -20,10 +20,10 @@ const GREY: &str = "\x1b[38;5;244m";
 const RESET: &str = "\x1b[0m";
 
 /// Docs landing page advertised by the banner.
-const DOCS_URL: &str = "https://aspect.build/docs/cli";
+const DOCS_URL: &str = crate::links::CLI;
 
 /// The grey banner line for `version`, e.g.
-/// `Aspect CLI v1.2.3 — https://aspect.build/docs/cli`, wrapped in ANSI grey.
+/// `Aspect CLI v1.2.3 — https://aspect.build/go/cli`, wrapped in ANSI grey.
 ///
 /// A `-debug-` build is marked here too: it is slower and larger than the primary
 /// binary, so a run that unexpectedly used one should be obvious from its output.
