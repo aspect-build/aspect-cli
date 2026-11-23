@@ -1,7 +1,8 @@
 //! The BuildEvents feature's options reach `BazelTrait`, as do the deprecated
 //! `--workflows:bes-*` spellings, with a warning, unless the option is also
 //! set to other than its default; a negative count, a limit too small to hold
-//! a publish request or a malformed duration is refused before the task runs.
+//! a publish request or a malformed duration, in either spelling, is refused
+//! before the task runs.
 //!
 //! A scratch workspace's `show` task prints the trait's fields, so nothing
 //! here runs Bazel.
@@ -176,5 +177,21 @@ fn malformed_durations_are_refused_before_the_task_runs() {
     assert_refused(
         &["--build-events:timeout=later"],
         "--build-events:timeout must be a duration such as '500ms', '2s' or '1m', got 'later'",
+    );
+}
+
+#[test]
+fn bad_workflows_spellings_are_refused_before_the_task_runs() {
+    assert_refused(
+        &["--workflows:bes-max-retries=-5"],
+        "--workflows:bes-max-retries must be at least 0, got -5",
+    );
+    assert_refused(
+        &["--workflows:bes-retry-min-delay=soon"],
+        "--workflows:bes-retry-min-delay must be a duration such as '500ms', '2s' or '1m', got 'soon'",
+    );
+    assert_refused(
+        &["--workflows:bes-timeout=later"],
+        "--workflows:bes-timeout must be a duration such as '500ms', '2s' or '1m', got 'later'",
     );
 }

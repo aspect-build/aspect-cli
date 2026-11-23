@@ -1,3 +1,4 @@
+load("@aspect//bazel/build_events.axl", "refuse_below", "refuse_non_duration")
 load("@aspect//bazel/build_metadata.axl", "register_bes_metadata")
 load("@aspect//bazel.axl", "BazelTrait")
 load(
@@ -117,19 +118,24 @@ def _deprecated(ctx, arg: str, option: str):
 def _apply_deprecated_bes_args(ctx, bazel_trait):
     """Write each `bes_*` arg that is set to the BazelTrait field its BuildEvents
     option sets, with a warning naming that option. Like those options, they
-    apply to every backend the CLI streams to, and the BuildEvents feature,
-    registered after this one, overwrites any it is also given."""
-    if ctx.args.bes_max_retries >= 0:
+    apply to every backend the CLI streams to, are refused as they are before
+    the task runs, and are overwritten by the BuildEvents feature, registered
+    after this one, when it is also given them. A count of -1 or a buffer
+    budget of 0 or less reads as unset."""
+    if ctx.args.bes_max_retries != -1:
         _deprecated(ctx, "bes-max-retries", "max-retries")
+        refuse_below("--workflows:bes-max-retries", ctx.args.bes_max_retries, 0)
         bazel_trait.bes_max_retries = ctx.args.bes_max_retries
     if ctx.args.bes_retry_min_delay:
         _deprecated(ctx, "bes-retry-min-delay", "retry-min-delay")
+        refuse_non_duration("--workflows:bes-retry-min-delay", ctx.args.bes_retry_min_delay, "retry_min_delay")
         bazel_trait.bes_retry_min_delay = ctx.args.bes_retry_min_delay
     if ctx.args.bes_retry_max_buffer_bytes > 0:
         _deprecated(ctx, "bes-retry-max-buffer-bytes", "retry-max-buffer-bytes")
         bazel_trait.bes_retry_max_buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
     if ctx.args.bes_timeout:
         _deprecated(ctx, "bes-timeout", "timeout")
+        refuse_non_duration("--workflows:bes-timeout", ctx.args.bes_timeout, "timeout")
         bazel_trait.bes_timeout = ctx.args.bes_timeout
 
 Workflows = feature(
