@@ -76,8 +76,10 @@ pub struct CollapseRepeats {
     /// The last record folded, as it came, to write out again in place of
     /// the count before a tool's redraw.
     folded: Vec<u8>,
-    /// A tool moved the cursor up in this burst of output, so nothing folds
-    /// until Bazel's next progress row.
+    /// The cursor moved up in this burst of output other than to erase
+    /// Bazel's progress area (a tool redrawing its own lines, or curses
+    /// erasing an area of a blank row), so nothing folds until Bazel's next
+    /// progress row: a missed fold, never a wrong screen.
     redrawn: bool,
     /// The last record with text was a row of Bazel's progress area, so a
     /// record starting with cursor movement is curses erasing it.
@@ -144,7 +146,7 @@ impl LineProcessor for CollapseRepeats {
         let tools_redraw = self.pty && given.fresh && !self.after_area;
         if progress {
             self.redrawn = false;
-        } else if tools_redraw && !blank {
+        } else if tools_redraw {
             self.redrawn = true;
         }
         let foldable = !blank && !progress && !given.fresh && !given.returns && !self.redrawn;
@@ -152,6 +154,10 @@ impl LineProcessor for CollapseRepeats {
             self.repeats += 1;
             self.folded = record.to_vec();
             return None;
+        }
+        if self.pty && blank && given.returns && !given.fresh && self.repeats > 0 {
+            // The `\r` a tool writes before moving up: the run goes on.
+            return Some(record.to_vec());
         }
         if tools_redraw && self.repeats > 0 {
             // A tool's redraw: its cursor-up counts the copies.
@@ -588,6 +594,55 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    /// A redraw whose cursor-up comes as a record of its own, before a bare
+    /// `\r` (indicatif's frames), still stops folding until the area.
+    #[test]
+    fn under_a_pty_a_bare_cursor_up_stops_folding_too() {
+        let mut p = pty_repeats();
+        let mut out = Vec::new();
+        for (record, returns) in [
+            (&b"\x1b[4A"[..], true),
+            (b"\x1b[2Ka", false),
+            (b"\x1b[2Ka", false),
+        ] {
+            let mut line = line::Classifier::default().classify(record);
+            line.returns = returns;
+            p.see(&line);
+            if let Some(bytes) = p.process(record) {
+                out.extend(bytes);
+                out.push(b'\n');
+            }
+        }
+        assert_eq!(
+            out, b"\x1b[4A\n\x1b[2Ka\n\x1b[2Ka\n",
+            "nothing folds after the redraw"
+        );
+    }
+
+    /// The `\r` a tool writes before moving up over a run does not end it, so
+    /// the copies are written back before the redraw that counts them.
+    #[test]
+    fn under_a_pty_a_tools_carriage_return_keeps_the_run_pending() {
+        let mut p = pty_repeats();
+        let mut out = Vec::new();
+        for (record, returns) in [
+            (&b"wait"[..], false),
+            (b"wait", false),
+            (b"wait", false),
+            (b"", true),
+            (b"\x1b[1A\x1b[Kdone", false),
+        ] {
+            let mut line = line::Classifier::default().classify(record);
+            line.returns = returns;
+            p.see(&line);
+            if let Some(bytes) = p.process(record) {
+                out.extend(bytes);
+                out.push(b'\n');
+            }
+        }
+        assert_eq!(out, b"wait\n\nwait\nwait\n\x1b[1A\x1b[Kdone\n");
     }
 
     /// Before a tool redrawing its own line, whose cursor-up counts the
