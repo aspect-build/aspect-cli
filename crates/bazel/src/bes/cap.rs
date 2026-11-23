@@ -26,8 +26,8 @@ use super::kind::payload_name;
 /// gRPC's default receive limit, which the publish request must fit in.
 pub const MAX_REQUEST_BYTES: usize = 4 << 20;
 
-/// Room left in [`MAX_REQUEST_BYTES`] for the request wrapping an event: about
-/// 170 bytes with UUID build and invocation ids.
+/// Room left in [`MAX_REQUEST_BYTES`] for the request wrapping an event: at
+/// most about 160 bytes with UUID build and invocation ids.
 pub const REQUEST_HEADROOM: usize = 4 << 10;
 
 /// The largest event passed on whole, in encoded bytes.
@@ -92,24 +92,24 @@ impl Capped {
     }
 }
 
-/// Fit `event`, `len` bytes encoded, in [`MAX_EVENT_BYTES`] where its command
-/// line is what can give; `None` when it fits already.
+/// Hold `event`, `len` bytes encoded, to [`MAX_EVENT_BYTES`] by cutting its
+/// command line; `None` when it fits already.
 ///
 /// Arguments go from the end, each counted at its key, length and bytes. The
 /// enclosing length prefixes only shrink as they go, so the event that results
-/// fits, with at most one argument more removed than strictly needed.
+/// fits, with at most one argument more removed than strictly needed. An
+/// action too large without its command line loses all of it, and `after`
+/// says it is still over.
 pub fn cap_event(event: &mut BuildEvent, len: usize) -> Option<Capped> {
     if len <= MAX_EVENT_BYTES {
         return None;
     }
-    let action_label = match &event.id.as_ref().and_then(|id| id.id.as_ref()) {
-        Some(Id::ActionCompleted(id)) => id.label.clone(),
-        _ => String::new(),
-    };
-    let kind = event.payload.as_ref().map_or("payload-less", payload_name);
     let action = match event.payload.as_mut() {
         Some(Payload::Action(action)) if !action.command_line.is_empty() => action,
-        _ => return Some(Capped::Oversize { kind, bytes: len }),
+        other => {
+            let kind = other.map_or("payload-less", |p| payload_name(p));
+            return Some(Capped::Oversize { kind, bytes: len });
+        }
     };
     let total = action.command_line.len();
     let mut over = len - MAX_EVENT_BYTES;
@@ -120,20 +120,31 @@ pub fn cap_event(event: &mut BuildEvent, len: usize) -> Option<Capped> {
         over = over.saturating_sub(cost);
     }
     let kept = action.command_line.len();
-    let action = match (action_label.is_empty(), action.r#type.is_empty()) {
-        (false, false) => format!("{action_label} ({})", action.r#type),
-        (false, true) => action_label,
-        (true, false) => format!("a {} action", action.r#type),
-        (true, true) => "an action".to_owned(),
-    };
-    let after = prost::Message::encoded_len(event);
     Some(Capped::CommandLine {
-        action,
+        action: describe_action(event),
         kept,
         total,
         before: len,
-        after,
+        after: prost::Message::encoded_len(event),
     })
+}
+
+/// "//label (Mnemonic)" for an action event, with what of the two it has.
+fn describe_action(event: &BuildEvent) -> String {
+    let label = match event.id.as_ref().and_then(|id| id.id.as_ref()) {
+        Some(Id::ActionCompleted(id)) => id.label.as_str(),
+        _ => "",
+    };
+    let mnemonic = match &event.payload {
+        Some(Payload::Action(action)) => action.r#type.as_str(),
+        _ => "",
+    };
+    match (label.is_empty(), mnemonic.is_empty()) {
+        (false, false) => format!("{label} ({mnemonic})"),
+        (false, true) => label.to_owned(),
+        (true, false) => format!("a {mnemonic} action"),
+        (true, true) => "an action".to_owned(),
+    }
 }
 
 fn mib(bytes: usize) -> String {
@@ -321,6 +332,24 @@ mod tests {
             "{}",
             capped.warning()
         );
+    }
+
+    #[test]
+    fn an_action_is_named_by_what_its_event_has() {
+        let mut event = failed_action(0, 0);
+        assert_eq!(describe_action(&event), "//big:link (CppLink)");
+        let Some(Payload::Action(action)) = &mut event.payload else {
+            unreachable!()
+        };
+        action.r#type.clear();
+        assert_eq!(describe_action(&event), "//big:link");
+        event.id = None;
+        assert_eq!(describe_action(&event), "an action");
+        let Some(Payload::Action(action)) = &mut event.payload else {
+            unreachable!()
+        };
+        action.r#type = "Javac".into();
+        assert_eq!(describe_action(&event), "a Javac action");
     }
 
     #[test]
