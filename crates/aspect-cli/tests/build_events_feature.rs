@@ -1,7 +1,7 @@
 //! The BuildEvents feature's options reach `BazelTrait`, as do the deprecated
 //! `--workflows:bes-*` spellings, with a warning, unless the option is also
-//! set to other than its default; a negative count or a limit too small to
-//! hold a publish request is refused before the task runs.
+//! set to other than its default; a negative count, a limit too small to hold
+//! a publish request or a malformed duration is refused before the task runs.
 //!
 //! A scratch workspace's `show` task prints the trait's fields, so nothing
 //! here runs Bazel.
@@ -145,5 +145,17 @@ fn negative_counts_are_refused_before_the_task_runs() {
     assert_refused(
         &["--build-events:retry-max-buffer-bytes=-1"],
         "--build-events:retry-max-buffer-bytes must be at least 0, got -1",
+    );
+}
+
+#[test]
+fn malformed_durations_are_refused_before_the_task_runs() {
+    assert_refused(
+        &["--build-events:retry-min-delay=soon"],
+        "--build-events:retry-min-delay must be a duration such as '500ms', '2s' or '1m', got 'soon'",
+    );
+    assert_refused(
+        &["--build-events:timeout=later"],
+        "--build-events:timeout must be a duration such as '500ms', '2s' or '1m', got 'later'",
     );
 }
