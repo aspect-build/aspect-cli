@@ -185,8 +185,10 @@ def _test_resolve_targets_keeps_explicit_patterns(_):
 
 def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
     """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
-    it exit without ever creating the build event file, and the invocation has
-    to surface that exit rather than wait for a file that can never appear.
+    it exit early, and the invocation has to surface that exit rather than
+    wait on the build event file. Whether Bazel writes any events first
+    depends on its version (9.0 wrote none, 9.3 writes the started and
+    aborted events), so only the exit is checked.
 
     Requires `build_events`, since that is what gives the reader a file to wait
     for.
@@ -200,13 +202,11 @@ def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
         flags = ["--definitely_not_a_flag"],
         stderr = None,
     )
-    seen = 0
     for _ in events:
-        seen += 1
+        pass
     status = build.wait()
     if status.success:
         fail("expected Bazel to reject --definitely_not_a_flag")
-    _eq("rejected command line yields no events", seen, 0)
 
 def _test_exit_codes_and_retries_for_a_signal_ended_client(_):
     """A client a signal ended has no `code`: it stands for 128 + the signal,

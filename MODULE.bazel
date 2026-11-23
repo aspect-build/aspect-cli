@@ -81,13 +81,11 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//patches:starlark+0.14.2.patch"],
 )
-
 crate.annotation(
     crate = "witx",
     patch_args = ["-p1"],
     patches = ["//patches:witx+0.9.1.patch"],
 )
-
 crate.annotation(
     crate = "wiggle-macro",
     patch_args = ["-p1"],
