@@ -26,7 +26,7 @@ Payload fields used:
   WorkspaceStatus.item               — repeated list of {key, value} structs (proto field is "item")
   Configuration.cpu, .compilation_mode, .is_tool_configuration, .mnemonic (output directory)
   WorkspaceConfig.local_exec_root
-  ActionExecuted.success, .type, .stderr (File — uri only, never .contents)
+  ActionExecuted.success, .type, .stdout, .stderr (Files — uri only, never .contents)
   TargetComplete.success
   TestResult.test_action_output (File list), .status, .test_attempt_duration_millis
   TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed), .run_count, .shard_count
@@ -653,7 +653,7 @@ def process_event(data, event, bb_root, std = None):
         data:    dict from init_data(), mutated in place
         event:   BuildEvent from BazelTrait.build_event hook
         bb_root: `usable_bb_clientd_root(ctx.std)`, resolved once per task. It
-                 decides how test log and action stderr URIs map to local paths
+                 decides how test log and action stdout/stderr URIs map to local paths
                  (see `local_output_path`); None (no mount) falls back to the
                  output tree.
         std:     the task's `ctx.std`, for the `DEBUG:` lines; None emits
@@ -776,7 +776,7 @@ def process_event(data, event, bb_root, std = None):
             if label and label not in data["bazel"]["failed_action_labels"]:
                 data["bazel"]["failed_action_labels"].append(label)
 
-            # Resolve the stderr File to a local path only (never .contents):
+            # Resolve the stdout and stderr Files to local paths only (never .contents):
             # read on demand for the inline snippet, kept off the Starlark heap.
             stdout_path = local_output_path(bes_get(payload, "stdout", None), bb_root, data["bazel"]["workspace_directory"])
             stderr_path = local_output_path(bes_get(payload, "stderr", None), bb_root, data["bazel"]["workspace_directory"])
@@ -4340,7 +4340,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         _apply_snippet(entry, res)
 
     def _attach_action_snippet(action, entry):
-        """Read a failed action's stderr snippet (by path) onto the table row."""
+        """Read a failed action's stdout/stderr snippet (by path) onto the table row."""
         if _snippet_budget[0] <= 0:
             return
         res = extract_action_snippet(std, action.get("stdout_path", ""), action.get("stderr_path", ""), snippet_options)
@@ -4702,7 +4702,7 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
     bazel_results `data`, for the PR-summary-comment producer.
 
     A snippet can only be read by the job that ran the failure (it owns the
-    local test.log / action-stderr paths); sibling jobs can't. So each job
+    local test.log / action stdout and stderr paths); sibling jobs can't. So each job
     extracts its own here on its terminal update and ships the result in its
     status artifact. Build-action failures take precedence over test failures,
     matching the check-surface order.
@@ -4745,7 +4745,7 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
             "repros": _repros.get(label, []),
         })
 
-    # Build-action stderr first (precedence), then failed tests, then timeouts.
+    # Build-action output first (precedence), then failed tests, then timeouts.
     for a in bz.get("failed_actions", []):
         if len(out) >= max_per_task:
             break

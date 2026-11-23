@@ -9,8 +9,8 @@ Strategy, in order of preference:
   1. Structured first — `extract_junit_failure` scans a JUnit `test.xml` for the
      first `<failure>`/`<error>` element and emits its message + stack trace.
      Zero heuristics; the framework already isolated the failure.
-  2. Heuristic fallback — `extract_snippet` reads the raw `test.log` / action
-     stderr and picks its lines with `std.excerpt`, the choice the console's
+  2. Heuristic fallback — `extract_snippet` reads the raw `test.log`, and
+     `extract_action_snippet` an action's stdout then stderr, and each picks its lines with `std.excerpt`, the choice the console's
      recap of an error makes too (`bazel::console::excerpt`): the first line
      that reads as an error with context around it, and the last lines, or the
      tail when no line reads as one.
@@ -101,9 +101,11 @@ def _excerpt(std, text, options):
     )
     return (picked["lines"], picked["cut_head"], picked["cut_tail"], picked["cut_between"])
 
-def extract_snippet_from_text(std, text, hit_cap, options):
+def extract_snippet_from_text(std, text, hit_cap, options, cut_inside = False):
     """Turn raw log `text` into a SnippetResult of the lines `std.excerpt`
-    picks. `hit_cap` is True when `text` was already byte-capped upstream."""
+    picks. `hit_cap` is True when `text`'s end was byte-capped upstream;
+    `cut_inside` when bytes inside it were (an action's stdout, before its
+    stderr)."""
     if not text:
         return _EMPTY
     window, trunc_head, trunc_tail, cut_between = _excerpt(std, text, options)
@@ -114,7 +116,7 @@ def extract_snippet_from_text(std, text, hit_cap, options):
     trunc_tail = trunc_tail or hit_cap
     return SnippetResult(
         text = "\n".join(window),
-        truncated = trunc_head or trunc_tail or cut_between,
+        truncated = trunc_head or trunc_tail or cut_between or cut_inside,
         trunc_head = trunc_head,
         trunc_tail = trunc_tail,
         source = SnippetSource("log"),
@@ -309,13 +311,24 @@ def extract_snippet(std, path, options = None):
 def extract_action_snippet(std, stdout_path, stderr_path, options = None):
     """I/O wrapper for a failed action: its stdout then its stderr (as Bazel's
     console prints them), each read bounded, windowed together. Some tools
-    write their errors to stdout (tsc), leaving stderr a wrapper's line. `none`
-    when neither is readable."""
+    write their errors to stdout (tsc), leaving stderr a wrapper's line. A
+    stdout cut by the bound before a stderr says so between them, and is no
+    cut at the end. `none` when neither is readable."""
     opts = options or SnippetOptions()
     out, out_cap = _read_bounded(std, stdout_path, opts.max_read_bytes)
     err, err_cap = _read_bounded(std, stderr_path, opts.max_read_bytes)
-    text = "\n".join([t.rstrip("\n") for t in [out, err] if t])
-    return extract_snippet_from_text(std, text, out_cap or err_cap, opts)
+    parts = [out.rstrip("\n")] if out else []
+    if out and out_cap and err:
+        parts.append("… stdout cut at %d bytes" % opts.max_read_bytes)
+    if err:
+        parts.append(err.rstrip("\n"))
+    return extract_snippet_from_text(
+        std,
+        "\n".join(parts),
+        err_cap if err else out_cap,
+        opts,
+        cut_inside = bool(out and out_cap and err),
+    )
 
 def extract_junit_failure(std, xml_path, options = None):
     """I/O wrapper: read a JUnit `test.xml` (bounded) and emit its first failure.

@@ -97,8 +97,23 @@ def _test_an_actions_stdout_comes_before_its_stderr(ctx):
     _eq("stderr alone", r.text, "Target //:a failed to build")
     _eq("neither", extract_action_snippet(ctx.std, "", d + "/missing", SnippetOptions()).source.value, "none")
 
+def _test_a_cut_stdout_is_marked_where_it_was_cut(ctx):
+    """A stdout cut by the read bound before a stderr read whole: the cut is
+    said between them, and the snippet's end is not marked cut."""
+    d = ctx.std.env.temp_dir() + "/log_snippet_cut_test"
+    ctx.std.fs.create_dir_all(d)
+    ctx.std.fs.write(d + "/stdout", "".join(["progress %d\n" % i for i in range(100)]))
+    ctx.std.fs.write(d + "/stderr", "src/x.ts:1:1 - error TS1: bad\nTarget //:a failed to build\n")
+    r = extract_action_snippet(ctx.std, d + "/stdout", d + "/stderr", SnippetOptions(max_read_bytes = 200, max_lines = 6))
+    lines = r.text.split("\n")
+    _eq("the cut said", "… stdout cut at 200 bytes" in lines, True)
+    _eq("stderr whole", lines[-2:], ["src/x.ts:1:1 - error TS1: bad", "Target //:a failed to build"])
+    _eq("end not cut", r.trunc_tail, False)
+    _eq("truncated", r.truncated, True)
+
 _UNIT_TESTS = [
     _test_an_actions_stdout_comes_before_its_stderr,
+    _test_a_cut_stdout_is_marked_where_it_was_cut,
     _test_the_first_error_and_the_end_are_kept,
     _test_bazels_sandbox_hint_is_not_the_error,
     _test_go_junit_char_refs_decode,
