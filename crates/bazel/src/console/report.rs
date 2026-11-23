@@ -536,13 +536,17 @@ impl LineProcessor for Summary {
         let mut out = Vec::new();
         match (hidden, log) {
             (0, None) => return None,
-            (0, Some(log)) => self.style.line(&mut out, &format!("INFO: {log}")),
+            (0, Some(log)) => {
+                // Its own sentence, so capitalised.
+                let log = format!("{}{}", log[..1].to_uppercase(), &log[1..]);
+                self.style.line(&mut out, &format!("INFO: {log}"))
+            }
             (n, log) => {
                 let s = if n == 1 { "" } else { "s" };
                 let log = log.map(|l| format!("; {l}")).unwrap_or_default();
                 self.style.line(
                     &mut out,
-                    &format!("INFO: aspect hid {n} console line{s}{log}"),
+                    &format!("INFO: Aspect hid {n} console line{s}{log}"),
                 );
             }
         }
@@ -751,7 +755,7 @@ mod tests {
         );
         assert_eq!(
             feed(&mut p, &["a"]),
-            "INFO: the raw console is in /tmp/c.log\n",
+            "INFO: The raw console is in /tmp/c.log\n",
             "a kept log is named though nothing was hidden"
         );
 
@@ -765,7 +769,7 @@ mod tests {
         stats.hid(2);
         assert_eq!(
             feed(&mut p, &[]),
-            "INFO: aspect hid 6 console lines; the raw console is in /tmp/c.log\n  \
+            "INFO: Aspect hid 6 console lines; the raw console is in /tmp/c.log\n  \
              3 more like: WARNING: many\n  1 more like: WARNING: few\n"
         );
     }
@@ -829,7 +833,7 @@ mod tests {
         let stats = Arc::new(Stats::default());
         stats.hid(1);
         let mut p = Summary::new(stats.clone(), RawLogState::Off, Style::default(), false);
-        assert_eq!(feed(&mut p, &[]), "INFO: aspect hid 1 console line\n");
+        assert_eq!(feed(&mut p, &[]), "INFO: Aspect hid 1 console line\n");
         let mut p = Summary::new(
             Arc::new(Stats::default()),
             RawLogState::Off,
@@ -849,12 +853,12 @@ mod tests {
         let p = |state| Summary::new(Arc::new(Stats::default()), state, Style::default(), false);
         assert_eq!(
             feed(&mut p(RawLogState::Failed), &[]),
-            "INFO: the raw console could not be saved\n"
+            "INFO: The raw console could not be saved\n"
         );
         let cut = Arc::new(std::sync::atomic::AtomicU8::new(Cut::Failed as u8));
         assert_eq!(
             feed(&mut p(RawLogState::Kept("/tmp/c.log".into(), cut)), &[]),
-            "INFO: the raw console (incomplete: writing it failed) is in /tmp/c.log\n"
+            "INFO: The raw console (incomplete: writing it failed) is in /tmp/c.log\n"
         );
     }
 
@@ -926,7 +930,7 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "INFO: aspect hid 3 console lines; the raw console is in {}\n  \
+                "INFO: Aspect hid 3 console lines; the raw console is in {}\n  \
                  2 more like: WARNING: many 1\n    all 3 in {}\n  \
                  1 more like: WARNING: few 1\n    all 2 in {}\n",
                 log.display(),

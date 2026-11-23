@@ -201,14 +201,14 @@ def config(ctx: ConfigContext):
     let console = std::fs::read_to_string(&log).unwrap();
     assert!(status.success(), "{console}");
     assert!(!console.contains('\x1b'), "{console}");
-    assert!(console.contains("aspect hid"), "{console}");
+    assert!(console.contains("Aspect hid"), "{console}");
 }
 
 /// A `--bazel-flag=--color=…` decides as an rc's does.
 #[test]
 fn a_color_flag_of_the_users_own_stands() {
     let (_dir, console) = noisy_build(&["--bazel-flag=--color=no"], &[]);
-    assert!(console.contains("aspect hid"), "{console}");
+    assert!(console.contains("Aspect hid"), "{console}");
     assert!(!console.contains('\x1b'), "{console}");
 }
 
@@ -230,7 +230,7 @@ def config(ctx: ConfigContext):
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(out.status.success(), "{stderr}");
-    assert!(stderr.contains("aspect hid"), "{stderr}");
+    assert!(stderr.contains("Aspect hid"), "{stderr}");
     assert!(!stderr.contains('\x1b'), "{stderr}");
     assert!(!stdout.contains('\x1b'), "{stdout}");
 }
@@ -280,7 +280,7 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
     );
     let summary = stderr
         .lines()
-        .find(|l| l.starts_with("INFO: aspect hid 2 console lines; the raw console is in "))
+        .find(|l| l.starts_with("INFO: Aspect hid 2 console lines; the raw console is in "))
         .unwrap_or_else(|| panic!("no summary:\n{stderr}"));
     assert!(
         stderr
@@ -326,7 +326,7 @@ fn the_users_own_curses_choice_decides_the_output() {
         &[],
     );
     assert!(!stderr.contains("\x1b[1A"), "{stderr}");
-    assert!(stderr.contains("aspect hid"), "{stderr}");
+    assert!(stderr.contains("Aspect hid"), "{stderr}");
 }
 
 /// A coding agent gets the `agent` profile: plain lines without Bazel's
@@ -338,7 +338,7 @@ fn an_agent_gets_the_agent_profile() {
     assert!(stderr.contains("assertion a failed"), "{stderr}");
     assert!(stderr.contains("assertion b failed"), "{stderr}");
     assert!(
-        stderr.contains("INFO: aspect hid 2 console lines"),
+        stderr.contains("INFO: Aspect hid 2 console lines"),
         "{stderr}"
     );
 }
@@ -357,7 +357,7 @@ fn a_bad_console_setting_warns_instead_of_failing() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("INFO: aspect hid 2 console lines"),
+        stderr.contains("INFO: Aspect hid 2 console lines"),
         "{stderr}"
     );
 }
@@ -413,7 +413,7 @@ fn tips_and_drops_follow_their_settings() {
     assert!(!stderr.contains("The Bazel server crashed"), "{stderr}");
     assert!(!stderr.contains("canonical reproducible form"), "{stderr}");
     assert!(
-        stderr.contains("INFO: aspect hid 4 console lines"),
+        stderr.contains("INFO: Aspect hid 4 console lines"),
         "{stderr}"
     );
 }
@@ -426,7 +426,7 @@ fn a_silent_layout_keeps_the_end_of_bazels_console() {
     assert!(!stderr.contains("Running"), "no header: {stderr}");
     assert!(!stderr.contains("Passed"), "no verdict: {stderr}");
     assert!(
-        stderr.contains("INFO: aspect hid 2 console lines"),
+        stderr.contains("INFO: Aspect hid 2 console lines"),
         "{stderr}"
     );
     assert!(
@@ -447,7 +447,7 @@ fn a_disabled_console_feature_takes_the_full_layout() {
     );
     assert!(stderr.contains("Running"), "the full header: {stderr}");
     assert!(stderr.contains("Passed"), "the full verdict: {stderr}");
-    assert!(!stderr.contains("aspect hid"), "{stderr}");
+    assert!(!stderr.contains("Aspect hid"), "{stderr}");
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn a_disabled_console_feature_leaves_the_console_alone() {
     let (_dir, stderr) = noisy_build(&["--console:enabled=false"], &[]);
     assert_eq!(stderr.matches("Analysis failed").count(), 3, "{stderr}");
     assert!(stderr.contains("canonical reproducible form"), "{stderr}");
-    assert!(!stderr.contains("aspect hid"), "{stderr}");
+    assert!(!stderr.contains("Aspect hid"), "{stderr}");
     assert!(!stderr.contains("The Bazel server crashed"), "{stderr}");
 }
 

@@ -692,7 +692,7 @@ mod tests {
             format!(
                 "WARNING: a/BUILD:1:1: target '//a:a' is deprecated\n\
                  INFO: Build completed successfully\n\
-                 INFO: aspect hid 2 console lines; the raw console is in {}\n  \
+                 INFO: Aspect hid 2 console lines; the raw console is in {}\n  \
                  1 more like: WARNING: a/BUILD:1:1: target '//a:a' is deprecated\n    \
                  all 2 in {}\n",
                 log.display(),
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(
             out,
             "WARNING: a 1\nINFO: next\nERROR: boom\nx\n(last line repeated 1 more time)\n\
-             INFO: aspect hid 2 console lines\n  2 more like: WARNING: a 1\n"
+             INFO: Aspect hid 2 console lines\n  2 more like: WARNING: a 1\n"
         );
     }
 
@@ -1287,7 +1287,7 @@ mod tests {
             .join()
             .unwrap();
             let after = ansi::text(&sink.bytes());
-            let shown = &after[..after.find("INFO: aspect hid").unwrap_or(after.len())];
+            let shown = &after[..after.find("INFO: Aspect hid").unwrap_or(after.len())];
             for noise in [
                 "indicated that a canonical",
                 "instantiated at:",
@@ -1821,7 +1821,7 @@ mod tests {
                 // The console itself, without the reports after it, whose
                 // quotes would pass for lines that survived.
                 let report = [
-                    "INFO: aspect hid",
+                    "INFO: Aspect hid",
                     "INFO: The first",
                     "INFO: Errors Bazel reported",
                 ]
