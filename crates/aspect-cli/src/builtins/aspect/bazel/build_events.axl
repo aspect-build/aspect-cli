@@ -120,8 +120,7 @@ def bes_streamed_by_bazel(sources: list[(str, str)], rc, command: str = "build")
 
 def _backends_to_stream(bazel_trait, extra_backends: list) -> list:
     """The backend URIs to stream to: the ones features injected on the trait
-    (`--remote`'s deployment BES, a Workflows runner's), then the caller's own,
-    each listed once."""
+    (`--remote`'s deployment BES), then the caller's own, each listed once."""
     seen = []
     for uri in list(bazel_trait.bes_backends) + list(extra_backends):
         if uri and uri not in seen:
@@ -143,11 +142,12 @@ def grpc_sink(bazel_trait, uri: str, metadata = {}):
         timeout = bazel_trait.bes_timeout,
     )
 
-def _runner_backends(bazel_trait) -> list:
-    """`BazelTrait.bes_runner_backends`, each listed once."""
+def _runner_backends(bazel_trait, streamed: list) -> list:
+    """`BazelTrait.bes_runner_backends` not already in `streamed`, each listed
+    once."""
     seen = []
     for uri in bazel_trait.bes_runner_backends:
-        if uri and uri not in seen:
+        if uri and uri not in seen and uri not in streamed:
             seen.append(uri)
     return seen
 
@@ -157,21 +157,24 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     `--bes-header`, the backends features injected on `BazelTrait.bes_backends`
     (the deployment `--remote` wired) and `extra_backends`, then one for each of
     `BazelTrait.bes_runner_backends` (a Workflows runner's env-injected
-    backend), then the ones features already pushed onto
-    `BazelTrait.build_event_sinks` (a `--bep-file` dump). Every gRPC sink built
-    here takes the trait's retry, buffer and timeout options (`grpc_sink`).
+    backend) not already named one of those ways, then the ones features
+    already pushed onto `BazelTrait.build_event_sinks` (a `--bep-file` dump).
+    Every gRPC sink built here takes the trait's retry, buffer and timeout
+    options (`grpc_sink`).
 
     Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
-    both groups so the invocation is streamed once — see `_drop_bazel_streamed`.
+    every group so the invocation is streamed once — see `_drop_bazel_streamed`.
 
     The one call a bazel-spawning task makes; pair it with `bes_link_data` for
     the keys the results surface needs. The caller `wait()`s the returned sinks
     after the build.
     """
     bazel_backend = bazel_bes_backend(rc, command)
+    backends = _backends_to_stream(bazel_trait, extra_backends)
+    runner_backends = _runner_backends(bazel_trait, list(ctx.args.bes_backends) + backends)
     sinks = (
-        collect_bes_from_args(ctx, extra_backends = _backends_to_stream(bazel_trait, extra_backends), bazel_backend = bazel_backend, bazel_trait = bazel_trait) +
-        [grpc_sink(bazel_trait, uri) for uri in _drop_bazel_streamed(_runner_backends(bazel_trait), lambda b: b, bazel_backend)] +
+        collect_bes_from_args(ctx, extra_backends = backends, bazel_backend = bazel_backend, bazel_trait = bazel_trait) +
+        [grpc_sink(bazel_trait, uri) for uri in _drop_bazel_streamed(runner_backends, lambda b: b, bazel_backend)] +
         _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
     ctx.defer(drain_bes_sinks, ctx, sinks)
@@ -223,7 +226,7 @@ def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_bac
         return []
 
     candidates = (list(ctx.args.bes_backends) + _backends_to_stream(bazel_trait, extra_backends) +
-                  _runner_backends(bazel_trait) + [s.uri for s in bazel_trait.build_event_sinks])
+                  _runner_backends(bazel_trait, []) + [s.uri for s in bazel_trait.build_event_sinks])
     dropped = []
     for uri in candidates:
         if uri and same_bes_endpoint(uri, bazel_backend) and uri not in dropped:

@@ -14,9 +14,10 @@ the build. That command line is cut from the end to fit; any other event over
 the limit is passed on unchanged. Either way the CLI warns.
 
 Each option is written to `BazelTrait` only when it differs from its default,
-so a value `config.axl` put on the trait directly is kept otherwise. The
-feature runs after Workflows, so an option given here outranks its deprecated
-`--workflows:bes-*` spelling.
+so a value `config.axl` put on the trait directly is kept otherwise, and so is
+a deprecated `--workflows:bes-*` spelling's: the feature runs after Workflows,
+so an option set here to other than its default outranks that spelling, and
+one set to its default does not.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")

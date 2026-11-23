@@ -242,8 +242,8 @@ def _fails(f):
 
 def _test_runner_backends_stream_after_the_tasks_own(_):
     """A runner's backends come after the `--bes-backend` sinks and before the
-    trait's prebuilt ones, each once, and are dropped like the others when
-    Bazel uploads there itself."""
+    trait's prebuilt ones, each once and only when not named another way, and
+    are dropped like the others when Bazel uploads there itself."""
     runner = "grpcs://bes.runner"
     trait = _fake_trait(_sinks("grpcs://bes.prebuilt"), runner_backends = [runner, runner])
     ctx = _fake_ctx(bes_backends = ["grpcs://bes.cli"])
@@ -251,6 +251,16 @@ def _test_runner_backends_stream_after_the_tasks_own(_):
         "order",
         [s.uri for s in collect_bes_sinks(ctx, trait, _fake_rc({}))],
         ["grpcs://bes.cli", runner, "grpcs://bes.prebuilt"],
+    )
+    _eq(
+        "named by --bes-backend too",
+        [s.uri for s in collect_bes_sinks(_fake_ctx(bes_backends = [runner]), trait, _fake_rc({}))],
+        [runner, "grpcs://bes.prebuilt"],
+    )
+    _eq(
+        "named on bes_backends too",
+        [s.uri for s in collect_bes_sinks(_fake_ctx(), _fake_trait([], backends = [runner], runner_backends = [runner]), _fake_rc({}))],
+        [runner],
     )
     rc = _fake_rc({"--bes_backend": runner})
     _eq(

@@ -1,6 +1,6 @@
 //! The BuildEvents feature's options reach `BazelTrait`, as do the deprecated
-//! `--workflows:bes-*` spellings, with a warning, unless the option is given
-//! too; a negative count or a limit too small to hold a publish request is
+//! `--workflows:bes-*` spellings, with a warning, unless the option is set
+//! too to other than its default; a negative count or a limit too small to hold a publish request is
 //! refused before the task runs.
 //!
 //! A scratch workspace's `show` task prints the trait's fields, so nothing
@@ -104,6 +104,17 @@ fn an_option_outranks_its_workflows_spelling() {
         "--workflows:bes-timeout=5m",
     ]);
     assert_eq!(fields(&out), "7|1s|None|5m|None");
+}
+
+/// An option given its default is not told from one left unset, so the
+/// Workflows spelling's value stands.
+#[test]
+fn an_option_at_its_default_leaves_the_workflows_spelling() {
+    let out = show(&[
+        "--workflows:bes-max-retries=2",
+        "--build-events:max-retries=4",
+    ]);
+    assert_eq!(fields(&out), "2|1s|None|0s|None");
 }
 
 /// `aspect show <args>` fails before the task runs with `error`, and no
