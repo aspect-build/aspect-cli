@@ -31,5 +31,5 @@ version("${VERSION}")
 See https://aspect.build/go/cli-version-pinning for the full reference.
 
 **Documentation**: https://aspect.build/go/cli
-**Additional installation instructions**: https://aspect.build/go/cli-install
+**Additional installation instructions**: https://aspect.build/go/install
 EOF

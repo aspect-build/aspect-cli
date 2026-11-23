@@ -60,16 +60,16 @@ commands without opening the status surface.
 
 load("./ansi.axl", "ansi")
 load("./lifecycle.axl", "ReproFixCommand")
-load("./links.axl", "CLI_INSTALL_LINK_MARKDOWN", "CLI_INSTALL_URL")
+load("./links.axl", "INSTALL_LINK_MARKDOWN", "INSTALL_URL")
 
 # Install hint at the bottom of each repro/fix section — developers who don't
 # yet have `aspect` on their PATH need it to run a copied repro command.
 # Plain-text form used by the CLI renderer.
-ASPECT_CLI_INSTALL_HINT = "Install aspect: " + CLI_INSTALL_URL
+ASPECT_CLI_INSTALL_HINT = "Install aspect: " + INSTALL_URL
 
 # Markdown `<sub>` hint spliced into per-task check-run and PR-comment
 # templates.
-ASPECT_CLI_INSTALL_HINT_MARKDOWN = "<sub>Install `aspect`: " + CLI_INSTALL_LINK_MARKDOWN + "</sub>"
+ASPECT_CLI_INSTALL_HINT_MARKDOWN = "<sub>Install `aspect`: " + INSTALL_LINK_MARKDOWN + "</sub>"
 
 # Soft cap on a composed command's length; targets past it collapse to
 # ` … +N more` so the output stays copy-paste-able.

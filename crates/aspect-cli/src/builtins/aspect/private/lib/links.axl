@@ -12,8 +12,8 @@ A new slug lands on the site before the CLI change that prints it.
 
 _GO = "https://aspect.build/go/"
 
-CLI_INSTALL_URL = _GO + "cli-install"
-CLI_INSTALL_LINK_MARKDOWN = "[aspect.build/go/cli-install](" + CLI_INSTALL_URL + ")"
+INSTALL_URL = _GO + "install"
+INSTALL_LINK_MARKDOWN = "[aspect.build/go/install](" + INSTALL_URL + ")"
 CLI_LOGIN_URL = _GO + "cli-login"
 CLI_DELIVERY_STATE_URL = _GO + "cli-delivery-state"
 CI_API_TOKEN_URL = _GO + "ci-api-token"
