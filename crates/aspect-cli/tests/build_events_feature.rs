@@ -1,6 +1,7 @@
 //! The BuildEvents feature's options reach `BazelTrait`, and a negative count,
-//! a limit too small to hold a publish request or a malformed duration is
-//! refused before the task runs.
+//! a limit too small to hold a publish request, a malformed duration or a
+//! `config.axl` value too large for the runtime is refused before the task
+//! runs.
 //!
 //! A scratch workspace's `show` task prints the trait's fields, so nothing
 //! here runs Bazel.
@@ -27,11 +28,19 @@ fn show(args: &[&str]) -> Output {
 
 /// [`show`] with `env` set on top of the base environment.
 fn show_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    show_in(args, env, None)
+}
+
+/// [`show_with_env`] with `.aspect/config.axl` holding `config`, if given.
+fn show_in(args: &[&str], env: &[(&str, &str)], config: Option<&str>) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     let aspect = dir.path().join(".aspect");
     std::fs::create_dir(&aspect).expect(".aspect");
     std::fs::write(aspect.join("tasks.axl"), TASKS).expect("tasks.axl");
+    if let Some(config) = config {
+        std::fs::write(aspect.join("config.axl"), config).expect("config.axl");
+    }
     let output = Command::new(aspect_cli())
         .arg("show")
         .args(args)
@@ -92,7 +101,10 @@ fn set_options_reach_the_trait() {
 /// `aspect show <args>` fails before the task runs with `error`, and no
 /// traceback.
 fn assert_refused(args: &[&str], error: &str) {
-    let out = show(args);
+    assert_refused_output(show(args), error);
+}
+
+fn assert_refused_output(out: Output, error: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains(&format!("ERROR: {error}")), "{stderr}");
@@ -129,5 +141,39 @@ fn malformed_durations_are_refused_before_the_task_runs() {
     assert_refused(
         &["--build-events:timeout=later"],
         "--build-events:timeout must be a duration such as '500ms', '2s' or '1m', got 'later'",
+    );
+}
+
+/// A `config.axl` value skips the flag parser's range check, so the feature
+/// refuses one past what the runtime takes instead of failing when a sink is
+/// built.
+#[test]
+fn a_config_value_too_large_for_the_runtime_is_refused_before_the_task_runs() {
+    let config = |option: &str, value: &str| {
+        format!(
+            "load(\"@aspect//feature/build_events.axl\", \"BuildEvents\")\n\n\
+             def config(ctx: ConfigContext):\n    \
+             ctx.features[BuildEvents].args.{option} = {value}\n"
+        )
+    };
+    assert_refused_output(
+        show_in(&[], &[], Some(&config("max_retries", "2147483648"))),
+        "--build-events:max-retries must be at most 2147483647, got 2147483648",
+    );
+    assert_refused_output(
+        show_in(
+            &[],
+            &[],
+            Some(&config("max_event_bytes", "9223372036854775808")),
+        ),
+        "--build-events:max-event-bytes must be at most 9223372036854775807, got 9223372036854775808",
+    );
+    assert_eq!(
+        fields(&show_in(
+            &[],
+            &[],
+            Some(&config("max_retries", "2147483647"))
+        )),
+        "2147483647|1s|None|0s|None"
     );
 }

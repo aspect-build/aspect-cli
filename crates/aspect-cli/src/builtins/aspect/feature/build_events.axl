@@ -16,7 +16,8 @@ the limit is passed on unchanged. Either way the CLI warns.
 Each option is written to `BazelTrait` only when it differs from its default,
 so a value `config.axl` put on the trait directly is kept otherwise.
 
-A negative count, a malformed duration or a `max_event_bytes` under 64 KiB is
+A negative count, a malformed duration, a `max_event_bytes` under 64 KiB, or a
+value past what the runtime takes (which only `config.axl` can set) is
 refused, without a traceback, before the task runs.
 """
 
@@ -28,12 +29,20 @@ _TIMEOUT = "0s"
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
 _MIN_MAX_EVENT_BYTES = 64 * 1024
 
+# The largest values the runtime takes: a 32-bit retry count, 64-bit byte sizes.
+# A command-line flag cannot exceed the first, but a `config.axl` value can.
+_MAX_INT32 = 2147483647
+_MAX_INT64 = 9223372036854775807
+
 _UsageError = error.type(traceback = False)
 
-def _refuse_below(flag: str, value: int, least: int, note: str = ""):
-    """Fail the task, without a traceback, when `flag`'s `value` is under `least`."""
+def _refuse_outside(flag: str, value: int, least: int, most: int, note: str = ""):
+    """Fail the task, without a traceback, when `flag`'s `value` is under
+    `least` or over `most`."""
     if value < least:
         fail(_UsageError("%s must be at least %d%s, got %d" % (flag, least, note, value)))
+    if value > most:
+        fail(_UsageError("%s must be at most %d, got %d" % (flag, most, value)))
 
 def _refuse_non_duration(flag: str, value: str, kwarg: str):
     """Fail the task, without a traceback, when `flag`'s `value` is not a
@@ -47,9 +56,9 @@ def _refuse_non_duration(flag: str, value: str, kwarg: str):
         fail(_UsageError("%s must be a duration such as '500ms', '2s' or '1m', got '%s'" % (flag, value)))
 
 def _build_events_impl(ctx: FeatureContext):
-    _refuse_below("--build-events:max-retries", ctx.args.max_retries, 0)
-    _refuse_below("--build-events:retry-max-buffer-bytes", ctx.args.retry_max_buffer_bytes, 0)
-    _refuse_below("--build-events:max-event-bytes", ctx.args.max_event_bytes, _MIN_MAX_EVENT_BYTES, " (64 KiB)")
+    _refuse_outside("--build-events:max-retries", ctx.args.max_retries, 0, _MAX_INT32)
+    _refuse_outside("--build-events:retry-max-buffer-bytes", ctx.args.retry_max_buffer_bytes, 0, _MAX_INT64)
+    _refuse_outside("--build-events:max-event-bytes", ctx.args.max_event_bytes, _MIN_MAX_EVENT_BYTES, _MAX_INT64, " (64 KiB)")
     _refuse_non_duration("--build-events:retry-min-delay", ctx.args.retry_min_delay, "retry_min_delay")
     _refuse_non_duration("--build-events:timeout", ctx.args.timeout, "timeout")
     t = ctx.traits[BazelTrait]
