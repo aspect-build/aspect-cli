@@ -128,7 +128,9 @@ _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JIN
 #                   the id's tips in its final state, up to `max_shown`; the
 #                   tips past it are counted.
 #
-# A tip emitted after the end prints at once.
+# A tip emitted after the end prints at once. A tip the Console's `tip`
+# template hides (renders blank) is neither printed nor counted, and takes
+# no `max_shown` slot.
 TIP_SHOW_EACH = "each"
 TIP_SHOW_FIRST = "first"
 TIP_SHOW_END = "end"
@@ -1294,9 +1296,13 @@ def _tips_impl(ctx):
             return
         if finished[0] or cap == 0 or shown[id] < cap:
             _print_stored(call_ctx, stored, call_ctx.std.io.stderr.color)
-        else:
+        elif _visible(call_ctx, stored):
             more[id] += 1
             held_last[id] = stored
+
+    def _visible(ctx, stored):
+        """Whether `stored` would print: its template does not hide it."""
+        return _tip_head(stored["id"], stored["severity"], stored["title"], False, _console(ctx)) != ""
 
     def _print_stored(call_ctx, stored, color_on):
         id = stored["id"]
@@ -1305,8 +1311,8 @@ def _tips_impl(ctx):
         if lines:
             shown[id] += 1
 
-        # A tip its template hides is printed as nothing: never "now:",
-        # never counted as more.
+        # A tip its template hides is printed as nothing, so never "now:";
+        # counted as more only if it is visible at the end.
         printed[id][stored.get("key", "")] = (stored["title"], stored["body"]) if lines else None
 
     def _finish(task_ctx):
@@ -1332,7 +1338,9 @@ def _tips_impl(ctx):
                     if cap != 0 and shown[id] >= cap:
                         break
                     _print_stored(task_ctx, t, color_on)
-            unprinted = [t for t in tips_for if t.get("key", "") not in printed[id]]
+
+            # Not printed, or hidden when it was and since made visible.
+            unprinted = [t for t in tips_for if printed[id].get(t.get("key", "")) == None and _visible(task_ctx, t)]
             occurrences, lost = dropped.get(id, 0), dropped_tips.get(id, 0)
             if show == TIP_SHOW_EACH:
                 # Occurrences: a dropped group's matches are among `dropped`
