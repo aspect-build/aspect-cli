@@ -1,4 +1,10 @@
-"""Rust rule defaults"""
+"""Rust rule defaults.
+
+Release (`-c opt`) builds compile every first-party crate at opt-level 3 with one
+codegen unit and `panic=abort`. Other modes take the compilation mode's defaults,
+as the external `@crates` do, so test builds don't optimize a large crate such as
+`axl-runtime` on a single LLVM thread.
+"""
 
 load("@aspect_bazel_lib//lib:expand_template.bzl", _expand_template = "expand_template")
 load("@rules_rust//rust:defs.bzl", _rust_binary = "rust_binary", _rust_library = "rust_library", _rust_proc_macro = "rust_proc_macro", _rust_test = "rust_test")
@@ -40,10 +46,7 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
                 "-Copt-level=3",
                 "-Cpanic=abort",
             ] + release_rustc_flags,
-            "//conditions:default": [
-                "-Ccodegen-units=1",
-                "-Copt-level=3",
-            ],
+            "//conditions:default": [],
         }),
         crate_features = crate_features + ["bazel"],
         **kwargs
@@ -95,10 +98,7 @@ def rust_library(name, rustc_env_files = [], version_key = "", crate_features = 
                 "-Cpanic=abort",
                 "-Cstrip=symbols",
             ],
-            "//conditions:default": [
-                "-Ccodegen-units=1",
-                "-Copt-level=3",
-            ],
+            "//conditions:default": [],
         }),
         crate_features = crate_features + ["bazel"],
         stamp = stamp,
@@ -123,10 +123,7 @@ def rust_proc_macro(name, crate_features = [], **kwargs):
                 "-Cpanic=abort",
                 "-Cstrip=symbols",
             ],
-            "//conditions:default": [
-                "-Ccodegen-units=1",
-                "-Copt-level=3",
-            ],
+            "//conditions:default": [],
         }),
         crate_features = crate_features + ["bazel"],
         **kwargs
