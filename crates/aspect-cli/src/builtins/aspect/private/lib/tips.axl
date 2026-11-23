@@ -49,7 +49,7 @@ not printed, and a last line names the ids shown and how to silence them
 """
 
 load("./ansi.axl", "ansi")
-load("./links.axl", "CI_API_TOKEN_URL")
+load("./links.axl", "CI_API_TOKEN_URL", "CLI_TIPS_SILENCE_URL")
 load("./text.axl", "did_you_mean_then")
 
 # ── Severity constants ───────────────────────────────────────────────
@@ -1020,11 +1020,9 @@ def terminal_now_line(id, severity, title, color_on = False):
 # The id of the end-of-task line saying how to silence the tips shown.
 TIPS_HINT_ID = "tips_hint"
 
-TIPS_DOCS_URL = "https://aspect.build/docs/cli/guides/tips#silencing-tips"
-
 def terminal_hint_line(ids, color_on = False):
     """The end-of-task line naming the ids shown and how to silence them."""
-    return _tip_head(TIPS_HINT_ID, TIP_INFO, "Silence a tip with `--tips:silence=<id>` (shown: %s)" % ", ".join(ids), color_on) + "; see " + TIPS_DOCS_URL
+    return _tip_head(TIPS_HINT_ID, TIP_INFO, "Silence a tip with `--tips:silence=<id>` (shown: %s)" % ", ".join(ids), color_on) + "; see " + CLI_TIPS_SILENCE_URL
 
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
