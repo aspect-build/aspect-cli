@@ -120,6 +120,8 @@ impl Linker {
     }
 
     /// [`Linker::link`], a path `hints` names linked to its file.
+    /// Each hint links one path, the first shown as it says: two stages
+    /// may show two files the same way.
     pub fn link_with(&mut self, record: &[u8], hints: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         if record.len() > MAX_RECORD || contains(record, b"\x1b]8;") {
             return record.to_vec();
@@ -127,17 +129,18 @@ impl Linker {
         if !contains(record, b"/") && !contains(record, b".") {
             return record.to_vec();
         }
-        ansi::map_text(record, |text| self.text(text, hints))
+        let mut used = vec![false; hints.len()];
+        ansi::map_text(record, |text| self.text(text, hints, &mut used))
     }
 
-    fn text(&mut self, text: &[u8], hints: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    fn text(&mut self, text: &[u8], hints: &[(Vec<u8>, Vec<u8>)], used: &mut [bool]) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         let mut urls = URL.find_iter(text).peekable();
         while at < text.len() {
             let next_url = urls.peek().map(|m| m.start());
             let stop = next_url.unwrap_or(text.len());
-            self.paths(&text[at..stop], hints, &mut out);
+            self.paths(&text[at..stop], hints, used, &mut out);
             at = stop;
             if let Some(m) = urls.next() {
                 let end = m.start() + url_end(m.as_bytes());
@@ -146,7 +149,7 @@ impl Linker {
                     &text[m.start()..end],
                 ));
                 // What was trimmed from the URL's end is text again.
-                self.paths(&text[end..m.end()], hints, &mut out);
+                self.paths(&text[end..m.end()], hints, used, &mut out);
                 at = m.end();
             }
         }
@@ -154,7 +157,13 @@ impl Linker {
     }
 
     /// `text`, holding no URL, onto `out` with its paths linked.
-    fn paths(&mut self, text: &[u8], hints: &[(Vec<u8>, Vec<u8>)], out: &mut Vec<u8>) {
+    fn paths(
+        &mut self,
+        text: &[u8],
+        hints: &[(Vec<u8>, Vec<u8>)],
+        used: &mut [bool],
+        out: &mut Vec<u8>,
+    ) {
         let mut at = 0;
         for m in PATH.find_iter(text) {
             let (start, mut end) = (m.start(), m.end());
@@ -175,10 +184,12 @@ impl Linker {
             if path.is_empty() {
                 continue;
             }
-            let hinted = hints
-                .iter()
-                .find(|(shown, _)| shown == path)
-                .map(|(_, file)| self.place(file))
+            let hint = (0..hints.len()).find(|&i| !used[i] && hints[i].0 == path);
+            if let Some(i) = hint {
+                used[i] = true;
+            }
+            let hinted = hint
+                .map(|i| self.place(&hints[i].1))
                 .filter(|file| file.exists());
             let Some(file) = hinted.or_else(|| self.resolve(path)) else {
                 continue;
@@ -683,6 +694,48 @@ mod tests {
         assert!(
             hints.get().is_empty(),
             "the last stage clears the record's hints"
+        );
+    }
+
+    #[test]
+    fn stacked_stages_showing_the_same_name_link_each_to_its_own_file() {
+        let root = tempfile::tempdir().unwrap();
+        let vend = tempfile::tempdir().unwrap();
+        for at in [
+            root.path().join("pkg/BUILD.bazel"),
+            vend.path().join("BUILD.bazel"),
+        ] {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let ws = root.path().display().to_string();
+        let v = vend.path().display().to_string();
+        let hints = Hints::default();
+        let mut first = crate::console::filters::RelativizePaths::new(
+            Some(ws.clone()),
+            Some(format!("{ws}/pkg")),
+        )
+        .hinting(Some(hints.clone()));
+        let mut second = crate::console::filters::RelativizePaths::new(Some(v.clone()), None)
+            .hinting(Some(hints.clone()));
+        let mut links = Links {
+            linker: Linker::new(vec![root.path().to_path_buf()]),
+            hints,
+        };
+        links.linker.host = String::new();
+        use crate::console::forward::LineProcessor as _;
+        let line = format!("ERROR: {ws}/pkg/BUILD.bazel:1:1: x; see {v}/BUILD.bazel:2");
+        let shown = second
+            .process(&first.process(line.as_bytes()).unwrap())
+            .unwrap();
+        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "ERROR: {}:1:1: x; see {}:2",
+                file(root.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
+                file(vend.path(), "BUILD.bazel", "BUILD.bazel")
+            )
         );
     }
 

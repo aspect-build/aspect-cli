@@ -208,6 +208,13 @@ fn continues_path(b: u8) -> bool {
     super::links::is_path_byte(b)
 }
 
+/// Whether an absolute path after `b` is the rest of a longer path or a
+/// URL (`file:///ws/x`) rather than one of its own. `@` is not, so a
+/// response file (`@/ws/x.params`) is made relative as any path is.
+fn joins_path(b: u8) -> bool {
+    b != b'@' && continues_path(b)
+}
+
 /// An absolute path through an execroot, a sandbox's included, up to the
 /// workspace's directory in it: `…/execroot/_main/`.
 static EXECROOT: LazyLock<BytesRegex> = LazyLock::new(|| {
@@ -359,7 +366,7 @@ impl RelativizePaths {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         for found in EXECROOT.find_iter(text) {
-            if found.start() > 0 && continues_path(text[found.start() - 1]) {
+            if found.start() > 0 && joins_path(text[found.start() - 1]) {
                 // Part of a longer path or a URL (`file:///…/execroot/…`).
                 continue;
             }
@@ -400,7 +407,7 @@ impl RelativizePaths {
         let mut out = Vec::with_capacity(hay.len());
         let mut i = 0;
         while i < hay.len() {
-            if hay[i..].starts_with(root) && (i == 0 || !continues_path(hay[i - 1])) {
+            if hay[i..].starts_with(root) && (i == 0 || !joins_path(hay[i - 1])) {
                 let (with, consumed) = self.relative(&hay[i + root.len()..]);
                 self.hint(root, &with, &hay[i + root.len()..], consumed, hints);
                 out.extend(with);
@@ -1129,6 +1136,26 @@ mod tests {
             ),
             "/o/execroot/_main/external/rules_x/x.h:1"
         );
+    }
+
+    #[test]
+    fn a_response_files_path_is_made_relative() {
+        let mut p = RelativizePaths::new(Some("/ws".into()), None);
+        let run = |p: &mut RelativizePaths, s: &str| {
+            String::from_utf8(p.process(s.as_bytes()).unwrap()).unwrap()
+        };
+        assert_eq!(
+            run(&mut p, "argfile @/ws/pkg/x.params"),
+            "argfile @pkg/x.params"
+        );
+        assert_eq!(
+            run(
+                &mut p,
+                "argfile @/o/sandbox/darwin-sandbox/3/execroot/_main/bazel-out/bin/x.params"
+            ),
+            "argfile @/o/execroot/_main/bazel-out/bin/x.params"
+        );
+        assert_eq!(run(&mut p, "file:///ws/a stays"), "file:///ws/a stays");
     }
 
     #[test]
