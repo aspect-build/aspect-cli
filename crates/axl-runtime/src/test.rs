@@ -56,6 +56,7 @@ fn raise_first(failures: PhaseFailures) -> anyhow::Result<()> {
 }
 
 pub fn eval(code: &str) -> EvalBuilder {
+    crate::trace::telemetry_tests::install_interest_floor();
     EvalBuilder {
         code: code.to_string(),
         with_loader: false,
