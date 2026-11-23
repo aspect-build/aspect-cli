@@ -1281,12 +1281,12 @@ fn history_dir(history: &History) -> Option<PathBuf> {
         .next_bazel_dir()
         .inspect_err(|err| {
             if history.first_failure() {
-                errln!(
-                    "WARNING: could not create a history folder under {}: {err}. Builds' \
+                crate::diag::warn(&format!(
+                    "could not create a history folder under {}: {err}. Builds' \
                      execution, workspace and console logs go to the temp dir instead, and \
                      the profile is left to Bazel.",
                     history.root().display(),
-                )
+                ))
             }
         })
         .ok()
@@ -1330,11 +1330,11 @@ impl Build {
         if let Some((from, to)) = self.profile_copy.take()
             && let Err(err) = bazel::profile::copy(&from, &to)
         {
-            errln!(
-                "WARNING: could not copy the profile from {} to {}: {err}",
+            crate::diag::warn(&format!(
+                "could not copy the profile from {} to {}: {err}",
                 from.display(),
                 to.display(),
-            );
+            ));
         }
     }
 
@@ -2433,18 +2433,18 @@ impl Build {
             let path = execlog_stream.path().display().to_string();
             match execlog_stream.join() {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() && build.execlog_read => {
-                    errln!(
-                        "WARNING: bazel completed successfully but wrote no execution \
-                         log, so nothing that reads it saw this invocation."
+                    crate::diag::warn(
+                        "bazel completed successfully but wrote no execution log, so \
+                         nothing that reads it saw this invocation.",
                     );
                 }
                 Ok(ReaderOutcome::Undecodable(reason)) => {
-                    errln!(
-                        "WARNING: the execution log '{path}' stopped decoding \
-                         ({reason}), so its hooks, spawn telemetry and decoded sinks \
-                         hold only the entries before that point. The build's result \
-                         and copies of the compact log are unaffected."
-                    );
+                    crate::diag::warn(&format!(
+                        "the execution log '{path}' stopped decoding ({reason}), so its \
+                         hooks, spawn telemetry and decoded sinks hold only the entries \
+                         before that point. The build's result and copies of the compact \
+                         log are unaffected."
+                    ));
                 }
                 Ok(_) => {}
                 Err(err) => {

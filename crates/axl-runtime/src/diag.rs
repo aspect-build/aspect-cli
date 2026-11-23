@@ -205,17 +205,17 @@ pub fn debug(msg: &str) {
     }
 }
 
-/// Print a cyan `INFO:` line for a notable runtime branch.
+/// Print a bold cyan `INFO:` line for a notable runtime branch.
 pub fn info(msg: &str) {
     emit(Severity::Info, msg);
 }
 
-/// Print a yellow `WARNING:` line for a non-fatal subsystem failure.
+/// Print a bold yellow `WARNING:` line for a non-fatal subsystem failure.
 pub fn warn(msg: &str) {
     emit(Severity::Warning, msg);
 }
 
-/// Print a red `ERROR:` line for a recoverable error (usually preceding a
+/// Print a bold red `ERROR:` line for a recoverable error (usually preceding a
 /// non-zero exit).
 pub fn error(msg: &str) {
     emit(Severity::Error, msg);

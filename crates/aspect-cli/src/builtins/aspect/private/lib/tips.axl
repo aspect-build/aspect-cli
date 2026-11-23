@@ -1304,7 +1304,10 @@ def _tips_impl(ctx):
         _print(lines)
         if lines:
             shown[id] += 1
-        printed[id][stored.get("key", "")] = (stored["title"], stored["body"])
+
+        # A tip its template hides is printed as nothing: never "now:",
+        # never counted as more.
+        printed[id][stored.get("key", "")] = (stored["title"], stored["body"]) if lines else None
 
     def _finish(task_ctx):
         """The end of the task's terminal output, once: each `TIP_SHOW_END`
