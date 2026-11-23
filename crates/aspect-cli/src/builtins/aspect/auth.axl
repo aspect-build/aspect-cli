@@ -386,7 +386,7 @@ login = task(
     args = {
         "with_token": args.boolean(
             default = False,
-            description = "Log in with a JWT read from stdin instead of the browser flow.",
+            description = "Log in with a JWT read from stdin instead of the browser flow. The token is stored as given, so the target needs no issuer or client id configured.",
         ),
         "with_api_token": args.boolean(
             default = False,
@@ -486,7 +486,8 @@ def _configure_impl(ctx: TaskContext) -> int:
         print("")
         print("This deployment does not advertise its login config, so the CLI")
         print("cannot log in against it. Add the issuer, client_id, and hosts to")
-        print("~/.aspect/config.json by hand.")
+        print("~/.aspect/config.json by hand, or log in with a token it accepts:")
+        print("  aspect auth login --with-token --deployment " + info.name)
         return 1
     if not ctx.args.login:
         print("")
@@ -562,11 +563,11 @@ def _logout_impl(ctx: TaskContext) -> int:
 logout = task(
     group = ["auth"],
     summary = "Log out of Aspect Cloud or an Aspect Workflows deployment",
-    description = "Clear a stored credential: the effective default (Aspect Cloud, or the default deployment) unless --deployment <name> is given, or --all to clear every credential. A configured deployment stays configured; use `aspect auth remove` to forget it entirely.",
+    description = "Clear a stored credential: Aspect Cloud's unless --deployment <name> is given, or --all to clear every credential. A configured deployment stays configured; use `aspect auth remove` to forget it entirely.",
     implementation = _logout_impl,
     args = {
         "deployment": args.string(
-            description = "Log out of this configured Aspect Workflows deployment instead of the effective default. Logging out of the current default deployment also clears the default (no fall-through to another).",
+            description = "Log out of this configured Aspect Workflows deployment instead of Aspect Cloud. Logging out of the current default deployment also clears the default (no fall-through to another).",
         ),
         "all": args.boolean(
             default = False,

@@ -749,10 +749,11 @@ def config(ctx: ConfigContext):
     # Default `--remote` to Aspect Cloud's cache and BES on GitHub-hosted runners,
     # which have no remote cache of their own. A self-hosted Workflows runner is
     # excluded because it already injects its own (feature/workflows.axl), and a
-    # run without the API token because `--remote` fails outright with no
-    # discovered deployment — which a fork PR, getting no secrets, would hit on
-    # every job. ASPECT_HAS_API_TOKEN is the workflow's "true"/"false" answer to
-    # whether that secret exists; the token itself is never in the job env.
+    # run without the API token because the credential helper registered below
+    # would have no token to return, which Bazel treats as fatal — and a fork PR,
+    # getting no secrets, would hit that on every job.
+    # ASPECT_HAS_API_TOKEN is the workflow's "true"/"false" answer to whether that
+    # secret exists; the token itself is never in the job env.
     on_github_hosted_runner = (
         bool(ctx.std.env.var("GITHUB_ACTIONS")) and
         not bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER")) and
@@ -761,17 +762,13 @@ def config(ctx: ConfigContext):
     if on_github_hosted_runner:
         ctx.features[Deployment].args.remote = "cache,bes"
 
-        # Authenticate the cache through the credential helper rather than the
-        # `--remote_header` the deployment feature would otherwise inject:
-        # `_endpoint_auth_flags` suppresses its header once a helper covers the
-        # host, so the two never both attach an `authorization`. Bazel re-invokes
-        # the helper when its own cache lapses, so the bearer cannot go stale
-        # mid-build the way a header fixed at invocation start can.
-        #
-        # A bare name, resolved on PATH, where install-prebuilt-aspect-cli put
-        # the CLI (Bazel errors loudly if it is missing). The BES sink is CLI-
-        # streamed rather than a Bazel flag, so it keeps resolving its own bearer
-        # — the helper covers the cache only.
+        # The deployment feature registers the running CLI as the cache's
+        # credential helper itself, and adds nothing for a host a helper already
+        # covers (`_endpoint_auth_flags`), so the two never both attach an
+        # `authorization`. This one names the helper by bare name, resolved on
+        # PATH where install-prebuilt-aspect-cli put the CLI (Bazel errors loudly
+        # if it is missing). The BES sink is CLI-streamed rather than a Bazel
+        # flag, so it resolves its own bearer — the helper covers the cache only.
         ctx.traits[BazelTrait].extra_flags.append(
             "--credential_helper=cache.aspect.build=aspect",
         )
