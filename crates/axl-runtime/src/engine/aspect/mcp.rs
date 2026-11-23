@@ -1100,7 +1100,7 @@ mod tests {
             "Workflows operator",
             "upgrade",
             "then retry",
-            "#action-performance-history",
+            crate::links::BUILD_RESULTS_API_ACTION_HISTORY,
         ] {
             assert!(hint.contains(expected), "missing {expected}: {hint}");
         }
