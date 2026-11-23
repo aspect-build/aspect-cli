@@ -755,9 +755,9 @@ def _test_terminal_format(_):
     _eq("coloured", ansi.strip(terminal_tip_lines("x", TIP_IMPORTANT, "T", "", True)[0]), "TIP[x] 📌 important: T")
     _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "TIP[x] 🟡 warning: 3 more; the last: T")
     _eq("now", terminal_now_line("x", TIP_INFO, "T"), "TIP[x] 💬 note: now: T")
-    _eq("hint", terminal_hint_lines(["a", "b"]), [
-        "TIP[tips_hint] 💬 note: Silence a tip with `--tips:silence=<id>` (shown: a, b)",
-        "  https://aspect.build/docs/cli/guides/tips#silencing-tips",
+    _eq("hint", terminal_hint_lines(), [
+        "TIP[tips_hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips_hint`) or in `.aspect/config.axl`",
+        "  https://aspect.build/go/cli-tips-silence",
     ])
 
 def _test_terminal_colour_and_console(ctx):
@@ -796,7 +796,7 @@ def _test_show_each_with_a_cap(ctx):
     _eq("two printed", lines, ["TIP[e] warning: T0", "TIP[e] warning: T1"])
     tips._finish_for_test(ctx)
     _eq("then counted, and the hint", lines[2:4], ["TIP[e] warning: 2 more; the last: T3", lines[3]])
-    _eq("hint names it", "(shown: e)" in lines[3], True)
+    _eq("hint", lines[3].startswith("TIP[tips_hint]"), True)
     _reset(ctx)
 
 def _test_show_first_and_end(ctx):
@@ -817,7 +817,7 @@ def _test_show_first_and_end(ctx):
         "  b",
     ])
     _eq("end's cap counts the rest", lines[4], "TIP[n] note: 1 more; the last: c")
-    _eq("hint", "(shown: f, n)" in lines[5], True)
+    _eq("hint", lines[5].startswith("TIP[tips_hint]"), True)
     _reset(ctx)
 
 def _test_quiet_reemits_and_silenced_hint(ctx):

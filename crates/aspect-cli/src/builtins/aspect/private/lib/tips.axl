@@ -41,8 +41,8 @@ CLI's own `INFO:` and `WARNING:` lines, and the severity's lowercase word,
 as rustc writes `warning` and `note`, reads without colour. The emoji is
 the status surfaces' but for a warning, 🟡 rather than ⚠️. When the task
 ends, a line per id counts what was not printed, and a last tip,
-`tips_hint` (itself silenceable), names the ids shown and how to silence
-them.
+`tips_hint` (itself silenceable), says how to silence a tip, on the
+command line or in `.aspect/config.axl`, and links the docs.
 
 # Severities, most urgent first
 
@@ -1079,13 +1079,13 @@ def terminal_now_line(id, severity, title, color_on = False, console = None):
     printed: its title now."""
     return _tip_head(id, severity, "now: " + title, color_on, console)
 
-# The id of the end-of-task line saying how to silence the tips shown.
+# The id of the end-of-task line saying how to silence a tip.
 TIPS_HINT_ID = "tips_hint"
 
-def terminal_hint_lines(ids, color_on = False, console = None):
-    """The end-of-task `tips_hint` tip, naming the ids shown and how to
-    silence them, the docs under it."""
-    title = "Silence a tip with `--tips:silence=<id>` (shown: %s)" % ", ".join(ids)
+def terminal_hint_lines(color_on = False, console = None):
+    """The end-of-task `tips_hint` tip: how to silence a tip, by flag (its
+    own id the example) or in `.aspect/config.axl`, the docs under it."""
+    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `.aspect/config.axl`" % TIPS_HINT_ID
     return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, CLI_TIPS_SILENCE_URL, color_on, console)
 
 def _console(ctx):
@@ -1321,7 +1321,7 @@ def _tips_impl(ctx):
         print (`terminal_more_line`: for `TIP_SHOW_EACH` the occurrences, for
         the others the tips) or, for `TIP_SHOW_FIRST`, how its printed tip
         changed (`terminal_now_line`), then, when any tip was printed, how to
-        silence them (`terminal_hint_lines`). A tip emitted after it prints at
+        silence a tip (`terminal_hint_lines`). A tip emitted after it prints at
         once."""
         if not auto_print[0] or finished[0]:
             return
@@ -1374,9 +1374,8 @@ def _tips_impl(ctx):
                     line = terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on, _console(task_ctx))
                     if line:
                         _print([line])
-        names = [id for id in order if shown[id]]
-        if names and TIPS_HINT_ID not in silenced:
-            _print(terminal_hint_lines(names, color_on, _console(task_ctx)))
+        if any([shown[id] for id in order]) and TIPS_HINT_ID not in silenced:
+            _print(terminal_hint_lines(color_on, _console(task_ctx)))
 
     def _add(call_ctx, tip):
         if tip["id"] in silenced:
