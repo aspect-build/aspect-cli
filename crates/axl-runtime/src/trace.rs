@@ -269,12 +269,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     const trace: Trace = Trace;
 }
 
-/// Process-wide lock serializing all trace-touching tests. The
-/// `tracing` crate's per-callsite interest cache is global and not
-/// per-thread; concurrent tests that fire trace.event/trace.log under
-/// different subscribers can poison each other's interest cache and
-/// produce flaky failures (see `telemetry_tests::capture` for the
-/// rebuild-cache machinery on the recorder side).
+/// Process-wide lock serializing all trace-touching tests: they share the
+/// global `ACTIVE` flag and the `tracing` crate's per-callsite interest
+/// cache. A test that hits a callsite without taking the lock can still race
+/// the cache; `telemetry_tests::install_interest_floor` keeps that from
+/// silencing a recorder.
 #[cfg(test)]
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -441,6 +440,45 @@ pub(crate) mod telemetry_tests {
         }
     }
 
+    /// A subscriber that wants every callsite `sometimes` and enables nothing.
+    struct InterestFloor;
+
+    impl Subscriber for InterestFloor {
+        fn register_callsite(
+            &self,
+            _: &'static Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    /// Register [`InterestFloor`] for the rest of the test process. Idempotent.
+    ///
+    /// `tracing` caches a callsite's interest the first time any thread hits
+    /// it, from a snapshot of the subscribers registered at that moment. A
+    /// thread that first hits a callsite while [`capture_events`] registers its
+    /// recorder can store `never` over the recorder's rebuild, and the recorder
+    /// then misses that callsite's events. With this subscriber in every
+    /// snapshot no callsite is cached as `never`, so each event asks the
+    /// thread's current subscriber. `capture_events` and [`crate::test::eval`]
+    /// both install it, so a thread reaching a callsite through either has
+    /// installed it first.
+    pub(crate) fn install_interest_floor() {
+        static FLOOR: std::sync::OnceLock<Dispatch> = std::sync::OnceLock::new();
+        FLOOR.get_or_init(|| Dispatch::new(InterestFloor));
+    }
+
     use super::TEST_LOCK;
 
     /// Run `expr` with a recording subscriber installed. Returns whatever
@@ -459,6 +497,7 @@ pub(crate) mod telemetry_tests {
     /// Run `f` with a recording subscriber installed, holding `TEST_LOCK`,
     /// and return the events it fired. For tests anywhere in the crate.
     pub(crate) fn capture_events(f: impl FnOnce()) -> Vec<Recorded> {
+        install_interest_floor();
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         tracing::callsite::rebuild_interest_cache();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -596,6 +635,7 @@ pub(crate) mod telemetry_tests {
     fn no_event_when_otel_inactive() {
         // Take the lock manually so the disable/restore window can't race
         // with other capture-based tests touching the same global flag.
+        install_interest_floor();
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         super::disable();
         // Inline the capture body to avoid re-entering TEST_LOCK.
