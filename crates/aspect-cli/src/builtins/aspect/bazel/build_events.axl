@@ -16,7 +16,9 @@ Every gRPC sink built here takes the retry, buffer and timeout options the
 BuildEvents feature puts on `BazelTrait` (`grpc_sink`), whichever way its
 backend was named: `--bes-backend`, a feature's `BazelTrait.bes_backends`, or a
 Workflows runner's `BazelTrait.bes_runner_backends`. The feature refuses a bad
-option before the task runs, so building a sink from them does not fail.
+option before the task runs; a bad value written on the trait directly is
+refused, without a traceback and naming the option to set instead, when a
+task collects its sinks (`check_build_event_options`).
 
 The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
 the user has not supplied their own `authorization` header — see
@@ -134,12 +136,61 @@ def _backends_to_stream(bazel_trait, extra_backends: list) -> list:
     (`--remote`'s deployment BES), then the caller's own, each endpoint once."""
     return _distinct_endpoints(list(bazel_trait.bes_backends) + list(extra_backends))
 
+# The BuildEvents options' bounds: the smallest message a backend can be held
+# to, and the largest values the runtime takes. `bazel.build_events.grpc` reads
+# `max_retries` as an i32, and the byte sizes are read as i64. A command-line
+# flag is held to i32 by its parser; a `config.axl` value is not.
+MIN_MAX_EVENT_BYTES = 64 * 1024
+MAX_INT32 = 2147483647
+MAX_INT64 = 9223372036854775807
+
+_UsageError = error.type(traceback = False)
+
+def refuse_outside(name: str, value: int, least: int, most: int, note: str = "", hint: str = ""):
+    """Fail the task, without a traceback, when `name`'s `value` is under
+    `least` or over `most`; `note` follows the bound, `hint` the message."""
+    if value < least:
+        fail(_UsageError("%s must be at least %d%s, got %d%s" % (name, least, note, value, hint)))
+    if value > most:
+        fail(_UsageError("%s must be at most %d, got %d%s" % (name, most, value, hint)))
+
+def refuse_non_duration(name: str, value: str, kwarg: str, hint: str = ""):
+    """Fail the task, without a traceback, when `name`'s `value` is not a
+    duration `bazel.build_events.grpc` takes as `kwarg`. The sink built to
+    check it is never bound, so nothing is dialed; a buffer budget is given so
+    `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` is not read, and warned about, in a
+    task that streams nowhere."""
+    err, _ = catch(lambda: bazel.build_events.grpc(uri = "grpc://localhost", retry_max_buffer_bytes = 1, **{kwarg: value}))
+    if err != None:
+        fail(_UsageError("%s must be a duration such as '500ms', '2s' or '1m', got '%s'%s" % (name, value, hint)))
+
+def check_build_event_options(bazel_trait):
+    """Refuse, without a traceback, a BuildEvents value on `bazel_trait` the
+    runtime would fail on, naming the field and the option to set instead.
+    The feature checks its own options before the task runs; this catches a
+    value written on the trait directly (a `config.axl`, another feature),
+    before any sink is built or Bazel is run."""
+
+    def hint(option):
+        return "; set it with --build-events:%s or ctx.features[BuildEvents].args.%s" % (option.replace("_", "-"), option)
+
+    t = bazel_trait
+    refuse_outside("BazelTrait.bes_max_retries", t.bes_max_retries, 0, MAX_INT32, hint = hint("max_retries"))
+    refuse_non_duration("BazelTrait.bes_retry_min_delay", t.bes_retry_min_delay, "retry_min_delay", hint = hint("retry_min_delay"))
+    if t.bes_retry_max_buffer_bytes != None:
+        refuse_outside("BazelTrait.bes_retry_max_buffer_bytes", t.bes_retry_max_buffer_bytes, 1, MAX_INT64, hint = hint("retry_max_buffer_bytes"))
+    refuse_non_duration("BazelTrait.bes_timeout", t.bes_timeout, "timeout", hint = hint("timeout"))
+    if t.max_build_event_bytes != None:
+        refuse_outside("BazelTrait.max_build_event_bytes", t.max_build_event_bytes, MIN_MAX_EVENT_BYTES, MAX_INT64, " (64 KiB)", hint = hint("max_event_bytes"))
+
 def grpc_sink(bazel_trait, uri: str, metadata = {}):
     """A gRPC sink streaming to `uri` with `metadata` as headers, under the
     retry, buffer and timeout options on `bazel_trait` (the BuildEvents
-    feature's); the runtime's defaults when `bazel_trait` is None."""
+    feature's, checked by `check_build_event_options`); the runtime's defaults
+    when `bazel_trait` is None."""
     if bazel_trait == None:
         return bazel.build_events.grpc(uri = uri, metadata = metadata)
+    check_build_event_options(bazel_trait)
     return bazel.build_events.grpc(
         uri = uri,
         metadata = metadata,
@@ -168,7 +219,11 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     The one call a bazel-spawning task makes; pair it with `bes_link_data` for
     the keys the results surface needs. The caller `wait()`s the returned sinks
     after the build.
+
+    Refuses a bad BuildEvents value on the trait first, before anything is
+    built (`check_build_event_options`).
     """
+    check_build_event_options(bazel_trait)
     bazel_backend = bazel_bes_backend(rc, command)
     backends = _backends_to_stream(bazel_trait, extra_backends)
     runner_backends = _distinct_endpoints(list(bazel_trait.bes_runner_backends), list(ctx.args.bes_backends) + backends)
