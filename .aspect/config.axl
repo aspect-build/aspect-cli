@@ -1,6 +1,8 @@
 load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//bazel/build_metadata_test.axl", "build_metadata_tests")
+load("@aspect//bazel/console_test.axl", "console_tests")
+load("@aspect//bazel/console_tips_test.axl", "console_tips_tests")
 load("@aspect//bazel/exec_log_test.axl", "exec_log_tests")
 load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//bazel_test.axl", "bazel_facade_tests")
@@ -93,6 +95,8 @@ load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases"
 load("@aspect//workspace_data_test.axl", "workspace_data_tests")
 load("@std//time.axl", "time")
 load("./lambda.axl", "lambda_with_global_bind")
+load("./plugins/notify.axl", "Notify")
+load("./plugins/plugins_test.axl", "console_plugins_tests")
 
 def _user_task_impl(ctx: TaskContext) -> int:
     print("I am a task added by .aspect/config.axl")
@@ -247,11 +251,19 @@ def _dogfood_task_hooks(ctx: ConfigContext) -> None:
     ctx.hooks.pre_task(_pre)
     ctx.hooks.post_task(_post)
 
+def _console_plugins(ctx: ConfigContext):
+    """The example plugins ported from BuildBuddy's CLI plugins (`./plugins/`). On:
+    the theme, Go highlighting, the strict-deps offer and the executor check.
+    Off until asked for, as their plugins' flags are: `--notify:enabled=true`
+    (with a sound here) and `--open-invocation:enabled=true`."""
+    ctx.features[Notify].args.sound = "Tink"
+
 def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
     _dogfood_task_hooks(ctx)
+    _console_plugins(ctx)
 
     # Dogfood telemetry.exporters: when DASH0_ENDPOINT/DASH0_TOKEN are injected
     # (CI), ship aspect-cli's own traces, logs and metrics to Dash0 via OTLP +
@@ -602,6 +614,18 @@ def config(ctx: ConfigContext):
     # and that no registered hook leaves the execution log off.
     # Run with: aspect dev test-bazel-exec-log
     ctx.tasks.add(exec_log_tests)
+
+    # bazel/console.axl: the default stages, their tip rules, the processor.
+    # Run with: aspect dev test-bazel-console
+    ctx.tasks.add(console_tests)
+
+    # bazel/console_tips.axl: unique ids, compiling patterns, matching examples.
+    # Run with: aspect dev test-bazel-console-tips
+    ctx.tasks.add(console_tips_tests)
+
+    # .aspect/plugins: the console plugins' parsing.
+    # Run with: aspect dev test-console-plugins
+    ctx.tasks.add(console_plugins_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

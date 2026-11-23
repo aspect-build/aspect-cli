@@ -1,0 +1,20 @@
+[32mINFO: [0mInvocation ID: 03cc85aa-fc38-445d-ac15-a017eaad9836
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 2 targets (1 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m 2 targets (1 packages loaded, 0 targets configured)
+
+[32mINFO: [0mAnalyzed 2 targets (1 packages loaded, 2 targets configured).
+[32mINFO: [0mFrom Executing genrule //:partial:
+tool first line
+[32m[2 / 3][0m Executing genrule //:later; 1s darwin-sandbox
+[35mDEBUG: [0mRule 'y' indicated that a canonical reproducible form can be obtained (tool partial)
+[32mINFO: [0mFrom Executing genrule //:later:
+later output
+[32mINFO: [0mFound 2 targets...
+[32mINFO: [0mElapsed time: 4.202s, Critical Path: 4.03s
+[32mINFO: [0m3 processes: 1 internal, 2 darwin-sandbox.
+[32mINFO: [0mBuild completed successfully, 3 total actions
+[0m

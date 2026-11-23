@@ -1,0 +1,27 @@
+Starting local Bazel server and connecting to it...
+[32mINFO: [0mInvocation ID: def412db-0420-4457-ab75-6e216fc37bf0
+[32mComputing main repo mapping:[0m 
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[35mWARNING: [0mThe target pattern '//:all' is ambiguous: ':all' is both a wildcard, and the name of an existing filegroup rule; using the latter interpretation
+[32mAnalyzing:[0m target //:all (1 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m target //:all (1 packages loaded, 0 targets configured)
+
+[33mDEBUG: [0mRule '_main~ext~bar' indicated that a canonical reproducible form can be obtained by modifying arguments integrity = "sha256-175Ja2nch4ffKeLsLsE+y9eObxh+pfrzIo8Q3dYXVBo="
+[33mDEBUG: [0mRepository _main~ext~bar instantiated at:
+  <builtin>: in <toplevel>
+Repository rule http_archive defined at:
+  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/external/bazel_tools/tools/build_defs/repo/http.bzl:400:31: in <toplevel>
+[33mDEBUG: [0mRule '_main~ext~foo' indicated that a canonical reproducible form can be obtained by modifying arguments integrity = "sha256-175Ja2nch4ffKeLsLsE+y9eObxh+pfrzIo8Q3dYXVBo="
+[33mDEBUG: [0mRepository _main~ext~foo instantiated at:
+  <builtin>: in <toplevel>
+Repository rule http_archive defined at:
+  /home/user/.cache/bazel/_bazel_user/0123456789abcdef/external/bazel_tools/tools/build_defs/repo/http.bzl:400:31: in <toplevel>
+[32mINFO: [0mAnalyzed target //:all (7 packages loaded, 10 targets configured).
+[32mINFO: [0mFound 1 target...
+Target //:all up-to-date (nothing to build)
+[32mINFO: [0mElapsed time: 2.585s, Critical Path: 0.01s
+[32mINFO: [0m1 process: 1 internal.
+[32mINFO: [0mBuild completed successfully, 1 total action
+[0m

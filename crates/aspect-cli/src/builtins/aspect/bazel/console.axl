@@ -1,0 +1,254 @@
+"""Bazel's console on the `build`/`test` tasks: the stages the `Console`
+feature processes it with by default, and the tips its tip rules emit.
+
+## Default stages
+
+`default_stages` is what the `Console` feature (`@aspect//feature/console.axl`)
+puts on `BazelTrait.output_stages`, which every `ctx.bazel.build`/`test` of a
+task processes its console with:
+
+  `relativize_paths`  sandbox and workspace paths made relative to the cwd.
+  `drop`              the caller's own patterns; nothing by default.
+  `collapse_similar`  the first warning of each kind is shown; the summary at
+                      the end counts the rest, and names a file with all of
+                      them. A debug message (a `print()`) is not collapsed.
+  `recap_errors`      the first `recap_max` errors again at the end, once they
+                      have scrolled away.
+  `collapse_repeats`  a run of identical lines, an action's output included,
+                      shown as its first and a count. Never Bazel's progress
+                      area or status line, so a stalled build still shows it
+                      is alive.
+
+Any of them but `drop`, which has no default, can be left out by name
+(`STAGE_NAMES`). Apart from `collapse_repeats`, they never collapse `INFO:`
+messages: `INFO: From <action>:` carries the action's output, a failing
+test's included, in its body. A caller's own `collapse` and `drop` patterns
+can match any severity. Every line hidden is in the raw log the summary
+names.
+
+Bazel is always captured with its curses UI, which ends each action's output
+for the stages. Where curses is not shown (stdout or stderr not a terminal,
+or the user's `--curses=no`), the console is rendered to plain lines and the
+stages run on those; Bazel's status line comes through every few seconds.
+The `agent` profile, for a coding agent reading the console, shows plain
+lines whatever the terminal, and no status line. A user's `--curses=yes`
+still shows curses, unless their `--noshow_progress` turned progress off:
+then plain lines, without the status line, whatever the profile.
+
+## Tips
+
+Besides those stages, an `aggregate` stage per tip rule matches it over the
+whole console (`./console_tips.axl` and `TipsTrait.rules`, `tip_stages`), and
+the feature's `BazelTrait.output_end` hook emits the tips of each rule that
+matched once the console ends (`emit_tips`). Both read the rules as each
+build starts and ends, through `output_start` and `output_end`, so rules a
+feature appends after the `Console` feature's own implementation has run are
+matched too. `--tips:silence` turns a rule off, so it is not a stage
+`disable` names.
+
+## Held lines and frames
+
+Lines an `intercept` stage holds are answered by the `BazelTrait.output_intercept`
+hooks, and the `BazelTrait.output_frame` hooks draw a feature's own screen. The
+runtime calls both: from `build.run_output_hooks()`, which the invocation
+handles call for every build event and quiet tick and, with `until_ended`,
+before they close the execution log (whose close blocks until the client
+exits, and would leave a held line stalling Bazel), and inside `build.wait()`.
+"""
+
+load("@aspect//bazel/console_tips.axl", "CONSOLE_TIP_RULES")
+load("../private/lib/text.axl", "did_you_mean_then")
+load("../private/lib/tips.axl", "RULE_VARS", "all_tip_rules", "emit_rule_tips", "rule_aggregation")
+
+# The default stages, by the names `disable` takes.
+STAGE_NAMES = ["relativize_paths", "collapse_similar", "recap_errors", "collapse_repeats"]
+
+PROFILES = ["human", "agent"]
+
+# What a tip rule's `aggregate` id starts with, to tell it from a caller's own.
+TIP_ID_PREFIX = "tip:"
+
+def console_tip_rules(user: list) -> list:
+    """The built-in console tip rules, then `user`'s; an id used twice fails."""
+    return all_tip_rules(CONSOLE_TIP_RULES, user)
+
+def _rule_problem(r) -> str | None:
+    """Why rule `r` cannot be matched: its pattern does not compile, names a
+    group its template already has a variable for (`line`, `count`,
+    `truncated`, or one of its aggregates), or the rule groups by or
+    aggregates a capture its pattern does not name."""
+    err = bazel.output.pattern_error(r.when.pattern)
+    if err:
+        return err
+    groups = bazel.output.pattern_groups(r.when.pattern)
+    taken = [g for g in groups if g in RULE_VARS or g in r.aggregate]
+    if taken:
+        return "its pattern's group %s would hide a template variable of the same name; rename it" % ", ".join(taken)
+    wanted = list(r.group_by) + [a.capture for a in r.aggregate.values() if a.capture]
+    missing = [c for c in wanted if c not in groups + ["line"]]
+    if missing:
+        return "its pattern has no named group %s (it has: %s)" % (", ".join(missing), ", ".join(groups) or "none")
+    return None
+
+def tip_stages(rules: list) -> struct:
+    """`struct(stages, problems)`: an `aggregate` stage per `on_console_line`
+    rule in `rules` (`rule_aggregation`), for `emit_tips`. A rule that
+    cannot be matched is left out, and reported in `problems`."""
+    stages = []
+    problems = []
+    for r in rules:
+        if r.when.kind != "console_line":
+            continue
+        err = _rule_problem(r)
+        if err:
+            problems.append("tip rule %r ignored: %s" % (r.id, err))
+            continue
+        a = rule_aggregation(r)
+        stages.append(bazel.output.aggregate(
+            TIP_ID_PREFIX + a.id,
+            a.pattern,
+            group_by = a.group_by,
+            aggregations = a.aggregations,
+            samples = a.samples,
+        ))
+    return struct(stages = stages, problems = problems)
+
+def emit_tips(ctx, build, rules: list, batch: str) -> None:
+    """Emit the tips of every rule in `rules` that a line of `build`'s
+    console matched (`emit_rule_tips`), after its `wait()`. `batch`, unique
+    among the task's builds, names the build, so its aggregates count once."""
+    reports = {r["id"]: r for r in build.output_aggregates()}
+    for rule in rules:
+        report = reports.get(TIP_ID_PREFIX + rule.id)
+        if report:
+            emit_rule_tips(ctx, rule, report, build, batch)
+
+# `recap_errors`' `max` unless the caller sets one.
+RECAP_MAX = 10
+
+def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = [], drop: list[str] = [], recap_max = RECAP_MAX, root = None, cwd = None) -> struct:
+    """The default console stages for `profile` (`human` or `agent`).
+
+    Never fails on what a user configured, since the `Console` feature runs for
+    every task: an unknown stage name or an invalid pattern is left out and
+    reported in `problems` instead.
+
+    Args:
+        profile:  `human`, or `agent` for a coding agent reading the console.
+        disable:  names from `STAGE_NAMES` to leave out. Leaving out
+                  `collapse_similar` leaves out its default, not the
+                  caller's `collapse` patterns; `drop` has no default.
+        collapse: regexes; the messages each matches collapse together as one
+                  kind, whatever their severity.
+        drop:     regexes of messages to hide, with the indented lines under
+                  them; nothing by default.
+        recap_max: how many errors `recap_errors` repeats.
+        root:     the workspace directory, for `relativize_paths`, or a
+                  function returning it, called only when that stage is on.
+        cwd:      the directory paths are made relative to, likewise; None
+                  is `root`.
+
+    Returns:
+        `struct(stages, display, progress, problems)`: the `bazel.output`
+        stages, the `BazelTrait.output_display` and `output_progress` the
+        profile asks for (`display` `auto` for no preference), and messages
+        about what was left out.
+    """
+    problems = []
+    for n in disable:
+        if n not in STAGE_NAMES:
+            problems.append("unknown console stage %r is ignored%s" % (n, did_you_mean_then(n, STAGE_NAMES, "; ", "the stages are " + ", ".join(STAGE_NAMES))))
+    if profile not in PROFILES:
+        problems.append("unknown console profile %r%s" % (profile, did_you_mean_then(profile, PROFILES, "; ", "using human")))
+        profile = "human"
+
+    def _valid(patterns):
+        ok = []
+        for p in patterns:
+            err = bazel.output.pattern_error(p)
+            if err:
+                problems.append("console pattern ignored: %s" % err)
+            else:
+                ok.append(p)
+        return ok
+
+    agent = profile == "agent"
+    o = bazel.output
+    stages = []
+    if "relativize_paths" not in disable:
+        call = lambda v: v() if type(v) == "function" else v
+        stages.append(o.relativize_paths(root = call(root), cwd = call(cwd)))
+    drops = _valid(drop)
+    if drops:
+        stages.append(o.drop(drops))
+
+    # Warnings fold by kind. A `DEBUG:` (a Starlark `print()`) never does: its
+    # values differ, and so may the lines under it.
+    severities = [] if "collapse_similar" in disable else ["WARNING"]
+    groups = {p: p for p in _valid(collapse)}
+    if severities or groups:
+        stages.append(o.collapse_similar(severities = severities, groups = groups))
+    if "recap_errors" not in disable:
+        if type(recap_max) == "int" and recap_max > 0:
+            stages.append(o.recap_errors(max = recap_max))
+        else:
+            problems.append("console recap_max %r is not a positive number; using %d" % (recap_max, RECAP_MAX))
+            stages.append(o.recap_errors(max = RECAP_MAX))
+    if "collapse_repeats" not in disable:
+        stages.append(o.collapse_repeats())
+    return struct(stages = stages, display = "lines" if agent else "auto", progress = not agent, problems = problems)
+
+def start_stages(ctx, trait) -> list:
+    """The stages `trait`'s `output_start` hooks return for `ctx`, now."""
+    stages = []
+    for hook in trait.output_start:
+        stages.extend(hook(ctx) or [])
+    return stages
+
+def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], curses = None, color = None, show_progress = None):
+    """The `bazel.output.processor` for `trait.output_stages` and `extra`
+    (the `output_start` hooks' stages, `start_stages`), or None, leaving
+    Bazel's stderr inherited, when there are no stages and the trait neither
+    hides the console nor draws frames over it.
+
+    Nothing is shown for a `trait.output_display` of `none`: a feature draws
+    the screen itself. Otherwise what is shown is Bazel's curses UI as
+    `curses`, the user's own `--curses`, says; else as `trait.output_display`
+    does (`curses` or `lines`); else, for `auto`, when the task's stdout and
+    stderr are both terminals, since Bazel decides colour and its live UI for
+    both. Plain lines carry Bazel's status line every few seconds unless
+    `trait.output_progress` is False, or `show_progress`, the user's own
+    `--show_progress`, is, which shows plain lines in place of curses too. Colour shows as `color`, the user's own
+    `--color`, says; else as the CLI's own lines do (`std.io.stderr.color`).
+    Bazel itself is asked for curses, colour and progress either way: see
+    `bazel.output.processor`."""
+    stages = list(trait.output_stages) + list(extra)
+    if not stages and trait.output_display != "none" and not trait.output_frame:
+        return None
+    if trait.output_display == "none":
+        display = "none"
+    elif curses != None:
+        display = "curses" if curses else "lines"
+    elif trait.output_display != "auto":
+        display = trait.output_display
+    else:
+        display = "curses" if stdout_is_tty and stderr_is_tty else "lines"
+
+    # Progress turned off: the capture still asks Bazel for it, so its curses
+    # UI would show it; plain lines leave it out.
+    if show_progress == False and display == "curses":
+        display = "lines"
+    return bazel.output.processor(
+        stages = stages,
+        display = display,
+        show_color = color,
+        progress = trait.output_progress and show_progress != False,
+    )
+
+bazel_console = struct(
+    emit_tips = emit_tips,
+    tip_rules = console_tip_rules,
+    tip_stages = tip_stages,
+    processor_for = processor_for,
+    start_stages = start_stages,
+)

@@ -21,9 +21,14 @@ Covers the tip framework primitives directly:
   - `blockquote_body` — the line-prefix transform applied to tip bodies
                         so they render as Markdown blockquotes.
   - `strip_code_fences` — fence-line strip used by the terminal
-                            `TIP:` printer.
-  - `_State.auto_print` — `add_tip` reads this to gate its terminal
-                           print; tests pin it `False` via
+                            printer.
+  - The terminal: `terminal_tip_lines` and the end-of-task lines, and
+                  `show` / `max_shown` (each, first, end), captured
+                  through `tips._set_sink_for_test`.
+  - `merge_aggregate(s)` and the once-per-batch merge of `aggregates`.
+  - `emit_rule_tips` — a rule's tips from an aggregate report: per
+                       group, per match, `only_if`, `emit`.
+  - `_State.auto_print` — gates the terminal; tests pin it `False` via
                            `tips._reset_for_test`.
 
 These tests need a real `ctx` (storage is keyed off `ctx`'s tmpdir).
@@ -32,6 +37,7 @@ Run with:
   aspect dev test-tips
 """
 
+load("./ansi.axl", "ansi")
 load(
     "./tips.axl",
     "AspectApiTokenHost",
@@ -44,6 +50,8 @@ load(
     "TIP_IMPORTANT",
     "TIP_INFO",
     "TIP_REJECT",
+    "TIP_SHOW_END",
+    "TIP_SHOW_FIRST",
     "TIP_SUGGESTION",
     "TIP_TEMPLATE_FORMAT",
     "TIP_TEMPLATE_JINJA2",
@@ -51,17 +59,26 @@ load(
     "TIP_WARNING",
     "TipsTrait",
     "add_tip",
+    "agg",
     "blockquote_body",
     "collect_tips_sorted",
     "decorate_tip",
+    "emit_rule_tips",
+    "merge_aggregate",
+    "merge_aggregates",
+    "on_console_line",
     "severity_emoji",
     "severity_label",
     "severity_rank",
     "silence_hint_line",
     "strip_code_fences",
+    "terminal_more_line",
+    "terminal_now_line",
+    "terminal_tip_lines",
     "tip_add_aspect_api_token",
     "tip_add_id_token_permission",
     "tip_replace",
+    "tip_rule",
     "tip_shows_on",
     "tip_to_payload",
     "tips",
@@ -698,6 +715,241 @@ def _test_auto_print_flag(ctx):
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "T", body = "B")
     _eq("auto_print False — tip still recorded", _ids(tips._inspect_for_test(ctx)), ["x"])
 
+def _capture(ctx):
+    """Turn printing on and capture what the terminal would get, colour
+    stripped, into the returned list."""
+    lines = []
+    tips._set_auto_print_for_test(ctx, True)
+    tips._set_sink_for_test(ctx, lambda line: lines.append(ansi.strip(line)))
+    return lines
+
+def _test_terminal_format(_):
+    """`SEVERITY[id]: title`, the body indented, no footer."""
+    _eq("one line", terminal_tip_lines("disk-full", TIP_WARNING, "The disk is full", "`aspect gc` prunes."), [
+        "⚠️ WARNING[disk-full]: The disk is full",
+        "  `aspect gc` prunes.",
+    ])
+    _eq("multi-line, fences stripped", terminal_tip_lines("x", TIP_SUGGESTION, "T", "Run:\n\n```\naspect gc\n```\n"), [
+        "💡 TIP[x]: T",
+        "  Run:",
+        "",
+        "  aspect gc",
+    ])
+    _eq("no body", terminal_tip_lines("x", TIP_INFO, "T", ""), ["ℹ️ INFO[x]: T"])
+    _eq("coloured", ansi.strip(terminal_tip_lines("x", TIP_IMPORTANT, "T", "", True)[0]), "🔥 IMPORTANT[x]: T")
+    _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "⚠️ WARNING[x]: 3 more; the last: T")
+    _eq("now", terminal_now_line("x", TIP_INFO, "T"), "ℹ️ INFO[x]: now: T")
+
+def _test_show_each_with_a_cap(ctx):
+    """Each changed emit prints up to `max_shown`; the rest are counted for
+    one line at the end."""
+    _reset(ctx)
+    lines = _capture(ctx)
+    for i in range(4):
+        add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T%d" % i, body = "", max_shown = 2)
+    add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T3", body = "", max_shown = 2)
+    _eq("two printed", lines, ["⚠️ WARNING[e]: T0", "⚠️ WARNING[e]: T1"])
+    tips._finish_for_test(ctx)
+    _eq("then counted", lines[2:], ["⚠️ WARNING[e]: 2 more; the last: T3"])
+    _reset(ctx)
+
+def _test_show_first_and_end(ctx):
+    """`first` prints the first and counts the rest; `end` prints only at
+    the end, each of its tips in its final state."""
+    _reset(ctx)
+    lines = _capture(ctx)
+    add_tip(ctx, id = "f", severity = TIP_INFO, title = "one", body = "", show = TIP_SHOW_FIRST)
+    add_tip(ctx, id = "f", severity = TIP_INFO, title = "two", body = "", show = TIP_SHOW_FIRST)
+    add_tip(ctx, id = "n", severity = TIP_INFO, title = "a", body = "b", key = "1", show = TIP_SHOW_END, max_shown = 1)
+    add_tip(ctx, id = "n", severity = TIP_INFO, title = "a2", body = "b", key = "1", show = TIP_SHOW_END, max_shown = 1)
+    add_tip(ctx, id = "n", severity = TIP_INFO, title = "c", body = "", key = "2", show = TIP_SHOW_END, max_shown = 1)
+    _eq("only the first so far", lines, ["ℹ️ INFO[f]: one"])
+    tips._finish_for_test(ctx)
+    _eq("the end", lines[1:4], [
+        "ℹ️ INFO[f]: now: two",
+        "ℹ️ INFO[n]: a2",
+        "  b",
+    ])
+    _eq("end's cap counts the rest", lines[4], "ℹ️ INFO[n]: 1 more; the last: c")
+    _eq("nothing after", len(lines), 5)
+    _reset(ctx)
+
+def _test_quiet_reemits(ctx):
+    """An unchanged re-emit neither prints nor counts."""
+    _reset(ctx)
+    lines = _capture(ctx)
+    add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
+    add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
+    tips._finish_for_test(ctx)
+    _eq("printed once, no more line", lines, ["ℹ️ INFO[q]: same"])
+    _reset(ctx)
+    lines = _capture(ctx)
+    add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
+    add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
+    tips._finish_for_test(ctx)
+    _eq("an unchanged occurrence past the cap counts", lines[:2], ["ℹ️ INFO[o]: same", "ℹ️ INFO[o]: 1 more; the last: same"])
+    add_tip(ctx, id = "late", severity = TIP_INFO, title = "after", body = "", show = TIP_SHOW_END)
+    _eq("a tip after the end prints at once", lines[-1], "ℹ️ INFO[late]: after")
+    add_tip(ctx, id = "o", severity = TIP_INFO, title = "later", body = "", max_shown = 1)
+    _eq("even past its cap", lines[-1], "ℹ️ INFO[o]: later")
+    tips._finish_for_test(ctx)
+    _eq("the end runs once", lines[-1], "ℹ️ INFO[o]: later")
+    _reset(ctx)
+    lines = _capture(ctx)
+    add_tip(ctx, id = "x", severity = TIP_INFO, title = "A", body = "", max_shown = 1)
+    add_tip(ctx, id = "x", severity = TIP_INFO, title = "B", body = "", key = "k2", max_shown = 1)
+    add_tip(ctx, id = "x", severity = TIP_INFO, title = "A", body = "", max_shown = 1)
+    tips._finish_for_test(ctx)
+    _eq("the last names what was held, not a refresh", lines[1], "ℹ️ INFO[x]: 1 more; the last: B")
+    _reset(ctx)
+    lines = _capture(ctx)
+    hooks = ctx.traits[TipsTrait].tip_suggestion
+    hooks.append(lambda c, info: TIP_REJECT if info.key == "foo" else TIP_ACCEPT)
+    add_tip(ctx, id = "r", severity = TIP_INFO, title = "kept", body = "", occurrence = True)
+    add_tip(ctx, id = "r", severity = TIP_INFO, title = "gone", body = "", key = "foo", occurrence = True, unshown = 5)
+    hooks.pop()
+    tips._finish_for_test(ctx)
+    _eq("what a rejected emit stood for still counts", lines[1], "ℹ️ INFO[r]: 5 more")
+    _reset(ctx)
+    add_tip(ctx, id = "broken", severity = TIP_INFO, title = "{{ x", body = "", type = TIP_TEMPLATE_JINJA2, vars = {"x": 1})
+    _eq("a template that does not render is shown as written", tips._inspect_for_test(ctx)[0]["title"], "{{ x")
+    _reset(ctx)
+    lines = _capture(ctx)
+    add_tip(ctx, id = "off", severity = TIP_INFO, title = "t", body = "", surfaces = [SURFACE_GITHUB_PR_SUMMARY])
+    tips._finish_for_test(ctx)
+    _eq("nothing on the terminal, no hint", lines, [])
+    _reset(ctx)
+
+def _test_merge_aggregate(_):
+    """Each kind merges as documented; lists stop at `max`."""
+    m = lambda kind, a, b, mx = 3: merge_aggregate({"kind": kind, "value": a, "max": mx}, {"kind": kind, "value": b, "max": mx})
+    _eq("count", m("count", 2, 3)["value"], 5)
+    _eq("count_distinct sums", m("count_distinct", 2, 3)["value"], 5)
+    _eq("unique", m("unique", ["a", "b"], ["b", "c"])["value"], ["a", "b", "c"])
+    got = m("unique", ["a", "b"], ["c", "d"])
+    _eq("unique stops at max", (got["value"], got["truncated"]), (["a", "b", "c"], True))
+    _eq("all", m("all", ["a"], ["a"], 5)["value"], ["a", "a"])
+    _eq("count_by", m("count_by", {"x": 2, "y": 1}, {"y": 3})["value"], {"y": 4, "x": 2})
+    _eq("first", m("first", "a", "b")["value"], "a")
+    _eq("first from b when a has none", m("first", None, "b")["value"], "b")
+    _eq("last", m("last", "a", "b")["value"], "b")
+    _eq("merge_aggregates adds new names", merge_aggregates({}, {"n": {"kind": "count", "value": 1}})["n"]["value"], 1)
+
+def _test_aggregates_merge_once_per_batch(ctx):
+    """Aggregates merge on each new batch (a build), and an emit of the same
+    batch replaces that batch's share instead of adding to it."""
+    _reset(ctx)
+    n = lambda v: {"n": {"kind": "count", "value": v, "max": 0}}
+    emit = lambda v, batch: add_tip(ctx, id = "a", severity = TIP_INFO, title = "{{ n }}", body = "", type = TIP_TEMPLATE_JINJA2, aggregates = n(v), batch = batch)
+    emit(2, "1")
+    emit(2, "1")
+    _eq("one batch counts once", tips._inspect_for_test(ctx)[0]["title"], "2")
+    emit(3, "2")
+    _eq("a second batch adds", tips._inspect_for_test(ctx)[0]["title"], "5")
+    emit(4, "2")
+    _eq("its re-emit replaces its share", tips._inspect_for_test(ctx)[0]["title"], "6")
+    emit(1, "")
+    _eq("no batch: every emit adds", tips._inspect_for_test(ctx)[0]["title"], "7")
+    _eq("payload carries them", tip_to_payload(tips._inspect_for_test(ctx)[0])["aggregates"]["n"]["value"], 7)
+
+def _report(groups, samples = [], dropped = 0):
+    count = dropped
+    for g in groups:
+        count += g["count"]
+    return {"id": "tip:r", "count": count, "groups": groups, "dropped_matches": dropped, "samples": samples}
+
+def _test_rule_tips_from_a_report(ctx):
+    """One tip per group, keyed by its `group_by` values, rendered from its
+    aggregates; under `each`, one per kept match with its captures."""
+    _reset(ctx)
+    rule = tip_rule(
+        id = "deps",
+        when = on_console_line("x"),
+        severity = TIP_SUGGESTION,
+        title = "{{ count }} on {{ dep }}",
+        body = "{{ targets | join(', ') }}{% if truncated %} and more{% endif %}",
+        group_by = ["dep"],
+        aggregate = {"targets": agg.unique("target")},
+        show = TIP_SHOW_END,
+    )
+    report = _report([
+        {"key": {"dep": "//old"}, "line": "l1", "count": 2, "values": {"targets": ["//a", "//b"]}, "truncated": []},
+        {"key": {"dep": "//legacy"}, "line": "l2", "count": 1, "values": {"targets": ["//c"]}, "truncated": ["targets"]},
+    ])
+    emit_rule_tips(ctx, rule, report, None, "1")
+    got = [(t["key"], t["title"], t["body"]) for t in tips._inspect_for_test(ctx)]
+    _eq("a tip per group", got, [("//old", "2 on //old", "//a, //b"), ("//legacy", "1 on //legacy", "//c and more")])
+    emit_rule_tips(ctx, rule, report, None, "2")
+    _eq("a second build merges", tips._inspect_for_test(ctx)[0]["title"], "4 on //old")
+
+    _reset(ctx)
+    lines = _capture(ctx)
+    each = tip_rule(id = "each", when = on_console_line("x"), severity = TIP_INFO, title = "t={{ target }}", body = "{{ line }}", max_shown = 2)
+    report = _report(
+        [{
+            "key": {},
+            "line": "first",
+            "captures": {"target": "//a"},
+            "last": {"group": 0, "seq": 5, "line": "L5", "captures": {"target": "//e"}},
+            "count": 5,
+            "values": {},
+            "truncated": [],
+        }],
+        samples = [
+            {"group": 0, "seq": 1, "line": "L1", "captures": {"target": "//a"}},
+            {"group": 0, "seq": 2, "line": "L2", "captures": {}},
+        ],
+    )
+    emit_rule_tips(ctx, each, report, None, "1")
+    tips._finish_for_test(ctx)
+    _eq("each match, then the rest counted", lines[:5], [
+        "ℹ️ INFO[each]: t=//a",
+        "  L1",
+        "ℹ️ INFO[each]: t=",
+        "  L2",
+        "ℹ️ INFO[each]: 3 more; the last: t=//e",
+    ])
+    _eq("the group stores its last match", tips._inspect_for_test(ctx)[0]["title"], "t=//e")
+
+    _reset(ctx)
+    lines = _capture(ctx)
+    same = {"group": 0, "seq": 1, "line": "L", "captures": {}}
+    report = _report(
+        [{"key": {}, "line": "L", "captures": {}, "last": dict(same, seq = 2), "count": 2, "values": {}, "truncated": []}],
+        samples = [same, dict(same, seq = 2)],
+    )
+    emit_rule_tips(ctx, tip_rule(id = "twice", when = on_console_line("x"), severity = TIP_INFO, title = "same", body = ""), report, None, "1")
+    _eq("identical matches each print", lines, ["ℹ️ INFO[twice]: same", "ℹ️ INFO[twice]: same"])
+
+    _reset(ctx)
+    lines = _capture(ctx)
+    grouped = tip_rule(id = "grp", when = on_console_line("x"), severity = TIP_INFO, title = "{{ t }}", body = "", group_by = ["t"], show = TIP_SHOW_FIRST)
+    report = dict(_report([
+        {"key": {"t": "a"}, "line": "a", "captures": {}, "count": 1, "values": {}, "truncated": []},
+    ], dropped = 3), dropped_groups = 3)
+    emit_rule_tips(ctx, grouped, report, None, "1")
+    emit_rule_tips(ctx, grouped, report, None, "2")
+    tips._finish_for_test(ctx)
+    _eq("groups past max_groups count once, and no printed title is named", lines[:2], ["ℹ️ INFO[grp]: a", "ℹ️ INFO[grp]: 3 more"])
+
+    _reset(ctx)
+    guarded = tip_rule(id = "g", when = on_console_line("x"), severity = TIP_INFO, title = "t", body = "", only_if = lambda _ctx, _build: False)
+    emit_rule_tips(ctx, guarded, report, None, "1")
+    _eq("only_if False: nothing", tips._inspect_for_test(ctx), [])
+    custom = tip_rule(
+        id = "c",
+        when = on_console_line("x"),
+        severity = TIP_INFO,
+        title = "t",
+        body = "",
+        emit = lambda _ctx, _build, groups: [{"title": "{{ n }} groups", "body": "", "vars": {"n": len(groups)}}],
+    )
+    emit_rule_tips(ctx, custom, report, None, "1")
+    _eq("emit decides", tips._inspect_for_test(ctx)[0]["title"], "1 groups")
+    emit_rule_tips(ctx, custom, _report([]), None, "1")
+    _eq("no matches: nothing more", len(tips._inspect_for_test(ctx)), 1)
+    _reset(ctx)
+
 def _test_impl(ctx):
     _test_add_tip_basic(ctx)
     _test_add_tip_dedup(ctx)
@@ -731,7 +983,14 @@ def _test_impl(ctx):
     _test_tip_suggestion_hook(ctx)
     _test_strip_code_fences(ctx)
     _test_auto_print_flag(ctx)
-    print("tips.axl: OK (34 sections)")
+    _test_terminal_format(ctx)
+    _test_show_each_with_a_cap(ctx)
+    _test_show_first_and_end(ctx)
+    _test_quiet_reemits(ctx)
+    _test_merge_aggregate(ctx)
+    _test_aggregates_merge_once_per_batch(ctx)
+    _test_rule_tips_from_a_report(ctx)
+    print("tips.axl: OK (41 sections)")
     return 0
 
 tips_tests = task(

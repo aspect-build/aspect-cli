@@ -1,0 +1,57 @@
+"""The built-in tip rules on Bazel's console: a next step for a failure a line
+of the console names, emitted as a tip once the console ends.
+
+To add one, append a `tip_rule` to `CONSOLE_TIP_RULES`:
+
+  `id`        a short name, unique among all tip rules;
+              `--tips:silence=<id>` turns it off.
+  `when`      `on_console_line(pattern)`: a regex matched against every
+              console line, an action's or a test's output included, with
+              escape sequences stripped.
+  `severity`  `TIP_IMPORTANT`, `TIP_WARNING`, `TIP_SUGGESTION` or `TIP_INFO`.
+  `title`, `body`  what to do about it, as Jinja2: `{{ line }}` is the line
+              that matched, `{{ count }}` how many did.
+  `surfaces`  where it shows; None is the terminal only.
+  `show`      `TIP_SHOW_FIRST` for advice that is the same whatever line
+              fired it; the default prints a tip per matching line.
+  `example`   a real line it must match, as Bazel or the tool printed it;
+              rules see it after the rewrites, so with workspace paths
+              shortened as the console shows them.
+
+`tip_rule` also takes `group_by`, `aggregate`, `max_shown`, `emit`, `only_if`
+and `combine_across_tasks`; see "Tip rules" in `private/lib/tips.axl`.
+
+`console_tips_test.axl` checks that every id is unique, every pattern
+compiles and every pattern matches its `example`. Run it with
+`aspect dev test-bazel-console-tips`.
+
+A repository's own rules go on `ctx.traits[TipsTrait].rules`, next to these;
+an id used twice fails.
+"""
+
+load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SHOW_FIRST", "TIP_WARNING", "on_console_line", "tip_rule")
+
+CONSOLE_TIP_RULES = [
+    tip_rule(
+        id = "server-crash",
+        when = on_console_line(r"Server terminated abruptly|FATAL: bazel ran out of memory"),
+        severity = TIP_WARNING,
+        title = "The Bazel server crashed",
+        body = "It most often runs out of memory. `bazel info server_log` names its log. A larger heap (the `--host_jvm_args=-Xmx<size>` startup flag) usually helps, and `--heap_dump_on_oom` writes a heap dump on the next out-of-memory crash, to show what filled it.",
+        surfaces = TASK_SCREENS,
+        show = TIP_SHOW_FIRST,
+        example = "Server terminated abruptly (error code: 14, error message: 'Socket closed', log file: '/home/user/.cache/bazel/_bazel_user/0123456789abcdef/server/jvm.out')",
+    ),
+    tip_rule(
+        id = "disk-full",
+        # Bazel's own error, or its crash's exception at the start of a line
+        # of its trace: not a tool's output that merely mentions a full disk.
+        when = on_console_line(r"^(?:(?:ERROR|FATAL): .*|java\.io\.IOException: )No space left on device"),
+        severity = TIP_WARNING,
+        title = "The disk is full",
+        body = "`aspect gc` prunes idle output bases and Bazel's download cache.",
+        surfaces = TASK_SCREENS,
+        show = TIP_SHOW_FIRST,
+        example = "ERROR: /home/user/demo/lib/BUILD.bazel:3:8: Compiling lib/a.cc failed: I/O exception during sandboxed execution: /home/user/.cache/bazel/_bazel_user/0123456789abcdef/sandbox/darwin-sandbox/12/execroot/_main/lib/a.o (No space left on device)",
+    ),
+]

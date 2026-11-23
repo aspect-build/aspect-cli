@@ -10,19 +10,22 @@ silent breakage here would skip every Workflows-feature recovery hook.
 Also covers `target_patterns`, which decides whether the `targets` arg's
 default reaches Bazel — get that wrong and a caller-forwarded
 `--target_pattern_file` collides with an invented pattern, which Bazel
-rejects outright — and `resolve_targets`, which turns a task's args into the
-patterns and flags it spawns with.
+rejects outright — `resolve_targets`, which turns a task's args into the
+patterns and flags it spawns with, and `tty_flags`, which tells Bazel
+whether it writes to a terminal, by the console processor when the trait
+has `output_stages`.
 
-Every section but the last is pure logic. The last one spawns a real Bazel,
-because the thing it guards — an invocation that Bazel rejects outright —
-only exists once there is a real process to reject it.
+Every section but the last two is pure logic. Those spawn a real Bazel,
+because what they guard — an invocation Bazel rejects outright, and the
+console capture reading that rejection — only exists once there is a real
+process to reject it.
 
 Run with:
   aspect dev test-bazel-invocation
 """
 
 load("@aspect//bazel/flags.axl", "testonly_eviction_retry_flag")
-load("@aspect//bazel/invocation.axl", "resolve_targets", "target_patterns")
+load("@aspect//bazel/invocation.axl", "resolve_targets", "target_patterns", "tty_flags")
 load("@aspect//bazel.axl", "BazelTrait", "default_retry", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of", "exit_codes", "may_retry", "server_error")
 
 def _eq(label, got, want):
@@ -183,6 +186,38 @@ def _test_resolve_targets_keeps_explicit_patterns(_):
         (["//a"], ["--target_pattern_file=/tmp/p"]),
     )
 
+def _test_tty_flags_follow_the_processor(_):
+    """A captured console sets `--isatty` on the spawn itself, after the
+    user's flags; without one, stdout decides it as a base flag."""
+    _eq("capturing", tty_flags(True, True), [])
+    _eq("inherited tty", tty_flags(False, True), ["--isatty=1"])
+    _eq("inherited non-tty", tty_flags(False, False), ["--isatty=0"])
+
+def _test_trait_accepts_output_stages(_):
+    _eq("default", BazelTrait().output_stages, [])
+    _eq("no hooks by default", (BazelTrait().output_intercept, BazelTrait().output_end), ([], []))
+    stages = [bazel.output.collapse_similar()]
+    _eq("set", [s.name for s in BazelTrait(output_stages = stages).output_stages], ["collapse_similar"])
+
+def _test_captured_console_sees_bazel_reject_a_flag(ctx: TaskContext) -> None:
+    """The capture against a real Bazel: its rejection of an unknown flag
+    reaches the observer patterns, and `wait()` returns once the client is
+    gone."""
+    processor = bazel.output.processor(
+        display = "lines",
+        stages = [bazel.output.observe({"unrecognized": "Unrecognized option"})],
+    )
+    build = ctx.bazel.build(
+        "//crates/bazel:bazel",
+        flags = ["--definitely_not_a_flag"] + processor.flags,
+        output = processor,
+    )
+    status = build.wait()
+    if status.success:
+        fail("expected Bazel to reject --definitely_not_a_flag")
+    ids = [id for (id, _) in build.output_matches()]
+    _eq("rejection observed", ids[:1], ["unrecognized"])
+
 def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
     """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
     it exit early, and the invocation has to surface that exit rather than
@@ -271,11 +306,14 @@ def _test_impl(ctx: TaskContext) -> int:
     _test_resolve_targets_reads_the_forwarded_spelling(ctx)
     _test_resolve_targets_without_the_arg(ctx)
     _test_resolve_targets_keeps_explicit_patterns(ctx)
+    _test_tty_flags_follow_the_processor(ctx)
+    _test_trait_accepts_output_stages(ctx)
 
-    # Spawns a real Bazel; keep it last so a stall cannot mask the pure
+    # Spawn a real Bazel; keep them last so a stall cannot mask the pure
     # sections above.
     _test_rejected_command_line_does_not_hang(ctx)
-    print("invocation_test.axl: OK (18 sections)")
+    _test_captured_console_sees_bazel_reject_a_flag(ctx)
+    print("invocation_test.axl: OK (22 sections)")
     return 0
 
 invocation_tests = task(

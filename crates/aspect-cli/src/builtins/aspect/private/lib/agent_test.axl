@@ -31,6 +31,7 @@ load(
     "testonly_env_detectors",
     "testonly_harnesses",
     "testonly_hosts_sessions",
+    "under_agent",
 )
 
 _AGENT_VARS = [
@@ -176,6 +177,28 @@ def _test_claude_code_is_detected_from_its_own_variables(ctx):
     _restore(ctx, saved)
     _eq("kind", got["kind"], "claude-code")
     _eq("id", got["id"], "b22fe20c-1f9f-4476-9097-9f4648158215")
+
+def _test_under_agent_reads_the_environment(ctx):
+    """Each layer `under_agent` reads, alone, and none at all."""
+    saved = _clear(ctx)
+    none = under_agent(ctx.std)
+    seen = {}
+    for (var, value) in [
+        ("ASPECT_AGENT_KIND", "custom"),
+        ("ASPECT_AGENT_ID", "x"),
+        ("CLAUDECODE", "1"),
+        ("CODEX_THREAD_ID", "t"),
+        ("GROK_SESSION_ID", "g"),
+        ("CURSOR_AGENT", "1"),
+        ("AI_AGENT", "claude-code_2-1-325_agent"),
+    ]:
+        ctx.std.env.set_var(var, value)
+        seen[var] = under_agent(ctx.std)
+        ctx.std.env.remove_var(var)
+    _restore(ctx, saved)
+    _eq("nothing set", none, False)
+    for var in seen:
+        _eq(var, seen[var], True)
 
 def _test_codex_is_detected_from_the_thread_id_it_exports(ctx):
     """Codex sets `CODEX_THREAD_ID` for shell and tool executions, which is how
@@ -661,6 +684,7 @@ _UNIT_TESTS = [
     _test_codex_is_detected_from_the_thread_id_it_exports,
     _test_gemini_is_detected_with_a_kind_and_no_session,
     _test_cursor_is_detected_from_a_marker_whose_value_is_unspecified,
+    _test_under_agent_reads_the_environment,
     _test_gemini_names_its_session_when_run_as_a_hook,
     _test_grok_is_named_and_its_sessions_can_be_found,
     _test_session_filed_answers_only_what_the_store_says,

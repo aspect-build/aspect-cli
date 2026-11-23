@@ -1,0 +1,78 @@
+"""`PingRemote`: an example plugin, ported from BuildBuddy's open-source
+[ping-remote](https://github.com/siggisim/ping-remote) CLI plugin. Before
+Bazel starts, it checks that the remote executor answers, and builds without
+remote execution when it does not.
+
+How it works:
+
+1. `_check_executor` is a `BazelTrait.rc_flags` hook. The CLI calls it once
+   it has resolved every flag the build will use, and appends whatever it
+   returns to Bazel's command line.
+2. `flags.flag_value("--remote_executor")` is the executor that resolution
+   settled on, wherever it came from: a `.bazelrc`, `--bazel-flag`, or one the
+   CLI set itself (`--remote=exec`, `--workflows:remote-exec`).
+3. It opens a TCP connection to the executor's host and port. BuildBuddy's
+   plugin sends an ICMP ping instead, which firewalls often drop.
+4. If nothing answers within `--ping-remote:timeout-ms`, the hook returns
+   `--remote_executor=`. Bazel takes the last value of a flag, so the empty
+   one turns remote execution off for this build.
+
+Each executor is checked once per task, so a retried build does not wait
+again. Executors it cannot check over TCP, such as `unix:` sockets, are left
+alone. Only `--remote_executor` is cleared, so an rc that also asks for a
+`remote` strategy fails the build instead. With no `--remote_cache`, Bazel
+uses the executor as the cache too, so clearing it also turns off that
+cache: the same endpoint that did not answer.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+def host_port(uri: str):
+    """`host:port` to connect to for a `--remote_executor` value, or None
+    when it is not reached over TCP. The port is the URI's own, else 80 for
+    `grpc://`, else 443 (`grpcs://` or a bare host)."""
+    lower = uri.lower()
+    if lower.startswith("grpcs://"):
+        rest, port = uri[len("grpcs://"):], 443
+    elif lower.startswith("grpc://"):
+        rest, port = uri[len("grpc://"):], 80
+    elif "://" in lower or lower.startswith("unix:"):
+        return None
+    else:
+        rest, port = uri, 443
+
+    host = rest.rstrip("/").partition("/")[0]
+    has_port = "]:" in host if host.startswith("[") else ":" in host
+    return host if has_port else "%s:%d" % (host, port)
+
+def _ping_impl(ctx: FeatureContext):
+    answered = {}
+
+    def _answers(task_ctx, addr):
+        """Whether `addr` accepts a TCP connection within the timeout."""
+        err, conn = task_ctx.std.net.tcp.try_connect(addr, timeout_ms = ctx.args.timeout_ms)
+        if conn == None:
+            task_ctx.std.io.stderr.write("WARNING: %s did not answer (%s); building without remote execution.\n" % (addr, getattr(err, "kind", err)))
+            return False
+        conn.close()
+        return True
+
+    def _check_executor(task_ctx, flags, command):
+        executor = flags.flag_value("--remote_executor", command = command)
+        addr = host_port(executor) if executor else None
+        if addr == None:
+            return []
+        if addr not in answered:
+            answered[addr] = _answers(task_ctx, addr)
+        return [] if answered[addr] else ["--remote_executor="]
+
+    ctx.traits[BazelTrait].rc_flags.append(_check_executor)
+
+PingRemote = feature(
+    display_name = "Ping remote",
+    summary = "Build without remote execution when the remote executor does not answer.",
+    implementation = _ping_impl,
+    args = {
+        "timeout_ms": args.int(default = 500, description = "How long the connection may take, in milliseconds."),
+    },
+)

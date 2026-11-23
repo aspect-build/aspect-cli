@@ -1,0 +1,18 @@
+[32mINFO: [0mInvocation ID: 971a3ae9-7507-4a18-be6a-65c1b211a667
+[32mComputing main repo mapping:[0m 
+[32mLoading:[0m 
+[32mLoading:[0m 0 packages loaded
+[32mAnalyzing:[0m target //:all (0 packages loaded, 0 targets configured)
+[32mAnalyzing:[0m target //:all (0 packages loaded, 0 targets configured)
+
+[33mDEBUG: [0mRepo '+ext+bar' indicated that a canonical reproducible form can be obtained by modifying arguments integrity = "sha256-175Ja2nch4ffKeLsLsE+y9eObxh+pfrzIo8Q3dYXVBo="
+[33mDEBUG: [0mRepo +ext+bar defined by rule http_archive in @@bazel_tools//tools/build_defs/repo:http.bzl
+[33mDEBUG: [0mRepo '+ext+foo' indicated that a canonical reproducible form can be obtained by modifying arguments integrity = "sha256-175Ja2nch4ffKeLsLsE+y9eObxh+pfrzIo8Q3dYXVBo="
+[33mDEBUG: [0mRepo +ext+foo defined by rule http_archive in @@bazel_tools//tools/build_defs/repo:http.bzl
+[32mINFO: [0mAnalyzed target //:all (2 packages loaded, 3 targets configured).
+[32mINFO: [0mFound 1 target...
+Target //:all up-to-date (nothing to build)
+[32mINFO: [0mElapsed time: 0.115s, Critical Path: 0.00s
+[32mINFO: [0m1 process: 1 internal.
+[32mINFO: [0mBuild completed successfully, 1 total action
+[0m

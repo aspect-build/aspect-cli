@@ -14,6 +14,10 @@ and customize tips with a single import:
          "TIP_TEMPLATE_RAW",
          "TIP_TEMPLATE_FORMAT",
          "TIP_TEMPLATE_JINJA2",
+         "TIP_SHOW_EACH",
+         "TIP_SHOW_FIRST",
+         "TIP_SHOW_END",
+         "TIP_MAX_SHOWN",
          "SURFACE_CLI",
          "SURFACE_GITHUB_STATUS_CHECKS",
          "SURFACE_BUILDKITE_ANNOTATIONS",
@@ -26,7 +30,11 @@ and customize tips with a single import:
          "TipSuggestion",
          "TIP_ACCEPT",
          "TIP_REJECT",
-         "tip_replace")
+         "tip_replace",
+         "tip_rule",
+         "on_console_line",
+         "agg",
+         "TipRule")
 
 This is the customer-facing surface; internal modules load directly from
 `lib/tips.axl`.
@@ -44,7 +52,11 @@ load(
     _TIP_ACCEPT = "TIP_ACCEPT",
     _TIP_IMPORTANT = "TIP_IMPORTANT",
     _TIP_INFO = "TIP_INFO",
+    _TIP_MAX_SHOWN = "TIP_MAX_SHOWN",
     _TIP_REJECT = "TIP_REJECT",
+    _TIP_SHOW_EACH = "TIP_SHOW_EACH",
+    _TIP_SHOW_END = "TIP_SHOW_END",
+    _TIP_SHOW_FIRST = "TIP_SHOW_FIRST",
     _TIP_SUGGESTION = "TIP_SUGGESTION",
     _TIP_TEMPLATE_FORMAT = "TIP_TEMPLATE_FORMAT",
     _TIP_TEMPLATE_JINJA2 = "TIP_TEMPLATE_JINJA2",
@@ -52,10 +64,14 @@ load(
     _TIP_WARNING = "TIP_WARNING",
     _TipAction = "TipAction",
     _TipInfo = "TipInfo",
+    _TipRule = "TipRule",
     _TipSuggestion = "TipSuggestion",
     _TipsTrait = "TipsTrait",
     _add_tip = "add_tip",
+    _agg = "agg",
+    _on_console_line = "on_console_line",
     _tip_replace = "tip_replace",
+    _tip_rule = "tip_rule",
     _tips = "tips",
 )
 
@@ -70,6 +86,13 @@ TIP_TEMPLATE_RAW = _TIP_TEMPLATE_RAW
 TIP_TEMPLATE_FORMAT = _TIP_TEMPLATE_FORMAT
 TIP_TEMPLATE_JINJA2 = _TIP_TEMPLATE_JINJA2
 
+# When a tip shows on the terminal (`show`), and how many of an id's tips
+# print before the rest are counted (`max_shown`).
+TIP_SHOW_EACH = _TIP_SHOW_EACH
+TIP_SHOW_FIRST = _TIP_SHOW_FIRST
+TIP_SHOW_END = _TIP_SHOW_END
+TIP_MAX_SHOWN = _TIP_MAX_SHOWN
+
 # Surfaces + shorthands.
 SURFACE_CLI = _SURFACE_CLI
 SURFACE_GITHUB_STATUS_CHECKS = _SURFACE_GITHUB_STATUS_CHECKS
@@ -78,6 +101,13 @@ SURFACE_GITHUB_PR_SUMMARY = _SURFACE_GITHUB_PR_SUMMARY
 TASK_SCREENS = _TASK_SCREENS
 AGGREGATE_SCREENS = _AGGREGATE_SCREENS
 SURFACE_ALL = _SURFACE_ALL
+
+# Rules: a tip and the condition that emits it (see "Tip rules" in
+# `lib/tips.axl`). Append to `ctx.traits[TipsTrait].rules`.
+tip_rule = _tip_rule
+on_console_line = _on_console_line
+agg = _agg
+TipRule = _TipRule
 
 # Producer API.
 #
@@ -99,9 +129,17 @@ def add_tip(
         vars: dict = {},
         accumulate: dict = {},
         surfaces: list = [],
-        combine_across_tasks: bool = False):
-    """Add a tip to the task's tip storage and print a `TIP:` block to
-    the terminal (subject to the owner feature's `auto_print` arg).
+        combine_across_tasks: bool = False,
+        show: str = TIP_SHOW_EACH,
+        max_shown: int = TIP_MAX_SHOWN,
+        aggregates: dict = {}):
+    """Add a tip to the task's tip storage and show it on the terminal as
+    `show` says (subject to the owner feature's `auto_print` arg):
+
+        💡 TIP[<id>]: <title>
+          <body, indented>
+
+    Once the task ends, a line per id counts what was not printed.
 
     The single entry point for tips.
 
@@ -136,8 +174,8 @@ def add_tip(
         `TIP_TEMPLATE_RAW`. A name set in both `vars` and `accumulate`
         is an error.
       accumulate: List-valued Jinja2 fields (a `{{ name }}` reference
-        sees a list). Each re-emit unions in new values (deduped +
-        sorted); with `combine_across_tasks` the union also spans tasks.
+        sees a list). Each re-emit unions in new values (deduped, first
+        seen first); with `combine_across_tasks` the union also spans tasks.
         `TIP_TEMPLATE_JINJA2` only.
       surfaces: Allowlist of surface identifiers (`SURFACE_CLI` /
         `SURFACE_GITHUB_STATUS_CHECKS` / `SURFACE_BUILDKITE_ANNOTATIONS` /
@@ -149,6 +187,20 @@ def add_tip(
         rollup.
       combine_across_tasks: How same-`(id, key)` tips from sibling tasks
         combine in the PR summary.
+      show: When the id's tips print on the terminal, as its first tip
+        says: `TIP_SHOW_EACH` (default) prints each emit whose content
+        changed, up to `max_shown`; `TIP_SHOW_FIRST` prints the first;
+        `TIP_SHOW_END` prints each of the id's tips at the end, in its final
+        state. What an id did not print is counted in one line at the end
+        of the task. Status surfaces always show the final state.
+      max_shown: How many of the id's tips print before the rest are only
+        counted; 0 for no limit.
+      aggregates: Named values that merge on each re-emit and across tasks
+        by kind, `{name: {"kind", "value", "truncated", "max"}}` with kinds
+        `count`, `unique`, `all`, `count_distinct`, `count_by`, `first`,
+        `last` (as a tip rule's `agg.*` makes them). `TIP_TEMPLATE_JINJA2`
+        only; each is a variable of its value, and `truncated` lists those
+        that stopped at their `max`.
     """
     _add_tip(
         ctx,
@@ -162,6 +214,9 @@ def add_tip(
         accumulate = accumulate,
         surfaces = surfaces,
         combine_across_tasks = combine_across_tasks,
+        show = show,
+        max_shown = max_shown,
+        aggregates = aggregates,
     )
 
 tips = _tips

@@ -286,7 +286,7 @@ impl File {
         false
     }
 
-    /// R2 to R4 for a read that found nothing, with `held` asked about the
+    /// R2 to R5 for a read that found nothing, with `held` asked about the
     /// name the file being read has now.
     fn judge(&mut self) -> Option<Done> {
         if !self.next.is_empty() {
