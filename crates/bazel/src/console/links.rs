@@ -1358,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hyperlink_format_is_an_alias_a_template_or_none() {
+    fn a_file_hyperlink_format_is_an_alias_a_template_or_none() {
         let url = |f: &str, at| {
             FileLinks {
                 host: "h".into(),

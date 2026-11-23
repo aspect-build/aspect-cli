@@ -85,9 +85,9 @@ pub(crate) fn terminal_links() -> bool {
         && !crate::agent::detected(|v| std::env::var_os(v))
 }
 
-/// What a link to a file opens, as the Console feature's `hyperlink_format`
+/// What a link to a file opens, as the Console feature's `file_hyperlink_format`
 /// says once a task resolves it ([`set_link_format`]); until then
-/// `ASPECT_HYPERLINK_FORMAT`; and for `auto`, the editor
+/// `ASPECT_FILE_HYPERLINK_FORMAT`; and for `auto`, the editor
 /// `LinkFormat::auto` finds (its terminal's, `$VISUAL`/`$EDITOR`'s, one
 /// installed, on `PATH` or as a macOS app), else none.
 static LINK_FORMAT: std::sync::RwLock<Option<bazel::console::links::LinkFormat>> =
@@ -104,7 +104,7 @@ pub(crate) fn set_link_format(format: Option<bazel::console::links::LinkFormat>)
 }
 
 /// What a link to a file opens now; see [`LINK_FORMAT`]. Before a task
-/// resolves the Console, `ASPECT_HYPERLINK_FORMAT` when it is a format.
+/// resolves the Console, `ASPECT_FILE_HYPERLINK_FORMAT` when it is a format.
 pub(crate) fn link_format() -> bazel::console::links::LinkFormat {
     LINK_FORMAT
         .read()
@@ -130,18 +130,18 @@ static AUTO_LINK_FORMAT: std::sync::LazyLock<bazel::console::links::LinkFormat> 
         )
     });
 
-/// `ASPECT_HYPERLINK_FORMAT`, when set and not empty: a format, `None` for
+/// `ASPECT_FILE_HYPERLINK_FORMAT`, when set and not empty: a format, `None` for
 /// `auto`, or why it is neither.
 pub(crate) fn env_link_format() -> Option<Result<Option<bazel::console::links::LinkFormat>, String>>
 {
-    let value = std::env::var("ASPECT_HYPERLINK_FORMAT")
+    let value = std::env::var("ASPECT_FILE_HYPERLINK_FORMAT")
         .ok()
         .filter(|v| !v.is_empty())?;
     Some(match value.as_str() {
         "auto" => Ok(None),
         value => bazel::console::links::LinkFormat::parse(value)
             .map(Some)
-            .map_err(|e| format!("ASPECT_HYPERLINK_FORMAT: {e}")),
+            .map_err(|e| format!("ASPECT_FILE_HYPERLINK_FORMAT: {e}")),
     })
 }
 
