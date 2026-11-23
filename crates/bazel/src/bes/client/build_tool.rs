@@ -48,9 +48,9 @@ pub fn bazel_event(
     )
 }
 
-/// [`bazel_event`] for an event already on the wire: `encoded` is the
-/// serialized `BuildEvent` message exactly as bazel wrote it, so a caller
-/// holding those bytes skips a decode/re-encode round trip.
+/// [`bazel_event`] for an event already encoded: `encoded` is the serialized
+/// `BuildEvent` message as the feed passes it on, so a caller holding those
+/// bytes skips a decode/re-encode round trip.
 pub fn bazel_event_encoded(
     build_id: String,
     invocation_id: String,

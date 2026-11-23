@@ -4069,7 +4069,7 @@ Test = task(implementation = _impl)
     mod event_kinds {
         use super::super::*;
         use axl_proto::build_event_stream::build_event::Payload;
-        use bazel::bes::kind::{EVENT_KINDS, payload_discriminant};
+        use bazel::bes::kind::{EVENT_KINDS, payload_discriminant, payload_name};
         use starlark::values::Heap;
 
         /// One default-constructed payload per `Payload` variant, in
@@ -4141,6 +4141,7 @@ Test = task(implementation = _impl)
         fn payload_tags_agree_with_the_kind_table() {
             for (payload, (tag, type_name, _)) in every_payload().into_iter().zip(EVENT_KINDS) {
                 assert_eq!(payload_discriminant(&payload), *tag, "tag for {type_name}");
+                assert_eq!(payload_name(&payload), *type_name);
             }
         }
 

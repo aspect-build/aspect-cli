@@ -126,6 +126,15 @@ pub fn tag_from_name(s: &str) -> Result<i32, String> {
     ))
 }
 
+/// The snake_case name of `p`'s payload message, as [`EVENT_KINDS`] lists it.
+pub fn payload_name(p: &Payload) -> &'static str {
+    let tag = payload_discriminant(p);
+    EVENT_KINDS
+        .iter()
+        .find(|(t, _, _)| *t == tag)
+        .map_or("unknown", |(_, name, _)| name)
+}
+
 /// Maps a payload variant to this runtime's payload tag — the integers
 /// [`EVENT_KINDS`] lists, so `kinds=` matches by integer set lookup.
 pub fn payload_discriminant(p: &Payload) -> i32 {

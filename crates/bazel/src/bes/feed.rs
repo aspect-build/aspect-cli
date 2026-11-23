@@ -1,7 +1,8 @@
 //! The build event stream of one bazel command: a reader thread follows
 //! `--build_event_binary_file` ([`super::binary_file`]), redacts each event,
-//! mirrors the raw bytes to file sinks and fans the events out to subscribers,
-//! which bind between [`BuildEventStream::new`] and [`BuildEventStream::start`].
+//! caps its size ([`super::cap`]), mirrors the bytes to file sinks and fans the
+//! events out to subscribers, which bind between [`BuildEventStream::new`] and
+//! [`BuildEventStream::start`].
 
 use prost::Message;
 use prost::bytes::Bytes;
@@ -14,6 +15,7 @@ use thiserror::Error;
 
 use super::BuildEventEnvelope;
 use super::binary_file::{End, Reader};
+use super::cap::cap_event;
 use super::redact::redact_event;
 use crate::fanout::{Broadcaster, Subscriber, SubscriberFilter};
 use crate::stream::Gate;
@@ -198,7 +200,9 @@ impl BuildEventStream {
     ///
     /// Every event is redacted (see [`super::redact`]) before anything sees
     /// it: subscribers and file sinks read the same post-redact stream, so
-    /// secrets never leave this process. An event redaction leaves alone, the
+    /// secrets never leave this process. Then [`cap_event`] holds each to
+    /// [`super::cap::MAX_EVENT_BYTES`], with a warning for every event over it,
+    /// and every consumer gets the capped copy. An event neither changes, the
     /// common case, is mirrored as its original bytes without a re-encode.
     ///
     /// File sinks are written on the reader thread, so a slow sink slows the
@@ -219,8 +223,7 @@ impl BuildEventStream {
         self.handle = Some(thread::spawn(move || {
             let broadcaster = thread_broadcaster;
             let mut mirrors = Mirrors::open(file_sinks);
-            // Reused for the rare event redaction changes; the common case
-            // mirrors the original bytes.
+            // Reused for the rare event redaction or the cap changes.
             let mut reencode_buf: Vec<u8> = Vec::with_capacity(1024);
             let mut reader = Reader::new(file);
 
@@ -239,7 +242,17 @@ impl BuildEventStream {
 
                 let payload = frame.payload_bytes();
                 let mut event = frame.event;
-                let encoded = if redact_event(&mut event) {
+                let mut changed = redact_event(&mut event);
+                let len = if changed {
+                    event.encoded_len()
+                } else {
+                    payload.len()
+                };
+                if let Some(capped) = cap_event(&mut event, len) {
+                    super::sink::warn(&capped.warning());
+                    changed |= capped.changed();
+                }
+                let encoded = if changed {
                     reencode_buf.clear();
                     if let Err(err) = event.encode_length_delimited(&mut reencode_buf) {
                         mirrors.finish(Err(format!("BES encode error: {err}")));
@@ -1013,6 +1026,50 @@ mod tests {
         assert_eq!(
             take_sink(&sink),
             encoded_all(&[started(), build_finished(0, true)])
+        );
+    }
+
+    /// An action event over the size limit reaches subscribers, their wire
+    /// bytes and file sinks with its command line cut to fit; any other event
+    /// over it reaches them unchanged.
+    #[test]
+    fn oversized_events_reach_every_consumer_capped() {
+        use axl_proto::build_event_stream::{ActionExecuted, Progress};
+        let big_action = BuildEvent {
+            payload: Some(Payload::Action(ActionExecuted {
+                command_line: vec!["x".repeat(1000); 10_000],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let big_progress = BuildEvent {
+            payload: Some(Payload::Progress(Progress {
+                stderr: "x".repeat(super::super::cap::MAX_EVENT_BYTES),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut capped = big_action.clone();
+        let len = capped.encoded_len();
+        assert!(cap_event(&mut capped, len).is_some_and(|c| c.changed()));
+        let client = sleeper();
+        let (sink, spec) = file_sink();
+        let rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
+        rig.attempt(&[big_action, big_progress.clone(), build_finished(0, true)]);
+        let wire: Vec<Bytes> = (0..2)
+            .map(|_| rig.sub.recv().expect("an event").encoded.clone())
+            .collect();
+        let (joined, rest, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(
+            wire,
+            vec![capped.encode_to_vec(), big_progress.encode_to_vec()]
+        );
+        assert_eq!(rest, vec![build_finished(0, true)]);
+        assert_eq!(
+            take_sink(&sink),
+            encoded_all(&[capped, big_progress, build_finished(0, true)])
         );
     }
 

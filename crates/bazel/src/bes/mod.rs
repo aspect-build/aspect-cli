@@ -6,6 +6,7 @@ use axl_proto::build_event_stream::BuildEvent;
 use prost::bytes::Bytes;
 
 pub mod binary_file;
+pub mod cap;
 pub mod client;
 pub mod feed;
 pub mod kind;
@@ -19,7 +20,8 @@ pub mod warning;
 mod testing;
 
 /// One build event as a feed hands it to subscribers: decoded, and with it
-/// the exact bytes it was decoded from (re-encoded when redaction changed it).
+/// the exact bytes it was decoded from (re-encoded when redaction or the size
+/// cap of [`cap`] changed it).
 /// A subscriber that only forwards events — the gRPC sink — takes the bytes
 /// and never touches the proto, so a backlog behind a slow backend costs what
 /// bazel wrote and no more; subscribers that read fields share the one decode
