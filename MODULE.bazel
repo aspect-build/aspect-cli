@@ -17,47 +17,37 @@ bazel_dep(name = "rules_pkg", version = "1.1.0")
 bazel_dep(name = "rules_python", version = "2.0.1")  # for the //examples/deliverable py_binary delivery e2e fixture
 bazel_dep(name = "rules_shell", version = "0.7.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.12.0")
-bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.2")
+bazel_dep(name = "llvm", version = "0.8.27")
 
-register_toolchains("@toolchains_llvm_bootstrapped//toolchain:all")
+register_toolchains("@llvm//toolchain:all")
 
 # Any osx.framework tag replaces the extension's default framework list, so the
 # defaults are repeated here. CoreServices is required by fsevent-sys (notify).
-osx = use_extension("@toolchains_llvm_bootstrapped//extensions:osx.bzl", "osx")
-osx.framework(name = "CFNetwork")  # re-exported by the CoreServices umbrella
-osx.framework(name = "CoreFoundation")
-osx.framework(name = "CoreServices")
-osx.framework(name = "Foundation")
-osx.framework(name = "Kernel")
-osx.framework(name = "OSLog")
-osx.framework(name = "Security")
-osx.framework(name = "SystemConfiguration")
+osx = use_extension("@llvm//extensions:osx.bzl", "osx")
+osx.frameworks(names = [
+    "CFNetwork",  # re-exported by the CoreServices umbrella
+    "CoreFoundation",
+    "CoreServices",
+    "Foundation",
+    "Kernel",
+    "OSLog",
+    "Security",
+    "SystemConfiguration",
+])
 
-bazel_dep(name = "rules_rs", version = "0.0.27")
+bazel_dep(name = "rules_rs", version = "0.2.4")
 
-# Special toolchains branch
-archive_override(
-    module_name = "rules_rs",
-    integrity = "sha256-YbDRjZos4UmfIPY98znK1BgBWRQ1/ui3CtL6RqxE30I=",
-    strip_prefix = "rules_rs-6cf3d940fdc48baf3ebd6c37daf8e0be8fc73ecb",
-    url = "https://github.com/dzbarsky/rules_rs/archive/6cf3d940fdc48baf3ebd6c37daf8e0be8fc73ecb.tar.gz",
-)
-
-rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
+rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
 
-toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
+toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 toolchains.toolchain(
     edition = "2024",
     version = "1.92.0",
 )
-use_repo(
-    toolchains,
-    "experimental_rust_toolchains_1_92_0",
-    "rust_toolchain_artifacts_macos_aarch64_1_92_0",
-)
+use_repo(toolchains, "default_rust_toolchains")
 
-register_toolchains("@experimental_rust_toolchains_1_92_0//:all")
+register_toolchains("@default_rust_toolchains//...")
 
 crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
 crate.from_cargo(
@@ -90,6 +80,18 @@ crate.annotation(
     crate = "starlark",
     patch_args = ["-p1"],
     patches = ["//patches:starlark+0.14.2.patch"],
+)
+
+crate.annotation(
+    crate = "witx",
+    patch_args = ["-p1"],
+    patches = ["//patches:witx+0.9.1.patch"],
+)
+
+crate.annotation(
+    crate = "wiggle-macro",
+    patch_args = ["-p1"],
+    patches = ["//patches:wiggle-macro+34.0.2.patch"],
 )
 use_repo(crate, "crates")
 

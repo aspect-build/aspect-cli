@@ -4,4 +4,4 @@
 #
 # "failed to update path override" means the copy is missing: install the tool
 # once with `cargo install patch-crate --locked`, then run `cargo patch-crate`.
-paths = ["target/patch/starlark-0.14.2"]
+paths = ["target/patch/starlark-0.14.2", "target/patch/wiggle-macro-34.0.2", "target/patch/witx-0.9.1"]

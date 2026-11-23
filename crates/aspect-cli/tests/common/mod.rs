@@ -102,7 +102,10 @@ pub fn basil_bin() -> &'static str {
         path.push("basil");
         if !path.exists() {
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            // Only reached under cargo, which sets CARGO_MANIFEST_DIR for test
+            // binaries. Read at run time: env! would embed the build path.
+            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+            let workspace_root = PathBuf::from(manifest_dir)
                 .parent()
                 .and_then(Path::parent)
                 .expect("workspace root above crates/aspect-cli")

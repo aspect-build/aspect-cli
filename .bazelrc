@@ -12,7 +12,7 @@ common:macos --build_tag_filters=-no-macos
 common:linux --host_platform=//bazel/platforms:linux_host_platform
 
 common --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=False
-common --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
+common --@llvm//config:experimental_stub_libgcc_s=True
 
 # Rewrite flaky download hosts to mirrors (musl.libc.org times out from CI,
 # stalling the musl_libc repository fetch until the job timeout kills it).
@@ -33,7 +33,7 @@ common:release --@rules_rust//rust/settings:lto=fat
 common:ci --keep_going
 
 # Use Go's internal linker rather than the cc_toolchain — required when
-# building gazelle from source on Linux because toolchains_llvm_bootstrapped's
+# building gazelle from source on Linux because the `@llvm` toolchain's
 # lld can't accept Go's non-PIC relocations (relocation R_X86_64_64 ...
 # recompile with -fPIC). Pure Go binaries skip cgo and the cc link step
 # entirely. Used by the //tools/gazelle:gazelle_from_source regression target;

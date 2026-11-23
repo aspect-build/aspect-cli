@@ -1,0 +1,17 @@
+--- a/src/phases.rs
++++ b/src/phases.rs
+@@ -50,10 +50,10 @@
+ }
+ 
+ fn repo_root() -> Result<PathBuf> {
+-    let repo_root = if let Ok(e) = env::var("WASI_REPO") {
+-        PathBuf::from(e)
+-    } else {
+-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
++    // No CARGO_MANIFEST_DIR fallback: it would embed the build path in the rlib.
++    let repo_root = match env::var("WASI_REPO") {
++        Ok(e) => PathBuf::from(e),
++        Err(_) => bail!("could not find WASI repo root - try setting WASI_REPO env variable"),
+     };
+     if repo_root.exists() {
+         Ok(repo_root)

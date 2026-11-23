@@ -242,7 +242,7 @@ jobs:
       # Regression test for the build-from-source gazelle path —
       # upstream `gazelle()` macro + rules_go toolchain compiling a
       # bespoke gazelle binary, instead of the prebuilt artifact.
-      # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
+      # `--config=pure_go` is required on Linux: the `@llvm` toolchain's
       # lld can't accept Go's non-PIC relocations on x86_64.
       - name: Gazelle Task — from-source
         run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-gha
@@ -649,12 +649,9 @@ jobs:
   # plugin produces through the tools/bazel wrapper, asserting that the composed
   # command line is one Bazel accepts and that the caller's
   # `--build_event_binary_file` is written.
-  # `--coverage` is exercised against an sh_test rather than a
-  # rust_test: toolchains_llvm_bootstrapped 0.5.2 (pinned in MODULE.bazel) ships
-  # without libclang_rt.profile.a, so any rust_test under --collect_code_coverage
-  # fails CppLink (upstream hermeticbuild/hermetic-llvm#318, fixed in #468 — not
-  # in 0.5.2 yet). sh_test has no coverage instrumentation so this exercises flag
-  # plumbing + the "report not found" warning path rather than an LCOV payload.
+  # `--coverage` is exercised against an sh_test, which has no coverage
+  # instrumentation, so this checks flag plumbing + the "report not found"
+  # warning path rather than an LCOV payload.
   test-flags-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
