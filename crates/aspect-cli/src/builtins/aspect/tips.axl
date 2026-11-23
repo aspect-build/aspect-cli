@@ -144,7 +144,7 @@ def add_tip(
     with 🟡 warning, 📌 important or 💬 note for the other severities;
     the emoji shows under the `full` and `silent` presets only. Once the
     task ends, a line per id counts what was not printed, and a last tip,
-    `tips_hint`, says how to silence a tip.
+    `tips-hint`, says how to silence a tip.
 
     The single entry point for tips.
 

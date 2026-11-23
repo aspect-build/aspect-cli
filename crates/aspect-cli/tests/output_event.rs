@@ -275,7 +275,7 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
     );
     assert!(
         stderr.contains(
-            "TIP[tips_hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips_hint`) or in `.aspect/config.axl`"
+            "TIP[tips-hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips-hint`) or in `.aspect/config.axl`"
         ),
         "the hint once, at the end, naming what was shown:\n{stderr}"
     );
