@@ -318,7 +318,10 @@ const AFTER_POLL: Duration = Duration::from_millis(1);
 /// one: a PTY writes every newline that way, and the record goes out with
 /// both in one write. When a read ends between the two, the `\r` is forwarded
 /// with its record straight away, since a bare one is how curses redraws, and
-/// the `\n` arriving next is forwarded only if that record was. A hidden
+/// the `\n` arriving next is forwarded only if that record was; but a `\r`
+/// with nothing before it waits for the next read, which says whether it is
+/// half of a blank line or a bare one: a stage tells the two apart
+/// ([`Line::returns`]), and there is nothing to show meanwhile. A hidden
 /// record forwards neither, only its escape sequences.
 struct Splitter {
     carry: Vec<u8>,
@@ -327,6 +330,8 @@ struct Splitter {
     out: Destination,
     /// Set after a record ending in `\r`: whether that record was dropped.
     after_cr: Option<bool>,
+    /// The carry is a `\r` with nothing before it, held for the next read.
+    held_cr: bool,
     /// Rendering curses output to plain lines ([`Screen`]) ahead of the
     /// stages, which then run on the rows it settles.
     screen: Option<Screen>,
@@ -346,6 +351,7 @@ impl Splitter {
             processors,
             out,
             after_cr: None,
+            held_cr: false,
             screen,
             row_lines: Classifier::default(),
         }
@@ -355,8 +361,13 @@ impl Splitter {
     /// incomplete one (up to [`MAX_CARRY_BYTES`]), then flush.
     fn feed(&mut self, bytes: &[u8]) {
         let mut carry = std::mem::take(&mut self.carry);
-        // The carry holds no boundary, so only the new bytes need scanning.
-        let scanned = carry.len();
+        // The carry holds no boundary but a held `\r`, so only it and the new
+        // bytes need scanning.
+        let scanned = if std::mem::take(&mut self.held_cr) {
+            0
+        } else {
+            carry.len()
+        };
         carry.extend_from_slice(bytes);
         let mut start = 0;
         let mut i = scanned;
@@ -376,6 +387,9 @@ impl Splitter {
                 self.after_cr = None;
                 i += 1;
                 start = i + 1;
+            } else if b == b'\r' && start == i && i + 1 == carry.len() {
+                self.held_cr = true;
+                break;
             } else if b == b'\n' || b == b'\r' {
                 let kept = self.emit(&carry[start..i], &[b]);
                 self.after_cr = (b == b'\r').then_some(!kept);
@@ -420,11 +434,14 @@ impl Splitter {
 
     /// Forward the incomplete record, with no boundary.
     fn flush_carry(&mut self) {
-        if !self.carry.is_empty() {
+        if std::mem::take(&mut self.held_cr) {
+            self.carry.clear();
+            self.emit(b"", b"\r");
+        } else if !self.carry.is_empty() {
             let record = std::mem::take(&mut self.carry);
             self.emit(&record, b"");
-            self.after_cr = None;
         }
+        self.after_cr = None;
     }
 
     /// Run one record through the chain and write the result with its
@@ -956,6 +973,22 @@ mod tests {
             assert_eq!(out, b"keep\r\nlast\r\n");
             assert_eq!(*seen.0.lock().unwrap(), ["keep", "secret", "last"]);
         }
+    }
+
+    /// A `\r` with nothing before it at the end of a read waits for the next:
+    /// half of a blank line is not a tool's bare `\r`, so a run of repeats
+    /// before it is counted before the blank line, not after.
+    #[test]
+    fn a_blank_lines_half_waits_for_the_next_read() {
+        let repeats = super::super::processors::CollapseRepeats::default().under_pty(true);
+        let out = run_chunks(
+            &[b"wait\r\nwait\r\nwait\r\n\r", b"\nwait\r\n"],
+            vec![Box::new(repeats)],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "wait\r\n(last line repeated 2 more times)\n\r\nwait\r\n"
+        );
     }
 
     #[test]

@@ -52,7 +52,9 @@ pub const MAX_RECORDED_LINE_BYTES: usize = 2048;
 /// * a record that starts by moving the cursor up (a tool redrawing its own
 ///   line), which overwrites the line before rather than repeating it;
 /// * under a PTY, a record that ends in a bare `\r` (a tool's spinner), which
-///   the next record writes over, and which ends a run.
+///   the next record writes over, and which, unless blank, ends a run: a bare
+///   `\r` with nothing on it, as a tool writes before moving up, leaves the
+///   run pending.
 ///
 /// The count goes just before the record that ends the run, which under a
 /// PTY ([`CollapseRepeats::under_pty`]) is normally the first row of the
