@@ -252,11 +252,11 @@ pub struct RelativizePaths {
     given: Option<Line>,
 }
 
-/// How [`RelativizePaths`] links what it makes relative: on `host`, a
-/// workspace path from an execroot under `workspace`, the workspace the
+/// How [`RelativizePaths`] links what it makes relative: as `files` says,
+/// a workspace path from an execroot under `workspace`, the workspace the
 /// build runs in.
 pub struct LinkTo {
-    pub host: String,
+    pub files: super::links::FileLinks,
     pub workspace: std::path::PathBuf,
 }
 
@@ -509,13 +509,17 @@ impl RelativizePaths {
                 continue;
             };
             // Whether or not it exists: this is the file the path named, and
-            // a later stage would take the shown text for another's.
+            // a later stage would take the shown text for another's. Files
+            // not linked, as shown.
             let file = std::path::Path::new(std::ffi::OsStr::from_bytes(&out[i + 1..mid]));
             let shown = &out[mid + 1..close];
-            linked.extend(super::links::osc8(
-                &super::links::file_url(&link.host, file),
-                shown,
-            ));
+            match link
+                .files
+                .url(file, super::links::position(&out[close + 1..]))
+            {
+                Some(url) => linked.extend(super::links::osc8(&url, shown)),
+                None => linked.extend_from_slice(shown),
+            }
             i = close + 1;
         }
         linked
@@ -1238,7 +1242,7 @@ mod tests {
             want
         );
         let mut linking = RelativizePaths::new(Some("/ws".into()), None).linking(Some(LinkTo {
-            host: String::new(),
+            files: crate::console::links::FileLinks::file(),
             workspace: "/ws".into(),
         }));
         assert_eq!(

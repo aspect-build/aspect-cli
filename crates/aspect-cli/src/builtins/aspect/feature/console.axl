@@ -85,9 +85,13 @@ file beside the log holding all of them. They are kept and pruned with the
 rest of the history.
 
 On a terminal, the URLs in Bazel's console and the recap, and the paths that
-name a file or directory that exists (`src/a.cc:3:4` links to `src/a.cc`),
-are links too, unless a coding agent is reading it, it is a CI job's, or
-`TERM` is `dumb`.
+name a file or directory that exists (`src/a.cc:3:4` links to `src/a.cc` at
+line 3), are links too, unless a coding agent is reading it, it is a CI
+job's, or `TERM` is `dumb`. What a path's link opens is `hyperlink_format`:
+in VS Code's or Cursor's terminal, by default, that editor at the line;
+elsewhere paths are not linked unless it names an editor or `file`:
+
+    ctx.features[Console].args.hyperlink_format = "cursor"
 
     load("@aspect//feature/console.axl", "Console")
 
@@ -249,6 +253,16 @@ Console = feature(
                           "may also assign True or False. ASPECT_VERBOSE takes the same values and " +
                           "beats config.axl but not the command line; ASPECT_DEBUG=1 means " +
                           "'debug'. Other INFO lines, and WARNING and ERROR lines, always print.",
+        ),
+        "hyperlink_format": args.string(
+            default = "auto",
+            description = "What a link to a file opens, on a terminal, as ripgrep's --hyperlink-format: " +
+                          "an editor's scheme with the line and column after the path (`vscode`, " +
+                          "`vscode-insiders`, `cursor`, `macvim`, `textmate`, `kitty`), `file` (file://, " +
+                          "what the system opens the file with, at no line), `none`, or a template over " +
+                          "{path}, {line}, {column} and {host} (`idea://open?file={path}&line={line}`). " +
+                          "`auto` (the default) is the editor's in VS Code's or Cursor's terminal and " +
+                          "`none` elsewhere. URLs are links whatever it says.",
         ),
         "profile": args.string(
             default = "auto",

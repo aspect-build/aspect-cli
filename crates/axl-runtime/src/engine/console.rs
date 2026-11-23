@@ -35,8 +35,10 @@ use super::template::json_to_minijinja;
 /// the next, except that `auto` on the command line replaces the arg a
 /// `config.axl` set, so it skips to the preset when the environment sets
 /// none. A disabled feature gives the `full` layout and the environment's
-/// level. Fails on a malformed `templates`, `task_presets`, `task_templates`
-/// or `verbose` value and on everything [`Surface::resolve`] refuses. The surface carries a
+/// level. It also sets what links to files open, for the process
+/// (`hyperlink_format`, see `crate::out::set_link_format`), whether or not
+/// the feature is enabled. Fails on a malformed `templates`, `task_presets`,
+/// `task_templates`, `verbose` or `hyperlink_format` value and on everything [`Surface::resolve`] refuses. The surface carries a
 /// warning for each `task_presets` / `task_templates` key that is a near miss
 /// of one of `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
@@ -45,6 +47,7 @@ pub fn from_feature_args(
     host: Host,
     task_paths: &[String],
 ) -> Result<Surface, String> {
+    crate::out::set_link_format(hyperlink_format(args)?);
     if !args
         .get("enabled")
         .and_then(|v| v.unpack_bool())
@@ -107,6 +110,19 @@ pub fn from_feature_args(
     }
     Ok(Surface::resolve(preset, &overrides, task, host)?
         .with_warnings(overrides.near_miss_warnings(task_paths)))
+}
+
+/// The `hyperlink_format` arg: what a link to a file opens, `None` for
+/// `auto` or unset (`LinkFormat::auto`).
+fn hyperlink_format(
+    args: &Arguments<'_>,
+) -> Result<Option<bazel::console::links::LinkFormat>, String> {
+    match args.get("hyperlink_format").and_then(|v| v.unpack_str()) {
+        None | Some("auto") => Ok(None),
+        Some(value) => bazel::console::links::LinkFormat::parse(value)
+            .map(Some)
+            .map_err(|e| format!("Console hyperlink_format: {e}")),
+    }
 }
 
 /// The `verbose` arg: `None` for `auto` or unset, so the preset decides.

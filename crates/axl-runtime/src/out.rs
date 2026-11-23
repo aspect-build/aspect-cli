@@ -85,6 +85,29 @@ pub(crate) fn terminal_links() -> bool {
         && !crate::agent::detected(|v| std::env::var_os(v))
 }
 
+/// What a link to a file opens, as the Console feature's `hyperlink_format`
+/// says once a task resolves it ([`set_link_format`]); until then, and for
+/// `auto`, the editor's whose terminal this is, else none.
+static LINK_FORMAT: std::sync::RwLock<Option<bazel::console::links::LinkFormat>> =
+    std::sync::RwLock::new(None);
+
+/// Make links to files in `format` from now on, for Bazel's console and the
+/// CLI's own lines; `None` for `auto`.
+pub(crate) fn set_link_format(format: Option<bazel::console::links::LinkFormat>) {
+    if let Ok(mut slot) = LINK_FORMAT.write() {
+        *slot = format;
+    }
+}
+
+/// What a link to a file opens now; see [`LINK_FORMAT`].
+pub(crate) fn link_format() -> bazel::console::links::LinkFormat {
+    LINK_FORMAT
+        .read()
+        .ok()
+        .and_then(|f| f.clone())
+        .unwrap_or_else(|| bazel::console::links::LinkFormat::auto(|v| std::env::var_os(v)))
+}
+
 /// Links what the CLI's own lines name, when [`terminal_links`] holds.
 static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console::links::Linker>>> =
     std::sync::LazyLock::new(|| {
@@ -102,6 +125,7 @@ impl starlark::PrintHandler for TolerantPrintHandler {
         match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
             Some(mut linker) => {
                 use std::io::Write as _;
+                linker.set_format(link_format());
                 let mut line = linker.link(text.as_bytes());
                 line.push(b'\n');
                 let _ = std::io::stderr().write_all(&line);

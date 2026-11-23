@@ -16,6 +16,11 @@
 //! label, prose) or cut short (`src/a.c…`) is left alone. A URL ends before
 //! trailing punctuation, a bracket that closes none of its own, and a `…`
 //! that marks it cut.
+//!
+//! What a file's link opens is a [`LinkFormat`], as ripgrep's
+//! `--hyperlink-format` is: an editor's URL scheme (`vscode://file{path}:{line}:{column}`)
+//! with the line and column that follow the path, `file://` (what the
+//! system opens a file with, at no line), or none, which links URLs alone.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,12 +58,145 @@ const REMEMBERED: usize = 4096;
 /// The longest record linked: a longer one (a command line) is left as it is.
 const MAX_RECORD: usize = 8192;
 
+/// What a link to a file opens: ripgrep's `--hyperlink-format`, an alias or
+/// a template over `{path}`, `{line}`, `{column}` and `{host}`, or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkFormat {
+    /// Files are not linked; URLs still are.
+    None,
+    /// A URL template, `{path}` its file's absolute path, percent-encoded,
+    /// `{line}` and `{column}` where in it (1 when not said).
+    Template(String),
+}
+
+impl LinkFormat {
+    /// The names [`LinkFormat::parse`] takes, ripgrep's, each with the
+    /// template it stands for.
+    pub const ALIASES: &[(&str, &str)] = &[
+        ("file", "file://{host}{path}"),
+        ("vscode", "vscode://file{path}:{line}:{column}"),
+        (
+            "vscode-insiders",
+            "vscode-insiders://file{path}:{line}:{column}",
+        ),
+        ("cursor", "cursor://file{path}:{line}:{column}"),
+        (
+            "macvim",
+            "mvim://open?url=file://{path}&line={line}&column={column}",
+        ),
+        (
+            "textmate",
+            "txmt://open?url=file://{path}&line={line}&column={column}",
+        ),
+        ("kitty", "file://{host}{path}#{line}"),
+    ];
+
+    /// `none`, an alias, or a template naming `{path}`.
+    pub fn parse(value: &str) -> Result<LinkFormat, String> {
+        if value == "none" {
+            return Ok(LinkFormat::None);
+        }
+        if let Some((_, template)) = Self::ALIASES.iter().find(|(name, _)| *name == value) {
+            return Ok(LinkFormat::Template(template.to_string()));
+        }
+        if value.contains("{path}") {
+            return Ok(LinkFormat::Template(value.to_string()));
+        }
+        let names: Vec<&str> = std::iter::once("none")
+            .chain(Self::ALIASES.iter().map(|(name, _)| *name))
+            .collect();
+        Err(format!(
+            "{value:?} is not a hyperlink format: expected auto, {}, or a template naming {{path}}",
+            names.join(", ")
+        ))
+    }
+
+    /// The format for a terminal that says nothing of its own: the editor's
+    /// whose integrated terminal this is, VS Code's or a fork's, as each
+    /// sets `TERM_PROGRAM=vscode` and names its own app in the paths it
+    /// gives the shell; files unlinked anywhere else, since a `file://`
+    /// link opens whatever the system picks, at no line.
+    pub fn auto(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> LinkFormat {
+        let is =
+            |name: &str, want: &str| var(name).is_some_and(|v| v.to_string_lossy().contains(want));
+        let cursor = is("TERM_PROGRAM", "Cursor")
+            || var("CURSOR_TRACE_ID").is_some()
+            || is("VSCODE_GIT_ASKPASS_NODE", "Cursor")
+            || is("VSCODE_IPC_HOOK_CLI", "Cursor");
+        if cursor {
+            return Self::parse("cursor").expect("an alias");
+        }
+        if is("TERM_PROGRAM", "vscode") {
+            let insiders =
+                is("TERM_PROGRAM_VERSION", "insider") || is("VSCODE_GIT_ASKPASS_NODE", "Insiders");
+            return Self::parse(if insiders {
+                "vscode-insiders"
+            } else {
+                "vscode"
+            })
+            .expect("an alias");
+        }
+        LinkFormat::None
+    }
+}
+
+/// How links to files are made: on what host, in what [`LinkFormat`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLinks {
+    pub host: String,
+    pub format: LinkFormat,
+}
+
+impl FileLinks {
+    /// `file://` links on this host, for a caller that does not choose.
+    pub fn file() -> FileLinks {
+        FileLinks::new(LinkFormat::parse("file").expect("an alias"))
+    }
+
+    pub fn new(format: LinkFormat) -> FileLinks {
+        FileLinks {
+            host: hostname(),
+            format,
+        }
+    }
+
+    /// The URL a link to `path` opens, at `at` (line, column) when the text
+    /// says, or None when files are not linked.
+    pub fn url(&self, path: &Path, at: (Option<u32>, Option<u32>)) -> Option<String> {
+        let LinkFormat::Template(template) = &self.format else {
+            return None;
+        };
+        Some(
+            template
+                .replace("{host}", &self.host)
+                .replace("{path}", &encoded_path(path))
+                .replace("{line}", &at.0.unwrap_or(1).to_string())
+                .replace("{column}", &at.1.unwrap_or(1).to_string()),
+        )
+    }
+}
+
+/// Where in a file the text after its path points: `:12:3`, `:12`,
+/// `(12,3)` or `(12)`.
+pub fn position(after: &[u8]) -> (Option<u32>, Option<u32>) {
+    static AT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(?::(\d+)(?::(\d+))?|\((\d+)(?:,(\d+))?\))").unwrap());
+    let Some(c) = AT.captures(after) else {
+        return (None, None);
+    };
+    let num = |i: usize| {
+        c.get(i)
+            .and_then(|m| std::str::from_utf8(m.as_bytes()).ok()?.parse().ok())
+    };
+    (num(1).or(num(3)), num(2).or(num(4)))
+}
+
 /// Links what a console record names; see the module docs.
 pub struct Linker {
     /// Where a relative path may be from, in the order tried.
     bases: Vec<PathBuf>,
-    /// The host a `file://` URL names.
-    pub(crate) host: String,
+    /// How files are linked.
+    pub(crate) files: FileLinks,
     /// What each path looked up names, by the path as written: the file, or
     /// None for nothing as of when it was looked up.
     resolved: HashMap<Vec<u8>, (Option<PathBuf>, std::time::Instant)>,
@@ -70,9 +208,20 @@ impl Linker {
     pub fn new(bases: Vec<PathBuf>) -> Self {
         Self {
             bases,
-            host: hostname(),
+            files: FileLinks::file(),
             resolved: HashMap::new(),
         }
+    }
+
+    /// This linker making its files' links as `files` says.
+    pub fn with_files(mut self, files: FileLinks) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// Make files' links in `format` from now on.
+    pub fn set_format(&mut self, format: LinkFormat) {
+        self.files.format = format;
     }
 
     /// `record` with each URL and each path to something that exists
@@ -180,11 +329,11 @@ impl Linker {
                     start += 1;
                 }
             }
-            let Some(file) = file else {
+            let Some(url) = file.and_then(|f| self.files.url(&f, position(&text[end..]))) else {
                 continue;
             };
             out.extend_from_slice(&text[at..start]);
-            out.extend(osc8(&file_url(&self.host, &file), &text[start..end]));
+            out.extend(osc8(&url, &text[start..end]));
             at = end;
         }
         out.extend_from_slice(&text[at..]);
@@ -346,8 +495,13 @@ pub fn osc8(url: &str, shown: &[u8]) -> Vec<u8> {
 
 /// `path` as a `file://` URL on `host`, percent-encoded.
 pub fn file_url(host: &str, path: &Path) -> String {
+    format!("file://{host}{}", encoded_path(path))
+}
+
+/// `path`, percent-encoded for a URL.
+fn encoded_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
-    let mut url = format!("file://{host}");
+    let mut url = String::new();
     for &b in path.as_os_str().as_bytes() {
         if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
             url.push(b as char);
@@ -358,10 +512,14 @@ pub fn file_url(host: &str, path: &Path) -> String {
     url
 }
 
-/// `path` as an OSC 8 hyperlink to it, its text the path itself.
-pub fn file_link(path: &Path) -> String {
+/// `path` as an OSC 8 hyperlink to it as `files` says, its text the path
+/// itself; just the path when files are not linked.
+pub fn file_link(files: &FileLinks, path: &Path) -> String {
     let shown = path.display().to_string();
-    String::from_utf8(osc8(&file_url(&hostname(), path), shown.as_bytes())).unwrap_or(shown)
+    match files.url(path, (None, None)) {
+        Some(url) => String::from_utf8(osc8(&url, shown.as_bytes())).unwrap_or(shown),
+        None => shown,
+    }
 }
 
 pub(crate) fn hostname() -> String {
@@ -387,7 +545,7 @@ mod tests {
         std::fs::write(dir.path().join("src/a.cc"), "").unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
         let mut l = Linker::new(vec![dir.path().to_path_buf()]);
-        l.host = String::new();
+        l.files.host = String::new();
         (dir, l)
     }
 
@@ -539,7 +697,7 @@ mod tests {
         std::fs::write(root.path().join("pkg/src/a.ts"), "").unwrap();
         std::fs::write(root.path().join("pkg/only.ts"), "").unwrap();
         let mut l = Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]);
-        l.host = String::new();
+        l.files.host = String::new();
         assert_eq!(
             link(&mut l, "src/a.ts:3"),
             format!("{}:3", file(root.path(), "src/a.ts", "src/a.ts")),
@@ -591,13 +749,16 @@ mod tests {
                     cwd.map(|c| c.replace("$T", &top)),
                 )
                 .linking(Some(LinkTo {
-                    host: String::new(),
+                    files: FileLinks {
+                        host: String::new(),
+                        format: LinkFormat::parse("file").unwrap(),
+                    },
                     workspace: ws.clone(),
                 }))
             })
             .collect();
         let mut linker = Linker::new(vec![ws.clone(), dir.path().to_path_buf()]);
-        linker.host = String::new();
+        linker.files.host = String::new();
         let mut links = Links(linker);
         let run = move |line: &str| {
             let mut record = line.replace("$T", &top).into_bytes();
@@ -747,7 +908,7 @@ mod tests {
         let shown = run("ERROR: $T/pkg/BUILD.bazel:1: x");
         let known = links_in(shown.as_bytes());
         let mut l = Linker::new(vec![dir.path().to_path_buf()]);
-        l.host = String::new();
+        l.files.host = String::new();
         let quoted = String::from_utf8(l.link_with(b"ERROR: BUILD.bazel:1: x", &known)).unwrap();
         assert_eq!(
             quoted,
@@ -789,6 +950,98 @@ mod tests {
         let (_dir, mut l) = linker();
         assert_eq!(link(&mut l, "see src/a.c…"), "see src/a.c…");
         assert_eq!(link(&mut l, "see src…"), "see src…");
+    }
+
+    #[test]
+    fn a_hyperlink_format_is_an_alias_a_template_or_none() {
+        let url = |f: &str, at| {
+            FileLinks {
+                host: "h".into(),
+                format: LinkFormat::parse(f).unwrap(),
+            }
+            .url(Path::new("/w/a b.ts"), at)
+        };
+        assert_eq!(
+            url("vscode", (Some(3), Some(4))).as_deref(),
+            Some("vscode://file/w/a%20b.ts:3:4")
+        );
+        assert_eq!(
+            url("cursor", (Some(3), None)).as_deref(),
+            Some("cursor://file/w/a%20b.ts:3:1")
+        );
+        assert_eq!(
+            url("file", (Some(3), Some(4))).as_deref(),
+            Some("file://h/w/a%20b.ts"),
+            "no line in a file URL"
+        );
+        assert_eq!(
+            url("idea://open?file={path}&line={line}", (Some(9), None)).as_deref(),
+            Some("idea://open?file=/w/a%20b.ts&line=9")
+        );
+        assert_eq!(url("none", (None, None)), None);
+        assert!(
+            LinkFormat::parse("vscod")
+                .unwrap_err()
+                .contains("expected auto, none, file, vscode")
+        );
+    }
+
+    #[test]
+    fn auto_is_the_editor_whose_terminal_this_is() {
+        let auto = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            LinkFormat::auto(|k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()))
+        };
+        assert_eq!(
+            auto(&[("TERM_PROGRAM", "Apple_Terminal")]),
+            LinkFormat::None
+        );
+        assert_eq!(
+            auto(&[("TERM_PROGRAM", "vscode")]),
+            LinkFormat::parse("vscode").unwrap()
+        );
+        assert_eq!(
+            auto(&[
+                ("TERM_PROGRAM", "vscode"),
+                (
+                    "VSCODE_GIT_ASKPASS_NODE",
+                    "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/x"
+                )
+            ]),
+            LinkFormat::parse("cursor").unwrap()
+        );
+        assert_eq!(
+            auto(&[
+                ("TERM_PROGRAM", "vscode"),
+                ("TERM_PROGRAM_VERSION", "1.96.0-insider")
+            ]),
+            LinkFormat::parse("vscode-insiders").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_path_links_at_the_line_after_it() {
+        assert_eq!(position(b":12:3: error"), (Some(12), Some(3)));
+        assert_eq!(position(b":12: x"), (Some(12), None));
+        assert_eq!(position(b"(12,3): error TS1"), (Some(12), Some(3)));
+        assert_eq!(position(b" at 12"), (None, None));
+        let (_dir, mut l) = linker();
+        l.set_format(LinkFormat::parse("vscode").unwrap());
+        let out = String::from_utf8(l.link(b"src/a.cc:3:4: bad")).unwrap();
+        assert!(
+            out.starts_with("\x1b]8;;vscode://file/")
+                && out.contains("/src/a.cc:3:4\x1b\\src/a.cc\x1b]8;;"),
+            "{out:?}"
+        );
+        l.set_format(LinkFormat::None);
+        assert_eq!(
+            String::from_utf8(l.link(b"src/a.cc:3:4 at https://x.test")).unwrap(),
+            "src/a.cc:3:4 at \x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\",
+            "URLs linked whatever it says"
+        );
     }
 
     #[test]

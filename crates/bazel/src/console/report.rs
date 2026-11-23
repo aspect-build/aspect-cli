@@ -22,7 +22,7 @@ use super::ansi;
 use super::filters::Collapsed;
 use super::forward::LineProcessor;
 use super::line::{self, Given, Kind, Line};
-use super::links::{Known, Linker, file_link, links_in};
+use super::links::{FileLinks, Known, Linker, file_link, links_in};
 use super::log::{self, Cut, RawLog};
 
 /// The longest line a report quotes.
@@ -532,17 +532,22 @@ pub enum RawLogState {
 /// The last stage of a pipeline that keeps a raw log or can hide lines:
 /// says how many were hidden, lists the collapsed kinds with the file each
 /// is in, and names the raw log whenever one was kept. Silent with no log
-/// and nothing hidden; a progress line hidden is not counted. `links`
-/// writes each path as an OSC 8 hyperlink, for a terminal.
+/// and nothing hidden; a progress line hidden is not counted. With `links`
+/// it writes each path as an OSC 8 hyperlink as they say, for a terminal.
 pub struct Summary {
     stats: std::sync::Arc<Stats>,
     log: RawLogState,
     style: Style,
-    links: bool,
+    links: Option<FileLinks>,
 }
 
 impl Summary {
-    pub fn new(stats: std::sync::Arc<Stats>, log: RawLogState, style: Style, links: bool) -> Self {
+    pub fn new(
+        stats: std::sync::Arc<Stats>,
+        log: RawLogState,
+        style: Style,
+        links: Option<FileLinks>,
+    ) -> Self {
         Self {
             stats,
             log,
@@ -552,10 +557,9 @@ impl Summary {
     }
 
     fn path(&self, path: &Path) -> String {
-        if self.links {
-            file_link(path)
-        } else {
-            path.display().to_string()
+        match &self.links {
+            Some(files) => file_link(files, path),
+            None => path.display().to_string(),
         }
     }
 }
@@ -797,7 +801,7 @@ mod tests {
             stats.clone(),
             RawLogState::Kept("/tmp/c.log".into(), Default::default()),
             Style::default(),
-            false,
+            None,
         );
         assert_eq!(
             feed(&mut p, &["a"]),
@@ -886,7 +890,7 @@ mod tests {
             std::fs::write(at, "").unwrap();
         }
         let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()]);
-        linker.host = String::new();
+        linker.files.host = String::new();
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(linker));
         let link = |rel: &str, shown: &str| {
             format!(
@@ -940,7 +944,7 @@ mod tests {
             std::fs::write(at, "").unwrap();
         }
         let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()]);
-        linker.host = String::new();
+        linker.files.host = String::new();
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(linker));
         let pkg = format!(
             "\x1b]8;;file://{}/pkg/src/a.ts\x1b\\src/a.ts\x1b]8;;\x1b\\",
@@ -990,13 +994,13 @@ mod tests {
     fn summary_names_no_log_when_none_was_configured() {
         let stats = Arc::new(Stats::default());
         stats.hid(1);
-        let mut p = Summary::new(stats.clone(), RawLogState::Off, Style::default(), false);
+        let mut p = Summary::new(stats.clone(), RawLogState::Off, Style::default(), None);
         assert_eq!(feed(&mut p, &[]), "INFO: Aspect hid 1 console line\n");
         let mut p = Summary::new(
             Arc::new(Stats::default()),
             RawLogState::Off,
             Style::default(),
-            false,
+            None,
         );
         assert_eq!(
             feed(&mut p, &[]),
@@ -1008,7 +1012,7 @@ mod tests {
     /// A log that could not be made, or stopped short, is said so.
     #[test]
     fn summary_says_when_the_log_failed() {
-        let p = |state| Summary::new(Arc::new(Stats::default()), state, Style::default(), false);
+        let p = |state| Summary::new(Arc::new(Stats::default()), state, Style::default(), None);
         assert_eq!(
             feed(&mut p(RawLogState::Failed), &[]),
             "INFO: The raw console could not be saved\n"
@@ -1033,7 +1037,7 @@ mod tests {
             stats,
             RawLogState::Kept("/tmp/c.log".into(), Default::default()),
             Style::default(),
-            false,
+            None,
         );
         let out = feed(&mut p, &[]);
         assert!(out.ends_with("  and 2 more kinds of line\n"), "{out}");
@@ -1066,7 +1070,7 @@ mod tests {
             stats,
             RawLogState::Kept(log.clone(), Default::default()),
             Style::default(),
-            false,
+            None,
         );
         let out = feed(&mut p, &[]);
         let one = RawLog::sibling(&log, "collapsed-1");
@@ -1100,7 +1104,7 @@ mod tests {
 
     #[test]
     fn a_link_names_the_path_it_shows() {
-        let link = file_link(Path::new("/tmp/a b.log"));
+        let link = file_link(&FileLinks::file(), Path::new("/tmp/a b.log"));
         assert!(link.starts_with("\x1b]8;;file://"), "{link:?}");
         assert!(
             link.contains("/tmp/a%20b.log\x1b\\/tmp/a b.log\x1b]8;;\x1b\\"),

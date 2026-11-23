@@ -337,6 +337,9 @@ pub struct Config {
     /// directories it exists under. A hidden console ([`Output::Hidden`])
     /// links nothing.
     pub links: Option<Vec<std::path::PathBuf>>,
+    /// What a link to a file opens, when [`Config::links`] links: URLs are
+    /// links whatever it says.
+    pub link_format: links::LinkFormat,
 }
 
 impl Config {
@@ -354,6 +357,7 @@ impl Config {
             strip_colour: false,
             user_colour: None,
             links: None,
+            link_format: links::LinkFormat::parse("file").expect("an alias"),
             colour: false,
         }
     }
@@ -378,7 +382,12 @@ impl Config {
     /// one and something is shown.
     fn linker(&self) -> Option<links::Linker> {
         let bases = self.links.clone()?;
-        (self.output != Output::Hidden).then(|| links::Linker::new(bases))
+        (self.output != Output::Hidden).then(|| links::Linker::new(bases).with_files(self.files()))
+    }
+
+    /// How this pipeline's links to files are made.
+    fn files(&self) -> links::FileLinks {
+        links::FileLinks::new(self.link_format.clone())
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
@@ -471,7 +480,7 @@ impl Config {
         let link_to = || {
             let workspace = self.linker().and(self.links.as_ref()?.first().cloned())?;
             Some(filters::LinkTo {
-                host: links::hostname(),
+                files: self.files(),
                 workspace,
             })
         };
@@ -543,7 +552,7 @@ impl Config {
                 stats,
                 state,
                 self.style.clone(),
-                self.links.is_some() && self.output != Output::Hidden,
+                self.linker().map(|_| self.files()),
             )));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
