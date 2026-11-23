@@ -1193,7 +1193,7 @@ def _finalize_command_rows(rows):
 _MAX_SUBORDINATE_TIPS = 5
 
 def _is_must_show(severity):
-    """Severities that always surface regardless of cap (important/warning)."""
+    """Severities that always surface regardless of cap (warning, important)."""
     return severity == TIP_IMPORTANT or severity == TIP_WARNING
 
 def _ordered_unique(values):
