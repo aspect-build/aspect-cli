@@ -277,7 +277,16 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
         stderr.contains(
             "TIP[tips-hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips-hint`) or in `.aspect/config.axl`"
         ),
-        "the hint once, at the end, naming what was shown:\n{stderr}"
+        "the hint:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("TIP[tips-hint]").count(),
+        1,
+        "the hint once:\n{stderr}"
+    );
+    assert!(
+        stderr.find("TIP[tips-hint]") > stderr.find("TIP[server-crash]"),
+        "the hint after the tips:\n{stderr}"
     );
     assert!(
         !stderr.contains("[1 / 2] Compiling"),

@@ -787,7 +787,7 @@ def _test_printer_keeps_a_bodys_blank_lines(ctx):
 
 def _test_show_each_with_a_cap(ctx):
     """Each changed emit prints up to `max_shown`; the rest are counted for
-    one line at the end, then the hint names the ids printed."""
+    one line at the end, then the hint."""
     _reset(ctx)
     lines = _capture(ctx)
     for i in range(4):
@@ -795,8 +795,8 @@ def _test_show_each_with_a_cap(ctx):
     add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T3", body = "", max_shown = 2)
     _eq("two printed", lines, ["TIP[e] warning: T0", "TIP[e] warning: T1"])
     tips._finish_for_test(ctx)
-    _eq("then counted, and the hint", lines[2:4], ["TIP[e] warning: 2 more; the last: T3", lines[3]])
-    _eq("hint", lines[3].startswith("TIP[tips-hint]"), True)
+    _eq("then counted", lines[2], "TIP[e] warning: 2 more; the last: T3")
+    _eq("then the hint, last", [_plain_tip(l) for l in lines[3:]], [_plain_tip(l) for l in terminal_hint_lines()])
     _reset(ctx)
 
 def _test_show_first_and_end(ctx):
