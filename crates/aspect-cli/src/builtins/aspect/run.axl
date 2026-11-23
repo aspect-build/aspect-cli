@@ -70,6 +70,7 @@ def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version:
     runs = ctx.bazel.run_all(
         [target],
         build_events = build_events,
+        max_event_bytes = bazel_trait.max_build_event_bytes,
         rc = rc,
         announce_version = announce_version,
         announce_command = announce_command,
@@ -371,6 +372,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     runs = ctx.bazel.run_all(
         [target],
         build_events = build_events,
+        max_event_bytes = bazel_trait.max_build_event_bytes,
         execution_log = xl.sinks or False,
         rc = rc,
         announce_version = announce_version,

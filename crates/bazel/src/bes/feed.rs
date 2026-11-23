@@ -164,6 +164,8 @@ pub struct BuildEventStream {
     /// it closes the broadcaster, so anything woken by the close can read it.
     /// `None` when the thread returned an error instead.
     end: Arc<OnceLock<End>>,
+    /// The size [`cap_event`] holds each event to.
+    event_limit: usize,
 }
 
 impl BuildEventStream {
@@ -183,7 +185,16 @@ impl BuildEventStream {
             handle: None,
             broadcaster: Some(Broadcaster::new()),
             end: Arc::new(OnceLock::new()),
+            event_limit: super::cap::MAX_EVENT_BYTES,
         }
+    }
+
+    /// Hold events to what fits in a message of `max_message_bytes`, the
+    /// largest the stream's BES backends accept (see [`super::cap::event_limit`]),
+    /// instead of [`super::cap::DEFAULT_MAX_MESSAGE_BYTES`].
+    pub fn max_message_bytes(mut self, max_message_bytes: usize) -> Self {
+        self.event_limit = super::cap::event_limit(max_message_bytes);
+        self
     }
 
     /// Start the reader thread on `file`.
@@ -200,8 +211,9 @@ impl BuildEventStream {
     ///
     /// Every event is redacted (see [`super::redact`]) before anything sees
     /// it: subscribers and file sinks read the same post-redact stream, so
-    /// secrets never leave this process. Then [`cap_event`] holds each to
-    /// [`super::cap::MAX_EVENT_BYTES`], with a warning for every event over it,
+    /// secrets never leave this process. Then [`cap_event`] holds each to the
+    /// stream's limit (see [`max_message_bytes`](Self::max_message_bytes)),
+    /// with a warning for every event over it,
     /// and every consumer gets the capped copy. An event neither changes, the
     /// common case, is mirrored as its original bytes without a re-encode.
     ///
@@ -219,6 +231,7 @@ impl BuildEventStream {
             .clone()
             .expect("a stream is started before it is joined");
         let thread_end = self.end.clone();
+        let event_limit = self.event_limit;
         let file = file.follow(gate);
         self.handle = Some(thread::spawn(move || {
             let broadcaster = thread_broadcaster;
@@ -248,7 +261,7 @@ impl BuildEventStream {
                 } else {
                     payload.len()
                 };
-                if let Some(capped) = cap_event(&mut event, len) {
+                if let Some(capped) = cap_event(&mut event, len, event_limit) {
                     super::sink::warn(&capped.warning());
                     changed |= capped.changed();
                 }
@@ -525,9 +538,17 @@ mod tests {
         }
 
         fn with_sinks(server: u32, client: u32, sinks: Vec<(String, Arc<FileSignal>)>) -> Self {
+            Self::of(BuildEventStream::new(), server, client, sinks)
+        }
+
+        fn of(
+            stream: BuildEventStream,
+            server: u32,
+            client: u32,
+            sinks: Vec<(String, Arc<FileSignal>)>,
+        ) -> Self {
             let file = BuildEventStream::reserve();
             let path = file.path().to_path_buf();
-            let stream = BuildEventStream::new();
             let sub = stream.subscribe();
             let stream = stream.start(file, gate(server, client), sinks);
             Self {
@@ -1051,7 +1072,10 @@ mod tests {
         };
         let mut capped = big_action.clone();
         let len = capped.encoded_len();
-        assert!(cap_event(&mut capped, len).is_some_and(|c| c.changed()));
+        assert!(
+            cap_event(&mut capped, len, super::super::cap::MAX_EVENT_BYTES)
+                .is_some_and(|c| c.changed())
+        );
         let client = sleeper();
         let (sink, spec) = file_sink();
         let rig = Rig::with_sinks(client.id(), client.id(), vec![spec]);
@@ -1071,6 +1095,33 @@ mod tests {
             take_sink(&sink),
             encoded_all(&[capped, big_progress, build_finished(0, true)])
         );
+    }
+
+    /// A stream whose backends take larger messages passes on an action event
+    /// that would be cut under the default.
+    #[test]
+    fn a_larger_message_size_passes_a_larger_event_on_whole() {
+        use axl_proto::build_event_stream::ActionExecuted;
+        let big = BuildEvent {
+            payload: Some(Payload::Action(ActionExecuted {
+                command_line: vec!["x".repeat(1000); 6_000],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(big.encoded_len() > super::super::cap::MAX_EVENT_BYTES);
+        let client = sleeper();
+        let rig = Rig::of(
+            BuildEventStream::new().max_message_bytes(16 << 20),
+            client.id(),
+            client.id(),
+            vec![],
+        );
+        rig.attempt(&[big.clone(), build_finished(0, true)]);
+        let (joined, rest, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(rest, vec![big, build_finished(0, true)]);
     }
 
     /// The retried attempt goes on writing after its retry marker. That tail

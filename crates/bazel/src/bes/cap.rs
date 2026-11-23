@@ -8,13 +8,15 @@
 //! of MB.
 //!
 //! [`cap_event`] drops arguments from the end of such a command line until the
-//! event fits in [`MAX_EVENT_BYTES`]. An event over the limit for any other
-//! reason is passed on as it is. Either way it says so, for the caller to warn.
+//! event fits in the limit. An event over the limit for any other reason is
+//! passed on as it is. Either way it says so, for the caller to warn.
 //!
-//! The limit is on the encoded `BuildEvent`, without a length prefix. A gRPC
-//! sink sends it packed in an `Any` inside a `PublishBuildToolEventStreamRequest`
-//! (see [`super::client::build_tool::bazel_event_encoded`]), so the limit
-//! leaves [`REQUEST_HEADROOM`] under the 4 MiB receive limit for that wrapper.
+//! The limit is set as the largest message a backend accepts
+//! ([`DEFAULT_MAX_MESSAGE_BYTES`] unless configured), and held on the encoded
+//! `BuildEvent`, without a length prefix. A gRPC sink sends the event packed in
+//! an `Any` inside a `PublishBuildToolEventStreamRequest` (see
+//! [`super::client::build_tool::bazel_event_encoded`]), so [`event_limit`]
+//! leaves [`REQUEST_HEADROOM`] of the message for that wrapper.
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -23,20 +25,29 @@ use prost::encoding::{encoded_len_varint, key_len};
 
 use super::kind::payload_name;
 
-/// gRPC's default receive limit, which the publish request must fit in.
-pub const MAX_REQUEST_BYTES: usize = 4 << 20;
+/// gRPC's default receive limit, the message size held to unless configured.
+pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 4 << 20;
 
-/// Room left in [`MAX_REQUEST_BYTES`] for the request wrapping an event: at
-/// most about 160 bytes with UUID build and invocation ids.
+/// The smallest message size that can be configured.
+pub const MIN_MAX_MESSAGE_BYTES: usize = 64 << 10;
+
+/// Room left in a message for the request wrapping an event: at most about
+/// 160 bytes with UUID build and invocation ids.
 pub const REQUEST_HEADROOM: usize = 4 << 10;
 
-/// The largest event passed on whole, in encoded bytes.
-pub const MAX_EVENT_BYTES: usize = MAX_REQUEST_BYTES - REQUEST_HEADROOM;
+/// The largest event passed on whole under [`DEFAULT_MAX_MESSAGE_BYTES`].
+pub const MAX_EVENT_BYTES: usize = DEFAULT_MAX_MESSAGE_BYTES - REQUEST_HEADROOM;
+
+/// The largest event passed on whole when backends accept messages of up to
+/// `max_message_bytes`, which is at least [`MIN_MAX_MESSAGE_BYTES`].
+pub fn event_limit(max_message_bytes: usize) -> usize {
+    max_message_bytes.max(MIN_MAX_MESSAGE_BYTES) - REQUEST_HEADROOM
+}
 
 /// `ActionExecuted.command_line`'s field number.
 const COMMAND_LINE_FIELD: u32 = 9;
 
-/// What [`cap_event`] did to an event over the limit.
+/// What [`cap_event`] did to an event over the `limit` it was held to.
 #[derive(Debug, PartialEq)]
 pub enum Capped {
     /// The action's command line was cut to its first `kept` of `total`
@@ -47,9 +58,14 @@ pub enum Capped {
         total: usize,
         before: usize,
         after: usize,
+        limit: usize,
     },
     /// Over the limit with nothing to cut; passed on unchanged.
-    Oversize { kind: &'static str, bytes: usize },
+    Oversize {
+        kind: &'static str,
+        bytes: usize,
+        limit: usize,
+    },
 }
 
 impl Capped {
@@ -67,14 +83,15 @@ impl Capped {
                 total,
                 before,
                 after,
+                limit,
             } => {
                 let mut msg = format!(
                     "the build event for {action} was {}, over the {} limit for build \
                      events; its command line was cut to the first {kept} of {total} arguments",
                     mib(*before),
-                    mib(MAX_EVENT_BYTES),
+                    mib(*limit),
                 );
-                if *after > MAX_EVENT_BYTES {
+                if after > limit {
                     msg.push_str(&format!(
                         ", and the event is still {}, which BES backends may refuse",
                         mib(*after)
@@ -82,37 +99,41 @@ impl Capped {
                 }
                 msg
             }
-            Self::Oversize { kind, bytes } => format!(
+            Self::Oversize { kind, bytes, limit } => format!(
                 "a build event of kind {kind} is {}, over the {} limit for build events; \
                  BES backends may refuse it",
                 mib(*bytes),
-                mib(MAX_EVENT_BYTES),
+                mib(*limit),
             ),
         }
     }
 }
 
-/// Hold `event`, `len` bytes encoded, to [`MAX_EVENT_BYTES`] by cutting its
-/// command line; `None` when it fits already.
+/// Hold `event`, `len` bytes encoded, to `limit` bytes by cutting its command
+/// line; `None` when it fits already.
 ///
 /// Arguments go from the end, each counted at its key, length and bytes. The
 /// enclosing length prefixes only shrink as they go, so the event that results
 /// fits, with at most one argument more removed than strictly needed. An
 /// action too large without its command line loses all of it, and `after`
 /// says it is still over.
-pub fn cap_event(event: &mut BuildEvent, len: usize) -> Option<Capped> {
-    if len <= MAX_EVENT_BYTES {
+pub fn cap_event(event: &mut BuildEvent, len: usize, limit: usize) -> Option<Capped> {
+    if len <= limit {
         return None;
     }
     let action = match event.payload.as_mut() {
         Some(Payload::Action(action)) if !action.command_line.is_empty() => action,
         other => {
             let kind = other.map_or("payload-less", |p| payload_name(p));
-            return Some(Capped::Oversize { kind, bytes: len });
+            return Some(Capped::Oversize {
+                kind,
+                bytes: len,
+                limit,
+            });
         }
     };
     let total = action.command_line.len();
-    let mut over = len - MAX_EVENT_BYTES;
+    let mut over = len - limit;
     while over > 0
         && let Some(arg) = action.command_line.pop()
     {
@@ -126,6 +147,7 @@ pub fn cap_event(event: &mut BuildEvent, len: usize) -> Option<Capped> {
         total,
         before: len,
         after: prost::Message::encoded_len(event),
+        limit,
     })
 }
 
@@ -184,7 +206,7 @@ mod tests {
         assert_eq!(
             {
                 let len = event.encoded_len();
-                cap_event(&mut event, len)
+                cap_event(&mut event, len, MAX_EVENT_BYTES)
             },
             None
         );
@@ -215,14 +237,17 @@ mod tests {
     fn an_event_exactly_at_the_limit_is_left_alone() {
         let mut event = action_of(MAX_EVENT_BYTES);
         let before = event.clone();
-        assert_eq!(cap_event(&mut event, MAX_EVENT_BYTES), None);
+        assert_eq!(
+            cap_event(&mut event, MAX_EVENT_BYTES, MAX_EVENT_BYTES),
+            None
+        );
         assert_eq!(event, before);
     }
 
     #[test]
     fn an_event_a_byte_over_loses_only_its_last_argument() {
         let mut event = action_of(MAX_EVENT_BYTES + 1);
-        let capped = cap_event(&mut event, MAX_EVENT_BYTES + 1).unwrap();
+        let capped = cap_event(&mut event, MAX_EVENT_BYTES + 1, MAX_EVENT_BYTES).unwrap();
         assert!(
             matches!(
                 capped,
@@ -238,7 +263,7 @@ mod tests {
     }
 
     /// The publish request a gRPC sink wraps an event at the limit in fits in
-    /// gRPC's default receive limit, even with ids far longer than UUIDs.
+    /// the message size, even with ids far longer than UUIDs.
     #[test]
     fn an_event_at_the_limit_fits_in_a_publish_request() {
         let encoded = action_of(MAX_EVENT_BYTES).encode_to_vec();
@@ -253,7 +278,7 @@ mod tests {
                     nanos: i32::MAX,
                 },
             );
-            assert!(req.encoded_len() <= MAX_REQUEST_BYTES, "{id_len}");
+            assert!(req.encoded_len() <= DEFAULT_MAX_MESSAGE_BYTES, "{id_len}");
         }
     }
 
@@ -262,7 +287,7 @@ mod tests {
         let mut event = failed_action(100_000, 100);
         let len = event.encoded_len();
         assert!(len > MAX_EVENT_BYTES);
-        let capped = cap_event(&mut event, len).unwrap();
+        let capped = cap_event(&mut event, len, MAX_EVENT_BYTES).unwrap();
         let after = event.encoded_len();
         let Capped::CommandLine {
             kept,
@@ -313,7 +338,7 @@ mod tests {
         });
         let capped = {
             let len = event.encoded_len();
-            cap_event(&mut event, len)
+            cap_event(&mut event, len, MAX_EVENT_BYTES)
         }
         .unwrap();
         assert!(
@@ -364,7 +389,7 @@ mod tests {
         let before = event.clone();
         let capped = {
             let len = event.encoded_len();
-            cap_event(&mut event, len)
+            cap_event(&mut event, len, MAX_EVENT_BYTES)
         }
         .unwrap();
         assert_eq!(event, before);
@@ -373,6 +398,25 @@ mod tests {
             capped.warning(),
             "a build event of kind progress is 4.0 MiB, over the 4.0 MiB limit for build events; \
              BES backends may refuse it"
+        );
+    }
+
+    #[test]
+    fn a_configured_message_size_sets_the_limit() {
+        assert_eq!(event_limit(DEFAULT_MAX_MESSAGE_BYTES), MAX_EVENT_BYTES);
+        assert_eq!(event_limit(16 << 20), (16 << 20) - REQUEST_HEADROOM);
+        assert_eq!(event_limit(1), MIN_MAX_MESSAGE_BYTES - REQUEST_HEADROOM);
+
+        let limit = event_limit(16 << 20);
+        let mut within = action_of(10 << 20);
+        assert_eq!(cap_event(&mut within, 10 << 20, limit), None);
+        let mut over = action_of(limit + 1);
+        let capped = cap_event(&mut over, limit + 1, limit).unwrap();
+        assert!(over.encoded_len() <= limit);
+        assert!(
+            capped.warning().contains("over the 16.0 MiB limit"),
+            "{}",
+            capped.warning()
         );
     }
 }

@@ -356,6 +356,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     runs = ctx.bazel.run_all(
         [ctx.args.formatter_target],
         build_events = build_events,
+        max_event_bytes = bazel_trait.max_build_event_bytes,
         execution_log = xl.sinks or False,
         rc = rc,
         directory = ctx.std.env.aspect_root_dir(),

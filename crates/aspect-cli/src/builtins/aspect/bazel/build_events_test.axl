@@ -46,14 +46,20 @@ def _sinks(*uris):
 _GCP = ("grpcs://bes.gcp", "https://app.gcp/i/")
 _RUNNER = ("grpcs://bes.runner", "https://app.runner")
 
-def _fake_trait(sinks, backends = [], results_sources = []):
-    """Stand-in for `BazelTrait`: the collectors read its sink list and the
-    backend URIs features injected on it (`--remote`'s deployment BES), and the
-    link helpers read its `(backend, viewer)` pairs."""
+def _fake_trait(sinks, backends = [], results_sources = [], runner_backends = [], max_retries = 4, retry_min_delay = "1s", timeout = "0s"):
+    """Stand-in for `BazelTrait`: the collectors read its sink list, the
+    backend URIs features injected on it (`--remote`'s deployment BES, a
+    runner's own) and the BuildEvents options gRPC sinks take, and the link
+    helpers read its `(backend, viewer)` pairs."""
     return struct(
         build_event_sinks = sinks,
         bes_backends = backends,
+        bes_runner_backends = runner_backends,
         bes_results_sources = results_sources,
+        bes_max_retries = max_retries,
+        bes_retry_min_delay = retry_min_delay,
+        bes_retry_max_buffer_bytes = None,
+        bes_timeout = timeout,
     )
 
 def _test_clean_stream(_):
@@ -228,6 +234,44 @@ def _test_collect_drops_duplicate_backends(_):
     _eq("different port kept", uris(duplicate + ":8980"), [duplicate, other])
     _eq("no bazel backend is a no-op", uris(""), [duplicate, other])
     _eq("no backends", uris(duplicate, backends = []), [])
+
+def _fails(f):
+    """Whether calling `f` fails."""
+    err, _ = catch(f)
+    return err != None
+
+def _test_runner_backends_stream_after_the_tasks_own(_):
+    """A runner's backends come after the `--bes-backend` sinks and before the
+    trait's prebuilt ones, each once, and are dropped like the others when
+    Bazel uploads there itself."""
+    runner = "grpcs://bes.runner"
+    trait = _fake_trait(_sinks("grpcs://bes.prebuilt"), runner_backends = [runner, runner])
+    ctx = _fake_ctx(bes_backends = ["grpcs://bes.cli"])
+    _eq(
+        "order",
+        [s.uri for s in collect_bes_sinks(ctx, trait, _fake_rc({}))],
+        ["grpcs://bes.cli", runner, "grpcs://bes.prebuilt"],
+    )
+    rc = _fake_rc({"--bes_backend": runner})
+    _eq(
+        "dropped when bazel uploads there",
+        [s.uri for s in collect_bes_sinks(_fake_ctx(), trait, rc)],
+        ["grpcs://bes.prebuilt"],
+    )
+    _eq("reported as dropped", dropped_bes_backends(_fake_ctx(), trait, rc, "build"), [runner])
+
+def _test_grpc_sinks_take_the_traits_options(_):
+    """Every gRPC sink is built under the trait's BuildEvents options, whichever
+    way its backend was named: an option the runtime rejects fails each."""
+    for (what, trait) in [
+        ("max_retries", _fake_trait([], max_retries = -1)),
+        ("retry_min_delay", _fake_trait([], retry_min_delay = "soon")),
+        ("timeout", _fake_trait([], timeout = "later")),
+    ]:
+        _eq("%s for --bes-backend" % what, _fails(lambda: collect_bes_from_args(_fake_ctx(bes_backends = ["grpcs://bes.cli"]), bazel_trait = trait)), True)
+        runner = _fake_trait([], runner_backends = ["grpcs://bes.runner"], max_retries = trait.bes_max_retries, retry_min_delay = trait.bes_retry_min_delay, timeout = trait.bes_timeout)
+        _eq("%s for a runner backend" % what, _fails(lambda: collect_bes_sinks(_fake_ctx(), runner, _fake_rc({}))), True)
+    _eq("valid options build", len(collect_bes_sinks(_fake_ctx(bes_backends = ["grpcs://bes.cli"]), _fake_trait([], max_retries = 0, retry_min_delay = "2s", timeout = "30s"), _fake_rc({}))), 1)
 
 def _test_collect_bes_sinks(_):
     """`collect_bes_sinks` returns the `--bes-backend` sinks then the trait's own,
@@ -442,6 +486,8 @@ _UNIT_TESTS = [
     _test_bazel_bes_backend,
     _test_collect_drops_duplicate_backends,
     _test_collect_bes_sinks,
+    _test_runner_backends_stream_after_the_tasks_own,
+    _test_grpc_sinks_take_the_traits_options,
     _test_trait_backends_are_collected,
     _test_bes_link_data,
     _test_bes_streamed_by_bazel,

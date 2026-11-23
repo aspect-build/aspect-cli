@@ -962,13 +962,19 @@ impl Unstarted {
         file: Option<Reservation>,
         gate: Gate,
         file_sinks: Vec<(String, Arc<FileSignal>)>,
+        max_event_bytes: Option<usize>,
     ) -> Self {
         Self {
             pending: file.map(|file| {
                 // BES sinks never fail the build; their warnings are how the
                 // user learns of a lost copy or upload.
                 bazel::bes::sink::set_warn(crate::diag::warn);
-                (BuildEventStream::new(), file, gate, file_sinks)
+                let stream = BuildEventStream::new();
+                let stream = match max_event_bytes {
+                    Some(n) => stream.max_message_bytes(n),
+                    None => stream,
+                };
+                (stream, file, gate, file_sinks)
             }),
         }
     }
@@ -1134,6 +1140,7 @@ impl Build {
         rt: AsyncRuntime,
         history: &History,
         keep_logs: bazel::bes::sink::keep::Keep,
+        max_event_bytes: Option<usize>,
     ) -> Result<Build, std::io::Error> {
         // Logs to keep are read from the stream, which a build keeping some
         // has even with no other consumer; and keeping them makes the history
@@ -1387,7 +1394,7 @@ impl Build {
             client: child.id(),
             server: Some(pid),
         };
-        let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks);
+        let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks, max_event_bytes);
 
         // Everything that can fail once bazel runs. A failure abandons the
         // stream (see `Unstarted`), and releases the handles this spawn bound.
@@ -4810,7 +4817,7 @@ Test = task(implementation = _impl)
         let client_exited = Arc::new(AtomicBool::new(false));
         let exited = client_exited.clone();
         let gate = Gate::new(move || exited.load(Ordering::SeqCst)).with_held(|_| false);
-        let unstarted = Unstarted::new(Some(file), gate, vec![]);
+        let unstarted = Unstarted::new(Some(file), gate, vec![], None);
         let sub = unstarted.stream().unwrap().subscribe();
         unstarted.abandon(|| {
             // Bazel wrote its file, and stopping the client ends it.

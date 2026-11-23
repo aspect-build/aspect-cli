@@ -512,6 +512,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     runs = ctx.bazel.run_all(
         [ctx.args.gazelle_target],
         build_events = build_events,
+        max_event_bytes = bazel_trait.max_build_event_bytes,
         execution_log = xl.sinks or False,
         rc = rc,
         directory = ctx.std.env.bazel_root_dir(),
