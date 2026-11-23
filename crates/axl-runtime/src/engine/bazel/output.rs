@@ -519,6 +519,7 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     // as Bazel writes its own, else from where the task runs, as
     // `relativize_paths` writes them.
     config.link_format = crate::out::link_format();
+    config.link_text = crate::out::links_as_text();
     config.links = (stderr_tty && crate::out::terminal_links())
         .then(|| std::env::current_dir().ok())
         .flatten()

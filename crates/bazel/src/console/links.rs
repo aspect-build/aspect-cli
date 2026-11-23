@@ -3,24 +3,31 @@
 //! its width.
 //!
 //! [`Linker::link`] links each `http://` or `https://` URL to itself, and
-//! each path to a file or directory that exists to it as its [`LinkFormat`]
-//! says (plain under `none`): an absolute path as written, a relative one (`src/a.cc:3:4`, `BUILD.bazel`)
-//! from the first of the linker's directories it exists under. For Bazel's
-//! console those are the workspace the build runs in, which Bazel's own
-//! paths are relative to, then the directory the task runs from. A path
-//! `relativize_paths` made relative it links itself, as only it knows the
-//! file (`BUILD.bazel` from a package directory is that package's), even
-//! one that does not exist: the linker leaves text already linked alone. A response file's path
-//! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not a
-//! `:line:col` after it. A path to nothing (a sandbox gone with its action, a
-//! label, prose) or cut short (`src/a.c…`) is left alone. A URL ends before
-//! trailing punctuation, a bracket that closes none of its own, and a `…`
-//! that marks it cut.
+//! each path to a file that exists as its [`LinkFormat`] says (a directory
+//! only under a `file://` format, which an editor would open as a folder;
+//! nothing under `none`): an absolute path as written, a relative one
+//! (`src/a.cc:3:4`, `BUILD.bazel`) from the first of the linker's
+//! directories it exists under. For Bazel's console those are the
+//! workspace the build runs in, which Bazel's own paths are relative to,
+//! then the directory the task runs from. A path `relativize_paths` made
+//! relative it links itself, as only it knows the file (`BUILD.bazel` from
+//! a package directory is that package's), even one that does not exist:
+//! the linker leaves text already linked alone. A response file's path
+//! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not
+//! a `:line:col` after it. A path to nothing (a sandbox gone with its
+//! action, a label, prose) or cut short (`src/a.c…`) is left alone. A URL
+//! ends before trailing punctuation, a bracket that closes none of its own,
+//! and a `…` that marks it cut.
 //!
 //! What a file's link opens is a [`LinkFormat`], as ripgrep's
-//! `--hyperlink-format` is: an editor's URL scheme (`vscode://file{path}:{line}:{column}`)
-//! with the line and column that follow the path, `file://` (what the
-//! system opens a file with, at no line), or none, which links URLs alone.
+//! `--hyperlink-format` is: an editor's URL scheme
+//! (`vscode://file{path}:{line}:{column}`) at the line and column that
+//! follow the path (`:12:3`, `(12,3)`, a Starlark traceback's
+//! `", line 12, column 3`), `file://` (what the system opens a file with, at
+//! no line), or none, which links URLs alone. [`LinkFormat::auto`] finds
+//! the editor. Where a terminal shows no OSC 8 link but opens a URL written
+//! out (Terminal.app), each link's URL is written beside it too
+//! ([`FileLinks::text`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -81,6 +88,11 @@ impl LinkFormat {
         ),
         ("cursor", "cursor://file{path}:{line}:{column}"),
         ("vscodium", "vscodium://file{path}:{line}:{column}"),
+        ("zed", "zed://file{path}:{line}:{column}"),
+        (
+            "idea",
+            "idea://open?file={path}&line={line}&column={column}",
+        ),
         (
             "macvim",
             "mvim://open?url=file://{path}&line={line}&column={column}",
@@ -112,15 +124,39 @@ impl LinkFormat {
         ))
     }
 
-    /// The format for a terminal that says nothing of its own: the editor's
-    /// whose integrated terminal this is, told by the app its terminal
-    /// names in the paths it gives the shell, as VS Code and each of its
-    /// forks set `TERM_PROGRAM=vscode` (Cursor, VSCodium, VS Code
-    /// Insiders, or VS Code itself); files unlinked anywhere else, in an
-    /// editor not known, and on a remote machine (SSH, a dev container,
-    /// Codespaces), whose paths a local editor cannot open. A `file://`
-    /// link opens whatever the system picks, at no line.
-    pub fn auto(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> LinkFormat {
+    /// The editors `auto` finds a person's choice of, by the command that
+    /// starts each, in the order picked when more than one is installed.
+    pub const EDITORS: &[(&str, &str)] = &[
+        ("cursor", "cursor"),
+        ("code", "vscode"),
+        ("code-insiders", "vscode-insiders"),
+        ("zed", "zed"),
+        ("codium", "vscodium"),
+        ("idea", "idea"),
+        ("mvim", "macvim"),
+        ("mate", "textmate"),
+    ];
+
+    /// The format for a terminal that says nothing of its own, the first
+    /// of:
+    ///
+    /// - on a remote machine (SSH, a dev container, Codespaces), none, as
+    ///   a local editor cannot open its paths;
+    /// - in an editor's integrated terminal, that editor: Cursor, VSCodium,
+    ///   VS Code Insiders or VS Code, each setting `TERM_PROGRAM=vscode`
+    ///   and told apart by the program its git extension names
+    ///   (`VSCODE_GIT_ASKPASS_NODE`); none for any other, a fork not known,
+    ///   a remote VS Code server or code-server;
+    /// - the editor `$VISUAL`, else `$EDITOR`, starts (`code --wait`), when
+    ///   it is one of [`LinkFormat::EDITORS`]; a terminal editor (`vim`)
+    ///   cannot be opened by a click;
+    /// - the first of [`LinkFormat::EDITORS`] installed, `on_path`;
+    /// - none: a `file://` link opens whatever the system picks, at no
+    ///   line.
+    pub fn auto(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+        on_path: impl Fn(&str) -> bool,
+    ) -> LinkFormat {
         let has =
             |name: &str, want: &str| var(name).is_some_and(|v| v.to_string_lossy().contains(want));
         let alias = |name: &str| Self::parse(name).expect("an alias");
@@ -130,36 +166,82 @@ impl LinkFormat {
         {
             return LinkFormat::None;
         }
-        let app =
-            |want: &str| has("VSCODE_GIT_ASKPASS_NODE", want) || has("VSCODE_IPC_HOOK_CLI", want);
-        if has("TERM_PROGRAM", "Cursor") || var("CURSOR_TRACE_ID").is_some() || app("Cursor") {
+        // The program the editor's git extension gives the shell, its own:
+        // the app's bundle on macOS (`Cursor.app/…/Cursor Helper (Plugin)`),
+        // its executable on Linux (`/usr/share/codium/codium`).
+        let exe = var("VSCODE_GIT_ASKPASS_NODE").map(|v| v.to_string_lossy().into_owned());
+        let named = |app: &str, file: &str| {
+            exe.as_deref().is_some_and(|p| {
+                p.contains(&format!("/{app}.app/"))
+                    || std::path::Path::new(p)
+                        .file_name()
+                        .is_some_and(|f| f == file)
+            })
+        };
+        if has("TERM_PROGRAM", "Cursor")
+            || var("CURSOR_TRACE_ID").is_some()
+            || named("Cursor", "cursor")
+        {
             return alias("cursor");
         }
-        if !has("TERM_PROGRAM", "vscode") {
-            return LinkFormat::None;
+        if has("TERM_PROGRAM", "vscode") {
+            if named("VSCodium", "codium") {
+                return alias("vscodium");
+            }
+            if named("Visual Studio Code - Insiders", "code-insiders")
+                || has("TERM_PROGRAM_VERSION", "insider")
+            {
+                return alias("vscode-insiders");
+            }
+            // VS Code itself, or one whose git extension names nothing; a
+            // fork, a remote server's `node` or code-server's names
+            // another program, whose paths a local VS Code may not open.
+            return if exe.is_none() || named("Visual Studio Code", "code") {
+                alias("vscode")
+            } else {
+                LinkFormat::None
+            };
         }
-        if app("VSCodium") {
-            return alias("vscodium");
+        let chosen = ["VISUAL", "EDITOR"].iter().find_map(|name| {
+            let value = var(name)?;
+            let value = value.to_string_lossy();
+            let command = value.split_whitespace().next()?;
+            let command = command.rsplit('/').next().unwrap_or(command);
+            Self::EDITORS
+                .iter()
+                .find(|(c, _)| *c == command)
+                .map(|(_, a)| *a)
+        });
+        if let Some(name) = chosen {
+            return alias(name);
         }
-        if app("Insiders") || has("TERM_PROGRAM_VERSION", "insider") {
-            return alias("vscode-insiders");
-        }
-        // VS Code's own helper, or no app named at all (its git extension
-        // off); another fork names an app of its own and gets none.
-        let named =
-            var("VSCODE_GIT_ASKPASS_NODE").is_some() || var("VSCODE_IPC_HOOK_CLI").is_some();
-        if !named || app("Visual Studio Code") || app("Code Helper") || app("/code") {
-            return alias("vscode");
-        }
-        LinkFormat::None
+        Self::EDITORS
+            .iter()
+            .find(|(command, _)| on_path(command))
+            .map_or(LinkFormat::None, |(_, name)| alias(name))
     }
 }
 
-/// How links to files are made: on what host, in what [`LinkFormat`].
+/// Whether `command` is an executable file in a directory of `PATH`.
+pub fn on_path(command: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            std::fs::metadata(dir.join(command))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
+/// How links to files are made: on what host, in what [`LinkFormat`], and
+/// whether each link's URL is also written beside it (`text`), for a
+/// terminal that shows no OSC 8 link but opens a URL written out
+/// (Terminal.app, by Cmd+double-click).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileLinks {
     pub host: String,
     pub format: LinkFormat,
+    pub text: bool,
 }
 
 impl FileLinks {
@@ -172,7 +254,25 @@ impl FileLinks {
         FileLinks {
             host: hostname(),
             format,
+            text: false,
         }
+    }
+
+    /// These links with each URL written beside its link too, when `text`.
+    pub fn written(mut self, text: bool) -> FileLinks {
+        self.text = text;
+        self
+    }
+
+    /// A link to `url` showing `shown`, then `said` (the `:12:3` after it),
+    /// then, when written out, ` <url>`.
+    pub fn link(&self, url: &str, shown: &[u8], said: &[u8]) -> Vec<u8> {
+        let mut out = osc8(url, shown);
+        out.extend_from_slice(said);
+        if self.text {
+            out.extend_from_slice(format!(" <{url}>").as_bytes());
+        }
+        out
     }
 
     /// The URL a link to `path` opens, at `at` (line, column) when the text
@@ -196,25 +296,40 @@ impl FileLinks {
 }
 
 /// Where in a file the text after its path, escapes removed, points:
-/// `:12:3`, `:12`, `(12,3)`, `(12, 3)` or `(12)`, a number not running on
-/// into a word (`:12abc`).
+/// `:12:3`, `:12`, `(12,3)`, `(12, 3)`, `(12)`, or a Starlark traceback's
+/// `", line 12, column 3`, a number not running on into a word (`:12abc`).
 pub fn position(after: &[u8]) -> (Option<u32>, Option<u32>) {
-    static AT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^(?::(\d+)(?::(\d+))?|\((\d+)(?:, ?(\d+))?\))").unwrap());
-    let Some(c) = AT.captures(after) else {
-        return (None, None);
-    };
-    if after
-        .get(c.get(0).unwrap().end())
-        .is_some_and(u8::is_ascii_alphanumeric)
-    {
-        return (None, None);
+    located(after).map_or((None, None), |(line, column, _)| (line, column))
+}
+
+/// The start of `after` that says a [`position`], if it says one.
+pub fn said(after: &[u8]) -> Option<&[u8]> {
+    located(after).map(|(.., len)| &after[..len])
+}
+
+/// [`position`], and how many bytes of `after` say it.
+fn located(after: &[u8]) -> Option<(Option<u32>, Option<u32>, usize)> {
+    static AT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"^(?::(\d+)(?::(\d+))?|\((\d+)(?:, ?(\d+))?\)",
+            r#"|", line (\d+)(?:, column (\d+))?)"#,
+        ))
+        .unwrap()
+    });
+    let c = AT.captures(after)?;
+    let end = c.get(0).unwrap().end();
+    if after.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
     }
     let num = |i: usize| {
         c.get(i)
             .and_then(|m| std::str::from_utf8(m.as_bytes()).ok()?.parse().ok())
     };
-    (num(1).or(num(3)), num(2).or(num(4)))
+    Some((
+        num(1).or(num(3)).or(num(5)),
+        num(2).or(num(4)).or(num(6)),
+        end,
+    ))
 }
 
 /// Links what a console record names; see the module docs.
@@ -369,9 +484,18 @@ impl Linker {
             let Some(url) = file.and_then(|f| self.files.url(&f, position(after))) else {
                 continue;
             };
+            // Where the position is said in this run of text, so a URL
+            // written beside the link goes after it.
+            let said = located(after)
+                .map(|(.., len)| &after[..len])
+                .filter(|said| text[end..].starts_with(said))
+                .map_or(0, <[u8]>::len);
             out.extend_from_slice(&text[at..start]);
-            out.extend(osc8(&url, &text[start..end]));
-            at = end;
+            out.extend(
+                self.files
+                    .link(&url, &text[start..end], &text[end..end + said]),
+            );
+            at = end + said;
         }
         out.extend_from_slice(&text[at..]);
     }
@@ -554,7 +678,7 @@ fn encoded_path(path: &Path) -> String {
 pub fn file_link(files: &FileLinks, path: &Path) -> String {
     let shown = path.display().to_string();
     match files.url(path, (None, None)) {
-        Some(url) => String::from_utf8(osc8(&url, shown.as_bytes())).unwrap_or(shown),
+        Some(url) => String::from_utf8(files.link(&url, shown.as_bytes(), b"")).unwrap_or(shown),
         None => shown,
     }
 }
@@ -789,6 +913,7 @@ mod tests {
                     files: FileLinks {
                         host: String::new(),
                         format: LinkFormat::parse("file").unwrap(),
+                        text: false,
                     },
                     workspace: ws.clone(),
                 }))
@@ -995,6 +1120,7 @@ mod tests {
             FileLinks {
                 host: "h".into(),
                 format: LinkFormat::parse(f).unwrap(),
+                text: false,
             }
             .url(Path::new("/w/a b.ts"), at)
         };
@@ -1030,7 +1156,10 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            LinkFormat::auto(|k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()))
+            LinkFormat::auto(
+                |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()),
+                |_| false,
+            )
         };
         assert_eq!(
             auto(&[("TERM_PROGRAM", "Apple_Terminal")]),
@@ -1088,7 +1217,10 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            LinkFormat::auto(|k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()))
+            LinkFormat::auto(
+                |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()),
+                |_| false,
+            )
         };
         let code =
             "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/x";
@@ -1158,6 +1290,148 @@ mod tests {
                 .unwrap()
                 .contains("\x1b]8"),
             "a file link to one"
+        );
+    }
+
+    fn auto_in(vars: &[(&str, &str)], installed: &[&str]) -> LinkFormat {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        LinkFormat::auto(
+            |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()),
+            |c| installed.contains(&c),
+        )
+    }
+
+    #[test]
+    fn auto_tells_editors_by_the_program_their_terminal_names() {
+        let vscode = LinkFormat::parse("vscode").unwrap();
+        assert_eq!(
+            auto_in(&[("TERM_PROGRAM", "vscode")], &[]),
+            vscode,
+            "its git extension off"
+        );
+        assert_eq!(
+            auto_in(
+                &[
+                    ("TERM_PROGRAM", "vscode"),
+                    ("VSCODE_IPC_HOOK_CLI", "/var/folders/x/T/vscode-ipc-1.sock")
+                ],
+                &[]
+            ),
+            vscode,
+            "an IPC socket names no app"
+        );
+        assert_eq!(
+            auto_in(
+                &[
+                    ("TERM_PROGRAM", "vscode"),
+                    ("VSCODE_GIT_ASKPASS_NODE", "/usr/share/code/code")
+                ],
+                &[]
+            ),
+            vscode
+        );
+        assert_eq!(
+            auto_in(
+                &[
+                    ("TERM_PROGRAM", "vscode"),
+                    ("VSCODE_GIT_ASKPASS_NODE", "/usr/share/codium/codium")
+                ],
+                &[]
+            ),
+            LinkFormat::parse("vscodium").unwrap()
+        );
+        for server in [
+            "/usr/lib/code-server/lib/node",
+            "/home/code/.vscode-server/bin/x/node",
+        ] {
+            assert_eq!(
+                auto_in(
+                    &[
+                        ("TERM_PROGRAM", "vscode"),
+                        ("VSCODE_GIT_ASKPASS_NODE", server)
+                    ],
+                    &["code"]
+                ),
+                LinkFormat::None,
+                "{server}: the paths are a server's"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_outside_an_editor_takes_the_one_chosen_else_installed() {
+        let plain = [("TERM_PROGRAM", "iTerm.app")];
+        assert_eq!(auto_in(&plain, &[]), LinkFormat::None);
+        assert_eq!(
+            auto_in(&plain, &["code"]),
+            LinkFormat::parse("vscode").unwrap()
+        );
+        assert_eq!(
+            auto_in(&plain, &["code", "cursor"]),
+            LinkFormat::parse("cursor").unwrap(),
+            "cursor first"
+        );
+        assert_eq!(
+            auto_in(
+                &[
+                    ("TERM_PROGRAM", "iTerm.app"),
+                    ("EDITOR", "/usr/local/bin/code --wait")
+                ],
+                &["cursor"]
+            ),
+            LinkFormat::parse("vscode").unwrap(),
+            "the editor chosen beats the one installed"
+        );
+        assert_eq!(
+            auto_in(
+                &[
+                    ("TERM_PROGRAM", "iTerm.app"),
+                    ("VISUAL", "zed"),
+                    ("EDITOR", "code")
+                ],
+                &[]
+            ),
+            LinkFormat::parse("zed").unwrap()
+        );
+        assert_eq!(
+            auto_in(
+                &[("TERM_PROGRAM", "iTerm.app"), ("EDITOR", "vim")],
+                &["code"]
+            ),
+            LinkFormat::parse("vscode").unwrap(),
+            "a terminal editor no click can open"
+        );
+        assert_eq!(
+            auto_in(&[("SSH_CONNECTION", "1 2 3 4")], &["code"]),
+            LinkFormat::None
+        );
+    }
+
+    #[test]
+    fn a_traceback_line_and_a_written_url() {
+        assert_eq!(
+            position(b"\", line 12, column 3, in f"),
+            (Some(12), Some(3))
+        );
+        assert_eq!(position(b"\", line 7"), (Some(7), None));
+        let (_dir, mut l) = linker();
+        l.files.format = LinkFormat::parse("vscode").unwrap();
+        l.files.text = true;
+        let out = String::from_utf8(l.link(b"ERROR: src/a.cc:3:4: bad")).unwrap();
+        let url = out
+            .split("\x1b]8;;")
+            .nth(1)
+            .unwrap()
+            .split('\x1b')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            out.ends_with(&format!("src/a.cc\x1b]8;;\x1b\\:3:4 <{url}>: bad")),
+            "{out:?}"
         );
     }
 

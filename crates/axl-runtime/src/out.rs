@@ -99,13 +99,44 @@ pub(crate) fn set_link_format(format: Option<bazel::console::links::LinkFormat>)
     }
 }
 
-/// What a link to a file opens now; see [`LINK_FORMAT`].
+/// What a link to a file opens now; see [`LINK_FORMAT`]. Before a task
+/// resolves the Console, `ASPECT_HYPERLINK_FORMAT` when it is a format.
 pub(crate) fn link_format() -> bazel::console::links::LinkFormat {
     LINK_FORMAT
         .read()
         .ok()
         .and_then(|f| f.clone())
-        .unwrap_or_else(|| bazel::console::links::LinkFormat::auto(|v| std::env::var_os(v)))
+        .or_else(|| env_link_format().and_then(Result::ok).flatten())
+        .unwrap_or_else(|| AUTO_LINK_FORMAT.clone())
+}
+
+/// Whether links' URLs are written beside them too: Terminal.app, which
+/// shows no OSC 8 link but opens a URL written out by Cmd+double-click.
+pub(crate) fn links_as_text() -> bool {
+    std::env::var_os("TERM_PROGRAM").is_some_and(|t| t == "Apple_Terminal")
+}
+
+/// `auto`'s format for this process: its environment, and the editors on
+/// its `PATH`, looked up once.
+static AUTO_LINK_FORMAT: std::sync::LazyLock<bazel::console::links::LinkFormat> =
+    std::sync::LazyLock::new(|| {
+        bazel::console::links::LinkFormat::auto(
+            |v| std::env::var_os(v),
+            bazel::console::links::on_path,
+        )
+    });
+
+/// `ASPECT_HYPERLINK_FORMAT`, when set: a format, `None` for `auto`, or why
+/// it is neither.
+pub(crate) fn env_link_format() -> Option<Result<Option<bazel::console::links::LinkFormat>, String>>
+{
+    let value = std::env::var("ASPECT_HYPERLINK_FORMAT").ok()?;
+    Some(match value.as_str() {
+        "" | "auto" => Ok(None),
+        value => bazel::console::links::LinkFormat::parse(value)
+            .map(Some)
+            .map_err(|e| format!("ASPECT_HYPERLINK_FORMAT: {e}")),
+    })
 }
 
 /// Links what the CLI's own lines name, when [`terminal_links`] holds.
@@ -115,10 +146,23 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
             return None;
         }
         let base = std::env::current_dir().ok()?;
-        Some(std::sync::Mutex::new(bazel::console::links::Linker::new(
-            vec![base],
-        )))
+        Some(std::sync::Mutex::new(
+            bazel::console::links::Linker::new(vec![base])
+                .with_files(bazel::console::links::FileLinks::file().written(links_as_text())),
+        ))
     });
+
+/// `line` with its URLs and paths linked as AXL `print()`'s are, for a line
+/// the runtime writes itself (the banner); as it is off a person's terminal.
+pub(crate) fn linked(line: &str) -> String {
+    match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
+        Some(mut linker) => {
+            linker.set_format(link_format());
+            String::from_utf8(linker.link(line.as_bytes())).unwrap_or_else(|_| line.to_string())
+        }
+        None => line.to_string(),
+    }
+}
 
 impl starlark::PrintHandler for TolerantPrintHandler {
     fn println(&self, text: &str) -> starlark::Result<()> {

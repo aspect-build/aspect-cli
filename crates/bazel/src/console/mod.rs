@@ -340,6 +340,9 @@ pub struct Config {
     /// What a link to a file opens, when [`Config::links`] links: URLs are
     /// links whatever it says.
     pub link_format: links::LinkFormat,
+    /// Write each link's URL beside it too, for a terminal that shows no
+    /// OSC 8 link (Terminal.app).
+    pub link_text: bool,
 }
 
 impl Config {
@@ -358,6 +361,7 @@ impl Config {
             user_colour: None,
             links: None,
             link_format: links::LinkFormat::parse("file").expect("an alias"),
+            link_text: false,
             colour: false,
         }
     }
@@ -387,7 +391,7 @@ impl Config {
 
     /// How this pipeline's links to files are made.
     fn files(&self) -> links::FileLinks {
-        links::FileLinks::new(self.link_format.clone())
+        links::FileLinks::new(self.link_format.clone()).written(self.link_text)
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a

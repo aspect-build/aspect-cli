@@ -676,16 +676,17 @@ impl Console {
         }
     }
 
-    /// Print `slot` to stderr, unless it renders blank. On Buildkite a section
-    /// slot opens a collapsed (`---`) section; see [`Console::emit_section`]
-    /// for another marker.
+    /// Print `slot` to stderr, unless it renders blank, its URLs and paths
+    /// linked as `print()`'s are (the banner's docs URL). On Buildkite a
+    /// section slot opens a collapsed (`---`) section; see
+    /// [`Console::emit_section`] for another marker.
     pub fn emit(&self, slot: Slot, context: JinjaValue) {
         if self.host.buildkite && slot.opens_buildkite_section() {
             return self.emit_section("---", slot, context);
         }
         let text = self.render(slot, context);
         if !text.is_empty() {
-            crate::errln!("{text}");
+            crate::errln!("{}", crate::out::linked(&text));
         }
     }
 

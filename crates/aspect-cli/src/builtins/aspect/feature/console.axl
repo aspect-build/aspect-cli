@@ -89,8 +89,10 @@ name a file or directory that exists (`src/a.cc:3:4` links to `src/a.cc` at
 line 3), are links too, unless a coding agent is reading it, it is a CI
 job's, or `TERM` is `dumb`. What a path's link opens is `hyperlink_format`
 (`ctx.features[Console].args.hyperlink_format = "cursor"` in the config
-below): in VS Code's or Cursor's terminal, by default, that editor at the
-line; elsewhere paths are not linked unless it names an editor or `file`.
+below, or `ASPECT_HYPERLINK_FORMAT=cursor` in your shell's profile): by
+default, your editor at the line, the one whose terminal this is, else the
+one `$VISUAL` or `$EDITOR` starts, else one installed. In Terminal.app,
+which cannot show such a link, its URL is written beside the path.
 
     load("@aspect//feature/console.axl", "Console")
 
@@ -257,12 +259,16 @@ Console = feature(
             default = "auto",
             description = "What a link to a file opens, on a terminal, as ripgrep's --hyperlink-format: " +
                           "an editor's scheme at the line after the path (`vscode`, `vscode-insiders`, " +
-                          "`vscodium`, `cursor`, `macvim`, `textmate`, `kitty`), `file` (file://, " +
-                          "what the system opens the file with, at no line), `none`, or a template over " +
-                          "{path}, {line}, {column} and {host} (`idea://open?file={path}&line={line}`). " +
-                          "`auto` (the default) is the editor's in VS Code's, VSCodium's or Cursor's " +
-                          "terminal, on this machine, and `none` elsewhere. A directory links only under " +
-                          "`file`. URLs are links whatever it says.",
+                          "`vscodium`, `cursor`, `zed`, `idea`, `macvim`, `textmate`, `kitty`), `file` " +
+                          "(file://, what the system opens the file with, at no line), `none`, or a URL " +
+                          "template over {path}, {line}, {column} and {host}. `auto` (the default) is, on " +
+                          "this machine, the editor whose terminal this is (VS Code, VSCodium, Cursor), else " +
+                          "the one $VISUAL or $EDITOR starts, else the first installed of cursor, code, zed, " +
+                          "codium, idea, mvim and mate, else `none`. ASPECT_HYPERLINK_FORMAT takes the same " +
+                          "values and beats config.axl but not the command line, and is what config.axl's " +
+                          "own lines follow. A directory links only under a file:// format. In Terminal.app, " +
+                          "which shows no such link, the link's URL is written beside the path, to open by " +
+                          "Cmd+double-click. URLs are links whatever it says.",
         ),
         "profile": args.string(
             default = "auto",

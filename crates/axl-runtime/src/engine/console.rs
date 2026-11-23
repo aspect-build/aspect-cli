@@ -112,16 +112,24 @@ pub fn from_feature_args(
         .with_warnings(overrides.near_miss_warnings(task_paths)))
 }
 
-/// The `hyperlink_format` arg: what a link to a file opens, `None` for
-/// `auto` or unset (`LinkFormat::auto`).
+/// What a link to a file opens, `None` for `auto` (`LinkFormat::auto`):
+/// the `hyperlink_format` arg typed on the command line, else
+/// `ASPECT_HYPERLINK_FORMAT`, else the arg a `config.axl` set.
 fn hyperlink_format(
     args: &Arguments<'_>,
 ) -> Result<Option<bazel::console::links::LinkFormat>, String> {
-    match args.get("hyperlink_format").and_then(|v| v.unpack_str()) {
+    let arg = || match args.get("hyperlink_format").and_then(|v| v.unpack_str()) {
         None | Some("auto") => Ok(None),
         Some(value) => bazel::console::links::LinkFormat::parse(value)
             .map(Some)
             .map_err(|e| format!("Console hyperlink_format: {e}")),
+    };
+    if args.is_explicit_key("hyperlink_format") {
+        return arg();
+    }
+    match crate::out::env_link_format() {
+        Some(Ok(None)) | None => arg(),
+        Some(chosen) => chosen,
     }
 }
 
