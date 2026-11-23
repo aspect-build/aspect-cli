@@ -7,7 +7,7 @@ Run with:
   aspect dev test-bes-sinks
 """
 
-load("@aspect//bazel/build_events.axl", "advertised_results_url", "bazel_bes_backend", "bes_link_data", "bes_results_line", "bes_results_url_flag", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
+load("@aspect//bazel/build_events.axl", "advertised_results_url", "bazel_bes_backend", "bes_link_data", "bes_results_line", "bes_results_url_flag", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends", "grpc_sink")
 
 def _eq(label, got, want):
     if got != want:
@@ -46,7 +46,7 @@ def _sinks(*uris):
 _GCP = ("grpcs://bes.gcp", "https://app.gcp/i/")
 _RUNNER = ("grpcs://bes.runner", "https://app.runner")
 
-def _fake_trait(sinks, backends = [], results_sources = [], runner_backends = [], max_retries = 4, retry_min_delay = "1s", timeout = "0s"):
+def _fake_trait(sinks, backends = [], results_sources = [], runner_backends = [], max_retries = 4, retry_min_delay = "1s", timeout = "0s", buffer_bytes = None, max_event_bytes = None):
     """Stand-in for `BazelTrait`: the collectors read its sink list, the
     backend URIs features injected on it (`--remote`'s deployment BES, a
     runner's own) and the BuildEvents options gRPC sinks take, and the link
@@ -58,8 +58,9 @@ def _fake_trait(sinks, backends = [], results_sources = [], runner_backends = []
         bes_results_sources = results_sources,
         bes_max_retries = max_retries,
         bes_retry_min_delay = retry_min_delay,
-        bes_retry_max_buffer_bytes = None,
+        bes_retry_max_buffer_bytes = buffer_bytes,
         bes_timeout = timeout,
+        max_build_event_bytes = max_event_bytes,
     )
 
 def _test_clean_stream(_):
@@ -264,6 +265,11 @@ def _fails(f):
     err, _ = catch(f)
     return err != None
 
+def _refusal(f):
+    """The message calling `f` fails with, or None."""
+    err, _ = catch(f)
+    return err.message if err != None else None
+
 def _test_runner_backends_stream_after_the_tasks_own(_):
     """A runner's backends come after the `--bes-backend` sinks and before the
     trait's prebuilt ones, each once and only when not named another way, and
@@ -301,16 +307,27 @@ def _test_runner_backends_stream_after_the_tasks_own(_):
 
 def _test_grpc_sinks_take_the_traits_options(_):
     """Every gRPC sink is built under the trait's BuildEvents options, whichever
-    way its backend was named: an option the runtime rejects fails each."""
-    for (what, trait) in [
-        ("max_retries", _fake_trait([], max_retries = -1)),
-        ("retry_min_delay", _fake_trait([], retry_min_delay = "soon")),
-        ("timeout", _fake_trait([], timeout = "later")),
+    way its backend was named. A bad value on the trait is refused before any
+    sink is built, naming the field and the option to set instead, even when
+    there is no backend to build one for."""
+    for (field, option, trait) in [
+        ("bes_max_retries", "max-retries", _fake_trait([], max_retries = -1)),
+        ("bes_max_retries", "max-retries", _fake_trait([], max_retries = 2147483648)),
+        ("bes_retry_min_delay", "retry-min-delay", _fake_trait([], retry_min_delay = "soon")),
+        ("bes_retry_max_buffer_bytes", "retry-max-buffer-bytes", _fake_trait([], buffer_bytes = 0)),
+        ("bes_timeout", "timeout", _fake_trait([], timeout = "later")),
+        ("max_build_event_bytes", "max-event-bytes", _fake_trait([], max_event_bytes = 1000)),
     ]:
-        _eq("%s for --bes-backend" % what, _fails(lambda: collect_bes_from_args(_fake_ctx(bes_backends = ["grpcs://bes.cli"]), bazel_trait = trait)), True)
-        runner = _fake_trait([], runner_backends = ["grpcs://bes.runner"], max_retries = trait.bes_max_retries, retry_min_delay = trait.bes_retry_min_delay, timeout = trait.bes_timeout)
-        _eq("%s for a runner backend" % what, _fails(lambda: collect_bes_sinks(_fake_ctx(), runner, _fake_rc({}))), True)
-    _eq("valid options build", len(collect_bes_sinks(_fake_ctx(bes_backends = ["grpcs://bes.cli"]), _fake_trait([], max_retries = 0, retry_min_delay = "2s", timeout = "30s"), _fake_rc({}))), 1)
+        names = "BazelTrait.%s" % field
+        fix = "set it with --build-events:%s or ctx.features[BuildEvents].args.%s" % (option, option.replace("-", "_"))
+        for (where, call) in [
+            ("no backend", lambda: collect_bes_sinks(_fake_ctx(), trait, _fake_rc({}))),
+            ("--bes-backend", lambda: collect_bes_sinks(_fake_ctx(bes_backends = ["grpcs://bes.cli"]), trait, _fake_rc({}))),
+            ("grpc_sink", lambda: grpc_sink(trait, "grpcs://bes.cli")),
+        ]:
+            got = _refusal(call) or ""
+            _eq("%s, %s: names the field and the fix" % (field, where), (names in got, fix in got), (True, True))
+    _eq("valid options build", len(collect_bes_sinks(_fake_ctx(bes_backends = ["grpcs://bes.cli"]), _fake_trait([], max_retries = 0, retry_min_delay = "2s", timeout = "30s", buffer_bytes = 1048576, max_event_bytes = 16777216), _fake_rc({}))), 1)
 
 def _test_collect_bes_sinks(_):
     """`collect_bes_sinks` returns the `--bes-backend` sinks then the trait's own,

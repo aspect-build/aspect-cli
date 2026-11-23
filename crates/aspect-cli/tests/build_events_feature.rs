@@ -3,8 +3,12 @@
 //! `config.axl` value too large for the runtime is refused before the task
 //! runs.
 //!
-//! A scratch workspace's `show` task prints the trait's fields, so nothing
-//! here runs Bazel.
+//! A value `config.axl` writes on `BazelTrait` directly is refused when a
+//! task builds a sink from it, naming the option to set instead.
+//!
+//! A scratch workspace's `show` task prints the trait's fields, and its `sink`
+//! task builds a gRPC sink from them without dialing, so nothing here runs
+//! Bazel.
 
 mod common;
 
@@ -12,6 +16,7 @@ use common::{aspect_cli, base_env};
 use std::process::{Command, Output};
 
 const TASKS: &str = r#"load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel/build_events.axl", "grpc_sink")
 
 def _show_impl(ctx: TaskContext) -> int:
     t = ctx.traits[BazelTrait]
@@ -19,6 +24,13 @@ def _show_impl(ctx: TaskContext) -> int:
     return 0
 
 show = task(implementation = _show_impl, traits = [BazelTrait], args = {})
+
+def _sink_impl(ctx: TaskContext) -> int:
+    grpc_sink(ctx.traits[BazelTrait], "grpc://127.0.0.1:1")
+    print("sink built")
+    return 0
+
+sink = task(implementation = _sink_impl, traits = [BazelTrait], args = {})
 "#;
 
 /// Run `aspect show <args>` in a scratch workspace under an empty `$HOME`.
@@ -29,6 +41,11 @@ fn show(args: &[&str]) -> Output {
 /// [`show`] with `env` set on top of the base environment and
 /// `.aspect/config.axl` holding `config`, if given.
 fn show_in(args: &[&str], env: &[(&str, &str)], config: Option<&str>) -> Output {
+    run("show", args, env, config)
+}
+
+/// Run `aspect <task> <args>` in a scratch workspace as [`show_in`] does.
+fn run(task: &str, args: &[&str], env: &[(&str, &str)], config: Option<&str>) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     let aspect = dir.path().join(".aspect");
@@ -38,7 +55,7 @@ fn show_in(args: &[&str], env: &[(&str, &str)], config: Option<&str>) -> Output 
         std::fs::write(aspect.join("config.axl"), config).expect("config.axl");
     }
     let output = Command::new(aspect_cli())
-        .arg("show")
+        .arg(task)
         .args(args)
         .current_dir(dir.path())
         .env_clear()
@@ -47,7 +64,7 @@ fn show_in(args: &[&str], env: &[(&str, &str)], config: Option<&str>) -> Output 
         .env("HOME", dir.path().join("home"))
         .envs(env.iter().copied())
         .output()
-        .unwrap_or_else(|e| panic!("running `aspect show {}`: {e}", args.join(" ")));
+        .unwrap_or_else(|e| panic!("running `aspect {task} {}`: {e}", args.join(" ")));
     dir.close().expect("removing temp dir");
     output
 }
@@ -184,5 +201,43 @@ fn a_config_value_at_the_runtime_bound_reaches_the_trait() {
     assert_eq!(
         fields(&show_configured("max_event_bytes", "9223372036854775807")),
         "4|1s|None|0s|9223372036854775807"
+    );
+}
+
+/// A value written on `BazelTrait` directly skips the feature's checks, so the
+/// sink built from it refuses it instead: no traceback, the field named, and
+/// the option to set in its place.
+#[test]
+fn a_bad_value_written_on_the_trait_is_refused_when_a_sink_is_built() {
+    let config = |field: &str, value: &str| {
+        format!(
+            "load(\"@aspect//bazel.axl\", \"BazelTrait\")\n\n\
+             def config(ctx: ConfigContext):\n    \
+             ctx.traits[BazelTrait].{field} = {value}\n"
+        )
+    };
+    for (field, value, option) in [
+        ("bes_timeout", "\"later\"", "timeout"),
+        ("bes_max_retries", "-1", "max_retries"),
+        ("max_build_event_bytes", "1000", "max_event_bytes"),
+    ] {
+        let out = run("sink", &[], &[], Some(&config(field, value)));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{field}: {stderr}");
+        let flag = option.replace('_', "-");
+        let fix =
+            format!("set it with --build-events:{flag} or ctx.features[BuildEvents].args.{option}");
+        assert!(
+            stderr.contains(&format!("ERROR: BazelTrait.{field} ")) && stderr.contains(&fix),
+            "{field}: {stderr}"
+        );
+        assert!(!stderr.contains("sink built"), "{field}: {stderr}");
+        assert!(!stderr.contains("Traceback"), "{field}: {stderr}");
+    }
+    let ok = run("sink", &[], &[], Some(&config("bes_timeout", "\"30s\"")));
+    assert!(
+        String::from_utf8_lossy(&ok.stderr).contains("sink built"),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
     );
 }

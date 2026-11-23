@@ -1726,13 +1726,15 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
 /// The `max_event_bytes` of `ctx.bazel.build`, `test`, `run` and `run_all`:
 /// the largest message the build's BES backends accept, None for the default.
+/// One under 64 KiB is refused as a `TaskExit`, without a traceback.
 pub(crate) fn max_event_bytes_arg(max_event_bytes: NoneOr<i64>) -> anyhow::Result<Option<usize>> {
     use bazel::bes::cap::MIN_MAX_MESSAGE_BYTES;
     match max_event_bytes {
         NoneOr::None => Ok(None),
-        NoneOr::Other(n) if n < MIN_MAX_MESSAGE_BYTES as i64 => anyhow::bail!(
-            "max_event_bytes must be at least {MIN_MAX_MESSAGE_BYTES} (64 KiB), got {n}"
-        ),
+        NoneOr::Other(n) if n < MIN_MAX_MESSAGE_BYTES as i64 => Err(crate::eval::TaskExit::error(
+            format!("max_event_bytes must be at least {MIN_MAX_MESSAGE_BYTES} (64 KiB), got {n}"),
+        )
+        .into()),
         NoneOr::Other(n) => Ok(Some(n as usize)),
     }
 }
@@ -1759,6 +1761,25 @@ fn keep_logs(actions: &str, tests: &str) -> anyhow::Result<bazel::bes::sink::kee
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `max_event_bytes` under 64 KiB is a refusal, reported without a
+    /// traceback; unset and a valid size pass.
+    #[test]
+    fn a_small_max_event_bytes_is_a_task_exit() {
+        let err = max_event_bytes_arg(NoneOr::Other(1000)).unwrap_err();
+        let exit = err
+            .downcast_ref::<crate::eval::TaskExit>()
+            .expect("a TaskExit");
+        assert_eq!(
+            exit.to_string(),
+            "max_event_bytes must be at least 65536 (64 KiB), got 1000"
+        );
+        assert_eq!(max_event_bytes_arg(NoneOr::None).unwrap(), None);
+        assert_eq!(
+            max_event_bytes_arg(NoneOr::Other(16 << 20)).unwrap(),
+            Some(16 << 20)
+        );
+    }
 
     /// A gated flag follows the version the rc was resolved against, which a
     /// caller may have named, without asking the running Bazel.
