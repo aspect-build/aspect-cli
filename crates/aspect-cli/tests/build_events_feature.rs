@@ -23,6 +23,11 @@ show = task(implementation = _show_impl, traits = [BazelTrait], args = {})
 
 /// Run `aspect show <args>` in a scratch workspace under an empty `$HOME`.
 fn show(args: &[&str]) -> Output {
+    show_with_env(args, &[])
+}
+
+/// [`show`] with `env` set on top of the base environment.
+fn show_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     let aspect = dir.path().join(".aspect");
@@ -36,6 +41,7 @@ fn show(args: &[&str]) -> Output {
         .envs(base_env())
         .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
         .env("HOME", dir.path().join("home"))
+        .envs(env.iter().copied())
         .output()
         .unwrap_or_else(|e| panic!("running `aspect show {}`: {e}", args.join(" ")));
     dir.close().expect("removing temp dir");
@@ -60,6 +66,19 @@ fn unset_options_leave_the_trait_defaults() {
         !String::from_utf8_lossy(&out.stderr).contains("deprecated"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Checking the durations builds no sink that reads the buffer budget's
+/// environment, so a task that streams nowhere does not warn about it.
+#[test]
+fn validating_the_options_leaves_the_buffer_env_unread() {
+    let out = show_with_env(&[], &[("ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES", "bogus")]);
+    assert_eq!(fields(&out), "4|1s|None|0s|None");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES"),
+        "{stderr}"
     );
 }
 

@@ -41,8 +41,10 @@ def _refuse_below(option: str, value: int, least: int, note: str = ""):
 def _refuse_non_duration(option: str, value: str, kwarg: str):
     """Fail the task, without a traceback, when `value` is not a duration
     `bazel.build_events.grpc` takes as `kwarg`, rather than when a sink is
-    first built from it."""
-    err, _ = catch(lambda: bazel.build_events.grpc(uri = "grpc://localhost", **{kwarg: value}))
+    first built from it. The sink is never bound, so nothing is dialed; a
+    buffer budget is given so `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` is not
+    read, and warned about, in a task that streams nowhere."""
+    err, _ = catch(lambda: bazel.build_events.grpc(uri = "grpc://localhost", retry_max_buffer_bytes = 1, **{kwarg: value}))
     if err != None:
         fail(_UsageError("--build-events:%s must be a duration such as '500ms', '2s' or '1m', got '%s'" % (option, value)))
 
