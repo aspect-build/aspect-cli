@@ -56,7 +56,6 @@ jobs:
       - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
         with:
           bazelrc-generate: false
-          disk-cache: true
       - name: Log in to Aspect Cloud
         if: env.ASPECT_HAS_API_TOKEN == 'true'
         working-directory: ${{ runner.temp }}
