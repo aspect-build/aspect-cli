@@ -661,7 +661,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// file) in a raw log (`build.output_log`), and ends the
     /// console with a summary naming it: how many lines were hidden, and for
     /// each kind `collapse_similar` folded, a file beside the log with every
-    /// message of that kind. On a terminal the paths are links. The log is
+    /// message of that kind. On a terminal the paths are links, but for a
+    /// coding agent reading the console (its environment set). The log is
     /// `console.log` in the Bazel invocation's folder in the task's history,
     /// with the folded kinds' `console.collapsed-<n>.log` beside it, kept and
     /// pruned as the rest of the history is (in the temp dir when no history

@@ -47,9 +47,15 @@ pub struct Stats {
     groups: Mutex<Option<PathBuf>>,
     /// Per kind, as `templates`: its lines not yet written (the first
     /// message's, until the kind hides one), whether writing failed, and its
-    /// file once open.
-    pending: Mutex<Vec<Pending>>,
+    /// file while open; and which kinds' files are open, oldest first, at
+    /// most [`MAX_OPEN_GROUPS`].
+    pending: Mutex<(Vec<Pending>, std::collections::VecDeque<usize>)>,
 }
+
+/// The most collapsed kinds' files held open at once, well under any
+/// descriptor limit (macOS's default is 256): past it the oldest opened is
+/// flushed and closed, and opened again, appending, should it hide more.
+const MAX_OPEN_GROUPS: usize = 32;
 
 /// One collapsed kind's file as it is written ([`Stats::group_line`]).
 #[derive(Debug, Default)]
@@ -79,7 +85,7 @@ impl Stats {
             file: None,
             incomplete: false,
         });
-        self.pending.lock().unwrap().push(Pending::default());
+        self.pending.lock().unwrap().0.push(Pending::default());
         templates.len() - 1
     }
 
@@ -97,25 +103,43 @@ impl Stats {
             return;
         };
         let hid = self.templates.lock().unwrap()[slot].hidden > 0;
-        let mut pending = self.pending.lock().unwrap();
-        let p = &mut pending[slot];
-        p.held.extend_from_slice(ansi::text(record).as_bytes());
-        p.held.push(b'\n');
-        if !hid || p.failed {
+        let mut guard = self.pending.lock().unwrap();
+        let (kinds, open) = &mut *guard;
+        if kinds[slot].failed {
             return;
         }
-        if p.file.is_none() {
+        let p = &mut kinds[slot];
+        p.held.extend_from_slice(ansi::text(record).as_bytes());
+        p.held.push(b'\n');
+        if !hid {
+            return;
+        }
+        if kinds[slot].file.is_none() {
+            while open.len() >= MAX_OPEN_GROUPS {
+                let Some(oldest) = open.pop_front() else {
+                    break;
+                };
+                if let Some(mut file) = kinds[oldest].file.take()
+                    && file.flush().is_err()
+                {
+                    kinds[oldest].failed = true;
+                }
+            }
             let path = staging(&log, slot);
             match log::append_private(&path) {
-                Ok(f) => p.file = Some(std::io::BufWriter::new(f)),
+                Ok(f) => {
+                    kinds[slot].file = Some(std::io::BufWriter::new(f));
+                    open.push_back(slot);
+                }
+                // Kept, to be written once it can be: on the kind's next
+                // line, or at the end.
                 Err(e) => {
                     tracing::debug!("collapsed console group {} failed: {e}", path.display());
-                    p.failed = true;
-                    p.held.clear();
                     return;
                 }
             }
         }
+        let p = &mut kinds[slot];
         let held = std::mem::take(&mut p.held);
         if let Some(file) = p.file.as_mut()
             && let Err(e) = file.write_all(&held)
@@ -137,7 +161,9 @@ impl Stats {
             return;
         };
         let mut templates = self.templates.lock().unwrap();
-        let mut pending = self.pending.lock().unwrap();
+        let mut guard = self.pending.lock().unwrap();
+        let (pending, open) = &mut *guard;
+        open.clear();
         let mut order: Vec<usize> = (0..templates.len())
             .filter(|&s| templates[s].hidden > 0)
             .collect();
@@ -548,6 +574,40 @@ mod tests {
     use std::sync::Arc;
 
     use crate::console::line::tests::bazel;
+
+    /// More kinds than are held open at once each keep every line, one
+    /// whose file was closed meanwhile appending to it again.
+    #[test]
+    fn many_kinds_keep_every_line_with_few_files_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        let stats = Stats::default();
+        stats.keep_groups(&log);
+        let kinds = MAX_OPEN_GROUPS + 8;
+        for k in 0..kinds {
+            let slot = stats.template(&format!("kind {k}"));
+            stats.group_line(slot, format!("kind {k} first").as_bytes());
+            stats.collapse(slot);
+            stats.group_line(slot, format!("kind {k} second").as_bytes());
+        }
+        stats.collapse(0);
+        stats.group_line(0, b"kind 0 third");
+        stats.finish_groups();
+        let mut lines: Vec<usize> = stats
+            .collapsed()
+            .iter()
+            .map(|k| {
+                std::fs::read_to_string(k.file.as_ref().unwrap())
+                    .unwrap()
+                    .lines()
+                    .count()
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(lines.len(), kinds);
+        assert_eq!((lines[0], lines[kinds - 1]), (2, 3));
+        assert!(stats.collapsed().iter().all(|k| !k.incomplete));
+    }
 
     /// A report's `INFO:` line has the CLI's own label, its text plain; a
     /// detail line under it is dim.
