@@ -442,6 +442,10 @@ _AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
 _APP_NOT_LINKED = "GitLab App not linked to your Aspect account for this project (see https://aspect.build/docs/cli/authentication)"
 _AUTH_KIND_API_ERROR = "aspect-api-error"
 
+# A 401 from the App route. Locally that is an expired login; on CI it is
+# usually a token that is not for the Aspect account.
+_REJECTED_CREDENTIAL = "Aspect account credential rejected (HTTP 401) — run `aspect auth login`, or on CI check that ASPECT_API_TOKEN is an API token for your Aspect account, not your deployment's"
+
 def _set_auth_reason(_reason, kind, msg):
     """Populate `_reason` with both the structured `kind` and the
     human-readable `reason`. No-op when the caller didn't pass a dict."""
@@ -455,16 +459,16 @@ def _classify_missing_credentials(ctx):
     the local case (`aspect auth login`)."""
     setup_url = "https://aspect.build/docs/cli/authentication"
     if ctx.std.env.var("GITHUB_ACTIONS"):
-        msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
+        msg = "no Aspect account credential — use the aspect-build/setup-aspect action with aspect-api-token set to an API token for your Aspect account, not your deployment's (https://github.com/aspect-build/setup-aspect)"
         kind = _AUTH_KIND_NO_CREDENTIALS
     elif ctx.std.env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
-        msg = "no Aspect credentials — set ASPECT_API_TOKEN in the job env or provision it as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
+        msg = "no Aspect account credential — set ASPECT_API_TOKEN to an API token for your Aspect account, not your deployment's, in the job env or as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
         kind = _AUTH_KIND_NO_CREDENTIALS
     elif ctx.std.env.var("CI"):
-        msg = "no Aspect credentials — set ASPECT_API_TOKEN (an API token from the Aspect Web UI) in the job env"
+        msg = "no Aspect account credential — set ASPECT_API_TOKEN to an API token for your Aspect account, not your deployment's, in the job env"
         kind = _AUTH_KIND_NO_CREDENTIALS
     else:
-        msg = "not logged in — run `aspect auth login`"
+        msg = "not logged in to your Aspect account — run `aspect auth login`"
         kind = _AUTH_KIND_NOT_LOGGED_IN
     return kind, msg + ". Setup guide: " + setup_url
 
@@ -547,7 +551,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
         return None
 
     if resp.status == 401:
-        _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, "credentials expired (run `aspect auth login`)")
+        _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, _REJECTED_CREDENTIAL)
     elif resp.status == 403:
         _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % (aspect_cloud_error(resp) or resp.body))
     elif resp.status == 404:

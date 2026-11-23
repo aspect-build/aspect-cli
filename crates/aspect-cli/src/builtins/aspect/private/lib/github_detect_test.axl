@@ -1003,6 +1003,7 @@ def _test_aspect_api_token_tip_gate(ctx):
     )
     _eq("direct authenticate: returns None on no-creds", token, None)
     _eq("direct authenticate: kind populated", reason.get("kind"), "no-credentials")
+    _eq("direct authenticate: names the Aspect account credential", "Aspect account, not your deployment's" in reason.get("reason", ""), True)
     _eq("direct authenticate: tip fires", len(tips._inspect_for_test(ctx)), 1)
     _eq("direct authenticate: tip id (GHA-specific)", tips._inspect_for_test(ctx)[0]["id"], "add-aspect-api-token-github-actions")
 
