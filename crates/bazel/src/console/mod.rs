@@ -333,8 +333,10 @@ pub struct Config {
     pub colour: bool,
     /// For a terminal: write the paths and URLs Bazel's lines and the
     /// recap name, and the paths the summary names, as OSC 8 hyperlinks
-    /// ([`links`]), a relative path resolved from this directory.
-    pub links: Option<std::path::PathBuf>,
+    /// ([`links`]), a relative path resolved from the first of these
+    /// directories it exists under. A hidden console ([`Output::Hidden`])
+    /// links nothing.
+    pub links: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Config {
@@ -365,8 +367,8 @@ impl Config {
     /// A [`links::Linker`] for what is shown, when [`Config::links`] asks for
     /// one and something is shown.
     fn linker(&self) -> Option<links::Linker> {
-        let base = self.links.clone()?;
-        (self.output != Output::Hidden).then(|| links::Linker::new(base))
+        let bases = self.links.clone()?;
+        (self.output != Output::Hidden).then(|| links::Linker::new(bases))
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
@@ -520,7 +522,7 @@ impl Config {
                 stats,
                 state,
                 self.style.clone(),
-                self.links.is_some(),
+                self.links.is_some() && self.output != Output::Hidden,
             )));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));

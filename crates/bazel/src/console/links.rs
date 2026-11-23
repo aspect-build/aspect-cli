@@ -5,10 +5,13 @@
 //! [`Linker::link`] links each `http://` or `https://` URL to itself, and
 //! each path to a file or directory that exists to it as a `file://` URL: an
 //! absolute path as written, a relative one (`src/a.cc:3:4`, `BUILD.bazel`)
-//! from the directory paths are relative to, where `relativize_paths` writes
-//! them from. Only the path is linked, not a `:line:col` after it. A path to
-//! nothing (a sandbox gone with its action, a label, prose) is left alone; a
-//! record that links anything itself is left whole.
+//! from the first of the linker's directories it exists under. For Bazel's
+//! console those are the workspace, which Bazel's own paths are relative to,
+//! then the directory `relativize_paths` writes paths from. Only the path is
+//! linked, not a `:line:col` after it. A path to nothing (a sandbox gone
+//! with its action, a label, prose) is left alone; a record that links
+//! anything itself is left whole. A URL ends before trailing punctuation, a
+//! bracket that closes none of its own, and a `…` that marks it cut.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +30,7 @@ static URL: LazyLock<Regex> =
 /// A run of the bytes a path is written with.
 static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9._/~+@-]+").unwrap());
 
-/// How many paths' existence a [`Linker`] remembers before forgetting them
+/// How many paths a [`Linker`] remembers resolving before forgetting them
 /// all.
 const REMEMBERED: usize = 4096;
 
@@ -36,20 +39,23 @@ const MAX_RECORD: usize = 8192;
 
 /// Links what a console record names; see the module docs.
 pub struct Linker {
-    /// Where a relative path is from.
-    base: PathBuf,
+    /// Where a relative path may be from, in the order tried.
+    bases: Vec<PathBuf>,
     /// The host a `file://` URL names.
     host: String,
-    /// Whether each path looked up exists, by the path as written.
-    exists: HashMap<Vec<u8>, bool>,
+    /// What each path looked up names, by the path as written: the file, or
+    /// None for nothing.
+    resolved: HashMap<Vec<u8>, Option<PathBuf>>,
 }
 
 impl Linker {
-    pub fn new(base: PathBuf) -> Self {
+    /// A linker resolving a relative path from the first of `bases` it
+    /// exists under.
+    pub fn new(bases: Vec<PathBuf>) -> Self {
         Self {
-            base,
+            bases,
             host: hostname(),
-            exists: HashMap::new(),
+            resolved: HashMap::new(),
         }
     }
 
@@ -77,7 +83,7 @@ impl Linker {
             if let Some(m) = urls.next() {
                 let end = m.start() + url_end(m.as_bytes());
                 out.extend(osc8(
-                    &String::from_utf8_lossy(&text[m.start()..end]),
+                    &url_target(&text[m.start()..end]),
                     &text[m.start()..end],
                 ));
                 // What was trimmed from the URL's end is text again.
@@ -100,46 +106,48 @@ impl Linker {
             let path = &text[start..end];
             // After a `:` it is a label's target (`//pkg:BUILD`) or a URL's
             // rest, not a path of its own.
-            if start > 0 && text[start - 1] == b':' || !self.names_something(path) {
+            if start > 0 && text[start - 1] == b':' {
                 continue;
             }
+            let Some(file) = self.resolve(path) else {
+                continue;
+            };
             out.extend_from_slice(&text[at..start]);
-            let absolute = self.absolute(path);
-            out.extend(osc8(&file_url(&self.host, &absolute), path));
+            out.extend(osc8(&file_url(&self.host, &file), path));
             at = end;
         }
         out.extend_from_slice(&text[at..]);
     }
 
-    /// Whether `path` could name a file and does: it has a `/` or a `.` past
-    /// its first byte and a letter, is not a label (`//pkg`), and exists.
-    fn names_something(&mut self, path: &[u8]) -> bool {
+    /// The file `path` names, when it could name one and does: it has a `/`
+    /// or a `.` past its first byte and a letter, is not a label (`//pkg`),
+    /// and exists, as written when absolute, else under one of the bases.
+    fn resolve(&mut self, path: &[u8]) -> Option<PathBuf> {
         let shaped = path.len() > 1
             && path[1..].iter().any(|&b| b == b'/' || b == b'.')
             && path.iter().any(u8::is_ascii_alphabetic)
             && !path.starts_with(b"//");
         if !shaped {
-            return false;
+            return None;
         }
-        if let Some(&known) = self.exists.get(path) {
-            return known;
+        if let Some(known) = self.resolved.get(path) {
+            return known.clone();
         }
-        if self.exists.len() >= REMEMBERED {
-            self.exists.clear();
+        if self.resolved.len() >= REMEMBERED {
+            self.resolved.clear();
         }
-        let found = self.absolute(path).exists();
-        self.exists.insert(path.to_vec(), found);
-        found
-    }
-
-    fn absolute(&self, path: &[u8]) -> PathBuf {
         use std::os::unix::ffi::OsStrExt;
-        let path = Path::new(std::ffi::OsStr::from_bytes(path));
-        if path.is_absolute() {
-            path.to_path_buf()
+        let written = Path::new(std::ffi::OsStr::from_bytes(path));
+        let found = if written.is_absolute() {
+            written.exists().then(|| written.to_path_buf())
         } else {
-            self.base.join(path)
-        }
+            self.bases
+                .iter()
+                .map(|b| b.join(written))
+                .find(|p| p.exists())
+        };
+        self.resolved.insert(path.to_vec(), found.clone());
+        found
     }
 }
 
@@ -153,17 +161,26 @@ impl LineProcessor for Links {
     }
 }
 
-/// Where a URL found by [`URL`] ends: before trailing punctuation, and
-/// before a `)` that closes no `(` of its own.
+/// Where a URL found by [`URL`] ends: at a `…` that marks it cut, then
+/// before trailing punctuation and before a `)`, `]` or `}` that closes none
+/// of its own.
 fn url_end(url: &[u8]) -> usize {
-    let mut end = url.len();
+    let mut end = url
+        .windows(ELLIPSIS.len())
+        .position(|w| w == ELLIPSIS)
+        .unwrap_or(url.len());
     loop {
         match url[..end].last() {
             Some(b'.' | b',' | b';' | b':' | b'!' | b'?') => end -= 1,
-            Some(b')') => {
-                let open = url[..end].iter().filter(|&&b| b == b'(').count();
-                let close = url[..end].iter().filter(|&&b| b == b')').count();
-                if close > open {
+            Some(&close @ (b')' | b']' | b'}')) => {
+                let open = match close {
+                    b')' => b'(',
+                    b']' => b'[',
+                    _ => b'{',
+                };
+                let opened = url[..end].iter().filter(|&&b| b == open).count();
+                let closed = url[..end].iter().filter(|&&b| b == close).count();
+                if closed > opened {
                     end -= 1;
                 } else {
                     return end;
@@ -172,6 +189,23 @@ fn url_end(url: &[u8]) -> usize {
             _ => return end,
         }
     }
+}
+
+/// `…`, which a quoted line ends with when it was cut.
+const ELLIPSIS: &[u8] = "…".as_bytes();
+
+/// A URL as an OSC 8 target, which takes printable ASCII only: any other
+/// byte percent-encoded.
+fn url_target(url: &[u8]) -> String {
+    let mut out = String::with_capacity(url.len());
+    for &b in url {
+        if (0x21..0x7f).contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -228,7 +262,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/a.cc"), "").unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
-        let mut l = Linker::new(dir.path().to_path_buf());
+        let mut l = Linker::new(vec![dir.path().to_path_buf()]);
         l.host = String::new();
         (dir, l)
     }
@@ -327,6 +361,66 @@ mod tests {
         assert_eq!(
             ansi::width(&l.link(row.as_bytes())),
             ansi::width(row.as_bytes())
+        );
+    }
+
+    #[test]
+    fn a_url_ends_at_an_unmatched_bracket_or_a_cut() {
+        let (_dir, mut l) = linker();
+        let u = |s: &str| format!("\x1b]8;;{s}\x1b\\{s}\x1b]8;;\x1b\\");
+        assert_eq!(
+            link(
+                &mut l,
+                "Error downloading [https://a.test/x.tar.gz, https://b.test/x.tar.gz] to y"
+            ),
+            format!(
+                "Error downloading [{}, {}] to y",
+                u("https://a.test/x.tar.gz"),
+                u("https://b.test/x.tar.gz")
+            )
+        );
+        assert_eq!(
+            link(&mut l, "see https://a.test/w[1]"),
+            format!("see {}", u("https://a.test/w[1]"))
+        );
+        assert_eq!(
+            link(&mut l, "{https://a.test/x}"),
+            format!("{{{}}}", u("https://a.test/x"))
+        );
+        assert_eq!(
+            link(&mut l, "see https://a.test/inv/1a2…"),
+            format!("see {}…", u("https://a.test/inv/1a2"))
+        );
+    }
+
+    #[test]
+    fn a_urls_target_is_printable_ascii() {
+        let (_dir, mut l) = linker();
+        assert_eq!(
+            link(&mut l, "https://a.test/café"),
+            "\x1b]8;;https://a.test/caf%C3%A9\x1b\\https://a.test/café\x1b]8;;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn a_relative_path_resolves_from_the_first_base_it_is_under() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::create_dir_all(root.path().join("pkg/src")).unwrap();
+        std::fs::write(root.path().join("src/a.ts"), "").unwrap();
+        std::fs::write(root.path().join("pkg/src/a.ts"), "").unwrap();
+        std::fs::write(root.path().join("pkg/only.ts"), "").unwrap();
+        let mut l = Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]);
+        l.host = String::new();
+        assert_eq!(
+            link(&mut l, "src/a.ts:3"),
+            format!("{}:3", file(root.path(), "src/a.ts", "src/a.ts")),
+            "the workspace's, as Bazel writes it"
+        );
+        assert_eq!(
+            link(&mut l, "only.ts:1"),
+            format!("{}:1", file(root.path(), "pkg/only.ts", "only.ts")),
+            "else the directory paths are relative to"
         );
     }
 

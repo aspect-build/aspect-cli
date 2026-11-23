@@ -514,13 +514,17 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     config.strip_colour = !s
         .show_colour
         .unwrap_or_else(crate::color::console_supports_color);
-    // Clickable paths and URLs for a person at a terminal, a relative path
-    // from where the task runs, as `relativize_paths` writes them; a coding
-    // agent reading the console (its environment set, as the Console
-    // feature's `auto` profile checks) gets each once, plain.
-    config.links = (stderr_tty && !crate::agent::detected(|v| std::env::var_os(v)))
+    // Clickable paths and URLs for a person at a terminal
+    // (`crate::out::terminal_links`). A relative path is the workspace's,
+    // as Bazel writes its own, else from where the task runs, as
+    // `relativize_paths` writes them.
+    config.links = (stderr_tty && crate::out::terminal_links())
         .then(|| std::env::current_dir().ok())
-        .flatten();
+        .flatten()
+        .map(|cwd| {
+            let root = crate::project_root::find_bazel_root(&cwd);
+            root.into_iter().chain([cwd]).collect()
+        });
     config
 }
 

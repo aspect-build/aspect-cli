@@ -779,7 +779,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
-            super::super::links::Linker::new(dir.path().to_path_buf()),
+            super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
         ));
         let out = feed(&mut p, &["ERROR: BUILD.bazel:1:1: see https://x.test/why"]);
         assert!(

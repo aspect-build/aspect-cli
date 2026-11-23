@@ -62,21 +62,31 @@ macro_rules! errln {
 /// the write matches `outln!`/`errln!`: nobody is reading the output, and
 /// finishing the task matters more than the line nobody sees.
 ///
-/// On a terminal, as Bazel's console is, a line's URLs and paths to files
-/// that exist are written as links ([`bazel::console::links`]), but for a
-/// coding agent reading it.
+/// Where [`terminal_links`] holds, as Bazel's console is, a line's URLs and
+/// paths to files that exist are written as links
+/// ([`bazel::console::links`]), a relative path from where the process runs.
 pub struct TolerantPrintHandler;
 
-/// Links what the CLI's own lines name, when stderr is a person's terminal.
+/// Whether this process's stderr is a person's terminal that shows links:
+/// a TTY with a `TERM` other than `dumb` (which writes an escape as text),
+/// and no coding agent reading it (its environment set, as the Console
+/// feature's `auto` profile checks), which gets each path once, plain.
+pub(crate) fn terminal_links() -> bool {
+    use std::io::IsTerminal as _;
+    std::io::stderr().is_terminal()
+        && std::env::var_os("TERM").is_some_and(|t| !t.is_empty() && t != "dumb")
+        && !crate::agent::detected(|v| std::env::var_os(v))
+}
+
+/// Links what the CLI's own lines name, when [`terminal_links`] holds.
 static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console::links::Linker>>> =
     std::sync::LazyLock::new(|| {
-        use std::io::IsTerminal as _;
-        if !std::io::stderr().is_terminal() || crate::agent::detected(|v| std::env::var_os(v)) {
+        if !terminal_links() {
             return None;
         }
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(bazel::console::links::Linker::new(
-            base,
+            vec![base],
         )))
     });
 
@@ -95,7 +105,8 @@ impl starlark::PrintHandler for TolerantPrintHandler {
     }
 }
 
-/// Shared instance — the handler is stateless.
+/// Shared instance: the handler holds no state of its own, only the
+/// process-wide [`PRINT_LINKER`].
 pub static TOLERANT_PRINT_HANDLER: TolerantPrintHandler = TolerantPrintHandler;
 
 /// Source scan behind the `no_panicking_print_macros` tests.
