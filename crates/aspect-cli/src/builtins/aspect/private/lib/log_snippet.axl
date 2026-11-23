@@ -9,7 +9,7 @@ Strategy, in order of preference:
   1. Structured first — `extract_junit_failure` scans a JUnit `test.xml` for the
      first `<failure>`/`<error>` element and emits its message + stack trace.
      Zero heuristics; the framework already isolated the failure.
-  2. Heuristic fallback — `extract_snippet` reads the raw `test.log`, and
+  2. Heuristic fallback: `extract_snippet` reads the raw `test.log`, and
      `extract_action_snippet` an action's stdout then stderr, and each picks
      its lines with `std.excerpt`, the choice the console's recap of an error
      makes too (`bazel::console::excerpt`): the first line that reads as an
@@ -20,7 +20,7 @@ Reads are bounded at the byte level. The historical "BES can inline 40+ MB of
 action stderr onto the Starlark heap" concern (see lib/bazel_results.axl) is
 about reading a BES `File.contents` oneof — NOT about reading a file by path.
 Here we read the on-disk file via `try_read_to_string_capped`, which pulls only
-the first `max_read_bytes` bytes into memory — never the whole file — so even a
+the first `max_read_bytes` bytes into memory (never the whole file), so even a
 multi-MB log degrades to a truncated prefix without spiking the heap; the
 file's size says whether it was cut.
 

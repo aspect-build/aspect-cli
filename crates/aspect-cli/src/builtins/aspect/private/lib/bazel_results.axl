@@ -26,7 +26,7 @@ Payload fields used:
   WorkspaceStatus.item               — repeated list of {key, value} structs (proto field is "item")
   Configuration.cpu, .compilation_mode, .is_tool_configuration, .mnemonic (output directory)
   WorkspaceConfig.local_exec_root
-  ActionExecuted.success, .type, .stdout, .stderr (Files — uri only, never .contents)
+  ActionExecuted.success, .type, .stdout, .stderr (Files: uri only, never .contents)
   TargetComplete.success
   TestResult.test_action_output (File list), .status, .test_attempt_duration_millis
   TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed), .run_count, .shard_count
@@ -491,7 +491,7 @@ def init_data():
             # stderr_path}] (deduped). Capped at MAX_FAILED_ACTIONS labels. Each
             # path is the local path `local_output_path` gives the BES stdout /
             # stderr File ("" when absent), read on demand for the inline
-            # snippet — never the raw bytes. Some tools (tsc) write their errors
+            # snippet, never the raw bytes. Some tools (tsc) write their errors
             # to stdout.
             "failed_actions": [],
             # May exceed len(failed_actions) due to cap.

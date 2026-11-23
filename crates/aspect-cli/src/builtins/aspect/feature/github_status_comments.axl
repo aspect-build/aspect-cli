@@ -845,7 +845,7 @@ def _results_subset(
     copied out; live-state fields come from `_state`.
 
     `failure_snippets` is this job's own inline failure snippets (plain dicts;
-    only this job can read its log, stdout and stderr paths) — extracted on the terminal
+    only this job can read its log, stdout and stderr paths), extracted on the terminal
     update by the caller and shipped in the contribution, since other jobs
     can't re-derive them. The renderer dedupes them across tasks and
     sticky-selects against the global budget."""
