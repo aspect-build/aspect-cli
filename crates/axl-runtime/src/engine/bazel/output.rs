@@ -951,7 +951,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// place, nor, on a terminal, a spinner's frame. Where curses is shown,
     /// the count goes just before the progress area curses draws after the
     /// run, never inside the area or its erase; before a tool redrawing its
-    /// own line, the copies are written out instead.
+    /// own lines, the copies are written out instead, and nothing folds after
+    /// one until Bazel's next progress row.
     fn collapse_repeats() -> anyhow::Result<OutputStage> {
         Ok(OutputStage {
             stage: Stage::CollapseRepeats,
