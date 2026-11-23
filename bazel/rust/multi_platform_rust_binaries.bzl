@@ -34,6 +34,10 @@ TARGET_NAMING_SCHEME = {}
 def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEME, target_triples = TARGET_TRIPLES, prefix = "", pkg_type = "zip", debug_assertions = False, **kwargs):
     """The multi_platform_rust_binaries macro creates a filegroup containing rust binaries that are ready for release.
 
+    Every target it creates is `manual`: each binary is a full `-c opt` build per
+    target triple, so `//...` would otherwise compile the whole graph again for
+    every platform. The release workflow builds them by label.
+
     Args:
         name: The name of the filegroup containing all rust targets produced by this macro.
         target: rust_binary that releases will be created for.
@@ -133,13 +137,13 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
     opt_filegroup(
         name = name,
         srcs = linux_bins + mac_bins,
-        tags = kwargs.get("tags", []),
+        tags = kwargs.get("tags", []) + ["manual"],
         visibility = kwargs.get("visibility", []),
     )
 
     opt_filegroup(
         name = "{}.packaged".format(name),
         srcs = linux_pkged + mac_pkged,
-        tags = kwargs.get("tags", []),
+        tags = kwargs.get("tags", []) + ["manual"],
         visibility = kwargs.get("visibility", []),
     )
