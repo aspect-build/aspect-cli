@@ -6,7 +6,8 @@
 //! flushed what it held, so the report follows bazel's last line. A report
 //! line is styled with [`Style`] on a terminal or a recognized CI log, so it
 //! reads as aspect's rather than bazel's: an `INFO:` line as the CLI's own
-//! are (its label bold cyan, the text plain), a detail line under it dim.
+//! are (its label bold cyan, the text plain), the summary's detail lines
+//! under it dim; the recap's quoted errors stay as Bazel wrote them.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -34,7 +35,8 @@ pub const MAX_LISTED_KINDS: usize = 10;
 /// included, also goes to a file of its own beside the raw log, as plain
 /// text. A kind's first message waits in memory until a second like it is
 /// hidden, so a kind that hid nothing leaves no file; from then on its lines
-/// are appended to `<log>.collapsed-s<slot>.log`, which
+/// are appended to `<log>.collapsed-s<slot>.log`, kept open and buffered
+/// (a console may hide hundreds of thousands of lines), which
 /// [`Stats::finish_groups`] renames to `<log>.collapsed-<n>.log`, numbered
 /// most hidden first, once the console ends.
 #[derive(Debug, Default)]
@@ -44,8 +46,17 @@ pub struct Stats {
     /// The raw log the group files go beside, when there is one.
     groups: Mutex<Option<PathBuf>>,
     /// Per kind, as `templates`: its lines not yet written (the first
-    /// message's, until the kind hides one), and whether writing failed.
-    pending: Mutex<Vec<(Vec<u8>, bool)>>,
+    /// message's, until the kind hides one), whether writing failed, and its
+    /// file once open.
+    pending: Mutex<Vec<Pending>>,
+}
+
+/// One collapsed kind's file as it is written ([`Stats::group_line`]).
+#[derive(Debug, Default)]
+struct Pending {
+    held: Vec<u8>,
+    failed: bool,
+    file: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl Stats {
@@ -68,7 +79,7 @@ impl Stats {
             file: None,
             incomplete: false,
         });
-        self.pending.lock().unwrap().push((vec![], false));
+        self.pending.lock().unwrap().push(Pending::default());
         templates.len() - 1
     }
 
@@ -87,18 +98,31 @@ impl Stats {
         };
         let hid = self.templates.lock().unwrap()[slot].hidden > 0;
         let mut pending = self.pending.lock().unwrap();
-        let (held, failed) = &mut pending[slot];
-        held.extend_from_slice(ansi::text(record).as_bytes());
-        held.push(b'\n');
-        if !hid {
+        let p = &mut pending[slot];
+        p.held.extend_from_slice(ansi::text(record).as_bytes());
+        p.held.push(b'\n');
+        if !hid || p.failed {
             return;
         }
-        let path = staging(&log, slot);
-        if let Err(e) = log::append_private(&path).and_then(|mut f| f.write_all(held)) {
-            tracing::debug!("collapsed console group {} failed: {e}", path.display());
-            *failed = true;
+        if p.file.is_none() {
+            let path = staging(&log, slot);
+            match log::append_private(&path) {
+                Ok(f) => p.file = Some(std::io::BufWriter::new(f)),
+                Err(e) => {
+                    tracing::debug!("collapsed console group {} failed: {e}", path.display());
+                    p.failed = true;
+                    p.held.clear();
+                    return;
+                }
+            }
         }
-        held.clear();
+        let held = std::mem::take(&mut p.held);
+        if let Some(file) = p.file.as_mut()
+            && let Err(e) = file.write_all(&held)
+        {
+            tracing::debug!("collapsed console group {slot} failed: {e}");
+            p.failed = true;
+        }
     }
 
     /// Records hidden, bodies included.
@@ -108,7 +132,7 @@ impl Stats {
 
     /// Give each kind that hid something its final file name, most hidden
     /// first. Once, at the end of the console.
-    fn finish_groups(&self) {
+    pub(crate) fn finish_groups(&self) {
         let Some(log) = self.groups.lock().unwrap().clone() else {
             return;
         };
@@ -120,19 +144,20 @@ impl Stats {
         order.sort_by_key(|&s| std::cmp::Reverse(templates[s].hidden));
         for (n, slot) in order.into_iter().enumerate() {
             let from = staging(&log, slot);
-            let (held, failed) = &mut pending[slot];
-            if !held.is_empty()
-                && log::append_private(&from)
-                    .and_then(|mut f| f.write_all(held))
-                    .is_err()
-            {
-                *failed = true;
+            let p = &mut pending[slot];
+            let held = std::mem::take(&mut p.held);
+            let wrote = match p.file.take() {
+                Some(mut file) => file.write_all(&held).and_then(|()| file.flush()),
+                None if held.is_empty() => Ok(()),
+                None => log::append_private(&from).and_then(|mut f| f.write_all(&held)),
+            };
+            if wrote.is_err() {
+                p.failed = true;
             }
-            held.clear();
             let to = RawLog::sibling(&log, &format!("collapsed-{}", n + 1));
             if std::fs::rename(&from, &to).is_ok() {
                 templates[slot].file = Some(to);
-                templates[slot].incomplete = pending[slot].1;
+                templates[slot].incomplete = pending[slot].failed;
             }
         }
     }
@@ -520,6 +545,10 @@ impl LineProcessor for Summary {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
+    use crate::console::line::tests::bazel;
+
     /// A report's `INFO:` line has the CLI's own label, its text plain; a
     /// detail line under it is dim.
     #[test]
@@ -532,9 +561,6 @@ mod tests {
             "\x1b[1;36mINFO\x1b[0m: Errors Bazel reported:\n\x1b[38;5;244m  3 more like: x\x1b[0m\n"
         );
     }
-    use std::sync::Arc;
-
-    use crate::console::line::tests::bazel;
 
     /// Run `records` through `p`, coloured as bazel colours its messages
     /// ([`bazel`]), and what it reports.

@@ -514,7 +514,10 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     config.strip_colour = !s
         .show_colour
         .unwrap_or_else(crate::color::console_supports_color);
-    config.links = stderr_tty;
+    // Clickable paths for a person at a terminal; a coding agent reading the
+    // console (its environment set, as the Console feature's `auto` profile
+    // checks) gets each path once, plain.
+    config.links = stderr_tty && !crate::agent::detected(|v| std::env::var_os(v));
     config
 }
 

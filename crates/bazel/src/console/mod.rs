@@ -1115,10 +1115,11 @@ mod tests {
         let out = crate::console::line::tests::unbazel(&sink.bytes());
         assert!(out.contains("line under the dropped one"), "{out}");
         assert_eq!(stats.hidden(), 2, "the collapsed warning and its own body");
-        // The kind's file is written once it hides one; finished by the
-        // summary, which this chain has none of, so read the open one.
+        // The kind's file is written once it hides one and finished by the
+        // summary, which this chain has none of: finished here.
+        stats.finish_groups();
         assert_eq!(
-            std::fs::read_to_string(log::RawLog::sibling(&log, "collapsed-s0")).unwrap(),
+            std::fs::read_to_string(log::RawLog::sibling(&log, "collapsed-1")).unwrap(),
             "WARNING: same 1\nWARNING: same 2\n  body of 2\n",
             "the line under the dropped one is not the warning's"
         );
