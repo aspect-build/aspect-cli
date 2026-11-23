@@ -1,10 +1,10 @@
 //! The terminal status surface: the lines Aspect itself prints around a task.
 //!
-//! Six slots cover them — `banner`, `header`, `phase`, `progress`, `verdict`
-//! and `section` — each a Jinja2 template rendered with the context documented
-//! on [`Slot`]. The runtime renders `banner`, `header` and `verdict`; AXL
-//! renders the rest through `ctx.console.render(...)` (see
-//! `lib/lifecycle.axl`). Bazel's own output, `warn()` / `error()` diagnostics
+//! Seven slots cover them, `banner`, `header`, `phase`, `progress`,
+//! `verdict`, `section` and `tip`, each a Jinja2 template rendered with the
+//! context documented on [`Slot`]. The runtime renders `banner`, `header` and
+//! `verdict`; AXL renders the rest through `ctx.console.render(...)` (see
+//! `lib/lifecycle.axl` and `lib/tips.axl`). Bazel's own output, `warn()` / `error()` diagnostics
 //! and stdout never pass through here.
 //!
 //! The `Console` feature (`feature/console.axl`) selects the templates the same
@@ -105,16 +105,23 @@ pub enum Slot {
     /// Workflows runner metadata; only printed on Buildkite. Context: `icon`
     /// (a Buildkite emoji shortcode, or empty), `title`.
     Section,
+    /// A tip's first line; its body prints indented under it, and a blank
+    /// render prints neither. Context: `id`, `severity` (`warning`,
+    /// `important`, `suggestion` or `note`), `emoji`, `title`, `tip_style`
+    /// and `id_style` (the escapes that open `TIP` and the id),
+    /// `highlight_style` (the severity's) and `highlight_reset`.
+    Tip,
 }
 
 impl Slot {
-    pub const ALL: [Slot; 6] = [
+    pub const ALL: [Slot; 7] = [
         Slot::Banner,
         Slot::Header,
         Slot::Phase,
         Slot::Progress,
         Slot::Verdict,
         Slot::Section,
+        Slot::Tip,
     ];
 
     pub fn name(self) -> &'static str {
@@ -125,6 +132,7 @@ impl Slot {
             Slot::Progress => "progress",
             Slot::Verdict => "verdict",
             Slot::Section => "section",
+            Slot::Tip => "tip",
         }
     }
 
@@ -169,6 +177,7 @@ pub struct Preset {
     progress: &'static str,
     verdict: &'static str,
     section: &'static str,
+    tip: &'static str,
 }
 
 impl Preset {
@@ -180,6 +189,7 @@ impl Preset {
             Slot::Progress => self.progress,
             Slot::Verdict => self.verdict,
             Slot::Section => self.section,
+            Slot::Tip => self.tip,
         }
     }
 }
@@ -192,6 +202,18 @@ macro_rules! verdict_text {
             "{{ highlight_style }}{{ verb }}{{ highlight_reset }} ",
             "{% if buildkite %}· {% endif %}{{ label }}{{ exit }}{{ timing }}",
             "{% if conclusion %} · {{ conclusion }}{% endif %}",
+        )
+    };
+}
+
+/// A tip's first line, `TIP[id] <emoji> severity: title`; `$emoji` is the
+/// emoji and its space, or nothing.
+macro_rules! tip_line {
+    ($emoji:literal) => {
+        concat!(
+            "{{ tip_style }}TIP{{ highlight_reset }}{{ id_style }}[{{ id }}]{{ highlight_reset }} ",
+            $emoji,
+            "{{ highlight_style }}{{ severity }}{{ highlight_reset }}: {{ title }}",
         )
     };
 }
@@ -237,6 +259,7 @@ const FULL: Preset = Preset {
         "{{ breakdown }}"
     ),
     section: "{% if icon %}{{ icon }} {% endif %}{{ title }}",
+    tip: tip_line!("{{ emoji }} "),
 };
 
 /// `full` without emojis or Buildkite emoji shortcodes.
@@ -257,6 +280,7 @@ const PLAIN: Preset = Preset {
         "{{ plain_breakdown }}"
     ),
     section: "{{ title }}",
+    tip: tip_line!(""),
 };
 
 const COMPACT: Preset = Preset {
@@ -273,6 +297,7 @@ const COMPACT: Preset = Preset {
         verdict_text!()
     ),
     section: "",
+    tip: PLAIN.tip,
 };
 
 /// `compact` without emojis or Buildkite emoji shortcodes, for a coding agent
@@ -288,6 +313,7 @@ const AGENT: Preset = Preset {
     progress: "",
     verdict: concat!("{% if not buildkite %}→ {% endif %}", verdict_text!()),
     section: "",
+    tip: PLAIN.tip,
 };
 
 const SILENT: Preset = Preset {
@@ -300,6 +326,7 @@ const SILENT: Preset = Preset {
     progress: "",
     verdict: "",
     section: "",
+    tip: FULL.tip,
 };
 
 /// Built-in presets, in the order `--help` lists them.
@@ -888,7 +915,7 @@ mod tests {
         .unwrap();
         let line =
             console("full", &o, false).render(Slot::Banner, crate::banner::console_context(true));
-        assert!(line.starts_with("\x1b[38;5;244maspect "), "{line:?}");
+        assert!(line.starts_with("\x1b[90maspect "), "{line:?}");
         assert!(
             line.ends_with(" · https://aspect.build/go/cli\x1b[0m"),
             "{line:?}"
@@ -1265,12 +1292,12 @@ mod tests {
     fn a_near_miss_slot_or_preset_is_suggested() {
         let slot = |name: &str| Overrides::default().set(name, "x".into()).unwrap_err();
         assert!(
-            slot("verdcit").ends_with(r#""verdcit" is not a slot; did you mean "verdict"? Expected one of banner, header, phase, progress, verdict, section"#),
+            slot("verdcit").ends_with(r#""verdcit" is not a slot; did you mean "verdict"? Expected one of banner, header, phase, progress, verdict, section, tip"#),
             "{}",
             slot("verdcit")
         );
         assert!(
-            slot("summary").ends_with("section"),
+            slot("summary").ends_with("section, tip"),
             "far miss: {}",
             slot("summary")
         );
@@ -1284,6 +1311,34 @@ mod tests {
         assert!(preset("plian").contains(r#""plian"; did you mean "plain"? Expected one of "#));
         assert!(!preset("loud").contains("did you mean"));
         assert!(!preset("fl").contains("did you mean"));
+    }
+
+    #[test]
+    fn a_tip_carries_its_emoji_under_full_and_silent_only() {
+        let tip = || {
+            minijinja::context! {
+                id => "x", severity => "suggestion", emoji => "💡", title => "T",
+                tip_style => "<t>", id_style => "<i>", highlight_style => "<s>", highlight_reset => "<r>",
+            }
+        };
+        let full = "<t>TIP<r><i>[x]<r> 💡 <s>suggestion<r>: T";
+        let plain = "<t>TIP<r><i>[x]<r> <s>suggestion<r>: T";
+        for (preset, want) in [
+            ("full", full),
+            ("silent", full),
+            ("plain", plain),
+            ("compact", plain),
+            ("agent", plain),
+        ] {
+            let c = console(preset, &Overrides::default(), false);
+            assert_eq!(c.render(Slot::Tip, tip()), want, "{preset}");
+        }
+        let c = console("full", &Overrides::default(), true);
+        assert_eq!(
+            c.render(Slot::Tip, tip()),
+            full,
+            "a tip opens no Buildkite section"
+        );
     }
 
     #[test]

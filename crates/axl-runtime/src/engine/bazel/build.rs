@@ -823,13 +823,11 @@ pub(super) fn announce_spawn(
 /// color too), whose rules are clap's plus ANSI-rendering CI hosts; empty
 /// strings otherwise, so file-captured / piped output stays plain.
 ///
-/// Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
-/// Actions' log viewer silently drops SGR 2. 256-color escapes are rendered by
-/// GHA, Buildkite, and every TTY we ship to, and match the grey `tools/bazel`
-/// itself uses for its `[tools/bazel]` trace line.
+/// Uses grey (bright black, `90`), the CLI's one grey, rather than SGR 2
+/// (faint): GitHub Actions' log viewer silently drops SGR 2.
 fn grey_style() -> (&'static str, &'static str) {
     if crate::color::console_supports_color() {
-        ("\x1b[38;5;244m", "\x1b[0m")
+        ("\x1b[90m", "\x1b[0m")
     } else {
         ("", "")
     }
@@ -1283,12 +1281,12 @@ fn history_dir(history: &History) -> Option<PathBuf> {
         .next_bazel_dir()
         .inspect_err(|err| {
             if history.first_failure() {
-                errln!(
-                    "WARNING: could not create a history folder under {}: {err}. Builds' \
+                crate::diag::warn(&format!(
+                    "could not create a history folder under {}: {err}. Builds' \
                      execution, workspace and console logs go to the temp dir instead, and \
                      the profile is left to Bazel.",
                     history.root().display(),
-                )
+                ))
             }
         })
         .ok()
@@ -1332,11 +1330,11 @@ impl Build {
         if let Some((from, to)) = self.profile_copy.take()
             && let Err(err) = bazel::profile::copy(&from, &to)
         {
-            errln!(
-                "WARNING: could not copy the profile from {} to {}: {err}",
+            crate::diag::warn(&format!(
+                "could not copy the profile from {} to {}: {err}",
                 from.display(),
                 to.display(),
-            );
+            ));
         }
     }
 
@@ -2369,7 +2367,7 @@ impl Build {
             if let Some(mut console) = console
                 && let Err(err) = console.join()
             {
-                errln!("WARNING: reading Bazel's console failed: {err}");
+                crate::diag::warn(&format!("reading Bazel's console failed: {err}"));
             }
         }
 
@@ -2380,7 +2378,7 @@ impl Build {
                     if let Some(warning) =
                         bazel::bes::warning::incomplete_events(event_stream.end(), result.success())
                     {
-                        errln!("{warning}");
+                        crate::diag::warn(&warning);
                     }
                     None
                 }
@@ -2435,18 +2433,18 @@ impl Build {
             let path = execlog_stream.path().display().to_string();
             match execlog_stream.join() {
                 Ok(ReaderOutcome::NeverAppeared) if result.success() && build.execlog_read => {
-                    errln!(
-                        "WARNING: bazel completed successfully but wrote no execution \
-                         log, so nothing that reads it saw this invocation."
+                    crate::diag::warn(
+                        "bazel completed successfully but wrote no execution log, so \
+                         nothing that reads it saw this invocation.",
                     );
                 }
                 Ok(ReaderOutcome::Undecodable(reason)) => {
-                    errln!(
-                        "WARNING: the execution log '{path}' stopped decoding \
-                         ({reason}), so its hooks, spawn telemetry and decoded sinks \
-                         hold only the entries before that point. The build's result \
-                         and copies of the compact log are unaffected."
-                    );
+                    crate::diag::warn(&format!(
+                        "the execution log '{path}' stopped decoding ({reason}), so its \
+                         hooks, spawn telemetry and decoded sinks hold only the entries \
+                         before that point. The build's result and copies of the compact \
+                         log are unaffected."
+                    ));
                 }
                 Ok(_) => {}
                 Err(err) => {

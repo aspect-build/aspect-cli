@@ -2,8 +2,9 @@
 
 use super::binary_file::End;
 
-/// What to say about a build event stream that did not end with bazel's final
-/// event, or `None` when there is nothing to say.
+/// What to warn about a build event stream that did not end with bazel's
+/// final event, without the `WARNING:` label the caller styles, or `None`
+/// when there is nothing to say.
 ///
 /// Bazel writes that event whenever it ends on its own terms, so its absence
 /// means the writer died, was cut off, or never wrote. That is worth a warning
@@ -15,7 +16,7 @@ pub fn incomplete_events(end: Option<&End>, bazel_succeeded: bool) -> Option<Str
         End::Complete => None,
         End::Incomplete(done) if !bazel_succeeded && done.bytes() == 0 => None,
         end => Some(format!(
-            "WARNING: the build events were incomplete ({end}); anything consuming them \
+            "the build events were incomplete ({end}); anything consuming them \
              (BES backends, hooks) may have missed events."
         )),
     }
@@ -51,7 +52,7 @@ mod tests {
         let end = ended(10);
         let warning = incomplete_events_warning(Some(&end), true).unwrap();
         assert!(
-            warning.starts_with("WARNING: the build events were incomplete"),
+            warning.starts_with("the build events were incomplete"),
             "{warning}"
         );
         assert!(warning.contains("after 10 bytes"), "{warning}");

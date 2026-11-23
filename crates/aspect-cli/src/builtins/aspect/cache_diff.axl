@@ -207,7 +207,7 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
     timing["probe"] = time.monotonic() - _t
 
     if not ctx.std.fs.exists(log_path):
-        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": the cache probe produced no gRPC log; Bazel failed before reaching the remote cache. Its output:")
+        _err(ctx, ansi.style("ERROR", ansi.ERROR_LABEL, color) + ": the cache probe produced no gRPC log; Bazel failed before reaching the remote cache. Its output:")
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return None
@@ -235,7 +235,7 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
     # probe failed and it isn't solely require-cached denials — no cache lookups
     # happened at all, or stderr carries a non-denial ERROR — surface it and fail.
     if not status.success and (not entries or _probe_has_unexpected_error(ctx, err_path)):
-        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(exit_code_of(status)))
+        _err(ctx, ansi.style("ERROR", ansi.ERROR_LABEL, color) + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(exit_code_of(status)))
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return None
@@ -274,7 +274,7 @@ def _build_missing_non_test(ctx: TaskContext, bazel_trait, patterns: list, rc, e
     status = build.wait()
     timing["build"] = time.monotonic() - _t
     if not status.success:
-        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(exit_code_of(status)))
+        _err(ctx, ansi.style("ERROR", ansi.ERROR_LABEL, color) + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(exit_code_of(status)))
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return False
@@ -346,7 +346,7 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
                 _attribute(ctx, causes, label, cause, stream_stdout, verbose, color)
 
     if unattributable > 0 and verbose:
-        _err(ctx, ansi.style("WARNING", ansi.YELLOW, color) + ": {} cache miss(es) outside the main repo could not be attributed to a test.".format(unattributable))
+        _err(ctx, ansi.style("WARNING", ansi.WARNING_LABEL, color) + ": {} cache miss(es) outside the main repo could not be attributed to a test.".format(unattributable))
     timing["attribute"] = rdeps_secs
     timing["classify"] = (time.monotonic() - _t_all) - rdeps_secs
     return causes
@@ -384,7 +384,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Explicit, up-front requirement: no remote cache → nothing to diff against.
     if not rc.flag_value("--remote_cache", command = "test") and not rc.flag_value("--remote_executor", command = "test"):
-        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": `aspect cache diff` requires a remote cache. It diffs the working tree against the cache to decide what changed; with no cache there is nothing to compare.")
+        _err(ctx, ansi.style("ERROR", ansi.ERROR_LABEL, color) + ": `aspect cache diff` requires a remote cache. It diffs the working tree against the cache to decide what changed; with no cache there is nothing to compare.")
         _err(ctx, "  Configure --remote_cache=<uri> (e.g. in .bazelrc), and seed a baseline once with `bazel test //... --remote_upload_local_results`.")
         return 1
 

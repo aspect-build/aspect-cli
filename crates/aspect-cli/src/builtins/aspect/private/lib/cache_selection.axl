@@ -1,6 +1,7 @@
 """Resolve cache-diff test scope through Bazel's test loading phase."""
 
 load("@aspect//bazel/trait.axl", "exit_code_of")
+load("./ansi.axl", "ansi")
 load("./runnable.axl", "normalize_label")
 
 def testonly_selected_tests(events: list, exit_code: int) -> list[str] | None:
@@ -42,7 +43,7 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
     """Load the original patterns with test-command RC and filtering semantics."""
     version = ctx.bazel.version()
     if version != None and int(version.split(".")[0]) < 7:
-        ctx.std.io.stderr.write("ERROR: cache diff test selection requires Bazel 7 or newer (found {}).\n".format(version))
+        ctx.std.io.stderr.write(ansi.style("ERROR", ansi.ERROR_LABEL, ctx.std.io.stderr.color) + ": cache diff test selection requires Bazel 7 or newer (found {}).\n".format(version))
         return None
     work = ctx.std.fs.mkdtemp(prefix = "aspect-cache-selection-")
     ctx.defer(lambda: ctx.std.fs.remove_dir_all(work) if ctx.std.fs.exists(work) else None)
@@ -89,9 +90,9 @@ def select_tests(ctx: TaskContext, patterns: list[str], rc, directory: str | Non
             events.append(event)
     tests = None if malformed else testonly_selected_tests(events, exit_code_of(status))
     if tests == None:
-        ctx.std.io.stderr.write("ERROR: cache diff could not establish the selected tests from Bazel's loading events (Bazel {}, exit {}). This requires Bazel 7+ with complete loading-only BEP events; no query fallback is used because it cannot preserve test filters.\n".format(version or "unknown", exit_code_of(status)))
+        ctx.std.io.stderr.write(ansi.style("ERROR", ansi.ERROR_LABEL, ctx.std.io.stderr.color) + ": cache diff could not establish the selected tests from Bazel's loading events (Bazel {}, exit {}). This requires Bazel 7+ with complete loading-only BEP events; no query fallback is used because it cannot preserve test filters.\n".format(version or "unknown", exit_code_of(status)))
         if malformed:
-            ctx.std.io.stderr.write("ERROR: line {} of Bazel's build event JSON file is not a JSON object; the log is truncated or corrupt.\n".format(malformed))
+            ctx.std.io.stderr.write(ansi.style("ERROR", ansi.ERROR_LABEL, ctx.std.io.stderr.color) + ": line {} of Bazel's build event JSON file is not a JSON object; the log is truncated or corrupt.\n".format(malformed))
         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(error_path))
     ctx.std.fs.remove_dir_all(work)
     return tests

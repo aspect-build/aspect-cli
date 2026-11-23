@@ -1,7 +1,7 @@
 //! The Starlark side of [`crate::console`]: reading the `Console` feature's
 //! args into a resolved surface for a given [`Host`], and `ctx.console`,
-//! through which AXL renders the `phase` and `progress` lines and asks whether
-//! the run opens Buildkite log sections.
+//! through which AXL renders the `phase`, `progress`, `section` and `tip`
+//! lines and asks whether the run opens Buildkite log sections.
 
 use std::sync::Arc;
 
@@ -275,8 +275,8 @@ fn console_methods(registry: &mut MethodsBuilder) {
         Ok(downcast(this)?.0.buildkite())
     }
 
-    /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict` or
-    /// `section`) with the kwargs as its context. Returns `""` when the
+    /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict`,
+    /// `section` or `tip`) with the kwargs as its context. Returns `""` when the
     /// layout leaves the slot blank; print nothing then. On Buildkite the
     /// section slots (`header`, `phase`, `verdict`, `section`) never render
     /// blank.
@@ -382,7 +382,7 @@ task_templates = {"check": {"progress": "mine"}}"#;
             ),
             (
                 r#"templates = {"lint": {"verdict": "v", "header": "h"}, "verdict": "V", "check": {"progress": "x"}}"#,
-                "Console templates takes slot keys only (banner, header, phase, progress, verdict, section); \
+                "Console templates takes slot keys only (banner, header, phase, progress, verdict, section, tip); \
                  a block keyed by a task goes in `task_templates`, keyed by task. For this config:\n    \
                  templates = {\"verdict\": ...}\n    task_templates = {\n        \
                  \"check\": {\"progress\": ...},\n        \"lint\": {\"header\": ..., \"verdict\": ...},\n    }",

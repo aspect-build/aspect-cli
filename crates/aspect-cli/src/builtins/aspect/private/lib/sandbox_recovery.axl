@@ -101,7 +101,7 @@ def _new(environment, retry_predicate = default_retry):
             return
         state["signal_pending"] = True
         print(
-            ansi.style("WARNING", ansi.RED, ctx.std.io.stderr.color) + ": " + reason + " Marking this " +
+            ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": " + reason + " Marking this " +
             "runner unhealthy once the job finishes, so the next job lands " +
             "on a fresh instance.",
         )
@@ -121,7 +121,7 @@ def _new(environment, retry_predicate = default_retry):
             return
         if result.outcome == "repaired":
             print(
-                ansi.style("WARNING", ansi.YELLOW, ctx.std.io.stderr.color) + ": cleaned up bazel#23880-poisoning " +
+                ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": cleaned up bazel#23880-poisoning " +
                 "sandbox entries: " + ", ".join(result.removed) + ". " +
                 "Retries (and future jobs on this runner) should now " +
                 "succeed. See bazelbuild/bazel#23880; fixed upstream in " +

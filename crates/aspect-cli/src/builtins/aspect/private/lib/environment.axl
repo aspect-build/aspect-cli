@@ -148,17 +148,17 @@ def bazel_misdetects_color(std) -> bool:
 
 def debug(std, msg):
     """Emit `msg` as an OTel log record, as `trace.log` does, and print it as a
-    grey `DEBUG:` line when the verbose level is `debug` (`std.io.debug`).
+    bold grey `DEBUG:` line when the verbose level is `debug` (`std.io.debug`).
     With `std` None (a caller with no `std` handle, such as a unit test of a
     pure helper) only the record is emitted."""
     trace.log(msg)
     if std != None and std.io.debug:
-        print(ansi.style("DEBUG", ansi.seq("0;90"), std.io.stderr.color) + ": " + msg)
+        print(ansi.style("DEBUG", ansi.DEBUG_LABEL, std.io.stderr.color) + ": " + msg)
 
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state. Every preset
     prints it; use `detail` for an aside a reader can do without."""
-    print(ansi.style("INFO", ansi.seq("1;36"), std.io.stderr.color) + ": " + msg)
+    print(ansi.style("INFO", ansi.INFO_LABEL, std.io.stderr.color) + ": " + msg)
 
 def detail(std, msg):
     """Print `info`'s `INFO:` line for an aside a reader can do without
@@ -169,12 +169,12 @@ def detail(std, msg):
         info(std, msg)
 
 def warn(std, msg):
-    """Print a yellow `WARNING:` line for non-fatal subsystem failures."""
-    print(ansi.style("WARNING", ansi.seq("0;33"), std.io.stderr.color) + ": " + msg)
+    """Print a bold yellow `WARNING:` line for non-fatal subsystem failures."""
+    print(ansi.style("WARNING", ansi.WARNING_LABEL, std.io.stderr.color) + ": " + msg)
 
 def error(std, msg):
-    """Print a red `ERROR:` line for recoverable errors preceding non-zero exit."""
-    print(ansi.style("ERROR", ansi.seq("0;31"), std.io.stderr.color) + ": " + msg)
+    """Print a bold red `ERROR:` line for recoverable errors preceding non-zero exit."""
+    print(ansi.style("ERROR", ansi.ERROR_LABEL, std.io.stderr.color) + ": " + msg)
 
 def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
     """Open a collapsed Buildkite log section, titled by the console's

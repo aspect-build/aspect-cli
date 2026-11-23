@@ -34,51 +34,64 @@ need to probe — the data flow just goes quiet.
 
 # The terminal
 
-A tip prints as `<emoji> SEVERITY[id]: title` with its body indented two
-spaces (`terminal_tip_lines`), when its id's `show` says (see "When a tip
-shows on the terminal"). When the task ends, a line per id counts what was
-not printed.
+A tip prints as `TIP[id] <emoji> severity: title` with its body indented
+two spaces (`terminal_tip_lines`), when its id's `show` says (see "When a
+tip shows on the terminal"). `TIP[` sets a tip apart from Bazel's and the
+CLI's own `INFO:` and `WARNING:` lines, and the severity's lowercase word,
+as rustc writes `warning` and `note`, reads without colour. The emoji is
+the status surfaces' but for a warning, 🟡 rather than ⚠️. When the task
+ends, a line per id counts what was not printed, and a last tip,
+`tips-hint` (itself silenceable), says how to silence a tip, on the
+command line or in `.aspect/config.axl`, and links the docs.
 
-# Severity ordering (highest → lowest urgency)
+# Severities, most urgent first
 
-    TIP_IMPORTANT   — action required; key features broken without it.
-    TIP_WARNING     — degraded behavior; fix to restore full function.
-    TIP_SUGGESTION  — improvement opportunity; works fine without it.
-    TIP_INFO        — FYI.
+GitHub's alerts' (without CAUTION, and TIP as SUGGESTION, since every tip
+is a `TIP[id]`), with the status surfaces' emoji:
+
+    TIP_WARNING     ⚠️  this run hit a problem that needs attention now (a
+                    full disk, a crashed server). 🟡 on the terminal.
+    TIP_IMPORTANT   📌  something the user needs to reach their goal (setup
+                    a feature lacks).
+    TIP_SUGGESTION  💡  advice for doing something better or more easily.
+    TIP_NOTE        💬  worth knowing, even when skimming. `TIP_INFO` is an
+                    alias of it.
 """
 
 load("./ansi.axl", "ansi")
-load("./links.axl", "CI_API_TOKEN_URL")
+load("./links.axl", "CI_API_TOKEN_URL", "CLI_TIPS_SILENCE_URL")
 load("./text.axl", "did_you_mean_then")
 
 # ── Severity constants ───────────────────────────────────────────────
 
-TIP_IMPORTANT = "important"
 TIP_WARNING = "warning"
+TIP_IMPORTANT = "important"
 TIP_SUGGESTION = "suggestion"
-TIP_INFO = "info"
+TIP_NOTE = "note"
+TIP_INFO = TIP_NOTE
 
 _SEVERITY_ORDER = {
-    TIP_IMPORTANT: 0,
-    TIP_WARNING: 1,
+    TIP_WARNING: 0,
+    TIP_IMPORTANT: 1,
     TIP_SUGGESTION: 2,
-    TIP_INFO: 3,
+    TIP_NOTE: 3,
 }
 
+# The status surfaces' emoji, which a browser draws whole.
 _SEVERITY_EMOJI = {
-    TIP_IMPORTANT: "🔥",
     TIP_WARNING: "⚠️",
+    TIP_IMPORTANT: "📌",
     TIP_SUGGESTION: "💡",
-    TIP_INFO: "ℹ️",
+    TIP_NOTE: "💬",
 }
 
-# Label paired with the emoji on each tip header (`💡 **Tip:** ...`), so
-# severity is legible even where the emoji doesn't render.
+# Label paired with the emoji on each tip header (`💡 **SUGGESTION: title**`),
+# so severity is legible even where the emoji doesn't render.
 _SEVERITY_LABEL = {
-    TIP_IMPORTANT: "Important",
     TIP_WARNING: "Warning",
-    TIP_SUGGESTION: "Tip",
-    TIP_INFO: "Info",
+    TIP_IMPORTANT: "Important",
+    TIP_SUGGESTION: "Suggestion",
+    TIP_NOTE: "Note",
 }
 
 # ── Template type enum ──────────────────────────────────────────────
@@ -115,7 +128,9 @@ _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JIN
 #                   the id's tips in its final state, up to `max_shown`; the
 #                   tips past it are counted.
 #
-# A tip emitted after the end prints at once.
+# A tip emitted after the end prints at once. A tip the Console's `tip`
+# template hides (renders blank) is neither printed nor counted, and takes
+# no `max_shown` slot.
 TIP_SHOW_EACH = "each"
 TIP_SHOW_FIRST = "first"
 TIP_SHOW_END = "end"
@@ -261,6 +276,8 @@ def tip_replace(
     current value. See `TipSuggestion` for field semantics."""
     if show != None and show not in _VALID_SHOW:
         fail("tip_replace: unknown show %r%s" % (show, did_you_mean_then(show, _VALID_SHOW, "; ", "valid: " + ", ".join(_VALID_SHOW))))
+    if severity != None and severity not in _SEVERITY_ORDER:
+        fail("tip_replace: unknown severity %r%s" % (severity, did_you_mean_then(severity, _SEVERITY_ORDER.keys(), "; ", "valid: " + ", ".join(_SEVERITY_ORDER.keys()))))
     return TipSuggestion(
         action = TipAction("replace"),
         severity = severity,
@@ -902,17 +919,17 @@ def collect_tips_sorted(ctx, limit = None, surface = None):
 
 def severity_emoji(severity):
     """Emoji prefix for a tip's severity. Used by renderers."""
-    return _SEVERITY_EMOJI.get(severity, "ℹ️")
+    return _SEVERITY_EMOJI.get(severity, _SEVERITY_EMOJI[TIP_NOTE])
 
 def severity_label(severity):
-    """Human-readable severity label (e.g. "Tip", "Warning"). Paired with
+    """Human-readable severity label (e.g. "Suggestion", "Warning"). Paired with
     `severity_emoji` so the tip reads even where the emoji may not."""
-    return _SEVERITY_LABEL.get(severity, "Info")
+    return _SEVERITY_LABEL.get(severity, _SEVERITY_LABEL[TIP_NOTE])
 
 def severity_rank(severity):
     """Sort rank for a severity — lower = more urgent. For cross-task
     aggregators that order tips without depending on the constant dict.
-    Unknown severities sort after `TIP_INFO`."""
+    Unknown severities sort after `TIP_NOTE`."""
     return _SEVERITY_ORDER.get(severity, 999)
 
 def silence_hint_line(id):
@@ -975,46 +992,106 @@ def strip_code_fences(body):
             kept.append(line)
     return "\n".join(kept)
 
+# `TIP` is one colour on every tip, so it reads as the CLI's. The id is the
+# CLI's grey.
+_TERMINAL_TIP_LABEL_COLOR = "1;38;5;75"  # bold sky blue
+_TERMINAL_TIP_ID_COLOR = "90"
+
+# The colour of each severity's lowercase word, every one bold, as rustc
+# writes its `warning` and `note`: the two to act on coloured, the two to
+# let pass quieter, in the terminal's own colour and grey.
 _TERMINAL_TIP_COLOR = {
-    TIP_IMPORTANT: "1;31",  # bold red — required action, key features broken without it
-    TIP_WARNING: "0;33",  # yellow — matches `warn()` in environment.axl
-    TIP_SUGGESTION: "1;32",  # bold green — helpful suggestion, distinct from INFO's cyan
-    TIP_INFO: "1;36",  # bold cyan — matches `info()` in environment.axl
+    TIP_WARNING: "1;33",  # bold yellow
+    TIP_IMPORTANT: "1;38;5;80",  # bold aqua
+    TIP_SUGGESTION: "1",  # bold, the terminal's own colour
+    TIP_NOTE: "1;90",  # bold grey
 }
 
-def _tip_head(id, severity, title, color_on):
-    """`<emoji> SEVERITY[id]: title`: the label coloured by severity (see
-    `_TERMINAL_TIP_COLOR`), the id dim, the title bold. The `[` keeps a tip
-    from reading as one of Bazel's or the CLI's own `WARNING:` lines."""
-    code = _TERMINAL_TIP_COLOR.get(severity, "1;36")
-    label = "%s %s" % (severity_emoji(severity), severity_label(severity).upper())
-    return (
-        ansi.style(label, ansi.seq(code), color_on) +
-        ansi.style("[%s]" % id, ansi.DIM, color_on) + ": " +
-        ansi.style(title, ansi.BOLD, color_on)
+# The terminal's emoji, each wide by default (Emoji_Presentation): one made
+# an emoji by VS16 (`⚠️`) is drawn one column wide by some terminals and two
+# by others, so no width is right for it.
+_TERMINAL_EMOJI = {
+    TIP_WARNING: "🟡",
+    TIP_IMPORTANT: "📌",
+    TIP_SUGGESTION: "💡",
+    TIP_NOTE: "💬",
+}
+
+def _tip_head(id, severity, title, color_on, console = None):
+    """`TIP[id] <emoji> severity: title` as `console`'s `tip` slot renders it
+    (`full` carries the emoji, `compact` does not), or, with no console, as
+    `full` does: `TIP` in the tips' own colour, the id grey, the severity's
+    emoji, then its word lowercase in its colour (`_TERMINAL_TIP_COLOR`), the
+    title plain. Every style is empty unless `color_on`. An unknown severity
+    reads as a note."""
+    if severity not in _TERMINAL_TIP_COLOR:
+        severity = TIP_NOTE
+    style = lambda code: ansi.seq(code) if color_on else ""
+    context = {
+        "id": id,
+        "severity": severity_label(severity).lower(),
+        "emoji": _TERMINAL_EMOJI[severity],
+        "title": title,
+        "tip_style": style(_TERMINAL_TIP_LABEL_COLOR),
+        "id_style": style(_TERMINAL_TIP_ID_COLOR),
+        "highlight_style": style(_TERMINAL_TIP_COLOR[severity]),
+        "highlight_reset": ansi.RESET if color_on else "",
+    }
+    if console != None:
+        return console.render("tip", **context)
+    c = context
+    return "%sTIP%s%s[%s]%s %s %s%s%s: %s" % (
+        c["tip_style"],
+        c["highlight_reset"],
+        c["id_style"],
+        id,
+        c["highlight_reset"],
+        c["emoji"],
+        c["highlight_style"],
+        c["severity"],
+        c["highlight_reset"],
+        title,
     )
 
-def terminal_tip_lines(id, severity, title, body, color_on = False):
+def terminal_tip_lines(id, severity, title, body, color_on = False, console = None):
     """A tip as the terminal shows it: its head (`_tip_head`), then its body
-    indented two spaces, code fences stripped."""
-    lines = [_tip_head(id, severity, title, color_on)]
+    indented two spaces, code fences stripped; nothing when the head renders
+    blank."""
+    head = _tip_head(id, severity, title, color_on, console)
+    if not head:
+        return []
+    lines = [head]
     cleaned = strip_code_fences(body)
     if cleaned:
         for line in cleaned.rstrip("\n").split("\n"):
             lines.append("  " + line if line else "")
     return lines
 
-def terminal_more_line(id, severity, title, more, color_on = False):
+def terminal_more_line(id, severity, title, more, color_on = False, console = None):
     """The end-of-task line for an id's `more` occurrences or tips not
     printed, and the title of the last of them, when there is one to name."""
     if title == None:
-        return _tip_head(id, severity, "%d more" % more, color_on)
-    return _tip_head(id, severity, "%d more; the last: %s" % (more, title), color_on)
+        return _tip_head(id, severity, "%d more" % more, color_on, console)
+    return _tip_head(id, severity, "%d more; the last: %s" % (more, title), color_on, console)
 
-def terminal_now_line(id, severity, title, color_on = False):
+def terminal_now_line(id, severity, title, color_on = False, console = None):
     """The end-of-task line for a `TIP_SHOW_FIRST` tip that changed after it
     printed: its title now."""
-    return _tip_head(id, severity, "now: " + title, color_on)
+    return _tip_head(id, severity, "now: " + title, color_on, console)
+
+# The id of the end-of-task line saying how to silence a tip.
+TIPS_HINT_ID = "tips-hint"
+
+def terminal_hint_lines(color_on = False, console = None):
+    """The end-of-task `tips-hint` tip: how to silence a tip, by flag (its
+    own id the example) or in `.aspect/config.axl`, the docs under it."""
+    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `.aspect/config.axl`" % TIPS_HINT_ID
+    return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, CLI_TIPS_SILENCE_URL, color_on, console)
+
+def _console(ctx):
+    """`ctx`'s console, through whose `tip` slot a tip renders, or None for a
+    context without one."""
+    return ctx.console if hasattr(ctx, "console") else None
 
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
@@ -1106,7 +1183,7 @@ def _surface_overrides(ctx, entries):
         bad = [n for n in wanted if n not in _VALID_SURFACES]
         if not eq or not id or not wanted or bad:
             hint = did_you_mean_then(bad[0], _VALID_SURFACES, "", "") if bad else ""
-            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s%s\n" % (e, ", ".join(_VALID_SURFACES), hint))
+            ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s%s\n" % (e, ", ".join(_VALID_SURFACES), hint))
             continue
         out[id] = wanted
     return out
@@ -1162,7 +1239,7 @@ def _tips_impl(ctx):
             return text
         if tip["id"] not in warned:
             warned[tip["id"]] = True
-            call_ctx.std.io.stderr.write("WARNING: tip %r: its template does not render, so it is shown as written: %s\n" % (tip["id"], text))
+            call_ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, call_ctx.std.io.stderr.color) + ": tip %r: its template does not render, so it is shown as written: %s\n" % (tip["id"], text))
         return src
 
     def _store(call_ctx, tip):
@@ -1219,22 +1296,32 @@ def _tips_impl(ctx):
             return
         if finished[0] or cap == 0 or shown[id] < cap:
             _print_stored(call_ctx, stored, call_ctx.std.io.stderr.color)
-        else:
+        elif _visible(call_ctx, stored):
             more[id] += 1
             held_last[id] = stored
 
-    def _print_stored(_call_ctx, stored, color_on):
+    def _visible(ctx, stored):
+        """Whether `stored` would print: its template does not hide it."""
+        return _tip_head(stored["id"], stored["severity"], stored["title"], False, _console(ctx)) != ""
+
+    def _print_stored(call_ctx, stored, color_on):
         id = stored["id"]
-        _print(terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on))
-        shown[id] += 1
-        printed[id][stored.get("key", "")] = (stored["title"], stored["body"])
+        lines = terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on, _console(call_ctx))
+        _print(lines)
+        if lines:
+            shown[id] += 1
+
+        # A tip its template hides is printed as nothing, so never "now:";
+        # counted as more only if it is visible at the end.
+        printed[id][stored.get("key", "")] = (stored["title"], stored["body"]) if lines else None
 
     def _finish(task_ctx):
         """The end of the task's terminal output, once: each `TIP_SHOW_END`
         id's tips in their final state, a line per id with what it did not
         print (`terminal_more_line`: for `TIP_SHOW_EACH` the occurrences, for
         the others the tips) or, for `TIP_SHOW_FIRST`, how its printed tip
-        changed (`terminal_now_line`). A tip emitted after it prints at
+        changed (`terminal_now_line`), then, when any tip was printed, how to
+        silence a tip (`terminal_hint_lines`). A tip emitted after it prints at
         once."""
         if not auto_print[0] or finished[0]:
             return
@@ -1246,10 +1333,20 @@ def _tips_impl(ctx):
             if not tips_for:
                 continue
             if show == TIP_SHOW_END:
-                for t in (tips_for if cap == 0 else tips_for[:cap]):
+                # Up to `cap` shown: a tip its template hides takes no slot.
+                for t in tips_for:
+                    if cap != 0 and shown[id] >= cap:
+                        break
                     _print_stored(task_ctx, t, color_on)
-            unprinted = [t for t in tips_for if t.get("key", "") not in printed[id]]
+
+            # Not printed, or hidden when it was and since made visible.
+            unprinted = [t for t in tips_for if printed[id].get(t.get("key", "")) == None and _visible(task_ctx, t)]
             occurrences, lost = dropped.get(id, 0), dropped_tips.get(id, 0)
+
+            # What was never emitted counts only for an id something of
+            # which its template shows.
+            if not [t for t in tips_for if _visible(task_ctx, t)]:
+                occurrences, lost = 0, 0
             if show == TIP_SHOW_EACH:
                 # Occurrences: a dropped group's matches are among `dropped`
                 # when the rule reported them, so its tips count only when
@@ -1257,17 +1354,28 @@ def _tips_impl(ctx):
                 # is still on the terminal.
                 held = more[id] + occurrences + (0 if occurrences else lost)
                 key = held_last[id].get("key", "") if id in held_last else None
-                now = [t for t in tips_for if t.get("key", "") == key]
+                now = [t for t in tips_for if t.get("key", "") == key and _visible(task_ctx, t)]
                 latest = now[0] if now else None
             else:
                 held = len(unprinted) + lost
                 latest = unprinted[-1] if unprinted else None
             if held:
-                _print([terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on)])
+                # The severity of what is counted: the tip named, else the
+                # occurrence held as it was emitted, else the id's last
+                # visible tip.
+                visible = [t for t in tips_for if _visible(task_ctx, t)]
+                counted = latest or (held_last.get(id) if show == TIP_SHOW_EACH else None) or (visible[-1] if visible else last[id])
+                line = terminal_more_line(id, counted["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))
+                if line:
+                    _print([line])
             elif show == TIP_SHOW_FIRST:
-                now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])]]
+                now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])] and _visible(task_ctx, t)]
                 if now:
-                    _print([terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on)])
+                    line = terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on, _console(task_ctx))
+                    if line:
+                        _print([line])
+        if any([shown[id] for id in order]) and TIPS_HINT_ID not in silenced:
+            _print(terminal_hint_lines(color_on, _console(task_ctx)))
 
     def _add(call_ctx, tip):
         if tip["id"] in silenced:

@@ -7,10 +7,10 @@ and customize tips with a single import:
     load("@aspect//tips.axl",
          "add_tip",
          "tips",
-         "TIP_IMPORTANT",
          "TIP_WARNING",
+         "TIP_IMPORTANT",
          "TIP_SUGGESTION",
-         "TIP_INFO",
+         "TIP_NOTE",
          "TIP_TEMPLATE_RAW",
          "TIP_TEMPLATE_FORMAT",
          "TIP_TEMPLATE_JINJA2",
@@ -53,6 +53,7 @@ load(
     _TIP_IMPORTANT = "TIP_IMPORTANT",
     _TIP_INFO = "TIP_INFO",
     _TIP_MAX_SHOWN = "TIP_MAX_SHOWN",
+    _TIP_NOTE = "TIP_NOTE",
     _TIP_REJECT = "TIP_REJECT",
     _TIP_SHOW_EACH = "TIP_SHOW_EACH",
     _TIP_SHOW_END = "TIP_SHOW_END",
@@ -75,10 +76,11 @@ load(
     _tips = "tips",
 )
 
-# Severities.
-TIP_IMPORTANT = _TIP_IMPORTANT
+# Severities, most urgent first. `TIP_INFO` is an alias of `TIP_NOTE`.
 TIP_WARNING = _TIP_WARNING
+TIP_IMPORTANT = _TIP_IMPORTANT
 TIP_SUGGESTION = _TIP_SUGGESTION
+TIP_NOTE = _TIP_NOTE
 TIP_INFO = _TIP_INFO
 
 # Template types.
@@ -136,10 +138,13 @@ def add_tip(
     """Add a tip to the task's tip storage and show it on the terminal as
     `show` says (subject to the owner feature's `auto_print` arg):
 
-        💡 TIP[<id>]: <title>
+        TIP[<id>] 💡 suggestion: <title>
           <body, indented>
 
-    Once the task ends, a line per id counts what was not printed.
+    with 🟡 warning, 📌 important or 💬 note for the other severities;
+    the emoji shows under the `full` and `silent` presets only. Once the
+    task ends, a line per id counts what was not printed, and a last tip,
+    `tips-hint`, says how to silence a tip.
 
     The single entry point for tips.
 
@@ -156,8 +161,9 @@ def add_tip(
       id: Stable identifier — the kind of tip and its silence key. Tips
         with the same `(id, key)` are the same tip (re-emit replaces);
         `id` alone is what `--tips:silence=<id>` and the silence list match.
-      severity: One of `TIP_IMPORTANT` / `TIP_WARNING` / `TIP_SUGGESTION` /
-        `TIP_INFO` — drives ordering and the emoji/label.
+      severity: One of `TIP_WARNING` / `TIP_IMPORTANT` / `TIP_SUGGESTION` /
+        `TIP_NOTE` (`TIP_INFO`), most urgent first: drives ordering and
+        the emoji and label.
       title: Short headline, interpreted per `type`.
       body: Markdown body, interpreted per `type`.
       type: The interpolation engine for `title` / `body`:
