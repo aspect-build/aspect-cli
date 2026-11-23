@@ -14,6 +14,10 @@
 //! For human-facing console output only. Anything a *program* consumes — a
 //! credential-helper response, a machine-readable dump — must propagate the
 //! failure rather than report success on output nobody received.
+//!
+//! AXL `print()` goes through [`TolerantPrintHandler`], which on a person's
+//! terminal ([`terminal_links`]) also writes a line's URLs and paths to files
+//! that exist as links, as Bazel's console does.
 
 /// `println!` that ignores a failed write (notably a closed pipe).
 #[macro_export]

@@ -37,6 +37,17 @@ static URL: LazyLock<Regex> =
 /// A run of the bytes a path is written with.
 static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9._/~+@-]+").unwrap());
 
+/// Whether a path written as [`PATH`] matches can go on through `b`, for a
+/// stage that finds a path's end as the linker will (`node_modules/@types/…`).
+pub(crate) fn is_path_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"._/~+@-".contains(&b)
+}
+
+/// How long a path found to name nothing is taken to still name nothing:
+/// long enough that a busy console does not look one up on every line,
+/// short enough that a file made since is linked.
+const MISS_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// How many paths a [`Linker`] remembers resolving before forgetting them
 /// all.
 const REMEMBERED: usize = 4096;
@@ -78,8 +89,8 @@ pub struct Linker {
     /// The host a `file://` URL names.
     host: String,
     /// What each path looked up names, by the path as written: the file, or
-    /// None for nothing.
-    resolved: HashMap<Vec<u8>, Option<PathBuf>>,
+    /// None for nothing as of when it was looked up.
+    resolved: HashMap<Vec<u8>, (Option<PathBuf>, std::time::Instant)>,
 }
 
 impl Linker {
@@ -191,7 +202,9 @@ impl Linker {
         if !shaped {
             return None;
         }
-        if let Some(known) = self.resolved.get(path) {
+        if let Some((known, at)) = self.resolved.get(path)
+            && (known.is_some() || at.elapsed() < MISS_FOR)
+        {
             return known.clone();
         }
         if self.resolved.len() >= REMEMBERED {
@@ -207,7 +220,8 @@ impl Linker {
                 .map(|b| b.join(written))
                 .find(|p| p.exists())
         };
-        self.resolved.insert(path.to_vec(), found.clone());
+        self.resolved
+            .insert(path.to_vec(), (found.clone(), std::time::Instant::now()));
         found
     }
 }
@@ -560,6 +574,54 @@ mod tests {
                 file(&other, "src/a.ts", "src/a.ts")
             ),
             "the build's workspace's files; nothing for dots"
+        );
+    }
+
+    #[test]
+    fn a_scoped_package_path_keeps_its_hint() {
+        let root = tempfile::tempdir().unwrap();
+        for f in [
+            "node_modules/@types/x/index.d.ts",
+            "pkg/node_modules/@types/x/index.d.ts",
+        ] {
+            let at = root.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "").unwrap();
+        }
+        let ws = root.path().display().to_string();
+        let hints = Hints::default();
+        let mut rel = crate::console::filters::RelativizePaths::new(
+            Some(ws.clone()),
+            Some(format!("{ws}/pkg")),
+        )
+        .hinting(Some(hints.clone()));
+        let mut links = Links {
+            linker: Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]),
+            hints,
+        };
+        links.linker.host = String::new();
+        use crate::console::forward::LineProcessor as _;
+        let shown = rel
+            .process(
+                format!("ERROR: {ws}/pkg/node_modules/@types/x/index.d.ts:1:1: bad").as_bytes(),
+            )
+            .unwrap();
+        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+        assert!(
+            out.contains("/pkg/node_modules/%40types/x/index.d.ts\x1b\\node_modules/@types"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_made_after_it_was_named_is_linked() {
+        let (dir, mut l) = linker();
+        assert_eq!(link(&mut l, "made.txt here"), "made.txt here");
+        std::fs::write(dir.path().join("made.txt"), "").unwrap();
+        l.resolved.get_mut(b"made.txt".as_slice()).unwrap().1 -= MISS_FOR;
+        assert_eq!(
+            link(&mut l, "made.txt here"),
+            format!("{} here", file(dir.path(), "made.txt", "made.txt"))
         );
     }
 

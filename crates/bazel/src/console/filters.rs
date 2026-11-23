@@ -340,7 +340,7 @@ impl RelativizePaths {
     ) {
         let mut end = rest
             .iter()
-            .position(|&b| !continues_path(b))
+            .position(|&b| !super::links::is_path_byte(b))
             .unwrap_or(rest.len());
         while end > consumed && rest[end - 1] == b'.' {
             end -= 1;
