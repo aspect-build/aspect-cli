@@ -52,11 +52,12 @@ mod wrappers;
 use wrappers::ExecLogSink;
 
 /// The console processor a build or test runs with: `output`, or, when the
-/// call gives none and leaves both stdout and stderr to the runtime, one from
+/// call gives none, leaves stderr to the runtime and sends stdout to this
+/// process's stdout or stderr (`stdout_ours`, [`stdout_to`]), one from
 /// the task's `BazelTrait.output_stages` and the stages its `output_start`
 /// hooks return, whose capture flags go after `flags`, so they win. A call
-/// that redirects either stream gets no processing and no flags: Bazel's
-/// output as it wired it. What is shown follows the user's own `--curses`
+/// that redirects stderr, or stdout elsewhere, gets no processing and no
+/// flags: Bazel's output as it wired it. What is shown follows the user's own `--curses`
 /// and `--color` in `flags` (the call's, or an active rc's; with no rc
 /// active, Bazel's own rc files are not read for them), when they gave one.
 /// An `output` the call gives is used as it is, its flags appended after
@@ -67,7 +68,7 @@ use wrappers::ExecLogSink;
 fn console_for<'v>(
     output: Option<bazel::console::Config>,
     stderr_free: bool,
-    stdout_inherited: bool,
+    stdout_ours: bool,
     flags: &mut Vec<String>,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<Option<bazel::console::Config>> {
@@ -84,7 +85,7 @@ fn console_for<'v>(
             }
             Some(config)
         }
-        (None, Some(t)) if stderr_free && stdout_inherited => {
+        (None, Some(t)) if stderr_free && stdout_ours => {
             let mut stages = t.stages.clone();
             stages.extend(t.started(eval)?);
             // Captured even with no stages when hidden (inherited, it would
@@ -117,6 +118,20 @@ fn console_for<'v>(
         );
     }
     Ok(config)
+}
+
+/// Where a build's `stdout` (or `stdio`) sends Bazel's stdout, for its
+/// console: this process's own stdout (none given, or `ctx.std.io.stdout`),
+/// its stderr (`ctx.std.io.stderr`), or elsewhere.
+fn stdout_to(stdout: &Option<NoneOr<Writable>>, stdio: &NoneOr<StdStdio>) -> build::StdoutTo {
+    if !stdio.is_none() {
+        return build::StdoutTo::Elsewhere;
+    }
+    match stdout {
+        None | Some(NoneOr::Other(Writable::Stdout(..))) => build::StdoutTo::Ours,
+        Some(NoneOr::Other(Writable::Stderr(..))) => build::StdoutTo::Stderr,
+        _ => build::StdoutTo::Elsewhere,
+    }
 }
 
 /// Resolve the `(stdout, stderr)` `Stdio` slots from the Starlark args.
@@ -749,12 +764,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &aspects.items,
             &resolved_startup_flags,
         )?);
-        let stdout_inherited = stdout.is_none() && stdio.is_none();
+        let stdout_to = stdout_to(&stdout, &stdio);
         let directory = directory.into_option();
         let mut console = console_for(
             output.into_option().map(|p| p.config().clone()),
             stderr.is_none() && stdio.is_none(),
-            stdout_inherited,
+            stdout_to != build::StdoutTo::Elsewhere,
             &mut resolved_flags,
             eval,
         )?;
@@ -776,7 +791,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             stdout,
             stderr,
             console,
-            stdout_inherited,
+            stdout_to,
             directory,
             build::AnnounceSpawn {
                 version: announce_version,
@@ -968,12 +983,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &aspects.items,
             &resolved_startup_flags,
         )?);
-        let stdout_inherited = stdout.is_none() && stdio.is_none();
+        let stdout_to = stdout_to(&stdout, &stdio);
         let directory = directory.into_option();
         let mut console = console_for(
             output.into_option().map(|p| p.config().clone()),
             stderr.is_none() && stdio.is_none(),
-            stdout_inherited,
+            stdout_to != build::StdoutTo::Elsewhere,
             &mut resolved_flags,
             eval,
         )?;
@@ -995,7 +1010,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             stdout,
             stderr,
             console,
-            stdout_inherited,
+            stdout_to,
             directory,
             build::AnnounceSpawn {
                 version: announce_version,

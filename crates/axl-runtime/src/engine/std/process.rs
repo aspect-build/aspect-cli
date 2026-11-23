@@ -880,8 +880,10 @@ mod tests {
     #[test]
     fn parent_stderr_can_take_a_childs_stdout() {
         use std::sync::{Arc, Mutex};
-        let stderr =
-            stream::Writable::Stderr(Arc::new(Mutex::new(RefCell::new(Some(std::io::stderr())))));
+        let stderr = stream::Writable::Stderr(
+            Arc::new(Mutex::new(RefCell::new(Some(std::io::stderr())))),
+            false,
+        );
         let status = process::Command::new("true")
             .stdout(writable_to_stdio(&stderr).unwrap())
             .status()
@@ -892,7 +894,7 @@ mod tests {
     #[test]
     fn closed_parent_stream_is_an_error() {
         use std::sync::{Arc, Mutex};
-        let closed = stream::Writable::Stdout(Arc::new(Mutex::new(RefCell::new(None))));
+        let closed = stream::Writable::Stdout(Arc::new(Mutex::new(RefCell::new(None))), false);
         assert!(writable_to_stdio(&closed).is_err());
     }
 

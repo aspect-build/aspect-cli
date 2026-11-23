@@ -230,9 +230,11 @@ def child_stdout(io, args):
     Every child a task runs writes human-facing output to stdout — Bazel its
     result summary and test output, `patch` the files it touched, a formatter
     or coverage uploader its report — and any of it landing in the document
-    breaks it. Our own stdout on the text path is an fd dup, identical to
-    inheriting, so call sites need no conditional. Takes `ctx.std.io` and
-    `ctx.args` so a unit test can drive both branches.
+    breaks it. To a build, our own stdout on the text path is the same as
+    inheriting it, its console capture included, and our stderr joins the
+    capture of its stderr, keeping Bazel's order; so call sites need no
+    conditional. Takes `ctx.std.io` and `ctx.args` so a unit test can drive
+    both branches.
     """
     return io.stderr if wants_json(args) else io.stdout
 

@@ -693,7 +693,7 @@ Plus task-level sections at the top (primary task data, Artifacts, Task timing) 
 Two consequences for task code that adopts it:
 
 - The task declares `results_json.output_arg()` in its `args` and calls `results_json.emit(...)` beside its `final = True` dispatch.
-- **stdout must be exclusively the document.** Bazel writes its result summary and test output to *stdout* (only progress goes to stderr), so every child the task spawns — the Bazel invocation, `test`'s `--coverage-tool`, `format`'s formatter, `lint`'s `patch` — takes `stdout = results_json.child_stdout(ctx.std.io, ctx.args)`, which is stderr under `--output=json`. A task whose stdout already belongs to something else registers no `--output` at all — which is why `run`, whose stdout belongs to the target binary, has none.
+- **stdout must be exclusively the document.** Bazel writes its result summary and test output to *stdout* (only progress goes to stderr), so every child the task spawns — the Bazel invocation, `test`'s `--coverage-tool`, `format`'s formatter, `lint`'s `patch` — takes `stdout = results_json.child_stdout(ctx.std.io, ctx.args)`, which is stderr under `--output=json`. A build given our own stdout or stderr keeps its console processing: the runtime takes `ctx.std.io.stdout` as inherited, and sends Bazel's stdout into its console's capture of stderr when given `ctx.std.io.stderr`, keeping Bazel's order. A task whose stdout already belongs to something else registers no `--output` at all — which is why `run`, whose stdout belongs to the target binary, has none.
 
 ---
 

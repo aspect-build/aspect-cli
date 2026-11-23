@@ -476,7 +476,7 @@ fn start<'v>(
         build_stdout,
         build_stderr,
         None,
-        false,
+        crate::engine::bazel::build::StdoutTo::Elsewhere,
         directory,
         announce,
         env.signals.clone(),

@@ -833,18 +833,33 @@ impl Drop for Abandon {
     }
 }
 
+/// Where a build's stdout goes, as its console capture sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StdoutTo {
+    /// This process's stdout: inherited, or given as `ctx.std.io.stdout`.
+    Ours,
+    /// This process's stderr (`--output=json`, keeping stdout for a
+    /// document): under a capture, the stderr's own, so it keeps Bazel's
+    /// order and the colour shown.
+    Stderr,
+    /// Anything else, which the call wired itself.
+    Elsewhere,
+}
+
 impl Console {
-    /// The client's stderr and, when it is inherited, its stdout (see
-    /// [`bazel::console::capture`]: the same capture when stdout is stderr's
-    /// file, a pipe of its own otherwise), and the forwarders reading them
-    /// into this process's from their own threads, so a task's own lines
-    /// interleave with them by whole line.
+    /// The client's stderr and, when it goes to this process's stdout or
+    /// stderr, its stdout (see [`bazel::console::capture`]: the same capture
+    /// when stdout is stderr's file or is sent to stderr, a pipe of its own
+    /// otherwise), and the forwarders reading them into this process's from
+    /// their own threads, so a task's own lines interleave with them by whole
+    /// line.
     fn start(
         config: &bazel::console::Config,
-        stdout_inherited: bool,
+        stdout_to: StdoutTo,
     ) -> io::Result<(Stdio, Option<Stdio>, Console)> {
         use bazel::console::capture;
-        let share_stdout = stdout_inherited && capture::stdout_is_stderrs_file();
+        let share_stdout = stdout_to == StdoutTo::Stderr
+            || (stdout_to == StdoutTo::Ours && capture::stdout_is_stderrs_file());
         let capture::Capture {
             stderr: child_stderr,
             stdout: shared_stdout,
@@ -896,7 +911,7 @@ impl Console {
         )?;
         let (child_stdout, stdout) = match shared_stdout {
             Some(shared) => (Some(shared), None),
-            None if stdout_inherited => {
+            None if stdout_to == StdoutTo::Ours => {
                 let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
                 let after = forwarder.ordered_after(Box::new(std::io::stdout()), probe.into());
@@ -1310,7 +1325,7 @@ impl Build {
         stdout: Stdio,
         stderr: Stdio,
         console: Option<bazel::console::Config>,
-        stdout_inherited: bool,
+        stdout_to: StdoutTo,
         directory: Option<String>,
         announce: AnnounceSpawn,
         signals: Arc<Signals>,
@@ -1579,8 +1594,7 @@ impl Build {
 
         let console = match console {
             Some(config) => {
-                let (child_stderr, child_stdout, console) =
-                    Console::start(&config, stdout_inherited)?;
+                let (child_stderr, child_stdout, console) = Console::start(&config, stdout_to)?;
                 cmd.stdout(child_stdout.unwrap_or(stdout));
                 cmd.stderr(child_stderr);
                 Some(console)

@@ -81,7 +81,9 @@ _Invocation = record(
     max_attempts = field(int),
     # Where Bazel's own stdout goes. Always a `Writable`, never None: the
     # builtin reads None as "discard", and `_do_spawn` should not need a
-    # conditional. See `_build()`.
+    # conditional. `ctx.std.io.stdout` is the same to a build as inheriting,
+    # and `ctx.std.io.stderr` joins its console's capture of stderr. See
+    # `_build()`.
     stdout = field(typing.Any),
 )
 
@@ -189,7 +191,7 @@ def _resolve(ctx, command: str, stdout = None) -> _Invocation:
     # `--show_progress` decide what is shown.
     processor = bazel_console.processor_for(
         trait,
-        ctx.std.io.stdout.is_tty,
+        stdout.is_tty,
         ctx.std.io.stderr.is_tty,
         extra = extra,
         curses = rc.bool_flag("--curses", command = command),

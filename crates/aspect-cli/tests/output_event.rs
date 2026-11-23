@@ -511,6 +511,48 @@ def config(ctx: ConfigContext):
     assert!(order.is_sorted(), "out of order:\n{merged}");
 }
 
+/// Under `--output=json` Bazel's stdout goes to our stderr, into the
+/// console's capture of it, so it keeps Bazel's order there and our stdout is
+/// only the document.
+#[test]
+fn a_json_build_keeps_bazels_order_on_stderr() {
+    let dir = workspace("config.axl", |_| {
+        r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario=merged_console")
+"#
+        .to_string()
+    });
+    let (out, err) = (dir.path().join("out.json"), dir.path().join("err.txt"));
+    let status = aspect(dir.path(), "build")
+        .arg("--output=json")
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(&err).unwrap())
+        .status()
+        .expect("running aspect build");
+    let (out, err) = (
+        std::fs::read_to_string(&out).unwrap(),
+        std::fs::read_to_string(&err).unwrap(),
+    );
+    assert!(status.success(), "{err}");
+    let doc: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("{e}: stdout is not one document:\n{out}"));
+    assert!(doc.get("schema_version").is_some(), "{out}");
+    let at = |needle: &str| {
+        err.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} missing from:\n{err}"))
+    };
+    let order = [
+        at("INFO: From Testing //pkg:t:"),
+        at("==== Test output for //pkg:t:"),
+        at("failing output"),
+        at("FAIL: //pkg:t"),
+    ];
+    assert!(order.is_sorted(), "out of order:\n{err}");
+    assert!(!err.contains('\x1b'), "no colour in a file:\n{err}");
+}
+
 /// A graceful cancel waits for the client, and the console with it: the
 /// cleanup line basil prints after the interrupt is forwarded, under CI's stop
 /// sequence, which sends two SIGINTs and leaves the client to finish on its
