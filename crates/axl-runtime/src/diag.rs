@@ -134,11 +134,11 @@ pub fn debugging() -> bool {
 pub(crate) enum Severity {
     /// Bold grey `DEBUG:` - internals a bug report needs.
     Debug,
-    /// Cyan `INFO:` — a notable but expected runtime branch fired.
+    /// Bold cyan `INFO:` - a notable but expected runtime branch fired.
     Info,
-    /// Bold yellow `WARNING:` — a subsystem problem; the task continues.
+    /// Bold yellow `WARNING:` - a subsystem problem; the task continues.
     Warning,
-    /// Bold red `ERROR:` — a recoverable error, usually preceding a non-zero exit.
+    /// Bold red `ERROR:` - a recoverable error, usually preceding a non-zero exit.
     Error,
 }
 

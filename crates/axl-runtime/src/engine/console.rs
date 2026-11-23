@@ -1,7 +1,7 @@
 //! The Starlark side of [`crate::console`]: reading the `Console` feature's
 //! args into a resolved surface for a given [`Host`], and `ctx.console`,
-//! through which AXL renders the `phase` and `progress` lines and asks whether
-//! the run opens Buildkite log sections.
+//! through which AXL renders the `phase`, `progress`, `section` and `tip`
+//! lines and asks whether the run opens Buildkite log sections.
 
 use std::sync::Arc;
 
@@ -275,8 +275,8 @@ fn console_methods(registry: &mut MethodsBuilder) {
         Ok(downcast(this)?.0.buildkite())
     }
 
-    /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict` or
-    /// `section`) with the kwargs as its context. Returns `""` when the
+    /// Render one slot (`banner`, `header`, `phase`, `progress`, `verdict`,
+    /// `section` or `tip`) with the kwargs as its context. Returns `""` when the
     /// layout leaves the slot blank; print nothing then. On Buildkite the
     /// section slots (`header`, `phase`, `verdict`, `section`) never render
     /// blank.

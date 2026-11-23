@@ -54,8 +54,8 @@ is a `TIP[id]`), with the status surfaces' emoji:
     TIP_IMPORTANT   📌  something the user needs to reach their goal (setup
                     a feature lacks).
     TIP_SUGGESTION  💡  advice for doing something better or more easily.
-    TIP_NOTE        💬  worth knowing, even when skimming. `TIP_INFO` is the
-                    same severity by its earlier name.
+    TIP_NOTE        💬  worth knowing, even when skimming. `TIP_INFO` is an
+                    alias of it.
 """
 
 load("./ansi.axl", "ansi")
@@ -918,7 +918,7 @@ def severity_emoji(severity):
     return _SEVERITY_EMOJI.get(severity, _SEVERITY_EMOJI[TIP_NOTE])
 
 def severity_label(severity):
-    """Human-readable severity label (e.g. "Tip", "Warning"). Paired with
+    """Human-readable severity label (e.g. "Suggestion", "Warning"). Paired with
     `severity_emoji` so the tip reads even where the emoji may not."""
     return _SEVERITY_LABEL.get(severity, _SEVERITY_LABEL[TIP_NOTE])
 
@@ -1263,8 +1263,7 @@ def _tips_impl(ctx):
 
     def _print(lines):
         for line in lines:
-            if line:
-                sink[0](line)
+            sink[0](line)
 
     def _on_emit(call_ctx, stored, changed, occurrence):
         """Print `stored` on the terminal, or count it for the end, as its
@@ -1340,11 +1339,15 @@ def _tips_impl(ctx):
                 held = len(unprinted) + lost
                 latest = unprinted[-1] if unprinted else None
             if held:
-                _print([terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))])
+                line = terminal_more_line(id, last[id]["severity"], latest["title"] if latest else None, held, color_on, _console(task_ctx))
+                if line:
+                    _print([line])
             elif show == TIP_SHOW_FIRST:
                 now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])]]
                 if now:
-                    _print([terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on, _console(task_ctx))])
+                    line = terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on, _console(task_ctx))
+                    if line:
+                        _print([line])
         names = [id for id in order if shown[id]]
         if names and TIPS_HINT_ID not in silenced:
             _print(terminal_hint_lines(names, color_on, _console(task_ctx)))

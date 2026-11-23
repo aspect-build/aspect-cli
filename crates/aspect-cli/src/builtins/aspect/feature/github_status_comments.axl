@@ -1188,8 +1188,8 @@ def _finalize_command_rows(rows):
         prev_heading_key = heading_key
     return rows
 
-# Cap on suggestion+info tips combined (important/warning always render
-# in full). See `_collect_tip_rows`.
+# Cap on suggestion and note tips combined (warning and important always
+# render in full). See `_collect_tip_rows`.
 _MAX_SUBORDINATE_TIPS = 5
 
 def _is_must_show(severity):
@@ -1260,7 +1260,7 @@ def _collect_tip_rows(ctx, entries):
       - False → `_latest` (identical content attributes all; divergent
         takes latest).
 
-    Caps: important/warning always surface; suggestion+info capped at
+    Caps: warning and important always surface; suggestion and note are capped at
     `_MAX_SUBORDINATE_TIPS`. Returns `decorate_tip` rows + sorted
     `task_names`."""
     groups = {}

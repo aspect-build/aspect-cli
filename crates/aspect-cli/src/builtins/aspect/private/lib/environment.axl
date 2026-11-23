@@ -153,12 +153,12 @@ def debug(std, msg):
     pure helper) only the record is emitted."""
     trace.log(msg)
     if std != None and std.io.debug:
-        print(ansi.style("DEBUG", ansi.seq("1;90"), std.io.stderr.color) + ": " + msg)
+        print(ansi.style("DEBUG", ansi.DEBUG_LABEL, std.io.stderr.color) + ": " + msg)
 
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state. Every preset
     prints it; use `detail` for an aside a reader can do without."""
-    print(ansi.style("INFO", ansi.seq("1;36"), std.io.stderr.color) + ": " + msg)
+    print(ansi.style("INFO", ansi.INFO_LABEL, std.io.stderr.color) + ": " + msg)
 
 def detail(std, msg):
     """Print `info`'s `INFO:` line for an aside a reader can do without
@@ -170,11 +170,11 @@ def detail(std, msg):
 
 def warn(std, msg):
     """Print a bold yellow `WARNING:` line for non-fatal subsystem failures."""
-    print(ansi.style("WARNING", ansi.seq("1;33"), std.io.stderr.color) + ": " + msg)
+    print(ansi.style("WARNING", ansi.WARNING_LABEL, std.io.stderr.color) + ": " + msg)
 
 def error(std, msg):
     """Print a bold red `ERROR:` line for recoverable errors preceding non-zero exit."""
-    print(ansi.style("ERROR", ansi.seq("1;31"), std.io.stderr.color) + ": " + msg)
+    print(ansi.style("ERROR", ansi.ERROR_LABEL, std.io.stderr.color) + ": " + msg)
 
 def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
     """Open a collapsed Buildkite log section, titled by the console's

@@ -345,7 +345,7 @@ def _test_collect_sorted_by_severity(ctx):
     add_tip(ctx, id = "important-2", severity = TIP_IMPORTANT, title = "T", body = "B")
     sorted_ids = _ids(collect_tips_sorted(ctx))
     _eq(
-        "sorted — warning → important → suggestion → note; stable within bucket",
+        "sorted: warning → important → suggestion → note; stable within bucket",
         sorted_ids,
         ["warning-1", "important-1", "important-2", "suggestion-1", "info-1"],
     )
@@ -359,19 +359,19 @@ def _test_collect_limit(ctx):
     _eq("limit — 0 returns empty", len(collect_tips_sorted(ctx, limit = 0)), 0)
 
 def _test_severity_emoji(ctx):
-    _eq("emoji — important", severity_emoji(TIP_IMPORTANT), "📌")
-    _eq("emoji — warning", severity_emoji(TIP_WARNING), "⚠️")
-    _eq("emoji — suggestion", severity_emoji(TIP_SUGGESTION), "💡")
-    _eq("emoji — note", severity_emoji(TIP_NOTE), "💬")
-    _eq("emoji — info is note", severity_emoji(TIP_INFO), "💬")
-    _eq("emoji — unknown defaults to note", severity_emoji("bogus"), "💬")
+    _eq("emoji: important", severity_emoji(TIP_IMPORTANT), "📌")
+    _eq("emoji: warning", severity_emoji(TIP_WARNING), "⚠️")
+    _eq("emoji: suggestion", severity_emoji(TIP_SUGGESTION), "💡")
+    _eq("emoji: note", severity_emoji(TIP_NOTE), "💬")
+    _eq("emoji: TIP_INFO is note", severity_emoji(TIP_INFO), "💬")
+    _eq("emoji: unknown defaults to note", severity_emoji("bogus"), "💬")
 
 def _test_severity_label(ctx):
-    _eq("label — important", severity_label(TIP_IMPORTANT), "Important")
-    _eq("label — warning", severity_label(TIP_WARNING), "Warning")
-    _eq("label — suggestion", severity_label(TIP_SUGGESTION), "Suggestion")
-    _eq("label — note", severity_label(TIP_NOTE), "Note")
-    _eq("label — unknown defaults to note", severity_label("bogus"), "Note")
+    _eq("label: important", severity_label(TIP_IMPORTANT), "Important")
+    _eq("label: warning", severity_label(TIP_WARNING), "Warning")
+    _eq("label: suggestion", severity_label(TIP_SUGGESTION), "Suggestion")
+    _eq("label: note", severity_label(TIP_NOTE), "Note")
+    _eq("label: unknown defaults to note", severity_label("bogus"), "Note")
 
 def _test_blockquote_body(ctx):
     _eq("blockquote — empty body", blockquote_body(""), "")
@@ -479,12 +479,12 @@ def _test_silence_hint_line(ctx):
         fail("silence_hint: must wrap in <sub>: %r" % line)
 
 def _test_severity_rank(ctx):
-    _eq("rank — warning most urgent", severity_rank(TIP_WARNING), 0)
-    _eq("rank — important", severity_rank(TIP_IMPORTANT), 1)
-    _eq("rank — suggestion", severity_rank(TIP_SUGGESTION), 2)
-    _eq("rank — note least urgent", severity_rank(TIP_NOTE), 3)
+    _eq("rank: warning most urgent", severity_rank(TIP_WARNING), 0)
+    _eq("rank: important", severity_rank(TIP_IMPORTANT), 1)
+    _eq("rank: suggestion", severity_rank(TIP_SUGGESTION), 2)
+    _eq("rank: note least urgent", severity_rank(TIP_NOTE), 3)
     if severity_rank("bogus") <= severity_rank(TIP_INFO):
-        fail("rank — unknown severity must sort after info")
+        fail("rank: unknown severity must sort after info")
 
 def _test_tip_to_payload(ctx):
     """`tip_to_payload` projects a stored tip into the artifact-boundary
@@ -740,7 +740,7 @@ def _capture(ctx):
     return lines
 
 def _test_terminal_format(_):
-    """`SEVERITY[id]: title`, the body indented, no footer."""
+    """`TIP[id] <emoji> severity: title`, the body indented, no footer."""
     _eq("one line", terminal_tip_lines("disk-full", TIP_WARNING, "The disk is full", "`aspect gc` prunes."), [
         "TIP[disk-full] 🟡 warning: The disk is full",
         "  `aspect gc` prunes.",
@@ -776,6 +776,14 @@ def _test_terminal_colour_and_console(ctx):
         _eq("console, colour %s: the body under it" % color_on, via[1:], ["  B"])
     emoji = "🟡" in terminal_tip_lines("x", TIP_WARNING, "T", "", False, ctx.console)[0]
     _eq("emoji as the preset says", emoji, ctx.console.template_preset in ["full", "silent"])
+
+def _test_printer_keeps_a_bodys_blank_lines(ctx):
+    """The printer prints a body's blank lines, so its paragraphs stay apart."""
+    _reset(ctx)
+    lines = _capture(ctx)
+    add_tip(ctx, id = "para", severity = TIP_WARNING, title = "T", body = "one\n\ntwo")
+    _eq("paragraphs apart", lines, ["TIP[para] warning: T", "  one", "", "  two"])
+    _reset(ctx)
 
 def _test_show_each_with_a_cap(ctx):
     """Each changed emit prints up to `max_shown`; the rest are counted for
@@ -1025,13 +1033,14 @@ def _test_impl(ctx):
     _test_auto_print_flag(ctx)
     _test_terminal_format(ctx)
     _test_terminal_colour_and_console(ctx)
+    _test_printer_keeps_a_bodys_blank_lines(ctx)
     _test_show_each_with_a_cap(ctx)
     _test_show_first_and_end(ctx)
     _test_quiet_reemits_and_silenced_hint(ctx)
     _test_merge_aggregate(ctx)
     _test_aggregates_merge_once_per_batch(ctx)
     _test_rule_tips_from_a_report(ctx)
-    print("tips.axl: OK (42 sections)")
+    print("tips.axl: OK (43 sections)")
     return 0
 
 tips_tests = task(

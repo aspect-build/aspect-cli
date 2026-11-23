@@ -1,7 +1,7 @@
 //! The terminal status surface: the lines Aspect itself prints around a task.
 //!
-//! Seven slots cover them — `banner`, `header`, `phase`, `progress`,
-//! `verdict`, `section` and `tip` — each a Jinja2 template rendered with the
+//! Seven slots cover them, `banner`, `header`, `phase`, `progress`,
+//! `verdict`, `section` and `tip`, each a Jinja2 template rendered with the
 //! context documented on [`Slot`]. The runtime renders `banner`, `header` and
 //! `verdict`; AXL renders the rest through `ctx.console.render(...)` (see
 //! `lib/lifecycle.axl` and `lib/tips.axl`). Bazel's own output, `warn()` / `error()` diagnostics
