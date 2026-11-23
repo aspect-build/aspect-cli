@@ -36,7 +36,8 @@ pub const MAX_LISTED_KINDS: usize = 10;
 /// text. A kind's first message waits in memory until a second like it is
 /// hidden, so a kind that hid nothing leaves no file; from then on its lines
 /// are appended to `<log>.collapsed-s<slot>.log`, kept open and buffered
-/// (a console may hide hundreds of thousands of lines), which
+/// (a console may hide hundreds of thousands of lines) while it is among
+/// the [`max_open_groups`] most recently written, which
 /// [`Stats::finish_groups`] renames to `<log>.collapsed-<n>.log`, numbered
 /// most hidden first, once the console ends.
 #[derive(Debug, Default)]
@@ -47,15 +48,31 @@ pub struct Stats {
     groups: Mutex<Option<PathBuf>>,
     /// Per kind, as `templates`: its lines not yet written (the first
     /// message's, until the kind hides one), whether writing failed, and its
-    /// file while open; and which kinds' files are open, oldest first, at
-    /// most [`MAX_OPEN_GROUPS`].
+    /// file while open; and which kinds' files are open, least recently
+    /// written first, at most [`max_open_groups`].
     pending: Mutex<(Vec<Pending>, std::collections::VecDeque<usize>)>,
 }
 
-/// The most collapsed kinds' files held open at once, well under any
-/// descriptor limit (macOS's default is 256): past it the oldest opened is
-/// flushed and closed, and opened again, appending, should it hide more.
-const MAX_OPEN_GROUPS: usize = 32;
+/// The most collapsed kinds' files held open at once: a quarter of the
+/// process's descriptor limit (macOS's default is 256, Linux's 1024),
+/// between 16 and 512. Past it the one least recently written is flushed
+/// and closed, and opened again, appending, should its kind hide more.
+fn max_open_groups() -> usize {
+    static MAX: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only writes the struct it is given.
+        let soft = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+            limit.rlim_cur as u64
+        } else {
+            256
+        };
+        (soft / 4).clamp(16, 512) as usize
+    });
+    *MAX
+}
 
 /// One collapsed kind's file as it is written ([`Stats::group_line`]).
 #[derive(Debug, Default)]
@@ -114,8 +131,16 @@ impl Stats {
         if !hid {
             return;
         }
-        if kinds[slot].file.is_none() {
-            while open.len() >= MAX_OPEN_GROUPS {
+        if kinds[slot].file.is_some() {
+            // Least recently written last out: a kind in use stays open.
+            if open.back() != Some(&slot)
+                && let Some(at) = open.iter().position(|&s| s == slot)
+            {
+                open.remove(at);
+                open.push_back(slot);
+            }
+        } else {
+            while open.len() >= max_open_groups() {
                 let Some(oldest) = open.pop_front() else {
                     break;
                 };
@@ -583,7 +608,7 @@ mod tests {
         let log = dir.path().join("console.log");
         let stats = Stats::default();
         stats.keep_groups(&log);
-        let kinds = MAX_OPEN_GROUPS + 8;
+        let kinds = max_open_groups() + 8;
         for k in 0..kinds {
             let slot = stats.template(&format!("kind {k}"));
             stats.group_line(slot, format!("kind {k} first").as_bytes());
