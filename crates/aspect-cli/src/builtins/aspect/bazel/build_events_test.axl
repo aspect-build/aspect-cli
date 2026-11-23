@@ -305,11 +305,11 @@ def _test_runner_backends_stream_after_the_tasks_own(_):
     )
     _eq("reported as dropped", dropped_bes_backends(_fake_ctx(), trait, rc, "build"), [runner])
 
-def _test_grpc_sinks_take_the_traits_options(_):
-    """Every gRPC sink is built under the trait's BuildEvents options, whichever
-    way its backend was named. A bad value on the trait is refused before any
-    sink is built, naming the field and the option to set instead, even when
-    there is no backend to build one for."""
+def _test_a_bad_trait_value_is_refused_naming_the_option(_):
+    """A bad BuildEvents value on the trait is refused before any sink is
+    built, naming the field and the option to set instead, whichever way a
+    task builds its sinks and even when there is no backend to build one for;
+    good values build."""
     for (field, option, trait) in [
         ("bes_max_retries", "max-retries", _fake_trait([], max_retries = -1)),
         ("bes_max_retries", "max-retries", _fake_trait([], max_retries = 2147483648)),
@@ -549,7 +549,7 @@ _UNIT_TESTS = [
     _test_collect_bes_sinks,
     _test_backends_dedup_by_endpoint,
     _test_runner_backends_stream_after_the_tasks_own,
-    _test_grpc_sinks_take_the_traits_options,
+    _test_a_bad_trait_value_is_refused_naming_the_option,
     _test_trait_backends_are_collected,
     _test_bes_link_data,
     _test_bes_streamed_by_bazel,

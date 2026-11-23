@@ -13,11 +13,11 @@ event past a backend's receive limit, which refuses it and loses the rest of
 the build. That command line is cut from the end to fit; any other event over
 the limit is passed on unchanged. Either way the CLI warns.
 
-Set these through the options here rather than on `BazelTrait`: an option is
-checked before the task runs. Each is written to the trait only when it differs
-from its default, so a value `config.axl` put on the trait directly is kept
-otherwise, and checked only when a task collects its sinks, with the option
-to set instead named.
+Set these through the options here rather than on `BazelTrait`. Each is
+written to the trait only when it differs from its default, so a value
+`config.axl` put on the trait directly is kept otherwise. An option is checked
+before the task runs; a value on the trait only when a task collects its
+sinks, and a bad one is refused there, naming the option to set instead.
 
 A negative count, a malformed duration, a `max_event_bytes` under 64 KiB, or a
 value past what the runtime takes (which only `config.axl` can set) is
