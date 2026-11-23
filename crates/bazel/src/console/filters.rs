@@ -241,9 +241,9 @@ static SANDBOX: LazyLock<BytesRegex> =
 /// hyperlink's target, say).
 pub struct RelativizePaths {
     root: Option<Vec<u8>>,
-    /// Where it tells [`super::links`] which file each path it made relative
-    /// names, as the shown text is no longer enough to tell.
-    hints: Option<super::links::Hints>,
+    /// When set, each path made relative is written as a link to the file
+    /// it names ([`RelativizePaths::linking`]).
+    link: Option<LinkTo>,
     /// Where `cwd` is: the workspace root, below it (its directories under
     /// the root), or outside it.
     cwd: Cwd,
@@ -251,6 +251,21 @@ pub struct RelativizePaths {
     pty: bool,
     given: Option<Line>,
 }
+
+/// How [`RelativizePaths`] links what it makes relative: on `host`, a
+/// workspace path from an execroot under `workspace`, the workspace the
+/// build runs in.
+pub struct LinkTo {
+    pub host: String,
+    pub workspace: std::path::PathBuf,
+}
+
+/// Around a path made relative while its record is rewritten, before
+/// [`RelativizePaths::linked`] writes it as a link: `OPEN file MID shown
+/// CLOSE`. Control bytes a record's text never holds when linking is on.
+const OPEN: u8 = 0x0e;
+const MID: u8 = 0x0f;
+const CLOSE: u8 = 0x10;
 
 /// Where paths are made relative to: the workspace root, a directory below
 /// it (its components), or one outside it.
@@ -268,10 +283,12 @@ impl RelativizePaths {
         self
     }
 
-    /// This stage telling `hints`, for each record, which file each path it
-    /// made relative names, beside what another such stage before it told.
-    pub fn hinting(mut self, hints: Option<super::links::Hints>) -> Self {
-        self.hints = hints;
+    /// This stage writing each path it makes relative as an OSC 8 link to
+    /// the file it names, when that exists, for a terminal: the shown text
+    /// alone no longer tells which file (`BUILD.bazel` from a package
+    /// directory is that package's).
+    pub fn linking(mut self, link: Option<LinkTo>) -> Self {
+        self.link = link;
         self
     }
 
@@ -293,7 +310,7 @@ impl RelativizePaths {
         };
         Self {
             root: root.map(|r| (r + "/").into_bytes()),
-            hints: None,
+            link: None,
             cwd,
             pty: false,
             given: None,
@@ -331,20 +348,23 @@ impl RelativizePaths {
         (with, consumed)
     }
 
-    /// The file a path made relative names, for [`super::links`]: `with`
-    /// shown in place of everything up to `rest`, which `consumed` bytes of
-    /// `rest` also stand for, under `base`, the directory `rest` is in; an
-    /// empty `base` leaves the file the workspace's (`src/a.cc`), for the
-    /// linker to place in the workspace the build runs in. Nothing for a
-    /// path that comes to no more than the directories it shares.
-    fn hint(
+    /// `with` shown in place of everything up to `rest`, which `consumed`
+    /// bytes of `rest` also stand for, onto `out`; when linking, wrapped as
+    /// the file it names, under `base` (`root`'s, or the build's workspace
+    /// for `None`), for [`RelativizePaths::linked`]. How much of `rest` it
+    /// stands for.
+    fn shown(
         &self,
-        base: &[u8],
-        with: &[u8],
+        base: Option<&[u8]>,
+        with: Vec<u8>,
         rest: &[u8],
         consumed: usize,
-        hints: &mut Vec<(Vec<u8>, Vec<u8>)>,
-    ) {
+        out: &mut Vec<u8>,
+    ) -> usize {
+        let Some(link) = &self.link else {
+            out.extend(with);
+            return consumed;
+        };
         let mut end = rest
             .iter()
             .position(|&b| !super::links::is_path_byte(b))
@@ -353,16 +373,27 @@ impl RelativizePaths {
             end -= 1;
         }
         if end <= consumed {
-            return;
+            out.extend(with);
+            return consumed;
         }
-        let mut shown = with.to_vec();
-        shown.extend_from_slice(&rest[consumed..end.max(consumed)]);
-        let mut file = base.to_vec();
-        file.extend_from_slice(&rest[..end]);
-        hints.push((shown, file));
+        use std::os::unix::ffi::OsStrExt;
+        out.push(OPEN);
+        match base {
+            Some(base) => out.extend_from_slice(base),
+            None => {
+                out.extend_from_slice(link.workspace.as_os_str().as_bytes());
+                out.push(b'/');
+            }
+        }
+        out.extend_from_slice(&rest[..end]);
+        out.push(MID);
+        out.extend(with);
+        out.extend_from_slice(&rest[consumed..end]);
+        out.push(CLOSE);
+        end
     }
 
-    fn text(&self, text: &[u8], hints: &mut Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
+    fn text(&self, text: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         for found in EXECROOT.find_iter(text) {
@@ -383,35 +414,33 @@ impl RelativizePaths {
                 out.extend_from_slice(found.as_bytes());
             } else {
                 let (with, consumed) = self.relative(rest);
-                self.hint(b"", &with, rest, consumed, hints);
-                out.extend(with);
-                at += consumed;
+                at += self.shown(None, with, rest, consumed, &mut out);
             }
         }
         out.extend_from_slice(&text[at..]);
         match &self.root {
-            Some(root) if !matches!(self.cwd, Cwd::Outside) => self.replace_root(&out, root, hints),
+            Some(root) if !matches!(self.cwd, Cwd::Outside) => self.replace_root(&out, root),
             _ => out,
         }
     }
 
     /// `hay` with each occurrence of `root` that starts a path made
     /// relative: one not preceded by a byte a path could continue through
-    /// (`file:///ws/x` keeps its root).
-    fn replace_root(
-        &self,
-        hay: &[u8],
-        root: &[u8],
-        hints: &mut Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Vec<u8> {
+    /// but `@` (`file:///ws/x` keeps its root, `@/ws/x.params` does not). A
+    /// path already made relative and wrapped to be linked is passed over.
+    fn replace_root(&self, hay: &[u8], root: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(hay.len());
         let mut i = 0;
         while i < hay.len() {
-            if hay[i..].starts_with(root) && (i == 0 || !joins_path(hay[i - 1])) {
-                let (with, consumed) = self.relative(&hay[i + root.len()..]);
-                self.hint(root, &with, &hay[i + root.len()..], consumed, hints);
-                out.extend(with);
-                i += root.len() + consumed;
+            if hay[i] == OPEN
+                && let Some(len) = hay[i..].iter().position(|&b| b == CLOSE)
+            {
+                out.extend_from_slice(&hay[i..=i + len]);
+                i += len + 1;
+            } else if hay[i..].starts_with(root) && (i == 0 || !joins_path(hay[i - 1])) {
+                let rest = &hay[i + root.len()..];
+                let (with, consumed) = self.relative(rest);
+                i += root.len() + self.shown(Some(root), with, rest, consumed, &mut out);
             } else {
                 out.push(hay[i]);
                 i += 1;
@@ -429,19 +458,68 @@ fn keeps_its_rows(record: &[u8], rewritten: &[u8]) -> bool {
 }
 
 impl RelativizePaths {
-    /// `record` with its paths made relative, what each now shown names in
-    /// `hints`.
-    fn relativized(&mut self, record: &[u8], hints: &mut Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
+    /// `record` with its paths made relative, each linked to its file when
+    /// linking.
+    fn relativized(&mut self, record: &[u8]) -> Vec<u8> {
         let in_progress_area = self.given.take().is_some_and(|l| l.drawn);
         let contains = |needle: &[u8]| record.windows(needle.len()).any(|w| w == needle);
         if !contains(b"/execroot/") && !self.root.as_deref().is_some_and(contains) {
             return record.to_vec();
         }
-        let out = ansi::map_text(record, |text| self.text(text, hints));
+        // A record whose text holds the bytes the links are marked with
+        // (never Bazel's) is relativized without them.
+        let link = self
+            .link
+            .take_if(|_| record.iter().any(|&b| matches!(b, OPEN | MID | CLOSE)));
+        let out = ansi::map_text(record, |text| self.text(text));
+        let out = self.linked(&out);
+        if link.is_some() {
+            self.link = link;
+        }
         if self.pty && in_progress_area && !keeps_its_rows(record, &out) {
             return record.to_vec();
         }
         out
+    }
+
+    /// `out` with each path [`RelativizePaths::shown`] wrapped written as an
+    /// OSC 8 link to its file, or as shown when that does not exist.
+    fn linked(&self, out: &[u8]) -> Vec<u8> {
+        let Some(link) = &self.link else {
+            return out.to_vec();
+        };
+        if !out.contains(&OPEN) {
+            return out.to_vec();
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let mut linked = Vec::with_capacity(out.len() + 64);
+        let mut i = 0;
+        while i < out.len() {
+            let parts = (out[i] == OPEN)
+                .then(|| {
+                    let mid = i + out[i..].iter().position(|&b| b == MID)?;
+                    let close = mid + out[mid..].iter().position(|&b| b == CLOSE)?;
+                    Some((mid, close))
+                })
+                .flatten();
+            let Some((mid, close)) = parts else {
+                linked.push(out[i]);
+                i += 1;
+                continue;
+            };
+            let file = std::path::Path::new(std::ffi::OsStr::from_bytes(&out[i + 1..mid]));
+            let shown = &out[mid + 1..close];
+            if file.exists() {
+                linked.extend(super::links::osc8(
+                    &super::links::file_url(&link.host, file),
+                    shown,
+                ));
+            } else {
+                linked.extend_from_slice(shown);
+            }
+            i = close + 1;
+        }
+        linked
     }
 }
 
@@ -451,14 +529,7 @@ impl LineProcessor for RelativizePaths {
     }
 
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
-        let mut hints = Vec::new();
-        let out = self.relativized(record, &mut hints);
-        if let Some(slot) = &self.hints
-            && out != record
-        {
-            slot.extend(hints);
-        }
-        Some(out)
+        Some(self.relativized(record))
     }
 }
 

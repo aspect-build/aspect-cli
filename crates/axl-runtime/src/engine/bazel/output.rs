@@ -873,10 +873,11 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// which `$1` and `${name}` expand to capture groups. Unlike the other
     /// patterns, `pattern` sees the line's escape sequences too. It sees the
     /// line as the stages before it left it: after `intercept`, and after any
-    /// earlier `rewrite`/`relativize_paths`. Where curses is shown, a row of
-    /// Bazel's live progress area stays one row: newlines in the result become
-    /// spaces, and one longer than Bazel wrote is cut to that width. In plain
-    /// lines the stages never see that area.
+    /// earlier `rewrite`/`relativize_paths`, whose paths are OSC 8 links on
+    /// a terminal. Where curses is shown, a row of Bazel's live progress area
+    /// stays one row: newlines in the result become spaces, and one longer
+    /// than Bazel wrote is cut to that width. In plain lines the stages never
+    /// see that area.
     fn rewrite(
         #[starlark(require = pos)] pattern: &str,
         #[starlark(require = pos)] replacement: &str,
@@ -889,7 +890,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// file, and so does a path under `root`, the workspace directory; each
     /// is written relative to `cwd` (default `root`), or absolute when `cwd`
     /// is outside the workspace. An execroot path into `bazel-out/` or
-    /// `external/` stays absolute, since that is where it exists.
+    /// `external/` stays absolute, since that is where it exists. On a
+    /// terminal each path made relative is a link to the file it names.
     fn relativize_paths(
         #[starlark(require = named, default = NoneOr::None)] root: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] cwd: NoneOr<String>,

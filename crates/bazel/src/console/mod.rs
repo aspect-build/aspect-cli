@@ -466,9 +466,15 @@ impl Config {
             _ => None,
         };
         let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
-        // What `relativize_paths` says each path it made relative names, for
-        // the links, when there are any.
-        let hints = self.linker().map(|_| links::Hints::default());
+        // What `relativize_paths` links its paths with: Bazel's execroot
+        // paths are the workspace's the build runs in, the first link base.
+        let link_to = || {
+            let workspace = self.linker().and(self.links.as_ref()?.first().cloned())?;
+            Some(filters::LinkTo {
+                host: links::hostname(),
+                workspace,
+            })
+        };
         for stage in self.stages() {
             let stage: Box<dyn LineProcessor> = match stage.clone() {
                 Stage::Observe(patterns) => {
@@ -507,12 +513,11 @@ impl Config {
                 Stage::RelativizePaths { root, cwd } => Box::new(
                     RelativizePaths::new(root, cwd)
                         .under_pty(pty)
-                        .hinting(hints.clone()),
+                        .linking(link_to()),
                 ),
                 Stage::Drop(patterns) => Box::new(DropLines::new(patterns, pty, stats.clone())),
                 Stage::RecapErrors { max, after } => Box::new(
-                    RecapErrors::new(max, after, self.style.clone())
-                        .linking(self.linker().zip(hints.clone())),
+                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker()),
                 ),
                 Stage::CollapseRepeats => Box::<CollapseRepeats>::default(),
                 Stage::CollapseSimilar { severities, groups } => {
@@ -522,10 +527,7 @@ impl Config {
             chain.push(stage);
         }
         if let Some(linker) = self.linker() {
-            chain.push(Box::new(links::Links {
-                linker,
-                hints: hints.clone().unwrap_or_default(),
-            }));
+            chain.push(Box::new(links::Links(linker)));
         }
         if let Some(l) = &log {
             stats.keep_groups(l.path());

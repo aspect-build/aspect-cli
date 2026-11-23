@@ -6,23 +6,20 @@
 //! each path to a file or directory that exists to it as a `file://` URL: an
 //! absolute path as written, a relative one (`src/a.cc:3:4`, `BUILD.bazel`)
 //! from the first of the linker's directories it exists under. For Bazel's
-//! console those are the workspace, which Bazel's own paths are relative to,
-//! then the directory the task runs from. A path `relativize_paths` made
-//! relative links to the file it named, which that stage tells the linker
-//! through [`Hints`]: shown relative to a subdirectory, `BUILD.bazel` is
-//! that directory's, though the workspace has one too. A hinted file that is
-//! the workspace's (an execroot path's) is placed in the linker's first
-//! directory, the workspace the build runs in; one that does not exist
-//! resolves as any other path. A path cut short
-//! (`src/a.c…`) is left alone. Only the path is
-//! linked, not a `:line:col` after it. A path to nothing (a sandbox gone
-//! with its action, a label, prose) is left alone; a record that links
-//! anything itself is left whole. A URL ends before trailing punctuation, a
-//! bracket that closes none of its own, and a `…` that marks it cut.
+//! console those are the workspace the build runs in, which Bazel's own
+//! paths are relative to, then the directory the task runs from. A path
+//! `relativize_paths` made relative it links itself, as only it knows the
+//! file (`BUILD.bazel` from a package directory is that package's): the
+//! linker leaves text already linked alone. A response file's path
+//! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not a
+//! `:line:col` after it. A path to nothing (a sandbox gone with its action, a
+//! label, prose) or cut short (`src/a.c…`) is left alone. A URL ends before
+//! trailing punctuation, a bracket that closes none of its own, and a `…`
+//! that marks it cut.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use regex::bytes::Regex;
 
@@ -56,41 +53,6 @@ const REMEMBERED: usize = 4096;
 /// The longest record linked: a longer one (a command line) is left as it is.
 const MAX_RECORD: usize = 8192;
 
-/// What a record's paths made relative name, `(shown, file)`, which each
-/// `relativize_paths` stage adds to as the record goes by, the stages after
-/// it read, and the last stage ([`Links`]) clears, whether it shows the
-/// record or a stage before it dropped it.
-#[derive(Debug, Clone, Default)]
-pub struct Hints(Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>);
-
-impl Hints {
-    pub fn set(&self, hints: Vec<(Vec<u8>, Vec<u8>)>) {
-        if let Ok(mut slot) = self.0.lock() {
-            *slot = hints;
-        }
-    }
-
-    /// Add `hints` to the current record's.
-    pub fn extend(&self, hints: Vec<(Vec<u8>, Vec<u8>)>) {
-        if let Ok(mut slot) = self.0.lock() {
-            slot.extend(hints);
-        }
-    }
-
-    /// The current record's, left for the stages after.
-    pub fn get(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.0.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    /// The current record's, for the last stage to read them.
-    pub fn take(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.0
-            .lock()
-            .map(|mut s| std::mem::take(&mut *s))
-            .unwrap_or_default()
-    }
-}
-
 /// Links what a console record names; see the module docs.
 pub struct Linker {
     /// Where a relative path may be from, in the order tried.
@@ -114,33 +76,43 @@ impl Linker {
     }
 
     /// `record` with each URL and each path to something that exists
-    /// linked; escape sequences kept as they are.
+    /// linked; escape sequences, and text already linked, kept as they are.
     pub fn link(&mut self, record: &[u8]) -> Vec<u8> {
         self.link_with(record, &[])
     }
 
-    /// [`Linker::link`], a path `hints` names linked to its file.
-    /// Each hint links one path, the first shown as it says: two stages
-    /// may show two files the same way.
-    pub fn link_with(&mut self, record: &[u8], hints: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
-        if record.len() > MAX_RECORD || contains(record, b"\x1b]8;") {
+    /// [`Linker::link`], a path `known` names, `(shown, url)`, linked to its
+    /// URL, each once, the first shown as it says.
+    pub fn link_with(&mut self, record: &[u8], known: &[(Vec<u8>, String)]) -> Vec<u8> {
+        if record.len() > MAX_RECORD || !contains(record, b"/") && !contains(record, b".") {
             return record.to_vec();
         }
-        if !contains(record, b"/") && !contains(record, b".") {
-            return record.to_vec();
+        let mut used = vec![false; known.len()];
+        let mut out = Vec::with_capacity(record.len());
+        let mut inside = false;
+        for (escape, seg) in ansi::segments(record) {
+            if escape {
+                if let Some(url) = osc8_url(seg) {
+                    inside = !url.is_empty();
+                }
+                out.extend_from_slice(seg);
+            } else if inside {
+                out.extend_from_slice(seg);
+            } else {
+                out.extend(self.text(seg, known, &mut used));
+            }
         }
-        let mut used = vec![false; hints.len()];
-        ansi::map_text(record, |text| self.text(text, hints, &mut used))
+        out
     }
 
-    fn text(&mut self, text: &[u8], hints: &[(Vec<u8>, Vec<u8>)], used: &mut [bool]) -> Vec<u8> {
+    fn text(&mut self, text: &[u8], known: &[(Vec<u8>, String)], used: &mut [bool]) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         let mut urls = URL.find_iter(text).peekable();
         while at < text.len() {
             let next_url = urls.peek().map(|m| m.start());
             let stop = next_url.unwrap_or(text.len());
-            self.paths(&text[at..stop], hints, used, &mut out);
+            self.paths(&text[at..stop], known, used, &mut out);
             at = stop;
             if let Some(m) = urls.next() {
                 let end = m.start() + url_end(m.as_bytes());
@@ -149,7 +121,7 @@ impl Linker {
                     &text[m.start()..end],
                 ));
                 // What was trimmed from the URL's end is text again.
-                self.paths(&text[end..m.end()], hints, used, &mut out);
+                self.paths(&text[end..m.end()], known, used, &mut out);
                 at = m.end();
             }
         }
@@ -160,55 +132,61 @@ impl Linker {
     fn paths(
         &mut self,
         text: &[u8],
-        hints: &[(Vec<u8>, Vec<u8>)],
+        known: &[(Vec<u8>, String)],
         used: &mut [bool],
         out: &mut Vec<u8>,
     ) {
         let mut at = 0;
         for m in PATH.find_iter(text) {
-            let (start, mut end) = (m.start(), m.end());
+            let (mut start, mut end) = (m.start(), m.end());
             // A sentence's full stop, or `..` after a path, is not part of it.
             while end > start && text[end - 1] == b'.' {
                 end -= 1;
             }
-            let path = &text[start..end];
             // After a `:` it is a label's target (`//pkg:BUILD`) or a URL's
             // rest, not a path of its own.
             if start > 0 && text[start - 1] == b':' {
                 continue;
             }
             // Cut short, it names some other file, if any.
-            if text[end..].starts_with(ELLIPSIS) {
+            if text[end..].starts_with(ELLIPSIS) || end == start {
                 continue;
             }
-            if path.is_empty() {
-                continue;
+            let mut url = self.url_of(&text[start..end], known, used);
+            // A response file (`@pkg/x.params`), not a scoped package's
+            // directory (`@types/x`) or a label (`@repo//pkg`).
+            if url.is_none()
+                && text[start] == b'@'
+                && !text[start..end].windows(2).any(|w| w == b"//")
+            {
+                url = self.url_of(&text[start + 1..end], known, used);
+                if url.is_some() {
+                    start += 1;
+                }
             }
-            let hint = (0..hints.len()).find(|&i| !used[i] && hints[i].0 == path);
-            if let Some(i) = hint {
-                used[i] = true;
-            }
-            let hinted = hint
-                .map(|i| self.place(&hints[i].1))
-                .filter(|file| file.exists());
-            let Some(file) = hinted.or_else(|| self.resolve(path)) else {
+            let Some(url) = url else {
                 continue;
             };
             out.extend_from_slice(&text[at..start]);
-            out.extend(osc8(&file_url(&self.host, &file), path));
+            out.extend(osc8(&url, &text[start..end]));
             at = end;
         }
         out.extend_from_slice(&text[at..]);
     }
 
-    /// A hinted file: as written when absolute, else in the first base.
-    fn place(&self, file: &[u8]) -> PathBuf {
-        use std::os::unix::ffi::OsStrExt;
-        let file = Path::new(std::ffi::OsStr::from_bytes(file));
-        match self.bases.first() {
-            Some(base) if file.is_relative() => base.join(file),
-            _ => file.to_path_buf(),
+    /// The URL `path` links to: one `known` gives it, else its file's.
+    fn url_of(
+        &mut self,
+        path: &[u8],
+        known: &[(Vec<u8>, String)],
+        used: &mut [bool],
+    ) -> Option<String> {
+        if let Some(i) = (0..known.len()).find(|&i| !used[i] && known[i].0 == path) {
+            used[i] = true;
+            return Some(known[i].1.clone());
         }
+        let file = self.resolve(path)?;
+        Some(file_url(&self.host, &file))
     }
 
     /// The file `path` names, when it could name one and does: it has a `/`
@@ -247,21 +225,48 @@ impl Linker {
 }
 
 /// The stage that links what Bazel's records name, last before the
-/// reports, for a terminal, with what `relativize_paths` said of each.
-pub struct Links {
-    pub linker: Linker,
-    pub hints: Hints,
-}
+/// reports, for a terminal.
+pub struct Links(pub Linker);
 
 impl LineProcessor for Links {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
-        let hints = self.hints.take();
-        Some(self.linker.link_with(record, &hints))
+        Some(self.0.link(record))
     }
+}
 
-    fn skipped(&mut self, _line: &crate::console::line::Line) {
-        self.hints.take();
+/// The URL an OSC 8 sequence links to, empty for the one that ends a link,
+/// or None for another escape.
+fn osc8_url(seq: &[u8]) -> Option<&[u8]> {
+    let rest = seq.strip_prefix(b"\x1b]8;")?;
+    let uri = &rest[rest.iter().position(|&b| b == b';')? + 1..];
+    let end = uri
+        .iter()
+        .position(|&b| b == 0x07 || b == 0x1b)
+        .unwrap_or(uri.len());
+    Some(&uri[..end])
+}
+
+/// The `(shown, url)` of each link in `record`, for a stage that quotes its
+/// text without its escapes and links it again.
+pub fn links_in(record: &[u8]) -> Vec<(Vec<u8>, String)> {
+    let mut found = Vec::new();
+    let mut open: Option<(String, Vec<u8>)> = None;
+    for (escape, seg) in ansi::segments(record) {
+        if escape {
+            if let Some(url) = osc8_url(seg) {
+                if let Some((url, shown)) = open.take() {
+                    found.push((shown, url));
+                }
+                if !url.is_empty() {
+                    open = Some((String::from_utf8_lossy(url).into_owned(), Vec::new()));
+                }
+            }
+        } else if let Some((_, shown)) = &mut open {
+            shown.extend_from_slice(seg);
+        }
     }
+    found.extend(open.map(|(url, shown)| (shown, url)));
+    found
 }
 
 /// Where a URL found by [`URL`] ends: at a `…` that marks it cut, then
@@ -453,8 +458,12 @@ mod tests {
                 file(dir.path(), "src/a.cc", "src/a.cc")
             )
         );
-        let linked = "\x1b]8;;file:///x\x1b\\src/a.cc\x1b]8;;\x1b\\ https://x.test";
-        assert_eq!(link(&mut l, linked), linked);
+        let linked = "\x1b]8;;file:///x\x1b\\src/a.cc\x1b]8;;\x1b\\";
+        assert_eq!(
+            link(&mut l, &format!("{linked} https://x.test")),
+            format!("{linked} \x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\"),
+            "text already linked is left alone, the rest linked"
+        );
     }
 
     #[test]
@@ -528,116 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn a_path_made_relative_links_to_the_file_it_named() {
-        let root = tempfile::tempdir().unwrap();
-        for f in ["BUILD.bazel", "pkg/BUILD.bazel", "src/a.ts"] {
-            let at = root.path().join(f);
-            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-            std::fs::write(at, "").unwrap();
-        }
-        let ws = root.path().display().to_string();
-        let mut rel = crate::console::filters::RelativizePaths::new(
-            Some(ws.clone()),
-            Some(format!("{ws}/pkg")),
-        );
-        let hints = Hints::default();
-        rel = rel.hinting(Some(hints.clone()));
-        let mut links = Links {
-            linker: Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]),
-            hints: hints.clone(),
-        };
-        links.linker.host = String::new();
-        use crate::console::forward::LineProcessor as _;
-        let shown = rel
-            .process(format!("ERROR: {ws}/pkg/BUILD.bazel:3:1: x; src/a.ts:1").as_bytes())
-            .unwrap();
-        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
-        assert_eq!(
-            out,
-            format!(
-                "ERROR: {}:3:1: x; {}:1",
-                file(root.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
-                file(root.path(), "src/a.ts", "src/a.ts")
-            ),
-            "the package's BUILD.bazel, though the workspace has one; a tool's path the workspace's"
-        );
-        assert!(
-            hints.get().is_empty(),
-            "the last stage takes the record's hints"
-        );
-    }
-
-    #[test]
-    fn a_hint_places_an_execroot_path_in_the_builds_workspace_and_dots_link_nothing() {
-        let top = tempfile::tempdir().unwrap();
-        let other = top.path().join("other");
-        for f in ["src/a.ts", "other/src/a.ts", "other/src/b.ts"] {
-            let at = top.path().join(f);
-            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-            std::fs::write(at, "").unwrap();
-        }
-        let ws = top.path().display().to_string();
-        let hints = Hints::default();
-        let mut rel = crate::console::filters::RelativizePaths::new(Some(ws.clone()), None)
-            .hinting(Some(hints.clone()));
-        let mut links = Links {
-            linker: Linker::new(vec![other.clone(), top.path().to_path_buf()]),
-            hints: hints.clone(),
-        };
-        links.linker.host = String::new();
-        use crate::console::forward::LineProcessor as _;
-        let shown = rel
-            .process(format!("/o/execroot/_main/src/b.ts:1 and /o/sandbox/x/3/execroot/_main/src/a.ts:2; {ws}/... retry ...").as_bytes())
-            .unwrap();
-        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
-        assert_eq!(
-            out,
-            format!(
-                "{}:1 and {}:2; ... retry ...",
-                file(&other, "src/b.ts", "src/b.ts"),
-                file(&other, "src/a.ts", "src/a.ts")
-            ),
-            "the build's workspace's files; nothing for dots"
-        );
-    }
-
-    #[test]
-    fn a_scoped_package_path_keeps_its_hint() {
-        let root = tempfile::tempdir().unwrap();
-        for f in [
-            "node_modules/@types/x/index.d.ts",
-            "pkg/node_modules/@types/x/index.d.ts",
-        ] {
-            let at = root.path().join(f);
-            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-            std::fs::write(at, "").unwrap();
-        }
-        let ws = root.path().display().to_string();
-        let hints = Hints::default();
-        let mut rel = crate::console::filters::RelativizePaths::new(
-            Some(ws.clone()),
-            Some(format!("{ws}/pkg")),
-        )
-        .hinting(Some(hints.clone()));
-        let mut links = Links {
-            linker: Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]),
-            hints,
-        };
-        links.linker.host = String::new();
-        use crate::console::forward::LineProcessor as _;
-        let shown = rel
-            .process(
-                format!("ERROR: {ws}/pkg/node_modules/@types/x/index.d.ts:1:1: bad").as_bytes(),
-            )
-            .unwrap();
-        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
-        assert!(
-            out.contains("/pkg/node_modules/%40types/x/index.d.ts\x1b\\node_modules/@types"),
-            "{out:?}"
-        );
-    }
-
-    #[test]
     fn a_path_made_after_it_was_named_is_linked() {
         let (dir, mut l) = linker();
         assert_eq!(link(&mut l, "made.txt here"), "made.txt here");
@@ -649,92 +548,196 @@ mod tests {
         );
     }
 
-    #[test]
-    fn two_relativize_stages_keep_each_others_hints() {
-        let root = tempfile::tempdir().unwrap();
-        for f in ["BUILD.bazel", "pkg/BUILD.bazel", "pkg/@scope/foo/index.ts"] {
-            let at = root.path().join(f);
+    /// A workspace of `files` under a temp dir, and what Bazel's console
+    /// passes through: `stages` of `relativize_paths` (root, cwd), each
+    /// linking with the workspace `build` (else the temp dir) as the build's,
+    /// then the link stage with `bases`.
+    fn console(
+        files: &[&str],
+        stages: &[(&str, Option<&str>)],
+        build: Option<&str>,
+    ) -> (tempfile::TempDir, impl FnMut(&str) -> String) {
+        use crate::console::filters::{LinkTo, RelativizePaths};
+        use crate::console::forward::LineProcessor as _;
+        let dir = tempfile::tempdir().unwrap();
+        for f in files {
+            let at = dir.path().join(f);
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, "").unwrap();
         }
-        let ws = root.path().display().to_string();
-        let hints = Hints::default();
-        let mut first = crate::console::filters::RelativizePaths::new(
-            Some(ws.clone()),
-            Some(format!("{ws}/pkg")),
-        )
-        .hinting(Some(hints.clone()));
-        let mut second =
-            crate::console::filters::RelativizePaths::new(Some("/nonexistent/vendor".into()), None)
-                .hinting(Some(hints.clone()));
-        let mut links = Links {
-            linker: Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]),
-            hints: hints.clone(),
-        };
-        links.linker.host = String::new();
-        use crate::console::forward::LineProcessor as _;
-        let line = format!("ERROR: {ws}/pkg/BUILD.bazel:1:1: bad; {ws}/pkg/@scope/foo/index.ts:2");
-        let shown = second
-            .process(&first.process(line.as_bytes()).unwrap())
-            .unwrap();
-        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
-        assert_eq!(
-            out,
-            format!(
-                "ERROR: {}:1:1: bad; {}:2",
-                file(root.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
-                file(
-                    root.path(),
-                    "pkg/%40scope/foo/index.ts",
-                    "@scope/foo/index.ts"
+        let top = dir.path().display().to_string();
+        let ws = build.map_or(dir.path().to_path_buf(), |b| dir.path().join(b));
+        let mut rels: Vec<RelativizePaths> = stages
+            .iter()
+            .map(|(root, cwd)| {
+                RelativizePaths::new(
+                    Some(root.replace("$T", &top)),
+                    cwd.map(|c| c.replace("$T", &top)),
                 )
-            ),
-            "the package's file, and `@scope` not shown as `.@scope`"
+                .linking(Some(LinkTo {
+                    host: String::new(),
+                    workspace: ws.clone(),
+                }))
+            })
+            .collect();
+        let mut linker = Linker::new(vec![ws.clone(), dir.path().to_path_buf()]);
+        linker.host = String::new();
+        let mut links = Links(linker);
+        let run = move |line: &str| {
+            let mut record = line.replace("$T", &top).into_bytes();
+            for r in &mut rels {
+                record = r.process(&record).unwrap();
+            }
+            String::from_utf8(links.process(&record).unwrap()).unwrap()
+        };
+        (dir, run)
+    }
+
+    #[test]
+    fn a_path_made_relative_links_to_the_file_it_named() {
+        let (dir, mut run) = console(
+            &["BUILD.bazel", "pkg/BUILD.bazel", "src/a.ts"],
+            &[("$T", Some("$T/pkg"))],
+            None,
         );
-        assert!(
-            hints.get().is_empty(),
-            "the last stage clears the record's hints"
+        assert_eq!(
+            run("ERROR: $T/pkg/BUILD.bazel:3:1: x; src/a.ts:1"),
+            format!(
+                "ERROR: {}:3:1: x; {}:1",
+                file(dir.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
+                file(dir.path(), "src/a.ts", "src/a.ts")
+            ),
+            "the package's BUILD.bazel, though the workspace has one; a tool's path the workspace's"
         );
     }
 
     #[test]
-    fn stacked_stages_showing_the_same_name_link_each_to_its_own_file() {
-        let root = tempfile::tempdir().unwrap();
-        let vend = tempfile::tempdir().unwrap();
-        for at in [
-            root.path().join("pkg/BUILD.bazel"),
-            vend.path().join("BUILD.bazel"),
-        ] {
-            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-            std::fs::write(at, "").unwrap();
-        }
-        let ws = root.path().display().to_string();
-        let v = vend.path().display().to_string();
-        let hints = Hints::default();
-        let mut first = crate::console::filters::RelativizePaths::new(
-            Some(ws.clone()),
-            Some(format!("{ws}/pkg")),
-        )
-        .hinting(Some(hints.clone()));
-        let mut second = crate::console::filters::RelativizePaths::new(Some(v.clone()), None)
-            .hinting(Some(hints.clone()));
-        let mut links = Links {
-            linker: Linker::new(vec![root.path().to_path_buf()]),
-            hints,
-        };
-        links.linker.host = String::new();
-        use crate::console::forward::LineProcessor as _;
-        let line = format!("ERROR: {ws}/pkg/BUILD.bazel:1:1: x; see {v}/BUILD.bazel:2");
-        let shown = second
-            .process(&first.process(line.as_bytes()).unwrap())
-            .unwrap();
-        let out = String::from_utf8(links.process(&shown).unwrap()).unwrap();
+    fn a_shortened_path_and_a_literal_one_shown_alike_each_link_their_own() {
+        let (dir, mut run) = console(
+            &["BUILD.bazel", "pkg/BUILD.bazel"],
+            &[("$T", Some("$T/pkg"))],
+            None,
+        );
+        assert_eq!(
+            run("ERROR: BUILD.bazel:9: stale; see $T/pkg/BUILD.bazel:1:1"),
+            format!(
+                "ERROR: {}:9: stale; see {}:1:1",
+                file(dir.path(), "BUILD.bazel", "BUILD.bazel"),
+                file(dir.path(), "pkg/BUILD.bazel", "BUILD.bazel")
+            )
+        );
+    }
+
+    #[test]
+    fn an_execroot_path_links_in_the_builds_workspace_and_dots_link_nothing() {
+        let (dir, mut run) = console(
+            &["src/a.ts", "other/src/a.ts", "other/src/b.ts"],
+            &[("$T", None)],
+            Some("other"),
+        );
+        let other = dir.path().join("other");
+        assert_eq!(
+            run(
+                "/o/execroot/_main/src/b.ts:1 and /o/sandbox/x/3/execroot/_main/src/a.ts:2; $T/... retry ..."
+            ),
+            format!(
+                "{}:1 and {}:2; ... retry ...",
+                file(&other, "src/b.ts", "src/b.ts"),
+                file(&other, "src/a.ts", "src/a.ts")
+            )
+        );
+    }
+
+    #[test]
+    fn a_scoped_package_path_links_its_own_file() {
+        let (dir, mut run) = console(
+            &[
+                "node_modules/@types/x/index.d.ts",
+                "pkg/node_modules/@types/x/index.d.ts",
+            ],
+            &[("$T", Some("$T/pkg"))],
+            None,
+        );
+        let out = run("ERROR: $T/pkg/node_modules/@types/x/index.d.ts:1:1: bad");
         assert_eq!(
             out,
             format!(
-                "ERROR: {}:1:1: x; see {}:2",
-                file(root.path(), "pkg/BUILD.bazel", "BUILD.bazel"),
-                file(vend.path(), "BUILD.bazel", "BUILD.bazel")
+                "ERROR: {}:1:1: bad",
+                file(
+                    dir.path(),
+                    "pkg/node_modules/%40types/x/index.d.ts",
+                    "node_modules/@types/x/index.d.ts"
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn stacked_stages_link_each_path_to_its_own_file_in_any_order() {
+        let (dir, mut run) = console(
+            &[
+                "ws/BUILD.bazel",
+                "ws/pkg/BUILD.bazel",
+                "ws/pkg/@scope/foo/index.ts",
+                "vend/BUILD.bazel",
+            ],
+            &[("$T/ws", Some("$T/ws/pkg")), ("$T/vend", None)],
+            Some("ws"),
+        );
+        let pkg = file(dir.path(), "ws/pkg/BUILD.bazel", "BUILD.bazel");
+        let vend = file(dir.path(), "vend/BUILD.bazel", "BUILD.bazel");
+        assert_eq!(
+            run("ERROR: $T/ws/pkg/BUILD.bazel:1:1: x; see $T/vend/BUILD.bazel:2"),
+            format!("ERROR: {pkg}:1:1: x; see {vend}:2")
+        );
+        assert_eq!(
+            run("ERROR: $T/vend/BUILD.bazel:2: x; see $T/ws/pkg/BUILD.bazel:1:1"),
+            format!("ERROR: {vend}:2: x; see {pkg}:1:1")
+        );
+        assert_eq!(
+            run("at $T/ws/pkg/@scope/foo/index.ts:2"),
+            format!(
+                "at {}:2",
+                file(
+                    dir.path(),
+                    "ws/pkg/%40scope/foo/index.ts",
+                    "@scope/foo/index.ts"
+                )
+            ),
+            "not `.@scope`"
+        );
+    }
+
+    #[test]
+    fn a_response_files_path_links_after_its_at() {
+        let (dir, mut run) = console(&["MODULE.bazel", "pkg/x.params"], &[("$T", None)], None);
+        assert_eq!(
+            run("argfile @$T/pkg/x.params and @MODULE.bazel, not @repo//pkg"),
+            format!(
+                "argfile @{} and @{}, not @repo//pkg",
+                file(dir.path(), "pkg/x.params", "pkg/x.params"),
+                file(dir.path(), "MODULE.bazel", "MODULE.bazel")
+            )
+        );
+    }
+
+    #[test]
+    fn a_quoted_lines_links_carry_over() {
+        let (dir, mut run) = console(
+            &["BUILD.bazel", "pkg/BUILD.bazel"],
+            &[("$T", Some("$T/pkg"))],
+            None,
+        );
+        let shown = run("ERROR: $T/pkg/BUILD.bazel:1: x");
+        let known = links_in(shown.as_bytes());
+        let mut l = Linker::new(vec![dir.path().to_path_buf()]);
+        l.host = String::new();
+        let quoted = String::from_utf8(l.link_with(b"ERROR: BUILD.bazel:1: x", &known)).unwrap();
+        assert_eq!(
+            quoted,
+            format!(
+                "ERROR: {}:1: x",
+                file(dir.path(), "pkg/BUILD.bazel", "BUILD.bazel")
             )
         );
     }

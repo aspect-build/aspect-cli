@@ -22,7 +22,7 @@ use super::ansi;
 use super::filters::Collapsed;
 use super::forward::LineProcessor;
 use super::line::{self, Given, Kind, Line};
-use super::links::{Hints, Linker, file_link};
+use super::links::{Linker, file_link, links_in};
 use super::log::{self, Cut, RawLog};
 
 /// The longest line a report quotes.
@@ -333,23 +333,23 @@ pub struct RecapErrors {
     after_first: usize,
     /// Links what the repeated lines name, for a terminal, with what
     /// `relativize_paths` said of each line's paths.
-    linker: Option<(Linker, Hints)>,
+    linker: Option<Linker>,
 }
 
-/// What `relativize_paths` said a line's paths name, for its links.
-type LineHints = Vec<(Vec<u8>, Vec<u8>)>;
+/// The links a line went by with, `(shown, url)`, for its quoted text.
+type LineLinks = Vec<(Vec<u8>, String)>;
 
 /// One error a recap repeats: its header, and what it keeps of its body,
-/// each line with its own hints.
+/// each line with the links it went by with.
 struct Recapped {
-    header: (String, LineHints),
-    head: Vec<(String, LineHints)>,
-    last: Option<(String, LineHints)>,
+    header: (String, LineLinks),
+    head: Vec<(String, LineLinks)>,
+    last: Option<(String, LineLinks)>,
     skipped: usize,
 }
 
 impl Recapped {
-    fn body_line(&mut self, text: String, hints: LineHints) {
+    fn body_line(&mut self, text: String, hints: LineLinks) {
         if self.head.len() < RECAP_BODY_LINES - 1 {
             self.head.push((text, hints));
         } else if self.last.replace((text, hints)).is_some() {
@@ -374,20 +374,22 @@ impl RecapErrors {
     }
 
     /// This recap with the paths and URLs it repeats linked ([`Linker`]),
-    /// each line's paths as `hints` said when it went by.
-    pub fn linking(mut self, linker: Option<(Linker, Hints)>) -> Self {
+    /// a path a stage before linked (`relativize_paths`) to the file it did.
+    pub fn linking(mut self, linker: Option<Linker>) -> Self {
         self.linker = linker;
         self
     }
 }
 
 impl RecapErrors {
-    /// What `relativize_paths` said of the record going by, when linking.
-    fn hints(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.linker
-            .as_ref()
-            .map(|(_, h)| h.get())
-            .unwrap_or_default()
+    /// The links the stages before put in `record` (`relativize_paths`'),
+    /// for its quoted text, which has no escapes, when linking.
+    fn links(&self, record: &[u8]) -> LineLinks {
+        if self.linker.is_some() {
+            links_in(record)
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -412,7 +414,7 @@ impl LineProcessor for RecapErrors {
                 .map_or(text, |c| c.get(1).unwrap().as_str());
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
-                let hints = self.hints();
+                let hints = self.links(record);
                 self.errors.push(Recapped {
                     header: (quoted, hints),
                     head: vec![],
@@ -427,7 +429,7 @@ impl LineProcessor for RecapErrors {
             && !line.fresh
         {
             if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
-                let hints = self.hints();
+                let hints = self.links(record);
                 self.errors[i].body_line(quote(text), hints);
             }
             self.body = Some(i);
@@ -460,8 +462,8 @@ impl LineProcessor for RecapErrors {
             "INFO: Errors Bazel reported:".to_string()
         };
         self.style.line(&mut out, &header);
-        let mut line = |text: &str, hints: &[(Vec<u8>, Vec<u8>)]| match self.linker.as_mut() {
-            Some((l, _)) => l.link_with(text.as_bytes(), hints),
+        let mut line = |text: &str, hints: &[(Vec<u8>, String)]| match self.linker.as_mut() {
+            Some(l) => l.link_with(text.as_bytes(), hints),
             None => text.as_bytes().to_vec(),
         };
         for e in &self.errors {
@@ -808,10 +810,9 @@ mod tests {
     fn a_linking_recap_links_what_its_errors_name() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
-        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some((
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
             super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
-            Hints::default(),
-        )));
+        ));
         let out = feed(&mut p, &["ERROR: BUILD.bazel:1:1: see https://x.test/why"]);
         assert!(
             out.starts_with("INFO: Errors Bazel reported:\n  ERROR: \x1b]8;;file://"),
@@ -828,38 +829,28 @@ mod tests {
     }
 
     #[test]
-    fn a_recapped_line_links_by_its_own_hints() {
+    fn a_recapped_line_keeps_the_links_it_went_by_with() {
         let dir = tempfile::tempdir().unwrap();
         for f in ["src/a.ts", "pkg/src/a.ts"] {
             let at = dir.path().join(f);
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, "").unwrap();
         }
-        let hints = Hints::default();
-        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some((
+        let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
             super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
-            hints.clone(),
-        )));
-        let pkg_file = dir
-            .path()
-            .join("pkg/src/a.ts")
-            .display()
-            .to_string()
-            .into_bytes();
-        for (record, hint) in [
-            ("ERROR: x failed: (Exit 1): tsc", vec![]),
-            ("src/a.ts(1,1): error", vec![]),
-            (
-                "src/a.ts:1: absolute",
-                vec![(b"src/a.ts".to_vec(), pkg_file.clone())],
-            ),
-        ] {
-            hints.set(hint);
-            feed(&mut p, &[record]);
-        }
+        ));
+        let pkg = dir.path().join("pkg/src/a.ts").display().to_string();
+        let linked = format!("\x1b]8;;file://{pkg}\x1b\\src/a.ts\x1b]8;;\x1b\\:1: absolute");
+        feed(
+            &mut p,
+            &[
+                "ERROR: x failed: (Exit 1): tsc",
+                "src/a.ts(1,1): error",
+                &linked,
+            ],
+        );
         let out = feed(&mut p, &[]);
         let ws = dir.path().join("src/a.ts").display().to_string();
-        let pkg = dir.path().join("pkg/src/a.ts").display().to_string();
         let first = out.lines().find(|l| l.contains("error")).unwrap();
         let second = out.lines().find(|l| l.contains("absolute")).unwrap();
         assert!(
@@ -868,7 +859,7 @@ mod tests {
         );
         assert!(
             second.contains(&format!("{pkg}\x1b\\")),
-            "its own hint: {second:?}"
+            "the link it had: {second:?}"
         );
     }
 
