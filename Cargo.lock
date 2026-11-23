@@ -357,6 +357,7 @@ dependencies = [
  "blake2",
  "chrono",
  "clap",
+ "core-foundation 0.10.1",
  "derive_more 2.0.1",
  "digest",
  "dirs",

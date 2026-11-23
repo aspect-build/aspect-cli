@@ -11,8 +11,8 @@
 //!   entry. The default on developer machines.
 //! - **file** - a `0600` JSON file. The fallback where no secret service is
 //!   available (a CI container with no session keyring, a macOS daemon or
-//!   fresh `HOME` with no default keychain), or when forced via
-//!   `$ASPECT_CREDENTIALS_FILE`.
+//!   fresh `HOME` with no default keychain, or a default keychain whose file
+//!   was deleted), or when forced via `$ASPECT_CREDENTIALS_FILE`.
 //!
 //! CI relies on the file backend: `aspect auth login --with-api-token` persists
 //! the exchanged JWT, and a later step of the same job reads it back. A `0600`
@@ -133,15 +133,37 @@ fn keyring_available() -> bool {
 }
 
 /// Whether the user's default keychain exists. Looks the keychain up the way
-/// keyring does before every access, without reading the entry, so the probe
-/// never raises a keychain access or unlock prompt.
+/// keyring does before every access, then asks for its status, without
+/// reading the entry, so the probe never raises a keychain access or unlock
+/// prompt. The status catches a default that names a keychain file since
+/// deleted (`errSecNoSuchKeychain`), which the lookup alone does not: saving
+/// to it fails, and keyring reports it as `NoStorageAccess`.
 #[cfg(target_os = "macos")]
 fn store_present(_: &keyring::Entry) -> bool {
     use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
     keyring_usable(
         &SecKeychain::default_for_domain(SecPreferencesDomain::User)
+            .and_then(|keychain| keychain_status(&keychain))
             .map_err(keyring::macos::decode_error),
     )
+}
+
+/// `SecKeychainGetStatus`, which security-framework does not wrap. Fails for a
+/// keychain whose file is gone; a locked keychain is a status, not a failure.
+#[cfg(target_os = "macos")]
+fn keychain_status(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+) -> security_framework::base::Result<()> {
+    use core_foundation::base::TCFType;
+    unsafe extern "C" {
+        fn SecKeychainGetStatus(keychain: *const std::ffi::c_void, status: *mut u32) -> i32;
+    }
+    let mut status = 0;
+    // SAFETY: a live keychain reference and a valid out-pointer.
+    match unsafe { SecKeychainGetStatus(keychain.as_CFTypeRef(), &mut status) } {
+        0 => Ok(()),
+        code => Err(security_framework::base::Error::from_code(code)),
+    }
 }
 
 /// Whether a read of the entry finds a store (Windows reports a missing logon
