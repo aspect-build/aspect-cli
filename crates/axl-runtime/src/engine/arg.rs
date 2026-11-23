@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::fmt::Display;
-use std::u32;
 
 use allocative::Allocative;
 
