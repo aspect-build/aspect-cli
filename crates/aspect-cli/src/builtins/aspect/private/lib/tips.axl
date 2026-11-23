@@ -85,7 +85,7 @@ _SEVERITY_EMOJI = {
     TIP_NOTE: "💬",
 }
 
-# Label paired with the emoji on each tip header (`💡 **SUGGESTION:** ...`),
+# Label paired with the emoji on each tip header (`💡 **SUGGESTION: title**`),
 # so severity is legible even where the emoji doesn't render.
 _SEVERITY_LABEL = {
     TIP_WARNING: "Warning",
@@ -274,6 +274,8 @@ def tip_replace(
     current value. See `TipSuggestion` for field semantics."""
     if show != None and show not in _VALID_SHOW:
         fail("tip_replace: unknown show %r%s" % (show, did_you_mean_then(show, _VALID_SHOW, "; ", "valid: " + ", ".join(_VALID_SHOW))))
+    if severity != None and severity not in _SEVERITY_ORDER:
+        fail("tip_replace: unknown severity %r%s" % (severity, did_you_mean_then(severity, _SEVERITY_ORDER.keys(), "; ", "valid: " + ", ".join(_SEVERITY_ORDER.keys()))))
     return TipSuggestion(
         action = TipAction("replace"),
         severity = severity,
@@ -1179,7 +1181,7 @@ def _surface_overrides(ctx, entries):
         bad = [n for n in wanted if n not in _VALID_SURFACES]
         if not eq or not id or not wanted or bad:
             hint = did_you_mean_then(bad[0], _VALID_SURFACES, "", "") if bad else ""
-            ctx.std.io.stderr.write("WARNING: --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s%s\n" % (e, ", ".join(_VALID_SURFACES), hint))
+            ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": --tips:surfaces=%s is ignored: expected <id>=<surface>[,<surface>] with surfaces from %s%s\n" % (e, ", ".join(_VALID_SURFACES), hint))
             continue
         out[id] = wanted
     return out
@@ -1235,7 +1237,7 @@ def _tips_impl(ctx):
             return text
         if tip["id"] not in warned:
             warned[tip["id"]] = True
-            call_ctx.std.io.stderr.write("WARNING: tip %r: its template does not render, so it is shown as written: %s\n" % (tip["id"], text))
+            call_ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, call_ctx.std.io.stderr.color) + ": tip %r: its template does not render, so it is shown as written: %s\n" % (tip["id"], text))
         return src
 
     def _store(call_ctx, tip):
@@ -1322,7 +1324,10 @@ def _tips_impl(ctx):
             if not tips_for:
                 continue
             if show == TIP_SHOW_END:
-                for t in (tips_for if cap == 0 else tips_for[:cap]):
+                # Up to `cap` shown: a tip its template hides takes no slot.
+                for t in tips_for:
+                    if cap != 0 and shown[id] >= cap:
+                        break
                     _print_stored(task_ctx, t, color_on)
             unprinted = [t for t in tips_for if t.get("key", "") not in printed[id]]
             occurrences, lost = dropped.get(id, 0), dropped_tips.get(id, 0)

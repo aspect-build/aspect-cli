@@ -2367,7 +2367,7 @@ impl Build {
             if let Some(mut console) = console
                 && let Err(err) = console.join()
             {
-                errln!("WARNING: reading Bazel's console failed: {err}");
+                crate::diag::warn(&format!("reading Bazel's console failed: {err}"));
             }
         }
 

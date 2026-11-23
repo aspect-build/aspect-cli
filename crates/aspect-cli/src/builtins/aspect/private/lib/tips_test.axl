@@ -484,7 +484,7 @@ def _test_severity_rank(ctx):
     _eq("rank: suggestion", severity_rank(TIP_SUGGESTION), 2)
     _eq("rank: note least urgent", severity_rank(TIP_NOTE), 3)
     if severity_rank("bogus") <= severity_rank(TIP_INFO):
-        fail("rank: unknown severity must sort after info")
+        fail("rank: unknown severity must sort after note")
 
 def _test_tip_to_payload(ctx):
     """`tip_to_payload` projects a stored tip into the artifact-boundary

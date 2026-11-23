@@ -412,7 +412,7 @@ def _check_collect_tip_rows(ctx):
     if ids != ["w", "c", "s", "i"]:
         fail("collect_tip_rows severity sort: expected [w, c, s, i], got %r" % ids)
 
-    # Cap: suggestion + info combined capped at 5; important + warning unbounded.
+    # Cap: suggestion and note combined capped at 5; warning and important unbounded.
     big = (
         [{"id": "c%d" % i, "severity": "important", "title": "C", "body": ""} for i in range(3)] +
         [{"id": "w%d" % i, "severity": "warning", "title": "W", "body": ""} for i in range(4)] +
@@ -2738,7 +2738,7 @@ def _test_impl(ctx):
             ],
         ),
         (
-            "20. tips — important + warning render in full; suggestion / info capped at 5",
+            "20. tips: warning and important render in full; suggestion and note capped at 5",
             [
                 _entry(
                     "build",
