@@ -130,8 +130,15 @@ pub enum BazelrcError {
     #[error("--config expansion cycle: {}", cycle.join(" → "))]
     ConfigCycle { cycle: Vec<String> },
 
+    /// `referenced_in` is the file holding the `--config=NAME` that named it
+    /// (for a nested request, the file defining the config that holds it), or
+    /// [`COMMAND_LINE_SOURCE`] for a caller-supplied flag.
     #[error("undefined config '{name}' for command '{command}'")]
-    UndefinedConfig { command: String, name: String },
+    UndefinedConfig {
+        command: String,
+        name: String,
+        referenced_in: PathBuf,
+    },
 
     #[error("invalid import directive arguments: {directive}")]
     InvalidImportArgs { directive: String },
@@ -142,6 +149,20 @@ pub enum BazelrcError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// A `.bazelrc` that can't be loaded or resolved, worded for whoever owns the
+/// rc. The Starlark-facing methods fail with this rather than a bare
+/// [`BazelrcError`] so the CLI can recognize it and print it without the AXL
+/// traceback: the fix is in the user's rc, not in the code that read it.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct RcResolutionError(String);
+
+impl From<BazelrcError> for RcResolutionError {
+    fn from(err: BazelrcError) -> Self {
+        Self(format!("bazelrc: {err}"))
+    }
 }
 
 /// Parsed representation of one or more `.bazelrc` files, plus the user-supplied
@@ -352,6 +373,48 @@ impl Bazelrc {
     /// Return the source file path for the given option.
     pub fn source_of(&self, option: &RcOption) -> &Path {
         &self.sources[option.source_index]
+    }
+
+    /// `err`, from resolving this rc, as the message its owner acts on.
+    ///
+    /// An undefined config gets Bazel's own wording plus what Bazel leaves the
+    /// reader to work out: which file asked for the config, which rc files were
+    /// searched for it, and the two ways out. Any other error keeps its one line.
+    pub fn resolution_error(&self, err: BazelrcError) -> RcResolutionError {
+        let BazelrcError::UndefinedConfig {
+            command,
+            name,
+            referenced_in,
+        } = &err
+        else {
+            return err.into();
+        };
+        let requested_by = if referenced_in == Path::new(COMMAND_LINE_SOURCE) {
+            "the task's own flags".to_owned()
+        } else {
+            referenced_in.display().to_string()
+        };
+        let loaded: Vec<String> = self
+            .sources
+            .iter()
+            .filter(|p| p.as_path() != Path::new(COMMAND_LINE_SOURCE))
+            .map(|p| format!("    {}", p.display()))
+            .collect();
+        let loaded = if loaded.is_empty() {
+            "    (none)".to_owned()
+        } else {
+            loaded.join("\n")
+        };
+        RcResolutionError(format!(
+            "bazelrc: config value '{name}' is not defined in any .rc file (needed by '{command}')\n\
+             \n\
+             \x20 --config={name} is requested by:\n    {requested_by}\n\
+             \n\
+             \x20 Loaded rc files:\n{loaded}\n\
+             \n\
+             \x20 Define a `common:{name}` (or `{command}:{name}`) section in one of them,\n\
+             \x20 or remove the --config={name} reference."
+        ))
     }
 
     /// Direct map lookup — returns options for exactly this key (e.g. `"build"` or `"build:opt"`).
@@ -771,7 +834,7 @@ impl Bazelrc {
             .collect();
         let opts = self
             .expand_configs(command, &skip)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| self.resolution_error(e))?;
 
         if !opts.iter().any(|o| o.version_condition.is_some()) {
             return Ok(opts);
@@ -3173,6 +3236,115 @@ build:b --config=a
         let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config=nonexistent"])).unwrap();
         let err = rc.expand_configs("build", &[]).unwrap_err();
         assert!(matches!(err, BazelrcError::UndefinedConfig { .. }));
+    }
+
+    #[test]
+    fn an_undefined_config_names_the_rc_file_that_requested_it() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let rc_path = root.join(".bazelrc");
+        fs::write(&rc_path, "build --config=missing\n").unwrap();
+
+        let rc = Bazelrc::new(root, ISOLATE, &[]).unwrap();
+        let err = rc.expand_configs("build", &[]).unwrap_err();
+        let BazelrcError::UndefinedConfig { referenced_in, .. } = &err else {
+            panic!("expected UndefinedConfig, got {err:?}");
+        };
+        assert_eq!(referenced_in, rc.sources().first().unwrap());
+
+        let rendered = rc.resolution_error(err).to_string();
+        let source = rc.sources()[0].display().to_string();
+        assert_eq!(
+            rendered,
+            format!(
+                "bazelrc: config value 'missing' is not defined in any .rc file (needed by 'build')\n\
+                 \n\
+                 \x20 --config=missing is requested by:\n    {source}\n\
+                 \n\
+                 \x20 Loaded rc files:\n    {source}\n\
+                 \n\
+                 \x20 Define a `common:missing` (or `build:missing`) section in one of them,\n\
+                 \x20 or remove the --config=missing reference."
+            )
+        );
+    }
+
+    #[test]
+    fn an_undefined_config_from_caller_flags_names_the_task() {
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let rendered = rc
+            .resolution_error(rc.expand_configs("test", &[]).unwrap_err())
+            .to_string();
+        assert!(
+            rendered.contains("is requested by:\n    the task's own flags\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Loaded rc files:\n    (none)\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("`test:ci`"), "{rendered}");
+    }
+
+    #[test]
+    fn a_nested_undefined_config_names_the_file_that_holds_the_nested_request() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let user_rc = root.join("user.bazelrc");
+        fs::write(&user_rc, "build:a --config=missing\n").unwrap();
+        fs::write(
+            root.join(".bazelrc"),
+            format!("import {}\nbuild --config=a\n", user_rc.display()),
+        )
+        .unwrap();
+
+        let rc = Bazelrc::new(root, ISOLATE, &[]).unwrap();
+        let err = rc.expand_configs("build", &[]).unwrap_err();
+        let BazelrcError::UndefinedConfig { referenced_in, .. } = &err else {
+            panic!("expected UndefinedConfig, got {err:?}");
+        };
+        assert!(referenced_in.ends_with("user.bazelrc"), "{referenced_in:?}");
+    }
+
+    #[test]
+    fn an_undefined_config_nested_in_a_caller_config_names_the_rc_file() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:ci --config=missing\n").unwrap();
+
+        let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let err = rc.expand_configs("build", &[]).unwrap_err();
+        let BazelrcError::UndefinedConfig { referenced_in, .. } = &err else {
+            panic!("expected UndefinedConfig, got {err:?}");
+        };
+        assert!(referenced_in.ends_with(".bazelrc"), "{referenced_in:?}");
+    }
+
+    #[test]
+    fn other_rc_errors_keep_their_one_line() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:loop --config=loop\n").unwrap();
+
+        let rc = Bazelrc::new(root, ISOLATE, &flags(&["--config=loop"])).unwrap();
+        let rendered = rc
+            .resolution_error(rc.expand_configs("build", &[]).unwrap_err())
+            .to_string();
+        assert_eq!(rendered, "bazelrc: --config expansion cycle: loop → loop");
+    }
+
+    #[test]
+    fn the_value_queries_fail_with_the_rendered_error() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --config=missing\n").unwrap();
+
+        let rc = Bazelrc::new(root, ISOLATE, &[]).unwrap();
+        let err = rc.applicable_options("build", None).unwrap_err();
+        assert!(err.downcast_ref::<RcResolutionError>().is_some(), "{err:?}");
     }
 
     #[test]

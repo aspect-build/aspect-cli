@@ -10,7 +10,7 @@ mod prefetch;
 pub mod task;
 
 pub use api::get_globals;
-pub use error::EvalError;
+pub use error::{EvalError, rc_resolution_error};
 pub use exit::TaskExit;
 pub use load::AxlLoader as Loader;
 pub(crate) use load_path::join_confined;
