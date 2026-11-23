@@ -789,8 +789,9 @@ pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
 /// invocation. Gated by the `--announce-bazel-version` / `--announce-bazel-command`
 /// task flags, resolved in AXL and passed through as `announce`.
 ///
-/// Styled in grey so the long `INFO: Spawning:` line reads as background
-/// context next to bazel's own (undimmed) `INFO:` output. Falls back to
+/// Its `INFO` label is the CLI's own (bold cyan), its text grey, so the long
+/// `INFO: Spawning:` line reads as background context next to bazel's own
+/// (undimmed) `INFO:` output. Falls back to
 /// plain text when stderr isn't a TTY and we're not on a recognized CI host
 /// — matching the gate used elsewhere in the runtime (see
 /// `multi_phase::running_verb_color`).
@@ -800,15 +801,16 @@ pub(super) fn announce_spawn(
     cmd: &Command,
 ) {
     let (grey, reset) = grey_style();
+    let info = if grey.is_empty() { "" } else { "\x1b[1;36m" };
     if announce.version {
         errln!(
-            "{grey}INFO: {}{reset}",
+            "{info}INFO{reset}: {grey}{}{reset}",
             bazel::command::version_line(version)
         );
     }
     if announce.command {
         errln!(
-            "{grey}INFO: Spawning: {}{reset}",
+            "{info}INFO{reset}: {grey}Spawning: {}{reset}",
             bazel::command::render(cmd)
         );
     }

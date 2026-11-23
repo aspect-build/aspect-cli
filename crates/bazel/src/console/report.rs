@@ -4,8 +4,9 @@
 //!
 //! Each writes its lines from [`LineProcessor::report`], after every stage has
 //! flushed what it held, so the report follows bazel's last line. A report
-//! line is styled with [`Style`], dim on a terminal or a recognized CI log, so
-//! it reads as aspect's rather than bazel's.
+//! line is styled with [`Style`] on a terminal or a recognized CI log, so it
+//! reads as aspect's rather than bazel's: an `INFO:` line as the CLI's own
+//! are (its label bold cyan, the text plain), a detail line under it dim.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -175,26 +176,40 @@ fn hostname() -> String {
     }
 }
 
-/// How report lines are set apart from bazel's: wrapped in `open`/`close`.
+/// How report lines are set apart from bazel's: an `INFO:` line's label in
+/// `info`, as the CLI's own `INFO:` lines have it (`axl_runtime::diag`), a
+/// detail line wrapped in `open`/`close`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Style {
     pub open: String,
     pub close: String,
+    pub info: String,
 }
 
 impl Style {
-    /// Dim grey, which every terminal and CI log viewer we ship to renders.
+    /// The CLI's bold cyan `INFO` label, and dim grey for the detail under
+    /// it, which every terminal and CI log viewer we ship to renders.
     pub fn dim() -> Style {
         Style {
             open: "\x1b[38;5;244m".into(),
             close: "\x1b[0m".into(),
+            info: "\x1b[1;36m".into(),
         }
     }
 
     fn line(&self, out: &mut Vec<u8>, text: &str) {
-        out.extend_from_slice(self.open.as_bytes());
-        out.extend_from_slice(text.as_bytes());
-        out.extend_from_slice(self.close.as_bytes());
+        match text.strip_prefix("INFO:") {
+            Some(rest) if !self.info.is_empty() => {
+                out.extend_from_slice(self.info.as_bytes());
+                out.extend_from_slice(b"INFO\x1b[0m:");
+                out.extend_from_slice(rest.as_bytes());
+            }
+            _ => {
+                out.extend_from_slice(self.open.as_bytes());
+                out.extend_from_slice(text.as_bytes());
+                out.extend_from_slice(self.close.as_bytes());
+            }
+        }
         out.push(b'\n');
     }
 }
@@ -504,6 +519,19 @@ impl LineProcessor for Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A report's `INFO:` line has the CLI's own label, its text plain; a
+    /// detail line under it is dim.
+    #[test]
+    fn an_info_line_looks_as_the_clis_own_do() {
+        let mut out = Vec::new();
+        Style::dim().line(&mut out, "INFO: Errors Bazel reported:");
+        Style::dim().line(&mut out, "  3 more like: x");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[1;36mINFO\x1b[0m: Errors Bazel reported:\n\x1b[38;5;244m  3 more like: x\x1b[0m\n"
+        );
+    }
     use std::sync::Arc;
 
     use crate::console::line::tests::bazel;
