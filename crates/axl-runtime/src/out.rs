@@ -88,8 +88,8 @@ pub(crate) fn terminal_links() -> bool {
 /// What a link to a file opens, as the Console feature's `hyperlink_format`
 /// says once a task resolves it ([`set_link_format`]); until then
 /// `ASPECT_HYPERLINK_FORMAT`; and for `auto`, the editor
-/// `LinkFormat::auto` finds (its terminal's, `$VISUAL`/`$EDITOR`'s, one on
-/// `PATH`), else none.
+/// `LinkFormat::auto` finds (its terminal's, `$VISUAL`/`$EDITOR`'s, one
+/// installed, on `PATH` or as a macOS app), else none.
 static LINK_FORMAT: std::sync::RwLock<Option<bazel::console::links::LinkFormat>> =
     std::sync::RwLock::new(None);
 
@@ -120,13 +120,13 @@ pub(crate) fn links_as_text() -> bool {
     std::env::var_os("TERM_PROGRAM").is_some_and(|t| t == "Apple_Terminal")
 }
 
-/// `auto`'s format for this process: its environment, and the editors on
-/// its `PATH`, looked up once.
+/// `auto`'s format for this process: its environment, and the editors
+/// installed (on its `PATH`, or as macOS apps), looked up once.
 static AUTO_LINK_FORMAT: std::sync::LazyLock<bazel::console::links::LinkFormat> =
     std::sync::LazyLock::new(|| {
         bazel::console::links::LinkFormat::auto(
             |v| std::env::var_os(v),
-            bazel::console::links::on_path,
+            bazel::console::links::installed,
         )
     });
 

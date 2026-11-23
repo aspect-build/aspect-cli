@@ -150,12 +150,12 @@ impl LinkFormat {
     /// - the editor `$VISUAL`, else `$EDITOR`, starts (`code --wait`), when
     ///   it is one of [`LinkFormat::EDITORS`]; a terminal editor (`vim`)
     ///   cannot be opened by a click;
-    /// - the first of [`LinkFormat::EDITORS`] installed, `on_path`;
+    /// - the first of [`LinkFormat::EDITORS`] `installed` ([`installed`]);
     /// - none: a `file://` link opens whatever the system picks, at no
     ///   line.
     pub fn auto(
         var: impl Fn(&str) -> Option<std::ffi::OsString>,
-        on_path: impl Fn(&str) -> bool,
+        installed: impl Fn(&str) -> bool,
     ) -> LinkFormat {
         let has =
             |name: &str, want: &str| var(name).is_some_and(|v| v.to_string_lossy().contains(want));
@@ -214,7 +214,7 @@ impl LinkFormat {
         }
         Self::EDITORS
             .iter()
-            .find(|(command, _)| on_path(command))
+            .find(|(command, _)| installed(command))
             .map_or(LinkFormat::None, |(_, name)| alias(name))
     }
 }
@@ -266,15 +266,65 @@ fn editor_command(value: &str) -> Option<String> {
     Some(command.rsplit('/').next().unwrap_or(&command).to_string())
 }
 
-/// Whether `command` is an executable file in a directory of `PATH`.
-pub fn on_path(command: &str) -> bool {
+/// The macOS apps of [`LinkFormat::EDITORS`], by command. The app is what
+/// registers the URL scheme a link opens, and an editor's command is often
+/// never put on `PATH` (VS Code's and Cursor's are each a palette command
+/// away).
+const APPS: &[(&str, &[&str])] = &[
+    ("cursor", &["Cursor.app"]),
+    ("code", &["Visual Studio Code.app"]),
+    ("code-insiders", &["Visual Studio Code - Insiders.app"]),
+    ("zed", &["Zed.app", "Zed Preview.app"]),
+    ("codium", &["VSCodium.app"]),
+    (
+        "idea",
+        &[
+            "IntelliJ IDEA.app",
+            "IntelliJ IDEA Ultimate.app",
+            "IntelliJ IDEA CE.app",
+            "IntelliJ IDEA Community Edition.app",
+        ],
+    ),
+    ("mvim", &["MacVim.app"]),
+    ("mate", &["TextMate.app"]),
+];
+
+/// Whether the editor `command` starts is installed: the command is on
+/// `PATH`, or, on macOS, its app is in `/Applications` or `~/Applications`.
+pub fn installed(command: &str) -> bool {
+    let mut apps = Vec::new();
+    if cfg!(target_os = "macos") {
+        apps.push(std::path::PathBuf::from("/Applications"));
+        apps.extend(
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| std::path::Path::new(&h).join("Applications")),
+        );
+    }
+    installed_in(command, std::env::var_os("PATH").as_deref(), &apps)
+}
+
+/// [`installed`] over a given `PATH` and app directories.
+fn installed_in(
+    command: &str,
+    path: Option<&std::ffi::OsStr>,
+    apps: &[std::path::PathBuf],
+) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| {
+    let on_path = path.is_some_and(|path| {
+        std::env::split_paths(path).any(|dir| {
             std::fs::metadata(dir.join(command))
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
-    })
+    });
+    on_path
+        || APPS
+            .iter()
+            .find(|(c, _)| *c == command)
+            .is_some_and(|(_, names)| {
+                apps.iter()
+                    .any(|dir| names.iter().any(|name| dir.join(name).is_dir()))
+            })
 }
 
 /// How links to files are made: on what host, in what [`LinkFormat`], and
@@ -1424,6 +1474,40 @@ mod tests {
             |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()),
             |c| installed.contains(&c),
         )
+    }
+
+    #[test]
+    fn an_editor_is_installed_by_its_command_or_its_app() {
+        let root = tempfile::tempdir().unwrap();
+        let (bin, apps) = (root.path().join("bin"), root.path().join("Applications"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(apps.join("Cursor.app/Contents")).unwrap();
+        std::fs::create_dir_all(apps.join("IntelliJ IDEA CE.app")).unwrap();
+        std::fs::write(bin.join("code"), "").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("code"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("zed"), "").unwrap();
+        std::fs::write(apps.join("Zed.app"), "").unwrap();
+        let path = bin.as_os_str();
+        let dirs = [apps.clone()];
+        assert!(installed_in("code", Some(path), &[]), "on PATH");
+        assert!(
+            installed_in("cursor", Some(path), &dirs),
+            "its app, not on PATH"
+        );
+        assert!(installed_in("idea", None, &dirs), "an edition's app");
+        assert!(!installed_in("cursor", Some(path), &[]), "no app directory");
+        assert!(
+            !installed_in("zed", Some(path), &dirs),
+            "neither executable nor an app"
+        );
+        assert!(!installed_in("agent", Some(path), &dirs));
+        let found = |c: &str| installed_in(c, Some(path), &dirs);
+        assert_eq!(
+            LinkFormat::auto(|_| None, found),
+            LinkFormat::parse("cursor").unwrap(),
+            "Cursor's app outranks code on PATH"
+        );
     }
 
     #[test]

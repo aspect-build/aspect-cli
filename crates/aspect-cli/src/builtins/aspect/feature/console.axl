@@ -266,7 +266,8 @@ Console = feature(
                           "on a remote machine (SSH, a dev container, Codespaces), else the editor whose " +
                           "terminal this is (VS Code, VS Code Insiders, VSCodium, Cursor), else " +
                           "the one $VISUAL or $EDITOR starts, else the first installed of cursor, code, " +
-                          "code-insiders, zed, codium, idea, mvim and mate, else `none`. ASPECT_HYPERLINK_FORMAT takes the same " +
+                          "code-insiders, zed, codium, idea, mvim and mate (its command on PATH, or on macOS " +
+                          "its app in /Applications or ~/Applications), else `none`. ASPECT_HYPERLINK_FORMAT takes the same " +
                           "values and beats config.axl but not the command line, and is what config.axl's " +
                           "own lines follow. A directory links only under a file:// format. In Terminal.app, " +
                           "which shows no such link, the link's URL is written after the path and its line, " +
