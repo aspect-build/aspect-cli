@@ -69,6 +69,8 @@ const READ_BUF_SIZE: usize = 8 * 1024;
 
 /// The longest incomplete record kept. A producer that never writes a boundary
 /// has its bytes passed on as a record of this size, so memory stays bounded.
+/// A held record with no text and its `\r` waits one read more past it, as
+/// that read settles it.
 const MAX_CARRY_BYTES: usize = 1024 * 1024;
 
 /// One stage of the chain, run on the reader thread for every record. Must
@@ -323,8 +325,7 @@ const AFTER_POLL: Duration = Duration::from_millis(1);
 /// with no text (nothing, an escape, spaces) waits with its `\r` for the
 /// next read, which says whether it is a blank line or a bare `\r`: a stage
 /// tells the two apart ([`Line::returns`]), and there is nothing to show
-/// meanwhile. A hidden
-/// record forwards neither, only its escape sequences.
+/// meanwhile. A hidden record forwards neither, only its escape sequences.
 struct Splitter {
     carry: Vec<u8>,
     lines: Classifier,
@@ -405,7 +406,7 @@ impl Splitter {
         }
         carry.drain(..start);
         self.carry = carry;
-        if self.carry.len() > MAX_CARRY_BYTES {
+        if !self.held_cr && self.carry.len() > MAX_CARRY_BYTES {
             self.flush_carry();
         }
         self.out.flush();
@@ -994,6 +995,26 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&out),
             "wait\r\n(last line repeated 2 more times)\n\r\nwait\r\n"
+        );
+    }
+
+    /// So does one past the carry cap: it waits one read more, not the cap.
+    #[test]
+    fn a_held_blank_line_past_the_carry_cap_waits_too() {
+        let blank = b"\x1b[K".repeat(MAX_CARRY_BYTES / 3 + 10);
+        let mut first = b"wait\r\nwait\r\nwait\r\n".to_vec();
+        first.extend(&blank);
+        first.push(b'\r');
+        let mut chunks: Vec<&[u8]> = first.chunks(8190).collect();
+        chunks.push(b"\nwait\r\n");
+        let repeats = super::super::processors::CollapseRepeats::default().under_pty(true);
+        let out = run_chunks(&chunks, vec![Box::new(repeats)]);
+        let mut want = b"wait\r\n(last line repeated 2 more times)\n".to_vec();
+        want.extend(&blank);
+        want.extend(b"\r\nwait\r\n");
+        assert!(
+            out == want,
+            "the count before the blank line, and no extra one"
         );
     }
 
