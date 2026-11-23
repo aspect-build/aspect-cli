@@ -113,7 +113,7 @@ turns one off and `--tips:surfaces=<id>=<surface>,...` moves it:
     load("@aspect//tips.axl", "TIP_SHOW_FIRST", "TIP_WARNING", "TipsTrait", "on_console_line", "tip_rule")
 
     ctx.traits[TipsTrait].rules.append(tip_rule(
-        id = "cache_token",
+        id = "cache-token",
         when = on_console_line(r"PERMISSION_DENIED.*remote cache"),
         show = TIP_SHOW_FIRST,
         severity = TIP_WARNING,

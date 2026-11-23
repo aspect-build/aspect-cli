@@ -72,7 +72,6 @@ load(
     "severity_rank",
     "silence_hint_line",
     "strip_code_fences",
-    "terminal_hint_line",
     "terminal_more_line",
     "terminal_now_line",
     "terminal_tip_lines",
@@ -726,8 +725,8 @@ def _capture(ctx):
 
 def _test_terminal_format(_):
     """`SEVERITY[id]: title`, the body indented, no footer."""
-    _eq("one line", terminal_tip_lines("disk_full", TIP_WARNING, "The disk is full", "`aspect gc` prunes."), [
-        "⚠️ WARNING[disk_full]: The disk is full",
+    _eq("one line", terminal_tip_lines("disk-full", TIP_WARNING, "The disk is full", "`aspect gc` prunes."), [
+        "⚠️ WARNING[disk-full]: The disk is full",
         "  `aspect gc` prunes.",
     ])
     _eq("multi-line, fences stripped", terminal_tip_lines("x", TIP_SUGGESTION, "T", "Run:\n\n```\naspect gc\n```\n"), [
@@ -740,11 +739,10 @@ def _test_terminal_format(_):
     _eq("coloured", ansi.strip(terminal_tip_lines("x", TIP_IMPORTANT, "T", "", True)[0]), "🔥 IMPORTANT[x]: T")
     _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "⚠️ WARNING[x]: 3 more; the last: T")
     _eq("now", terminal_now_line("x", TIP_INFO, "T"), "ℹ️ INFO[x]: now: T")
-    _eq("hint", "INFO[tips_hint]: Silence a tip with `--tips:silence=<id>` (shown: a, b)" in terminal_hint_line(["a", "b"]), True)
 
 def _test_show_each_with_a_cap(ctx):
     """Each changed emit prints up to `max_shown`; the rest are counted for
-    one line at the end, then the hint names the ids printed."""
+    one line at the end."""
     _reset(ctx)
     lines = _capture(ctx)
     for i in range(4):
@@ -752,8 +750,7 @@ def _test_show_each_with_a_cap(ctx):
     add_tip(ctx, id = "e", severity = TIP_WARNING, title = "T3", body = "", max_shown = 2)
     _eq("two printed", lines, ["⚠️ WARNING[e]: T0", "⚠️ WARNING[e]: T1"])
     tips._finish_for_test(ctx)
-    _eq("then counted, and the hint", lines[2:4], ["⚠️ WARNING[e]: 2 more; the last: T3", lines[3]])
-    _eq("hint names it", "(shown: e)" in lines[3], True)
+    _eq("then counted", lines[2:], ["⚠️ WARNING[e]: 2 more; the last: T3"])
     _reset(ctx)
 
 def _test_show_first_and_end(ctx):
@@ -774,19 +771,17 @@ def _test_show_first_and_end(ctx):
         "  b",
     ])
     _eq("end's cap counts the rest", lines[4], "ℹ️ INFO[n]: 1 more; the last: c")
-    _eq("hint", "(shown: f, n)" in lines[5], True)
+    _eq("nothing after", len(lines), 5)
     _reset(ctx)
 
-def _test_quiet_reemits_and_silenced_hint(ctx):
-    """An unchanged re-emit neither prints nor counts; the hint is silenced
-    by its own id, and absent when nothing printed."""
+def _test_quiet_reemits(ctx):
+    """An unchanged re-emit neither prints nor counts."""
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
     add_tip(ctx, id = "q", severity = TIP_INFO, title = "same", body = "")
-    tips._set_silenced_for_test(ctx, ["tips_hint"])
     tips._finish_for_test(ctx)
-    _eq("printed once, no more line, no hint", lines, ["ℹ️ INFO[q]: same"])
+    _eq("printed once, no more line", lines, ["ℹ️ INFO[q]: same"])
     _reset(ctx)
     lines = _capture(ctx)
     add_tip(ctx, id = "o", severity = TIP_INFO, title = "same", body = "", occurrence = True, max_shown = 1)
@@ -991,7 +986,7 @@ def _test_impl(ctx):
     _test_terminal_format(ctx)
     _test_show_each_with_a_cap(ctx)
     _test_show_first_and_end(ctx)
-    _test_quiet_reemits_and_silenced_hint(ctx)
+    _test_quiet_reemits(ctx)
     _test_merge_aggregate(ctx)
     _test_aggregates_merge_once_per_batch(ctx)
     _test_rule_tips_from_a_report(ctx)

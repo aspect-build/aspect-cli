@@ -265,14 +265,8 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("WARNING[server_crash]: The Bazel server crashed"),
+        stderr.contains("WARNING[server-crash]: The Bazel server crashed"),
         "{stderr}"
-    );
-    assert!(
-        stderr.contains(
-            "INFO[tips_hint]: Silence a tip with `--tips:silence=<id>` (shown: server_crash)"
-        ),
-        "the hint once, at the end, naming what was shown:\n{stderr}"
     );
     assert!(
         !stderr.contains("[1 / 2] Compiling"),
@@ -405,7 +399,7 @@ def config(ctx: ConfigContext):
 fn tips_and_drops_follow_their_settings() {
     let (_dir, stderr) = noisy_build(
         &[
-            "--tips:silence=server_crash",
+            "--tips:silence=server-crash",
             "--console:drop=indicated that a canonical",
         ],
         &[],
@@ -430,7 +424,7 @@ fn a_silent_layout_keeps_the_end_of_bazels_console() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("WARNING[server_crash]: The Bazel server crashed"),
+        stderr.contains("WARNING[server-crash]: The Bazel server crashed"),
         "{stderr}"
     );
 }

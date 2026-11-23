@@ -33,7 +33,7 @@ load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SHOW_FIRST", "TIP_WARNING", "on_c
 
 CONSOLE_TIP_RULES = [
     tip_rule(
-        id = "server_crash",
+        id = "server-crash",
         when = on_console_line(r"Server terminated abruptly|FATAL: bazel ran out of memory"),
         severity = TIP_WARNING,
         title = "The Bazel server crashed",
@@ -43,7 +43,7 @@ CONSOLE_TIP_RULES = [
         example = "Server terminated abruptly (error code: 14, error message: 'Socket closed', log file: '/home/user/.cache/bazel/_bazel_user/0123456789abcdef/server/jvm.out')",
     ),
     tip_rule(
-        id = "disk_full",
+        id = "disk-full",
         # Bazel's own error, or its crash's exception at the start of a line
         # of its trace: not a tool's output that merely mentions a full disk.
         when = on_console_line(r"^(?:(?:ERROR|FATAL): .*|java\.io\.IOException: )No space left on device"),

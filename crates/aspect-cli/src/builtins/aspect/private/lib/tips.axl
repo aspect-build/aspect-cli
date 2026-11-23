@@ -37,8 +37,7 @@ need to probe — the data flow just goes quiet.
 A tip prints as `<emoji> SEVERITY[id]: title` with its body indented two
 spaces (`terminal_tip_lines`), when its id's `show` says (see "When a tip
 shows on the terminal"). When the task ends, a line per id counts what was
-not printed, and a last line names the ids shown and how to silence them
-(`tips_hint`, itself silenceable).
+not printed.
 
 # Severity ordering (highest → lowest urgency)
 
@@ -49,7 +48,7 @@ not printed, and a last line names the ids shown and how to silence them
 """
 
 load("./ansi.axl", "ansi")
-load("./links.axl", "CI_API_TOKEN_URL", "CLI_TIPS_SILENCE_URL")
+load("./links.axl", "CI_API_TOKEN_URL")
 load("./text.axl", "did_you_mean_then")
 
 # ── Severity constants ───────────────────────────────────────────────
@@ -1017,13 +1016,6 @@ def terminal_now_line(id, severity, title, color_on = False):
     printed: its title now."""
     return _tip_head(id, severity, "now: " + title, color_on)
 
-# The id of the end-of-task line saying how to silence the tips shown.
-TIPS_HINT_ID = "tips_hint"
-
-def terminal_hint_line(ids, color_on = False):
-    """The end-of-task line naming the ids shown and how to silence them."""
-    return _tip_head(TIPS_HINT_ID, TIP_INFO, "Silence a tip with `--tips:silence=<id>` (shown: %s)" % ", ".join(ids), color_on) + "; see " + CLI_TIPS_SILENCE_URL
-
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
     Markdown blockquote — the closest "box" on GHSC summaries and BK
@@ -1242,8 +1234,7 @@ def _tips_impl(ctx):
         id's tips in their final state, a line per id with what it did not
         print (`terminal_more_line`: for `TIP_SHOW_EACH` the occurrences, for
         the others the tips) or, for `TIP_SHOW_FIRST`, how its printed tip
-        changed (`terminal_now_line`), then, when any tip was printed, how to
-        silence them (`terminal_hint_line`). A tip emitted after it prints at
+        changed (`terminal_now_line`). A tip emitted after it prints at
         once."""
         if not auto_print[0] or finished[0]:
             return
@@ -1277,9 +1268,6 @@ def _tips_impl(ctx):
                 now = [t for t in tips_for if printed[id].get(t.get("key", "")) not in [None, (t["title"], t["body"])]]
                 if now:
                     _print([terminal_now_line(id, now[-1]["severity"], now[-1]["title"], color_on)])
-        names = [id for id in order if shown[id]]
-        if names and TIPS_HINT_ID not in silenced:
-            _print([terminal_hint_line(names, color_on)])
 
     def _add(call_ctx, tip):
         if tip["id"] in silenced:
