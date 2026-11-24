@@ -1352,9 +1352,10 @@ def _tips_impl(ctx):
         if not auto_print[0] or finished[0]:
             return
 
-        # Through the feature's own context: a task without the Tips trait
-        # (`history list`) still ends here.
-        terminal_app_links_tip(ctx)
+        # Only on a task with the Tips trait: one without it (`history
+        # list`) still ends here, and a tip hook reads the task's context.
+        if _TipsTrait in task_ctx.traits:
+            terminal_app_links_tip(task_ctx)
         finished[0] = True
         color_on = task_ctx.std.io.stderr.color
         for id in order:
