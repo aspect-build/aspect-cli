@@ -26,3 +26,15 @@ exports_files(
     ],
     visibility = ["//visibility:public"],
 )
+
+exports_files(
+    ["MODULE.aspect"],
+    visibility = ["//crates/aspect-cli:__pkg__"],
+)
+
+# This repo's own `.aspect/` config, for tests that load the surface it defines.
+filegroup(
+    name = "aspect_config",
+    srcs = glob([".aspect/**"]),
+    visibility = ["//crates/aspect-cli:__pkg__"],
+)

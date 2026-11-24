@@ -153,6 +153,27 @@ rust_test(
 )
 
 rust_test(
+    name = "feature_shorthand_test",
+    srcs = ["tests/feature_shorthand.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    compile_data = ["src/builtins/aspect/bazel/value_flags.axl"],
+    crate_root = "tests/feature_shorthand.rs",
+    data = [
+        ":aspect-cli",
+        "//:MODULE.aspect",
+        "//:aspect_config",
+    ],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+        "ASPECT_REPO_MODULE": "$(rootpath //:MODULE.aspect)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "worktree_color_test",
     srcs = ["tests/worktree_color.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/worktree_color.rs",

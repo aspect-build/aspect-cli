@@ -4,7 +4,8 @@ It covers two things: the lines Aspect prints around a task, and Bazel's
 console on every `ctx.bazel.build` / `ctx.bazel.test` that leaves stdout and
 stderr to the CLI (`aspect build`, `aspect test`, `aspect lint`, ...).
 
-`--console:enabled=false` (or `ctx.features[Console].enabled = False`) sets
+`--console=false` (or `--console:enabled=false`, or
+`ctx.features[Console].enabled = False`) sets
 both aside: Aspect's lines take the `full` layout, whatever the four layout
 args say; Bazel's stderr is left inherited, as `bazel` itself shows it, unless
 another feature adds stages of its own; and the tip rules are off, built-in

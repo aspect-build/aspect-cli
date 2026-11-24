@@ -3,7 +3,8 @@
 CLI plugin. Opens the invocation's results page in a browser when the task
 ends.
 
-Off by default, as the plugin's `--open` is: `--open-invocation:enabled=true`.
+Off by default, as the plugin's `--open` is: `--open-invocation` (or
+`--open-invocation:enabled=true`).
 
 The page depends on who uploads the build event stream:
 

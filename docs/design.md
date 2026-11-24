@@ -184,7 +184,7 @@ Both config-only args (`args.custom(...)`) and CLI flags (`args.boolean(...)`, `
 
 **Naming:** features must be exported as **CamelCase** (`ArtifactUpload`). This is enforced at definition time. The convention mirrors Bazel providers (`CcInfo`, `DefaultInfo`) — features are referenced as type keys (`ctx.features[ArtifactUpload]`), and CamelCase signals this role. `display_name` overrides the auto-derived Title Case heading name. The `summary` and `description` fields work identically to tasks.
 
-Features are disabled per-task via `ctx.features[ArtifactUpload].enabled = False` in `config.axl`.
+Features are disabled per-task via `ctx.features[ArtifactUpload].enabled = False` in `config.axl`. On the command line, `--artifact-upload:enabled=false` does the same for one invocation, and the bare `--artifact-upload` / `--artifact-upload=false` is its short form; a feature whose name is already another flag (`deployment`) gets no short form.
 
 ### Trait Definitions
 
