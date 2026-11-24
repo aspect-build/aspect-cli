@@ -29,21 +29,19 @@ whose stdout is already spoken for stay text-only.
 """
 
 load("./bazel_results.axl", "aspect_web_ui_url", "redacted_explicit_command", "render_bes_url")
+load("./output_json.axl", "OUTPUT_JSON", "OUTPUT_TEXT", "SCHEMA_VERSION", "wants_json")
 
-# Bumped whenever a key in `document()` is renamed, removed, or changes meaning.
-# Additive keys do not bump it - consumers must tolerate unknown fields.
-SCHEMA_VERSION = 1
-
-_OUTPUT_TEXT = "text"
-_OUTPUT_JSON = "json"
+# How many failed targets the document lists; `failures.truncated.targets`
+# says when there were more.
+_MAX_TARGETS = 1000
 
 def output_arg() -> dict:
     """The `--output` arg every task emitting a results document registers.
     Splat into `task(args)` alongside the task's own args."""
     return {
         "output": args.string(
-            default = _OUTPUT_TEXT,
-            values = [_OUTPUT_TEXT, _OUTPUT_JSON],
+            default = OUTPUT_TEXT,
+            values = [OUTPUT_TEXT, OUTPUT_JSON],
             description = (
                 "stdout format. `text` (default): human-readable output as " +
                 "usual. `json`: one result document on stdout when the task " +
@@ -91,12 +89,14 @@ def _test_entries(entries: list, details: dict) -> list:
     return out
 
 def _action_entries(entries: list) -> list:
-    """Failed build actions. `stderr_path` is the action's captured stderr on
-    disk ("" when the BES event carried no local URI)."""
+    """Failed build actions. `stdout_path` and `stderr_path` are the action's
+    captured streams on disk ("" when the BES event carried no local URI);
+    some tools (tsc) write their errors to stdout."""
     return [
         {
             "label": a.get("label", ""),
             "mnemonics": a.get("mnemonics", []) or [],
+            "stdout_path": a.get("stdout_path", ""),
             "stderr_path": a.get("stderr_path", ""),
         }
         for a in entries or []
@@ -167,10 +167,12 @@ def _failures(bz: dict) -> dict:
         list_key, total = _TRUNCATION[name]
         kept = [e for e in bz.get(list_key, []) or [] if e.get("label")]
         truncated[name] = total(bz) > len(kept)
+    targets = bz.get("failed_targets", []) or []
+    truncated["targets"] = len(targets) > _MAX_TARGETS
     return {
         "targets": [
             {"label": t.get("label", ""), "kind": t.get("kind", "")}
-            for t in bz.get("failed_targets", []) or []
+            for t in targets[:_MAX_TARGETS]
         ],
         "actions": _action_entries(bz.get("failed_actions", [])),
         "tests": _test_entries(bz.get("failed_tests", []), details),
@@ -216,12 +218,6 @@ def document(env: std.Env, data: dict, task_path: str, status: str, exit_code: i
             "description": bz.get("abort_description", ""),
         }
     return doc
-
-def wants_json(args) -> bool:
-    """True when this invocation asked for the JSON document. `args` is
-    `ctx.args`, whose type is not expressible here. False for a task that
-    declares no `--output` at all, so callers need no guard of their own."""
-    return getattr(args, "output", _OUTPUT_TEXT) == _OUTPUT_JSON
 
 def child_stdout(io, args):
     """The `stdout` to hand a spawned process: our stderr when the document owns

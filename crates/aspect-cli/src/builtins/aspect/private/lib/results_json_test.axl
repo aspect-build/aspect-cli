@@ -13,6 +13,7 @@ with the test task's own `ctx.std.env`.
 
 load("./bazel_results.axl", "init_data")
 load("./lifecycle.axl", "ReproFixCommand")
+load("./output_json.axl", "emit_error")
 load("./results_json.axl", "results_json")
 
 def _eq(label, got, want):
@@ -247,7 +248,47 @@ def _test_counts_and_timing_default_to_zero(ctx):
     _eq("no failures", doc["failures"]["tests"], [])
     _eq("nothing truncated", doc["failures"]["truncated"]["tests"], False)
 
+def _test_an_action_names_both_its_streams(ctx):
+    """An action's stdout is where some tools (tsc) write their errors, so it
+    crosses beside its stderr."""
+    d = init_data()
+    d["bazel"]["failed_actions"].append({"label": "//a:gen", "mnemonics": ["Genrule"], "stdout_path": "/out/a/gen.stdout", "stderr_path": ""})
+    d["bazel"]["failed_action_labels"] = ["//a:gen"]
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("stdout path", doc["failures"]["actions"][0]["stdout_path"], "/out/a/gen.stdout")
+    _eq("stderr path", doc["failures"]["actions"][0]["stderr_path"], "")
+
+def _test_failed_targets_are_capped(ctx):
+    """The failed targets of a broken shared dependency can run to thousands;
+    the document lists the first ones and says it cut the list."""
+    d = init_data()
+    d["bazel"]["failed_targets"] = [{"label": "//t:%d" % i, "kind": "cc_library"} for i in range(1005)]
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("capped", len(doc["failures"]["targets"]), 1000)
+    _true("flagged", doc["failures"]["truncated"]["targets"])
+    d["bazel"]["failed_targets"] = d["bazel"]["failed_targets"][:3]
+    _eq("not flagged", results_json.document(ctx.std.env, d, "build", "failed", 1)["failures"]["truncated"]["targets"], False)
+
+def _test_an_error_document_only_under_json(ctx):
+    """A task ending before its result (a failed health check) writes an
+    error document under `--output=json`, and nothing under `text`."""
+    written = []
+    fake = struct(
+        args = struct(output = "json"),
+        std = struct(io = struct(stdout = struct(write = lambda s: written.append(s)))),
+    )
+    emit_error(fake, "health_check", "disk full")
+    _eq("one line", len(written), 1)
+    doc = json.decode(written[0])
+    _eq("shape", (doc["schema_version"], doc["error"], doc["message"]), (1, "health_check", "disk full"))
+    written.clear()
+    emit_error(struct(args = struct(output = "text"), std = fake.std), "health_check", "disk full")
+    _eq("nothing under text", written, [])
+
 _UNIT_TESTS = [
+    _test_an_action_names_both_its_streams,
+    _test_failed_targets_are_capped,
+    _test_an_error_document_only_under_json,
     _test_secrets_never_reach_the_document,
     _test_resolved_flag_lists_are_not_exposed,
     _test_unbounded_fields_are_not_exposed,

@@ -1,0 +1,28 @@
+"""The `--output=json` contract below the results document: whether one was
+asked for, its schema version, and the document a task writes in its place
+when it ends before it has a result (a failed health check), as `main`
+writes one for a config error. Loads nothing, so `lifecycle.axl` can end a
+task with it, below `results_json.axl`, which renders the result.
+"""
+
+# Bumped whenever a key in a document is renamed, removed, or changes
+# meaning. Additive keys do not bump it: consumers tolerate unknown fields.
+SCHEMA_VERSION = 1
+
+OUTPUT_TEXT = "text"
+OUTPUT_JSON = "json"
+
+def wants_json(args) -> bool:
+    """True when this invocation asked for the JSON document. `args` is
+    `ctx.args`, whose type is not expressible here. False for a task that
+    declares no `--output` at all, so callers need no guard of their own."""
+    return getattr(args, "output", OUTPUT_TEXT) == OUTPUT_JSON
+
+def emit_error(ctx, error: str, message: str) -> None:
+    """Write `{"schema_version", "error", "message"}` to stdout under
+    `--output=json`, for a task ending before it has a result: `error` names
+    why (`health_check`), `message` says what. Nothing under `text`."""
+    if not wants_json(ctx.args):
+        return
+    doc = {"schema_version": SCHEMA_VERSION, "error": error, "message": message}
+    ctx.std.io.stdout.write(json.encode(doc) + "\n")

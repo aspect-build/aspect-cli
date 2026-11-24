@@ -46,6 +46,7 @@ load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation", "bazel_rc")
 load("./ansi.axl", "ansi")
 load("./environment.axl", "detect_ci", "feature_logger")
 load("./health_check.axl", "HealthCheckTrait", "run_health_checks")
+load("./output_json.axl", "emit_error")
 load("./runner_job_history.axl", "append_runner_job_history")
 
 # Multi-style progress message. Producers set whichever variants they
@@ -1032,7 +1033,9 @@ def _fail_health_check(ctx, surface, kind, data, reason):
     the task with `reason` as an `ERROR:` line and no traceback: an unhealthy
     runner is an expected refusal, and the health check has already printed
     what it found and tried. Emits the terminal update itself so the surface
-    reads "Health check failed" rather than the exit's message."""
+    reads "Health check failed" rather than the exit's message, and under
+    `--output=json` a `health_check` error document, as the task's result
+    document is never written."""
     _track_and_dispatch(ctx, surface, TaskUpdate(
         kind = kind,
         status = "failed",
@@ -1041,6 +1044,7 @@ def _fail_health_check(ctx, surface, kind, data, reason):
         data = data,
         progress = ProgressStyles(body = _HEALTH_CHECK_FAILED),
     ))
+    emit_error(ctx, "health_check", reason)
     ctx.std.process.exit(1, "Health check failed: " + reason)
 
 def _new(ctx, data):
