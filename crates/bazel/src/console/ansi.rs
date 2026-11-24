@@ -60,7 +60,7 @@ fn escape_len(b: &[u8]) -> usize {
 }
 
 /// Split `b` into its runs of text (`false`) and escape sequences (`true`).
-pub(crate) fn segments(b: &[u8]) -> impl Iterator<Item = (bool, &[u8])> {
+pub fn segments(b: &[u8]) -> impl Iterator<Item = (bool, &[u8])> {
     let mut rest = b;
     std::iter::from_fn(move || {
         if rest.is_empty() {
@@ -232,7 +232,7 @@ pub fn truncate(b: &[u8], width: usize) -> Vec<u8> {
 
 /// Whether `seg`, an escape sequence, sets colours or text attributes (SGR:
 /// `ESC [ … m`) rather than moving the cursor or erasing.
-fn is_sgr(seg: &[u8]) -> bool {
+pub fn is_sgr(seg: &[u8]) -> bool {
     seg.starts_with(b"\x1b[") && seg.ends_with(b"m")
 }
 

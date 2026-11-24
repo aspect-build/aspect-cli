@@ -468,6 +468,11 @@ impl RecordFile {
         &self.path
     }
 
+    /// The task's secret flag values, which its record and output redact.
+    pub fn secrets(&self) -> &[String] {
+        &self.secrets
+    }
+
     /// Change the record and write it.
     pub fn update(&self, f: impl FnOnce(&mut TaskRecord)) {
         f(&mut self.record.lock().unwrap());

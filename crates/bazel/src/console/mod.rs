@@ -432,6 +432,7 @@ impl Config {
             },
             feed: None,
             hidden: self.output == Output::Hidden,
+            copy: None,
         }
     }
 

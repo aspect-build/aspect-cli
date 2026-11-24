@@ -2,7 +2,11 @@
 
 The task history (`aspect/history/` in the user cache, or
 `$ASPECT_HISTORY_DIR`) keeps every build's execution log, profile and build
-event stream already. This feature adds, off by default:
+event stream already, and the task's whole output as it was shown, its
+secret flag values redacted (not what a child wrote to a stream it
+inherited, such as `bazel run`'s program): `output.log` plain, for editors,
+`grep` and agents, and `output.ansi` with its colour kept, for a pager that
+shows it (`less -R`). This feature adds, off by default:
 
 - **Action logs** (`--history:action-logs`): the stdout and stderr Bazel
   wrote for each action, kept in the build's folder as

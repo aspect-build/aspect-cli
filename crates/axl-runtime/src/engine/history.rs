@@ -5,7 +5,8 @@
 //! refused (see [`History::earlier_run`]). Every task's entry is made when it
 //! starts, holding its record, `task.json` (see [`task_record`]): what ran,
 //! where, how it ended, and each of its Bazel invocations, with a summary of
-//! each one's build event stream. A subfolder per Bazel invocation that keeps
+//! each one's build event stream; and its output, `output.log` and
+//! `output.ansi` (see [`crate::out::keep_output`]). A subfolder per Bazel invocation that keeps
 //! a file (`bazel/<n>`, counting only those) is made at its spawn.
 //!
 //! A Bazel invocation's folder holds its compact execution log, workspace log,
@@ -34,7 +35,7 @@
 //! the record written within a week). Past that, a run elsewhere that has
 //! gone longer than the guard without writing, and is not among the newest
 //! kept, can lose its files; its record, written again later, stays evicted. Entries with
-//! only a record (a task that never built, one evicted) count toward neither
+//! no build's files (a task that never built, one evicted) count toward neither
 //! the budget nor `keep`; they are capped apart, by [`Retention::records`] and
 //! [`Retention::record_age`] ([`prune_records`]), also at the end of a run
 //! that started no prune. Dotfiles at the root serve the prune: `.pruned`
@@ -96,7 +97,7 @@ pub struct Retention {
     /// measured again. Far longer than `guard`, so a build that went quiet and
     /// wrote again is still measured.
     pub settle: Duration,
-    /// The most records kept of runs with no files besides their `task.json`
+    /// The most records kept of runs with no build's files
     /// (ones that never built, and ones whose files a prune removed), the
     /// most recently started first.
     pub records: usize,
@@ -122,6 +123,8 @@ impl Default for Retention {
 #[derive(Debug)]
 pub struct History {
     root: PathBuf,
+    /// This task's output files, as [`crate::out::keep_output`] numbered them.
+    output: Mutex<Option<u64>>,
     retention: Retention,
     current: Mutex<Option<Invocation>>,
     /// See [`History::record_every_build`].
@@ -164,6 +167,7 @@ impl History {
     pub fn at(root: PathBuf, retention: Retention) -> Self {
         Self {
             root,
+            output: Mutex::new(None),
             retention,
             current: Mutex::new(None),
             record: AtomicBool::new(false),
@@ -223,7 +227,14 @@ impl History {
         let made =
             create_private_dir(&dir).and_then(|()| RecordFile::begin(&dir, record, start.git_root));
         match made {
-            Ok(file) => *self.task_record.lock().unwrap() = Some(file),
+            Ok(file) => {
+                // Everything the task writes from now on, beside its record.
+                match crate::out::keep_output(&dir, file.secrets().to_vec()) {
+                    Ok(generation) => *self.output.lock().unwrap() = Some(generation),
+                    Err(e) => tracing::debug!("no output files in {}: {e}", dir.display()),
+                }
+                *self.task_record.lock().unwrap() = Some(file);
+            }
             Err(e) => tracing::debug!("no history record for this task in {}: {e}", dir.display()),
         }
     }
@@ -341,6 +352,9 @@ impl History {
     ) {
         for slot in self.slots.lock().unwrap().drain(..) {
             slot.summarize(true);
+        }
+        if let Some(generation) = self.output.lock().unwrap().take() {
+            crate::out::flush_output(generation);
         }
         let Some(file) = self.task_record.lock().unwrap().take() else {
             return;
