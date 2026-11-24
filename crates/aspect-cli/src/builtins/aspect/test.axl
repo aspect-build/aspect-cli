@@ -52,8 +52,8 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
 
     If no placeholder appears anywhere, the report path is appended as the
     last positional argument so simple tools like `genhtml` work without
-    extra ceremony. A non-zero exit code from the tool is surfaced as a
-    warning — it does not fail the test task, so uploaders (e.g. codecov)
+    extra ceremony. A tool not found, or a non-zero exit code from it, is
+    surfaced as a warning — it does not fail the test task, so uploaders (e.g. codecov)
     can still publish partial coverage when some tests failed.
     """
     bin, bin_matched = _substitute(bin, report_path)
@@ -66,6 +66,11 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
     if not any_match:
         final_args.append(report_path)
 
+    if ctx.std.process.which(bin) == None:
+        ctx.std.io.stderr.write(
+            "--coverage-tool: '" + bin + "' not found (continuing; tool failure does not fail the test task)\n",
+        )
+        return
     print("Running coverage tool: " + bin + " " + " ".join(final_args))
     status = ctx.std.process.command(bin).args(final_args) \
         .stdout(results_json.child_stdout(ctx.std.io, ctx.args)).spawn().wait()

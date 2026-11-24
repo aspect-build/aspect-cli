@@ -287,6 +287,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 }
             };
 
+            TASK_WANTS_JSON.store(
+                task_wants_json(&root_cmd, &matches),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
             // Everything past here either reports the CLI's own surface or
             // dispatches a task; see `Unloadable` for which may run degraded.
             if !unloadable.is_empty() {
@@ -691,16 +696,53 @@ fn strip_error_prefix(message: &str) -> &str {
     message.trim_start_matches("error: ")
 }
 
-/// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
-/// `--`. Read from the raw arguments because a config error stops the CLI
-/// before they are parsed.
+/// Whether the parsed task's `--output` is the `text`/`json` choice and was
+/// given `json`: set once the command line parses ([`task_wants_json`]).
+static TASK_WANTS_JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the leaf task `matches` selected takes `--output` as the
+/// `text`/`json` choice (`results_json.output_arg()`, not a file path as
+/// `setup bazelrc`'s) and was given `json`.
+fn task_wants_json(cmd: &clap::Command, matches: &clap::ArgMatches) -> bool {
+    if let Some((name, sub)) = matches.subcommand() {
+        return cmd
+            .find_subcommand(name)
+            .is_some_and(|c| task_wants_json(c, sub));
+    }
+    let choice = cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "output")
+        .is_some_and(|a| {
+            let mut values: Vec<String> = a
+                .get_possible_values()
+                .iter()
+                .map(|v| v.get_name().to_string())
+                .collect();
+            values.sort();
+            values == ["json", "text"]
+        });
+    choice
+        && matches
+            .try_get_one::<String>("output")
+            .ok()
+            .flatten()
+            .is_some_and(|v| v == "json")
+}
+
 /// An error document on stdout, `{"schema_version", "error", "message"}`,
 /// for a run that asked for `--output=json` and ends on an error before its
 /// task wrote one: a caller reading stdout otherwise gets nothing to parse.
-/// Nothing when the task already wrote to stdout (a document, then a hook's
-/// failure), so stdout never holds two.
-fn json_error(error: &str, message: &str) {
-    if wants_json_output(std::env::args().skip(1)) && !axl_runtime::engine::stdout_written() {
+/// A config error is judged from the raw arguments (`wants_json_output`),
+/// as it stops the CLI before they parse; any other from the parsed task
+/// (`parsed`). Nothing when the task already wrote to stdout (a document,
+/// then a hook's failure), so stdout never holds two.
+fn json_error(error: &str, message: &str, parsed: bool) {
+    let asked = if parsed {
+        TASK_WANTS_JSON.load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        wants_json_output(std::env::args().skip(1))
+    };
+    if asked && !axl_runtime::engine::stdout_written() {
         outln!(
             "{}",
             serde_json::json!({
@@ -721,6 +763,9 @@ fn error_line(text: &str) -> String {
         .unwrap_or_else(|| text.trim().to_string())
 }
 
+/// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
+/// `--`. Read from the raw arguments because a config error stops the CLI
+/// before they are parsed.
 fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
     let args: Vec<String> = args.into_iter().take_while(|a| a != "--").collect();
     args.iter().enumerate().any(|(i, arg)| {
@@ -760,7 +805,7 @@ fn main() -> ExitCode {
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
                 if exit.code != 0 {
-                    json_error("task_exit", exit.message.as_deref().unwrap_or(""));
+                    json_error("task_exit", exit.message.as_deref().unwrap_or(""), true);
                 }
                 return ExitCode::from(exit.code);
             }
@@ -768,13 +813,14 @@ fn main() -> ExitCode {
             if err.downcast_ref::<ConfigError>().is_some() {
                 let message = format!("{:#}", err.root_cause());
                 errln!("error: {}", strip_error_prefix(&message));
-                json_error("config_error", &message);
+                json_error("config_error", &message, false);
                 return ExitCode::FAILURE;
             }
             errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
             json_error(
                 "task_error",
                 &error_line(&format!("{:#}", err.root_cause())),
+                true,
             );
             ExitCode::FAILURE
         }
