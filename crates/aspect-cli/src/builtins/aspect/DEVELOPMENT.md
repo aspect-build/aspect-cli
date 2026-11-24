@@ -507,7 +507,14 @@ is the authoritative table and a mistyped kind lists every accepted spelling.
 Note that bazel only publishes `ActionExecuted` for *successful* actions when
 `--build_event_publish_all_actions` is set; without it, only failed actions
 produce one, so an `action_executed` filter on a green build legitimately
-yields nothing.
+yields nothing. A task that needs every action asks through `publish_all_actions(bazel_trait)`
+in `private/lib/aspect_flags.axl`, `ctx.bazel.build(publish_all_actions = True)`
+or `keep_action_logs = "all"` rather than the raw flag: the runtime adds the
+flag, and unless the user's own flags or rc ask for it, the BES backends the
+CLI streams to, its file sinks and a requested `--build_event_binary_file` get
+the stream as Bazel sends it without the flag, while hooks and iterators see
+every action. A `--bes_backend` or `--build_event_json_file` Bazel serves
+itself is not trimmed.
 
 The mpsc channel between the broadcaster and the iterator is unbounded; iterate promptly to keep memory in check, or call `events.drain()` to stop accumulating events.
 

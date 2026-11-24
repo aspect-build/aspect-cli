@@ -10,9 +10,11 @@ event stream already. This feature adds, off by default:
   listed, with each action's label, mnemonic, output, exit code and times, in
   `bazel/<n>/actions.json`. `failed` keeps failed actions', which Bazel
   reports by default; `all` keeps every action's that wrote any: those builds run
-  with `--build_event_publish_all_actions` so Bazel reports them. They are
-  hard-linked from where Bazel wrote them, which costs no space until the next
-  build replaces Bazel's own, and copied where a link cannot be made.
+  with `--build_event_publish_all_actions` so Bazel reports them to the CLI,
+  while the BES backends it streams to and a requested BEP file get only what
+  Bazel reports without it, unless your own flags or rc ask for every action.
+  They are hard-linked from where Bazel wrote them, which costs no space until
+  the next build replaces Bazel's own, and copied where a link cannot be made.
 - **Test logs** (`--history:test-logs`): each attempt's `test.log`,
   `test.xml` and other outputs, copied to
   `bazel/<n>/testlogs/[external/<repo>/]<package>/<name>/run_<r>/shard_<s>/attempt_<a>/` and
@@ -49,7 +51,7 @@ History = feature(
         "action_logs": args.string(
             default = "none",
             values = ["none", "failed", "all"],
-            description = "Which actions' stdout and stderr to keep in the history: 'none' (default; leaves config's choice), 'failed', or 'all' (adds --build_event_publish_all_actions).",
+            description = "Which actions' stdout and stderr to keep in the history: 'none' (default; leaves config's choice), 'failed', or 'all' (adds --build_event_publish_all_actions for the CLI's own use; BES backends the CLI streams to get the extra events only if your flags or rc ask).",
         ),
         "test_logs": args.string(
             default = "none",

@@ -53,7 +53,7 @@ use super::iter::WorkspaceEventIter;
 use super::output::TraitConsole;
 use super::wrappers::ExecLogSink;
 use bazel::bes::BuildEventEnvelope;
-use bazel::bes::feed::{BuildEventStream, FileSignal};
+use bazel::bes::feed::{BuildEventStream, FileSignal, FileSink};
 use bazel::bes::kind::{self, event_kind_help, event_kind_in};
 use bazel::bes::sink::grpc;
 use bazel::bes::sink::retry::{RetryConfig, SinkStats};
@@ -323,6 +323,7 @@ impl BuildEventSink {
         rt: AsyncRuntime,
         stream: &BuildEventStream,
         invocation_id: String,
+        trim: bool,
     ) -> anyhow::Result<()> {
         let SinkConfig::Grpc {
             uri,
@@ -351,6 +352,7 @@ impl BuildEventSink {
             metadata.clone(),
             invocation_id,
             retry.clone(),
+            trim,
         );
         *phase = SinkPhase::Live(SinkLive::Grpc { join });
         Ok(())
@@ -1134,17 +1136,18 @@ pub struct Build {
 /// joined the stream. A file sink already naming the path (compared lexically,
 /// not resolved) is left as its only writer. Its folder is created, as Bazel
 /// creates it; one that cannot be costs only the copy, which then fails to open.
-fn tee_requested_bep_file(file_sinks: &mut Vec<(String, Arc<FileSignal>)>, path: PathBuf) {
-    if file_sinks.iter().any(|(p, _)| Path::new(p) == path) {
+fn tee_requested_bep_file(file_sinks: &mut Vec<FileSink>, path: PathBuf, trim: bool) {
+    if file_sinks.iter().any(|sink| Path::new(&sink.path) == path) {
         return;
     }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    file_sinks.push((
-        path.to_string_lossy().into_owned(),
-        Arc::new(FileSignal::new()),
-    ));
+    file_sinks.push(FileSink {
+        path: path.to_string_lossy().into_owned(),
+        signal: Arc::new(FileSignal::new()),
+        trim,
+    });
 }
 
 /// How long [`Build::spawn`] gives a cancelled client to exit before killing
@@ -1161,19 +1164,14 @@ const ABANDON_STOP: Duration = Duration::from_secs(30);
 /// the file would be left in the temp dir holding the build's unredacted
 /// events.
 struct Unstarted {
-    pending: Option<(
-        BuildEventStream,
-        Reservation,
-        Gate,
-        Vec<(String, Arc<FileSignal>)>,
-    )>,
+    pending: Option<(BuildEventStream, Reservation, Gate, Vec<FileSink>)>,
 }
 
 impl Unstarted {
     fn new(
         file: Option<Reservation>,
         gate: Gate,
-        file_sinks: Vec<(String, Arc<FileSignal>)>,
+        file_sinks: Vec<FileSink>,
         max_event_bytes: Option<usize>,
     ) -> Self {
         Self {
@@ -1366,6 +1364,7 @@ impl Build {
         rt: AsyncRuntime,
         history: &History,
         keep_logs: bazel::bes::sink::keep::Keep,
+        publish_all_actions: bool,
         max_event_bytes: Option<usize>,
     ) -> Result<Build, std::io::Error> {
         // Logs to keep are read from the stream, which a build keeping some
@@ -1374,7 +1373,9 @@ impl Build {
         let (build_events, bes_telemetry) = telemetry
             .build_events()
             .resolve(build_events || keep_logs.any(), telemetry.exporting());
-        let (flags, history_asked) = bazel::execlog::take_history_request(flags);
+        let (flags, requests) = bazel::cli_request::take(flags);
+        let history_asked = requests.execlog_in_history;
+        let publish_all_actions = publish_all_actions || requests.all_actions;
         let workspace = workspace_of(directory.as_deref());
         let requested_execlog_path = bazel::execlog::requested_path(
             &flags,
@@ -1475,6 +1476,15 @@ impl Build {
         );
         let requested_workspace_log =
             bazel::workspace_event::requested_path(&flags, verb, directory.as_deref());
+        // Every action is reported when the CLI's own readers need it; then,
+        // unless the caller asked for it too, what goes downstream is trimmed
+        // back to what Bazel reports without it. An rc the CLI did not render
+        // may ask for it unseen, so nothing is trimmed then.
+        let cli_publishes_all_actions = build_events
+            && (publish_all_actions
+                || keep_logs.actions == bazel::bes::sink::keep::ActionLogs::All)
+            && !bazel::bes::sink::downstream::asks_for_all_actions(&flags, verb);
+        let trim_downstream = cli_publishes_all_actions && rc_visible;
 
         let mut cmd = super::runner::CancellableRunner(&signals).command();
         cmd.args(startup_flags);
@@ -1487,25 +1497,29 @@ impl Build {
 
         // File sinks share the BES reader's raw-bytes path (bazel's bytes, but
         // with secrets redacted); gRPC sinks run as broadcaster subscriber threads.
-        let mut file_sinks: Vec<(String, Arc<FileSignal>)> = vec![];
+        let mut file_sinks: Vec<FileSink> = vec![];
         let mut grpc_sinks: Vec<BuildEventSink> = vec![];
         for sink in sinks {
             if let Some(path) = sink.file_path() {
                 let signal = sink.bind_file().map_err(io::Error::other)?;
-                file_sinks.push((path, signal));
+                file_sinks.push(FileSink {
+                    path,
+                    signal,
+                    trim: trim_downstream,
+                });
             } else {
                 grpc_sinks.push(sink);
             }
         }
         if build_events && let Some(path) = requested_bep_path {
-            tee_requested_bep_file(&mut file_sinks, path);
+            tee_requested_bep_file(&mut file_sinks, path, trim_downstream);
         }
-        // The history keeps the stream as the sinks get it, redacted. Bazel's
+        // The history keeps the whole stream, redacted. Bazel's
         // own file is a temp file the reader moves away at each attempt and
         // removes, since nothing reads it by path once the stream is over.
         if build_events && let Some(dir) = &history_dir {
             let path = dir.join(bazel::bes::binary_file::FILE_NAME);
-            file_sinks.push((
+            file_sinks.push(FileSink::new(
                 path.to_string_lossy().into_owned(),
                 Arc::new(FileSignal::new()),
             ));
@@ -1516,16 +1530,15 @@ impl Build {
         // once the spawned child's pid is in hand and every subscriber is bound.
         //
         // Bazel's default action publishing (failed actions only) is left
-        // alone, per-action data coming from the execution log, unless this
-        // build keeps every action's logs (below). A feature uploading every
-        // action's logs adds `--build_event_publish_all_actions` itself.
+        // alone, per-action data coming from the execution log, unless the
+        // CLI's own readers need every action (above).
         let bes_file = if build_events {
             let file = BuildEventStream::reserve();
             cmd.arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg(bazel::bes::binary_file::FLAG)
                 .arg(file.path());
-            if keep_logs.actions == bazel::bes::sink::keep::ActionLogs::All {
-                cmd.arg(bazel::bes::sink::keep::PUBLISH_ALL_ACTIONS);
+            if cli_publishes_all_actions {
+                cmd.arg(bazel::bes::sink::downstream::PUBLISH_ALL_ACTIONS);
             }
             Some(file)
         } else {
@@ -1736,7 +1749,7 @@ impl Build {
                 }
                 let stream = build_event_stream.stream().unwrap();
                 for sink in grpc_sinks {
-                    sink.bind_grpc(rt.clone(), stream, invocation_id.clone())
+                    sink.bind_grpc(rt.clone(), stream, invocation_id.clone(), trim_downstream)
                         .map_err(io::Error::other)?;
                 }
                 Some(invocation_id)
@@ -3243,6 +3256,235 @@ Test = task(implementation = _impl)
             "fine\n"
         );
         assert!(!dir.join("testlogs").exists(), "test logs not asked for");
+    }
+
+    /// The actions a BEP file reports, as `(label, success)`.
+    #[cfg(unix)]
+    fn bep_file_actions(path: &std::path::Path) -> Vec<(String, bool)> {
+        use axl_proto::build_event_stream::build_event::Payload;
+        use axl_proto::build_event_stream::build_event_id::Id;
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("the BEP file at {} should exist: {e}", path.display()));
+        let mut buf = bytes.as_slice();
+        let mut actions = vec![];
+        while !buf.is_empty() {
+            let event =
+                axl_proto::build_event_stream::BuildEvent::decode_length_delimited(&mut buf)
+                    .expect("the BEP file should hold whole events");
+            if let (Some(Payload::Action(a)), Some(Id::ActionCompleted(id))) = (
+                &event.payload,
+                event.id.as_ref().and_then(|id| id.id.as_ref()),
+            ) {
+                actions.push((id.label.clone(), a.success));
+            }
+        }
+        actions
+    }
+
+    /// Run a build of the `action_and_test_logs` scenario under an rc of
+    /// `rc` the CLI renders, with `extra` flags and `args` to `ctx.bazel.build`,
+    /// writing a requested BEP file and an AXL file sink, and asserting an
+    /// iterator saw both actions. Returns the actions the file sinks got, those
+    /// the history's copy holds, and the command line.
+    #[cfg(unix)]
+    fn every_action_downstream(
+        rc: &str,
+        extra: &[&str],
+        args: &str,
+    ) -> (Vec<(String, bool)>, Vec<(String, bool)>, String) {
+        let history = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let rc_file = out.path().join("test.bazelrc");
+        std::fs::write(&rc_file, rc).unwrap();
+        let asked = out.path().join("asked.bep");
+        let sink = out.path().join("sink.bep");
+        let flags: Vec<String> = [
+            "--scenario=action_and_test_logs".to_string(),
+            format!("--basil-scratch={}", scratch.path().display()),
+            format!("--build_event_binary_file={}", asked.display()),
+        ]
+        .into_iter()
+        .chain(extra.iter().map(|f| f.to_string()))
+        .collect();
+        let script = format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    rc = ctx.bazel.parse_rc(startup_flags = ["--nosystem_rc", "--nohome_rc", "--noworkspace_rc", "--bazelrc={rc_file}"], flags = [])
+    build = ctx.bazel.build(
+        rc = rc,
+        flags = {flags:?},
+        build_events = [iter, bazel.build_events.file(path = {sink:?})],
+        stderr = None,
+        {args}
+    )
+    seen = len([e for e in iter if e.kind == "action_completed"])
+    build.wait()
+    return 0 if seen == 2 else 1
+
+Test = task(implementation = _impl)
+"#,
+            sink = sink.to_str().unwrap(),
+            rc_file = rc_file.display(),
+        );
+        run_task_with_history(&script, history.path());
+        let kept =
+            bazel_dir(&only_invocation(history.path()), 1).join(bazel::bes::binary_file::FILE_NAME);
+        let args = std::fs::read_to_string(scratch.path().join("args")).unwrap();
+        let asked = bep_file_actions(&asked);
+        assert_eq!(asked, bep_file_actions(&sink), "both file sinks agree");
+        (asked, bep_file_actions(&kept), args)
+    }
+
+    #[cfg(unix)]
+    fn broken() -> (String, bool) {
+        ("//pkg:broken".to_string(), false)
+    }
+
+    #[cfg(unix)]
+    fn fine() -> (String, bool) {
+        ("//pkg:fine".to_string(), true)
+    }
+
+    /// Every action the CLI asked Bazel for reaches its own readers, the
+    /// history's copy and an iterator, but not a requested BEP file or a file
+    /// sink: those get what Bazel reports without the flag.
+    #[cfg(unix)]
+    #[test]
+    fn the_actions_the_cli_asked_for_stay_with_its_own_readers() {
+        let (downstream, kept, args) =
+            every_action_downstream("", &[], r#"keep_action_logs = "all","#);
+        assert!(
+            args.lines()
+                .any(|a| a == "--build_event_publish_all_actions"),
+            "{args}"
+        );
+        assert_eq!(downstream, [broken()]);
+        assert_eq!(kept, [broken(), fine()]);
+    }
+
+    /// The same, asked for through `publish_all_actions`, with no logs kept.
+    #[cfg(unix)]
+    #[test]
+    fn publish_all_actions_asks_bazel_for_every_action_for_the_cli_alone() {
+        let (downstream, kept, args) =
+            every_action_downstream("", &[], "publish_all_actions = True,");
+        assert!(
+            args.lines()
+                .any(|a| a == "--build_event_publish_all_actions"),
+            "{args}"
+        );
+        assert_eq!(downstream, [broken()]);
+        assert_eq!(kept, [broken(), fine()]);
+    }
+
+    /// A feature asks through the task's flags: the request is taken off the
+    /// command line, Bazel gets the flag, and downstream is trimmed.
+    #[cfg(unix)]
+    #[test]
+    fn a_feature_request_in_the_flags_is_the_clis() {
+        let (downstream, kept, args) =
+            every_action_downstream("", &["--build_event_publish_all_actions=%aspect_cli%"], "");
+        assert!(!args.contains("%aspect_cli%"), "{args}");
+        assert!(
+            args.lines()
+                .any(|a| a == "--build_event_publish_all_actions"),
+            "{args}"
+        );
+        assert_eq!(downstream, [broken()]);
+        assert_eq!(kept, [broken(), fine()]);
+    }
+
+    /// `ctx.bazel.test` takes `publish_all_actions` too.
+    #[cfg(unix)]
+    #[test]
+    fn a_test_asks_bazel_for_every_action_too() {
+        let scratch = tempfile::tempdir().unwrap();
+        let script = format!(
+            r#"
+def _impl(ctx):
+    ctx.bazel.test(
+        flags = ["--scenario=success", "--basil-scratch={scratch}"],
+        build_events = True,
+        publish_all_actions = True,
+        stderr = None,
+    ).wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            scratch = scratch.path().display(),
+        );
+        let history = tempfile::tempdir().unwrap();
+        run_task_with_history(&script, history.path());
+        let args = std::fs::read_to_string(scratch.path().join("args")).unwrap();
+        assert!(
+            args.lines()
+                .any(|a| a == "--build_event_publish_all_actions"),
+            "{args}"
+        );
+    }
+
+    /// A caller asking for every action itself gets every action downstream,
+    /// and the flag is not given twice.
+    #[cfg(unix)]
+    #[test]
+    fn a_caller_asking_for_every_action_gets_them_downstream() {
+        let (downstream, kept, args) = every_action_downstream(
+            "",
+            &["--build_event_publish_all_actions"],
+            r#"keep_action_logs = "all","#,
+        );
+        assert_eq!(
+            args.lines()
+                .filter(|a| *a == "--build_event_publish_all_actions")
+                .count(),
+            1,
+            "{args}"
+        );
+        assert_eq!(downstream, [broken(), fine()]);
+        assert_eq!(kept, [broken(), fine()]);
+    }
+
+    /// An rc asking for every action counts as the caller's ask.
+    #[cfg(unix)]
+    #[test]
+    fn an_rc_asking_for_every_action_gets_them_downstream() {
+        let (downstream, _, _) = every_action_downstream(
+            "build --build_event_publish_all_actions\n",
+            &[],
+            r#"keep_action_logs = "all","#,
+        );
+        assert_eq!(downstream, [broken(), fine()]);
+    }
+
+    /// Without an rc the CLI rendered, Bazel reads one the CLI cannot see,
+    /// which may ask for every action, so nothing is trimmed.
+    #[cfg(unix)]
+    #[test]
+    fn an_unseen_rc_leaves_downstream_untrimmed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let asked = out.path().join("asked.bep");
+        let script = format!(
+            r#"
+def _impl(ctx):
+    ctx.bazel.build(
+        flags = ["--scenario=action_and_test_logs", "--basil-scratch={scratch}", "--build_event_binary_file={asked}"],
+        keep_action_logs = "all",
+        stderr = None,
+    ).wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            scratch = scratch.path().display(),
+            asked = asked.display(),
+        );
+        let history = tempfile::tempdir().unwrap();
+        run_task_with_history(&script, history.path());
+        assert_eq!(bep_file_actions(&asked), [broken(), fine()]);
     }
 
     #[test]

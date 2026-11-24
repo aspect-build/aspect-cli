@@ -2,6 +2,7 @@
 
 use std::sync::OnceLock;
 
+pub mod downstream;
 mod events;
 pub mod grpc;
 pub mod keep;

@@ -485,6 +485,7 @@ fn start<'v>(
         env.rt.clone(),
         &env.history,
         bazel::bes::sink::keep::Keep::default(),
+        false,
         max_event_bytes,
     )?;
 

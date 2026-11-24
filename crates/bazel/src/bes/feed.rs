@@ -1,8 +1,8 @@
 //! The build event stream of one bazel command: a reader thread follows
 //! `--build_event_binary_file` ([`super::binary_file`]), redacts each event,
-//! caps its size ([`super::cap`]), mirrors the bytes to file sinks and fans the
-//! events out to subscribers, which bind between [`BuildEventStream::new`] and
-//! [`BuildEventStream::start`].
+//! caps its size ([`super::cap`]), mirrors the bytes to file sinks (a trimmed
+//! one through [`Trim`]) and fans the events out to subscribers, which bind
+//! between [`BuildEventStream::new`] and [`BuildEventStream::start`].
 
 use prost::Message;
 use prost::bytes::Bytes;
@@ -17,6 +17,7 @@ use super::BuildEventEnvelope;
 use super::binary_file::{End, Reader};
 use super::cap::cap_event;
 use super::redact::redact_event;
+use super::sink::downstream::Trim;
 use crate::fanout::{Broadcaster, Subscriber, SubscriberFilter};
 use crate::stream::Gate;
 use crate::stream::file::Reservation;
@@ -57,6 +58,26 @@ impl FileSignal {
     }
 }
 
+/// A file a stream is mirrored to, and the signal set once it is whole.
+pub struct FileSink {
+    pub path: String,
+    pub signal: Arc<FileSignal>,
+    /// Write the stream through a [`Trim`], as it would have been without the
+    /// actions the CLI asked Bazel for, instead of every event.
+    pub trim: bool,
+}
+
+impl FileSink {
+    /// A sink of every event.
+    pub fn new(path: String, signal: Arc<FileSignal>) -> Self {
+        Self {
+            path,
+            signal,
+            trim: false,
+        }
+    }
+}
+
 /// The file sinks a stream mirrors its raw bytes to.
 ///
 /// A sink that fails to open, write or flush is dropped with a warning and the
@@ -74,6 +95,9 @@ struct Mirror {
     signal: Arc<FileSignal>,
     /// `None` before the first open, once failed, and once finished.
     out: Option<BufWriter<File>>,
+    /// Set for a trimmed sink, which is written the frames it lets through
+    /// instead of the raw bytes.
+    trim: Option<Trim>,
 }
 
 impl Mirror {
@@ -88,17 +112,46 @@ impl Mirror {
     fn failed(&self) -> bool {
         self.signal.is_complete()
     }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if let Some(Err(e)) = self.out.as_mut().map(|out| out.write_all(bytes)) {
+            self.fail(format!("write failed: {e}"));
+        }
+    }
+
+    /// Write what the trim lets through, each event length-delimited.
+    fn write_trimmed(
+        &mut self,
+        push: impl FnOnce(&mut Trim, &mut dyn FnMut(Arc<BuildEventEnvelope>)),
+    ) {
+        if self.out.is_none() {
+            return;
+        }
+        let Some(mut trim) = self.trim.take() else {
+            return;
+        };
+        let mut frame = Vec::new();
+        push(&mut trim, &mut |envelope| {
+            prost::encoding::encode_varint(envelope.encoded.len() as u64, &mut frame);
+            frame.extend_from_slice(&envelope.encoded);
+        });
+        self.trim = Some(trim);
+        if !frame.is_empty() {
+            self.write(&frame);
+        }
+    }
 }
 
 impl Mirrors {
-    fn open(sinks: Vec<(String, Arc<FileSignal>)>) -> Self {
+    fn open(sinks: Vec<FileSink>) -> Self {
         let mut mirrors = Self {
             sinks: sinks
                 .into_iter()
-                .map(|(path, signal)| Mirror {
-                    path,
-                    signal,
+                .map(|sink| Mirror {
+                    path: sink.path,
+                    signal: sink.signal,
                     out: None,
+                    trim: sink.trim.then(Trim::new),
                 })
                 .collect(),
         };
@@ -117,6 +170,9 @@ impl Mirrors {
                 continue;
             }
             m.out = None;
+            if m.trim.is_some() {
+                m.trim = Some(Trim::new());
+            }
             match File::create(&m.path) {
                 Ok(f) => m.out = Some(BufWriter::new(f)),
                 Err(e) => m.fail(format!("cannot open: {e}")),
@@ -124,10 +180,13 @@ impl Mirrors {
         }
     }
 
-    fn write(&mut self, bytes: &[u8]) {
+    /// Write one event, `bytes` being its length-delimited frame.
+    fn write(&mut self, bytes: &[u8], envelope: &Arc<BuildEventEnvelope>) {
         for m in &mut self.sinks {
-            if let Some(Err(e)) = m.out.as_mut().map(|out| out.write_all(bytes)) {
-                m.fail(format!("write failed: {e}"));
+            if m.trim.is_some() {
+                m.write_trimmed(|trim, out| trim.push(envelope.clone(), &mut |e| out(e)));
+            } else {
+                m.write(bytes);
             }
         }
     }
@@ -135,6 +194,7 @@ impl Mirrors {
     /// Flush every sink and signal `result` to those still whole.
     fn finish(&mut self, result: Result<(), String>) {
         for m in &mut self.sinks {
+            m.write_trimmed(|trim, out| trim.flush(&mut |e| out(e)));
             match m.out.take().map(|mut out| out.flush()) {
                 Some(Err(e)) => m.fail(format!("flush failed: {e}")),
                 _ => m.signal.complete(result.clone()),
@@ -204,10 +264,11 @@ impl BuildEventStream {
     /// `PidPair::gate`, which keys "ended" on the client and "held" on the
     /// server.
     ///
-    /// Each `(path, signal)` pair gets the raw event bytes mirrored to `path`;
-    /// `signal.complete(result)` fires after flush, unblocking the file
-    /// sink handle's `wait()`. A sink starts over with each attempt of a build
-    /// bazel retries, so it holds only the last attempt.
+    /// Each [`FileSink`] gets the raw event bytes mirrored to its `path`, or,
+    /// trimmed, the frames its [`Trim`] lets through; `signal.complete(result)`
+    /// fires after flush, unblocking the file sink handle's `wait()`. A sink
+    /// starts over with each attempt of a build bazel retries, so it holds
+    /// only the last attempt.
     ///
     /// Every event is redacted (see [`super::redact`]) before anything sees
     /// it: subscribers and file sinks read the same post-redact stream, so
@@ -219,12 +280,7 @@ impl BuildEventStream {
     ///
     /// File sinks are written on the reader thread, so a slow sink slows the
     /// reader, though never bazel.
-    pub fn start(
-        mut self,
-        file: Reservation,
-        gate: Gate,
-        file_sinks: Vec<(String, Arc<FileSignal>)>,
-    ) -> Self {
+    pub fn start(mut self, file: Reservation, gate: Gate, file_sinks: Vec<FileSink>) -> Self {
         assert!(self.handle.is_none(), "a stream is started once");
         let thread_broadcaster = self
             .broadcaster
@@ -265,20 +321,20 @@ impl BuildEventStream {
                     super::sink::warn(&capped.warning());
                     changed |= capped.changed();
                 }
-                let encoded = if changed {
+                let (encoded, frame_bytes) = if changed {
                     reencode_buf.clear();
                     if let Err(err) = event.encode_length_delimited(&mut reencode_buf) {
                         mirrors.finish(Err(format!("BES encode error: {err}")));
                         broadcaster.close();
                         return Err(err.into());
                     }
-                    mirrors.write(&reencode_buf);
-                    Bytes::from(event.encode_to_vec())
+                    (Bytes::from(event.encode_to_vec()), &reencode_buf[..])
                 } else {
-                    mirrors.write(&frame.raw);
-                    payload
+                    (payload, &frame.raw[..])
                 };
-                broadcaster.send(Arc::new(BuildEventEnvelope { event, encoded }));
+                let envelope = Arc::new(BuildEventEnvelope { event, encoded });
+                mirrors.write(frame_bytes, &envelope);
+                broadcaster.send(envelope);
             }
 
             // The iterator stops only with an end; recorded before the close
@@ -344,7 +400,9 @@ impl Default for BuildEventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bes::testing::{build_finished, encoded, encoded_all, plain, retry_marker, started};
+    use crate::bes::testing::{
+        action, build_finished, encoded, encoded_all, plain, retry_marker, started,
+    };
     use crate::fanout::Subscriber;
     use crate::stream::file::moved_name;
     use crate::stream::pid_pair::PidPair;
@@ -538,15 +596,14 @@ mod tests {
         }
 
         fn with_sinks(server: u32, client: u32, sinks: Vec<(String, Arc<FileSignal>)>) -> Self {
+            let sinks = sinks
+                .into_iter()
+                .map(|(path, signal)| FileSink::new(path, signal))
+                .collect();
             Self::of(BuildEventStream::new(), server, client, sinks)
         }
 
-        fn of(
-            stream: BuildEventStream,
-            server: u32,
-            client: u32,
-            sinks: Vec<(String, Arc<FileSignal>)>,
-        ) -> Self {
+        fn of(stream: BuildEventStream, server: u32, client: u32, sinks: Vec<FileSink>) -> Self {
             let file = BuildEventStream::reserve();
             let path = file.path().to_path_buf();
             let sub = stream.subscribe();
@@ -936,6 +993,80 @@ mod tests {
         assert_eq!(joined, Ok(()));
         let written = take_sink(&sink);
         assert_eq!(written, encoded_all(&events));
+    }
+
+    fn announcing(labels: &[&str]) -> BuildEvent {
+        crate::bes::testing::announcing(plain(false), labels)
+    }
+
+    /// A rig of one client mirroring to `sinks`.
+    fn sinks_rig(client: u32, sinks: Vec<FileSink>) -> Rig {
+        Rig::of(BuildEventStream::new(), client, client, sinks)
+    }
+
+    #[test]
+    fn a_trimmed_file_sink_loses_only_the_successful_actions() {
+        let events = [
+            announcing(&["ok", "bad"]),
+            action("ok", true),
+            action("bad", false),
+            plain(true),
+        ];
+        let client = sleeper();
+        let (trimmed, (path, signal)) = file_sink();
+        let (whole, (whole_path, whole_signal)) = file_sink();
+        let rig = sinks_rig(
+            client.id(),
+            vec![
+                FileSink {
+                    path,
+                    signal,
+                    trim: true,
+                },
+                FileSink::new(whole_path, whole_signal),
+            ],
+        );
+        rig.attempt(&events);
+        let (joined, seen, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(seen.len(), 4, "subscribers see every event");
+        assert_eq!(take_sink(&whole), encoded_all(&events));
+        assert_eq!(
+            take_sink(&trimmed),
+            encoded_all(&[announcing(&["bad"]), action("bad", false), plain(true)]),
+        );
+    }
+
+    #[test]
+    fn a_trimmed_file_sink_holds_only_the_retried_attempt() {
+        let first = [started(), announcing(&["evicted"]), retry_marker(false)];
+        let second = [
+            started(),
+            announcing(&["ok"]),
+            action("ok", true),
+            build_finished(0, true),
+        ];
+        let client = sleeper();
+        let (trimmed, (path, signal)) = file_sink();
+        let rig = sinks_rig(
+            client.id(),
+            vec![FileSink {
+                path,
+                signal,
+                trim: true,
+            }],
+        );
+        rig.attempt(&first);
+        rig.recv(first.len());
+        rig.attempt(&second);
+        let (joined, _, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        assert_eq!(
+            take_sink(&trimmed),
+            encoded_all(&[started(), announcing(&[]), build_finished(0, true)]),
+        );
     }
 
     // -------------------------------------------------------------------------
