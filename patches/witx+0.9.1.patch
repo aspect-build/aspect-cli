@@ -1,6 +1,78 @@
+diff --git a/src/docs/md.rs b/src/docs/md.rs
+index 569b318..618c6b4 100644
+--- a/src/docs/md.rs
++++ b/src/docs/md.rs
+@@ -30,6 +30,7 @@ pub(super) trait MdElement: fmt::Display + fmt::Debug + 'static {
+     /// Sets `docs`, the "docs" of this `MdElement`.
+     fn set_docs(&mut self, docs: &str);
+ 
++    #[allow(dead_code)]
+     fn as_any(&self) -> &dyn Any;
+     fn as_any_mut(&mut self) -> &mut dyn Any;
+ }
+@@ -113,23 +114,23 @@ impl MdNodeRef {
+         child_ref
+     }
+ 
+-    pub fn borrow(&self) -> cell::Ref<MdNode> {
++    pub fn borrow(&self) -> cell::Ref<'_, MdNode> {
+         self.0.borrow()
+     }
+ 
+-    pub fn borrow_mut(&self) -> cell::RefMut<MdNode> {
++    pub fn borrow_mut(&self) -> cell::RefMut<'_, MdNode> {
+         self.0.borrow_mut()
+     }
+ 
+     /// Returns an immutable reference to `MdNode`'s `content` as-is, that
+     /// is as some type implementing the `MdElement` trait.
+-    pub fn any_ref(&self) -> cell::Ref<Box<dyn MdElement>> {
++    pub fn any_ref(&self) -> cell::Ref<'_, Box<dyn MdElement>> {
+         cell::Ref::map(self.borrow(), |b| &b.content)
+     }
+ 
+     /// Returns a mutable reference to `MdNode`'s `content` as-is, that
+     /// is as some type implementing the `MdElement` trait.
+-    pub fn any_ref_mut(&self) -> cell::RefMut<Box<dyn MdElement>> {
++    pub fn any_ref_mut(&self) -> cell::RefMut<'_, Box<dyn MdElement>> {
+         cell::RefMut::map(self.borrow_mut(), |b| &mut b.content)
+     }
+ 
+@@ -137,7 +138,7 @@ impl MdNodeRef {
+     /// `T` which implements `MdElement` trait.
+     ///
+     /// Panics if `content` cannot be downcast to `T`.
+-    pub fn content_ref_mut<T: MdElement + 'static>(&self) -> cell::RefMut<T> {
++    pub fn content_ref_mut<T: MdElement + 'static>(&self) -> cell::RefMut<'_, T> {
+         cell::RefMut::map(self.borrow_mut(), |b| {
+             let r = b.content.as_any_mut();
+             r.downcast_mut::<T>().expect("reference is not T type")
+diff --git a/src/layout.rs b/src/layout.rs
+index 6812f01..86a2487 100644
+--- a/src/layout.rs
++++ b/src/layout.rs
+@@ -96,14 +96,14 @@ pub struct RecordMemberLayout<'a> {
+ }
+ 
+ impl RecordDatatype {
+-    pub fn member_layout(&self) -> Vec<RecordMemberLayout> {
++    pub fn member_layout(&self) -> Vec<RecordMemberLayout<'_>> {
+         self.member_layout_(&mut HashMap::new()).1
+     }
+ 
+     fn member_layout_(
+         &self,
+         cache: &mut HashMap<TypeRef, SizeAlign>,
+-    ) -> (SizeAlign, Vec<RecordMemberLayout>) {
++    ) -> (SizeAlign, Vec<RecordMemberLayout<'_>>) {
+         let mut members = Vec::new();
+         let mut sa = SizeAlign::zero();
+         for m in self.members.iter() {
+diff --git a/src/phases.rs b/src/phases.rs
+index 0bf697e..6887cde 100644
 --- a/src/phases.rs
 +++ b/src/phases.rs
-@@ -50,10 +50,10 @@
+@@ -50,10 +50,10 @@ pub mod old {
  }
  
  fn repo_root() -> Result<PathBuf> {
