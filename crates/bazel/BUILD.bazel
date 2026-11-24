@@ -65,6 +65,7 @@ rust_test(
     name = "bazel_test",
     compile_data = glob(["src/**/testdata/*"]),
     crate = ":bazel",
+    crate_features = ["starlark"],
     deps = [
         "@crates//:opentelemetry_sdk",
         "@crates//:tempfile",
