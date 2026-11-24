@@ -68,7 +68,9 @@ pub struct Env {
     pub verbose: Result<Option<crate::diag::Verbose>, String>,
     /// The `editor` in the user's `~/.aspect/config.json`, read when a task
     /// resolves its console ([`crate::out::user_link_format`]). A test
-    /// harness sets its own, so no test reads the real `HOME`.
+    /// harness sets its own for that. Lines written before the console
+    /// resolves read `user_link_format` itself, which reads no file in this
+    /// crate's unit tests.
     pub user_editor: fn() -> Option<Option<bazel::console::links::LinkFormat>>,
 }
 
