@@ -24,21 +24,7 @@ pub const IN_HISTORY: &str = "%aspect_history%";
 /// a literal flag in either form, or an rc entry the CLI restated as a
 /// `--default_override` token (a `common`-scoped injection renders as one).
 pub fn take_history_request(flags: Vec<String>) -> (Vec<String>, bool) {
-    let inline = format!("{COMPACT_FILE_FLAG}={IN_HISTORY}");
-    let mut asked = false;
-    let mut kept = Vec::with_capacity(flags.len());
-    let mut flags = flags.into_iter().peekable();
-    while let Some(flag) = flags.next() {
-        if flag == inline || crate::rc::override_payload(&flag) == Some(inline.as_str()) {
-            asked = true;
-        } else if flag == COMPACT_FILE_FLAG && flags.peek().is_some_and(|v| v == IN_HISTORY) {
-            flags.next();
-            asked = true;
-        } else {
-            kept.push(flag);
-        }
-    }
-    (kept, asked)
+    crate::rc::take_flag(flags, COMPACT_FILE_FLAG, IN_HISTORY)
 }
 
 /// The compact log path something already asked Bazel for in `flags`, if any.

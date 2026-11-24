@@ -1154,7 +1154,8 @@ ArtifactUpload = feature(
                           "uploads nothing. 'failed' uploads the stdout/stderr of every " +
                           "build action Bazel reports unsuccessful. 'all' uploads every " +
                           "action's that wrote any, adding --build_event_publish_all_actions " +
-                          "so Bazel reports them.",
+                          "so Bazel reports them to this task; BES backends the CLI streams to " +
+                          "and BEP files it writes get them only if your own flags or rc ask.",
         ),
         "upload_profile": args.boolean(
             default = False,

@@ -1179,6 +1179,28 @@ pub fn is_default_override(token: &str) -> bool {
     token.starts_with(DefaultOverride::PREFIX)
 }
 
+/// `flags` without any `--name=value` (or two-token `--name value`), and whether
+/// there was one: a literal, or an rc entry the CLI restated as a
+/// `--default_override` token. For a value the CLI injects as a request of its
+/// own, which Bazel must never see.
+pub fn take_flag(flags: Vec<String>, name: &str, value: &str) -> (Vec<String>, bool) {
+    let inline = format!("{name}={value}");
+    let mut found = false;
+    let mut kept = Vec::with_capacity(flags.len());
+    let mut flags = flags.into_iter().peekable();
+    while let Some(flag) = flags.next() {
+        if flag == inline || override_payload(&flag) == Some(inline.as_str()) {
+            found = true;
+        } else if flag == name && flags.peek().is_some_and(|v| v == value) {
+            flags.next();
+            found = true;
+        } else {
+            kept.push(flag);
+        }
+    }
+    (kept, found)
+}
+
 /// The option a [`DefaultOverride`] token carries, or `None` for any other token. It is a
 /// suffix of `token`, so a caller can rewrite the option and keep the wrapper.
 pub fn override_payload(token: &str) -> Option<&str> {
@@ -2390,6 +2412,29 @@ mod tests {
                 ..RcOption::default()
             })
             .collect()
+    }
+
+    #[test]
+    fn take_flag_takes_every_form_of_one_value_and_nothing_else() {
+        let strs = |s: &[&str]| s.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+        let (kept, found) = take_flag(
+            strs(&[
+                "--x=ask",
+                "--x",
+                "ask",
+                "--default_override=0:build=--x=ask",
+                "--x=other",
+                "--y=ask",
+            ]),
+            "--x",
+            "ask",
+        );
+        assert!(found);
+        assert_eq!(kept, strs(&["--x=other", "--y=ask"]));
+        assert_eq!(
+            take_flag(strs(&["--x"]), "--x", "ask"),
+            (strs(&["--x"]), false)
+        );
     }
 
     // ── Tokenizer edge cases ────────────────────────────────────────────────

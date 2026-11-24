@@ -284,18 +284,20 @@ def add_task_flags(bazel_trait, flags: list) -> None:
 
     bazel_trait.rc_flags.append(_unset_deferring)
 
-# Asks Bazel to report every action in the build event stream, not only the
-# failed ones: what keeping or uploading every action's logs needs.
-PUBLISH_ALL_ACTIONS = "--build_event_publish_all_actions"
+# The flag the runtime reads as "every action, for the CLI's own readers": its
+# value is `bazel::bes::sink::downstream::CLI_REQUEST`.
+_PUBLISH_ALL_ACTIONS_FOR_CLI = "--build_event_publish_all_actions=%aspect_cli%"
 
 def publish_all_actions(bazel_trait) -> None:
-    """Have every build of the task report every action (`PUBLISH_ALL_ACTIONS`):
-    `ArtifactUpload`'s `upload_build_logs = "all"`. A build keeping every
-    action's logs in the history gets the flag from the runtime instead. Added
-    once however often it is asked; a build option, so it stays out of a
-    task's query."""
-    if PUBLISH_ALL_ACTIONS not in bazel_trait.extra_flags:
-        add_task_flags(bazel_trait, [PUBLISH_ALL_ACTIONS])
+    """Have every build of the task report every action, not only the failed
+    ones, to the task's own readers: `ArtifactUpload`'s
+    `upload_build_logs = "all"`. The runtime takes the request off the command
+    line, adds `--build_event_publish_all_actions` and, unless the user's own
+    flags or rc ask for every action, keeps the extra events from the BES
+    backends the CLI streams to and its file sinks. Added once however often it
+    is asked; a build option, so it stays out of a task's query."""
+    if _PUBLISH_ALL_ACTIONS_FOR_CLI not in bazel_trait.extra_flags:
+        add_task_flags(bazel_trait, [_PUBLISH_ALL_ACTIONS_FOR_CLI])
 
 def protected_omissions(omitted: list) -> list:
     """The entries of `omitted` that name a `PROTECTED_FLAGS` flag, as the user
@@ -463,9 +465,10 @@ def exec_log_flags(exec_log_path: str) -> list:
     repository asks for `all`. Per-action cache and timing data in the Web UI
     comes from this log, which is also why the per-action BEP events behind
     `--build_event_publish_all_actions` are requested only where every
-    action's logs are kept or uploaded. Gated to Bazel 7.4,
-    the first to know the flag without its `experimental_` prefix. An execution
-    option, so scoped to `build` and never reaching a task's `query`. The rc keeps it in its own
+    action's logs are kept or uploaded, and then for the CLI's own readers
+    alone. Gated to Bazel 7.4, the first to know the flag without its
+    `experimental_` prefix. An execution option, so scoped to `build` and
+    never reaching a task's `query`. The rc keeps it in its own
     `aspect-exec-log` group, the upload being slow on a thin link, so a
     repository can drop just this."""
     return [(_EXECUTION_LOG_COMPACT_FILE + "=" + exec_log_path, ">=7.4.0", "build")]

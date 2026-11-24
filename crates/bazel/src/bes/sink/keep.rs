@@ -48,10 +48,6 @@ use super::events::attempt_cached;
 use crate::bes::BuildEventEnvelope;
 use crate::fanout::{SinkOutcome, Subscriber, SubscriberFilter};
 
-/// The flag that has Bazel report every action, which [`ActionLogs::All`]
-/// needs: a build keeping every action's logs is spawned with it.
-pub const PUBLISH_ALL_ACTIONS: &str = "--build_event_publish_all_actions";
-
 /// Which actions' logs to keep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ActionLogs {
@@ -60,7 +56,8 @@ pub enum ActionLogs {
     /// Those of actions that failed: Bazel reports these by default.
     Failed,
     /// Those of every action that wrote any: Bazel reports them only with
-    /// [`PUBLISH_ALL_ACTIONS`], which a build keeping them is spawned with.
+    /// [`PUBLISH_ALL_ACTIONS`](super::downstream::PUBLISH_ALL_ACTIONS), which a
+    /// build keeping them is run with unless its flags already ask for it.
     All,
 }
 

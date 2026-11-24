@@ -28,6 +28,7 @@
 
 pub mod aspect;
 pub mod bes;
+pub mod cli_request;
 pub mod command;
 pub mod console;
 pub mod delimited;

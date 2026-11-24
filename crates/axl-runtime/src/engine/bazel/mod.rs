@@ -646,9 +646,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `keep_action_logs` - Keep actions' stdout and stderr in the task
     ///   invocation's history (`bazel/<n>/actions/`, listed in
     ///   `bazel/<n>/actions.json`): `none` (the default), `failed`, or `all`, for which the
-    ///   build runs with `--build_event_publish_all_actions` so Bazel reports
-    ///   every action.
+    ///   build has Bazel report every action, as `publish_all_actions` does.
     ///   Hard-linked from where Bazel wrote them, else copied.
+    /// * `publish_all_actions` - Run the build with
+    ///   `--build_event_publish_all_actions` when it has a build event stream,
+    ///   so Bazel reports every action to this task's own readers
+    ///   (`build_events` iterators, the history).
+    ///   Unless the caller's flags or rc ask for every action too, the gRPC
+    ///   and file sinks in `build_events`, and a `--build_event_binary_file`
+    ///   the flags or `rc` name, get the stream as it would be without the
+    ///   flag: no successful action's event, and no announcement of one.
+    ///   Without an rc the CLI renders (`rc`, or the task's), or for a
+    ///   `--bes_backend` or `--build_event_json_file` Bazel serves itself,
+    ///   nothing is trimmed.
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
     ///   (attempts this build ran, not cached) or `all`. Copied.
@@ -723,6 +733,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = "none")] keep_action_logs: &str,
         #[starlark(require = named, default = "none")] keep_test_logs: &str,
+        #[starlark(require = named, default = false)] publish_all_actions: bool,
         #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
@@ -779,6 +790,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             env.rt.clone(),
             &env.history,
             keep_logs,
+            publish_all_actions,
             max_event_bytes,
         )?;
         Ok(build)
@@ -855,9 +867,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `keep_action_logs` - Keep actions' stdout and stderr in the task
     ///   invocation's history (`bazel/<n>/actions/`, listed in
     ///   `bazel/<n>/actions.json`): `none` (the default), `failed`, or `all`, for which the
-    ///   build runs with `--build_event_publish_all_actions` so Bazel reports
-    ///   every action.
+    ///   build has Bazel report every action, as `publish_all_actions` does.
     ///   Hard-linked from where Bazel wrote them, else copied.
+    /// * `publish_all_actions` - Run the build with
+    ///   `--build_event_publish_all_actions` when it has a build event stream,
+    ///   so Bazel reports every action to this task's own readers
+    ///   (`build_events` iterators, the history).
+    ///   Unless the caller's flags or rc ask for every action too, the gRPC
+    ///   and file sinks in `build_events`, and a `--build_event_binary_file`
+    ///   the flags or `rc` name, get the stream as it would be without the
+    ///   flag: no successful action's event, and no announcement of one.
+    ///   Without an rc the CLI renders (`rc`, or the task's), or for a
+    ///   `--bes_backend` or `--build_event_json_file` Bazel serves itself,
+    ///   nothing is trimmed.
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
     ///   (attempts this build ran, not cached) or `all`. Copied.
@@ -930,6 +952,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = "none")] keep_action_logs: &str,
         #[starlark(require = named, default = "none")] keep_test_logs: &str,
+        #[starlark(require = named, default = false)] publish_all_actions: bool,
         #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
@@ -986,6 +1009,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             env.rt.clone(),
             &env.history,
             keep_logs,
+            publish_all_actions,
             max_event_bytes,
         )?;
         Ok(test)
@@ -1094,9 +1118,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Some(rc) => rc.resolve_for_command("info")?,
             None => (read_startup_flags(this)?, Vec::new()),
         };
-        // `info` reads the `build` section, so it is handed the history request
-        // a build is; Bazel would take it for a relative log path to open.
-        let (command_flags, _) = bazel::execlog::take_history_request(command_flags);
+        // `info` reads the `build` section, so it is handed the requests a
+        // build is, which Bazel would reject or misread.
+        let (command_flags, _) = bazel::cli_request::take(command_flags);
 
         let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
 

@@ -57,7 +57,9 @@ impl Grpc {
     /// Spawn a gRPC BES forwarding thread. All sinks for a single build
     /// share `invocation_id` so every backend indexes it under one UUID.
     /// Transport / BES errors never panic; they surface as `SinkOutcome`
-    /// for the caller's `sink.wait()` to inspect.
+    /// for the caller's `sink.wait()` to inspect. With `trim`, the backend
+    /// gets the stream through a [`Trim`](super::downstream::Trim), as it
+    /// would have been without the actions the CLI asked Bazel for.
     pub fn spawn(
         rt: Handle,
         recv: Subscriber<Arc<BuildEventEnvelope>>,
@@ -65,8 +67,11 @@ impl Grpc {
         headers: HashMap<String, String>,
         invocation_id: String,
         retry: RetryConfig,
+        trim: bool,
     ) -> JoinHandle<(SinkStats, SinkOutcome)> {
-        thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
+        thread::spawn(move || {
+            rt.block_on(work(recv, endpoint, headers, invocation_id, retry, trim))
+        })
     }
 }
 
@@ -198,6 +203,7 @@ async fn work(
     headers: HashMap<String, String>,
     invocation_id: String,
     retry: RetryConfig,
+    trim: bool,
 ) -> (SinkStats, SinkOutcome) {
     dbg(
         &endpoint,
@@ -217,16 +223,39 @@ async fn work(
     // for the next `drive_stream` iteration to drain.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SinkEvent>();
     let _forwarder = tokio::task::spawn_blocking(move || {
-        while let Ok(envelope) = recv.recv() {
+        let open = std::cell::Cell::new(true);
+        let mut forward = |envelope: Arc<BuildEventEnvelope>| {
             let ev = SinkEvent {
                 encoded: envelope.encoded.clone(),
                 last_message: envelope.event.last_message,
             };
             drop(envelope);
             if event_tx.send(ev).is_err() {
-                break;
+                open.set(false);
+            }
+        };
+        let Some(mut trim) = trim.then(super::downstream::Trim::new) else {
+            while let Ok(envelope) = recv.recv() {
+                forward(envelope);
+                if !open.get() {
+                    return;
+                }
+            }
+            return;
+        };
+        // Woken while the stream is quiet, so a hold ends on time.
+        let tick = super::downstream::MAX_HOLD / 4;
+        loop {
+            match recv.recv_timeout(tick) {
+                Ok(envelope) => trim.push(envelope, &mut forward),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => trim.tick(&mut forward),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if !open.get() {
+                return;
             }
         }
+        trim.flush(&mut forward);
     });
 
     // `Client::new` only builds a lazy channel (endpoint URI + TLS config); it
@@ -1200,6 +1229,7 @@ mod tests {
     };
     use prost::Message;
 
+    use crate::bes::testing::{action, action_id, announcing, envelope};
     use crate::fanout::Broadcaster;
     use futures::Stream;
     use tonic::{Request, Response, Status, Streaming};
@@ -1239,6 +1269,8 @@ mod tests {
 
     struct TestServer {
         mode: ServerMode,
+        /// Each event an `Ack` server read, with its sequence number.
+        seen: Arc<std::sync::Mutex<Vec<(i64, BuildEvent)>>>,
     }
 
     #[tonic::async_trait]
@@ -1355,9 +1387,16 @@ mod tests {
                 }
                 ServerMode::Ack => {
                     let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    let seen = self.seen.clone();
                     tokio::spawn(async move {
                         while let Some(Ok(req)) = inbound.next().await {
-                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let seq = req
+                                .ordered_build_event
+                                .as_ref()
+                                .map_or(0, |e| e.sequence_number);
+                            if let Some(event) = bazel_event_of(&req) {
+                                seen.lock().unwrap().push((seq, event));
+                            }
                             let ack = PublishBuildToolEventStreamResponse {
                                 stream_id: None,
                                 sequence_number: seq,
@@ -1403,14 +1442,41 @@ mod tests {
     }
 
     async fn start_server(mode: ServerMode) -> String {
+        start_recording_server(mode).await.0
+    }
+
+    /// A server, and the events it reads in `Ack` mode.
+    async fn start_recording_server(
+        mode: ServerMode,
+    ) -> (String, Arc<std::sync::Mutex<Vec<(i64, BuildEvent)>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
         tokio::spawn(
             tonic::transport::Server::builder()
-                .add_service(PublishBuildEventServer::new(TestServer { mode }))
+                .add_service(PublishBuildEventServer::new(TestServer {
+                    mode,
+                    seen: seen.clone(),
+                }))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
         );
-        format!("http://{addr}")
+        (format!("http://{addr}"), seen)
+    }
+
+    /// The Bazel event a publish request carries.
+    fn bazel_event_of(req: &PublishBuildToolEventStreamRequest) -> Option<BuildEvent> {
+        use axl_proto::google::devtools::build::v1::build_event::Event;
+        match req
+            .ordered_build_event
+            .as_ref()?
+            .event
+            .as_ref()?
+            .event
+            .as_ref()?
+        {
+            Event::BazelEvent(any) => BuildEvent::decode(any.value.as_slice()).ok(),
+            _ => None,
+        }
     }
 
     fn sink_event(event: &BuildEvent) -> SinkEvent {
@@ -1418,11 +1484,6 @@ mod tests {
             encoded: Bytes::from(event.encode_to_vec()),
             last_message: event.last_message,
         }
-    }
-
-    fn envelope(event: BuildEvent) -> Arc<BuildEventEnvelope> {
-        let encoded = Bytes::from(event.encode_to_vec());
-        Arc::new(BuildEventEnvelope { event, encoded })
     }
 
     fn retained(event: &BuildEvent) -> RetainedEvent {
@@ -1751,6 +1812,16 @@ mod tests {
         events: Vec<BuildEvent>,
         retry: RetryConfig,
     ) -> (SinkStats, SinkOutcome) {
+        work_against_trimmed(endpoint, events, retry, false).await
+    }
+
+    /// [`work_against`], the sink trimming the stream when `trim` is set.
+    async fn work_against_trimmed(
+        endpoint: String,
+        events: Vec<BuildEvent>,
+        retry: RetryConfig,
+        trim: bool,
+    ) -> (SinkStats, SinkOutcome) {
         let broadcaster = Broadcaster::new();
         let recv = broadcaster.subscribe();
         for ev in events {
@@ -1765,10 +1836,95 @@ mod tests {
                 HashMap::new(),
                 "test-invocation".to_string(),
                 retry,
+                trim,
             ),
         )
         .await
         .expect("work did not complete within the test bound")
+    }
+
+    /// A trimmed stream reaches the backend without the successful actions,
+    /// numbered from 1 without a gap, and without their announcements.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trimmed_stream_is_numbered_without_gaps() {
+        let (endpoint, seen) = start_recording_server(ServerMode::Ack).await;
+        let mut last = progress_event(1);
+        last.last_message = true;
+        let events = vec![
+            announcing(progress_event(1), &["ok", "bad"]),
+            action("ok", true),
+            action("bad", false),
+            last,
+        ];
+        let (stats, outcome) =
+            work_against_trimmed(endpoint, events, RetryConfig::default(), true).await;
+        assert!(outcome.is_ok(), "{:?}", outcome.unwrap_err());
+        assert_eq!(stats, SinkStats { sent: 3, acked: 3 });
+        let seen = seen.lock().unwrap();
+        let seqs: Vec<i64> = seen.iter().map(|(seq, _)| *seq).collect();
+        assert_eq!(seqs, [1, 2, 3]);
+        assert_eq!(seen[0].1.children, [action_id("bad")]);
+        assert_eq!(seen[1].1, action("bad", false));
+    }
+
+    /// A hold ends on time while the stream is quiet: the backend gets what
+    /// was held without waiting for the next event.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_stream_lets_a_hold_go_on_time() {
+        let (endpoint, seen) = start_recording_server(ServerMode::Ack).await;
+        let broadcaster = Broadcaster::new();
+        let recv = broadcaster.subscribe();
+        let work = tokio::spawn(work(
+            recv,
+            endpoint,
+            HashMap::new(),
+            "test-invocation".to_string(),
+            RetryConfig::default(),
+            true,
+        ));
+        broadcaster.send(envelope(announcing(progress_event(1), &["slow"])));
+        broadcaster.send(envelope(progress_event(2)));
+        let deadline = std::time::Instant::now() + super::super::downstream::MAX_HOLD * 3;
+        while seen.lock().unwrap().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "the hold never ended");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let mut last = action("slow", true);
+        last.last_message = true;
+        broadcaster.send(envelope(last));
+        broadcaster.close();
+        let (stats, outcome) = tokio::time::timeout(Duration::from_secs(30), work)
+            .await
+            .expect("work did not complete within the test bound")
+            .unwrap();
+        assert!(outcome.is_ok(), "{:?}", outcome.unwrap_err());
+        assert_eq!(
+            stats,
+            SinkStats { sent: 3, acked: 3 },
+            "the promised action is passed on"
+        );
+    }
+
+    /// The last message, held behind an announcement that never resolves,
+    /// still arrives once, last, when the stream ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_last_message_arrives_last() {
+        let (endpoint, seen) = start_recording_server(ServerMode::Ack).await;
+        let announcing = announcing(progress_event(1), &["never"]);
+        let mut last = progress_event(2);
+        last.last_message = true;
+        let (stats, outcome) = work_against_trimmed(
+            endpoint,
+            vec![announcing, progress_event(3), last],
+            RetryConfig::default(),
+            true,
+        )
+        .await;
+        assert!(outcome.is_ok(), "{:?}", outcome.unwrap_err());
+        assert_eq!(stats, SinkStats { sent: 3, acked: 3 });
+        let seen = seen.lock().unwrap();
+        let lasts: Vec<bool> = seen.iter().map(|(_, e)| e.last_message).collect();
+        assert_eq!(lasts, [false, false, true]);
     }
 
     /// Server sheds every stream with UNAVAILABLE after acking two events:
