@@ -8,7 +8,7 @@ separate it from a plain `json.encode(data)`:
     them `--remote_header=Authorization=...`. Only the redacted explicit
     command crosses into the document; the resolved flag lists never do.
   - **Bounded size.** `test_details`, `target_kinds` and `passed_tests` grow
-    with the build — a 5,000-test run carries ~5,000 entries in each. Failures
+    with the build - a 5,000-test run carries ~5,000 entries in each. Failures
     are reported in full (up to the accumulator's own caps, with `truncated`
     saying so); passes are counts only.
   - **A stable contract.** The accumulator's key names are internal and move
@@ -18,20 +18,20 @@ Per-kind blocks (`data["lint"]`, `data["format"]`, …) are deliberately absent
 from v1: each needs its own bounded shape, and lint diagnostics in particular
 need a cap of their own.
 
-`aspect run` registers no `--output`. Its stdout belongs to the target binary —
-running the program *is* the task — so a results document cannot share it, and
+`aspect run` registers no `--output`. Its stdout belongs to the target binary -
+running the program *is* the task - so a results document cannot share it, and
 redirecting the target's output to make room would defeat the command. Tasks
 whose stdout is already spoken for stay text-only.
 
 `emit` is the terminal-time counterpart to `repro_commands.print_repro_and_fix`
-— called once beside the `final = True` dispatch, and a no-op under the default
+- called once beside the `final = True` dispatch, and a no-op under the default
 `--output=text`.
 """
 
 load("./bazel_results.axl", "aspect_web_ui_url", "redacted_explicit_command", "render_bes_url")
 
 # Bumped whenever a key in `document()` is renamed, removed, or changes meaning.
-# Additive keys do not bump it — consumers must tolerate unknown fields.
+# Additive keys do not bump it - consumers must tolerate unknown fields.
 SCHEMA_VERSION = 1
 
 _OUTPUT_TEXT = "text"
@@ -184,7 +184,7 @@ def document(env: std.Env, data: dict, task_path: str, status: str, exit_code: i
     `task_path` is the command path without the leading `aspect` ("build",
     "test", "lint", …). `status` is the lifecycle status of the terminal emit
     ("passed", "failed", "warning", "aborted"). Takes `env` rather than the
-    whole `ctx` because that is all it reads — the Web UI base URL — which also
+    whole `ctx` because that is all it reads - the Web UI base URL - which also
     lets the unit tests drive it with a real `ctx.std.env`.
     """
     bz = data.get("bazel", {}) or {}
@@ -227,9 +227,9 @@ def child_stdout(io, args):
     """The `stdout` to hand a spawned process: our stderr when the document owns
     stdout, our own stdout otherwise.
 
-    Every child a task runs writes human-facing output to stdout — Bazel its
+    Every child a task runs writes human-facing output to stdout - Bazel its
     result summary and test output, `patch` the files it touched, a formatter
-    or coverage uploader its report — and any of it landing in the document
+    or coverage uploader its report - and any of it landing in the document
     breaks it. To a build, our own stdout on the text path is the same as
     inheriting it, its console capture included, and our stderr joins the
     capture of its stderr, keeping Bazel's order; so call sites need no

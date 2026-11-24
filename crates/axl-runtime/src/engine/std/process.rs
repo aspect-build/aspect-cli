@@ -227,7 +227,7 @@ impl<'v> values::StarlarkValue<'v> for Command {
 /// Resolve a `stdout`/`stderr` argument to a [`Stdio`]. Accepts the mode
 /// strings `"null"`/`"piped"`/`"inherit"`, a writable file stream from
 /// `fs.create(...)` — whose owned file is taken and handed to the child so its
-/// output lands directly on disk — or a parent stdio handle (`ctx.std.io.stdout`
+/// output lands directly on disk - or a parent stdio handle (`ctx.std.io.stdout`
 /// / `ctx.std.io.stderr`), whose fd is duplicated so cross-wiring such as
 /// `stdout = ctx.std.io.stderr` works. `field` names the caller for error
 /// messages.

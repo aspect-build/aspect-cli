@@ -88,7 +88,7 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
 Nothing is dropped by default.
 
 Bazel's console as it wrote it (its stderr, and its stdout when both go to
-one file) is kept in a raw log, `console.log` in the Bazel invocation's folder
+one file or it is sent to stderr) is kept in a raw log, `console.log` in the Bazel invocation's folder
 in the task's history, which the end of the console names (a link on a
 terminal), with how many messages were hidden and, for each kind collapsed, a
 file beside the log holding all of them. They are kept and pruned with the

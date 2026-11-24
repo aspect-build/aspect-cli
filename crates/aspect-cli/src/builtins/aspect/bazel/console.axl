@@ -27,7 +27,7 @@ can match any severity. Every line hidden is in the raw log the summary
 names.
 
 Bazel is always captured with its curses UI, which ends each action's output
-for the stages. Where curses is not shown (stdout or stderr not a terminal,
+for the stages. Where curses is not shown (where Bazel's stdout lands, or stderr, not a terminal,
 or the user's `--curses=no`), the console is rendered to plain lines and the
 stages run on those; Bazel's status line comes through every few seconds.
 The `agent` profile, for a coding agent reading the console, shows plain

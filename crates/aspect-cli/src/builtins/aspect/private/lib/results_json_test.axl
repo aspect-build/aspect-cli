@@ -1,4 +1,4 @@
-"""Unit tests for lib/results_json.axl — the `--output=json` document.
+"""Unit tests for lib/results_json.axl - the `--output=json` document.
 
 Run with:
   aspect dev test-results-json
@@ -58,7 +58,7 @@ def _test_resolved_flag_lists_are_not_exposed(ctx):
     _eq("cmd_line absent", "cmd_line" in blob, False)
 
 def _test_unbounded_fields_are_not_exposed(ctx):
-    """`target_kinds`, `test_details` and `passed_tests` scale with the build —
+    """`target_kinds`, `test_details` and `passed_tests` scale with the build -
     5,000 tests means 5,000 entries each. Only counts may cross."""
     d = init_data()
     for i in range(300):
@@ -216,7 +216,7 @@ def _test_document_is_encodable(ctx):
 
 def _test_child_stdout_keeps_the_document_alone_on_stdout(ctx):
     """Every spawned child routes through this. Getting it backwards puts
-    Bazel's result summary inside the document, which stops being JSON — and
+    Bazel's result summary inside the document, which stops being JSON - and
     nothing downstream would catch that.
     """
 

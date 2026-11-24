@@ -423,7 +423,7 @@ def _emit_final(ph, exit_code):
 
 # buildifier: disable=function-docstring
 def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
-    # The document describes a finished task, and `watch.loop` never concludes —
+    # The document describes a finished task, and `watch.loop` never concludes -
     # `_emit_final` is on the other branch. Refuse the pair rather than run the
     # watch loop and leave stdout empty forever.
     if ctx.args.watch and results_json.wants_json(ctx.args):

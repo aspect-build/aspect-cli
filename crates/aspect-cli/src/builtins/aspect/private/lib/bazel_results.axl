@@ -2726,7 +2726,7 @@ def _assemble_explicit_command(build_command, target_pattern, explicit_cmd_line,
 
 def redacted_explicit_command(data: dict) -> dict:
     """The user-typed bazel command as `{"short", "long"}`, credential-redacted
-    and shell-quoted — the same pair the rendered surfaces show, resolved from
+    and shell-quoted - the same pair the rendered surfaces show, resolved from
     `data` alone.
 
     For consumers outside the renderers (`lib/results_json.axl`). The resolved
