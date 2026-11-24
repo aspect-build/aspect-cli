@@ -427,10 +427,9 @@ def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
     # `_emit_final` is on the other branch. Refuse the pair rather than run the
     # watch loop and leave stdout empty forever.
     if ctx.args.watch and results_json.wants_json(ctx.args):
-        return TaskConclusion(
-            exit_code = 1,
-            message = "--output=%s and --watch cannot be combined: the JSON output ends with the task's final result, and --watch never finishes. Drop one of the two." % ctx.args.output,
-        )
+        refusal = "--output=%s and --watch cannot be combined: the JSON output ends with the task's final result, and --watch never finishes. Drop one of the two." % ctx.args.output
+        results_json.emit_error(ctx, "usage", refusal)
+        return TaskConclusion(exit_code = 1, message = refusal)
 
     # Initialize data for status-check emission.
     data = gaz_init_data()

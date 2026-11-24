@@ -720,8 +720,9 @@ impl JsonOutput {
 static TASK_JSON_OUTPUT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// The [`JsonOutput`] the leaf task `matches` selected was given, when it
-/// takes `--output` as `results_json.output_arg()`'s choice (`text`,
-/// `json`, `ndjson`), not a file path as `setup bazelrc`'s.
+/// takes `--output` as a choice of `text` and `json` (`results_json.
+/// output_arg()`'s, with `ndjson`, or `gc`'s), not a file path as `setup
+/// bazelrc`'s.
 fn task_json_output(cmd: &clap::Command, matches: &clap::ArgMatches) -> JsonOutput {
     if let Some((name, sub)) = matches.subcommand() {
         return cmd
@@ -732,13 +733,12 @@ fn task_json_output(cmd: &clap::Command, matches: &clap::ArgMatches) -> JsonOutp
         .get_arguments()
         .find(|a| a.get_id() == "output")
         .is_some_and(|a| {
-            let mut values: Vec<String> = a
+            let values: Vec<String> = a
                 .get_possible_values()
                 .iter()
                 .map(|v| v.get_name().to_string())
                 .collect();
-            values.sort();
-            values == ["json", "ndjson", "text"]
+            values.iter().any(|v| v == "json") && values.iter().any(|v| v == "text")
         });
     if !choice {
         return JsonOutput::None;
@@ -752,12 +752,13 @@ fn task_json_output(cmd: &clap::Command, matches: &clap::ArgMatches) -> JsonOutp
 
 /// An error document on stdout, `{"schema_version", "error", "message"}`
 /// (a line of `"type": "error"` in the `ndjson` stream), for a run that
-/// asked for JSON and ends on an error before its task wrote any: a caller
-/// reading stdout otherwise gets nothing to parse. A config error is judged
+/// asked for JSON and ends on an error: a caller reading stdout otherwise
+/// gets nothing to parse, or a stream with no end. A config error is judged
 /// from the raw arguments (`json_output_of`), as it stops the CLI before
-/// they parse; any other from the parsed task (`parsed`). Nothing when the
-/// task already wrote to stdout (a document, then a hook's failure), so
-/// stdout never holds two.
+/// they parse; any other from the parsed task (`parsed`). Nothing for a
+/// document when the task already wrote to stdout (a document, then a
+/// hook's failure), nor for a stream that already had its last line, so
+/// stdout never holds two ends.
 fn json_error(error: &str, message: &str, parsed: bool) {
     let asked = if parsed {
         match TASK_JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
@@ -768,7 +769,13 @@ fn json_error(error: &str, message: &str, parsed: bool) {
     } else {
         json_output_of(std::env::args().skip(1))
     };
-    if asked == JsonOutput::None || axl_runtime::engine::stdout_written() {
+    let ended = match asked {
+        JsonOutput::None => true,
+        JsonOutput::Document => axl_runtime::engine::stdout_written(),
+        // An error ends a stream its lines have begun.
+        JsonOutput::Stream => axl_runtime::engine::stdout_ended(),
+    };
+    if ended {
         return;
     }
     let mut doc = serde_json::Map::new();
@@ -1172,6 +1179,43 @@ mod config_error_tests {
             JsonOutput::None
         );
         assert_eq!(json_output_of(args(&["gc", "--output"])), JsonOutput::None);
+    }
+
+    #[test]
+    fn a_task_with_a_text_or_json_output_is_judged_from_its_parse() {
+        use super::task_json_output;
+        let output = |values: &[&'static str]| {
+            clap::Command::new("aspect").subcommand(
+                clap::Command::new("t").arg(
+                    clap::Arg::new("output")
+                        .long("output")
+                        .value_parser(clap::builder::PossibleValuesParser::new(values.to_vec())),
+                ),
+            )
+        };
+        let judged = |values: &[&'static str], given: &str| {
+            let mut cmd = output(values);
+            let matches = cmd
+                .try_get_matches_from_mut(["aspect", "t", &format!("--output={given}")])
+                .unwrap();
+            task_json_output(&cmd, &matches)
+        };
+        assert_eq!(
+            judged(&["text", "json", "ndjson"], "ndjson"),
+            JsonOutput::Stream
+        );
+        assert_eq!(judged(&["text", "json"], "json"), JsonOutput::Document);
+        assert_eq!(judged(&["text", "json"], "text"), JsonOutput::None);
+        let mut path = clap::Command::new("aspect")
+            .subcommand(clap::Command::new("t").arg(clap::Arg::new("output").long("output")));
+        let matches = path
+            .try_get_matches_from_mut(["aspect", "t", "--output=json"])
+            .unwrap();
+        assert_eq!(
+            task_json_output(&path, &matches),
+            JsonOutput::None,
+            "a path, not a choice"
+        );
     }
 
     #[test]

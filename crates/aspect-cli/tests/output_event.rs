@@ -599,6 +599,56 @@ def config(ctx: ConfigContext):
     );
 }
 
+/// An `--output=ndjson` stream a failure cuts short still ends: with Bazel
+/// not there to start, its attempt line is followed by an `error` line, as
+/// `--output=json` gets an error document.
+#[test]
+fn an_ndjson_stream_an_error_cuts_short_ends_with_the_error() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    for (output, want) in [
+        ("ndjson", vec!["attempt", "error"]),
+        ("json", vec!["task_error"]),
+    ] {
+        let out = aspect(dir.path(), "build")
+            .arg(format!("--output={output}"))
+            .env("BAZEL_REAL", dir.path().join("no-bazel"))
+            .output()
+            .expect("running aspect build");
+        assert!(!out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect();
+        let got: Vec<&str> = lines
+            .iter()
+            .map(|l| l["type"].as_str().or(l["error"].as_str()).unwrap())
+            .collect();
+        assert_eq!(got, want, "{output}: {stdout}");
+    }
+}
+
+/// `gazelle --watch` refuses JSON output, and says so on stdout too.
+#[test]
+fn gazelle_watch_refuses_json_output_with_a_document() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    for output in ["json", "ndjson"] {
+        let out = aspect(dir.path(), "gazelle")
+            .args(["--watch", &format!("--output={output}")])
+            .output()
+            .expect("running aspect gazelle");
+        assert!(!out.status.success());
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+        assert_eq!(doc["error"], "usage", "{doc}");
+        assert_eq!(doc.get("type").is_some(), output == "ndjson", "{doc}");
+    }
+}
+
 /// A graceful cancel waits for the client, and the console with it: the
 /// cleanup line basil prints after the interrupt is forwarded, under CI's stop
 /// sequence, which sends two SIGINTs and leaves the client to finish on its

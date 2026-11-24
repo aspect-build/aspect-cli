@@ -19,7 +19,7 @@ pub use aspect::auth::{
     UriProfile, login_hint, profile_for_uri, resolve_access_token, resolve_profile,
 };
 
-pub use axl_types::stream::stdout_written;
+pub use axl_types::stream::{stdout_ended, stdout_written};
 pub mod error;
 pub mod feature;
 pub mod grpc;

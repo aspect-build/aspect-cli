@@ -33,7 +33,7 @@ whose stdout is already spoken for stay text-only.
 """
 
 load("./bazel_results.axl", "aspect_web_ui_url", "redacted_explicit_command", "render_bes_url")
-load("./output_json.axl", "OUTPUT_JSON", "OUTPUT_NDJSON", "OUTPUT_TEXT", "SCHEMA_VERSION", "wants_json", "wants_ndjson")
+load("./output_json.axl", "OUTPUT_JSON", "OUTPUT_NDJSON", "OUTPUT_TEXT", "SCHEMA_VERSION", "emit_error", "wants_json", "wants_ndjson")
 
 # How many failed targets the document lists; `failures.truncated.targets`
 # says when there were more.
@@ -55,8 +55,10 @@ def output_arg() -> dict:
                 "`action_failed`, `target_failed`, `test_failed`, " +
                 "`test_flaky`), then the document as the last line " +
                 "(`\"type\": \"result\"`), so a reader can act on a failure " +
-                "while the build goes on. With either, Bazel's and every other " +
-                "child's stdout moves to stderr so stdout carries only JSON."
+                "while the build goes on; a run that ends on an error ends it " +
+                "with a `\"type\": \"error\"` line instead. With either, Bazel's " +
+                "and every other child's stdout moves to stderr so stdout " +
+                "carries only JSON."
             ),
         ),
     }
@@ -245,8 +247,10 @@ def child_stdout(io, args):
 def emit(ctx, data: dict, task_path: str, status: str, exit_code: int) -> None:
     """Write the result document to stdout, or nothing under `--output=text`.
 
-    Call once, beside the task's `final = True` dispatch. Indented because the
-    output is read by people at least as often as it is piped.
+    Call once, beside the task's `final = True` dispatch. Under `json`
+    indented, as it is read by people at least as often as it is piped;
+    under `ndjson` one compact line, `"type": "result"`, flushed: the
+    stream's last.
     """
     if not wants_json(ctx.args):
         return
@@ -274,7 +278,8 @@ def live(ctx):
     flushed, for each failure the accumulator recorded since. Both do
     nothing under `text` and `json`.
 
-    A line is `{"type": ..., "attempt": n, ...}`, the entry as the document
+    A line is `{"type": ..., "attempt": n, ...}`, `n` the attempt's index
+    from 0 (the console's "attempt n+1"), the entry as the document
     renders it: `action_failed` (label, mnemonics, stdout_path,
     stderr_path), `target_failed` (label, kind), `test_failed` and
     `test_flaky` (label, status, log_path, xml_path, ...). An action's line
@@ -320,6 +325,7 @@ results_json = namespace(
     child_stdout = child_stdout,
     document = document,
     emit = emit,
+    emit_error = emit_error,
     live = live,
     output_arg = output_arg,
     wants_json = wants_json,
