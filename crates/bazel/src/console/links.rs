@@ -34,8 +34,10 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// How many file links' URLs [`written_urls`] has written out in this
-/// process (Terminal.app's, which shows no OSC 8 link).
+/// How many file links' URLs [`written_url`] has written out in this
+/// process (Terminal.app's, which shows no OSC 8 link): a console line's,
+/// through [`written_urls`], and a summary path's, through
+/// [`FileLinks::link`].
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 
 /// How many file links' URLs this process has written beside their links.
