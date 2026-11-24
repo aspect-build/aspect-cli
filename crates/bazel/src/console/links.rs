@@ -439,6 +439,8 @@ pub struct Linker {
     /// What each path looked up names, by the path as written: the file, or
     /// None for nothing as of when it was looked up.
     resolved: HashMap<Vec<u8>, (Option<PathBuf>, std::time::Instant)>,
+    /// Whether paths are linked as well as URLs.
+    paths_too: bool,
 }
 
 impl Linker {
@@ -449,7 +451,18 @@ impl Linker {
             bases,
             files: FileLinks::file(),
             resolved: HashMap::new(),
+            paths_too: true,
         }
+    }
+
+    /// [`Linker::link_written`] with only its URLs linked: for text whose
+    /// paths are words to type rather than places to open (a tip's
+    /// `.aspect/config.axl`).
+    pub fn link_written_urls(&mut self, record: &[u8]) -> Vec<u8> {
+        self.paths_too = false;
+        let out = self.link_written(record);
+        self.paths_too = true;
+        out
     }
 
     /// This linker making its files' links as `files` says.
@@ -547,6 +560,10 @@ impl Linker {
         plain: &[u8],
         out: &mut Vec<u8>,
     ) {
+        if !self.paths_too {
+            out.extend_from_slice(text);
+            return;
+        }
         let mut at = 0;
         for m in PATH.find_iter(text) {
             if m.start() < at {
@@ -1852,6 +1869,26 @@ mod tests {
             editor_command("'/a\\ b/zed'").as_deref(),
             Some("zed"),
             "kept in single quotes"
+        );
+    }
+
+    #[test]
+    fn a_linker_can_leave_paths_alone_and_link_urls() {
+        let (_dir, mut l) = linker();
+        let out =
+            String::from_utf8(l.link_written_urls(b"in src/a.cc see https://x.test/a")).unwrap();
+        assert!(
+            out.contains("in src/a.cc see "),
+            "the path stays plain: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b]8;;https://x.test/a"),
+            "the URL is linked: {out:?}"
+        );
+        let out = String::from_utf8(l.link_written(b"in src/a.cc")).unwrap();
+        assert!(
+            out.contains("\x1b]8;;file://"),
+            "and paths link again after: {out:?}"
         );
     }
 

@@ -1276,19 +1276,29 @@ pub(crate) fn linked(line: &str) -> String {
     }
 }
 
+/// Print `text` to stderr as AXL `print()` does, its URLs linked on a
+/// person's terminal, and its paths too when `file_links`.
+pub(crate) fn print_line(text: &str, file_links: bool) {
+    match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
+        Some(mut linker) => {
+            use std::io::Write as _;
+            linker.set_format(link_format());
+            let mut line = if file_links {
+                linker.link_written(text.as_bytes())
+            } else {
+                linker.link_written_urls(text.as_bytes())
+            };
+            line.push(b'\n');
+            let _ = std::io::stderr().write_all(&line);
+            copy_output(&line);
+        }
+        None => errln!("{text}"),
+    }
+}
+
 impl starlark::PrintHandler for TolerantPrintHandler {
     fn println(&self, text: &str) -> starlark::Result<()> {
-        match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
-            Some(mut linker) => {
-                use std::io::Write as _;
-                linker.set_format(link_format());
-                let mut line = linker.link_written(text.as_bytes());
-                line.push(b'\n');
-                let _ = std::io::stderr().write_all(&line);
-                copy_output(&line);
-            }
-            None => errln!("{text}"),
-        }
+        print_line(text, true);
         Ok(())
     }
 }

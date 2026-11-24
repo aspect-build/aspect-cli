@@ -1217,7 +1217,13 @@ def _tips_impl(ctx):
     held_last = {}
     finished = [False]
     warned = {}
-    sink = [print]  # boxed so the test seam can capture lines
+
+    # A tip's paths are words to type (`.aspect/config.axl`), not places to
+    # open: only its URLs are linked. Boxed so the test seam can capture lines.
+    def _print_tip_line(line):
+        ctx.std.io.print(line, file_links = False)
+
+    sink = [_print_tip_line]
 
     def _render_jinja2(call_ctx, tip, accumulate, aggregates):
         """Render `tip`'s `_title_src`/`_body_src` against `vars`,
@@ -1444,7 +1450,7 @@ def _tips_impl(ctx):
         last.clear()
         warned.clear()
         finished[0] = False
-        sink[0] = print
+        sink[0] = _print_tip_line
         auto_print[0] = False
 
     def _set_silenced(ids):

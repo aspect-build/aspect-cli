@@ -92,6 +92,20 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
         Ok(this.stdin.dupe())
     }
 
+    /// Print `text` as `print()` does: to stderr, its URLs and the paths to
+    /// files that exist linked on a person's terminal. `file_links = False`
+    /// leaves paths as they are, for text whose paths are words to type (a
+    /// config file a hint names) rather than places to open.
+    fn print<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] text: &str,
+        #[starlark(require = named, default = true)] file_links: bool,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
+        crate::out::print_line(text, file_links);
+        Ok(starlark::values::none::NoneType)
+    }
+
     /// Whether detail lines print: the `INFO:` asides a reader can do
     /// without. The `Console` feature decides for the running task: its preset
     /// (shown under `full` and `plain`, hidden under `compact`, `agent` and
