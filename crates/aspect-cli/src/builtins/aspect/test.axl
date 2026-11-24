@@ -53,7 +53,7 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
     If no placeholder appears anywhere, the report path is appended as the
     last positional argument so simple tools like `genhtml` work without
     extra ceremony. A tool not found, or a non-zero exit code from it, is
-    surfaced as a warning — it does not fail the test task, so uploaders (e.g. codecov)
+    surfaced as a warning - it does not fail the test task, so uploaders (e.g. codecov)
     can still publish partial coverage when some tests failed.
     """
     bin, bin_matched = _substitute(bin, report_path)
@@ -115,8 +115,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bz.finish(w)
     conclusion = rs.conclude(w, bz.targets)
 
-    # Before the coverage tool, which may fail to start.
-    results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
         if not report_path:
@@ -130,6 +128,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 # was also set, the copied file is identical, so it doesn't
                 # matter which one the tool reads.
                 _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
+
+    # After the coverage tool: one that fails to start ends the run, and
+    # `main`'s error document then matches its exit.
+    results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     return conclusion
 
 test = task(
