@@ -31,19 +31,34 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
-/// How many file links' URLs [`written_url`] has written out in this
-/// process (Terminal.app's, which shows no OSC 8 link): a console line's,
-/// through [`written_urls`], and a summary path's, through
-/// [`FileLinks::link`].
-static WRITTEN: AtomicU64 = AtomicU64::new(0);
+/// How many URLs links have written out beside them (the macOS Terminal's,
+/// which shows no OSC 8 link), shared by every clone: one pipeline's
+/// [`FileLinks`] count together. A count, not part of what the links are,
+/// so equal whatever it holds.
+#[derive(Debug, Clone, Default)]
+pub struct WrittenCount(Arc<AtomicU64>);
 
-/// How many file links' URLs this process has written beside their links.
-pub fn written() -> u64 {
-    WRITTEN.load(Ordering::Relaxed)
+impl WrittenCount {
+    /// How many so far.
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn add(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
+
+impl PartialEq for WrittenCount {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for WrittenCount {}
 
 use regex::bytes::Regex;
 
@@ -351,6 +366,8 @@ pub struct FileLinks {
     /// Whether a URL written out is styled as a link: grey and underlined,
     /// and a URL's own link underlined, where colour is shown.
     pub styled: bool,
+    /// The URLs written out beside these links ([`FileLinks::counted`]).
+    pub written: WrittenCount,
 }
 
 impl FileLinks {
@@ -365,6 +382,7 @@ impl FileLinks {
             format,
             text: false,
             styled: false,
+            written: WrittenCount::default(),
         }
     }
 
@@ -380,13 +398,29 @@ impl FileLinks {
         self
     }
 
+    /// These links counting each URL they write out in `written`, which a
+    /// pipeline's links share.
+    pub fn counted(mut self, written: WrittenCount) -> FileLinks {
+        self.written = written;
+        self
+    }
+
     /// A link to `url` showing `shown`, then, when written out, ` <url>`,
     /// and `restore`, the style around it, after a styled one.
     pub fn link(&self, url: &str, shown: &[u8], restore: &[u8]) -> Vec<u8> {
         let mut out = osc8(url, shown);
         if self.text {
+            self.written.add();
             out.extend(written_url(url, self.styled, restore));
         }
+        out
+    }
+
+    /// `record` with each link to a file's URL written beside it, counted
+    /// ([`written_urls`]).
+    pub fn write_urls(&self, record: &[u8]) -> Vec<u8> {
+        let (out, n) = urls_written(record, self.styled);
+        (0..n).for_each(|_| self.written.add());
         out
     }
 
@@ -493,7 +527,7 @@ impl Linker {
     pub fn link_written(&mut self, record: &[u8]) -> Vec<u8> {
         let linked = self.link(record);
         if self.files.text {
-            written_urls(&linked, self.files.styled)
+            self.files.write_urls(&linked)
         } else {
             linked
         }
@@ -699,7 +733,7 @@ impl LineProcessor for Links {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
         let linked = self.linker.link(record);
         if self.linker.files.text && !(self.pty && self.drawn) {
-            return Some(written_urls(&linked, self.linker.files.styled));
+            return Some(self.linker.files.write_urls(&linked));
         }
         Some(linked)
     }
@@ -715,8 +749,13 @@ impl LineProcessor for Links {
 /// ([`written_url`]), the record's own style taken up again after it, and
 /// the text of a URL's own link is underlined, so both read as links.
 pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
+    urls_written(record, styled).0
+}
+
+/// [`written_urls`], and how many URLs it wrote.
+fn urls_written(record: &[u8], styled: bool) -> (Vec<u8>, usize) {
     if !contains(record, b"\x1b]8;") {
-        return record.to_vec();
+        return (record.to_vec(), 0);
     }
     let plain = ansi::strip(record);
     // Where in `record` each byte of `plain` starts.
@@ -759,10 +798,11 @@ pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
             (at, written_url(&url, styled, &active_style(&record[..at])))
         })
         .collect();
+    let written = inserts.len();
     inserts.extend(underlines);
     inserts.sort_by_key(|(at, _)| *at);
     if inserts.is_empty() {
-        return record.to_vec();
+        return (record.to_vec(), 0);
     }
     let mut out = Vec::with_capacity(record.len() + inserts.len() * 64);
     let mut from = 0;
@@ -772,7 +812,7 @@ pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
         from = at;
     }
     out.extend_from_slice(&record[from..]);
-    out
+    (out, written)
 }
 
 fn is_web(url: &str) -> bool {
@@ -782,7 +822,6 @@ fn is_web(url: &str) -> bool {
 /// ` <url>`, a URL written beside its link; when `styled`, grey with the
 /// URL underlined, then `restore` to take up the style around it again.
 fn written_url(url: &str, styled: bool, restore: &[u8]) -> Vec<u8> {
-    WRITTEN.fetch_add(1, Ordering::Relaxed);
     if !styled {
         return format!(" <{url}>").into_bytes();
     }
@@ -1187,6 +1226,7 @@ mod tests {
                         format: LinkFormat::parse("file").unwrap(),
                         text: false,
                         styled: false,
+                        written: WrittenCount::default(),
                     },
                     workspace: ws.clone(),
                 }))
@@ -1395,6 +1435,7 @@ mod tests {
                 format: LinkFormat::parse(f).unwrap(),
                 text: false,
                 styled: false,
+                written: WrittenCount::default(),
             }
             .url(Path::new("/w/a b.ts"), at)
         };
@@ -1853,6 +1894,7 @@ mod tests {
             format: LinkFormat::parse("idea").unwrap(),
             text: true,
             styled: false,
+            written: WrittenCount::default(),
         };
         let mut rel = RelativizePaths::new(Some(ws.clone()), None).linking(Some(LinkTo {
             files: files.clone(),
@@ -1886,19 +1928,31 @@ mod tests {
     }
 
     #[test]
-    fn every_written_file_url_is_counted() {
+    fn links_count_the_urls_they_write_out_together() {
         let file = "\x1b]8;;cursor://file/a.cc:1:1\x1b\\a.cc\x1b]8;;\x1b\\";
         let web = "\x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\";
-        // Other tests write URLs too, concurrently: at least these.
-        let before = super::written();
-        written_urls(format!("{file} and {web}").as_bytes(), false);
-        assert!(super::written() >= before + 1, "a console line's");
-        let before = super::written();
+        let files = FileLinks::file().written(true);
+        let summary = files.clone();
+        files.write_urls(format!("{file} and {web}").as_bytes());
+        assert_eq!(
+            files.written.get(),
+            1,
+            "a console line's file URL, not its web one"
+        );
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("console.log");
         std::fs::write(&log, "").unwrap();
-        file_link(&FileLinks::file().written(true), &log, "");
-        assert!(super::written() >= before + 1, "a summary path's");
+        file_link(&summary, &log, "");
+        assert_eq!(
+            files.written.get(),
+            2,
+            "a summary path's, counted with the line's"
+        );
+        assert_eq!(
+            FileLinks::file().written.get(),
+            0,
+            "another pipeline's links count apart"
+        );
         // A web link's URL is never written out, so nothing to count.
         assert_eq!(written_urls(web.as_bytes(), false), web.as_bytes());
     }

@@ -839,6 +839,8 @@ fn grey_style() -> (&'static str, &'static str) {
 /// between the client's spawn and its stderr having a reader.
 struct Console {
     forwarder: Forwarder,
+    /// The URLs the console's links wrote out beside them.
+    links_written: bazel::console::links::WrittenCount,
     /// The client's stdout when it is a file of its own: captured too, and
     /// forwarded as written (colour the capture asked for aside) after what
     /// the console's forwarder has pending,
@@ -977,6 +979,7 @@ impl Console {
             child_stdout,
             Console {
                 forwarder,
+                links_written: pipeline.links_written,
                 stdout,
                 feed,
                 observations: pipeline.observations,
@@ -1049,6 +1052,11 @@ pub struct Build {
     /// and `output_matches()`.
     #[allocative(skip)]
     console_observations: Option<Arc<Observations>>,
+
+    /// The URLs the console's links wrote out beside them:
+    /// `output_links_written`.
+    #[allocative(skip)]
+    console_links_written: Option<bazel::console::links::WrittenCount>,
 
     /// The raw console log, when the `output` processor changes what is shown.
     #[allocative(skip)]
@@ -1669,6 +1677,7 @@ impl Build {
             console,
             console_stdout,
             console_observations,
+            console_links_written,
             console_events,
             console_log,
             console_feed,
@@ -1683,12 +1692,13 @@ impl Build {
                     Some(console.forwarder),
                     console.stdout,
                     Some(console.observations),
+                    Some(console.links_written),
                     console.events,
                     console.log,
                     console.feed,
                 )
             }
-            None => (None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None),
         };
         let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks, max_event_bytes);
 
@@ -1899,6 +1909,7 @@ impl Build {
             console: RefCell::new(console),
             console_stdout: RefCell::new(console_stdout),
             console_observations,
+            console_links_written,
             console_log,
             console_gone,
             console_events: RefCell::new(console_events),
@@ -2078,6 +2089,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             "dropped": got.dropped,
             "progress": got.progress,
         })))
+    }
+
+    /// How many URLs the console wrote out beside its links, for a terminal
+    /// that shows no OSC 8 link but opens a URL written out (the macOS
+    /// Terminal): a line's, the recap's and the summary's paths. So far
+    /// during the build, all of them after `wait()`. 0 without a console.
+    #[starlark(attribute)]
+    fn output_links_written<'v>(this: values::Value<'v>) -> anyhow::Result<u64> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        Ok(build.console_links_written.as_ref().map_or(0, |w| w.get()))
     }
 
     /// The `(id, line)` hits of the `output` processor's `observe` stages:

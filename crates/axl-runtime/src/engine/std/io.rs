@@ -106,15 +106,6 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
         Ok(starlark::values::none::NoneType)
     }
 
-    /// How many file links' URLs this process has written out beside their
-    /// links so far: in Terminal.app, which shows no clickable link but
-    /// opens a URL written out. 0 elsewhere.
-    #[starlark(attribute)]
-    fn links_written<'v>(this: values::Value) -> anyhow::Result<u64> {
-        this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
-        Ok(bazel::console::links::written())
-    }
-
     /// Whether detail lines print: the `INFO:` asides a reader can do
     /// without. The `Console` feature decides for the running task: its preset
     /// (shown under `full` and `plain`, hidden under `compact`, `agent` and
