@@ -5,7 +5,6 @@
 //! [`bazel::console`].
 
 use std::cell::RefCell;
-use std::io::IsTerminal;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -494,11 +493,12 @@ pub(crate) struct ProcessorSettings {
 
 /// The console processor `processor(...)` makes; see its docs.
 pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
-    let stderr_tty = std::io::stderr().is_terminal();
+    // As they were before a screen a feature holds captured them.
+    let stderr_tty = crate::engine::stderr_is_terminal();
     let curses_out = match s.display {
         DisplayMode::Curses => true,
         DisplayMode::Lines | DisplayMode::None => false,
-        DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
+        DisplayMode::Auto => crate::engine::stdout_is_terminal() && stderr_tty,
     };
     let style = if crate::color::console_supports_color() {
         Style::themed(&s.palette)

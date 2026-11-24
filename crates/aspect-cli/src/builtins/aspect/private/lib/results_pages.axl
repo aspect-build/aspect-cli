@@ -1,0 +1,45 @@
+"""The results pages a Bazel invocation has, for a feature that names or
+opens them: the CLI's own sinks' viewer (`aspect_results_url` with the
+sinks' invocation id, from the task's `Phases` updates), and the page
+Bazel's own upload has (`--bes_results_url` with the stream's uuid).
+"""
+
+ASPECT_PAGE = "Aspect Build Results"
+BES_PAGE = "BES Results"
+
+def results_pages(bazel_base, bazel_uuid, data) -> list:
+    """Every results page the invocation has, as `(label, url)`, the CLI's
+    first:
+
+    - `ASPECT_PAGE` for the one the CLI's own sinks streamed to: the viewer
+      `data` (a task update's) advertises, joined with the sinks' id;
+    - the one Bazel uploaded to itself: `bazel_base` (its
+      `--bes_results_url`) joined with `bazel_uuid`. It is `ASPECT_PAGE` too
+      when `data` says Bazel streams to Aspect's backend itself, and
+      `BES_PAGE` otherwise.
+    """
+    pages = []
+    base = data.get("aspect_results_url", "") or ""
+    inv = data.get("sink_invocation_id", "") or ""
+    if base and inv:
+        pages.append((ASPECT_PAGE, base.rstrip("/") + "/" + inv))
+    if bazel_base and bazel_uuid:
+        label = ASPECT_PAGE if data.get("bes_streamed_by_bazel") else BES_PAGE
+        pages.append((label, bazel_base.rstrip("/") + "/" + bazel_uuid))
+    return pages
+
+def bes_results_url(event) -> str:
+    """The `--bes_results_url` in an `options_parsed` event's command line, or
+    `""`: what Bazel was told, from the rc, the task or the CLI. The last one
+    given, as Bazel takes it."""
+    url = ""
+    for arg in getattr(event.payload, "cmd_line", None) or []:
+        if arg.startswith("--bes_results_url="):
+            url = arg.partition("=")[2]
+    return url
+
+def results_page(bazel_base, bazel_uuid, data):
+    """The results page to open, or `""`: the CLI-streamed invocation's when
+    `data` (a task update's) names one, else the one Bazel uploaded."""
+    pages = results_pages(bazel_base, bazel_uuid, data)
+    return pages[0][1] if pages else ""

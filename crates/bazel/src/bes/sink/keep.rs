@@ -14,6 +14,10 @@
 //! them, once the stream ends or the build is retried in it; any other such
 //! log (an action's, with a remote cache) is counted as `not_local`.
 //!
+//! An action's kept logs are also published as they are placed
+//! ([`KeptActions`]), for a screen that shows a running build's failures
+//! after Bazel has replaced its own files.
+//!
 //! What is kept is listed in an index per kind beside its folder, out of
 //! reach of any label, written when the stream ends; a build the CLI was
 //! interrupted out of may have none:
@@ -32,8 +36,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::RecvError;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use axl_proto::build_event_stream::build_event::Payload;
@@ -108,6 +112,18 @@ pub struct Keep {
     pub tests: TestLogs,
 }
 
+/// Each action's kept logs so far, by its primary output: the paths, in the
+/// history folder, of its `stdout` and `stderr` that were kept. A retry's
+/// action replaces the earlier attempt's.
+pub type KeptActions = Arc<Mutex<HashMap<String, KeptAction>>>;
+
+/// An action's kept `stdout` and `stderr`, where each was kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeptAction {
+    pub stdout: Option<PathBuf>,
+    pub stderr: Option<PathBuf>,
+}
+
 impl Keep {
     /// Whether anything is kept.
     pub fn any(&self) -> bool {
@@ -135,14 +151,24 @@ impl Keep {
         )
     }
 
-    /// Start keeping logs from `recv` in `dir`, the build's history folder.
+    /// Start keeping logs from `recv` in `dir`, the build's history folder,
+    /// each action's as it is kept published to `published`, and for a
+    /// failed one an `INFO:` line naming where to `notes`, and where to
+    /// `kept_logs`, for the recap (the console's both).
     pub fn spawn(
         self,
         recv: Subscriber<Arc<BuildEventEnvelope>>,
         dir: PathBuf,
+        published: KeptActions,
+        told: Option<(
+            crate::console::forward::Notes,
+            crate::console::forward::KeptLogs,
+        )>,
     ) -> JoinHandle<SinkOutcome> {
         thread::spawn(move || {
             let mut kept = Kept::new(self, dir);
+            kept.published = Some(published);
+            (kept.notes, kept.kept_logs) = told.unzip();
             loop {
                 match recv.recv() {
                     Ok(envelope) => kept.event(&envelope.event),
@@ -159,6 +185,12 @@ impl Keep {
 struct Kept {
     keep: Keep,
     dir: PathBuf,
+    /// Where each action's kept logs are published as they are kept.
+    published: Option<KeptActions>,
+    /// Where a failed action's kept logs are told, as `INFO:` lines.
+    notes: Option<crate::console::forward::Notes>,
+    /// And listed, for the recap to name under its errors.
+    kept_logs: Option<crate::console::forward::KeptLogs>,
     actions: Vec<Value>,
     tests: Vec<Value>,
     /// Per `<label>/<mnemonic>`, how many actions have been kept.
@@ -213,6 +245,9 @@ impl Kept {
         Self {
             keep,
             dir,
+            published: None,
+            notes: None,
+            kept_logs: None,
             actions: vec![],
             tests: vec![],
             action_counts: HashMap::new(),
@@ -312,6 +347,36 @@ impl Kept {
                 &mut self.actions_not_kept,
             ) {
                 entry[stream] = json!(kept);
+            }
+        }
+        if let Some(published) = &self.published {
+            let at = |stream: &str| entry[stream].as_str().map(|rel| self.dir.join(rel));
+            let kept = KeptAction {
+                stdout: at("stdout"),
+                stderr: at("stderr"),
+            };
+            if kept != KeptAction::default() {
+                published
+                    .lock()
+                    .unwrap()
+                    .insert(id.primary_output.clone(), kept);
+            }
+        }
+        if !action.success {
+            let streams: Vec<(String, String)> = ["stderr", "stdout"]
+                .into_iter()
+                .filter_map(|stream| {
+                    let rel = entry[stream].as_str()?;
+                    Some((stream.to_string(), self.dir.join(rel).display().to_string()))
+                })
+                .collect();
+            if let Some(notes) = &self.notes {
+                for (stream, path) in &streams {
+                    notes.push(format!("INFO: {label} {mnemonic} {stream}: {path}").into_bytes());
+                }
+            }
+            if let (Some(kept_logs), false) = (&self.kept_logs, streams.is_empty()) {
+                kept_logs.push(label.clone(), streams);
             }
         }
         self.actions.push(entry);
@@ -765,6 +830,96 @@ mod tests {
 
     fn read_index(path: &Path) -> Value {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    /// A failed action's kept log is told to the console as an `INFO:`
+    /// line naming its label, mnemonic, stream and path; a successful
+    /// one's (`all`) is not.
+    #[test]
+    fn a_failed_actions_kept_log_is_noted_for_the_console() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr-1"), "ERROR: broken\n").unwrap();
+        fs::write(src.join("stdout-2"), "ok\n").unwrap();
+        let dir = tmp.path().join("history");
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::All,
+                tests: TestLogs::None,
+            },
+            dir.clone(),
+        );
+        let notes = crate::console::forward::Notes::default();
+        kept.notes = Some(notes.clone());
+        kept.event(&action_event(
+            "//pkg:broken",
+            "Genrule",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr-1"))),
+        ));
+        kept.event(&action_event(
+            "//pkg:fine",
+            "Genrule",
+            true,
+            Some(uri_file("stdout", &src.join("stdout-2"))),
+            None,
+        ));
+        let got: Vec<String> = notes
+            .take()
+            .into_iter()
+            .map(|n| String::from_utf8(n).unwrap())
+            .collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].starts_with("INFO: //pkg:broken Genrule stderr: "),
+            "{got:?}"
+        );
+        assert!(got[0].ends_with("Genrule-1.stderr"), "{got:?}");
+    }
+
+    /// Each kept action is published by its primary output as it is kept,
+    /// before the index is written, at the path it was kept at.
+    #[test]
+    fn kept_actions_are_published_as_they_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr-1"), "ERROR: broken\n").unwrap();
+        let dir = tmp.path().join("history");
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::Failed,
+                tests: TestLogs::None,
+            },
+            dir.clone(),
+        );
+        let published = KeptActions::default();
+        kept.published = Some(published.clone());
+        kept.event(&action_event(
+            "//pkg:broken",
+            "Genrule",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr-1"))),
+        ));
+        let got = published
+            .lock()
+            .unwrap()
+            .get("bazel-out/bin/Genrule.out")
+            .cloned()
+            .unwrap();
+        assert!(got.stdout.is_none());
+        let stderr = got.stderr.unwrap();
+        assert!(stderr.starts_with(&dir), "{stderr:?}");
+        // Bazel replacing its own file leaves the kept one as it was.
+        fs::remove_file(src.join("stderr-1")).unwrap();
+        assert_eq!(fs::read_to_string(&stderr).unwrap(), "ERROR: broken\n");
+        assert!(
+            !dir.join("actions.json").exists(),
+            "published before the index"
+        );
     }
 
     #[test]

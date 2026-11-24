@@ -9,8 +9,6 @@
 //! the line reaches the console's `banner` slot, which a `Console` layout may
 //! leave blank (see [`crate::console`]).
 
-use std::io::IsTerminal;
-
 use aspect_telemetry::{cargo_pkg_short_version, is_debug_build};
 
 use crate::ci::on_recognized_ci;
@@ -81,7 +79,7 @@ pub fn console_context(palette: Option<&aspect_theme::Palette>) -> minijinja::Va
 /// for output, so it always prints.)
 pub fn show_runtime_banner() -> bool {
     show_runtime_banner_from(
-        std::io::stderr().is_terminal(),
+        crate::engine::stderr_is_terminal(),
         on_recognized_ci(),
         std::env::var_os("ASPECT_CLI_NO_BANNER").is_some(),
     )

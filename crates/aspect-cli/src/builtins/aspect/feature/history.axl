@@ -10,7 +10,7 @@ run`'s program, and a build without a console processor (a task's
 `ctx.bazel.build` without `output =`), which writes to the terminal directly.
 This feature adds, off by default:
 
-- **Action logs** (`--history:action-logs`): the stdout and stderr Bazel
+- **Action logs** (`--history:action-logs`, failed actions' by default): the stdout and stderr Bazel
   wrote for each action, kept in the build's folder as
   `bazel/<n>/actions/[external/<repo>/]<package>/<name>/<mnemonic>-<k>.{stdout,stderr}` and
   listed, with each action's label, mnemonic, output, exit code and times, in
@@ -21,7 +21,9 @@ This feature adds, off by default:
   Bazel reports without it, unless your own flags or rc ask for every action.
   They are hard-linked from where Bazel wrote them, which costs no space until
   the next build replaces Bazel's own, and copied where a link cannot be made.
-- **Test logs** (`--history:test-logs`): each attempt's `test.log`,
+  Kept as each failure arrives, so a screen showing the build
+  (`build.kept_action_log()`) still has a log Bazel has since replaced.
+- **Test logs** (`--history:test-logs`, off by default): each attempt's `test.log`,
   `test.xml` and other outputs, copied to
   `bazel/<n>/testlogs/[external/<repo>/]<package>/<name>/run_<r>/shard_<s>/attempt_<a>/` and
   listed in `bazel/<n>/testlogs.json`. `failed` keeps attempts that did
@@ -29,8 +31,9 @@ This feature adds, off by default:
   took from a cache, `all` every one.
 
 The options apply to `aspect build` and `aspect test`; other tasks keep no
-logs unless they pass `keep_*` to `ctx.bazel.build` themselves. `none`, the
-default, leaves what config set on `BazelTrait`. With a remote cache Bazel
+logs unless they pass `keep_*` to `ctx.bazel.build` themselves. `auto`, the
+default, leaves what config set on `BazelTrait` (whose own defaults are
+`failed` action logs and no test logs); `none` keeps none. With a remote cache Bazel
 names logs by `bytestream://` URIs: test logs are then found in the local
 output tree, but action logs are not kept, and are counted in the index as
 `not_local`. The history is readable by its user
@@ -42,11 +45,11 @@ alone and pruned as usual. Uploading the same logs as CI artifacts is
 load("@aspect//bazel.axl", "BazelTrait")
 
 def _history_impl(ctx: FeatureContext):
-    # Only what was asked for: `none` leaves a value config set in place.
+    # Only what was asked for: `auto` leaves a value config set in place.
     t = ctx.traits[BazelTrait]
-    if ctx.args.action_logs != "none":
+    if ctx.args.action_logs != "auto":
         t.keep_action_logs = ctx.args.action_logs
-    if ctx.args.test_logs != "none":
+    if ctx.args.test_logs != "auto":
         t.keep_test_logs = ctx.args.test_logs
 
 History = feature(
@@ -55,14 +58,14 @@ History = feature(
     implementation = _history_impl,
     args = {
         "action_logs": args.string(
-            default = "none",
-            values = ["none", "failed", "all"],
-            description = "Which actions' stdout and stderr to keep in the history: 'none' (default; leaves config's choice), 'failed', or 'all' (adds --build_event_publish_all_actions for the CLI's own use; BES backends the CLI streams to get the extra events only if your flags or rc ask).",
+            default = "auto",
+            values = ["auto", "none", "failed", "all"],
+            description = "Which actions' stdout and stderr to keep in the history: 'auto' (default; config's choice, which is 'failed' unless config set another), 'none', 'failed', or 'all' (adds --build_event_publish_all_actions for the CLI's own use; BES backends the CLI streams to get the extra events only if your flags or rc ask).",
         ),
         "test_logs": args.string(
-            default = "none",
-            values = ["none", "failed", "executed", "all"],
-            description = "Which test attempts' logs to keep in the history: 'none' (default; leaves config's choice), 'failed', 'executed' (ran in this build, not cached) or 'all'.",
+            default = "auto",
+            values = ["auto", "none", "failed", "executed", "all"],
+            description = "Which test attempts' logs to keep in the history: 'auto' (default; config's choice, which is 'none' unless config set another), 'none', 'failed', 'executed' (ran in this build, not cached) or 'all'.",
         ),
     },
 )

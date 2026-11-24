@@ -30,7 +30,10 @@ mod history;
 pub mod io;
 mod net;
 pub(crate) mod process;
+pub mod re;
 pub mod stream;
+pub mod syntax;
+pub mod term;
 pub mod theme;
 pub(crate) mod watch;
 
@@ -82,6 +85,23 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn process<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<process::Process> {
         Ok(process::Process::new())
+    }
+
+    #[starlark(attribute)]
+    fn re<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<re::Re> {
+        Ok(re::Re)
+    }
+
+    /// Syntax highlighting for a source file shown on a screen; see
+    /// `std.Syntax`.
+    #[starlark(attribute)]
+    fn syntax<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<syntax::Syntax> {
+        Ok(syntax::Syntax)
+    }
+
+    #[starlark(attribute)]
+    fn term<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<term::Term> {
+        Ok(term::Term)
     }
 
     #[starlark(attribute)]
@@ -185,6 +205,17 @@ fn register_io_types(globals: &mut GlobalsBuilder) {
 }
 
 #[starlark_module]
+fn register_term_types(globals: &mut GlobalsBuilder) {
+    const Screen: StarlarkValueAsType<term::Screen> = StarlarkValueAsType::new();
+}
+
+#[starlark_module]
+fn register_re_types(globals: &mut GlobalsBuilder) {
+    const Pattern: StarlarkValueAsType<re::Pattern> = StarlarkValueAsType::new();
+    const Re: StarlarkValueAsType<re::Re> = StarlarkValueAsType::new();
+}
+
+#[starlark_module]
 fn register_watch_types(globals: &mut GlobalsBuilder) {
     const CreatedEvent: StarlarkValueAsType<watch::WatchCreated> = StarlarkValueAsType::new();
     const ModifiedEvent: StarlarkValueAsType<watch::WatchModified> = StarlarkValueAsType::new();
@@ -196,6 +227,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     globals.namespace("process", register_process_types);
     globals.namespace("net", net::register_net_types);
+    globals.namespace("re", register_re_types);
+    globals.namespace("term", register_term_types);
     globals.namespace("io", |g| {
         register_io_types(g);
         g.set("Error", IoError::native_type().error_type());

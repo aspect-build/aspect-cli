@@ -512,6 +512,9 @@ mod unix {
         if log_fd >= 0 {
             write_marker(log_fd, sig);
         }
+        // A feature's full screen holds stderr: give the terminal back first,
+        // so the report reaches it.
+        axl_runtime::engine::restore_terminal_after_crash();
         write_marker(libc::STDERR_FILENO, sig);
 
         let bias = load_bias();

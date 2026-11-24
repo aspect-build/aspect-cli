@@ -855,6 +855,11 @@ struct Console {
     stdout: Option<Forwarder>,
     /// The feed `output_feed()` drains, with `bazel::console::Output::Hidden`.
     feed: Option<Arc<bazel::console::feed::Feed>>,
+    /// Lines the console writes between Bazel's: the history's note of where
+    /// it kept each failed action's log.
+    notes: bazel::console::forward::Notes,
+    /// The failed actions' kept logs, which the console's recap names.
+    kept_logs: bazel::console::forward::KeptLogs,
     observations: Arc<Observations>,
     events: Option<std::sync::mpsc::Receiver<HeldLine>>,
     log: Option<std::path::PathBuf>,
@@ -942,6 +947,8 @@ impl Console {
         pipeline.shape.copy = Some(crate::out::copy_console_output);
         let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
         let feed = pipeline.feed.clone();
+        let notes = pipeline.notes.clone();
+        let kept_logs = pipeline.kept_logs.clone();
         let forwarder = Forwarder::spawn_reported(
             Box::new(reader),
             Box::new(std::io::stderr()),
@@ -989,6 +996,8 @@ impl Console {
                 links_written: pipeline.links_written,
                 stdout,
                 feed,
+                notes,
+                kept_logs,
                 observations: pipeline.observations,
                 events: pipeline.events,
                 log,
@@ -1134,6 +1143,11 @@ pub struct Build {
     /// by `history_slot` instead when there is one.
     #[allocative(skip)]
     keep_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
+
+    /// What the keep sink has kept of each action so far, when action logs
+    /// are asked for (`kept_action_log()`).
+    #[allocative(skip)]
+    kept_actions: Option<bazel::bes::sink::keep::KeptActions>,
 
     /// Its place in the task's record (`task.json`): its exit noted at the
     /// reap, its summary once `wait()` has joined the stream and the keep
@@ -1696,6 +1710,7 @@ impl Build {
             console_events,
             console_log,
             console_feed,
+            console_notes,
         ) = match console {
             Some(console) => {
                 console
@@ -1711,9 +1726,10 @@ impl Build {
                     console.events,
                     console.log,
                     console.feed,
+                    Some((console.notes, console.kept_logs)),
                 )
             }
-            None => (None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, None),
         };
         let build_event_stream =
             Unstarted::new(bes_file, pids.gate(), file_sinks, max_message_bytes);
@@ -1721,6 +1737,10 @@ impl Build {
         // Everything that can fail once bazel runs. A failure abandons the
         // stream (see `Unstarted`), and releases the handles this spawn bound.
         let mut execlog_bound = false;
+        // What the keep sink has kept of each action so far, when action
+        // logs are asked for: empty if no history folder could be made.
+        let kept_actions = (keep_logs.actions != bazel::bes::sink::keep::ActionLogs::None)
+            .then(bazel::bes::sink::keep::KeptActions::default);
         let parts = (|| -> io::Result<_> {
             // Started first: Bazel already has the path, so a stream dropped on
             // a later failure still reads to the client's exit, which `abandon`
@@ -1845,10 +1865,15 @@ impl Build {
             // Without a history folder (none can be made) nothing is kept;
             // `history_dir` has said why.
             let keep_sink = match (keep_logs.any(), &history_dir, build_event_stream.stream()) {
-                (true, Some(dir), Some(stream)) => Some(keep_logs.spawn(
-                    stream.subscribe_filtered(Some(keep_logs.filter())),
-                    dir.clone(),
-                )),
+                (true, Some(dir), Some(stream)) => {
+                    let published = kept_actions.clone().unwrap_or_default();
+                    Some(keep_logs.spawn(
+                        stream.subscribe_filtered(Some(keep_logs.filter())),
+                        dir.clone(),
+                        published,
+                        console_notes.clone(),
+                    ))
+                }
                 _ => None,
             };
             // With a record, the record's slot joins the keep sink, first,
@@ -1939,6 +1964,7 @@ impl Build {
             signals,
             trace_sink: RefCell::new(trace_sink),
             keep_sink: RefCell::new(keep_sink),
+            kept_actions,
             history_slot,
             span: RefCell::new(span),
         })
@@ -2072,7 +2098,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                 }
             };
             if let Err(e) = console.answer(held, eval) {
-                build.hook_failed(e);
+                build.hook_failed("intercept", e);
                 break;
             }
             wait = HOOK_FOLLOW;
@@ -2086,6 +2112,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// escape sequences stripped, a carriage return's redraw kept at its
     /// newest state, and other control characters but a tab removed (a
     /// backspace too, not applied);
+    /// `links`, each line's links at the same index, as `[start, end, url]`
+    /// with `start` and `end` characters of the line: the URLs and the paths
+    /// to files the console linked (`--console:file-hyperlink-format` says
+    /// what a file's opens), for a screen to draw as links and open;
     /// `dropped`, how many older lines were let go to keep at most 10000
     /// between calls; and `progress`, the rows of Bazel's progress area as it
     /// was before its latest redraw (at most one redraw behind), its status
@@ -2102,6 +2132,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let got = feed.drain();
         Ok(heap.alloc(serde_json::json!({
             "lines": got.lines,
+            "links": got.links,
             "dropped": got.dropped,
             "progress": got.progress,
         })))
@@ -2115,6 +2146,33 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     fn output_links_written<'v>(this: values::Value<'v>) -> anyhow::Result<u64> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         Ok(build.console_links_written.as_ref().map_or(0, |w| w.get()))
+    }
+
+    /// The logs this build's history has kept, so far, of the action whose
+    /// primary output (`ActionCompleted`'s `primary_output`) is `output`: a
+    /// dict of `{"stdout": path, "stderr": path}`, each stream it kept, empty
+    /// when it kept neither (a retry's action replaces its earlier
+    /// attempt's). Kept as each one arrives, so a log Bazel has since
+    /// replaced can still be read. None when the build keeps no action logs
+    /// (`keep_action_logs = "none"`, `--history:action-logs=none`).
+    fn kept_action_log<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] output: &str,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let Some(kept) = &build.kept_actions else {
+            return Ok(values::Value::new_none());
+        };
+        let mut streams = serde_json::Map::new();
+        if let Some(k) = kept.lock().unwrap().get(output) {
+            for (name, path) in [("stdout", &k.stdout), ("stderr", &k.stderr)] {
+                if let Some(p) = path {
+                    streams.insert(name.into(), p.to_string_lossy().into_owned().into());
+                }
+            }
+        }
+        Ok(heap.alloc(serde_json::Value::Object(streams)))
     }
 
     /// The `(id, line)` hits of the `output` processor's `observe` stages:
@@ -2236,14 +2294,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let console = TraitConsole::of(eval);
         build.answer_until_the_console_ends(console.as_ref(), this, eval);
-        let status = build.wait_status()?;
+        let status = build.wait_status().inspect_err(|_| {
+            build.release_frames_screen();
+        })?;
         if let Some(console) = &console
             && build.console_observations.is_some()
             && !build.console_ended.replace(true)
         {
             build.frame(console, this, eval, true);
             if let Err(e) = console.ended(this, eval) {
-                build.hook_failed(e);
+                build.hook_failed("end", e);
             }
         }
         match build.hook_error.take() {
@@ -2266,10 +2326,35 @@ const HOOK_BUDGET: usize = 1000;
 /// one before is answered.
 const HOOK_FOLLOW: Duration = Duration::from_millis(20);
 
+/// What an AXL error says went wrong: its `error:` line (a traceback's
+/// frames come first), else its last line.
+fn cause(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("error: "))
+        .or_else(|| text.lines().map(str::trim).filter(|l| !l.is_empty()).last())
+        .unwrap_or_default();
+    line.to_string()
+}
+
 impl Build {
-    /// Keep `e`, the first a console hook raised, for `wait()`, and let go
-    /// of the held lines: the rest are shown at once.
-    fn hook_failed(&self, e: anyhow::Error) {
+    /// Keep `e`, the first a console hook of `kind` (`frame`, `intercept`,
+    /// `end`) raised, for `wait()`, and let go of the held lines: the rest
+    /// are shown at once. No frame runs after it, so a screen the build's
+    /// frame hooks took is given back ([`Build::release_frames_screen`]),
+    /// saying so at once when one was and the build goes on: a console
+    /// hidden for that screen stays hidden, and the error is raised only
+    /// once the build ends.
+    fn hook_failed(&self, kind: &str, e: anyhow::Error) {
+        let released = self.release_frames_screen();
+        if released && self.hook_error.borrow().is_none() && !self.console_done() {
+            errln!(
+                "WARNING: a console {kind} hook failed ({}); the build goes on without its screen, and the error follows when it ends.",
+                cause(&e)
+            );
+        }
         drop(self.console_events.take());
         self.hook_error.borrow_mut().get_or_insert(e);
     }
@@ -2319,7 +2404,7 @@ impl Build {
             match next {
                 Recv::Item(held) => {
                     if let Err(e) = console.answer(held, eval) {
-                        self.hook_failed(e);
+                        self.hook_failed("intercept", e);
                         return;
                     }
                 }
@@ -2352,7 +2437,8 @@ impl Build {
     /// Run the `output_frame` hooks with `this` build when one is due, or
     /// now with `force` (the last frame, as the console ends). After any
     /// console hook's error, `output_intercept`'s too, no frame runs: the
-    /// error is kept for `wait()`.
+    /// error is kept for `wait()`, and the screen is given back at once
+    /// ([`Build::release_frames_screen`]).
     fn frame<'v>(
         &self,
         console: &TraitConsole<'v>,
@@ -2369,8 +2455,16 @@ impl Build {
         }
         self.last_frame.set(Some(std::time::Instant::now()));
         if let Err(e) = console.framed(this, eval) {
-            self.hook_error.borrow_mut().get_or_insert(e);
+            self.hook_failed("frame", e);
         }
+    }
+
+    /// No frame will run for this build any more (a hook failed, or the wait
+    /// did): with frame hooks, give back the terminal a screen holds, which
+    /// is process-wide, rather than leave it frozen until the CLI exits.
+    /// Whether a screen was given back.
+    fn release_frames_screen(&self) -> bool {
+        self.has_frames.get() == Some(true) && crate::engine::release_terminal()
     }
 
     /// The client's token, the one `handle.cancellation` wraps.
@@ -2521,6 +2615,15 @@ mod tests {
     //! binary, selected per-test via `--scenario=<name>`.
 
     use crate::engine::history::bazel_dir;
+
+    #[test]
+    fn a_hook_errors_cause_is_its_error_line() {
+        let traceback = anyhow::anyhow!(
+            "Traceback (most recent call last):\n  File <builtin>, in <module>\n  * a.axl:3, in _frame\n      fail(\"boom\")\nerror: fail: boom at frame 5\n --> a.axl:3:5"
+        );
+        assert_eq!(super::cause(&traceback), "fail: boom at frame 5");
+        assert_eq!(super::cause(&anyhow::anyhow!("plain\nlast")), "last");
+    }
 
     #[test]
     fn a_workspace_is_found_from_a_relative_or_symlinked_directory() {

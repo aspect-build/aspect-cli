@@ -426,12 +426,46 @@ fn ignore_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
     }
 }
 
+/// Whether the process's stdout and stderr were terminals before something
+/// that redirects them (a feature's full screen) did, while it does: what
+/// [`stdout_is_terminal`], [`stderr_is_terminal`] and `is_tty` report then.
+static REMEMBERED_TTY: std::sync::Mutex<Option<(bool, bool)>> = std::sync::Mutex::new(None);
+
+/// Remember `(stdout, stderr)`'s terminal state across a redirect, or forget
+/// it (None) once it is undone.
+pub fn remember_tty(state: Option<(bool, bool)>) {
+    *REMEMBERED_TTY.lock().unwrap_or_else(|e| e.into_inner()) = state;
+}
+
+fn remembered_tty() -> Option<(bool, bool)> {
+    *REMEMBERED_TTY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether stdout is a terminal, as it was before a redirect [`remember_tty`]
+/// knows of.
+pub fn stdout_is_terminal() -> bool {
+    remembered_tty().map_or_else(|| std::io::stdout().is_terminal(), |(out, _)| out)
+}
+
+/// Whether stderr is a terminal, as it was before a redirect [`remember_tty`]
+/// knows of.
+pub fn stderr_is_terminal() -> bool {
+    remembered_tty().map_or_else(|| std::io::stderr().is_terminal(), |(_, err)| err)
+}
+
 #[starlark_module]
 fn writable_methods(registry: &mut MethodsBuilder) {
-    /// Returns true if the underlying stream is connected to a terminal/tty.
+    /// Returns true if the underlying stream is connected to a terminal/tty;
+    /// for stdout and stderr, as it was before a feature's full screen
+    /// redirected it, while it does.
     #[starlark(attribute)]
     fn is_tty<'v>(this: values::Value) -> anyhow::Result<bool> {
         let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
+        match &*io {
+            Writable::Stdout(..) if remembered_tty().is_some() => return Ok(stdout_is_terminal()),
+            Writable::Stderr(..) if remembered_tty().is_some() => return Ok(stderr_is_terminal()),
+            _ => {}
+        }
         Ok(match &*io {
             Writable::ChildStdin(_) => false,
             Writable::Stdout(out, _) => {
@@ -464,7 +498,10 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// Writes a buffer into this writer, returning how many bytes were written.
+    /// Writes a buffer into this writer, returning how many bytes were
+    /// written: all of it to a child's stdin, or to a reader that has gone
+    /// (a broken pipe, reported as written: the child's exit says how it
+    /// went).
     ///
     /// What is written to stdout or stderr is also copied to the task
     /// history's `output.log` and `output.ansi`; `copy = False` leaves it
@@ -489,10 +526,16 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
-                inner
-                    .write(data)
-                    .map(|f| f as u32)
-                    .map_err(|err| anyhow!(err))
+                match inner.write_all(data) {
+                    Ok(()) => Ok(data.len() as u32),
+                    // A child that exited before reading it all: reported as
+                    // written, as on stdout (`ignore_broken_pipe`); its exit
+                    // status says how it went.
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(data.len() as u32)
+                    }
+                    Err(err) => Err(anyhow!(err)),
+                }
             }
             Writable::Stdout(stdout, _) => {
                 let guard = stdout.lock().unwrap();
@@ -653,5 +696,25 @@ mod broken_pipe_tests {
     #[test]
     fn success_passes_through() {
         assert!(ignore_broken_pipe(Ok(())).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod remembered_tty_tests {
+    use super::*;
+
+    /// While a redirect is remembered, the terminal state is the one from
+    /// before it, whatever the descriptors are now; forgotten, it is theirs.
+    #[test]
+    fn a_remembered_terminal_outlasts_the_redirect() {
+        let was = (
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        );
+        remember_tty(Some((!was.0, !was.1)));
+        let during = (stdout_is_terminal(), stderr_is_terminal());
+        remember_tty(None);
+        assert_eq!(during, (!was.0, !was.1));
+        assert_eq!((stdout_is_terminal(), stderr_is_terminal()), was);
     }
 }

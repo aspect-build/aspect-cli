@@ -344,7 +344,8 @@ pub struct Config {
     /// recap name, and the paths the summary names, as OSC 8 hyperlinks
     /// ([`links`]), a relative path resolved from the first of these
     /// directories it exists under. A hidden console ([`Output::Hidden`])
-    /// links nothing.
+    /// links what its feed gets, for the screen drawing it to open, with no
+    /// URL written out beside a link.
     pub links: Option<Vec<std::path::PathBuf>>,
     /// What a link to a file opens, when [`Config::links`] links: URLs are
     /// links whatever it says.
@@ -386,6 +387,15 @@ impl Config {
         self
     }
 
+    /// The workspace and the directory the task runs from, as linking has
+    /// them ([`Config::link_from`]), the second the first when they are one.
+    fn link_bases(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let bases = self.links.as_ref()?;
+        let workspace = bases.first()?.clone();
+        let cwd = bases.get(1).cloned().unwrap_or_else(|| workspace.clone());
+        Some((workspace, cwd))
+    }
+
     /// This config linking a relative path from `root`, the workspace a
     /// build runs in, before the directory the task runs from (the last of
     /// [`Config::links`]), each directory tried once.
@@ -397,19 +407,26 @@ impl Config {
     }
 
     /// A [`links::Linker`] for what is shown, when [`Config::links`] asks for
-    /// one and something is shown, counting the URLs it writes in `written`.
+    /// one: to the terminal, or hidden, to the feed, whose screen opens a
+    /// link itself, so neither its URL is written beside it nor styled;
+    /// counting the URLs it writes in `written`.
     fn linker(&self, written: &links::WrittenCount) -> Option<links::Linker> {
         let bases = self.links.clone()?;
-        (self.output != Output::Hidden)
-            .then(|| links::Linker::new(bases).with_files(self.files(written)))
+        Some(links::Linker::new(bases).with_files(self.files(written)))
     }
 
     /// How this pipeline's links to files are made, the URLs they write out
-    /// counted in `written`, which all of a pipeline's share.
+    /// counted in `written`, which all of a pipeline's share: hidden, plain
+    /// links for the feed's screen to open, no URL written beside one.
     fn files(&self, written: &links::WrittenCount) -> links::FileLinks {
+        let hidden = self.output == Output::Hidden;
         links::FileLinks::new(self.link_format.clone())
-            .written(self.link_text)
-            .styled(self.shown_palette().map(|p| links::LinkStyle::of(p)))
+            .written(self.link_text && !hidden)
+            .styled(
+                self.shown_palette()
+                    .filter(|_| !hidden)
+                    .map(|p| links::LinkStyle::of(p)),
+            )
             .counted(written.clone())
     }
 
@@ -462,6 +479,7 @@ impl Config {
             },
             feed: None,
             hidden: self.output == Output::Hidden,
+            notes: None,
             copy: None,
         }
     }
@@ -490,6 +508,7 @@ impl Config {
     /// channel and raw log.
     pub fn pipeline(&self) -> Pipeline {
         let pty = self.shows_curses();
+        let kept_logs = forward::KeptLogs::default();
         let observations = Arc::new(Observations::default());
         let stats = Arc::new(Stats::default());
         let written = links::WrittenCount::default();
@@ -566,7 +585,9 @@ impl Config {
                 ),
                 Stage::Drop(patterns) => Box::new(DropLines::new(patterns, pty, stats.clone())),
                 Stage::RecapErrors { max, after } => Box::new(
-                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker(&written)),
+                    RecapErrors::new(max, after, self.style.clone())
+                        .linking(self.linker(&written))
+                        .naming(kept_logs.clone(), self.link_bases()),
                 ),
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
@@ -602,6 +623,8 @@ impl Config {
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
         let mut shape = self.shape();
         shape.feed = feed.clone();
+        let notes = forward::Notes::default();
+        shape.notes = Some(notes.clone());
         Pipeline {
             chain,
             observations,
@@ -610,6 +633,8 @@ impl Config {
             shape,
             feed,
             links_written: written,
+            notes,
+            kept_logs,
         }
     }
 }
@@ -630,6 +655,10 @@ pub struct Pipeline {
     /// The URLs its links have written out beside them (the macOS
     /// Terminal's): a console line's, the recap's and the summary's paths.
     pub links_written: links::WrittenCount,
+    /// Lines for the console from another thread, written between Bazel's.
+    pub notes: forward::Notes,
+    /// The failed actions' kept logs, which the recap names.
+    pub kept_logs: forward::KeptLogs,
 }
 
 #[cfg(test)]

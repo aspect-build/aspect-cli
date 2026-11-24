@@ -385,6 +385,12 @@ pub struct RecapErrors {
     /// Links what the repeated lines name, for a terminal, with what
     /// `relativize_paths` said of each line's paths.
     linker: Option<Linker>,
+    /// The failed actions' logs the history kept, named under the errors
+    /// they are the output of ([`kept_for`]).
+    kept: Option<super::forward::KeptLogs>,
+    /// The workspace and the directory the task runs from, which an
+    /// error's BUILD file path is under or relative to.
+    bases: Option<(PathBuf, PathBuf)>,
 }
 
 /// The links a line went by with, placed in its quoted text.
@@ -483,7 +489,24 @@ impl RecapErrors {
             distinct: HashSet::new(),
             after_first: 0,
             linker: None,
+            kept: None,
+            bases: None,
         }
+    }
+
+    /// This recap naming, under each error, where the history kept the
+    /// failed action's whole output (`full stderr: <path>`), when `kept`
+    /// has it. `bases` (the workspace, then the directory the task runs
+    /// from) place an error's BUILD file in its package; without them only
+    /// an error naming its action's label is matched.
+    pub fn naming(
+        mut self,
+        kept: super::forward::KeptLogs,
+        bases: Option<(PathBuf, PathBuf)>,
+    ) -> Self {
+        self.kept = Some(kept);
+        self.bases = bases;
+        self
     }
 
     /// This recap with the paths and URLs it repeats linked ([`Linker`]),
@@ -592,6 +615,8 @@ impl LineProcessor for RecapErrors {
             Some(l) => l.link_with(text.as_bytes(), links),
             None => text.as_bytes().to_vec(),
         };
+        let kept = self.kept.as_ref().map(|k| k.all()).unwrap_or_default();
+        let mut used = vec![false; kept.len()];
         for e in &self.errors {
             out.extend(
                 b"  "
@@ -600,6 +625,8 @@ impl LineProcessor for RecapErrors {
                     .chain(style.error_label(line(&e.header.0, &e.header.1)))
                     .chain(*b"\n"),
             );
+            let whole =
+                kept_for(&e.header.0, &kept, &mut used, self.bases.as_ref()).map(|i| &kept[i].1);
             for part in e.excerpt() {
                 match part {
                     Part::Line((b, links)) => {
@@ -611,9 +638,75 @@ impl LineProcessor for RecapErrors {
                     }
                 }
             }
+            for (stream, path) in whole.into_iter().flatten() {
+                let text = format!("full {stream}: {path}");
+                out.extend(
+                    b"    "
+                        .iter()
+                        .copied()
+                        .chain(line(&text, &[]))
+                        .chain(*b"\n"),
+                );
+            }
         }
         Some(out)
     }
+}
+
+/// Which of `kept` (the history's failed actions, in order) is the action
+/// the error `header` reports, not yet `used`: the one the header names by
+/// its label (a genrule's), else the first from the package of the BUILD
+/// file the header's location is in (`Compiling a.cc failed` names none),
+/// that file's path made absolute from the task's directory and taken
+/// relative to the workspace (`bases`); outside it, or without `bases`,
+/// none.
+fn kept_for(
+    header: &str,
+    kept: &[(String, Vec<(String, String)>)],
+    used: &mut [bool],
+    bases: Option<&(PathBuf, PathBuf)>,
+) -> Option<usize> {
+    let names = |label: &str| {
+        header.match_indices(label).any(|(i, _)| {
+            !header[i + label.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || "_-./+".contains(c))
+        })
+    };
+    let package = |label: &str| {
+        let local = label.split_once("//").map_or(label, |(_, rest)| rest);
+        local
+            .split_once(':')
+            .map_or(local, |(pkg, _)| pkg)
+            .to_string()
+    };
+    static LOCATION: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"^ERROR: (.*?)BUILD(?:\.bazel)?:\d+:\d+: ").unwrap()
+    });
+    let dir = bases.and_then(|(workspace, cwd)| {
+        let found = LOCATION.captures(header)?;
+        let dir = cwd.join(found[1].trim_end_matches('/'));
+        let mut parts: Vec<&std::ffi::OsStr> = vec![];
+        for part in dir.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    parts.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => parts.push(other.as_os_str()),
+            }
+        }
+        let dir: PathBuf = parts.iter().collect();
+        let pkg = dir.strip_prefix(workspace).ok()?;
+        Some(pkg.to_string_lossy().replace('\\', "/"))
+    });
+    let in_dir = |label: &str| dir.as_ref().is_some_and(|dir| *dir == package(label));
+    let pick =
+        |want: &dyn Fn(&str) -> bool| (0..kept.len()).find(|&i| !used[i] && want(&kept[i].0));
+    let found = pick(&|l| names(l)).or_else(|| pick(&|l| in_dir(l)))?;
+    used[found] = true;
+    Some(found)
 }
 
 /// Where a collapsed kind's messages are staged, by its slot in the stats,
@@ -743,6 +836,83 @@ impl LineProcessor for Summary {
 
 #[cfg(test)]
 mod tests {
+
+    /// An error is matched to the action the history kept: by its label when
+    /// it names one, else by its BUILD file's package, each action once.
+    #[test]
+    fn an_error_is_matched_to_its_kept_action() {
+        let kept = vec![
+            (
+                "//a:gen".to_string(),
+                vec![("stderr".to_string(), "/h/a/gen.stderr".to_string())],
+            ),
+            (
+                "//b:lib".to_string(),
+                vec![("stderr".to_string(), "/h/b/lib.stderr".to_string())],
+            ),
+            (
+                "//b:other".to_string(),
+                vec![("stdout".to_string(), "/h/b/other.stdout".to_string())],
+            ),
+        ];
+        let mut used = vec![false; kept.len()];
+        let bases = (PathBuf::from("/ws"), PathBuf::from("/ws"));
+        let b = Some(&bases);
+        let genrule = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)";
+        assert_eq!(super::kept_for(genrule, &kept, &mut used, b), Some(0));
+        let compile = "ERROR: b/BUILD.bazel:3:1: Compiling b/x.cc failed: (Exit 1)";
+        assert_eq!(super::kept_for(compile, &kept, &mut used, b), Some(1));
+        assert_eq!(
+            super::kept_for(compile, &kept, &mut used, b),
+            Some(2),
+            "the next in the package"
+        );
+        assert_eq!(
+            super::kept_for(compile, &kept, &mut used, b),
+            None,
+            "each once"
+        );
+        let prefix = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:generate failed: (Exit 1)";
+        let mut fresh = vec![false; kept.len()];
+        assert_eq!(
+            super::kept_for(prefix, &kept[..1], &mut fresh[..1], b),
+            Some(0),
+            "by package, not by a label's prefix"
+        );
+
+        // Only the package itself: not one ending in its name, and the
+        // root package by its own BUILD file.
+        let mut fresh = vec![false; kept.len()];
+        let nested = "ERROR: /ws/c/b/BUILD.bazel:3:1: Compiling c/b/x.cc failed: (Exit 1)";
+        assert_eq!(super::kept_for(nested, &kept, &mut fresh, b), None);
+        let root_kept = vec![(
+            "//:gen".to_string(),
+            vec![("stderr".to_string(), "/h/gen.stderr".to_string())],
+        )];
+        let root = "ERROR: /ws/BUILD.bazel:1:8: Executing genrule //:generate failed: (Exit 1)";
+        assert_eq!(super::kept_for(root, &root_kept, &mut [false], b), Some(0));
+        let ends_in_b = (PathBuf::from("/x/b"), PathBuf::from("/x/b"));
+        let root_b = "ERROR: /x/b/BUILD.bazel:1:8: Compiling x.cc failed: (Exit 1)";
+        assert_eq!(
+            super::kept_for(root_b, &kept[1..], &mut [false, false], Some(&ends_in_b)),
+            None,
+            "a workspace ending in a package's name"
+        );
+
+        // Relative to the task's directory, a subdirectory of the workspace.
+        let sub = (PathBuf::from("/ws"), PathBuf::from("/ws/c"));
+        let relative = "ERROR: ../b/BUILD:3:1: Compiling b/x.cc failed: (Exit 1)";
+        assert_eq!(
+            super::kept_for(relative, &kept, &mut [false; 3], Some(&sub)),
+            Some(1)
+        );
+        assert_eq!(
+            super::kept_for(compile, &kept, &mut [false; 3], None),
+            None,
+            "without the workspace, by label only"
+        );
+    }
+
     use super::*;
 
     use std::sync::Arc;

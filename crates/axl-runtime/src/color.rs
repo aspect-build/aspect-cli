@@ -21,7 +21,6 @@
 //! report the run's [`StreamColor`].
 
 use std::ffi::OsString;
-use std::io::IsTerminal;
 use std::sync::OnceLock;
 
 /// Whether each of the process's console streams may carry ANSI color,
@@ -37,9 +36,11 @@ impl StreamColor {
     pub fn of_process() -> Self {
         static PROCESS: OnceLock<StreamColor> = OnceLock::new();
         *PROCESS.get_or_init(|| {
+            // As the streams were before a full screen captured them, if one
+            // has: a pipe then, they are the terminal's still.
             Self::from_snapshot(
-                std::io::stdout().is_terminal(),
-                std::io::stderr().is_terminal(),
+                crate::engine::stdout_is_terminal(),
+                crate::engine::stderr_is_terminal(),
                 |name| std::env::var_os(name),
             )
         })

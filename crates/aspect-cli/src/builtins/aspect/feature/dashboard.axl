@@ -1,0 +1,3929 @@
+"""`Dashboard`: a live dashboard of a build in place of Bazel's terminal
+UI, on the terminal's alternate screen. Off by default:
+
+    aspect build //... --dashboard:enabled=true
+
+While a build runs it shows:
+
+- a status bar with the task, how long Bazel has run, and a bar of its
+  `[done / total]` actions;
+- the actions running now, from Bazel's own progress area, oldest first,
+  yellow past a minute and red past five; once the build has finished,
+  Bazel's critical path and the slowest actions seen running;
+- links to the invocation's results pages: the Aspect Build Results page the
+  CLI streams to, and the BES results page Bazel streams to itself with
+  `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
+- a Results pane: targets and tests, cache hits from their sources of truth
+  (actions' from the compact execution log, tests' from their results), and
+  the failures counted (a click shows them);
+- the main pane's tabs, always in one order, the shown one named by what is
+  open in it (`Failures ✗1 › //pkg:t › attempt 1/2 › a.py:12`):
+  - Console: the task's whole output, from its start (what the CLI wrote
+    before Bazel's console began, then Bazel's, then the CLI's own lines,
+    marked `» `), scrollable, Bazel's labels coloured by the theme, the
+    lines under each `INFO: From` folded to a count;
+  - Failures: each failed action, each failed test run, shard and attempt,
+    then the failed targets Bazel gave no log for and those a failed
+    dependency blocked; Enter opens one's log in the tab (its stderr and
+    stdout, a test's `test.log`, found where Bazel left it, a remote cache's
+    `bytestream://` one in the output tree); `a` lists the actions that
+    succeeded and wrote output instead (with `--dashboard:actions=all`);
+  - Metrics: spawns and cache hits by runner, Bazel's action cache, tests,
+    targets, time and memory, the slowest actions;
+  - Invocation: the command, ids, Bazel's version, the flags given,
+    workspace status and build metadata, what may be a secret redacted;
+- a row of the keys for what has focus, and `?` for all of them (`_HELP`).
+
+The keys, as in `less`, lazygit and Claude Code's transcript: `↑`/`↓` or
+`k`/`j` scroll a line and the wheel three; Shift or Option with `↑`/`↓`,
+`u`/`d` and Ctrl+`u`/`d` half a page; Page Up/Down, `b` and Space a page;
+Shift+`K` or Home the top, Shift+`J` or End back to following (a list's
+first and last row), as in Claude Code's transcript. Tab and
+Shift+Tab cycle the tabs (or a click); `]`/`[` show the next or previous
+failure's log in Failures, `}`/`{` the next or previous attempt, shard or
+run of the same target; Esc goes back a crumb, then to the tab's own pane,
+then to the console. A click on a path shows the file in place (a peek,
+highlighted by `std.syntax`), `o` opens what is shown in the editor
+`editor` in `~/.aspect/config.json` or `--console:file-hyperlink-format`
+names, and `O` picks another; a click on a web link opens it. The screen
+takes the mouse: a drag selects and copies, a double click a word; `m`
+(or `--dashboard:mouse=false`) gives it back to the terminal. `e` cycles
+every line, errors and warnings, errors only; `w` cuts long lines rather
+than wrap them; Ctrl+O unfolds; `z` gives the main pane the whole screen;
+`q` cancels the build, as Ctrl+C does.
+
+Ctrl+F or `/` opens a search bar for a regular expression (`std.re`),
+smart case unless Ctrl+T (or Alt+C) makes it match case, whole words with
+Ctrl+B (or Alt+W). As you type it jumps to the newest match at or above the
+view; Tab in the bar filters to the matching lines instead. Enter keeps it,
+and `n`/`N` then step to the next and previous match, round to the other
+end past the last; Esc clears it and
+goes back to where the bar opened.
+
+When a `build` or `test` task ends the screen stays up, its failures still
+browsable, until `q`, Enter or Esc with nothing open, or Ctrl+C; with
+nothing failed it counts down three seconds and leaves unless a key stops
+it (`--dashboard:stay=always`, `never`). Then the scrollback gets the
+console as the screen showed it (`replay_lines`) and a summary: each
+failure with its log's path (the history's copy, which outlives Bazel's),
+the targets a failure blocked, the flaky tests, the counts, and
+`aspect history show <id>` for the rest (`report_lines`).
+
+How it is built:
+
+1. `BazelTrait.output_display = "none"`: Bazel's console is still captured
+   and run through every stage, but nothing of it is shown.
+2. A `BazelTrait.output_frame` hook, which the runtime calls about every
+   100ms while the console is open, takes the terminal on its first call
+   (`ctx.std.term.take()`, the mouse taken with `screen.mouse(True)`
+   unless asked not to, the wheel sent as arrows with
+   `screen.wheel_keys(True)` while it is the terminal's),
+   then on each call reads what the console would have shown
+   (`build.output_feed()`, through `add_lines`), reads the keys
+   (`screen.key()`, through `on_key`), and redraws the whole screen in one
+   write (`render`) when it changed (Ctrl+L redraws it anyway); the
+   finished screen, idle, reads a key a second.
+3. `build_event` hooks count targets and tests from the build event stream,
+   gather the failures and the actions that wrote output with their logs
+   (`failure_of`, `output_of`), and what finding a test's log in the output
+   tree takes (the exec root, each configuration's output folder, each
+   test's run and shard counts and last attempts).
+4. An `output_end` hook draws the build's last frame. A retry keeps the
+   screen, starting afresh on its first frame.
+   Any other task (`lint`, `warming`) gives the terminal back there, as it
+   goes on after its build.
+5. A `post_task` hook keeps the screen up (or counts down, the task's exit
+   code 0 and nothing failed), with Ctrl+C read as a key
+   (`screen.interrupts(False)`) since the task has already ended, then gives
+   the terminal back (`screen.release(replay_stderr = False)`), then
+   writes the console as it showed it (`replay_lines`) and the summary.
+
+On a terminal only, and never on CI. A task's builds show it while they
+run; `build` and `test` keep it up once they end, and any other task gets
+the terminal back (and the replay) when its build ends. Under a coding agent,
+with `TERM` dumb or unset, or on a terminal under 40x12, it stays off even
+when enabled, saying why in a line on stderr (`refusal`): an agent's pty
+has nobody to press the keys the finished screen waits for.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook")
+load("@aspect//helpers.axl", "file_uri_to_path")
+load("@aspect//traits.axl", "Phases")
+load("@std//base64.axl", "base64")
+load("@std//theme.axl", "theme")
+load("@std//time.axl", "monotonic")
+load("../private/lib/agent.axl", "under_agent")
+load("../private/lib/aspect_flags.axl", "publish_all_actions")
+load("../private/lib/results_pages.axl", "bes_results_url", "results_pages")
+
+# The screen's colours, by the run's theme (`@std//theme.axl`), looked up
+# as they are drawn: the theme the run has then (the background the screen
+# learns, a config's), whatever the stream's own colour.
+def _c(role: str) -> str:
+    return theme.sgr(role, stream = True)
+
+_RESET = theme.reset
+
+# Bazel's labels as the console shows them: the theme's, or Bazel's own
+# when the theme leaves Bazel's colours alone (`bazel = "tool"`).
+_LABELS = [
+    ("ERROR:", "bazel.error", "\x1b[31m\x1b[1m"),
+    ("FAILED:", "bazel.status.failed", "\x1b[31m\x1b[1m"),
+    ("FAIL:", "bazel.fail", "\x1b[31m\x1b[1m"),
+    ("WARNING:", "bazel.warning", "\x1b[35m"),
+    ("INFO: Build completed successfully", "bazel.status.success", "\x1b[32m"),
+    ("INFO:", "bazel.info", "\x1b[32m"),
+    ("DEBUG:", "bazel.debug", "\x1b[33m"),
+]
+
+def _bazel_raw() -> bool:
+    """Whether Bazel's labels keep Bazel's own colours: the theme leaves
+    them alone (`bazel = "tool"`) and draws colour (not `mono`)."""
+    info = theme.info()
+    return info["bazel"] == "tool" and info["name"] != "mono"
+
+def _label(line: str, raw = None) -> str:
+    """`line` with its leading Bazel label (`ERROR:`, `WARNING:`, ...)
+    coloured, the rest of it left as it is."""
+    rest = bazel_line(line)
+    at = len(line) - len(rest)
+    for word, role, code in _LABELS:
+        if rest.startswith(word):
+            tool = _bazel_raw() if raw == None else raw
+            return line[:at] + (code if tool else _c(role)) + word + _RESET + line[at + len(word):]
+    return line
+
+# Console lines kept for scrolling back; older ones are counted in the
+# pane's title, and Bazel's console log has them all.
+_MAX_LOG = 20000
+
+# The console's text kept, in characters, whatever its lines' length (a
+# minified bundle's), and the most of one line: the rest is on disk.
+_MAX_LOG_SIZE = 16 * 1024 * 1024
+_MAX_LINE = 8 * 1024
+
+# The lines a record's logs share in its view (`fit_logs`).
+_MAX_VIEW = 5000
+
+# The most of a failure's log read into its view: the end, where the failure
+# usually is.
+_MAX_LOG_BYTES = 1024 * 1024
+
+# Escape sequences a log file may hold (colour, cursor moves, OSC links,
+# character set choices, two-byte ones such as saving the cursor).
+ANSI = "\\x1b\\[[0-?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)|\\x1b[ -/]+[0-~]|\\x1b[0-~]"
+
+# Control characters a log line may still hold once its escape sequences are
+# gone, C1's 8-bit ones among them, which would move the cursor off the row
+# (a tab is spaced by `fit`).
+CONTROLS = "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]"
+
+# The tasks whose screen stays up after their build: the others go on to
+# run something that needs the terminal.
+_STAY_KINDS = ["build", "test"]
+
+# Errors repeated in the scrollback once the screen goes.
+_MAX_ERRORS = 20
+
+# Test statuses that are failures; `no_status`, `incomplete` and the like are
+# not.
+_FAILED_TEST_STATUSES = ["failed", "timeout", "failed_to_build", "remote_failure", "tool_halted_before_testing"]
+
+# The Aborted reasons a target counts as failed for: the rest (skipped, an
+# interrupt) are skipped.
+_FAILED_ABORTS = ["analysis_failure", "loading_failure"]
+
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Alt (Option) with an arrow scrolls half a page, not an Esc and the arrow.
+_ALT_SCROLL = ["alt-up", "alt-down"]
+
+# The most keys a frame applies before it draws, so the screen keeps up
+# with a burst of wheel or drag reports.
+_MAX_KEYS = 512
+
+# How many lines a turn of the mouse wheel scrolls.
+_WHEEL = 3
+
+# How long a finished screen with nothing failed stays up (`stay =
+# "failure"`), counting down.
+_COUNTDOWN_MS = 3000
+
+# How old, in seconds, a running action is coloured slow, and stuck.
+_SLOW_S = 60
+_STUCK_S = 300
+
+# The keys, for the `?` overlay.
+_HELP = [
+    ("↑ ↓  k j", "scroll a line; in a list, choose"),
+    ("⇧↑↓ ⌥↑↓  u d  ^U ^D", "scroll half a page (macOS Terminal sends ⇧↑↓ as ↑↓)"),
+    ("PgUp PgDn  Space b", "scroll a page (PgUp/PgDn are Fn+↑↓ on a Mac)"),
+    ("K  J", "the top; the end, following the newest (Home, End too)"),
+    ("wheel", "scroll"),
+    ("drag", "select, and copy on release"),
+    ("click", "a file's link shows the file here (o: in your editor); a web link opens; any other is copied"),
+    ("m  o  O", "the mouse to the terminal and back; open the log (or the task's output) in your editor; pick the editor"),
+    ("^L", "redraw the screen"),
+    ("e", "every line, errors and warnings, errors only"),
+    ("/  ^F", "find: jumps to the newest match; n the next one down, N the previous, round the ends"),
+    ("  Tab", "in the bar: filter to the matches instead, and back"),
+    ("  ^T  ^B", "in the bar: match case (else a capital does), whole words"),
+    ("  ^W", "in the bar: delete a word"),
+    ("  ^U  Enter  Esc", "in the bar: clear; keep and close; clear and go back"),
+    ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation (or click one)"),
+    ("Enter", "in the list: show the chosen log"),
+    ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"),
+    ("a", "the list: failures, or actions that wrote output"),
+    ("z", "the console fills the screen, and back"),
+    ("w", "wrap long lines (the default), or cut them at the edge"),
+    ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold them again"),
+    ("Esc", "back a crumb: a file to the log it was opened from, a log to its tab; a tab to the console"),
+    ("q", "cancel the build; once it is done, leave"),
+    ("?", "these keys"),
+]
+
+# The code points a terminal draws two cells wide (East Asian Wide and
+# Fullwidth, emoji among them) and none (combining marks, zero-width spaces,
+# variation selectors), as `(first, last, cells)`, in order.
+_CELLS = [
+    (0x0300, 0x036F, 0),
+    (0x1100, 0x115F, 2),
+    (0x200B, 0x200F, 0),
+    (0x20D0, 0x20FF, 0),
+    (0x231A, 0x231B, 2),
+    (0x2329, 0x232A, 2),
+    (0x23E9, 0x23EC, 2),
+    (0x23F0, 0x23F0, 2),
+    (0x23F3, 0x23F3, 2),
+    (0x25FD, 0x25FE, 2),
+    (0x2614, 0x2615, 2),
+    (0x2648, 0x2653, 2),
+    (0x267F, 0x267F, 2),
+    (0x2693, 0x2693, 2),
+    (0x26A1, 0x26A1, 2),
+    (0x26AA, 0x26AB, 2),
+    (0x26BD, 0x26BE, 2),
+    (0x26C4, 0x26C5, 2),
+    (0x26CE, 0x26CE, 2),
+    (0x26D4, 0x26D4, 2),
+    (0x26EA, 0x26EA, 2),
+    (0x26F2, 0x26F3, 2),
+    (0x26F5, 0x26F5, 2),
+    (0x26FA, 0x26FA, 2),
+    (0x26FD, 0x26FD, 2),
+    (0x2705, 0x2705, 2),
+    (0x270A, 0x270B, 2),
+    (0x2728, 0x2728, 2),
+    (0x274C, 0x274C, 2),
+    (0x274E, 0x274E, 2),
+    (0x2753, 0x2755, 2),
+    (0x2757, 0x2757, 2),
+    (0x2795, 0x2797, 2),
+    (0x27B0, 0x27B0, 2),
+    (0x27BF, 0x27BF, 2),
+    (0x2B1B, 0x2B1C, 2),
+    (0x2B50, 0x2B50, 2),
+    (0x2B55, 0x2B55, 2),
+    (0x2E80, 0x303E, 2),
+    (0x3041, 0x33FF, 2),
+    (0x3400, 0x4DBF, 2),
+    (0x4E00, 0x9FFF, 2),
+    (0xA000, 0xA4CF, 2),
+    (0xAC00, 0xD7A3, 2),
+    (0xF900, 0xFAFF, 2),
+    (0xFE00, 0xFE0F, 0),
+    (0xFE20, 0xFE2F, 0),
+    (0xFE30, 0xFE4F, 2),
+    (0xFF00, 0xFF60, 2),
+    (0xFFE0, 0xFFE6, 2),
+    (0x16FE0, 0x18AFF, 2),
+    (0x1B000, 0x1B2FF, 2),
+    (0x1F004, 0x1F004, 2),
+    (0x1F0CF, 0x1F0CF, 2),
+    (0x1F18E, 0x1F18E, 2),
+    (0x1F191, 0x1F19A, 2),
+    (0x1F200, 0x1F251, 2),
+    (0x1F300, 0x1F320, 2),
+    (0x1F32D, 0x1F335, 2),
+    (0x1F337, 0x1F37C, 2),
+    (0x1F37E, 0x1F393, 2),
+    (0x1F3A0, 0x1F3CA, 2),
+    (0x1F3CF, 0x1F3D3, 2),
+    (0x1F3E0, 0x1F3F0, 2),
+    (0x1F3F4, 0x1F3F4, 2),
+    (0x1F3F8, 0x1F43E, 2),
+    (0x1F440, 0x1F440, 2),
+    (0x1F442, 0x1F4FC, 2),
+    (0x1F4FF, 0x1F53D, 2),
+    (0x1F54B, 0x1F54E, 2),
+    (0x1F550, 0x1F567, 2),
+    (0x1F57A, 0x1F57A, 2),
+    (0x1F595, 0x1F596, 2),
+    (0x1F5A4, 0x1F5A4, 2),
+    (0x1F5FB, 0x1F64F, 2),
+    (0x1F680, 0x1F6C5, 2),
+    (0x1F6CC, 0x1F6CC, 2),
+    (0x1F6D0, 0x1F6D2, 2),
+    (0x1F6D5, 0x1F6D7, 2),
+    (0x1F6DC, 0x1F6DF, 2),
+    (0x1F6EB, 0x1F6EC, 2),
+    (0x1F6F4, 0x1F6FC, 2),
+    (0x1F7E0, 0x1F7EB, 2),
+    (0x1F7F0, 0x1F7F0, 2),
+    (0x1F90C, 0x1F93A, 2),
+    (0x1F93C, 0x1F945, 2),
+    (0x1F947, 0x1F9FF, 2),
+    (0x1FA70, 0x1FAFF, 2),
+    (0x20000, 0x3FFFD, 2),
+    (0xE0100, 0xE01EF, 0),
+]
+
+def _cells(c: int) -> int:
+    """How many cells a terminal draws code point `c` in (see `_CELLS`)."""
+    if c < 0x0300:
+        return 1
+    for first, last, cells in _CELLS:
+        if c < first:
+            return 1
+        if c <= last:
+            return cells
+    return 1
+
+def _widths(text: str) -> list:
+    """Each code point of `text` and the cells it adds: as `_cells` has it,
+    but for the emoji selector (U+FE0F), which widens a narrow character
+    before it (`⚠️`) to two."""
+    out = []
+    last = 0
+    for c in text.codepoints():
+        n = 1 if c < 0x0300 else _cells(c)
+        if c == 0xFE0F and last == 1:
+            n = 1
+        out.append((c, n))
+        last = n if n else last
+    return out
+
+def text_width(text: str) -> int:
+    """How many cells a terminal draws `text` in: a wide character (`✅`,
+    `⚠️`) two, a combining mark none."""
+    n = 0
+    last = 0
+    for c in text.codepoints():
+        if c < 0x0300:
+            n += 1
+            last = 1
+            continue
+        cells = _cells(c)
+        if c == 0xFE0F and last == 1:
+            cells = 1
+        n += cells
+        last = cells if cells else last
+    return n
+
+def fit(text: str, width: int) -> str:
+    """`text` cut or padded with spaces to `width` cells: a row wider than
+    the screen would wrap and scroll the screen up. Only as much of a long
+    line is measured as could show."""
+    if width <= 0:
+        return ""
+
+    # A tab would move the cursor off the row.
+    text = text.replace("\t", "  ")
+
+    # Every code point but a zero-width one is a cell or more, so a line
+    # longer than this is cut, but for one of zero-width marks, measured
+    # whole.
+    head = text[:2 * width + 2]
+    cells = text_width(head)
+    if len(head) < len(text) and cells <= width:
+        head = text
+        cells = text_width(text)
+    if cells <= width and len(head) == len(text):
+        return text + " " * (width - cells)
+    room = width - 1 if width > 1 else width
+    kept, used = [], 0
+    for c, n in _widths(head):
+        if used + n > room:
+            break
+        kept.append(chr(c))
+        used += n
+    if width > 1:
+        kept.append("…")
+        used += 1
+    return "".join(kept) + " " * (width - used)
+
+def progress_counts(status: str):
+    """`(done, total)` from Bazel's status line (`[5,619 / 13,381] …`), or
+    None when it has none."""
+    status = bazel_line(status)
+    if not status.startswith("[") or " / " not in status or "]" not in status:
+        return None
+    inner = status[1:status.index("]")]
+    done, _, total = inner.partition(" / ")
+    done = done.replace(",", "").strip()
+    total = total.replace(",", "").strip()
+    if not done.isdigit() or not total.isdigit():
+        return None
+    return (int(done), int(total))
+
+def running_actions(progress: list) -> list:
+    """The running actions in Bazel's progress area: the rows under its
+    status line, or, when there are none, the one action a status line names
+    itself (`[n / m] Compiling a.cc; 3s …`), as Bazel draws a single action."""
+    rows = [r.strip() for r in progress[1:] if r.strip()]
+    if rows or not progress:
+        return rows
+    status = bazel_line(progress[0])
+    if not status.startswith("[") or "] " not in status:
+        return []
+    rest = status.partition("] ")[2].strip()
+    words = rest.split(" ")
+    if not rest or rest.startswith("no action") or (len(words) > 1 and words[0].isdigit() and words[1].startswith("action")):
+        return []
+    return [rest]
+
+def _count(word: str) -> int:
+    """`word` as a count, its thousands separators (`1,204`) and a trailing
+    comma dropped; -1 for a word that is none."""
+    digits = word.rstrip(",").replace(",", "")
+    return int(digits) if digits.isdigit() else -1
+
+def action_counts(progress: list):
+    """`(running, started)` from Bazel's status line: `[n / m] 300 actions
+    running` (300 of each), or `[n / m] 400 actions, 300 running` with some
+    started but not yet running (remote execution, a full local pool), each
+    word perhaps followed by `,` or `;` (`… 15 running; last test: …`); -1 for
+    what the line does not name. Bazel lists only `--ui_actions_shown` of the
+    running ones under it, 8 by default."""
+    if not progress or "] " not in progress[0]:
+        return (-1, -1)
+    words = [w.rstrip(",;") for w in bazel_line(progress[0]).partition("] ")[2].split()]
+    running, started = -1, -1
+    for i in range(len(words) - 1):
+        n = _count(words[i])
+        if n < 0:
+            continue
+        after = words[i + 1]
+        if after.startswith("action"):
+            started = n
+            if i + 2 < len(words) and words[i + 2] == "running":
+                running = n
+        elif after == "running":
+            running = n
+    return (running, started)
+
+def bar(done: int, total: int, width: int) -> str:
+    """A `width`-character bar, filled by `done` of `total`."""
+    if width <= 0 or total <= 0:
+        return ""
+    filled = min(width, width * done // total)
+    return "█" * filled + "░" * (width - filled)
+
+# What `e` cycles the console through, in order.
+_FILTERS = ["all", "warnings", "errors"]
+
+_FILTER_TITLES = {"all": "", "warnings": " (errors and warnings)", "errors": " (errors only)"}
+
+def new_search() -> dict:
+    """The search bar's state: closed, empty, smart case, jumping to matches
+    (`mode`, or `filter` to show only them). `origin` is where the console
+    was scrolled when the bar opened, `anchored` when that was not following
+    the newest line (scrolled up, or held on a match), and `back` the current
+    match, as lines from the newest shown (-1 for none): both counted from
+    the end, so new lines arriving keep them on the same line."""
+    return {"open": False, "query": "", "case": False, "word": False, "pattern": None, "error": "", "mode": "jump", "origin": 0, "anchored": False, "back": -1}
+
+def has_capital(query: str) -> bool:
+    """Whether `query` has a capital letter of its own: not one naming an
+    escape (`\\W`, `\\pL`, `\\p{Lu}`), a hex digit of one (`\\x4A`,
+    `\\u{00C9}`, `\\U0001F600`), a flag (`(?U)`, `(?iR:…)`) or a group
+    (`(?P<Name>…)`, `(?<Name>…)`)."""
+    at = ""
+    end = ""
+    need = 0
+    full = 0
+    recent = ""
+    for c in query.elems():
+        prev = recent
+        recent = (recent + c)[-3:]
+        if at == "skip":
+            if c == end:
+                at = ""
+            continue
+        if at == "flags":
+            if c in "imsxURu-":
+                continue
+            at = ""
+            if c in "):":
+                continue
+        if at == "hex":
+            if c == "{" and need == full:
+                at = "skip"
+                end = "}"
+                continue
+            if need > 0 and c in "0123456789abcdefABCDEF":
+                need -= 1
+                if need == 0:
+                    at = ""
+                continue
+            at = ""
+        if at == "escape":
+            # An escaped character opens nothing: `\\(?U` is no flag group.
+            at = ""
+            recent = ""
+            if c in ("p", "P"):
+                at = "class"
+            elif c in ("x", "u", "U"):
+                at = "hex"
+                need = {"x": 2, "u": 4, "U": 8}[c]
+                full = need
+            continue
+        if at == "class":
+            at = ""
+            if c == "{":
+                at = "skip"
+                end = "}"
+            continue
+        if c == "\\":
+            at = "escape"
+            continue
+        if prev.endswith("(?") or prev.endswith("(?P"):
+            if c == "<":
+                at = "skip"
+                end = ">"
+                continue
+            if c == "P" and prev.endswith("(?"):
+                continue
+            if c in "imsxURu-" and prev.endswith("(?"):
+                at = "flags"
+                continue
+        if c != c.lower():
+            return True
+    return False
+
+def case_sensitive(search: dict) -> bool:
+    """Whether the search matches case: when Ctrl+T says so, else, smart case
+    as in fzf and ripgrep, when its query has a capital (`has_capital`)."""
+    return search["case"] or has_capital(search["query"])
+
+def _search_update(state: dict):
+    """Recompile the search's pattern from its query and toggles. A query
+    that does not compile (one still being typed) keeps the last pattern that
+    did, its error shown in the bar."""
+    search = state["search"]
+    if not search["query"]:
+        search["pattern"] = None
+        search["error"] = ""
+        return
+    case = case_sensitive(search)
+    error = state["re"].check(search["query"], case_sensitive = case, whole_word = search["word"])
+    if error != None:
+        search["error"] = error
+        return
+    search["error"] = ""
+    search["pattern"] = state["re"].compile(search["query"], case_sensitive = case, whole_word = search["word"])
+
+def _search_key(state: dict, key: str, page: int) -> bool:
+    """Apply `key` to an open search bar; False for a key it leaves to the
+    console (the arrows and the wheel, which scroll). A change finds anew:
+    jumping, the newest match at or above where the bar opened (`_find`);
+    filtering, the newest line, or with no query where the bar opened."""
+    search = state["search"]
+    if key == "enter":
+        search["open"] = False
+        return True
+    if key == "esc":
+        state["search"] = new_search()
+        state["scroll"] = search.get("origin_rows", search["origin"]) if folding(state) else search["origin"]
+        return True
+    if key == "tab":
+        search["mode"] = "filter" if search["mode"] == "jump" else "jump"
+        search["back"] = -1
+    elif key in ("ctrl-t", "alt-c"):
+        search["case"] = not search["case"]
+    elif key in ("ctrl-b", "alt-w"):
+        search["word"] = not search["word"]
+    elif key in ("ctrl-w", "alt-backspace"):
+        # The last word, as readline deletes it: the spaces after it too.
+        search["query"] = search["query"].rstrip(" ").rpartition(" ")[0] + (" " if " " in search["query"].rstrip(" ") else "")
+    elif key == "ctrl-u":
+        search["query"] = ""
+    elif key == "backspace":
+        search["query"] = search["query"][:-1]
+    elif key.startswith("paste:"):
+        search["query"] += paste_text(key)
+    elif len(key) == 1:
+        search["query"] += key
+    else:
+        return key not in ("up", "down", "shift-up", "shift-down", "wheel-up", "wheel-down")
+    _search_update(state)
+    if search["mode"] == "jump":
+        _find(state, page)
+    else:
+        # Filtering shows the newest match; with no query, where it opened.
+        state["scroll"] = 0 if search["pattern"] != None else _origin_scroll(state)
+    return True
+
+def shown_lines(state: dict) -> list:
+    """What the console pane lists: a log's lines or the console's, through
+    the `e` filter and a filtering search (`console_lines`)."""
+    view = state["view"]
+    if view != None:
+        return console_lines(state, view["lines"])
+    if folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and state.get("folded"):
+        # The folded view, when it is of the lines kept (`add_lines`).
+        return state["folded"]
+    log, kinds = state.get("log", []), state.get("kinds")
+    early = state.get("early")
+    if early and state["filter"] != "all" and kinds != None:
+        # Errors and warnings from before `_MAX_LOG`, kept for `e`.
+        log = [line for line, _ in early] + log
+        kinds = [kind for _, kind in early] + kinds
+    return console_lines(state, log, kinds)
+
+def _match_from(pattern, lines: list, start: int, step: int) -> int:
+    """The first of `lines` from `start` on, going `step` (-1 older, 1
+    newer), that `pattern` matches; -1 for none."""
+    i = start
+    for _ in range(len(lines)):
+        if i < 0 or i >= len(lines):
+            break
+        if pattern.search(lines[i]):
+            return i
+        i += step
+    return -1
+
+def _show_match(state: dict, lines: list, i: int, page: int):
+    """Make line `i` of `lines` the current match, scrolled to the middle of
+    a console `page` lines high."""
+    state["search"]["back"] = len(lines) - 1 - i
+    state["scroll"] = max(0, len(lines) - i - 1 - (page - 1) // 2)
+
+    # Wrapped, `render` centres it in rows on its next frame, once.
+    state["search"]["centre"] = True
+
+def _origin_scroll(state: dict) -> int:
+    """Where the bar opened, as the view now scrolls: in folded rows when it
+    is folded (no query shown), else in lines."""
+    search = state["search"]
+    return search.get("origin_rows", search["origin"]) if folding(state) else search["origin"]
+
+def _find(state: dict, page: int):
+    """Jump to the newest match at or above the bottom of the console as the
+    bar found it (its `origin`), else the newest of all; with none, or no
+    query, back to that `origin`. A query that does not compile moves
+    nothing."""
+    search = state["search"]
+    if search["error"]:
+        return
+    lines = shown_lines(state)
+    at = -1
+    if search["pattern"] != None:
+        at = _match_from(search["pattern"], lines, len(lines) - 1 - search["origin"], -1)
+        if at < 0:
+            at = _match_from(search["pattern"], lines, len(lines) - 1, -1)
+    if at < 0:
+        search["back"] = -1
+        state["scroll"] = _origin_scroll(state)
+        return
+    _show_match(state, lines, at, page)
+
+def step_match(state: dict, step: int, page: int):
+    """`N` (`step` -1) and `n` (1): the next older or newer match from the
+    current one, or from the bottom of the console without one; past the
+    newest or the oldest, round to the other end, the keys row saying so."""
+    search = state["search"]
+    if search["pattern"] == None or search["mode"] != "jump":
+        return
+    lines = shown_lines(state)
+    back = search["back"]
+    if back >= 0 and back < len(lines):
+        start = len(lines) - 1 - back + step
+    else:
+        # The bottom of the console as `render` draws it, a scroll past the
+        # top (`K`) at the top page.
+        bottom = max(min(len(lines) - state["scroll"], len(lines)), min(len(lines), page)) - 1
+        start = bottom + (1 if step > 0 else 0)
+    at = _match_from(search["pattern"], lines, start, step)
+    if at < 0:
+        at = _match_from(search["pattern"], lines, 0 if step > 0 else len(lines) - 1, step)
+        if at >= 0:
+            state["note"] = "wrapped round to the oldest match" if step > 0 else "wrapped round to the newest match"
+    if at >= 0:
+        _show_match(state, lines, at, page)
+
+def paste_text(key: str) -> str:
+    """A `paste:` key's text for the search bar: on one line, without control
+    characters, which would move the cursor or count as columns they are not."""
+    out = []
+    for c in key[len("paste:"):].elems():
+        if c in "\r\n\t":
+            out.append(" ")
+        elif c >= " " and not ("\x7f" <= c and c <= "\x9f"):
+            out.append(c)
+    return "".join(out)
+
+def failure_of(kind: str, event_id, payload):
+    """A record for the Failures list from a build event, or None: a failed
+    action (`action_completed`, which Bazel sends for every failure) with its
+    stderr and stdout, or a test attempt that did not pass (`test_result`;
+    flaky ones did not) with its `test.log`. Each log is a BES `File.file`: a
+    URI, or the contents inline."""
+    label = str(_get(event_id, "label", "") or "")
+    if kind == "action_completed":
+        if _get(payload, "success", True):
+            return None
+        return _action_record(label, payload, event_id)
+    if kind == "test_result":
+        if str(_get(payload, "status", "") or "").lower() not in _FAILED_TEST_STATUSES:
+            return None
+        attempt = _get(event_id, "attempt", 1) or 1
+        return {
+            "kind": "test",
+            "label": label,
+            "detail": "attempt %d" % attempt,
+            "run": _get(event_id, "run", 1) or 1,
+            "shard": _get(event_id, "shard", 1) or 1,
+            "attempt": attempt,
+            "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
+            "status": str(_get(payload, "status", "") or "").lower(),
+            "duration_ms": _attempt_ms(payload),
+            "files": [("test.log", bounded_log(_get(f, "file", None))) for f in (_get(payload, "test_action_output", None) or []) if str(_get(f, "name", "") or "") == "test.log"],
+        }
+    return None
+
+def _attempt_ms(payload) -> int:
+    """How long a test attempt ran, in milliseconds."""
+    ms = _get(payload, "test_attempt_duration_millis", 0) or 0
+    if ms:
+        return ms
+    d = _get(payload, "test_attempt_duration", None)
+    return (_get(d, "seconds", 0) or 0) * 1000 + (_get(d, "nanos", 0) or 0) // 1000000 if d != None else 0
+
+def _action_record(label: str, payload, event_id = None) -> dict:
+    """An action's record for a list: its label, mnemonic, logs, primary
+    output (which the history keeps its logs by) and whether it succeeded."""
+    files = []
+    for name in ("stderr", "stdout"):
+        f = _get(payload, name, None)
+        if f != None:
+            files.append((name, bounded_log(_get(f, "file", None))))
+    return {
+        "kind": "action",
+        "label": label,
+        "detail": str(_get(payload, "type", "") or "") or "Action",
+        "files": files,
+        "output": str(_get(event_id, "primary_output", "") or ""),
+        "success": bool(_get(payload, "success", False)),
+    }
+
+def output_of(kind: str, event_id, payload):
+    """A record for the actions list from a build event, or None: an action
+    that succeeded and wrote a stdout or stderr, which Bazel reports only
+    with `--build_event_publish_all_actions` (`actions = "all"`)."""
+    if kind != "action_completed" or not _get(payload, "success", False):
+        return None
+    record = _action_record(str(_get(event_id, "label", "") or ""), payload, event_id)
+    return record if record["files"] else None
+
+def cut_text(text: str) -> str:
+    """An inline log's end, cut anywhere, the byte before the cut first (see
+    `bounded_log`), started where `std.fs.try_read_tail` starts a file's: at
+    the cut when it falls at a line's start, else the next line when one
+    follows, else the first whole character."""
+    if text.startswith("\n"):
+        return text[1:]
+    head, newline, rest = text.partition("\n")
+    return rest if newline and rest else text[1:].lstrip("\ufffd")
+
+def bounded_log(value, cap = _MAX_LOG_BYTES):
+    """A log's BES `File.file`: a URI as it is, or inline contents as
+    `(bytes, cut)`, cut to their last `cap` bytes and the one before (to see
+    whether the cut falls at a line's start, as `cut_text` reads it), so the
+    rest of a failed action's tens of MB never stays on the heap."""
+    if type(value) == "bytes" and len(value) > cap:
+        return (value[-(cap + 1):], True)
+    if type(value) == "bytes":
+        return (value, False)
+    return value
+
+def local_test_logs(state: dict, record: dict) -> list:
+    """Where Bazel's output tree has a test attempt's `test.log`, for one a
+    remote cache named by `bytestream://`: `<exec root>/bazel-out/<output
+    dir>/testlogs/[external/<repo>/]<package>/<name>/[shard_<s>_of_<n>][_]
+    [run_<r>_of_<m>]/`, `test_attempts/attempt_<a>.log` for an attempt
+    Bazel retried, `test.log` for its last. Both the folder (its shard and
+    run counts) and which attempt was last come from the test's summary,
+    sent after its last attempt: before it, no path, rather than a guess
+    that could name an older build's log."""
+    root = state["exec_root"]
+    out = state["output_dirs"].get(record["config"], "")
+    label = record["label"].lstrip("@")
+    key = (record["label"], record["config"])
+    if not root or not out or key not in state["test_counts"] or "//" not in label or ":" not in label.partition("//")[2]:
+        return []
+    repo, _, rest = label.partition("//")
+    package, _, name = rest.partition(":")
+    path = root + "/bazel-out/" + out + "/testlogs" + ("/external/" + repo if repo else "")
+    for part in (package + "/" + name).split("/"):
+        if part:
+            path += "/" + part
+    runs, shards = state["test_counts"][key]
+    run, shard, attempt = record["run"], record["shard"], record["attempt"]
+    sub = (["shard_%d_of_%d" % (shard, shards)] if shards > 1 else []) + (["run_%d_of_%d" % (run, runs)] if runs > 1 else [])
+    if sub:
+        path += "/" + "_".join(sub)
+    last = state["last_attempts"].get((record["label"], record["config"], run, shard), attempt)
+    return [path + ("/test_attempts/attempt_%d.log" % attempt if attempt < last else "/test.log")]
+
+def log_paths(state: dict, record: dict, uri) -> list:
+    """Where a log named by `uri` may be on disk, likeliest first."""
+    if type(uri) != "string" or not uri:
+        return []
+    paths = []
+    if uri.startswith("bytestream://") and record["kind"] == "test":
+        paths.extend(local_test_logs(state, record))
+    paths.append(file_uri_to_path(state["env"], uri))
+    return [p for p in paths if p]
+
+def log_view(state: dict, record: dict) -> dict:
+    """The view of a failure's logs: its title, the lines (the end of each
+    log, escape sequences stripped, a divider between an action's stderr and
+    stdout) and whether any was cut. The logs share `_MAX_VIEW` lines (`fit_logs`).
+    An action's log is read from the history's copy (`kept_action_log()`,
+    kept as it failed) before Bazel's own file, which Bazel replaces as the
+    build goes on: a log gone from both says so, and how to keep one when
+    the history keeps no action logs."""
+    blocks = []
+    cut = False
+    build = state.get("build")
+    copies = build.kept_action_log(record.get("output", "")) if build != None and record["kind"] == "action" else None
+    keeping = copies != None
+    copies = copies or {}
+    for name, value in record["files"]:
+        text = None
+        if type(value) == "tuple":
+            contents, inline_cut = value
+            text = str(contents)
+            cut = cut or inline_cut
+            if inline_cut:
+                text = cut_text(text)
+        for path in ([copies[name]] if name in copies else []) + log_paths(state, record, value):
+            got = state["read"](path, _MAX_LOG_BYTES)
+            if got != None:
+                text, skipped = got
+                cut = cut or skipped > 0
+                break
+        if text == None:
+            pending = record["kind"] == "test" and (record["label"], record["config"]) not in state["test_counts"]
+            remote = type(value) == "string" and value.startswith("bytestream://")
+            if pending and remote:
+                blocks.append((name, ["(%s is found once the test has finished: a remote cache names it)" % name]))
+            elif remote:
+                blocks.append((name, ["(%s is not on this machine: only in the remote cache)" % name]))
+            elif record["kind"] == "action" and not keeping:
+                blocks.append((name, ["(%s is gone: Bazel removed it, and the history keeps no action logs; --history:action-logs=failed keeps a copy)" % name]))
+            elif record["kind"] == "action" and record.get("success"):
+                blocks.append((name, ["(%s is gone: Bazel removed it; the history keeps a successful action's only with --history:action-logs=all)" % name]))
+            elif record["kind"] == "action":
+                blocks.append((name, ["(%s is gone: Bazel removed it, and the history has no copy)" % name]))
+            else:
+                blocks.append((name, ["(%s is gone: Bazel removed it)" % name]))
+            continue
+        if not text.strip():
+            blocks.append((name, ["(empty)"]))
+            continue
+
+        # A line's last carriage return wins, as on a terminal (a progress
+        # bar redrawing itself, a CRLF line end); no control is left to move
+        # the cursor off its row.
+        own = []
+        for line in state["ansi"].replace(text, "").rstrip("\n").split("\n"):
+            line = line.rstrip("\r").rpartition("\r")[2]
+            own.append(state["controls"].replace(line, ""))
+        blocks.append((name, own))
+    kept = fit_logs([own for _, own in blocks], _MAX_VIEW)
+    lines = []
+    for (name, own), keep in zip(blocks, kept):
+        if len(blocks) > 1:
+            lines.append("── " + name + " ──")
+        if keep < len(own):
+            cut = True
+        lines.extend(own[len(own) - keep:])
+    if not record["files"]:
+        lines.append("(Bazel reported no log for it)")
+    return {"title": record["label"] + " · " + failure_detail(state, record), "lines": lines, "cut": cut, "record": record}
+
+def failure_detail(state: dict, record: dict) -> str:
+    """What tells a failure apart from others of its label: an action's
+    mnemonic; a test attempt's number, after its shard and run when the
+    test has (its summary's counts) or has been seen to have (`spread`, the
+    highest of each its results named) more than one."""
+    if record["kind"] != "test":
+        return record["detail"]
+    detail = record["detail"]
+    if record.get("status") == "timeout":
+        ms = record.get("duration_ms", 0)
+        detail += " · timeout" + (" after %d.%ds" % (ms // 1000, ms % 1000 // 100) if ms else "")
+    if state.get("counts", {}).get("flaky", {}).get(record["label"]):
+        detail += " · flaky, passed on a later attempt"
+    key = (record["label"], record["config"])
+    runs, shards = state["test_counts"].get(key, (0, 0))
+    seen_runs, seen_shards = state["spread"].get(key, (1, 1))
+    parts = []
+    if max(shards, seen_shards) > 1:
+        parts.append("shard %d" % record["shard"])
+    if max(runs, seen_runs) > 1:
+        parts.append("run %d" % record["run"])
+    return " · ".join(parts + [detail])
+
+def fit_logs(logs: list, room: int) -> list:
+    """How many of each log's last lines to keep for `room` lines in all:
+    every log whole when they fit, else each over a fair share cut to it,
+    the share of a log under it passed to the others."""
+    keep = [len(log) for log in logs]
+    total = 0
+    for n in keep:
+        total += n
+    if total <= room:
+        return keep
+    left = room
+    order = sorted(range(len(logs)), key = lambda i: keep[i])
+    for n, i in enumerate(order):
+        share = left // (len(order) - n)
+        keep[i] = min(keep[i], share)
+        left -= keep[i]
+    return keep
+
+def attempt_state(now_ms: int) -> dict:
+    """What a Bazel attempt starts with: its own counts, console, failures
+    and actions, nothing open, timed from `now_ms`."""
+    return dict(
+        fresh = False,
+        phase = "Starting Bazel…",
+        fails = [],
+        outputs = [],
+        selected = 0,
+        picked = 0,
+        cache = None,
+        unseen = 0,
+        focus = "console",
+        view = None,
+        last_attempts = {},
+        spread = {},
+        logged_index = None,
+        test_counts = {},
+        counts = new_counts(),
+        errors = [],
+        error_count = 0,
+        log = [],
+        log_size = 0,
+        views = [],
+        parked = {},
+        inv = {},
+        tab_scroll = 0,
+        hover = None,
+        select = None,
+        kinds = [],
+        block = "",
+        closing = [],
+        closing_tail = [],
+        closing_cut = 0,
+        early = [],
+        dropped = 0,
+        unseen_errors = 0,
+        slowest = {},
+        critical = "",
+        folded = [],
+        fold_src = [],
+        fold_n = -1,
+        fold_seen = 0,
+        scroll = 0,
+        start_ms = now_ms,
+        bazel_uuid = "",
+    )
+
+def reset_attempt(state: dict, now_ms: int):
+    """Start a retried attempt afresh: its own counts, console, failures and
+    actions, no log open nor the list focused, timed from `now_ms`. The
+    search (but its current match and where it opened), the `e` filter, the
+    list shown, zoom and the mouse are the user's, kept."""
+    state["search"]["back"] = -1
+    state["search"]["origin"] = 0
+    state["search"]["anchored"] = False
+    state.update(attempt_state(now_ms))
+
+def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
+    """Gather from one build event what the Failures list needs: a failure's
+    record (`failure_of`), and what finding a test's log in the output tree
+    takes (the exec root, each configuration's output folder, each test's
+    run and shard counts, each run and shard's last attempt, and the most
+    runs and shards it has been seen to have, `spread`). A summary
+    the build announced but did not get to (`aborted`, an interrupt) has no
+    counts. A test's summary arriving shows its open log anew, now
+    findable, from its end."""
+    if aborted:
+        return
+    if kind == "workspace_config":
+        state["exec_root"] = str(_get(payload, "local_exec_root", "") or "")
+    elif kind == "configuration":
+        state["output_dirs"][str(_get(event_id, "id", "") or "")] = str(_get(payload, "mnemonic", "") or "")
+    elif kind == "test_summary":
+        key = (str(_get(event_id, "label", "") or ""), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        state["test_counts"][key] = (_get(payload, "run_count", 0) or 0, _get(payload, "shard_count", 0) or 0)
+        view = state["view"]
+        if view != None and view.get("record") != None and view["record"]["kind"] == "test" and (view["record"]["label"], view["record"]["config"]) == key:
+            state["view"] = log_view(state, view["record"])
+            state["scroll"] = 0
+            state["search"]["back"] = -1
+    elif kind == "test_result":
+        key = (
+            str(_get(event_id, "label", "") or ""),
+            str(_get(_get(event_id, "configuration", None), "id", "") or ""),
+            _get(event_id, "run", 1) or 1,
+            _get(event_id, "shard", 1) or 1,
+        )
+        state["last_attempts"][key] = max(state["last_attempts"].get(key, 0), _get(event_id, "attempt", 1) or 1)
+        runs, shards = state["spread"].get(key[:2], (1, 1))
+        state["spread"][key[:2]] = (max(runs, key[2]), max(shards, key[3]))
+    record = failure_of(kind, event_id, payload)
+    if record != None:
+        state["fails"].append(record)
+    record = output_of(kind, event_id, payload)
+    if record != None:
+        state["outputs"].append(record)
+
+def _items(state: dict) -> list:
+    """The records of the list the Results pane shows: the failures, or,
+    after `a`, the actions that wrote output."""
+    return state.get("outputs", []) if state.get("list") == "actions" else state["fails"]
+
+def _pick(state: dict) -> str:
+    """The key of `state` that holds the chosen row of the list shown: each
+    list keeps its own."""
+    return "picked" if state.get("list") == "actions" else "selected"
+
+def _keep_view(state: dict):
+    """Before showing a view deeper in the shown tab's stack (a file opened
+    from a log): keep the one shown, and where it was scrolled, for Esc and
+    the breadcrumb to go back to."""
+    view = state["view"]
+    if view != None:
+        back = state.setdefault("views", [])
+        back.append((view, state["scroll"]))
+        if len(back) > 32:
+            state["views"] = back[-32:]
+
+def _show_failure_view(state: dict, view: dict):
+    """`view`, a failure's log, as the Failures tab's: the tab shown, its
+    stack only this log (stepping is sideways, so a peek from the last one
+    goes)."""
+    show_tab(state, "failures")
+    state["views"] = []
+    state["view"] = view
+    state["scroll"] = 0
+    state["search"]["back"] = -1
+    state["focus"] = "console"
+
+def _open_failure(state: dict, index: int):
+    """Show the record at `index` of the list shown in the console pane, at
+    its end."""
+    state[_pick(state)] = index
+    _show_failure_view(state, log_view(state, _items(state)[index]))
+
+def logged_index(state: dict) -> dict:
+    """The labels with a log in the Failures list (`logged`), how many of
+    them are also among the failed targets (`both`), and the failed targets
+    without one in their order (`unlogged`, some of which may have gained a
+    log since, skipped), caught up with just the records and labels added
+    since the last call: so a build's tens of thousands of failures cost
+    each frame only what is new."""
+    index = state.get("logged_index")
+    fails = state["fails"]
+    failed = state["counts"]["failures"]
+
+    # Lists replaced (a retry's) without the index cleared: start over.
+    if index != None and (index["fails"] > len(fails) or index["failures"] > len(failed)):
+        index = None
+    if index == None:
+        index = {"logged": {}, "listed": {}, "both": 0, "fails": 0, "failures": 0, "unlogged": [], "dropped": 0, "head": 0}
+        state["logged_index"] = index
+    for rec in fails[index["fails"]:]:
+        label = rec["label"]
+        if label not in index["logged"]:
+            index["logged"][label] = True
+            if label in index["listed"]:
+                index["both"] += 1
+                index["dropped"] += 1
+    for label in failed[index["failures"]:]:
+        if label not in index["listed"]:
+            index["listed"][label] = True
+            if label in index["logged"]:
+                index["both"] += 1
+            else:
+                index["unlogged"].append(label)
+
+    # The labels that gained a log stay in `unlogged` until half of it is
+    # them (or a walk skips more than a few past its head, `first_unlogged`),
+    # then go.
+    if index["dropped"] * 2 > len(index["unlogged"]):
+        _compact(index)
+    index["fails"] = len(fails)
+    index["failures"] = len(failed)
+    return index
+
+def _compact(index: dict):
+    """Drop from `unlogged` the labels that have gained a log."""
+    index["unlogged"] = [label for label in index["unlogged"] if label not in index["logged"]]
+    index["dropped"] = 0
+    index["head"] = 0
+
+def first_unlogged(index: dict, wanted: int) -> list:
+    """The first `wanted` failed targets without a log, in order. A head
+    kept past the leading ones that have gained a log (which never lose it)
+    only moves forward, and more than a few skipped further in compacts the
+    list, so each frame's walk is bounded and every skip is paid for once."""
+    unlogged = index["unlogged"]
+
+    # By index, never a slice: a slice would copy the whole list each frame.
+    head = index.get("head", 0)
+    for i in range(head, len(unlogged)):
+        if unlogged[i] not in index["logged"]:
+            break
+        head = i + 1
+    index["head"] = head
+    found = []
+    skipped = 0
+    for i in range(head, len(unlogged)):
+        label = unlogged[i]
+        if label in index["logged"]:
+            skipped += 1
+            continue
+        found.append(label)
+        if len(found) == wanted:
+            break
+    if skipped > 64:
+        _compact(index)
+    return found
+
+def note_blocked(state: dict, event):
+    """Note a failed target Bazel did not build because a dependency failed:
+    its root causes (`event.children`, which Bazel gives every failed
+    target) are all other targets', so it is `blocked` by them, rather than
+    failed itself."""
+    if _get(event, "kind") not in ("target_completed", "aborted"):
+        return
+    payload = _get(event, "payload")
+    if _get(event, "kind") == "target_completed" and _get(payload, "success", True):
+        return
+    label = str(_get(_get(event, "id"), "label", "") or "")
+    roots = []
+    for child in _get(event, "children") or []:
+        root = str(_get(_get(child, "id"), "label", "") or "")
+        if root and root not in roots:
+            roots.append(root)
+    if label and roots and label not in roots:
+        state.setdefault("blocked", {})[label] = roots
+
+def blocked_text(label: str, roots: list) -> str:
+    """`blocked by :broken`: a root cause in `label`'s package by its name,
+    another by its label, and how many more there are."""
+    pkg = label.rpartition(":")[0]
+    first = roots[0]
+    shown = ":" + first.rpartition(":")[2] if first.rpartition(":")[0] == pkg else first
+    more = len(roots) - 1
+    return "blocked by " + shown + ((" and %d more" % more) if more else "")
+
+def _unlogged_label(state: dict, i: int) -> str:
+    """The failed target without a log at row `i` of the Failures list."""
+    index = logged_index(state)
+    found = first_unlogged(index, i - len(state["fails"]) + 1)
+    return found[-1] if found else ""
+
+def _failure_total(state: dict) -> int:
+    """How many rows the Failures list has: its records, then the failed
+    targets with no log of their own (the blocked among them)."""
+    index = logged_index(state)
+    return len(state["fails"]) + len(state["counts"]["failures"]) - index["both"]
+
+def _open_unlogged(state: dict, i: int):
+    """Enter on a failed target with no log: a blocked one shows what blocks
+    it (its first root cause's log, chosen in the list); another says why
+    there is nothing to show."""
+    label = _unlogged_label(state, i)
+    roots = state.get("blocked", {}).get(label, [])
+    for root in roots:
+        for j, rec in enumerate(state["fails"]):
+            if rec["label"] == root:
+                _open_failure(state, j)
+                return
+    state["selected"] = i
+    why = blocked_text(label, roots) + ", which has no log here" if roots else "Bazel reported no log for it: its error is in the console"
+    _show_failure_view(state, {"title": label, "lines": ["(" + why + ")"], "cut": False, "record": None})
+
+def failure_rows(state: dict, room: int, width: int) -> list:
+    """The Failures list's rows, `room` at most, each `width` wide: a ✗ and
+    the label with its mnemonic or attempt, the selected one in reverse
+    video while the list has focus, kept in sight, with how many are hidden
+    above and below; then the failed targets Bazel reported no log for. Only
+    the rows shown are drawn, and the counts come from `logged_index`, kept
+    up as failures arrive, so a frame never walks them all."""
+    fails = state["fails"]
+    failed = state["counts"]["failures"]
+    index = logged_index(state)
+    logged = index["logged"]
+    total = len(fails) + len(failed) - index["both"]
+    if room <= 0 or total == 0:
+        return []
+    selected = state["selected"]
+    start, shown, above, below = _window(total, room, selected)
+
+    # Just the window's unlogged ones. They follow the logged rows, and the
+    # window starts at or before the chosen (logged) row, so they are the
+    # first few of the index's.
+    wanted = start + shown - len(fails)
+    unlogged = first_unlogged(index, wanted) if wanted > 0 else []
+
+    blocked = state.get("blocked", {})
+
+    def row(i):
+        if i >= len(fails):
+            label = unlogged[i - len(fails)]
+            roots = blocked.get(label)
+            text = _middle(("○ " + label + "  " + blocked_text(label, roots)) if roots else ("✗ " + label + "  no log"), width)
+            if i == selected and state["focus"] == "failures":
+                return _c("active") + fit(text, width) + _RESET
+            return _c("muted") + text + _RESET if roots else _c("error") + "✗" + _RESET + text[1:]
+        rec = fails[i]
+        flaky = rec["kind"] == "test" and state["counts"].get("flaky", {}).get(rec["label"])
+        mark = "~" if flaky else "✗"
+        text = _middle(mark + " " + rec["label"] + "  " + failure_detail(state, rec), width)
+        if i == selected and state["focus"] == "failures":
+            return _c("active") + fit(text, width) + _RESET
+        return (_c("warning") if flaky else _c("error")) + mark + _RESET + text[1:]
+
+    rows = [row(i) for i in range(start, start + shown) if i < len(fails) or i - len(fails) < len(unlogged)]
+    return _counted(rows, above, below)
+
+def _window(total: int, room: int, selected: int):
+    """Which of a list's `total` rows `room` lines show: `(start, shown,
+    above, below)`, a window around the `selected` row, a line on each side
+    counting what is hidden there (`above`, `below`); one with nothing to
+    count gives its line back."""
+    if total <= room:
+        return (0, total, 0, 0)
+    if room < 3:
+        return (min(max(0, selected - room + 1), total - room), room, 0, 0)
+    shown = room - 2
+    start = min(max(0, selected - shown // 2), total - shown)
+    if start == 0:
+        shown += 1
+    elif start + shown >= total:
+        start -= 1
+        shown += 1
+    return (start, shown, start, total - start - shown)
+
+def _counted(rows: list, above: int, below: int) -> list:
+    """A list's `rows` with how many are hidden above and below them."""
+    return ([_c("muted") + "… %d earlier" % above + _RESET] if above else []) + rows + ([_c("muted") + "… %d more" % below + _RESET] if below else [])
+
+def action_rows(state: dict, room: int, width: int) -> list:
+    """The actions list's rows, `room` at most, each `width` wide: a • and
+    the label with its mnemonic, the chosen one in reverse video while the
+    list has focus, kept in sight."""
+    outputs = state.get("outputs", [])
+    if room <= 0 or not outputs:
+        return []
+    picked = state.get("picked", 0)
+    start, shown, above, below = _window(len(outputs), room, picked)
+    rows = []
+    for i in range(start, start + shown):
+        rec = outputs[i]
+        text = fit("• " + rec["label"] + "  " + rec["detail"], width).rstrip(" ")
+        if i == picked and state["focus"] == "failures":
+            rows.append(_c("active") + fit(text, width) + _RESET)
+        else:
+            rows.append(_c("accent") + "•" + _RESET + text[1:])
+    return _counted(rows, above, below)
+
+def console_lines(state: dict, log: list, kinds = None) -> list:
+    """The console's lines `state` shows: by its `e` filter, by `kinds`
+    (`classify`'s, of `log`, worked out when not given), then its search
+    when that filters (a search that jumps shows every line)."""
+    if state["filter"] != "all":
+        kinds = kinds if kinds != None and len(kinds) == len(log) else classify(log)[0]
+        log = [l for l, k in zip(log, kinds) if _shows(state["filter"], k)]
+    search = state["search"]
+    return search["pattern"].filter(log) if search["pattern"] != None and search["mode"] == "filter" else log
+
+def _console_row(pattern, current = False):
+    """How a console row is coloured: its Bazel label (`_label`), then its
+    search matches (found in the plain text, so a match never lands
+    inside a colour's escape sequence)."""
+
+    raw = _bazel_raw()
+
+    def colour(body, kind = None):
+        if pattern == None:
+            return _label(body, raw)
+        return _label(pattern.highlight(body, _c("search.current" if current else "search.match"), _RESET), raw)
+
+    return colour
+
+def wrap_line(text: str, width: int) -> list:
+    """`text` as the rows it wraps to at `width` cells, each `(piece,
+    start)`, `start` the character of `text` it starts at; a tab two cells,
+    as `fit` draws it; one row for an empty line."""
+    width = max(1, width)
+    rows = []
+    start = 0
+    used = 0
+    i = 0
+    for c, n in _widths(text):
+        n = 2 if c == 0x09 else n
+        if used + n > width and i > start:
+            rows.append((text[start:i], start))
+            start = i
+            used = 0
+        used += n
+        i += 1
+    rows.append((text[start:], start))
+    return rows
+
+def _piece_links(links, start: int, length: int):
+    """`links` (`[start, end, url]` by character of a line) as those of its
+    piece of `length` characters from `start`."""
+    if not links:
+        return None
+    out = []
+    for a, b, url in links:
+        a, b = max(a, start) - start, min(b, start + length) - start
+        if a < b:
+            out.append([a, b, url])
+    return out
+
+def _kind_colour(colour, kind: str):
+    return lambda body: colour(body, kind)
+
+def _tail(text: str, cells: int) -> str:
+    """The longest end of `text` a terminal draws in `cells` cells."""
+    widths = _widths(text)
+    used = 0
+    for i in range(len(widths) - 1, -1, -1):
+        if used + widths[i][1] > cells:
+            return "".join([chr(c) for c, _ in widths[i + 1:]])
+        used += widths[i][1]
+    return text
+
+def _search_bar(search: dict, matches: int, cols: int) -> str:
+    """The bar's row, `cols` wide at most: whether it finds or filters, the
+    query, its toggles lit when on (case when it matches case, by Ctrl+T or
+    a capital), what it found (nothing for an empty query) or what is wrong
+    with it, and its keys while they fit (the query's start goes before the
+    toggles do)."""
+    found = search["error"] or ("%d match%s" % (matches, "" if matches == 1 else "es") if search["query"] else "")
+    jump = search["mode"] == "jump"
+    hints = " · Tab %s · ^T case · ^B word · Enter keep · Esc back" % ("filter" if jump else "find")
+    toggles = " Aa W "
+    head = " Find: " if jump else " Filter: "
+
+    # Measured as plain text, the escape sequences added after.
+    room = cols - len(toggles) - text_width(found) - 1
+    if room - len(hints) >= len(head) + text_width(search["query"]) + 1:
+        room -= len(hints)
+    else:
+        hints = ""
+    query = search["query"]
+    if len(head) + text_width(query) + 1 > room:
+        head = " /"
+        keep = max(0, room - len(head) - 2)
+        if text_width(query) > keep + 1:
+            query = ("…" + _tail(query, keep)) if keep > 0 else ""
+    if len(head) + text_width(query) + 1 > room:
+        return fit(" /" + search["query"], cols)
+
+    def toggle(on, label):
+        return (_c("active") if on else _c("muted")) + label + _RESET
+
+    return (
+        head + query + "▏" + " " + toggle(case_sensitive(search), "Aa") + " " + toggle(search["word"], "W") + " " +
+        (_c("error") + found + _RESET if search["error"] else found) + _c("muted") + hints + _RESET
+    )
+
+def shown_by(filter: str, line: str) -> bool:
+    """Whether the console's `filter` (one of `_FILTERS`) shows `line`, by
+    itself (`severity`)."""
+    return _shows(filter, severity(line))
+
+def bazel_line(line: str) -> str:
+    """`line` without the `(23:04:25) ` (or `(23:04:25.123) `) Bazel puts
+    before it under `--show_timestamps`."""
+    if not line.startswith("("):
+        return line
+    close = line.find(") ")
+    if close < 2 or close > 14:
+        return line
+    for c in line[1:close].elems():
+        if c not in "0123456789:.":
+            return line
+    return line[close + 2:]
+
+# What starts a line of Bazel's own: a line that starts none, a tool's
+# (a compiler's diagnostic under an `ERROR:`), takes the kind of the one
+# it follows (`classify`).
+_HEADERS = ["INFO:", "WARNING:", "ERROR:", "DEBUG:", "FAIL:", "TIMEOUT:", "Target ", "Loading:", "Analyzing:", "Executed ", "Build ", "//", "@", "» ", "["]
+
+def severity(line: str) -> str:
+    """`error`, `warning` or `` for a console line by itself: Bazel's
+    `ERROR:`, `FAIL:` and `TIMEOUT:` (indented too, as the console's recap
+    of the errors lists them), a test summary's `FAILED`, `TIMEOUT` and
+    `FAILED TO BUILD`, and its `WARNING:`; with or without the timestamp
+    `--show_timestamps` puts before it."""
+    line = bazel_line(line).lstrip(" ")
+    for head in ("ERROR:", "FAIL:", "TIMEOUT:"):
+        if line.startswith(head):
+            return "error"
+    if " FAILED " in line or line.endswith(" FAILED") or " TIMEOUT " in line or " FAILED TO BUILD" in line:
+        return "error"
+    if line.startswith("WARNING:"):
+        return "warning"
+    return ""
+
+def _starts_block(line: str) -> bool:
+    line = bazel_line(line).lstrip(" ")
+    for head in _HEADERS:
+        if line.startswith(head):
+            return True
+    return False
+
+def classify(lines: list, block = "") -> tuple:
+    """Each of `lines`' kind (`severity`), the lines after an `ERROR:`
+    taking its kind until another line of Bazel's own, so a compiler's
+    diagnostic under its action's `ERROR:` is an error too; a `WARNING:`
+    (Bazel's are one line, a tool's own among its output, `INFO: From`'s)
+    is its line alone; and the kind the last line leaves for the next, from
+    `block`, the one the lines before them left."""
+    kinds = []
+    for line in lines:
+        kind = severity(line)
+        if _starts_block(line):
+            plain = bazel_line(line).lstrip(" ")
+            block = kind if plain.startswith("ERROR:") else ""
+        elif not kind:
+            kind = block
+        kinds.append(kind)
+    return kinds, block
+
+def _shows(filter: str, kind: str) -> bool:
+    return filter == "all" or kind == "error" or (kind == "warning" and filter == "warnings")
+
+def elapsed(ms: int) -> str:
+    """`ms` as `1m02s` or `12s`."""
+    s = ms // 1000
+    if s < 60:
+        return "%ds" % s
+    sec = s % 60
+    return "%dm%s%ds" % (s // 60, "0" if sec < 10 else "", sec)
+
+def _get(obj, name: str, default = None):
+    """`obj.name`, or `default` when `obj` is None or has no such field."""
+    return getattr(obj, name, default) if obj != None else default
+
+def new_counts() -> dict:
+    """The tallies `count_event` keeps for one Bazel attempt."""
+    return {
+        "configured": 0,
+        "built": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failures": [],
+        "failed_labels": {},
+        "aborted": {},
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "tests_flaky": 0,
+        "flaky": {},
+        "test_runs": 0,
+        "test_cached": 0,
+        "spawns": 0,
+        "spawn_hits": 0,
+        "runners": {},
+    }
+
+def count_spawn(counts: dict, spawn):
+    """Tally one spawn of the execution log (Bazel's compact one): the
+    source of truth for what ran and what a cache (remote or disk) served,
+    by runner. A test's are counted too, as `TestRunner` spawns."""
+    counts["spawns"] += 1
+    if _get(spawn, "cache_hit", False):
+        counts["spawn_hits"] += 1
+    runner = str(_get(spawn, "runner", "") or "") or "unknown"
+    counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
+
+def _fail(counts: dict, label: str):
+    """Count a failure, listing its target once however many there are (one
+    per configuration, say)."""
+    counts["failed"] += 1
+    _list_failure(counts, label)
+
+def _list_failure(counts: dict, label: str):
+    """List `label` as failed, once: a dict beside the list keeps it O(1)."""
+    if label not in counts["failed_labels"]:
+        counts["failed_labels"][label] = True
+        counts["failures"].append(label)
+
+def count_aborted(counts: dict, label: str, reason: str):
+    """Tally a target that did not build, its Aborted `reason` given: failed
+    when its loading or analysis did (`_FAILED_ABORTS`), else skipped; once
+    per label, as Bazel can report one under two ids."""
+    if not label or label in counts["aborted"]:
+        return
+    counts["aborted"][label] = True
+    if reason.lower() in _FAILED_ABORTS:
+        _fail(counts, label)
+    else:
+        counts["skipped"] += 1
+
+def count_event(counts: dict, kind: str, event_id, payload):
+    """Tally one build event into `counts`. A target that failed to build
+    arrives as `target_completed` without `success`; one that never got that
+    far (failed in loading or analysis, skipped, interrupted) as an Aborted
+    payload under its own id (`count_aborted`). An aspect's own completion is
+    not a target. A test's `overall_status` is lowercase (`passed`, `flaky`,
+    `failed`, …); only `_FAILED_TEST_STATUSES` count as failed. A label is
+    listed in `failures` once."""
+    label = str(_get(event_id, "label", "") or "")
+
+    # A target's own Aborted payload, under its `target_configured` or
+    # `target_completed` id; under `configured_label` or `unconfigured_label`
+    # it names a root cause (a dependency), not a target asked for.
+    if type(payload) == "aborted":
+        if kind in ("target_configured", "target_completed") and not _get(event_id, "aspect", ""):
+            count_aborted(counts, label, str(_get(payload, "reason", "") or ""))
+        return
+    if kind == "target_configured":
+        if not _get(event_id, "aspect", ""):
+            counts["configured"] += 1
+    elif kind == "target_completed":
+        if _get(event_id, "aspect", ""):
+            return
+        if _get(payload, "success", False):
+            counts["built"] += 1
+        else:
+            _fail(counts, label)
+    elif kind == "test_result":
+        # A test run, and whether a cache (Bazel's own, or a remote one)
+        # gave it rather than running it.
+        counts["test_runs"] += 1
+        info = _get(payload, "execution_info")
+        if _get(payload, "cached_locally", False) or _get(info, "cached_remotely", False):
+            counts["test_cached"] += 1
+    elif kind == "test_summary":
+        status = str(_get(payload, "overall_status", "") or "")
+        if status == "passed":
+            counts["tests_passed"] += 1
+        elif status == "flaky":
+            # Passed in the end: not a failure, nor a pass to count as one.
+            counts["tests_flaky"] += 1
+            counts["flaky"][label] = True
+        elif status in _FAILED_TEST_STATUSES:
+            counts["tests_failed"] += 1
+            _list_failure(counts, label)
+
+def link(url: str, text: str) -> str:
+    """`text` as an OSC 8 hyperlink to `url`, which a terminal that knows the
+    sequence opens on a click and any other shows as `text`."""
+    return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+
+# The link under the pointer is lit in its text (`link.hover`), a
+# selection in its background (`selection`): each turned off alone, so
+# the rest of the cell's colour stays.
+_NO_FOREGROUND = "\x1b[39m"
+_NO_BACKGROUND = "\x1b[49m"
+
+def _selection_colour(state: dict):
+    """How a selection is drawn, `(on, off)`: its background, or where the
+    theme draws it otherwise (reverse, at 16 colours or in `mono`), that,
+    then a full reset."""
+    bg = theme.bg("selection", stream = True)
+    return (bg, _NO_BACKGROUND) if bg else (_c("selection"), _RESET)
+
+def _hover_colour(state: dict):
+    """How the link under the pointer is drawn, `(on, off)`, as a
+    selection's is."""
+    fg = theme.fg("link.hover", stream = True)
+    return (fg, _NO_FOREGROUND) if fg else (_c("link.hover"), _RESET)
+
+# How a link the console made is drawn: an OSC 8 link, which a terminal
+# with the mouse opens on a click, underlined so it shows as one where the
+# terminal does not draw them (the macOS Terminal).
+_UNDERLINE = "\x1b[4m"
+_NO_UNDERLINE = "\x1b[24m"
+
+def _escape_state(state: int, c: int) -> int:
+    """Where an escape sequence is after code point `c`: 0 outside one, 1
+    just after ESC, 2 in a CSI (`ESC [`), 3 in an OSC (`ESC ]`), 4 in an
+    OSC after an ESC, which a `\\` ends."""
+    if state == 0:
+        return 1 if c == 0x1b else 0
+    if state == 1:
+        return 2 if c == 0x5b else (3 if c == 0x5d else 0)
+    if state == 2:
+        return 0 if c >= 0x40 and c <= 0x7e else 2
+    if state == 3:
+        return 0 if c == 0x07 else (4 if c == 0x1b else 3)
+    return 0 if c == 0x5c else 3
+
+def mark_cells(row: str, marks: list) -> str:
+    """`row`, a drawn row with its escapes, with each of `marks`, `(start,
+    end, open, close, again)` in cells from 0 and sorted, wrapped: `open`
+    before the first cell it covers, `close` after the last, and `again`
+    after every colour change inside it (a reset would undo `open`)."""
+    if not marks:
+        return row
+    out = []
+    at = 0
+    k = 0
+    inside = None
+    esc = 0
+    sgr = False
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            out.append(chr(c))
+            before = esc
+            esc = _escape_state(esc, c)
+            if before == 2 and esc == 0 and c == 0x6d and inside != None:
+                out.append(inside[4])
+            continue
+        if inside != None and at >= inside[1]:
+            out.append(inside[3])
+            inside = None
+        if inside == None and k < len(marks) and marks[k][0] <= at:
+            inside = marks[k]
+            k += 1
+            out.append(inside[2])
+        out.append(chr(c))
+        at += 1 if c < 0x0300 else _cells(c)
+    if inside != None:
+        out.append(inside[3])
+    return "".join(out)
+
+def _cut_escaped(text: str, cells: int) -> str:
+    """`text`, escapes and all, cut after `cells` visible cells, its colour
+    ended."""
+    out = []
+    at = 0
+    esc = 0
+    for c in text.codepoints():
+        if esc != 0 or c == 0x1b:
+            out.append(chr(c))
+            esc = _escape_state(esc, c)
+            continue
+        n = 1 if c < 0x0300 else _cells(c)
+        if at + n > cells:
+            break
+        out.append(chr(c))
+        at += n
+    return "".join(out) + "\x1b[39m"
+
+def _peek_paint(highlighted: str):
+    """A colour for `_box_row` drawing a peek's row: its highlighted line,
+    as wide as the text `fit` kept of it (its `…` too)."""
+
+    def paint(shown):
+        cut = shown.endswith("…")
+        return _cut_escaped(highlighted, text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
+
+    return paint
+
+# How many lines a peek reads around the line it shows, and before them for
+# the highlighter to start a comment or a string where the file does.
+_PEEK_LINES = 5000
+_PEEK_CONTEXT = 40
+
+# What a peek highlights, at most: past it (generated or minified code) the
+# lines are shown plain, as highlighting them would hold the screen.
+_HIGHLIGHT_BYTES = 512 * 1024
+_HIGHLIGHT_LINE = 1000
+
+def highlightable(lines: list) -> bool:
+    """Whether `lines` are few and short enough to highlight at once."""
+    total = 0
+    for text in lines:
+        if len(text) > _HIGHLIGHT_LINE:
+            return False
+        total += len(text) + 1
+        if total > _HIGHLIGHT_BYTES:
+            return False
+    return True
+
+def open_peek(state: dict, path: str, line: int) -> bool:
+    """Show `path` in the console pane around `line` (`_PEEK_LINES` of it),
+    highlighted (unless too large to, `highlightable`), numbered, `line` marked and in the middle; `o` opens it in
+    the editor. Each
+    line is drawable, as a log's: escapes stripped, a carriage return's
+    redraw resolved, other controls dropped, a tab two spaces. Whether it
+    could be read (a directory, a binary file past reading, cannot)."""
+    fs = state.get("fs")
+    syntax = state.get("syntax")
+    if fs == None:
+        return False
+    span = _PEEK_LINES
+    first = max(1, line - span // 4)
+    start = max(1, first - _PEEK_CONTEXT)
+    got = fs.try_read_lines(path, start, (first - start) + span)
+    if got == None:
+        return False
+    lines, more = got
+    ansi, controls = state.get("ansi"), state.get("controls")
+    clean = []
+    for text in lines:
+        if ansi != None:
+            text = ansi.replace(text, "")
+        text = text.rstrip("\r").rpartition("\r")[2].replace("\t", "  ")
+        if controls != None:
+            text = controls.replace(text, "")
+        clean.append(text)
+    lines = clean
+    env = state.get("env")
+    truecolor = env != None and (env.var("COLORTERM") or "") in ("truecolor", "24bit")
+    hl = syntax.highlight(lines, path, truecolor = truecolor) if syntax != None and highlightable(lines) else lines
+    plain = []
+    painted = []
+    for i in range(first - start, len(lines)):
+        n = start + i
+        mark = "▸" if n == line else " "
+        number = " " * max(0, 5 - len(str(n))) + str(n)
+        plain.append(mark + number + "  " + lines[i])
+        painted.append((_c("marker") + "▸" + _RESET if n == line else " ") + _c("border") + number + "  " + _RESET + hl[i])
+    if not plain:
+        plain, painted = ["(line %d is past the end of the file)" % line], ["(line %d is past the end of the file)" % line]
+    name = path.rpartition("/")[2]
+    _keep_view(state)
+    state["view"] = {"title": "%s:%d" % (name, line), "lines": plain, "hl": painted, "cut": more, "record": None, "path": path, "line": line, "peek": True}
+    state["search"]["back"] = -1
+    state["focus"] = "console"
+
+    # The line in the middle of the pane.
+    target = line - first
+    state["scroll"] = max(0, len(plain) - 1 - target - state.get("page_h", 20) // 2)
+    return True
+
+def link_spans(row: str, url: str) -> list:
+    """The cells `(start, end)` of each OSC 8 link to `url` drawn in `row`."""
+    out = []
+    at = 0
+    esc = 0
+    seq = []
+    current = ""
+    start = 0
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            seq.append(chr(c))
+            esc = _escape_state(esc, c)
+            if esc == 0:
+                text = "".join(seq)
+                seq = []
+                if text.startswith("\x1b]8;"):
+                    if current == url and start < at:
+                        out.append((start, at))
+                    current = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\").partition(";")[2]
+                    start = at
+            continue
+        at += 1 if c < 0x0300 else _cells(c)
+    if current == url and start < at:
+        out.append((start, at))
+    return out
+
+def link_span_at(row: str, col: int):
+    """The cells `(start, end)` of the OSC 8 link drawn at cell `col` of
+    `row`, or None."""
+    at = 0
+    esc = 0
+    seq = []
+    url = ""
+    start = -1
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            seq.append(chr(c))
+            esc = _escape_state(esc, c)
+            if esc == 0:
+                text = "".join(seq)
+                seq = []
+                if text.startswith("\x1b]8;"):
+                    body = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\")
+                    if url and start <= col and col < at:
+                        return (start, at)
+                    url = body.partition(";")[2]
+                    start = at
+            continue
+        at += 1 if c < 0x0300 else _cells(c)
+    if url and start <= col and col < at:
+        return (start, at)
+    return None
+
+def link_at(row: str, col: int):
+    """The URL of the OSC 8 link drawn at cell `col` of `row`, or None."""
+    at = 0
+    esc = 0
+    seq = []
+    url = ""
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            seq.append(chr(c))
+            esc = _escape_state(esc, c)
+            if esc == 0:
+                text = "".join(seq)
+                seq = []
+                if text.startswith("\x1b]8;"):
+                    body = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\")
+                    url = body.partition(";")[2]
+            continue
+        n = 1 if c < 0x0300 else _cells(c)
+        if url and at <= col and col < at + n:
+            return url
+        at += n
+    return None
+
+def _cell_slice(text: str, start: int, end: int) -> str:
+    """The characters of plain `text` drawn in cells `start` to `end`."""
+    out = []
+    at = 0
+    for c, n in _widths(text):
+        if at >= end:
+            break
+        if at >= start:
+            out.append(chr(c))
+        at += n
+    return "".join(out)
+
+def link_marks(text: str, links, room: int) -> list:
+    """`links` (`[start, end, url]` by character of `text`) as `mark_cells`
+    marks in cells, as `fit` draws `text` (a tab as two spaces), clipped to
+    `room` cells."""
+    if not links:
+        return []
+    cells = [0]
+    for c, n in _widths(text):
+        cells.append(cells[-1] + (2 if c == 0x09 else n))
+    marks = []
+    for start, end, url in sorted(links):
+        if start >= len(text) or end > len(text) or start >= end:
+            continue
+        c0, c1 = cells[start], min(cells[end], room)
+        if c0 < c1 and (not marks or c0 >= marks[-1][1]):
+            # A web page's link in the theme's `link`; a file's underlined
+            # alone, in the line's own colour.
+            web = url.startswith("http://") or url.startswith("https://")
+            on = _UNDERLINE + (_c("link") if web else "")
+            off = _NO_UNDERLINE + (_NO_FOREGROUND if web else "")
+            marks.append((c0, c1, "\x1b]8;;" + url + "\x1b\\" + on, off + "\x1b]8;;\x1b\\", on))
+    return marks
+
+def keep_links(state: dict, line: str, links):
+    """Note the console's `links` on `line` (`[start, end, url]` by
+    character), for its rows to draw them: by the line's text, so a filtered
+    or scrolled view finds them as the console pane does."""
+    if links:
+        state.setdefault("line_links", {})[line] = links
+
+def selection_rows(state: dict, cols: int) -> list:
+    """The selection as `(row, start, end)` in cells, its rows in order:
+    from where the drag began to where it is, across rows as text reads,
+    within the console pane's text when it began there."""
+    sel = state.get("select")
+    if sel == None or not sel["dragged"]:
+        return []
+    a, b = sel["from"], sel["to"]
+    if (a[1], a[0]) > (b[1], b[0]):
+        a, b = b, a
+    left, right = sel["bounds"]
+    top, bottom = sel.get("rows", (0, 1 << 30))
+    out = []
+    for row in range(max(a[1], top), min(b[1], bottom) + 1):
+        start = a[0] if row == a[1] else left
+        end = b[0] + 1 if row == b[1] else right
+        start, end = max(start, left), min(end, right)
+        if start < end:
+            out.append((row, start, end))
+    return out
+
+def selected_text(state: dict, cols: int) -> str:
+    """What the selection covers, as the rows were drawn, each row's
+    trailing spaces dropped and a wrapped line's rows joined again."""
+    frame = state.get("frame") or []
+    continued = state.get("continued", {})
+    lines = []
+    for row, start, end in selection_rows(state, cols):
+        if row < len(frame):
+            plain = state["ansi"].replace(frame[row], "") if state.get("ansi") != None else frame[row]
+            text = _cell_slice(plain, start, end).rstrip(" ")
+            if lines and row in continued:
+                # A wrapped line's next row: the same line.
+                lines[-1] += text
+            else:
+                lines.append(text)
+    return "\n".join(lines)
+
+def _remote(env) -> bool:
+    return env != None and (env.var("SSH_CONNECTION") != None or env.var("SSH_TTY") != None)
+
+def copy_text(state: dict, text: str) -> str:
+    """Put `text` on the clipboard: by OSC 52 with the next frame, which a
+    terminal that allows it takes (over SSH too), and on this machine's own
+    (`pbcopy`, `wl-copy`, `xclip`, `xsel`) unless it is a remote session.
+    What happened, for the keys row."""
+    state["osc"] = "\x1b]52;c;" + base64.encode(text) + "\x07"
+    process = state.get("process")
+    if process == None or _remote(state.get("env")):
+        return "copied"
+    env = state["env"]
+    wayland = env.var("WAYLAND_DISPLAY") != None
+    x11 = env.var("DISPLAY") != None
+    for argv in (["pbcopy"], ["wl-copy"] if wayland else [], ["xclip", "-selection", "clipboard"] if x11 else [], ["xsel", "--clipboard", "--input"] if x11 else []):
+        if argv and process.which(argv[0]) != None:
+            child = _detached(state, process.command(argv[0]).args(argv[1:]).stdin("piped").stdout("null").stderr("null"))
+            stdin = child.stdin()
+            stdin.write(text)
+            stdin.close()
+            child.wait()
+            return "copied"
+    return "copied (if the terminal allows OSC 52)"
+
+# What a click opens: a web page, or a file in an editor, by the URLs
+# `--console:file-hyperlink-format`'s editors open a file at (not their
+# other handlers, an extension's or a clone's). Any other link, which output
+# a build ran could have written (a `file://` script, `-a App`), is copied
+# rather than handed to the system's opener.
+_OPENED_PREFIXES = [
+    "http://",
+    "https://",
+    "vscode://file/",
+    "vscode-insiders://file/",
+    "vscodium://file/",
+    "cursor://file/",
+    "zed://file/",
+    "idea://open?file=",
+    "mvim://open?url=file://",
+    "txmt://open?url=file://",
+]
+
+def opens(url: str) -> bool:
+    """Whether a click opens `url`: one of `_OPENED_PREFIXES` and more,
+    printable ASCII with no space, so the opener reads it as one URL."""
+    for c in url.codepoints():
+        if c <= 0x20 or c >= 0x7f:
+            return False
+    for prefix in _OPENED_PREFIXES:
+        if url.startswith(prefix) and len(url) > len(prefix):
+            return True
+    return False
+
+def _detached(state: dict, command):
+    """`command` spawned in a process group of its own, on a token nothing
+    cancels, so the screen's `q` (its group's SIGINT) and a cancel leave a
+    browser it started or a clipboard daemon running."""
+    command = command.process_group(0)
+    cancellation = state.get("cancellation")
+    return command.spawn(cancellation = cancellation.new()) if cancellation != None else command.spawn()
+
+def _editor(state: dict):
+    """The editor `o` opens a file in, `(format, name)`: the one `O` chose
+    this session, else the console's (`--console:file-hyperlink-format`)."""
+    io = state.get("io")
+    if io == None:
+        return ("none", "")
+    choice = state.get("editor_choice")
+    if choice:
+        for alias, name in io.editors():
+            if alias == choice:
+                return (alias, name)
+    return io.editor()
+
+_KEEP_EDITOR = "to keep it, set ctx.features[Console].args.file_hyperlink_format = \"%s\" in .aspect/config.axl (or ASPECT_FILE_HYPERLINK_FORMAT=%s)"
+
+def open_in_editor(state: dict, path: str, line = 1) -> str:
+    """Open `path` at `line` in `_editor`'s editor; what happened, for the
+    keys row. A `file://` URL to a file the system would run
+    (`std.io.runs_when_opened`) is not opened."""
+    io = state.get("io")
+    if io == None or not path:
+        return "no file to open"
+    alias, name = _editor(state)
+    url = io.editor_url(path, line = line, format = "" if alias in ("none", "template") else alias) if alias != "none" else None
+    if url == None:
+        return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
+    if url.startswith("file:") and io.runs_when_opened(path):
+        return "not opened: the system would run %s; O picks an editor" % path.rpartition("/")[2]
+    return open_link(state, url, trusted = True).replace("opened " + url, "opened in " + name)
+
+def next_editor(state: dict) -> str:
+    """`O`: the next installed editor for `o`, this session; how to keep it."""
+    io = state.get("io")
+    editors = io.editors() if io != None else []
+    if not editors:
+        return "no editor found: install one, or set --console:file-hyperlink-format"
+    aliases = [alias for alias, _ in editors]
+    current = _editor(state)[0]
+    i = (aliases.index(current) + 1) % len(aliases) if current in aliases else 0
+    state["editor_choice"] = aliases[i]
+    return "o opens in %s now; %s" % (editors[i][1], _KEEP_EDITOR % (aliases[i], aliases[i]))
+
+def _view_file(state: dict):
+    """The file `o` opens, `(path, line)`: the peek's, the log shown's, or
+    for the console the task's whole output (`output.log` in its history
+    folder, beside its builds' `bazel/<n>/`), else Bazel's console log."""
+    view = state["view"]
+    if view != None and view.get("path"):
+        return (view["path"], view.get("line", 1))
+    if view != None and view.get("record") != None:
+        paths = _log_paths(state, view["record"])
+        return (paths[0][1] if paths else "", 1)
+    console = state.get("log_path", "")
+    task_dir = console.rpartition("/bazel/")[0]
+    output = task_dir + "/output.log" if task_dir else ""
+    if output and state.get("read") != None and state["read"](output, 0) != None:
+        return (output, 1)
+    return (console, 1)
+
+def open_link(state: dict, url: str, trusted = False) -> str:
+    """Open `url` as this machine does (`open`, `xdg-open`), not waiting on
+    it, when a click opens it (`opens`); copy it instead in a remote
+    session, which would open it there, and for any other link. What
+    happened, for the keys row."""
+    process = state.get("process")
+    if process == None or _remote(state.get("env")) or not (trusted or opens(url)):
+        copy_text(state, url)
+        return "link copied: " + url
+    for opener in ("open", "xdg-open"):
+        if process.which(opener) != None:
+            _detached(state, process.command(opener).args([url]).stdin("null").stdout("null").stderr("null"))
+            return "opened " + url
+    copy_text(state, url)
+    return "link copied: " + url
+
+# How soon a second press on the same cell makes a double click.
+_DOUBLE_CLICK_MS = 400
+
+# What ends a word a double click selects: a space, a bracket, a quote, a
+# comma, so a path (`src/a.cc:12`), a label or a URL is one word.
+_WORD_ENDS = " \t()[]{}<>\"'`,;|"
+
+def _select_word(state: dict, col: int, row: int) -> bool:
+    """Select the word drawn at `col` of `row` and copy it, as a drag would."""
+    frame = state.get("frame") or []
+    if row >= len(frame):
+        return True
+    plain = state["ansi"].replace(frame[row], "") if state.get("ansi") != None else frame[row]
+    cells = []
+    at = 0
+    for c, n in _widths(plain):
+        cells.append((at, at + n, chr(c)))
+        at += n
+    hit = [i for i, (a, b, _) in enumerate(cells) if a <= col and col < b]
+    if not hit or cells[hit[0]][2] in _WORD_ENDS:
+        return True
+    first = hit[0]
+    for i in range(hit[0], -1, -1):
+        if cells[i][2] in _WORD_ENDS:
+            break
+        first = i
+    last = hit[0]
+    for i in range(hit[0], len(cells)):
+        if cells[i][2] in _WORD_ENDS:
+            break
+        last = i
+    word = "".join([c for _, _, c in cells[first:last + 1]])
+    cols = state.get("cols", 80)
+    state["select"] = {"from": (cells[first][0], row), "to": (cells[last][1] - 1, row), "dragged": True, "done": True, "bounds": (0, cols), "rows": (0, 1 << 30)}
+    state["note"] = "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s")
+    return True
+
+def mouse_key(state: dict, key: str) -> bool:
+    """A left button's `mouse-press`, `mouse-drag` or `mouse-release` key:
+    a drag selects (within the console pane's text when it starts there)
+    and its release copies, the selection then shown until the next press;
+    a click on a link opens it (`open_link`). Whether `key` was one."""
+    kind, _, at = key.partition(":")
+    if kind not in ("mouse-press", "mouse-drag", "mouse-release", "mouse-move"):
+        return False
+    col, _, row = at.partition(":")
+    if not col.isdigit() or not row.isdigit():
+        return True
+    col, row = int(col), int(row)
+    if kind == "mouse-move":
+        # Where the pointer is, for `render` to light the link under it.
+        state["hover"] = (col, row)
+        return True
+    cols = state.get("cols", 80)
+    if kind == "mouse-press":
+        # A second press on the cell within `_DOUBLE_CLICK_MS`: the word
+        # under it, selected and copied.
+        now = int(monotonic() * 1000)
+        last = state.get("last_press")
+        state["last_press"] = (col, row, now)
+        if last != None and last[0] == col and last[1] == row and now - last[2] <= _DOUBLE_CLICK_MS:
+            state["last_press"] = None
+            return _select_word(state, col, row)
+        top, bottom = state.get("pane", (-1, -1))
+        inside = top <= row and row <= bottom
+        state["select"] = {
+            "from": (col, row),
+            "to": (col, row),
+            "dragged": False,
+            "bounds": (2, max(2, cols - 2)) if inside else (0, cols),
+            "rows": (top, bottom) if inside else (0, 1 << 30),
+        }
+        return True
+    sel = state.get("select")
+    if sel == None or sel.get("done"):
+        # No press since the last release (a legacy report names any
+        # button's release as the left's).
+        return True
+    if kind == "mouse-drag":
+        sel["to"] = (col, row)
+        sel["dragged"] = sel["dragged"] or (col, row) != sel["from"]
+        return True
+    sel["to"] = (col, row)
+    sel["done"] = True
+    if sel["dragged"]:
+        text = selected_text(state, cols)
+        if text:
+            state["note"] = "%s %d character%s" % (copy_text(state, text), len(text), "" if len(text) == 1 else "s")
+        return True
+    state["select"] = None
+    if row == state.get("tab_row"):
+        for a, b, tab in state.get("tab_spans", []):
+            if a <= col and col < b:
+                if type(tab) == "tuple":
+                    back_to(state, tab[1])
+                else:
+                    show_tab(state, tab)
+                return True
+    failed_at = state.get("failed_at")
+    if failed_at != None and row == failed_at[0] and col >= failed_at[1]:
+        show_tab(state, "failures")
+        return True
+    frame = state.get("frame") or []
+    url = link_at(frame[row], col) if row < len(frame) else None
+    if url != None:
+        # A file's link shows the file here (`o` opens it in the editor);
+        # any other opens.
+        io = state.get("io")
+        target = io.editor_target(url) if io != None else None
+        if target != None and open_peek(state, target[0], target[1]):
+            state["note"] = "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back"
+        else:
+            state["note"] = open_link(state, url)
+    return True
+
+def links_row(pages: list, cols: int) -> str:
+    """One row of `(label, url)` results pages, each cut to its share of the
+    width but linked to its whole url; `""` without pages."""
+    if not pages:
+        return ""
+    lead = " "
+    room = max(0, cols - len(lead) - 3 * (len(pages) - 1))
+    each = room // len(pages)
+    parts = []
+    for label, url in pages:
+        shown = fit(label + ": " + url, each).rstrip(" ")
+        parts.append(_c("link") + link(url, shown) + _RESET)
+    return lead + " · ".join(parts)
+
+def _box_top(title: str, width: int) -> str:
+    title = fit(title, width - 5).rstrip(" ")
+    return _c("border") + "┌─ " + _RESET + _c("strong") + title + _RESET + _c("border") + " " + "─" * max(0, width - text_width(title) - 5) + "┐" + _RESET
+
+def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, links = None) -> str:
+    """A row of a box `width` wide, `coloured` (a function of its text) when
+    given, `mark`ed in its left margin (the current match), its right border
+    `edge` when given (a scrollbar's), `links` (`[start, end, url]` by
+    character of `text`) drawn as links."""
+    body = fit(text, width - 4)
+    if coloured != None:
+        # Coloured before the padding, so a highlight never lights it.
+        shown = body.rstrip(" ")
+        body = coloured(shown) + " " * (len(body) - len(shown))
+    body = mark_cells(body, link_marks(text, links, width - 4))
+
+    # The current match marked by its row's left edge, as the scrollbar's
+    # thumb marks the view: `›` begins the CLI's own update lines.
+    left = (_c("marker") + "┃" if mark else _c("border") + "│") + _RESET + " "
+    return left + body + (" " + edge if edge != None else _c("border") + " │" + _RESET)
+
+def scrollbar(total: int, height: int, up: int):
+    """The right border of a pane `height` rows tall showing the lines
+    `up` from the end of `total`: a thumb as tall as the share shown, at the
+    bottom when following, at the top at the oldest line; None, the plain
+    border, when everything fits."""
+    if total <= height or height < 1:
+        return None
+    size = max(1, height * height // total)
+    top = height - size - (up * (height - size)) // max(1, total - height)
+    return [(_c("scrollbar") + "┃" + _RESET) if top <= i and i < top + size else (_c("border") + "│" + _RESET) for i in range(height)]
+
+def _box_bottom(width: int) -> str:
+    return _c("border") + "└" + "─" * max(0, width - 2) + "┘" + _RESET
+
+def action_seconds(row: str) -> int:
+    """How long a running action has run, in whole seconds, from the time
+    Bazel's progress row gives it (`Compiling a.cc; 12s remote`, `…; 1m 30s
+    local`); 0 without one."""
+    if "; " not in row:
+        return 0
+    total = 0
+    for word in row.rpartition("; ")[2].split(" "):
+        unit = word[-1:]
+        number = word[:-1]
+        if unit not in ("h", "m", "s") or not number or not number.replace(".", "", 1).isdigit():
+            break
+        total += int(number.partition(".")[0] or "0") * {"h": 3600, "m": 60, "s": 1}[unit]
+    return total
+
+def _middle(text: str, width: int) -> str:
+    """`text` in `width` cells, cut in its middle (`…`) when longer, so its
+    start and its end both show."""
+    if text_width(text) <= width:
+        return text
+    if width < 8:
+        return fit(text, width).rstrip(" ")
+    left = (width - 1) * 2 // 3
+    return _cell_slice(text, 0, left) + "…" + _tail(text, width - 1 - left)
+
+def action_row(row: str, width: int) -> str:
+    """A running action's row in `width` cells: how long it has run and
+    where (`2s darwin-sandbox`, after its last `; `) at the right, its
+    description cut in the middle to make room, as the part that tells a
+    stuck action is its age."""
+    head, sep, tail = row.rpartition("; ")
+    if not sep or text_width(row) <= width or text_width(tail) + 4 > width:
+        return _middle(row, width)
+    room = width - text_width(tail) - 1
+    head = _middle(head, room)
+    return head + " " * (room - text_width(head)) + " " + tail
+
+# The slowest actions the finished screen lists, of the most it keeps.
+_SLOWEST = 5
+_MAX_SLOW = 200
+
+def note_progress(state: dict, progress: list):
+    """Note how long each action Bazel shows running has run, the most
+    seen, for the finished screen's slowest (`slowest_rows`)."""
+    slowest = state.setdefault("slowest", {})
+    for row in running_actions(progress):
+        what = row.rpartition("; ")[0] or row
+        slowest[what] = max(slowest.get(what, 0), action_seconds(row))
+    if len(slowest) > _MAX_SLOW:
+        kept = sorted(slowest.items(), key = lambda kv: -kv[1])[:_MAX_SLOW // 2]
+        state["slowest"] = {what: secs for what, secs in kept}
+
+def slowest_rows(state: dict) -> list:
+    """What the finished screen's left pane shows in place of the running
+    actions: Bazel's critical path, then the slowest actions seen running,
+    the longest first, each with how long it ran."""
+    rows = []
+    if state.get("critical"):
+        rows.append("Critical path " + state["critical"])
+    for what, secs in sorted(state.get("slowest", {}).items(), key = lambda kv: -kv[1])[:_SLOWEST]:
+        if secs > 0:
+            rows.append("%s; %ds" % (what, secs))
+    return rows
+
+def _aged(row: str):
+    """How a running action's row is coloured by its age: none, slow, stuck."""
+    seconds = action_seconds(row)
+    if seconds >= _STUCK_S:
+        return lambda text: _c("error") + text + _RESET
+    if seconds >= _SLOW_S:
+        return lambda text: _c("warning") + text + _RESET
+    return None
+
+def cache_hits(line: str):
+    """`(hits, processes)` from Bazel's closing tally (`INFO: 1,204
+    processes: 1,000 remote cache hit, 200 internal, 4 darwin-sandbox.`):
+    the cache hits of every kind, of the processes not internal to Bazel;
+    None for any other line."""
+    line = bazel_line(line)
+    if not line.startswith("INFO: "):
+        return None
+    for sep in (" processes: ", " process: "):
+        head, found, rest = line[len("INFO: "):].partition(sep)
+        if found:
+            break
+    total = head.replace(",", "")
+    if not found or not total.isdigit():
+        return None
+    hits = 0
+    internal = 0
+    for part in rest.rstrip(".").split(", "):
+        n, _, what = part.partition(" ")
+        n = n.replace(",", "")
+        if not n.isdigit():
+            return None
+        if what.endswith("cache hit"):
+            hits += int(n)
+        elif what == "internal":
+            internal += int(n)
+    return (hits, int(total) - internal)
+
+def _plain(s: str) -> str:
+    """`s` without its colour sequences (`ESC [ ... m`)."""
+    parts = s.split("\x1b[")
+    out = parts[0]
+    for part in parts[1:]:
+        end = part.find("m")
+        out += part[end + 1:] if end >= 0 else part
+    return out
+
+def _top(state: dict, cols: int, rows: int) -> list:
+    """The rows above the console: the header and the progress bar, then,
+    unless zoomed (`z`) or showing the keys (`?`), the links, and the running actions, oldest first
+    and coloured by age, beside the Results pane, the list (failures or
+    actions) under its counts."""
+    out = []
+
+    # Header.
+    spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else "✔"
+    title = " %s aspect %s · %s " % (spin, state["task"], elapsed(state["now_ms"] - state["start_ms"]))
+    status = bazel_line(state["progress"][0]) if state["progress"] else state["phase"]
+    counts = progress_counts(status)
+
+    # The title first; Bazel's status in what is left, without the counts
+    # the bar under it shows.
+    shown = status.partition("] ")[2] if counts and "] " in status else status
+    title = fit(title, min(text_width(title), cols)).rstrip(" ")
+    if text_width(title) < cols:
+        title += " "
+    room = max(0, cols - text_width(title))
+    right = _middle(shown, max(0, room - 2)) + " " if room > 2 and shown else ""
+
+    # A status bar: the whole row in the theme's `status_bar`.
+    out.append(_c("status_bar") + title + " " * max(0, room - text_width(right)) + right + _RESET)
+    if counts:
+        done, total = counts
+        label = fit(" %d / %d actions " % (done, total), cols)
+        out.append(_c("progress") + bar(done, total, max(0, cols - len(label))) + _RESET + label)
+    else:
+        out.append("")
+
+    # The panes get what the console pane and the keys row leave (the
+    # links row going first under `_SHORT_ROWS`), and go when that is not
+    # two rows.
+    limit = rows - len(out) - 2 - 4
+    if state.get("zoom") or state.get("help") or limit < 2:
+        return out
+    if state["pages"] and (rows >= _SHORT_ROWS or limit >= 6):
+        limit -= 1
+        out.append(links_row(state["pages"], cols))
+
+    # Running actions | targets and tests.
+    actions = sorted(running_actions(state["progress"]), key = lambda r: -action_seconds(r))
+    running, started = action_counts(state["progress"])
+    running = max(len(actions), running)
+    finished = state["ended"] and not actions and (state.get("slowest") or state.get("critical"))
+    if finished:
+        actions = slowest_rows(state)
+    right_w = min(44, max(cols // 3, 32 if cols >= 70 else cols // 2))
+    left_w = cols - right_w
+    c = state["counts"]
+    failed = _c("error") if c["failed"] else ""
+    tests_failed = _c("error") if c["tests_failed"] else ""
+    summary = [
+        "Targets  %d configured" % c["configured"],
+        "         %s%d built%s, %s%d failed%s" % (_c("success"), c["built"], _RESET, failed, c["failed"], _RESET),
+        "Tests    %s%d passed%s, %s%d failed%s%s" % (_c("success"), c["tests_passed"], _RESET, tests_failed, c["tests_failed"], _RESET, (", %s%d flaky%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else ""),
+    ]
+    wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
+    if not wide:
+        # Narrow: the failures first, as what matters is what failed.
+        summary = [
+            "Targets %s✗%d%s %s✓%d%s/%d" % (failed, c["failed"], _RESET, _c("success"), c["built"], _RESET, c["configured"]),
+            "Tests   %s✗%d%s %s✓%d%s%s" % (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (" %s~%d%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else ""),
+        ]
+
+    # Cache hits from their sources of truth: actions' from Bazel's
+    # execution log, tests' from their results.
+    if c.get("spawns"):
+        summary.append(("Cached   %d%% of %d actions" if wide else "Cached  %d%%/%d") % (c["spawn_hits"] * 100 // c["spawns"], c["spawns"]))
+    if c.get("test_runs"):
+        summary.append(("         %d of %d test runs" if wide else "        %d/%dt") % (c["test_cached"], c["test_runs"]))
+    failed_n, blocked_n = _failure_counts(state)
+    failed_i = -1
+    if failed_n or blocked_n:
+        failed_i = len(summary)
+        summary.append("Failed   %s✗ %d%s%s" % (_c("error"), failed_n, _RESET, ("  ○ %d blocked" % blocked_n) if blocked_n else "") if wide else "%s✗%d%s ○%d" % (_c("error"), failed_n, _RESET, blocked_n))
+    least = min(4, limit)
+
+    # Clipped to the pane, the rest counted, Bazel's unlisted ones too, on
+    # a row of their own.
+    more = 1 if running > len(actions) and not finished else 0
+    pane = min(limit, max(least, min(max(len(actions) + more, len(summary)), rows // 3)))
+    if more or len(actions) > pane:
+        listed = actions[:min(len(actions), pane - 1)]
+        actions = listed + ["… and %d more" % ((len(actions) if finished else running) - len(listed))]
+    results = "Results"
+
+    # Started but not yet running (queued for a remote executor or a full
+    # local pool) are counted beside the running ones, as Bazel's line has.
+    head = "Running (%d of %d started)" % (running, started) if started > running else "Running (%d)" % running
+    if finished:
+        head = "Slowest"
+    out.append(_box_top(head, left_w) + _box_top(results, right_w))
+
+    # Where the failures' count is drawn, for a click to show their tab.
+    state["failed_at"] = None
+    for i in range(pane):
+        if i == failed_i:
+            state["failed_at"] = (len(out), left_w)
+        a = actions[i] if i < len(actions) else ""
+        s = summary[i] if i < len(summary) else ""
+
+        # `summary` rows carry colour: pad them by their visible length.
+        visible = text_width(_plain(s))
+        s_cell = _c("border") + "│ " + _RESET + s + " " * max(0, right_w - 4 - visible) + _c("border") + " │" + _RESET
+        if visible > right_w - 4:
+            s_cell = _box_row(_plain(s), right_w)
+        out.append(_box_row(action_row(a, left_w - 4), left_w, _aged(a)) + s_cell)
+    out.append(_box_bottom(left_w) + _box_bottom(right_w))
+
+    return out
+
+def console_height(state: dict, cols: int, rows: int) -> int:
+    """How many lines the console shows at `cols` by `rows`: a page, for the
+    keys that scroll by one."""
+    return max(1, rows - len(_top(state, cols, rows)) - 3)
+
+def render(state: dict, cols: int, rows: int) -> str:
+    """The whole screen for `state`, `cols` by `rows`, as one string: `_top`,
+    then the console pane (the console or a log, scrolled, or the keys while
+    `?` shows them) and the search bar, or the keys row while it is closed,
+    the keys shown or the countdown running."""
+    out = _top(state, cols, rows)
+    if state.get("tab", "console") != "console" and state["view"] == None and not state.get("help"):
+        return _frame_of(state, _tab_pane(state, out, cols, rows), rows, cols)
+
+    # The console, scrolled.
+    view = state["view"]
+    search = state["search"]
+    log = shown_lines(state)
+    log_h = max(1, rows - len(out) - 3)
+    pattern = search["pattern"]
+    scroll = 0
+    body_w = max(1, cols - 4)
+    wrapping = state.get("wrap", True) and not state.get("help") and not (view != None and view.get("peek"))
+    if state.get("help"):
+        # From the row ↑↓ have scrolled them to, a last row counting the rest
+        # when they do not fit; the console's scroll left as it is.
+        log = [fit(keys, 20) + " " + what for keys, what in _HELP]
+        top = min(state.get("help_top", 0), max(0, len(log) - log_h))
+        state["help_top"] = top
+        log = log[top:]
+        if len(log) > log_h:
+            rest = len(log) - log_h + 1
+            log = log[:log_h - 1] + ["… %d more: ↓" % rest]
+        pattern = None
+        scroll = max(0, len(log) - log_h)
+    else:
+        # Scrolled no further than the top: wrapped, as far as the oldest
+        # lines that fill the pane.
+        top_lines = log_h
+        if wrapping:
+            filled = 0
+            for i, line in enumerate(log):
+                filled += len(wrap_line(line, body_w))
+                if filled >= log_h:
+                    top_lines = i + 1
+                    break
+        state["scroll"] = min(state["scroll"], max(0, len(log) - top_lines))
+        scroll = state["scroll"]
+        if scroll == 0:
+            state["unseen"] = 0
+            state["unseen_errors"] = 0
+        if search["back"] >= len(log):
+            search["back"] = -1
+    end = len(log) - scroll
+    end = max(min(end, len(log)), min(len(log), log_h))
+    start = max(0, end - log_h)
+    jumped = len(log) - 1 - search["back"] if search["back"] >= 0 and pattern != None and search["mode"] == "jump" and not state.get("help") else -1
+    centred = False
+    if jumped >= 0 and state.get("last_size") not in (None, (cols, rows)):
+        # Resized under a held match: centred on it again.
+        search["centre"] = True
+    state["last_size"] = (cols, rows)
+    if wrapping:
+        # The lines whose rows fill the pane up to `end`; at the top, the
+        # oldest from their first row on.
+        end = max(0, min(len(log), len(log) - scroll))
+        filled = 0
+        start = end
+        for i in range(end - 1, -1, -1):
+            if filled >= log_h:
+                break
+            filled += len(wrap_line(log[i], body_w))
+            start = i
+        for i in range(end, len(log)):
+            if filled >= log_h:
+                break
+            filled += len(wrap_line(log[i], body_w))
+            end = i + 1
+
+        # A match jumped to, scrolled to in lines, may sit above the rows
+        # that fill the pane: centred on it in rows instead.
+        if jumped >= 0 and search.get("centre") and (jumped <= start or jumped >= end) and jumped < len(log):
+            filled = len(wrap_line(log[jumped], body_w))
+            start = jumped
+            for i in range(jumped - 1, -1, -1):
+                rows_i = len(wrap_line(log[i], body_w))
+                if filled + rows_i > log_h // 2:
+                    break
+                filled += rows_i
+                start = i
+
+            # Below it only whole lines, so the next frame, filling back
+            # from `end`, has it in view still.
+            end = jumped + 1
+            for i in range(jumped + 1, len(log)):
+                rows_i = len(wrap_line(log[i], body_w))
+                if filled + rows_i > log_h:
+                    break
+                filled += rows_i
+                end = i + 1
+            state["scroll"] = len(log) - end
+            centred = True
+
+            # Until a key moves the view, a frame keeps the match's first
+            # row in it.
+            search["anchored_view"] = True
+    search["centre"] = False
+    up = len(log) - end
+    held = search["back"] >= 0 and search["pattern"] != None and search["mode"] == "jump" and view == None
+    where = ("on the match, G to follow" if held else "following") if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
+    if state.get("unseen") and view == None:
+        errors = state.get("unseen_errors", 0)
+        where += " · %d new%s, G to follow" % (state["unseen"], (" (%d error%s)" % (errors, "" if errors == 1 else "s")) if errors else "")
+    if state.get("dropped") and view == None:
+        where += " · %d older not kept" % state["dropped"]
+
+    # The pattern finding or filtering, which a query that does not compile
+    # is not; a match found, which of them it is, oldest first.
+    found = ""
+    matches = len(log)
+    current = len(log) - 1 - search["back"] if search["back"] >= 0 and pattern != None and search["mode"] == "jump" else -1
+    if pattern != None and search["mode"] == "jump":
+        matches = len(pattern.filter(log))
+        found = " · /%s/ %s%d" % (pattern.pattern, ("%d of " % len(pattern.filter(log[:current + 1]))) if current >= 0 else "", matches)
+    elif pattern != None:
+        found = " · /%s/ %d" % (pattern.pattern, matches)
+    name = ("the end" if view["cut"] and not view.get("peek") else "") if view != None else "Console"
+    title = "%s%s%s · %s" % (name, _FILTER_TITLES[state["filter"]], found, where)
+    if state.get("help"):
+        title = "Keys · ↑↓ scroll · any other key closes"
+        out.append(_box_top(title, cols))
+    else:
+        # The tab names the console; its status follows.
+        status = title.removeprefix("Console").lstrip(" ·")
+        out.append(tab_top(state, status, cols, len(out)))
+    state["pane"] = (len(out), len(out) + log_h - 1)
+    line_links = {} if state.get("help") else state.get("line_links", {})
+    shown = log[start:end]
+    colour = _console_row(pattern)
+    colour_current = _console_row(pattern, True)
+    bar_edge = scrollbar(len(log), log_h, up) if not state.get("help") else None
+    drawn = []
+    first_row = -1
+    for i, line in enumerate(shown):
+        links = line_links.get(line)
+        if view != None and view.get("peek"):
+            # A peek's rows, highlighted, cut as `fit` cut their text.
+            drawn.append((line, _peek_paint(view["hl"][start + i]), False, None, False))
+            continue
+        if not wrapping:
+            drawn.append((line, colour_current if start + i == current else colour, start + i == current, links, False))
+            continue
+        kind = severity(line)
+        if start + i == jumped:
+            first_row = len(drawn)
+        for j, (piece, at) in enumerate(wrap_line(line, body_w)):
+            paint = colour_current if start + i == current else colour
+            drawn.append((piece, paint if j == 0 else _kind_colour(paint, kind), j == 0 and start + i == current, _piece_links(links, at, len(piece)), j > 0))
+
+    # Wrapped, more rows than fit: the newest, but for the top of the
+    # console, where the oldest line shows from its first row.
+    if len(drawn) > log_h:
+        top_first = (start == 0 and up > 0) or centred
+        window = 0 if top_first else len(drawn) - log_h
+        if first_row >= 0 and first_row < window and search.get("anchored_view"):
+            # Never below a held match's first row while the view is where
+            # its jump put it.
+            window = first_row
+        drawn = drawn[window:window + log_h]
+
+    # Which rows go on from the one above, for a copy to join them again.
+    state["continued"] = {}
+    state["page_h"] = log_h
+    for i in range(log_h):
+        text, paint, mark, links, more = drawn[i] if i < len(drawn) else ("", colour, False, None, False)
+        if more:
+            state["continued"][len(out)] = True
+        out.append(_box_row(text, cols, paint, mark, bar_edge[i] if bar_edge else None, links))
+    out.append(_box_bottom(cols))
+    if search["open"] and not state.get("help") and state.get("countdown_ms") == None:
+        out.append(_search_bar(search, matches, cols))
+    else:
+        out.append(keys_line(state, cols))
+
+    return _frame_of(state, out, rows, cols)
+
+# The main pane's tabs, by the number key that shows each.
+_TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"), ("invocation", "Invocation")]
+
+# The build events the Invocation and Metrics tabs read.
+_INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "build_metadata", "build_finished", "build_metrics"]
+
+def _failure_counts(state: dict):
+    """`(failed, blocked)`: targets and tests that failed themselves, and
+    targets not built for a failed dependency."""
+    blocked = len(state.get("blocked", {}))
+    index = logged_index(state)
+    failed = len(state["fails"]) + len(state["counts"]["failures"]) - index["both"] - blocked
+    return (max(0, failed), blocked)
+
+# A heading in the Metrics and Invocation tabs.
+
+def _shown_parts(parts: list, room: int) -> list:
+    """The shown tab's name and crumbs, `(text, level)`, to fit `room`
+    cells: whole, else the middle crumbs as `…`, else the root too, else
+    the last crumb cut from its left, so the deepest always shows."""
+    whole = [(p, i) for i, p in enumerate(parts)]
+    tries = [whole]
+    if len(parts) > 2:
+        tries.append([whole[0], ("…", None), whole[-1]])
+    if len(parts) > 1:
+        tries.append([("…", None), whole[-1]])
+    for parts_tried in tries:
+        if 2 + text_width(" › ".join([p for p, _ in parts_tried])) <= room:
+            return parts_tried
+    return [(_tail(parts[-1], max(1, room - 2)), len(parts) - 1)]
+
+def tab_top(state: dict, status: str, cols: int, row: int) -> str:
+    """The main pane's top border: its tabs, always in the same order, the
+    shown one in reverse video (the failures counted, `✗` failed and `○`
+    blocked) and named by its crumbs (a log or a file opened in it, the
+    current one bold), then what the shown one says of itself (`status`).
+    Where each tab and crumb is drawn is kept (`tab_spans`, on row `row`)
+    for a click to take it, or go back to it, and the pointer to light it.
+    Too narrow, the other tabs go, then the shown one's middle crumbs."""
+    failed, blocked = _failure_counts(state)
+    shown = state.get("tab", "console")
+    names = {}
+    for tab, name in _TABS:
+        if tab == "failures" and (failed or blocked):
+            name += " ✗%d" % failed + (" ○%d" % blocked if blocked else "")
+        names[tab] = name
+    parts = [names[shown]] + crumbs(state)
+    whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " › ".join(parts) + " ")
+    tabs = [t for t, _ in _TABS] if whole <= cols else [shown]
+    text = _c("border") + "┌─" + _RESET
+    at = 2
+    spans = []
+    for tab in tabs:
+        if tab != shown:
+            label = " " + names[tab] + " "
+            spans.append((at, at + text_width(label), tab))
+            text += label
+            at += text_width(label)
+            continue
+        room = cols - at - 2 - (0 if len(tabs) == 1 else text_width("".join([" " + names[t] + " " for t in tabs if t != shown])))
+        drawn = _shown_parts(parts, room)
+        text += _c("active") + " "
+        at += 1
+        for k, (part, level) in enumerate(drawn):
+            if k:
+                text += " › "
+                at += 3
+            last = k == len(drawn) - 1
+            width = text_width(part)
+            if level == 0 and len(parts) == 1:
+                spans.append((at, at + width, shown))
+            elif level != None and not last:
+                spans.append((at, at + width, ("crumb", level)))
+            text += (_c("strong") + part) if last and len(parts) > 1 else part
+            at += width
+        text += " " + _RESET
+        at += 1
+    state["tab_row"] = row
+    state["tab_spans"] = spans
+    rest = max(0, cols - at - 1)
+    info = fit(" " + status, rest - 1).rstrip(" ") + " " if status and rest > 4 else ""
+    return text + _c("muted") + info + _RESET + _c("border") + "─" * max(0, rest - text_width(info)) + "┐" + _RESET
+
+def _redacted(flag: str) -> str:
+    """`flag` with what may be a secret's value hidden: a header's, a
+    token's, a password's or a key's, an env var's value, a URL's
+    user and password."""
+    name, eq, value = flag.partition("=")
+    if not eq:
+        return flag
+    lower = name.lower()
+    for word in ("header", "token", "password", "secret", "credential", "auth", "key"):
+        if word in lower:
+            return name + "=<REDACTED>"
+    if lower.endswith("_env") or lower in ("--client_env", "--action_env", "--repo_env", "--test_env", "--host_action_env"):
+        return name + "=" + value.partition("=")[0] + ("=<REDACTED>" if "=" in value else "")
+    scheme, sep, rest = value.partition("://")
+    if sep and "@" in rest.partition("/")[0]:
+        value = scheme + "://<REDACTED>@" + rest.partition("@")[2]
+    return name + "=" + value
+
+def _row_of(name: str, value) -> str:
+    """A `name  value` row of a tab, the names in a column."""
+    return "  " + name + " " * max(1, 24 - len(name)) + str(value)
+
+def metrics_lines(state: dict) -> list:
+    """The Metrics tab: what ran and what a cache served (actions from
+    Bazel's execution log, the source of truth; tests from their results),
+    Bazel's own action cache, targets, timing and memory."""
+    c = state["counts"]
+    bm = state.get("inv", {}).get("build_metrics")
+    out = [_c("heading") + "Actions" + _RESET]
+    if c.get("spawns"):
+        pct = c["spawn_hits"] * 100 // c["spawns"]
+        out.append(_row_of("spawns", "%d · %d from a cache (%d%%) · %d run" % (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"])))
+        for runner in sorted(c["runners"], key = lambda r: -c["runners"][r]):
+            out.append(_row_of("  " + runner, c["runners"][runner]))
+    else:
+        out.append(_row_of("spawns", "not known: no execution log for this build"))
+    summary = _get(bm, "action_summary")
+    stats = _get(summary, "action_cache_statistics")
+    if stats != None:
+        out.append(_row_of("Bazel's action cache", "%d hits · %d misses" % (_get(stats, "hits", 0) or 0, _get(stats, "misses", 0) or 0)))
+    if summary != None:
+        out.append(_row_of("actions created", _get(summary, "actions_created", 0) or 0))
+    out += ["", _c("heading") + "Tests" + _RESET]
+    runs = c.get("test_runs", 0)
+    out.append(_row_of("runs", "%d · %d from a cache%s" % (runs, c.get("test_cached", 0), (" (%d%%)" % (c["test_cached"] * 100 // runs)) if runs else "")))
+    out.append(_row_of("results", "%d passed · %d failed · %d flaky" % (c["tests_passed"], c["tests_failed"], c.get("tests_flaky", 0))))
+    failed, blocked = _failure_counts(state)
+    out += ["", _c("heading") + "Targets" + _RESET]
+    out.append(_row_of("configured", c["configured"]))
+    out.append(_row_of("built", "%d · %d failed · %d blocked by a dependency" % (c["built"], failed, blocked)))
+    timing = _get(bm, "timing_metrics")
+    out += ["", _c("heading") + "Time" + _RESET]
+    out.append(_row_of("elapsed", elapsed(state["now_ms"] - state["start_ms"])))
+    if state.get("critical"):
+        out.append(_row_of("critical path", state["critical"].removeprefix("Critical path ")))
+    for field, name in (("analysis_phase_time_in_ms", "analysis"), ("execution_phase_time_in_ms", "execution"), ("cpu_time_in_ms", "CPU")):
+        ms = _get(timing, field, 0) or 0
+        if ms:
+            out.append(_row_of(name, elapsed(ms)))
+    heap = _get(_get(bm, "memory_metrics"), "peak_post_gc_heap_size", 0) or 0
+    if heap:
+        out += ["", _c("heading") + "Memory" + _RESET, _row_of("peak heap after GC", "%d MiB" % (heap // (1024 * 1024)))]
+    slow = slowest_rows(state)
+    if slow:
+        out += ["", _c("heading") + "Slowest" + _RESET] + ["  " + r for r in slow]
+    return out
+
+def invocation_lines(state: dict) -> list:
+    """The Invocation tab: what Bazel was asked to do, by whom and where,
+    as its build events say, flags that may hold a secret redacted."""
+    inv = state.get("inv", {})
+    started = inv.get("build_started")
+    out = [_c("heading") + "Invocation" + _RESET]
+    out.append(_row_of("command", str(_get(started, "command", "") or state["task"])))
+    out.append(_row_of("invocation id", str(_get(started, "uuid", "") or state.get("bazel_uuid", "") or "")))
+    out.append(_row_of("Bazel", str(_get(started, "build_tool_version", "") or "")))
+    out.append(_row_of("workspace", str(_get(started, "workspace_directory", "") or "")))
+    finished = inv.get("build_finished")
+    if finished != None:
+        code = _get(finished, "exit_code")
+        out.append(_row_of("exit", "%s (%d)" % (str(_get(code, "name", "") or ""), _get(code, "code", 0) or 0)))
+    for label, url in state.get("pages", []):
+        out.append(_row_of(label, url))
+    options = inv.get("options_parsed")
+    explicit = [_redacted(str(f)) for f in (_get(options, "explicit_cmd_line") or [])]
+    if explicit:
+        out += ["", _c("heading") + "Flags given" + _RESET] + ["  " + f for f in explicit]
+    startup = [_redacted(str(f)) for f in (_get(options, "explicit_startup_options") or [])]
+    if startup:
+        out += ["", _c("heading") + "Startup options given" + _RESET] + ["  " + f for f in startup]
+    status = _get(inv.get("workspace_status"), "item") or []
+    if status:
+        out += ["", _c("heading") + "Workspace status" + _RESET]
+        out += [_row_of(str(_get(i, "key", "")), _redacted(str(_get(i, "key", "")) + "=" + str(_get(i, "value", ""))).partition("=")[2]) for i in status]
+    metadata = _get(inv.get("build_metadata"), "metadata")
+    if metadata:
+        out += ["", _c("heading") + "Build metadata" + _RESET]
+        out += [_row_of(str(k), _redacted(str(k) + "=" + str(metadata[k])).partition("=")[2]) for k in sorted(metadata)]
+    return out
+
+def show_tab(state: dict, tab: str):
+    """Show the main pane's `tab`, as it was left: each tab keeps what it
+    shows (a log or a file opened in it, its stack, its scroll). The
+    failures' list takes the keys when nothing is open over it."""
+    shown = state.get("tab", "console")
+    if shown != tab:
+        parked = state.setdefault("parked", {})
+        parked[shown] = (state["view"], state.get("views", []), state["scroll"])
+        state["view"], state["views"], state["scroll"] = parked.pop(tab, (None, [], 0))
+        state["search"]["back"] = -1
+    state["tab"] = tab
+    state["focus"] = "failures" if tab == "failures" and state["view"] == None else "console"
+
+def _crumb(state: dict, view: dict) -> str:
+    """A view's crumb in the tab bar: a file's name and line; a failure's
+    target, then its shard, run and attempt where there are several."""
+    record = view.get("record")
+    if view.get("peek") or record == None:
+        return view["title"]
+    if record["kind"] != "test":
+        return record["label"] + (" › " + record["detail"] if record.get("detail") else "")
+    key = (record["label"], record["config"])
+    runs, shards = state["test_counts"].get(key, (0, 0))
+    seen_runs, seen_shards = state["spread"].get(key, (1, 1))
+    runs, shards = max(runs, seen_runs), max(shards, seen_shards)
+    attempts = state["last_attempts"].get((record["label"], record["config"], record["run"], record["shard"]), 1)
+    parts = [record["label"]]
+    if shards > 1:
+        parts.append("shard %d/%d" % (record["shard"], shards))
+    if runs > 1:
+        parts.append("run %d/%d" % (record["run"], runs))
+    if attempts > 1:
+        parts.append("attempt %d/%d" % (record["attempt"], attempts))
+    return " › ".join(parts)
+
+def _shown_record(state: dict):
+    """The failure whose log the shown tab has open, under any file
+    peeked from it; None for none."""
+    first = state.get("views", [])
+    view = first[0][0] if first else state["view"]
+    return view.get("record") if view != None else None
+
+def crumbs(state: dict) -> list:
+    """The shown tab's views as crumbs, its root first: what the tab bar
+    names it by."""
+    out = [_crumb(state, v) for v, _ in state.get("views", [])]
+    if state["view"] != None:
+        out.append(_crumb(state, state["view"]))
+    return out
+
+def back_to(state: dict, level: int):
+    """The shown tab back to its `level`th view (0 its own: the list or
+    the console), as it was scrolled."""
+    views = state.get("views", [])
+    if level <= 0:
+        state["view"], state["views"], state["scroll"] = None, [], 0
+    elif level <= len(views):
+        state["view"], state["scroll"] = views[level - 1]
+        state["views"] = views[:level - 1]
+    state["search"]["back"] = -1
+    state["focus"] = "failures" if state.get("tab") == "failures" and state["view"] == None else "console"
+
+def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
+    """`out` with the main pane showing the Failures, Metrics or Invocation
+    tab, and the keys row under it. The failures as their list, chosen with
+    ↑↓, Enter showing one's log; the others scrolled with ↑↓."""
+    tab = state.get("tab", "console")
+    log_h = max(1, rows - len(out) - 3)
+    width = cols - 4
+    if tab == "failures":
+        lines = (action_rows if state.get("list") == "actions" else failure_rows)(state, log_h, width)
+        title = ("Actions with output · " if state.get("list") == "actions" else "") + "↑↓ choose · Enter show its log"
+    else:
+        lines = metrics_lines(state) if tab == "metrics" else invocation_lines(state)
+        top = min(state.get("tab_scroll", 0), max(0, len(lines) - log_h))
+        state["tab_scroll"] = top
+        lines = lines[top:]
+        title = "↑↓ scroll" if len(lines) > log_h or top else ""
+    out.append(tab_top(state, title, cols, len(out)))
+    state["pane"] = (len(out), len(out) + log_h - 1)
+    for i in range(log_h):
+        line = lines[i] if i < len(lines) else ""
+        visible = text_width(_plain(line))
+        if visible > width:
+            out.append(_box_row(_plain(line), cols))
+        else:
+            out.append(_c("border") + "│ " + _RESET + line + " " * (width - visible) + _c("border") + " │" + _RESET)
+    out.append(_box_bottom(cols))
+    out.append(keys_line(state, cols))
+    return out
+
+def keys_line(state: dict, cols: int) -> str:
+    """The bottom row: the keys (`keys_row`), and at its right end the CLI's
+    version, when it leaves the keys room (60 cells, as many as fit at
+    once in that much)."""
+    version = state.get("cli_version", "")
+    tag = (" aspect " + version + " ") if version else ""
+    if not tag or cols - len(tag) < 60:
+        return _c("muted") + keys_row(state, cols) + _RESET
+    return _c("muted") + keys_row(state, cols - len(tag)) + _RESET + _c("subtle") + tag + _RESET
+
+def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
+    """The frame of `out`'s rows: the link under the pointer lit, the
+    selection drawn, each row cleared as it is written."""
+
+    # Home, each row cleared before it is written: cleared after, a row as
+    # wide as the screen would lose its last column, where the cursor waits.
+    # No newline after the last row, which would scroll.
+    shown = out[:rows]
+
+    # As drawn, for a click's link and the selection's text; the selection
+    # reversed over it.
+    state["frame"] = shown
+    state["cols"] = cols
+    selected = {row: (a, b) for row, a, b in selection_rows(state, cols)}
+    hover = state.get("hover")
+    if hover != None and hover[1] == state.get("tab_row") and hover[1] < len(shown):
+        for a, b, tab in state.get("tab_spans", []):
+            if a <= hover[0] and hover[0] < b and tab != state.get("tab", "console"):
+                shown = list(shown)
+                on = _c("hover")
+                shown[hover[1]] = mark_cells(shown[hover[1]], [(a, b, on, _RESET, on)])
+    url = link_at(shown[hover[1]], hover[0]) if hover != None and hover[1] < len(shown) else None
+    if url != None:
+        # The whole link lit: its row, and the rows above and below a wrap
+        # carried it onto.
+        shown = list(shown)
+        lit = [hover[1]]
+        for step in (-1, 1):
+            r = hover[1] + step
+            for _ in range(len(shown)):
+                if r < 0 or r >= len(shown) or not link_spans(shown[r], url):
+                    break
+                lit.append(r)
+                r += step
+        on, off = _hover_colour(state)
+        for r in lit:
+            shown[r] = mark_cells(shown[r], [(a, b, on, off, on) for a, b in link_spans(shown[r], url)])
+    if selected:
+        on, off = _selection_colour(state)
+        shown = [mark_cells(row, [(selected[i][0], selected[i][1], on, off, on)]) if i in selected else row for i, row in enumerate(shown)]
+    frame = state.get("osc", "") + "\x1b[H" + "\r\n".join(["\x1b[K" + row for row in shown])
+    state["osc"] = ""
+    if len(shown) < rows:
+        frame += "\r\n\x1b[J"
+    return frame
+
+# Where Bazel's closing block starts: the lines a reader of the
+# scrollback wants after the screen is gone (`report_lines`), its first
+# `_CLOSING_HEAD` and last `_CLOSING_TAIL` (where `Executed N out of M
+# tests` is) of them.
+_CLOSING = ["INFO: Elapsed time:", "INFO: Build completed", "ERROR: Build did NOT complete", "INFO: Errors Bazel reported", "── Errors (", "Executed "]
+_CLOSING_HEAD = 5
+_CLOSING_TAIL = 40
+
+# The most lines of an error block kept for the scrollback.
+_MAX_BLOCK = 20
+
+# Errors and warnings kept past `_MAX_LOG`, so `e` finds them all.
+_MAX_EARLY = 5000
+
+def _closing(line: str) -> bool:
+    line = bazel_line(line).lstrip(" ")
+    for head in _CLOSING:
+        if line.startswith(head):
+            return True
+    return False
+
+def _folded_line(n: int) -> str:
+    return "  … +%d line%s (Ctrl+O shows them)" % (n, "" if n == 1 else "s")
+
+def _fold_line(state: dict, line: str):
+    """Take `line` into the console's folded view (`folded`): the lines
+    under an `INFO: From` (a successful action's output) counted on one
+    row after it rather than shown."""
+    folded = state.setdefault("folded", [])
+    src = state.setdefault("fold_src", [])
+    at = state.get("fold_seen", 0)
+    state["fold_seen"] = at + 1
+    if bazel_line(line).startswith("INFO: From "):
+        folded.append(line)
+        src.append(at)
+        state["fold_n"] = 0
+        return
+    if state.get("fold_n", -1) >= 0 and not _starts_block(line):
+        state["fold_n"] += 1
+        if state["fold_n"] == 1:
+            folded.append(_folded_line(1))
+            src.append(at)
+        else:
+            folded[-1] = _folded_line(state["fold_n"])
+            src[-1] = at
+        return
+    state["fold_n"] = -1
+    folded.append(line)
+    src.append(at)
+
+def folded_to_lines(state: dict, scroll: int) -> int:
+    """A scroll of the folded view (rows from its newest) as one of the
+    lines kept, for a search, which reads them all: the bottom row's line,
+    the last of a fold for its count's row."""
+    src = state.get("fold_src", [])
+    if not src:
+        return scroll
+    row = max(0, min(len(src) - 1, len(src) - 1 - scroll))
+    return max(0, len(state.get("log", [])) - 1 - src[row])
+
+def folding(state: dict) -> bool:
+    """Whether the console shows its folded view: every line shown (`e`
+    on all, no search filtering nor jumping), not opened with Ctrl+O, and
+    not a log."""
+    search = state["search"]
+    return state.get("view") == None and state["filter"] == "all" and search["pattern"] == None and not state.get("unfolded")
+
+def add_lines(state: dict, lines: list, links = None):
+    """Take the console's new `lines`, and with them their `links` (each
+    line's `[start, end, url]`s, as `output_feed()` gives them): kept (the
+    newest `_MAX_LOG`, with each one's kind, `classify`'s, its errors and
+    warnings past that kept for `e`, the rest counted in `dropped`), the
+    first `_MAX_ERRORS` error blocks noted for the scrollback, Bazel's
+    closing block from where it starts (`_CLOSING`), Bazel's cache tally
+    read (`cache_hits`). Scrolled up, the console stays on the lines it
+    shows, counting the new ones and the errors among them (`unseen`,
+    `unseen_errors`); a log being viewed does not move. Counted from the
+    end, the current match and where the bar opened move with them, the
+    latter in lines the `e` filter shows, as a search that jumps lists
+    them."""
+    shown = 0
+    shown_errors = 0
+    unsearched = 0
+    folded_before = len(state.get("folded", []))
+    kinds, state["block"] = classify(lines, state.get("block", ""))
+    state.setdefault("kinds", [])
+    closing = state.setdefault("closing", [])
+    for i, line in enumerate(lines):
+        kind = kinds[i]
+        if len(line) > _MAX_LINE:
+            # The rest is in Bazel's console log, on disk.
+            line = line[:_MAX_LINE] + "… (%d more characters in the console log)" % (len(line) - _MAX_LINE)
+        state["log_size"] = state.get("log_size", 0) + len(line)
+        state["log"].append(line)
+        state["kinds"].append(kind)
+        _fold_line(state, line)
+        if links != None and i < len(links):
+            keep_links(state, line, links[i])
+
+        # Errors after Bazel's closing block began are its recap's.
+        if kind == "error" and severity(line) == "error" and not _closing(line) and not closing:
+            state["error_count"] += 1
+            if len(state["errors"]) < _MAX_ERRORS:
+                state["errors"].append([line])
+        elif kind == "error" and severity(line) != "error" and state["errors"] and len(state["errors"][-1]) < _MAX_BLOCK and state["error_count"] <= _MAX_ERRORS:
+            state["errors"][-1].append(line)
+        if (closing or _closing(line)) and not line.startswith("» "):
+            # Bazel's, not the CLI's own lines (`» `), which the scrollback
+            # gets as they were printed: the head, and a tail kept short.
+            if len(closing) < _CLOSING_HEAD:
+                closing.append(line)
+            else:
+                tail = state.setdefault("closing_tail", [])
+                tail.append(line)
+                if len(tail) > 2 * _CLOSING_TAIL:
+                    state["closing_cut"] = state.get("closing_cut", 0) + len(tail) - _CLOSING_TAIL
+                    state["closing_tail"] = tail[-_CLOSING_TAIL:]
+        if _shows(state["filter"], kind):
+            unsearched += 1
+            if console_lines(state, [line], [kind]):
+                shown += 1
+                if kind == "error":
+                    shown_errors += 1
+        cache = cache_hits(line)
+        if cache != None:
+            state["cache"] = cache
+        plain = bazel_line(line)
+        if plain.startswith("INFO: Elapsed time:") and "Critical Path: " in plain:
+            state["critical"] = plain.partition("Critical Path: ")[2].strip().split(" ")[0]
+
+    if folding(state):
+        # Folded, a line under an `INFO: From` adds no row.
+        shown = len(state["folded"]) - folded_before
+
+    # The console parked under another tab, scrolled up: held where it was.
+    parked = state.get("parked", {}).get("console")
+    if parked != None and parked[0] == None and parked[2] > 0:
+        state["parked"]["console"] = (parked[0], parked[1], parked[2] + shown)
+    if state["view"] == None and state.get("tab", "console") == "console":
+        search = state["search"]
+        held = search["back"] >= 0 and search["mode"] == "jump" and search["pattern"] != None
+        if search["open"] and search.get("anchored"):
+            search["origin"] += unsearched
+            search["origin_rows"] = search.get("origin_rows", 0) + (len(state["folded"]) - folded_before if state.get("folded") != None else unsearched)
+        if state["scroll"] > 0:
+            state["scroll"] += shown
+            state["unseen"] += shown
+            state["unseen_errors"] = state.get("unseen_errors", 0) + shown_errors
+        if search["back"] >= 0:
+            search["back"] += shown
+
+            # A match jumped to holds the view, even one near the newest
+            # line, until `J` follows again.
+            if state["scroll"] == 0 and held:
+                state["scroll"] = shown
+                state["unseen"] += shown
+    over = len(state["log"]) - _MAX_LOG
+    if state.get("log_size", 0) > _MAX_LOG_SIZE:
+        # Long lines: as many of the oldest as bring the text a tenth under
+        # its budget, if that is more than the line count asks.
+        excess = state["log_size"] - _MAX_LOG_SIZE * 9 // 10
+        drop = 0
+        for line in state["log"]:
+            if excess <= 0:
+                break
+            excess -= len(line)
+            drop += 1
+        if drop > 0:
+            over = max(over, drop - _MAX_LOG // 10, 1)
+    if over > 0:
+        # A tenth more than over, so what follows (refolding) runs once in
+        # that many lines, not on every batch.
+        over = min(len(state["log"]), over + _MAX_LOG // 10)
+        state["trims"] = state.get("trims", 0) + 1
+        early = state.setdefault("early", [])
+        for line, kind in zip(state["log"][:over], state["kinds"][:over]):
+            if kind:
+                early.append((line, kind))
+        if len(early) > _MAX_EARLY:
+            state["early"] = early[-_MAX_EARLY:]
+        for line in state["log"][:over]:
+            state["log_size"] = state.get("log_size", 0) - len(line)
+        state["log"] = state["log"][over:]
+        state["kinds"] = state["kinds"][over:]
+        state["dropped"] = state.get("dropped", 0) + over
+        state["folded"] = []
+        state["fold_src"] = []
+        state["fold_n"] = -1
+        state["fold_seen"] = 0
+        for line in state["log"]:
+            _fold_line(state, line)
+    if len(state.get("line_links", {})) > _MAX_LOG:
+        kept = {line: True for line in state["log"]}
+        state["line_links"] = {line: spans for line, spans in state["line_links"].items() if line in kept}
+
+# How long the finished screen waits for a key while nothing on it moves.
+_IDLE_MS = 1000
+
+# The keys that leave the finished screen, and leave at once during its
+# countdown.
+_LEAVE_KEYS = ["q", "enter", "esc"]
+
+# The phase between the console's end and post-task, while the task does
+# what follows its build.
+_FINISHING = "Finishing…"
+
+def keys_row(state: dict, cols: int) -> str:
+    """The keys row, `cols` wide: what is going on when that is all there is
+    to say (cancelling, the countdown, the keys overlay open, the task
+    finishing after its build, when no key is read), else the keys for what
+    has focus, the likeliest first, as many as fit before `? keys`."""
+    if state["ended"] and state["cancelling"]:
+        return fit(" Cancelled", cols)
+    if state["cancelling"]:
+        return fit(" cancelling… (Ctrl+C again to stop now)", cols)
+    if not state["ended"] and state["phase"] == _FINISHING:
+        return fit(" " + _FINISHING + " · Ctrl+C cancels", cols)
+    if state.get("countdown_ms") != None:
+        return fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
+    if state.get("help"):
+        return fit(" ↑↓ scroll · any other key closes", cols)
+    if state.get("note"):
+        return fit(" " + state["note"], cols)
+    if state.get("tab") in ("metrics", "invocation"):
+        return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
+    done = state["ended"]
+    items = _items(state)
+    other = "a failures" if state.get("list") == "actions" else "a actions"
+    has_other = bool(state.get("outputs")) or state.get("list") == "actions"
+    view = state["view"]
+    search = state["search"]
+    parts = ["Done"] if done else []
+    if state["focus"] == "failures":
+        parts += ["↑↓ choose", "Enter show its log", "Tab next tab", "Esc back", "q leave" if done else "q cancel"]
+        if has_other:
+            parts.append(other)
+    else:
+        if view != None:
+            parts.append("Esc back")
+        name = _editor(state)[1]
+        if name:
+            parts.append("o open in " + name)
+        if done:
+            parts.append("q leave" if view != None else "q Enter Esc leave")
+        else:
+            parts.append("q cancel")
+        if items:
+            parts.append("Tab next tab" if view == None else ("] [ next/prev action" if state.get("list") == "actions" else "] [ next/prev failure"))
+        parts.append("/ find")
+        if search["pattern"] != None and search["mode"] == "jump":
+            parts.append("n N next/prev match")
+
+        # The macOS Terminal sends Shift+↑↓ as plain arrows, unless its
+        # profile's keyboard settings say otherwise.
+        apple = state.get("env") != None and state["env"].var("TERM_PROGRAM") == "Apple_Terminal"
+        parts += ["e filter", "Fn+↑↓ ⌥↑↓ u d page" if apple else "PgUp PgDn ⇧↑↓ u d page", "K J top/end"]
+        if has_other:
+            parts.append(other)
+        parts.append("z " + ("unzoom" if state.get("zoom") else "zoom"))
+        parts.append("w " + ("cut" if state.get("wrap", True) else "wrap"))
+    text = " " + parts[0]
+    for part in parts[1:]:
+        if text_width(text) + 3 + text_width(part) + len(" · ? keys") > cols:
+            break
+        text += " · " + part
+    return fit(text + " · ? keys", cols)
+
+def on_key(state: dict, key: str, page: int) -> bool:
+    """Apply a key to the dashboard's state; whether it leaves the finished
+    screen. With the keys shown (`?`), ↑↓, `k`/`j` and the wheel scroll them
+    and any other key closes them.
+    Esc closes the innermost thing open, the search bar, the list's focus, a
+    log, and on the finished screen with none open leaves, as `q` and Enter
+    do. Ctrl+F or `/` opens the search bar, which takes every key but the
+    arrows and the wheel (`_search_key`); `n` and `N` step through what it
+    found (`step_match`: `n` the next newer, `N` the previous older). Tab
+    and Shift+Tab cycle the tabs; on Failures ↑↓ and the wheel choose and
+    Enter shows a record's log in the tab; `]` and `[` show the chosen
+    one's, then the next or previous one's, from anywhere; `a` switches the list between failures and the actions that
+    wrote output. Scroll by a line, `_WHEEL` lines (the wheel), half a `page`
+    (the console's height: Shift+↑↓, `u`/`d`, Ctrl+U/D) or a `page`, never
+    below the newest line; `K` (or Home) goes to the oldest, `J` (or End)
+    back to following (letting go of the current match), as they go to the first and last
+    row of the Failures list, Metrics and Invocation. `e` moves to the next of `_FILTERS`; `z` zooms
+    the console; `m` gives the mouse to the terminal and takes it back; `q` interrupts the build,
+    once, while it runs. With the mouse taken, a drag selects and copies,
+    and a click opens a link (`mouse_key`); any other key clears what that
+    said."""
+
+    if mouse_key(state, key):
+        return False
+    state["note"] = ""
+    if key == "ctrl-l":
+        # The next frame is written though unchanged: the terminal was
+        # cleared behind it.
+        state["drawn"] = None
+        return False
+
+    # An Esc typed just before a key reads as Alt with it: apart from the
+    # bar's own Alt toggles, it is the two keys.
+    if key.startswith("alt-") and key not in _ALT_SCROLL and not (state["search"]["open"] and key in ("alt-c", "alt-w", "alt-backspace")):
+        if on_key(state, "esc", page):
+            return True
+        return on_key(state, key[len("alt-"):], page)
+    if state.get("help"):
+        if key in ("up", "k", "wheel-up"):
+            state["help_top"] = max(0, state.get("help_top", 0) - 1)
+        elif key in ("down", "j", "wheel-down"):
+            state["help_top"] = state.get("help_top", 0) + 1
+        else:
+            state["help"] = False
+        return False
+    if state["search"]["open"] and _search_key(state, key, page):
+        return False
+    if key in ("1", "2", "3", "4") and not state["search"]["open"]:
+        # The main pane's tabs; the failures' list takes the keys.
+        show_tab(state, _TABS[int(key) - 1][0])
+        return False
+    if key in ("tab", "shift-tab") and not state["search"]["open"]:
+        # Through every tab, and back with Shift.
+        names = [tab for tab, _ in _TABS]
+        i = names.index(state.get("tab", "console")) if state.get("tab", "console") in names else 0
+        show_tab(state, names[(i + (1 if key == "tab" else -1)) % len(names)])
+        return False
+    if state.get("tab") in ("metrics", "invocation") and state["view"] == None:
+        if key in ("K", "home", "J", "end"):
+            state["tab_scroll"] = 0 if key in ("K", "home") else 1 << 30
+            return False
+        step = {"up": -1, "k": -1, "wheel-up": -_WHEEL, "down": 1, "j": 1, "wheel-down": _WHEEL, "pageup": -page, "pagedown": page, "b": -page, " ": page, "u": -page // 2, "d": page // 2}
+        if key in step:
+            state["tab_scroll"] = max(0, state.get("tab_scroll", 0) + step[key])
+            return False
+        if key == "esc" and state["view"] == None:
+            show_tab(state, "console")
+            return False
+    items = _items(state)
+    pick = _pick(state)
+    chosen = state.get(pick, 0)
+    if key == "esc":
+        if state["view"] != None:
+            # Back a crumb: to the view it was opened from, else the tab's own.
+            back_to(state, len(state.get("views", [])))
+        elif state.get("tab", "console") != "console":
+            show_tab(state, "console")
+        else:
+            return state["ended"]
+        return False
+    if key == "a":
+        if state.get("outputs") or state.get("list") == "actions":
+            state["list"] = "failures" if state.get("list") == "actions" else "actions"
+            if not _items(state) and state.get("tab") != "failures":
+                state["focus"] = "console"
+        return False
+    if state["focus"] == "failures":
+        # The Failures list also has the failed targets without a log of
+        # their own (a blocked one opens what blocks it).
+        rows = _failure_total(state) if state.get("list") != "actions" else len(items)
+        if rows == 0 and key in ("up", "k", "wheel-up", "down", "j", "wheel-down", "enter", "K", "home", "J", "end"):
+            return False
+        if key in ("up", "k", "wheel-up"):
+            state[pick] = max(0, chosen - 1)
+            return False
+        if key in ("down", "j", "wheel-down"):
+            state[pick] = min(rows - 1, chosen + 1)
+            return False
+        if key in ("K", "home", "J", "end"):
+            state[pick] = 0 if key in ("K", "home") else rows - 1
+            return False
+        if key == "enter":
+            if chosen >= len(items):
+                _open_unlogged(state, chosen)
+            else:
+                _open_failure(state, chosen)
+            return False
+    if key in ("]", "[") and items:
+        # The chosen record first, unless it is the one the Failures tab
+        # shows: then a step.
+        show_tab(state, "failures")
+        step = 1 if key == "]" else -1
+        shown = _shown_record(state) == items[chosen]
+        _open_failure(state, (chosen + step) % len(items) if shown else chosen)
+        return False
+    if key in ("}", "{") and items:
+        # Another attempt, shard or run of the target shown (or chosen).
+        show_tab(state, "failures")
+        label = (_shown_record(state) or items[chosen])["label"]
+        same = [i for i, r in enumerate(items) if r["label"] == label]
+        at = same.index(chosen) if chosen in same else 0
+        _open_failure(state, same[(at + (1 if key == "}" else -1)) % len(same)])
+        return False
+    half = max(1, page // 2)
+    up = {"up": 1, "k": 1, "wheel-up": _WHEEL, "shift-up": half, "alt-up": half, "u": half, "ctrl-u": half, "b": page, "pageup": page}
+    down = {"down": 1, "j": 1, "wheel-down": _WHEEL, "shift-down": half, "alt-down": half, "d": half, "ctrl-d": half, " ": page, "pagedown": page}
+    if key in ("ctrl-f", "/"):
+        # Where the bar opened, in the lines a search that jumps lists (a
+        # kept filter's scroll counts only its matches, so the newest), no
+        # higher than the top page, as `render` draws it.
+        search = state["search"]
+        held = search["back"] >= 0 and search["mode"] == "jump" and search["pattern"] != None and state["view"] == None
+        search["open"] = True
+        if search["mode"] == "filter" and search["pattern"] != None:
+            search["origin"] = 0
+        else:
+            search["origin"] = min(state["scroll"], max(0, len(shown_lines(state)) - page))
+
+        # Folded, the view's rows; the search reads every line, so the
+        # origin is kept in lines too, `origin_rows` to go back to.
+        search["origin_rows"] = search["origin"]
+        if folding(state):
+            search["origin"] = folded_to_lines(state, search["origin"])
+        search["anchored"] = search["origin"] > 0 or held
+    elif key in up:
+        state["scroll"] += up[key]
+        state["search"]["anchored_view"] = False
+    elif key in down:
+        state["scroll"] = max(0, state["scroll"] - down[key])
+        state["search"]["anchored_view"] = False
+    elif key == "n":
+        step_match(state, 1, page)
+    elif key == "N":
+        step_match(state, -1, page)
+    elif key in ("K", "home"):
+        # The top, as far as `render` lets it (the oldest lines that fill
+        # the pane, wrapped).
+        state["scroll"] = 1 << 30
+        state["search"]["anchored_view"] = False
+    elif key in ("J", "end"):
+        state["scroll"] = 0
+        state["search"]["back"] = -1
+        state["search"]["anchored_view"] = False
+    elif key == "e":
+        state["filter"] = _FILTERS[(_FILTERS.index(state["filter"]) + 1) % len(_FILTERS)]
+        state["scroll"] = 0
+        state["search"]["back"] = -1
+        state["search"]["anchored_view"] = False
+    elif key == "?":
+        state["help"] = True
+        state["help_top"] = 0
+    elif key == "o":
+        path, line = _view_file(state)
+        state["note"] = open_in_editor(state, path, line)
+    elif key == "O":
+        state["note"] = next_editor(state)
+    elif key == "w":
+        state["wrap"] = not state.get("wrap", True)
+        state["search"]["anchored_view"] = False
+    elif key == "ctrl-o":
+        # The lines folded under each `INFO: From`, shown or folded again,
+        # from the newest line, as the rows change under the view.
+        state["unfolded"] = not state.get("unfolded", False)
+        state["scroll"] = 0
+        state["search"]["anchored_view"] = False
+    elif key == "z":
+        state["zoom"] = not state.get("zoom", False)
+    elif key == "m":
+        if state.get("screen") != None:
+            state["mouse"] = not state.get("mouse", False)
+            state["screen"].mouse(state["mouse"])
+    elif key == "q" or (key == "enter" and state["view"] == None):
+        if state["ended"]:
+            return True
+        if key == "q" and not state["cancelling"]:
+            state["cancelling"] = True
+            state["screen"].interrupt()
+    return False
+
+# Under this many rows the links row goes first, so the panes, the console
+# and the keys row keep their place.
+_SHORT_ROWS = 16
+
+# The smallest terminal the screen draws in.
+_MIN_COLS = 40
+_MIN_ROWS = 12
+
+def refusal(std):
+    """Why the screen does not take this terminal, for a line on stderr, or
+    "" when it does; None when it is not one to ask (not a terminal, CI),
+    where Bazel's console is what is wanted. Under a coding agent the
+    screen would wait for keys nobody types, so it refuses even when
+    enabled."""
+    io = std.io
+    if not (io.stdout.is_tty and io.stderr.is_tty) or std.env.var("CI"):
+        return None
+    if under_agent(std):
+        return "dashboard off: a coding agent is running this; Bazel's console is shown instead"
+    term = std.env.var("TERM") or ""
+    if term in ("", "dumb"):
+        return "dashboard off: TERM is %s; Bazel's console is shown instead" % ("dumb" if term else "not set")
+    size = std.term.size()
+    if size == None:
+        return None
+    if size[0] < _MIN_COLS or size[1] < _MIN_ROWS:
+        return "dashboard off: the terminal is %dx%d, under %dx%d; Bazel's console is shown instead" % (size[0], size[1], _MIN_COLS, _MIN_ROWS)
+    return ""
+
+# How many of Bazel's errors and of the failures the scrollback lists.
+_REPORT_ERRORS = 10
+_REPORT_FAILURES = 20
+
+def _log_paths(state: dict, record: dict) -> list:
+    """Each of a failure's logs, `(stream, path)`, where it reads now (as
+    `_log_path` finds one)."""
+    out = []
+    for name, value in record["files"]:
+        path = _log_path(state, dict(record, files = [(name, value)]))
+        if path:
+            out.append((name, path))
+    return out
+
+def _paths_text(state: dict, record: dict) -> str:
+    """A failure's logs for the report: the one path, or each by its
+    stream."""
+    paths = _log_paths(state, record)
+    if len(paths) == 1:
+        return "  " + paths[0][1]
+    return "".join(["  %s: %s" % (name, path) for name, path in paths])
+
+def _log_path(state: dict, record: dict) -> str:
+    """Where a failure's log reads now: the history's copy of an action's
+    (`kept_action_log`), which outlives Bazel's own, before Bazel's; "" for
+    none."""
+    build = state.get("build")
+    if record["kind"] == "action" and build != None:
+        kept = build.kept_action_log(record.get("output", "")) or {}
+        for name, _ in record["files"]:
+            if name in kept:
+                return kept[name]
+    for _, value in record["files"]:
+        for path in log_paths(state, record, value):
+            if state["read"](path, 0) != None:
+                return path
+    return ""
+
+def _flaky(state: dict, record: dict) -> bool:
+    """Whether `record` is a failed attempt of a test that passed in the end."""
+    return record["kind"] == "test" and bool(state["counts"].get("flaky", {}).get(record["label"]))
+
+def replay_lines(state: dict, tty: bool) -> list:
+    """The console as the screen showed it, for the scrollback once the
+    screen is gone: every line it kept, Bazel's labels coloured on a
+    terminal, the CLI's own as it wrote them (unmarked), after a line
+    counting the oldest it did not keep."""
+    out = []
+    if state.get("dropped"):
+        out.append("… %d older lines not kept: aspect history show for all of it" % state["dropped"])
+    raw = _bazel_raw() if tty else False
+    for line in state["log"]:
+        line = line.removeprefix("» ")
+        out.append(_label(line, raw) if tty else line)
+    return out
+
+def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list:
+    """What the scrollback keeps once the screen is gone, for a person and
+    for an agent reading a cut capture's tail alike: the first of Bazel's
+    errors, each with what was under it (a compiler's diagnostic), unless
+    Bazel's closing block has the console's own recap of them, or the
+    console was `replayed` just above it (`replay_lines`); the
+    failures, each with its log's path (the history's copy first), the
+    first `_REPORT_FAILURES`, and apart from them the flaky tests' failed
+    attempts; Bazel's closing block as it wrote it (its test summary,
+    `Elapsed time`, `Build completed`), its head and its tail, unless
+    `replayed`; the results pages;
+    the counts; and how to see the rest (`aspect history show`)."""
+    out = []
+    bold = _c("strong") if tty else ""
+    reset = _RESET if tty else ""
+    red = _c("error") if tty else ""
+    tail = state.get("closing_tail", [])
+    cut = state.get("closing_cut", 0) + max(0, len(tail) - _CLOSING_TAIL)
+    closing = state.get("closing", []) + (["… %d more of Bazel's lines" % cut] if cut else []) + tail[-_CLOSING_TAIL:]
+    recap = [line for line in closing if "Errors Bazel reported" in line or "── Errors (" in line]
+    blocks = state["errors"]
+    if blocks and not recap and not replayed:
+        shown = blocks[:_REPORT_ERRORS]
+        total = state.get("error_count", len(blocks))
+        out.append(bold + "Bazel's errors" + reset + (" (the first %d of %d)" % (len(shown), total) if total > len(shown) else "") + ":")
+        for block in shown:
+            out.append("  " + red + block[0] + reset)
+            out.extend(["    " + line for line in block[1:]])
+        if total > len(shown) and state.get("log_path"):
+            out.append("  … %d more in Bazel's console log: %s" % (total - len(shown), state["log_path"]))
+    index = logged_index(state)
+    blocked = state.get("blocked", {})
+    unlogged = [label for label in index["unlogged"] if label not in index["logged"] and label not in blocked]
+    stopped = [label for label in index["unlogged"] if label not in index["logged"] and label in blocked]
+    fails = [rec for rec in state["fails"] if not _flaky(state, rec)]
+    flaky = [rec for rec in state["fails"] if _flaky(state, rec)]
+    failures = len(fails) + len(unlogged)
+    if failures:
+        out.append(bold + "Failed" + reset + ":")
+        listed = 0
+        for rec in fails[:_REPORT_FAILURES]:
+            out.append("  %s✗%s %s  %s%s" % (red, reset, rec["label"], failure_detail(state, rec), _paths_text(state, rec)))
+            listed += 1
+        for label in unlogged[:max(0, _REPORT_FAILURES - listed)]:
+            out.append("  %s✗%s %s" % (red, reset, label))
+            listed += 1
+        if failures > listed:
+            out.append("  … %d more: aspect history show %s" % (failures - listed, task_id))
+    if stopped:
+        out.append(bold + "Not built" + reset + ", blocked by a failed dependency (%d):" % len(stopped))
+        for label in stopped[:_REPORT_FAILURES]:
+            out.append("  ○ %s  %s" % (label, blocked_text(label, blocked[label])))
+        if len(stopped) > _REPORT_FAILURES:
+            out.append("  … %d more: aspect history show %s" % (len(stopped) - _REPORT_FAILURES, task_id))
+    if flaky:
+        yellow = _c("warning") if tty else ""
+        out.append(bold + "Flaky" + reset + " (passed on a later attempt):")
+        for rec in flaky[:_REPORT_FAILURES]:
+            path = _log_path(state, rec)
+            out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], rec["detail"], ("  " + path) if path else ""))
+    if not replayed:
+        out.extend(closing)
+    for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
+        out.append("%s: %s" % (label, link(url, url) if tty else url))
+    c = state["counts"]
+    out.append("%d built, %d failed · %d %s passed, %d failed%s%s" % (
+        c["built"],
+        c["failed"],
+        c["tests_passed"],
+        "test" if c["tests_passed"] == 1 else "tests",
+        c["tests_failed"],
+        (", %d flaky" % c["tests_flaky"]) if c.get("tests_flaky") else "",
+        (" · Bazel's console: " + state["log_path"]) if state["log_path"] else "",
+    ))
+    out.append("All of it: aspect history show %s" % task_id)
+    return out
+
+def _dashboard_impl(ctx: FeatureContext):
+    why = refusal(ctx.std)
+    if why != "":
+        if why:
+            ctx.std.io.stderr.write(why + "\n")
+        return
+
+    state = {
+        "screen": None,
+        "task": "",
+        "phase": "Starting Bazel…",
+        "start_ms": 0,
+        "now_ms": 0,
+        "frames": 0,
+        "progress": [],
+        "log": [],
+        "errors": [],
+        "scroll": 0,
+        "filter": "all",
+        "search": new_search(),
+        "re": None,
+        "read": None,
+        "ansi": None,
+        "controls": None,
+        "env": None,
+        "fails": [],
+        "outputs": [],
+        "list": "failures",
+        "selected": 0,
+        "picked": 0,
+        "focus": "console",
+        "view": None,
+        "help": False,
+        "zoom": False,
+        "mouse": ctx.args.mouse,
+        "line_links": {},
+        "select": None,
+        "frame": [],
+        "pane": (-1, -1),
+        "cols": 80,
+        "osc": "",
+        "note": "",
+        "process": None,
+        "unseen": 0,
+        "cache": None,
+        "countdown_ms": None,
+        "exec_root": "",
+        "output_dirs": {},
+        "test_counts": {},
+        "last_attempts": {},
+        "spread": {},
+        "logged_index": None,
+        "cancelling": False,
+        "ended": False,
+        "counts": new_counts(),
+        "error_count": 0,
+        "fresh": False,
+        "log_path": "",
+        "pages": [],
+        "bes_base": "",
+        "bazel_uuid": "",
+        "update": {},
+    }
+
+    # The first attempt's fields, as a retry's start them.
+    for key, value in attempt_state(0).items():
+        if key not in state:
+            state[key] = value
+
+    def _add_lines(lines, links = None):
+        add_lines(state, lines, links)
+
+    def _draw(screen, frame):
+        """Write `frame` unless it is the one on the screen; whether it was
+        written."""
+        if frame == state.get("drawn"):
+            return False
+        screen.write(frame)
+        state["drawn"] = frame
+        return True
+
+    def _add_output(screen):
+        # The CLI's own lines, marked as such, their links moved with them.
+        got = screen.output(with_links = True)
+        _add_lines(["» " + line for line, _ in got], [[(start + 2, end + 2, url) for start, end, url in links] for _, links in got])
+
+    def _frame(task_ctx, build):
+        # A build whose console is shown (its own `output =`) is left alone.
+        feed = build.output_feed()
+        if feed == None:
+            return
+
+        # The runtime gives a screen back on a hook's error.
+        if state["screen"] != None and not state["screen"].held:
+            state["screen"] = None
+        if state["screen"] == None:
+            if task_ctx.std.term.taken:
+                return
+            state["screen"] = task_ctx.std.term.take()
+            state["drawn"] = None
+
+            # The mouse taken unless asked not to (`m` outlives a screen the
+            # runtime took back), and its wheel as arrows while it is the
+            # terminal's.
+            state["screen"].wheel_keys(True)
+            if state["mouse"]:
+                state["screen"].mouse(True)
+            state["re"] = task_ctx.std.re
+            state["cli_version"] = task_ctx.std.env.aspect_cli_version() or ""
+            state["read"] = task_ctx.std.fs.try_read_tail
+            state["ansi"] = task_ctx.std.re.compile(ANSI)
+            state["controls"] = task_ctx.std.re.compile(CONTROLS)
+            state["env"] = task_ctx.std.env
+            state["process"] = task_ctx.std.process
+            state["io"] = task_ctx.std.io
+            state["fs"] = task_ctx.std.fs
+            state["syntax"] = task_ctx.std.syntax
+            state["cancellation"] = task_ctx.cancellation
+            state["task"] = task_ctx.task.kind
+            state["start_ms"] = int(monotonic() * 1000)
+
+        # For the logs the history keeps of its failures.
+        state["build"] = build
+        if state["fresh"]:
+            reset_attempt(state, int(monotonic() * 1000))
+        state["ended"] = False
+        state["pages"] = results_pages(state["bes_base"], state["bazel_uuid"], state["update"])
+        screen = state["screen"]
+        state["now_ms"] = int(monotonic() * 1000)
+        state["frames"] += 1
+        _add_lines(feed["lines"], feed.get("links"))
+        state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
+
+        # A frame that caught Bazel between drawing its progress area and
+        # redrawing it keeps the last one, which the header shows too.
+        if feed["progress"]:
+            state["progress"] = feed["progress"]
+            state["phase"] = feed["progress"][0]
+            note_progress(state, feed["progress"])
+        _add_output(screen)
+        cols, rows = screen.size()
+        page = console_height(state, cols, rows)
+
+        # Every key waiting, then one frame: a burst of wheel or drag
+        # reports costs one render, never a backlog.
+        for _ in range(_MAX_KEYS):
+            key = screen.key()
+            if key == None:
+                break
+            on_key(state, key, page)
+        _draw(screen, render(state, cols, rows))
+
+    def _event(task_ctx, event):
+        kind = event.kind
+        if kind == "build_started":
+            state["bazel_uuid"] = str(_get(event.payload, "uuid", "") or "")
+        elif kind == "options_parsed":
+            state["bes_base"] = bes_results_url(event) or state["bes_base"]
+        event_id, payload = _get(event, "id"), _get(event, "payload")
+        if kind in _INVOCATION_KINDS:
+            state["inv"][kind] = payload
+        count_event(state["counts"], kind, event_id, payload)
+        note_event(state, kind, event_id, payload, type(payload) == "aborted")
+        note_blocked(state, event)
+
+    def _update(task_ctx, update):
+        if update.data:
+            state["update"] = update.data
+
+    def _attempt_end(task_ctx, exit_code):
+        state["fresh"] = True
+
+    def _end(task_ctx, build):
+        state["log_path"] = build.output_log or ""
+        screen = state["screen"]
+        if screen == None or not screen.held:
+            return
+        state["cancelling"] = state["cancelling"] or task_ctx.cancellation.root.cancelled
+        state["progress"] = []
+        stays = task_ctx.task.kind in _STAY_KINDS
+
+        # Kept running until `_post`, where the finished screen's keys are
+        # read: what follows the console (BES uploads, attempt-end hooks)
+        # is the task's, and Ctrl+C meanwhile still cancels it.
+        state["ended"] = not stays
+        state["phase"] = _FINISHING if stays else "Done"
+        cols, rows = screen.size()
+        _draw(screen, render(state, cols, rows))
+
+        # A task that goes on after its build (`lint`'s reports, `warming`'s
+        # uploads) gets the terminal back now; only `build` and `test` end
+        # with their build, and keep the screen up after.
+        if not stays:
+            state["screen"] = None
+            _add_output(screen)
+            _add_lines(["» " + line for line in screen.release(replay_stderr = False)])
+            _report(task_ctx)
+
+    def _stay(task_ctx, screen, countdown_ms):
+        """Keep the finished screen up, scrollable, until a leave key, or
+        until the run is told to stop (a SIGTERM), which no key would end.
+        With a `countdown_ms`, it leaves by itself once that has gone by,
+        unless a key comes first, which only stops it. The screen is the state's meanwhile, for
+        the keys that use it (`m`)."""
+        state["screen"] = screen
+        _hold(task_ctx, screen, countdown_ms)
+        state["screen"] = None
+
+    def _hold(task_ctx, screen, countdown_ms):
+        # Keys typed while it finished were typed at a screen that read none,
+        # meaning to cancel: not to leave the finished one now.
+        for _ in range(1 << 20):
+            if screen.key() == None:
+                break
+        screen.interrupts(False)
+        deadline = int(monotonic() * 1000) + countdown_ms if countdown_ms else None
+        for _ in range(1 << 30):
+            if task_ctx.cancellation.root.cancelled or not screen.held:
+                return
+            if deadline != None:
+                state["countdown_ms"] = max(0, deadline - int(monotonic() * 1000))
+                if state["countdown_ms"] == 0:
+                    return
+            _add_output(screen)
+            cols, rows = screen.size()
+            changed = _draw(screen, render(state, cols, rows))
+
+            # Idle, a key a second; a frame that moves, or the countdown, ten.
+            key = screen.key(timeout_ms = 100 if changed or deadline != None else _IDLE_MS)
+            if key == "ctrl-c":
+                return
+            if key != None and deadline != None and key.startswith("mouse-move:"):
+                # The pointer passing over the screen: lit, the countdown
+                # left running.
+                mouse_key(state, key)
+            elif key != None and deadline != None:
+                # A leave key leaves now; any other stops the countdown and
+                # does nothing else.
+                if key in _LEAVE_KEYS:
+                    return
+                deadline = None
+                state["countdown_ms"] = None
+            elif key != None:
+                # This key and every one waiting behind it, then one frame.
+                page = console_height(state, cols, rows)
+                for _ in range(_MAX_KEYS):
+                    if on_key(state, key, page):
+                        return
+                    key = screen.key()
+                    if key == None or key == "ctrl-c":
+                        break
+                if key == "ctrl-c":
+                    return
+
+    def _post(task_ctx, outcome):
+        screen = state["screen"]
+        if screen == None:
+            return
+        state["screen"] = None
+        if screen.held:
+            # Not for a cancelled task (`q`, or Ctrl+C): the CLI is on its way
+            # out, and would force the exit before a key came.
+            if task_ctx.cancellation.root.cancelled:
+                state["cancelling"] = True
+            if ctx.args.stay != "never" and task_ctx.std.io.stdin.is_tty and not state["cancelling"]:
+                state["ended"] = True
+                state["progress"] = []
+                state["phase"] = "Done"
+                c = state["counts"]
+
+                # A flaky test's failed attempt is no failure: it passed.
+                passed = outcome.exit_code == 0 and not [r for r in state["fails"] if not _flaky(state, r)] and not c["failures"] and not c["tests_failed"]
+                _stay(task_ctx, screen, _COUNTDOWN_MS if passed and ctx.args.stay == "failure" else 0)
+            _add_output(screen)
+            _add_lines(["» " + line for line in screen.release(replay_stderr = False)])
+        _report(task_ctx)
+
+    def _report(task_ctx):
+        """What the scrollback keeps once the screen is gone: the console as
+        it showed it (`replay_lines`), what the task wrote meanwhile in it,
+        then the failures, the counts and where the rest is
+        (`report_lines`)."""
+        err = task_ctx.std.io.stderr
+
+        # The console's lines are in output.log already: not copied again.
+        for line in replay_lines(state, err.is_tty):
+            err.write(line + "\n", copy = False)
+        for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True):
+            err.write(line + "\n")
+
+    t = ctx.traits[BazelTrait]
+    t.output_display = "none"
+    if ctx.args.actions == "all":
+        # Every action reported to this task alone, not to its BES sinks.
+        publish_all_actions(t)
+
+    # A processor needs a stage; the console's defaults may be off.
+    t.output_stages.append(bazel.output.observe({"dashboard:error": r"^ERROR:"}))
+    t.output_frame.append(_frame)
+    t.output_end.append(_end)
+    t.build_event.append(_event)
+
+    def _spawn(task_ctx, entry):
+        # The entry's kind is its `type`: a `spawn` here, as asked.
+        count_spawn(state["counts"], _get(entry, "type"))
+
+    t.exec_log_event.append(ExecLogHook(on_entry = _spawn, kinds = ["spawn"]))
+    t.bazel_attempt_end.append(_attempt_end)
+    ctx.traits[Phases].task_update.append(_update)
+    ctx.hooks.post_task(_post)
+
+Dashboard = feature(
+    display_name = "Dashboard",
+    summary = "Replace Bazel's terminal UI with a full-screen dashboard of running actions, results and a scrollable console.",
+    implementation = _dashboard_impl,
+    enabled = False,
+    args = {
+        "stay": args.string(
+            default = "failure",
+            values = ["failure", "always", "never"],
+            bare = "always",
+            description = "Whether the screen stays up once the task ends, until q, Enter, Esc or Ctrl+C: `failure` (the default) stays when anything failed, and with nothing failed counts down 3 seconds first, which q, Enter or Esc cut short and any other key stops; `always` stays; `never` leaves at once. Only when stdin is a terminal.",
+        ),
+        "mouse": args.boolean(
+            default = True,
+            description = "Have the screen take the mouse (the default): its wheel scrolls the console and never the terminal past the screen, a drag selects and copies, and a click opens a web link or a path in the editor --console:file-hyperlink-format names (any other link is copied). false leaves the mouse to the terminal, which then selects and opens links itself and sends the wheel as the arrow keys where it supports that. `m` switches between the two while the screen is up.",
+        ),
+        "actions": args.string(
+            default = "failed",
+            values = ["failed", "all"],
+            description = "Which actions' logs the screen can show: `failed`, or `all` that wrote any (`a` lists them), adding --build_event_publish_all_actions for this task alone (BES backends get the extra events only if your own flags or rc ask).",
+        ),
+    },
+)

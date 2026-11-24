@@ -120,8 +120,8 @@ fn open_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 }
 
 /// The slave becomes the child's stderr and the master is read. The slave's
-/// window size is copied from the real stderr so bazel wraps at the
-/// terminal's width; it is not updated on a later resize.
+/// window size is the terminal's ([`terminal_size`]) so bazel wraps at its
+/// width; it is not updated on a later resize.
 fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
     let winsize = terminal_size();
     let pty = nix::pty::openpty(winsize.as_ref(), None)?;
@@ -136,20 +136,42 @@ fn set_cloexec(fd: &impl AsFd) -> io::Result<()> {
     Ok(())
 }
 
-/// The real stderr's window size, or `None` when it is not a terminal.
+/// Set while a feature's full screen has stderr captured, so a PTY opened
+/// meanwhile takes the controlling terminal's size ([`terminal_size`]).
+static STDERR_CAPTURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether stderr is captured by a feature's full screen: see
+/// [`STDERR_CAPTURED`].
+pub fn set_stderr_captured(captured: bool) {
+    STDERR_CAPTURED.store(captured, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The window size of the terminal `fd` is, by `TIOCGWINSZ`; `None` when it
+/// is not one.
+pub fn window_size(fd: std::os::fd::RawFd) -> Option<libc::winsize> {
+    // SAFETY: TIOCGWINSZ writes one `winsize` through the pointer, which
+    // points at a valid zeroed slot; the return code is checked.
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    (unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0).then_some(ws)
+}
+
+/// The terminal's window size: stderr's, or while a feature's full screen
+/// has stderr captured ([`set_stderr_captured`]), the controlling
+/// terminal's, even when stderr was redirected before the screen took it;
+/// `None` without one.
 fn terminal_size() -> Option<nix::pty::Winsize> {
     use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
     let stderr = io::stderr();
-    if !stderr.is_terminal() {
+    let captured = STDERR_CAPTURED.load(std::sync::atomic::Ordering::SeqCst);
+    let tty = (captured && !stderr.is_terminal())
+        .then(|| std::fs::File::open("/dev/tty").ok())
+        .flatten();
+    if tty.is_none() && !stderr.is_terminal() {
         return None;
     }
-    // SAFETY: TIOCGWINSZ writes one `winsize` through the pointer, which
-    // points at a valid zeroed slot; the return code is checked.
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    if unsafe { libc::ioctl(stderr.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } != 0 {
-        return None;
-    }
+    let fd = tty.as_ref().map_or(stderr.as_raw_fd(), |t| t.as_raw_fd());
+    let ws = window_size(fd)?;
     Some(nix::pty::Winsize {
         ws_row: ws.ws_row,
         ws_col: ws.ws_col,

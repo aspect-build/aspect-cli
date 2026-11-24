@@ -387,6 +387,7 @@ dependencies = [
  "hyperlocal",
  "include_dir",
  "keyring",
+ "libc",
  "liquid",
  "liquid-core",
  "md-5",
@@ -396,6 +397,7 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "rcgen",
+ "regex",
  "reqwest",
  "rmcp",
  "rustls",
@@ -412,6 +414,7 @@ dependencies = [
  "starlark",
  "starlark_derive",
  "starlark_map",
+ "syntect",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -4884,6 +4887,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "656b45c05d95a5704399aeef6bd0ddec7b2b3531b7c9e900abbf7c4d2190c925"
 dependencies = [
  "bincode",
+ "fancy-regex",
  "flate2",
  "fnv",
  "once_cell",
