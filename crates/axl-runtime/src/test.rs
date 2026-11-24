@@ -300,6 +300,7 @@ impl EvalBuilder {
                 &modules,
             );
             loader.env.signals = signals.clone();
+            loader.env.user_editor = || None;
             if let Some((color, buildkite, coding_agent, verbose)) = self.host_env.clone() {
                 loader.env.stream_color = color;
                 loader.env.buildkite = buildkite;

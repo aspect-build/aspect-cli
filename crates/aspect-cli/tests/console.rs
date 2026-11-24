@@ -8,7 +8,9 @@
 //!
 //! Spawns the real CLI so the feature's args, `config.axl` overrides, the
 //! runtime-rendered header and verdict, and the AXL-rendered phase and progress
-//! lines are exercised together.
+//! lines are exercised together. That includes where `file_hyperlink_format`
+//! comes from: the command line, `ASPECT_FILE_HYPERLINK_FORMAT`, the `editor`
+//! in the user's `~/.aspect/config.json` (a temp `$HOME`) or `config.axl`.
 
 mod common;
 
@@ -94,10 +96,27 @@ fn run(config_body: &str, args: &[&str], buildkite: bool) -> Output {
 
 /// [`run`] with `env` added to the CLI's environment.
 fn run_with_env(config_body: &str, args: &[&str], buildkite: bool, env: &[(&str, &str)]) -> Output {
+    run_with_files(config_body, args, buildkite, env, &[])
+}
+
+/// [`run_with_env`] with `files` written first, each at its path relative to
+/// the workspace (`home/` is `$HOME`).
+fn run_with_files(
+    config_body: &str,
+    args: &[&str],
+    buildkite: bool,
+    env: &[(&str, &str)],
+    files: &[(&str, &str)],
+) -> Output {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     let aspect = dir.path().join(".aspect");
     std::fs::create_dir(&aspect).expect(".aspect");
+    for (path, content) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("parent dir");
+        std::fs::write(&path, content).expect("file");
+    }
     std::fs::write(aspect.join("tasks.axl"), TASKS).expect("tasks.axl");
     let config = format!(
         "load(\"@aspect//feature/console.axl\", \"Console\")\n{OBSERVE}{}",
@@ -700,4 +719,81 @@ fn an_exit_message_prints_under_every_preset() {
         assert_eq!(output.status.code(), Some(0), "{preset}: {err}");
         assert!(err.contains("INFO: nothing to do"), "{preset}: {err}");
     }
+}
+
+/// Sets an invalid `file_hyperlink_format` in `config.axl`, which fails the
+/// task only when nothing above it in precedence chose a format.
+const BOGUS_CONFIG_FORMAT: &str = r#"ctx.features[Console].args.file_hyperlink_format = "bogus""#;
+
+const USER_CONFIG_JSON: &str = "home/.aspect/config.json";
+
+/// Whether the run failed on `config.axl`'s `file_hyperlink_format`, and on
+/// nothing else.
+fn config_format_refused(output: &Output) -> bool {
+    let err = stderr(output);
+    let refused = err.contains("Console file_hyperlink_format: ");
+    assert_eq!(output.status.code() != Some(0), refused, "{err}");
+    refused
+}
+
+#[test]
+fn the_user_editor_beats_config_axl_and_loses_to_the_command_line_and_env() {
+    let zed = [(USER_CONFIG_JSON, r#"{"editor": "zed"}"#)];
+    let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &[]);
+    assert!(config_format_refused(&output), "no user config.json");
+    let no_key = [(USER_CONFIG_JSON, r#"{"deployments": []}"#)];
+    let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &no_key);
+    assert!(config_format_refused(&output), "no editor key");
+
+    let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &zed);
+    assert!(!config_format_refused(&output), "editor > config.axl");
+
+    let flag = ["check", "--console:file-hyperlink-format=bogus"];
+    let output = run_with_files("", &flag, false, &[], &zed);
+    let err = stderr(&output);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "command line > editor: {err}"
+    );
+    assert!(err.contains("\"bogus\" is not a hyperlink format"), "{err}");
+
+    let env = [("ASPECT_FILE_HYPERLINK_FORMAT", "bogus")];
+    let output = run_with_files("", &["check"], false, &env, &zed);
+    let err = stderr(&output);
+    assert_ne!(output.status.code(), Some(0), "env > editor: {err}");
+    assert!(err.contains("ASPECT_FILE_HYPERLINK_FORMAT: "), "{err}");
+}
+
+#[test]
+fn an_invalid_user_editor_warns_and_falls_back_to_config_axl() {
+    let nope = [(USER_CONFIG_JSON, r#"{"editor": "nope"}"#)];
+    let config = r#"ctx.features[Console].args.file_hyperlink_format = "zed""#;
+    let output = run_with_files(config, &["check"], false, &[], &nope);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    let warning = err
+        .lines()
+        .find(|l| l.contains("WARNING") && l.contains("\"editor\""))
+        .unwrap_or_else(|| panic!("no editor warning in:\n{err}"));
+    assert!(warning.contains(".aspect/config.json"), "{warning}");
+    assert!(
+        warning.contains("\"nope\" is not a hyperlink format"),
+        "{warning}"
+    );
+
+    let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &nope);
+    assert!(config_format_refused(&output), "falls back to config.axl");
+}
+
+#[test]
+fn a_repositorys_config_json_sets_no_editor() {
+    let zed = [(".aspect/config.json", r#"{"editor": "zed"}"#)];
+    let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &zed);
+    assert!(config_format_refused(&output));
+    let nope = [(".aspect/config.json", r#"{"editor": "nope"}"#)];
+    let output = run_with_files("", &["check"], false, &[], &nope);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert!(!err.contains("\"editor\""), "{err}");
 }
