@@ -429,7 +429,7 @@ def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
     if ctx.args.watch and results_json.wants_json(ctx.args):
         return TaskConclusion(
             exit_code = 1,
-            message = "--output=json and --watch cannot be combined: the JSON document reports a task's final result, and --watch never finishes. Drop one of the two.",
+            message = "--output=%s and --watch cannot be combined: the JSON output ends with the task's final result, and --watch never finishes. Drop one of the two." % ctx.args.output,
         )
 
     # Initialize data for status-check emission.
@@ -554,6 +554,8 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     # records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
     bb_root = usable_bb_clientd_root(ctx.std)
+    live = results_json.live(ctx)  # --output=ndjson's lines
+    live.attempt(0)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
         bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
@@ -565,6 +567,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
                 handler(ctx, event)
             if process_event(data, event, bb_root, std = ctx.std):
                 interesting = True
+            live.update(data)
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
             ph.dispatch(phases.Update(

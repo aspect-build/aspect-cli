@@ -62,6 +62,7 @@ load(
 )
 load("./lifecycle.axl", "Phases", "phases")
 load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_action_snippet", "extract_junit_failure", "extract_snippet", "has_snippet")
+load("./output_json.axl", "wants_json")
 load("./path_glob.axl", "match_path")
 load("./report.axl", "REPORT_ARTIFACT_KIND")
 load(
@@ -5408,9 +5409,9 @@ def _results_new(ctx, command, report_uploader = None):
     return struct(
         ph = ph,
         data = data,
-        # Emit BES events only when a status surface is listening (no
-        # surfaces → bazel runs with no BEP file).
-        live = bool(ctx.traits[Phases].task_update),
+        # Emit BES events only when a status surface or the JSON output
+        # reads them (neither → bazel runs with no BEP file).
+        live = bool(ctx.traits[Phases].task_update) or wants_json(ctx.args),
         setup = setup,
         attempt = attempt,
         invocation = invocation,

@@ -32,13 +32,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bz.start()  # --cancel
 
     w = None
+    live = results_json.live(ctx)  # --output=ndjson's lines
     for i in bz.attempts:  # `i` is the single source of truth for the attempt index
         rs.attempt(i, prior = w)
+        live.attempt(i)
         sp = bz.spawn(i, events = results.KINDS if rs.live else False)
         rs.invocation(sp)
         for event in sp.events:  # BuildEvent | None (None = quiet-tick heartbeat)
             sp.on_event(event)  # build_event, exec_log_event, output_intercept and output_frame hooks
             rs.process(event)
+            live.update(rs.data)
         w = sp.wait()  # bazel_attempt_end hooks
         if w.success or not bz.should_retry(sp, w):
             break

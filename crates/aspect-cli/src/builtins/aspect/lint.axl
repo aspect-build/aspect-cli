@@ -893,6 +893,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # a usable mount (declared by env and actually mounted); bb_root None
     # routes them to the output-tree fallback instead (see local_output_path).
     bb_root = usable_bb_clientd_root(ctx.std)
+    live = results_json.live(ctx)  # --output=ndjson's lines
+    live.attempt(0)
     skipped_remote_files = 0
 
     # Emit on each interesting tick, and at least every MIN_HEARTBEAT_INTERVAL_MS
@@ -930,6 +932,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 handler(ctx, event)
             if process_event(data, event, bb_root, std = ctx.std):
                 interesting = True
+            live.update(data)
             if fix_produce and not fix_flag_rejected and event.kind == "progress":
                 fix_flag_rejected = fix_flag_load_error in bes_get(event.payload, "stderr", "")
             if event.kind == "named_set_of_files":

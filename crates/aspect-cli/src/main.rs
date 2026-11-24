@@ -287,8 +287,8 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 }
             };
 
-            TASK_WANTS_JSON.store(
-                task_wants_json(&root_cmd, &matches),
+            TASK_JSON_OUTPUT.store(
+                task_json_output(&root_cmd, &matches) as u8,
                 std::sync::atomic::Ordering::Relaxed,
             );
 
@@ -696,18 +696,37 @@ fn strip_error_prefix(message: &str) -> &str {
     message.trim_start_matches("error: ")
 }
 
-/// Whether the parsed task's `--output` is the `text`/`json` choice and was
-/// given `json`: set once the command line parses ([`task_wants_json`]).
-static TASK_WANTS_JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What `--output` asked of stdout: nothing, the document (`json`) or its
+/// stream (`ndjson`), whose every line carries a `type`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JsonOutput {
+    None = 0,
+    Document = 1,
+    Stream = 2,
+}
 
-/// Whether the leaf task `matches` selected takes `--output` as the
-/// `text`/`json` choice (`results_json.output_arg()`, not a file path as
-/// `setup bazelrc`'s) and was given `json`.
-fn task_wants_json(cmd: &clap::Command, matches: &clap::ArgMatches) -> bool {
+impl JsonOutput {
+    fn of(value: &str) -> Self {
+        match value {
+            "json" => JsonOutput::Document,
+            "ndjson" => JsonOutput::Stream,
+            _ => JsonOutput::None,
+        }
+    }
+}
+
+/// The parsed task's [`JsonOutput`], set once the command line parses
+/// ([`task_json_output`]).
+static TASK_JSON_OUTPUT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The [`JsonOutput`] the leaf task `matches` selected was given, when it
+/// takes `--output` as `results_json.output_arg()`'s choice (`text`,
+/// `json`, `ndjson`), not a file path as `setup bazelrc`'s.
+fn task_json_output(cmd: &clap::Command, matches: &clap::ArgMatches) -> JsonOutput {
     if let Some((name, sub)) = matches.subcommand() {
         return cmd
             .find_subcommand(name)
-            .is_some_and(|c| task_wants_json(c, sub));
+            .map_or(JsonOutput::None, |c| task_json_output(c, sub));
     }
     let choice = cmd
         .get_arguments()
@@ -719,39 +738,47 @@ fn task_wants_json(cmd: &clap::Command, matches: &clap::ArgMatches) -> bool {
                 .map(|v| v.get_name().to_string())
                 .collect();
             values.sort();
-            values == ["json", "text"]
+            values == ["json", "ndjson", "text"]
         });
-    choice
-        && matches
-            .try_get_one::<String>("output")
-            .ok()
-            .flatten()
-            .is_some_and(|v| v == "json")
+    if !choice {
+        return JsonOutput::None;
+    }
+    matches
+        .try_get_one::<String>("output")
+        .ok()
+        .flatten()
+        .map_or(JsonOutput::None, |v| JsonOutput::of(v))
 }
 
-/// An error document on stdout, `{"schema_version", "error", "message"}`,
-/// for a run that asked for `--output=json` and ends on an error before its
-/// task wrote one: a caller reading stdout otherwise gets nothing to parse.
-/// A config error is judged from the raw arguments (`wants_json_output`),
-/// as it stops the CLI before they parse; any other from the parsed task
-/// (`parsed`). Nothing when the task already wrote to stdout (a document,
-/// then a hook's failure), so stdout never holds two.
+/// An error document on stdout, `{"schema_version", "error", "message"}`
+/// (a line of `"type": "error"` in the `ndjson` stream), for a run that
+/// asked for JSON and ends on an error before its task wrote any: a caller
+/// reading stdout otherwise gets nothing to parse. A config error is judged
+/// from the raw arguments (`json_output_of`), as it stops the CLI before
+/// they parse; any other from the parsed task (`parsed`). Nothing when the
+/// task already wrote to stdout (a document, then a hook's failure), so
+/// stdout never holds two.
 fn json_error(error: &str, message: &str, parsed: bool) {
     let asked = if parsed {
-        TASK_WANTS_JSON.load(std::sync::atomic::Ordering::Relaxed)
+        match TASK_JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => JsonOutput::Document,
+            2 => JsonOutput::Stream,
+            _ => JsonOutput::None,
+        }
     } else {
-        wants_json_output(std::env::args().skip(1))
+        json_output_of(std::env::args().skip(1))
     };
-    if asked && !axl_runtime::engine::stdout_written() {
-        outln!(
-            "{}",
-            serde_json::json!({
-                "schema_version": 1,
-                "error": error,
-                "message": strip_error_prefix(message),
-            })
-        );
+    if asked == JsonOutput::None || axl_runtime::engine::stdout_written() {
+        return;
     }
+    let mut doc = serde_json::Map::new();
+    if asked == JsonOutput::Stream {
+        doc.insert("type".into(), "error".into());
+    }
+    doc.insert("schema_version".into(), 1.into());
+    doc.insert("error".into(), error.into());
+    doc.insert("message".into(), strip_error_prefix(message).into());
+    outln!("{}", serde_json::Value::Object(doc));
 }
 
 /// A Starlark error's own line (`error: fail: ...`), without the traceback
@@ -763,15 +790,20 @@ fn error_line(text: &str) -> String {
         .unwrap_or_else(|| text.trim().to_string())
 }
 
-/// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
-/// `--`. Read from the raw arguments because a config error stops the CLI
-/// before they are parsed.
-fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
+/// The [`JsonOutput`] `args` ask for with `--output=<v>` (or `--output
+/// <v>`) ahead of any `--`, the last one winning as with Clap. Read from the raw arguments because a config
+/// error stops the CLI before they are parsed.
+fn json_output_of(args: impl IntoIterator<Item = String>) -> JsonOutput {
     let args: Vec<String> = args.into_iter().take_while(|a| a != "--").collect();
-    args.iter().enumerate().any(|(i, arg)| {
-        arg == "--output=json"
-            || (arg == "--output" && args.get(i + 1).is_some_and(|v| v == "json"))
-    })
+    args.iter()
+        .enumerate()
+        .filter_map(|(i, arg)| match arg.strip_prefix("--output=") {
+            Some(v) => Some(JsonOutput::of(v)),
+            None if arg == "--output" => args.get(i + 1).map(|v| JsonOutput::of(v)),
+            None => None,
+        })
+        .last()
+        .unwrap_or(JsonOutput::None)
 }
 
 fn main() -> ExitCode {
@@ -1111,7 +1143,7 @@ mod print_macro_guard {
 
 #[cfg(test)]
 mod config_error_tests {
-    use super::wants_json_output;
+    use super::{JsonOutput, json_output_of};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|a| a.to_string()).collect()
@@ -1119,15 +1151,47 @@ mod config_error_tests {
 
     #[test]
     fn json_output_is_recognised_in_both_spellings() {
-        assert!(wants_json_output(args(&["gc", "--output=json"])));
-        assert!(wants_json_output(args(&["gc", "--output", "json"])));
-        assert!(!wants_json_output(args(&["gc", "--output=text"])));
-        assert!(!wants_json_output(args(&["gc", "--output"])));
+        assert_eq!(
+            json_output_of(args(&["gc", "--output=json"])),
+            JsonOutput::Document
+        );
+        assert_eq!(
+            json_output_of(args(&["gc", "--output", "json"])),
+            JsonOutput::Document
+        );
+        assert_eq!(
+            json_output_of(args(&["build", "--output=ndjson"])),
+            JsonOutput::Stream
+        );
+        assert_eq!(
+            json_output_of(args(&["build", "--output", "ndjson"])),
+            JsonOutput::Stream
+        );
+        assert_eq!(
+            json_output_of(args(&["gc", "--output=text"])),
+            JsonOutput::None
+        );
+        assert_eq!(json_output_of(args(&["gc", "--output"])), JsonOutput::None);
+    }
+
+    #[test]
+    fn the_last_output_wins() {
+        assert_eq!(
+            json_output_of(args(&["build", "--output=json", "--output=text"])),
+            JsonOutput::None
+        );
+        assert_eq!(
+            json_output_of(args(&["build", "--output=text", "--output=ndjson"])),
+            JsonOutput::Stream
+        );
     }
 
     #[test]
     fn arguments_after_a_double_dash_are_not_ours() {
-        assert!(!wants_json_output(args(&["build", "--", "--output=json"])));
+        assert_eq!(
+            json_output_of(args(&["build", "--", "--output=json"])),
+            JsonOutput::None
+        );
     }
 }
 

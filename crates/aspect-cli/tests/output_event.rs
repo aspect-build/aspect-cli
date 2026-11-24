@@ -553,6 +553,52 @@ def config(ctx: ConfigContext):
     assert!(!err.contains('\x1b'), "no colour in a file:\n{err}");
 }
 
+/// `--output=ndjson` streams: every stdout line is a JSON object with a
+/// `type`, the first the attempt, a failed action's line before the end,
+/// and the document last, as `"type": "result"`.
+#[test]
+fn an_ndjson_build_streams_its_failures_then_the_document() {
+    let dir = workspace("config.axl", |_| {
+        r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario=action_and_test_logs")
+"#
+        .to_string()
+    });
+    let (out, err) = (dir.path().join("out.ndjson"), dir.path().join("err.txt"));
+    let status = aspect(dir.path(), "build")
+        .arg("--output=ndjson")
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(&err).unwrap())
+        .status()
+        .expect("running aspect build");
+    let (out, err) = (
+        std::fs::read_to_string(&out).unwrap(),
+        std::fs::read_to_string(&err).unwrap(),
+    );
+    assert!(!status.success(), "the scenario fails: {err}");
+    let lines: Vec<serde_json::Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: not a JSON line: {l}")))
+        .collect();
+    let types: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+    assert_eq!(types, ["attempt", "action_failed", "result"], "{out}");
+    assert_eq!(lines[1]["label"], "//pkg:broken", "{out}");
+    assert!(
+        lines[1]["stderr_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("stderr-1"),
+        "{out}"
+    );
+    assert_eq!(lines[2]["status"], "failed", "{out}");
+    assert_eq!(
+        lines[2]["failures"]["actions"][0]["label"], "//pkg:broken",
+        "{out}"
+    );
+}
+
 /// A graceful cancel waits for the client, and the console with it: the
 /// cleanup line basil prints after the interrupt is forwarded, under CI's stop
 /// sequence, which sends two SIGINTs and leaves the client to finish on its

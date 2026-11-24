@@ -389,6 +389,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
     bb_root = usable_bb_clientd_root(ctx.std)
+    live = results_json.live(ctx)  # --output=ndjson's lines
+    live.attempt(0)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
         bazel_exec_log.pump(ctx, xl)  # exec_log_event hooks
@@ -400,6 +402,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 handler(ctx, event)
             if process_event(data, event, bb_root, std = ctx.std):
                 interesting = True
+            live.update(data)
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
             ph.dispatch(phases.Update(

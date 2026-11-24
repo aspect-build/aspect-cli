@@ -1,7 +1,11 @@
-"""Machine-readable task results: the `--output=json` document.
+"""Machine-readable task results: the `--output=json` document and the
+`--output=ndjson` stream.
 
 One document on stdout at the task's terminal emit, built from the same `data`
-accumulator (`lib/bazel_results.axl`) the status surfaces render. Three rules
+accumulator (`lib/bazel_results.axl`) the status surfaces render. Under
+`ndjson`, `live` writes a line per failure as the accumulator records it, so
+a reader (an agent) can act on one while the build goes on, and the document
+is the stream's last line (`"type": "result"`). Three rules
 separate it from a plain `json.encode(data)`:
 
   - **Redaction.** `data["bazel"]["options_parsed"]` holds raw tokens, among
@@ -29,7 +33,7 @@ whose stdout is already spoken for stay text-only.
 """
 
 load("./bazel_results.axl", "aspect_web_ui_url", "redacted_explicit_command", "render_bes_url")
-load("./output_json.axl", "OUTPUT_JSON", "OUTPUT_TEXT", "SCHEMA_VERSION", "wants_json")
+load("./output_json.axl", "OUTPUT_JSON", "OUTPUT_NDJSON", "OUTPUT_TEXT", "SCHEMA_VERSION", "wants_json", "wants_ndjson")
 
 # How many failed targets the document lists; `failures.truncated.targets`
 # says when there were more.
@@ -41,14 +45,18 @@ def output_arg() -> dict:
     return {
         "output": args.string(
             default = OUTPUT_TEXT,
-            values = [OUTPUT_TEXT, OUTPUT_JSON],
+            values = [OUTPUT_TEXT, OUTPUT_JSON, OUTPUT_NDJSON],
             description = (
                 "stdout format. `text` (default): human-readable output as " +
                 "usual. `json`: one result document on stdout when the task " +
                 "finishes, carrying the invocation ids, counts, every failure " +
-                "with its local log path, and the reproducer commands; Bazel's " +
-                "and every other child's stdout moves to stderr so stdout " +
-                "carries only the document."
+                "with its local log path, and the reproducer commands. " +
+                "`ndjson`: a JSON line per event as it happens (`attempt`, " +
+                "`action_failed`, `target_failed`, `test_failed`, " +
+                "`test_flaky`), then the document as the last line " +
+                "(`\"type\": \"result\"`), so a reader can act on a failure " +
+                "while the build goes on. With either, Bazel's and every other " +
+                "child's stdout moves to stderr so stdout carries only JSON."
             ),
         ),
     }
@@ -234,7 +242,7 @@ def child_stdout(io, args):
     """
     return io.stderr if wants_json(args) else io.stdout
 
-def emit(ctx: TaskContext, data: dict, task_path: str, status: str, exit_code: int) -> None:
+def emit(ctx, data: dict, task_path: str, status: str, exit_code: int) -> None:
     """Write the result document to stdout, or nothing under `--output=text`.
 
     Call once, beside the task's `final = True` dispatch. Indented because the
@@ -243,13 +251,76 @@ def emit(ctx: TaskContext, data: dict, task_path: str, status: str, exit_code: i
     if not wants_json(ctx.args):
         return
     doc = document(ctx.std.env, data, task_path, status, exit_code)
+    if wants_ndjson(ctx.args):
+        # The stream's last line, one line like the rest.
+        ctx.std.io.stdout.write(json.encode({"type": "result"} | doc) + "\n")
+        ctx.std.io.stdout.flush()
+        return
     ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
+
+# What `live` streams: the accumulator's list, the line's type, and how an
+# entry of it becomes the line (as the document renders it).
+_STREAMED = [
+    ("failed_actions", "action_failed", lambda bz, e: _action_entries([e])[0]),
+    ("failed_targets", "target_failed", lambda bz, e: {"label": e.get("label", ""), "kind": e.get("kind", "")}),
+    ("failed_tests", "test_failed", lambda bz, e: _test_entries([e], bz.get("test_details", {}))[0]),
+    ("flaky_tests", "test_flaky", lambda bz, e: _test_entries([e], bz.get("test_details", {}))[0]),
+]
+
+def live(ctx):
+    """The `--output=ndjson` stream for a task's run, as a struct of
+    `attempt(index)`, called as each Bazel attempt starts, and
+    `update(data)`, called after each event the accumulator took: a line,
+    flushed, for each failure the accumulator recorded since. Both do
+    nothing under `text` and `json`.
+
+    A line is `{"type": ..., "attempt": n, ...}`, the entry as the document
+    renders it: `action_failed` (label, mnemonics, stdout_path,
+    stderr_path), `target_failed` (label, kind), `test_failed` and
+    `test_flaky` (label, status, log_path, xml_path, ...). An action's line
+    carries what its first failed action named; the document has all of
+    its mnemonics. A retried attempt starts its lists over (`attempt`
+    says so), and only what the accumulator kept is streamed: past its
+    caps, the document's `truncated` says how much more there was.
+    """
+    on = wants_ndjson(ctx.args)
+    out = ctx.std.io.stdout
+    state = {"attempt": 0, "sent": {}}
+
+    def _line(doc):
+        out.write(json.encode(doc) + "\n")
+        out.flush()
+
+    def attempt(index):
+        if not on:
+            return
+        state["attempt"] = index
+        state["sent"] = {}
+        _line({"type": "attempt", "schema_version": SCHEMA_VERSION, "attempt": index})
+
+    def update(data):
+        if not on:
+            return
+        bz = data.get("bazel", {}) or {}
+        sent = state["sent"]
+        for key, kind, render in _STREAMED:
+            entries = bz.get(key, []) or []
+            done = sent.get(key, 0)
+            if len(entries) < done:
+                # The accumulator started over (`build_started`).
+                done = 0
+            for e in entries[done:]:
+                _line({"type": kind, "attempt": state["attempt"]} | render(bz, e))
+            sent[key] = len(entries)
+
+    return struct(attempt = attempt, update = update)
 
 results_json = namespace(
     SCHEMA_VERSION = SCHEMA_VERSION,
     child_stdout = child_stdout,
     document = document,
     emit = emit,
+    live = live,
     output_arg = output_arg,
     wants_json = wants_json,
 )

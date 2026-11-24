@@ -285,7 +285,104 @@ def _test_an_error_document_only_under_json(ctx):
     emit_error(struct(args = struct(output = "text"), std = fake.std), "health_check", "disk full")
     _eq("nothing under text", written, [])
 
+def _fake(output):
+    """A ctx with `args.output` and a stdout that keeps what is written."""
+    written = []
+    ctx = struct(
+        args = struct(output = output),
+        std = struct(io = struct(stdout = struct(write = lambda t: written.append(t), flush = lambda: None))),
+    )
+    return ctx, written
+
+def _lines(written):
+    return [json.decode(w) for w in written]
+
+def _test_ndjson_streams_each_failure_once(ctx):
+    """A line per failure as the accumulator records it, each once, tagged
+    with its attempt; the lists the document renders, rendered the same."""
+    fake, written = _fake("ndjson")
+    live = results_json.live(fake)
+    d = init_data()
+    live.attempt(0)
+    live.update(d)
+    _eq("the attempt first", _lines(written), [{"type": "attempt", "schema_version": 1, "attempt": 0}])
+    written.clear()
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": ["CppCompile"], "stdout_path": "", "stderr_path": "/e"})
+    live.update(d)
+    live.update(d)
+    d["bazel"]["failed_targets"].append({"label": "//a:b", "kind": "cc_library"})
+    d["bazel"]["failed_tests"].append({"label": "//t:x", "status": "FAILED", "kind": "sh_test", "cached": False, "duration_ms": 5})
+    d["bazel"]["test_details"]["//t:x"] = {"log_path": "/t.log", "xml_path": "/t.xml"}
+    d["bazel"]["flaky_tests"].append({"label": "//t:y", "kind": "sh_test", "cached": False, "duration_ms": 1})
+    live.update(d)
+    got = _lines(written)
+    _eq("types, each once", [l["type"] for l in got], ["action_failed", "target_failed", "test_failed", "test_flaky"])
+    _eq("an action as the document has it", got[0], {"type": "action_failed", "attempt": 0, "label": "//a:b", "mnemonics": ["CppCompile"], "stdout_path": "", "stderr_path": "/e"})
+    _eq("a test with its log", (got[2]["label"], got[2]["log_path"], got[2]["attempt"]), ("//t:x", "/t.log", 0))
+
+def _test_ndjson_starts_over_with_a_retry(ctx):
+    """A retried attempt's failures are streamed again, under its index,
+    after the accumulator started over."""
+    fake, written = _fake("ndjson")
+    live = results_json.live(fake)
+    d = init_data()
+    live.attempt(0)
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stdout_path": "", "stderr_path": ""})
+    live.update(d)
+    written.clear()
+    d = init_data()
+    live.attempt(1)
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stdout_path": "", "stderr_path": ""})
+    live.update(d)
+    _eq("the attempt, then its own failure", [(l["type"], l["attempt"]) for l in _lines(written)], [("attempt", 1), ("action_failed", 1)])
+
+def _test_ndjson_starts_over_when_the_lists_do(ctx):
+    """A `build_started` mid-attempt empties the accumulator's lists: what
+    follows is streamed from the start."""
+    fake, written = _fake("ndjson")
+    live = results_json.live(fake)
+    d = init_data()
+    d["bazel"]["failed_targets"] = [{"label": "//a", "kind": ""}, {"label": "//b", "kind": ""}]
+    live.update(d)
+    written.clear()
+    d["bazel"]["failed_targets"] = [{"label": "//c", "kind": ""}]
+    live.update(d)
+    _eq("the new list's entry", [l["label"] for l in _lines(written)], ["//c"])
+
+def _test_only_ndjson_streams(ctx):
+    """`json` and `text` write nothing before the end."""
+    for output in ["json", "text"]:
+        fake, written = _fake(output)
+        live = results_json.live(fake)
+        d = init_data()
+        live.attempt(0)
+        d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stdout_path": "", "stderr_path": ""})
+        live.update(d)
+        _eq("nothing streamed under " + output, written, [])
+
+def _test_ndjson_ends_with_the_document_as_a_line(ctx):
+    """The stream's last line is the document, typed `result`, on one line;
+    `json` writes the same document indented."""
+    fake, written = _fake("ndjson")
+    fake = struct(args = fake.args, std = struct(io = fake.std.io, env = ctx.std.env))
+    results_json.emit(fake, init_data(), "build", "passed", 0)
+    _eq("one line", (len(written), written[0].count("\n")), (1, 1))
+    doc = json.decode(written[0])
+    _eq("typed and whole", (doc["type"], doc["task"], doc["exit_code"]), ("result", "build", 0))
+
+def _test_an_ndjson_error_is_typed(ctx):
+    """Under `ndjson` the error document is a line of the stream, typed."""
+    fake, written = _fake("ndjson")
+    emit_error(fake, "health_check", "disk full")
+    _eq("typed", json.decode(written[0]), {"type": "error", "schema_version": 1, "error": "health_check", "message": "disk full"})
+
 _UNIT_TESTS = [
+    _test_ndjson_streams_each_failure_once,
+    _test_ndjson_starts_over_with_a_retry,
+    _test_ndjson_starts_over_when_the_lists_do,
+    _test_only_ndjson_streams,
+    _test_ndjson_ends_with_the_document_as_a_line,
+    _test_an_ndjson_error_is_typed,
     _test_an_action_names_both_its_streams,
     _test_failed_targets_are_capped,
     _test_an_error_document_only_under_json,
