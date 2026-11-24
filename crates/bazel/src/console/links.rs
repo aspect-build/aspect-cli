@@ -757,7 +757,6 @@ pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
             (at, written_url(&url, styled, &active_style(&record[..at])))
         })
         .collect();
-    WRITTEN.fetch_add(inserts.len() as u64, Ordering::Relaxed);
     inserts.extend(underlines);
     inserts.sort_by_key(|(at, _)| *at);
     if inserts.is_empty() {
@@ -781,6 +780,7 @@ fn is_web(url: &str) -> bool {
 /// ` <url>`, a URL written beside its link; when `styled`, grey with the
 /// URL underlined, then `restore` to take up the style around it again.
 fn written_url(url: &str, styled: bool, restore: &[u8]) -> Vec<u8> {
+    WRITTEN.fetch_add(1, Ordering::Relaxed);
     if !styled {
         return format!(" <{url}>").into_bytes();
     }
@@ -1884,17 +1884,21 @@ mod tests {
     }
 
     #[test]
-    fn written_file_urls_are_counted_and_web_links_not() {
-        let before = super::written();
+    fn every_written_file_url_is_counted() {
         let file = "\x1b]8;;cursor://file/a.cc:1:1\x1b\\a.cc\x1b]8;;\x1b\\";
         let web = "\x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\";
-        written_urls(format!("{file} and {web}").as_bytes(), false);
-        // Other tests write URLs too, concurrently: at least this one's.
-        assert!(super::written() >= before + 1);
+        // Other tests write URLs too, concurrently: at least these.
         let before = super::written();
-        written_urls(web.as_bytes(), false);
-        written_urls(b"no links", false);
-        assert!(super::written() >= before, "never down");
+        written_urls(format!("{file} and {web}").as_bytes(), false);
+        assert!(super::written() >= before + 1, "a console line's");
+        let before = super::written();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        std::fs::write(&log, "").unwrap();
+        file_link(&FileLinks::file().written(true), &log, "");
+        assert!(super::written() >= before + 1, "a summary path's");
+        // A web link's URL is never written out, so nothing to count.
+        assert_eq!(written_urls(web.as_bytes(), false), web.as_bytes());
     }
 
     #[test]

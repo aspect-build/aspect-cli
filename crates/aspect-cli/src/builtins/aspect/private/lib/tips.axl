@@ -1083,10 +1083,11 @@ def terminal_now_line(id, severity, title, color_on = False, console = None):
 # written out.
 TERMINAL_APP_LINKS_ID = "terminal-app-links"
 
-def terminal_app_links_tip(ctx):
-    """In Terminal.app, once the run wrote a link's URL out (it shows no
-    clickable link), a note on how to open one, at the end of the task."""
-    if ctx.std.io.links_written == 0:
+def terminal_app_links_tip(ctx, since = 0):
+    """In Terminal.app, once the task wrote a link's URL out (it shows no
+    clickable link; `since` the process's count when it started), a note on
+    how to open one, at the end of the task."""
+    if ctx.std.io.links_written <= since:
         return
     add_tip(
         ctx,
@@ -1245,6 +1246,10 @@ def _tips_impl(ctx):
 
     sink = [_print_tip_line]
 
+    # The links this process wrote out before the task, so its tip counts
+    # only the task's own.
+    links_at_start = ctx.std.io.links_written
+
     def _render_jinja2(call_ctx, tip, accumulate, aggregates):
         """Render `tip`'s `_title_src`/`_body_src` against `vars`,
         `accumulate` and `aggregates` (`tip_render_data`) and return the
@@ -1351,7 +1356,7 @@ def _tips_impl(ctx):
         once."""
         if not auto_print[0] or finished[0]:
             return
-        terminal_app_links_tip(task_ctx)
+        terminal_app_links_tip(task_ctx, links_at_start)
         finished[0] = True
         color_on = task_ctx.std.io.stderr.color
         for id in order:
