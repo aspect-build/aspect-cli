@@ -214,8 +214,9 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     Nothing is shown for a `trait.output_display` of `none`: a feature draws
     the screen itself. Otherwise what is shown is Bazel's curses UI as
     `curses`, the user's own `--curses`, says; else as `trait.output_display`
-    does (`curses` or `lines`); else, for `auto`, when the task's stdout and
-    stderr are both terminals, since Bazel decides colour and its live UI for
+    does (`curses` or `lines`); else, for `auto`, when where Bazel's stdout
+    lands (the first argument: the task's stdout, or its stderr when it is
+    sent there) and the task's stderr are both terminals, since Bazel decides colour and its live UI for
     both. Plain lines carry Bazel's status line every few seconds unless
     `trait.output_progress` is False, or `show_progress`, the user's own
     `--show_progress`, is, which shows plain lines in place of curses too. Colour shows as `color`, the user's own

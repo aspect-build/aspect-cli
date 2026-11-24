@@ -474,6 +474,9 @@ pub(crate) struct ProcessorSettings {
     pub show_colour: Option<bool>,
     /// In rendered lines, Bazel's status line every few seconds.
     pub progress: bool,
+    /// Whether where Bazel's stdout lands is a terminal, for `auto`; None:
+    /// this process's stdout.
+    pub stdout_tty: Option<bool>,
 }
 
 /// The console processor `processor(...)` makes; see its docs.
@@ -482,7 +485,11 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     let curses_out = match s.display {
         DisplayMode::Curses => true,
         DisplayMode::Lines | DisplayMode::None => false,
-        DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
+        DisplayMode::Auto => {
+            s.stdout_tty
+                .unwrap_or_else(|| std::io::stdout().is_terminal())
+                && stderr_tty
+        }
     };
     let style = if crate::color::console_supports_color() {
         Style::dim()
@@ -534,8 +541,9 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
 /// made, so a processor's own is `Curses`, `Lines` or `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
-    /// `curses` when this process's stdout and stderr are both terminals,
-    /// else `lines`.
+    /// `curses` when where Bazel's stdout lands (this process's stdout, or
+    /// its stderr when sent there) and this process's stderr are both
+    /// terminals, else `lines`.
     Auto,
     /// Bazel's curses UI, as it drew it.
     Curses,
@@ -732,6 +740,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
             colour: color.into_option(),
             show_colour: show_color.into_option(),
             progress,
+            stdout_tty: None,
         });
         Ok(OutputProcessor { config })
     }

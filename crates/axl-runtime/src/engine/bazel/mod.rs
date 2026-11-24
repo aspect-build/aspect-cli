@@ -53,7 +53,7 @@ use wrappers::ExecLogSink;
 
 /// The console processor a build or test runs with: `output`, or, when the
 /// call gives none, leaves stderr to the runtime and sends stdout to this
-/// process's stdout or stderr (`stdout_ours`, [`stdout_to`]), one from
+/// process's stdout or stderr (`stdout_to`), one from
 /// the task's `BazelTrait.output_stages` and the stages its `output_start`
 /// hooks return, whose capture flags go after `flags`, so they win. A call
 /// that redirects stderr, or stdout elsewhere, gets no processing and no
@@ -68,7 +68,7 @@ use wrappers::ExecLogSink;
 fn console_for<'v>(
     output: Option<bazel::console::Config>,
     stderr_free: bool,
-    stdout_ours: bool,
+    stdout_to: build::StdoutTo,
     flags: &mut Vec<String>,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<Option<bazel::console::Config>> {
@@ -85,7 +85,7 @@ fn console_for<'v>(
             }
             Some(config)
         }
-        (None, Some(t)) if stderr_free && stdout_ours => {
+        (None, Some(t)) if stderr_free && stdout_to != build::StdoutTo::Elsewhere => {
             let mut stages = t.stages.clone();
             stages.extend(t.started(eval)?);
             // Captured even with no stages when hidden (inherited, it would
@@ -101,6 +101,8 @@ fn console_for<'v>(
                     show_colour: output::user_choice(flags, "color"),
                     progress: t.progress
                         && output::user_choice(flags, "show_progress") != Some(false),
+                    stdout_tty: (stdout_to == build::StdoutTo::Stderr)
+                        .then(|| std::io::IsTerminal::is_terminal(&std::io::stderr())),
                 });
                 flags.extend(config.bazel_flags().into_iter().map(str::to_string));
                 Some(config)
@@ -633,19 +635,23 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
     ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
     ///   → redirect the child's stdout into that handle (the fd is duplicated).
-    ///   Redirecting it, `stderr` or `stdio` turns off the task's
-    ///   `BazelTrait` console for this call: no stages, hooks or added flags.
+    ///   Redirecting it elsewhere than `ctx.std.io.stdout` or
+    ///   `ctx.std.io.stderr`, or redirecting `stderr` or `stdio`, turns off
+    ///   the task's `BazelTrait` console for this call: no stages, hooks or
+    ///   added flags.
     /// * `stderr` - Per-fd config for the child's stderr. Same shape as `stdout`.
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
     /// * `output` - A `bazel.output.processor(...)`: capture the child's
     ///   stderr, run it through the processor and forward it to this
-    ///   process's stderr. An inherited stdout is captured too, to keep it in
-    ///   order with stderr: through the processor when it is the same file as
-    ///   stderr (a terminal, `2>&1`), forwarded to stdout as it is otherwise,
-    ///   except that the colour the capture asked for is stripped from a
-    ///   stdout that is not a terminal.
+    ///   process's stderr. A stdout inherited or given as `ctx.std.io.stdout`
+    ///   is captured too, to keep it in order with stderr: through the
+    ///   processor when it is the same file as stderr (a terminal, `2>&1`),
+    ///   forwarded to stdout as it is otherwise, except that the colour the
+    ///   capture asked for is stripped from a stdout that is not a terminal.
+    ///   A stdout given as `ctx.std.io.stderr` always goes through the
+    ///   processor.
     ///   Cannot be combined with `stderr`/`stdio`. Its `flags` are appended
     ///   after the call's. Read the results from the returned build's
     ///   `output_*` attributes and methods.
@@ -769,7 +775,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let mut console = console_for(
             output.into_option().map(|p| p.config().clone()),
             stderr.is_none() && stdio.is_none(),
-            stdout_to != build::StdoutTo::Elsewhere,
+            stdout_to,
             &mut resolved_flags,
             eval,
         )?;
@@ -854,19 +860,23 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
     ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
     ///   → redirect the child's stdout into that handle (the fd is duplicated).
-    ///   Redirecting it, `stderr` or `stdio` turns off the task's
-    ///   `BazelTrait` console for this call: no stages, hooks or added flags.
+    ///   Redirecting it elsewhere than `ctx.std.io.stdout` or
+    ///   `ctx.std.io.stderr`, or redirecting `stderr` or `stdio`, turns off
+    ///   the task's `BazelTrait` console for this call: no stages, hooks or
+    ///   added flags.
     /// * `stderr` - Per-fd config for the child's stderr. Same shape as `stdout`.
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
     /// * `output` - A `bazel.output.processor(...)`: capture the child's
     ///   stderr, run it through the processor and forward it to this
-    ///   process's stderr. An inherited stdout is captured too, to keep it in
-    ///   order with stderr: through the processor when it is the same file as
-    ///   stderr (a terminal, `2>&1`), forwarded to stdout as it is otherwise,
-    ///   except that the colour the capture asked for is stripped from a
-    ///   stdout that is not a terminal.
+    ///   process's stderr. A stdout inherited or given as `ctx.std.io.stdout`
+    ///   is captured too, to keep it in order with stderr: through the
+    ///   processor when it is the same file as stderr (a terminal, `2>&1`),
+    ///   forwarded to stdout as it is otherwise, except that the colour the
+    ///   capture asked for is stripped from a stdout that is not a terminal.
+    ///   A stdout given as `ctx.std.io.stderr` always goes through the
+    ///   processor.
     ///   Cannot be combined with `stderr`/`stdio`. Its `flags` are appended
     ///   after the call's. Read the results from the returned build's
     ///   `output_*` attributes and methods.
@@ -988,7 +998,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let mut console = console_for(
             output.into_option().map(|p| p.config().clone()),
             stderr.is_none() && stdio.is_none(),
-            stdout_to != build::StdoutTo::Elsewhere,
+            stdout_to,
             &mut resolved_flags,
             eval,
         )?;
