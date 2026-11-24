@@ -404,6 +404,29 @@ pub(crate) fn create_temp_dir(
     ))
 }
 
+/// `bytes`, the start of a file, as text: a byte that is not UTF-8 is
+/// replaced (`\u{FFFD}`) and the text after it kept, but a multi-byte
+/// character the cut split at the end is dropped.
+fn lossy_prefix(bytes: &[u8]) -> String {
+    let mut end = bytes.len();
+    // A lead byte in the last three, with fewer bytes after it than it needs.
+    for back in 1..=3.min(bytes.len()) {
+        let b = bytes[bytes.len() - back];
+        let needs = match b {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            0x80..=0xbf => continue,
+            _ => break,
+        };
+        if back < needs {
+            end = bytes.len() - back;
+        }
+        break;
+    }
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
 #[starlark_module]
 pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// Copies the contents of one file to another. This function will also copy the permission bits of the original file to the destination file.
@@ -934,16 +957,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
             Ok(f) => {
                 let mut buf = Vec::new();
                 if f.take(cap).read_to_end(&mut buf).is_ok() {
-                    match String::from_utf8(buf) {
-                        Ok(valid) => valid,
-                        // Lossy decode, then drop a trailing replacement char that
-                        // a cap-split multi-byte sequence would have produced.
-                        Err(e) => {
-                            let valid_up_to = e.utf8_error().valid_up_to();
-                            let bytes = e.into_bytes();
-                            String::from_utf8_lossy(&bytes[..valid_up_to]).into_owned()
-                        }
-                    }
+                    lossy_prefix(&buf)
                 } else {
                     String::new()
                 }
@@ -1057,6 +1071,33 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_capped_prefix_keeps_the_text_after_a_bad_byte() {
+        assert_eq!(
+            super::lossy_prefix(b"start\n\xff latin1\nError: real failure\n"),
+            "start\n\u{FFFD} latin1\nError: real failure\n"
+        );
+        assert_eq!(super::lossy_prefix("ab\u{e9}".as_bytes()), "ab\u{e9}");
+        assert_eq!(
+            super::lossy_prefix(&"ab\u{e9}".as_bytes()[..3]),
+            "ab",
+            "a split character is dropped"
+        );
+        assert_eq!(super::lossy_prefix(&"a\u{1F600}".as_bytes()[..4]), "a");
+        assert_eq!(
+            super::lossy_prefix(b"ab\xff"),
+            "ab\u{FFFD}",
+            "a bad last byte is not a split one"
+        );
+        assert_eq!(
+            super::lossy_prefix(b"ab\xc0"),
+            "ab\u{FFFD}",
+            "never a lead byte"
+        );
+        assert_eq!(super::lossy_prefix(b""), "");
+    }
+
     use super::*;
 
     #[test]

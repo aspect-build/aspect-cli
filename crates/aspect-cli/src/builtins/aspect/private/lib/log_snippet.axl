@@ -9,39 +9,39 @@ Strategy, in order of preference:
   1. Structured first — `extract_junit_failure` scans a JUnit `test.xml` for the
      first `<failure>`/`<error>` element and emits its message + stack trace.
      Zero heuristics; the framework already isolated the failure.
-  2. Heuristic fallback — `extract_snippet` reads the raw `test.log` / action
-     stderr and applies "tail-with-error-anchor windowing": strip ANSI/CR noise,
-     locate the last failure-marker line, and emit a window around it (plus a
-     little head context for compile errors), falling back to the tail of the
-     buffer when no marker is found.
+  2. Heuristic fallback: `extract_snippet` reads the raw `test.log`, and
+     `extract_action_snippet` an action's stdout then stderr, and each picks
+     its lines with `std.excerpt`, the choice the console's recap of an error
+     makes too (`bazel::console::excerpt`): the first line that reads as an
+     error with context around it, and the last lines, or the tail when no
+     line reads as one.
 
 Reads are bounded at the byte level. The historical "BES can inline 40+ MB of
 action stderr onto the Starlark heap" concern (see lib/bazel_results.axl) is
 about reading a BES `File.contents` oneof — NOT about reading a file by path.
 Here we read the on-disk file via `try_read_to_string_capped`, which pulls only
-the first `max_read_bytes` (+1, to detect truncation) into memory — never the
-whole file — so even a multi-MB log degrades to a truncated prefix without
-spiking the heap.
+the first `max_read_bytes` bytes into memory (never the whole file), so even a
+multi-MB log degrades to a truncated prefix without spiking the heap; the
+file's size says whether it was cut.
 
-The runtime has no regex module (see lib/lifecycle.axl), so cleaning and marker
-detection are plain character/substring walks.
-
-Pure logic (`*_from_text`) is split from the I/O wrappers so it is unit-testable
-without a filesystem; the wrappers take `std` (= `ctx.std`) and degrade to
-`source = "none"` on any missing/unreadable path.
+The `*_from_text` functions take text rather than a path, so they are
+unit-testable without a filesystem; the wrappers read the path and degrade to
+`source = "none"` on any missing/unreadable path. Both take `std`
+(= `ctx.std`) for `std.excerpt`.
 """
 
-load("./ansi.axl", "ansi")
-
 SnippetOptions = record(
-    # Max lines kept in the emitted snippet body.
+    # Max lines of the output kept in the snippet body, which also carries a
+    # `… N more lines` line where lines between two kept runs are left out.
     max_lines = field(int, default = 20),
-    # Hard cap on bytes/chars read from disk; a larger file is sliced to this
-    # prefix and flagged truncated.
+    # Hard cap on the bytes read from disk; a larger file (by its size) is read
+    # to this prefix and flagged truncated.
     max_read_bytes = field(int, default = 262144),
-    # Lines of context kept before / after the anchor marker line.
-    context_before = field(int, default = 8),
-    context_after = field(int, default = 6),
+    # Lines of context kept before / after the first line that reads as an
+    # error, and of the output's end kept with it.
+    context_before = field(int, default = 4),
+    context_after = field(int, default = 10),
+    tail = field(int, default = 5),
 )
 
 # Snippet provenance. "none" means nothing usable was found (missing path,
@@ -51,10 +51,10 @@ SnippetSource = enum("xml", "log", "none")
 SnippetResult = record(
     # Cleaned snippet body, newline-joined, no code fence. "" when source=none.
     text = field(str, default = ""),
-    # True when lines were elided (windowed/over max_lines) or the read hit the
-    # byte cap. `truncated` is the OR of the two below (back-compat); `trunc_head`
-    # / `trunc_tail` say which end was cut, so the renderer places a `…` marker
-    # only on the side that lost content.
+    # True when any lines were left out (at either end, or between two kept
+    # runs) or the read hit the byte cap. `trunc_head` / `trunc_tail` say which
+    # end was cut, so the renderer places a `…` marker only on the side that
+    # lost content; a gap between runs is shown inline as `… N more lines`.
     truncated = field(bool, default = False),
     trunc_head = field(bool, default = False),
     trunc_tail = field(bool, default = False),
@@ -90,102 +90,26 @@ def code_fence_for(text):
         n = _MIN_FENCE_LEN
     return "`" * n
 
-# Case-insensitive substrings that anchor the failure region. Converges on the
-# union used by GitHub problem matchers / Jenkins log-parser rule sets across
-# pytest / go test / cargo test / JUnit / compilers. Matched as lowercased
-# substrings (no regex), so they catch "ERROR:", "FAILED", "Traceback", etc.
-_FAILURE_MARKERS = [
-    "error",
-    "fail",
-    "fatal",
-    "panic",
-    "traceback",
-    "exception",
-    "assert",
-    "expected",
-    "segfault",
-    "sigsegv",
-    "core dumped",
-    "undefined reference",
-    "timed out",
-    "timeout",
-]
+def _excerpt(std, text, options):
+    """`text`'s lines as `std.excerpt` picks them, as `(lines, trunc_head,
+    trunc_tail, cut_between)`."""
+    picked = std.excerpt(
+        text,
+        max_lines = options.max_lines,
+        before = options.context_before,
+        after = options.context_after,
+        tail = options.tail,
+    )
+    return (picked["lines"], picked["cut_head"], picked["cut_tail"], picked["cut_between"])
 
-def _clean_lines(text):
-    """Split into display lines after ANSI stripping, progress-bar collapse, and
-    de-duplication of consecutive identical lines.
-
-    Carriage returns redraw a terminal line in place, so only the segment after
-    the last `\\r` on a physical line survives (drops progress-bar spam). Runs of
-    identical lines collapse to one. Returns a list of lines (no trailing \\n).
-    """
-    cleaned = ansi.strip(text)
-    lines = []
-    prev = None
-    for raw in cleaned.split("\n"):
-        line = raw.rstrip("\r")
-        if "\r" in line:
-            line = line.split("\r")[-1]
-        if line == prev:
-            continue
-        prev = line
-        lines.append(line)
-
-    # Drop a trailing empty line from the final newline.
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines
-
-def _last_marker_index(lines):
-    """Index of the last line containing a failure marker, or -1 if none."""
-    idx = -1
-    for i in range(len(lines)):
-        low = lines[i].lower()
-        for m in _FAILURE_MARKERS:
-            if m in low:
-                idx = i
-                break
-    return idx
-
-def _window(lines, options):
-    """Pick the most relevant <= max_lines window from cleaned `lines`.
-
-    Anchors on the last failure marker (failures usually report near the end);
-    emits `[anchor - context_before, anchor + context_after]`, then caps to
-    max_lines keeping the marker. With no marker, returns the tail. Returns
-    (window_lines, trunc_head, trunc_tail) — whether lines were dropped before /
-    after the window (so the renderer can place a `…` marker on each cut side).
-    """
-    total = len(lines)
-    if total <= options.max_lines:
-        return (lines, False, False)
-
-    anchor = _last_marker_index(lines)
-    if anchor < 0:
-        # No marker — trust the tail (head dropped, nothing after).
-        return (lines[total - options.max_lines:], True, False)
-
-    start = anchor - options.context_before
-    if start < 0:
-        start = 0
-    end = anchor + options.context_after + 1
-    if end > total:
-        end = total
-
-    # Enforce max_lines, biasing toward keeping the marker (drop from the front).
-    if end - start > options.max_lines:
-        start = end - options.max_lines
-    return (lines[start:end], start > 0, end < total)
-
-def extract_snippet_from_text(text, hit_cap, options):
-    """Pure: turn raw log `text` into a SnippetResult via tail-with-error-anchor
-    windowing. `hit_cap` is True when `text` was already byte-capped upstream."""
+def extract_snippet_from_text(std, text, hit_cap, options, cut_inside = False):
+    """Turn raw log `text` into a SnippetResult of the lines `std.excerpt`
+    picks. `hit_cap` is True when `text`'s end was byte-capped upstream;
+    `cut_inside` when bytes inside it were (an action's stdout, before its
+    stderr)."""
     if not text:
         return _EMPTY
-    lines = _clean_lines(text)
-    if not lines:
-        return _EMPTY
-    window, trunc_head, trunc_tail = _window(lines, options)
+    window, trunc_head, trunc_tail, cut_between = _excerpt(std, text, options)
     if not window:
         return _EMPTY
 
@@ -193,7 +117,7 @@ def extract_snippet_from_text(text, hit_cap, options):
     trunc_tail = trunc_tail or hit_cap
     return SnippetResult(
         text = "\n".join(window),
-        truncated = trunc_head or trunc_tail,
+        truncated = trunc_head or trunc_tail or cut_between or cut_inside,
         trunc_head = trunc_head,
         trunc_tail = trunc_tail,
         source = SnippetSource("log"),
@@ -284,8 +208,8 @@ def _is_low_signal_junit(header, body):
             return True
     return False
 
-def extract_junit_failure_from_text(xml, options):
-    """Pure: emit the first JUnit `<failure>`/`<error>` message + body as a
+def extract_junit_failure_from_text(std, xml, options):
+    """Emit the first JUnit `<failure>`/`<error>` message + body as a
     SnippetResult, or `none` on any parse miss (caller falls back to the log).
 
     Lightweight scan, not a real parser: find the first `<failure`/`<error`
@@ -350,13 +274,12 @@ def extract_junit_failure_from_text(xml, options):
     if not parts:
         return _EMPTY
 
-    lines = _clean_lines("\n".join(parts))
-    if not lines:
+    window, trunc_head, trunc_tail, cut_between = _excerpt(std, "\n".join(parts), options)
+    if not window:
         return _EMPTY
-    window, trunc_head, trunc_tail = _window(lines, options)
     return SnippetResult(
         text = "\n".join(window),
-        truncated = trunc_head or trunc_tail,
+        truncated = trunc_head or trunc_tail or cut_between,
         trunc_head = trunc_head,
         trunc_tail = trunc_tail,
         source = SnippetSource("xml"),
@@ -367,28 +290,68 @@ def _read_bounded(std, path, max_read_bytes):
 
     Reads only the capped prefix into memory via `try_read_to_string_capped`
     (never the whole file), so a multi-MB log can't spike the heap — the very
-    case this feature targets. Reads one extra byte to detect truncation: when
-    the result exceeds the cap, it's sliced and `hit_cap` is True. Missing /
-    unreadable paths degrade to `("", False)` rather than failing the task.
+    case this feature targets. `hit_cap` is whether the file is bigger than the
+    cap, by its size in bytes: the text's length counts characters, which
+    is fewer for non-ASCII text. Missing / unreadable paths degrade to
+    `("", False)` rather than failing the task.
     """
     if not path:
         return ("", False)
-    text = std.fs.try_read_to_string_capped(path, max_read_bytes + 1)
+    text = std.fs.try_read_to_string_capped(path, max_read_bytes)
     if not text:
         return ("", False)
-    if len(text) > max_read_bytes:
-        return (text[:max_read_bytes], True)
-    return (text, False)
+    hit_cap = std.fs.exists(path) and std.fs.metadata(path).size > max_read_bytes
+    return (text, hit_cap)
 
 def extract_snippet(std, path, options = None):
     """I/O wrapper: read `path` (bounded) and window it. `none` if unreadable."""
     opts = options or SnippetOptions()
     text, hit_cap = _read_bounded(std, path, opts.max_read_bytes)
-    return extract_snippet_from_text(text, hit_cap, opts)
+    return extract_snippet_from_text(std, text, hit_cap, opts)
+
+# The intermediate bytes of an `ESC` escape (`ESC (` before its charset).
+_ESC_INTERMEDIATES = " !\"#$%&'()*+,-./"
+
+def _closed(text):
+    """`text`, cut by the read bound, with any escape the cut left open
+    closed: an OSC 8 link would otherwise run on through the lines after it
+    when they are cleaned. An `ESC` the cut left last, alone or with only
+    intermediate bytes after it (`ESC (`, or the first half of an `ESC \\`),
+    is dropped first, as the terminator would end it short and leave its
+    `\\`; then `ESC \\` (ST) closes a string escape, ends a CSI cut short at
+    its `ESC`, and with none open is an escape of its own, cleaned away."""
+    at = text.rfind("\x1b")
+    if at >= 0 and all([c in _ESC_INTERMEDIATES for c in text[at + 1:].elems()]):
+        text = text[:at]
+    return text + "\x1b\\"
+
+def extract_action_snippet(std, stdout_path, stderr_path, options = None):
+    """I/O wrapper for a failed action: its stdout then its stderr (as Bazel's
+    console prints them), each read bounded, windowed together. Some tools
+    write their errors to stdout (tsc), leaving stderr a wrapper's line. A
+    stdout cut by the bound before a stderr says so between them, and is no
+    cut at the end. `none` when neither is readable."""
+    opts = options or SnippetOptions()
+    out, out_cap = _read_bounded(std, stdout_path, opts.max_read_bytes)
+    err, err_cap = _read_bounded(std, stderr_path, opts.max_read_bytes)
+    if out and out_cap:
+        out = _closed(out.rstrip("\n"))
+    parts = [out.rstrip("\n")] if out else []
+    if out and out_cap and err:
+        parts.append("… stdout cut at %d bytes" % opts.max_read_bytes)
+    if err:
+        parts.append(err.rstrip("\n"))
+    return extract_snippet_from_text(
+        std,
+        "\n".join(parts),
+        err_cap if err else out_cap,
+        opts,
+        cut_inside = bool(out and out_cap and err),
+    )
 
 def extract_junit_failure(std, xml_path, options = None):
     """I/O wrapper: read a JUnit `test.xml` (bounded) and emit its first failure.
     `none` on missing path or parse miss — caller should then try the raw log."""
     opts = options or SnippetOptions()
     text, _hit_cap = _read_bounded(std, xml_path, opts.max_read_bytes)
-    return extract_junit_failure_from_text(text, opts)
+    return extract_junit_failure_from_text(std, text, opts)

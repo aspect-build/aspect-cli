@@ -51,7 +51,7 @@ renderer. `_prepare_for_render` decorates each entry with:
   - `_result_text`  Kind-specific Result cell text.
 
 Inline failure snippets: each job extracts its own (it owns the local
-test.log / action-stderr paths; other jobs can't read them) on its terminal
+test.log / action stdout and stderr paths; other jobs can't read them) on its terminal
 update and ships them in its contribution under `failure_snippets`. The
 renderer picks which to show across all tasks via `_select_snippets`, which
 first DEDUPES by `(label, snippet)` - the same target failing in several jobs
@@ -845,7 +845,7 @@ def _results_subset(
     copied out; live-state fields come from `_state`.
 
     `failure_snippets` is this job's own inline failure snippets (plain dicts;
-    only this job can read its log/stderr paths) — extracted on the terminal
+    only this job can read its log, stdout and stderr paths), extracted on the terminal
     update by the caller and shipped in the contribution, since other jobs
     can't re-derive them. The renderer dedupes them across tasks and
     sticky-selects against the global budget."""
@@ -1051,7 +1051,7 @@ def _split_snippet_rows(rows):
                      <dur>" (timeout). Duration is omitted when 0 (build actions
                      have no reliable duration).
 
-    The "build" bucket is action-stderr failures; "test"/"timeout" are test
+    The "build" bucket is failed actions' output; "test"/"timeout" are test
     failures."""
     build_rows = []
     test_rows = []
@@ -2272,7 +2272,7 @@ def _github_status_comments(ctx: FeatureContext):
             bes_url = render_bes_url(data)
 
             # Inline failure snippets: bazel_results only, and only on the
-            # terminal update (data frozen, log/stderr paths materialized).
+            # terminal update (data frozen, log, stdout and stderr paths materialized).
             # Each job ships its own; sibling writers can't read its files.
             failure_snippets = None
             if update.final and update.kind == "bazel_results":
