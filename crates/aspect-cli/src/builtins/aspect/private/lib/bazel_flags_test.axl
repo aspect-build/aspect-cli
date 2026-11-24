@@ -478,9 +478,11 @@ def _test_passthrough_args_shape(ctx):
         sorted(fa.keys()),
         [
             "bazel_flags",
+            "bazel_no_value_flags",
             "bazel_passthrough_flags",
             "bazel_passthrough_startup_flags",
             "bazel_startup_flags",
+            "bazel_startup_no_value_flags",
             "bazel_startup_value_flags",
             "bazel_value_flags",
         ],
@@ -494,8 +496,10 @@ def _test_passthrough_args_is_the_opt_in_subset(ctx):
         "passthrough arg keys",
         sorted(pa.keys()),
         [
+            "bazel_no_value_flags",
             "bazel_passthrough_flags",
             "bazel_passthrough_startup_flags",
+            "bazel_startup_no_value_flags",
             "bazel_startup_value_flags",
             "bazel_value_flags",
         ],
@@ -514,6 +518,18 @@ def _test_startup_value_flags_cover_the_pre_command_slot(ctx):
             fail("expected %s in BAZEL_STARTUP_VALUE_FLAGS" % flag)
     if "--batch" in listed:
         fail("--batch takes no value; listing it would eat the task name")
+
+def _test_no_value_flags_are_bazels_other_spellings(ctx):
+    """Booleans in both spellings and expansion flags, in the slot Bazel takes
+    them in, and wired to the buckets that forward them."""
+    for flag in ["--stamp", "--nostamp", "--subcommands", "--build", "--remote_download_all"]:
+        if flag not in bazel_flags.NO_VALUE_FLAGS:
+            fail("expected %s in BAZEL_NO_VALUE_FLAGS" % flag)
+    for flag in ["--quiet", "--batch", "--noblock_for_lock"]:
+        if flag not in bazel_flags.STARTUP_NO_VALUE_FLAGS:
+            fail("expected %s in BAZEL_STARTUP_NO_VALUE_FLAGS" % flag)
+    if "--jobs" in bazel_flags.NO_VALUE_FLAGS:
+        fail("--jobs takes a value")
 
 def _test_value_flags_mirror_bazel(ctx):
     """The generated list carries Bazel's value-taking flags and none of its
@@ -1388,6 +1404,7 @@ def _test_impl(ctx):
     _test_passthrough_args_is_the_opt_in_subset(ctx)
     _test_value_flags_mirror_bazel(ctx)
     _test_startup_value_flags_cover_the_pre_command_slot(ctx)
+    _test_no_value_flags_are_bazels_other_spellings(ctx)
     _test_flags_empty_defaults(ctx)
     _test_announce_auto_follows_ci(ctx)
     _test_announce_explicit_overrides_ci(ctx)

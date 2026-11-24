@@ -87,8 +87,6 @@ pub enum CmdError {
     ReservedName(String, String, String),
     #[error("no task selected")]
     NoTaskSelected,
-    #[error("--{0}={1} conflicts with --{0}:enabled={2}; pass only one of them")]
-    ConflictingFeatureFlags(String, bool, bool),
 }
 
 /// Bridge from runtime values (tasks, features, modules) to a parsed Clap surface.
@@ -120,7 +118,7 @@ pub struct Dispatch {
 impl<'a, 'v> Cmd<'a, 'v> {
     /// Build the full root Clap command (`aspect`) with all task subcommands.
     pub fn build(&self, version: &str) -> Result<Command, CmdError> {
-        let reserved = shorthand_reserved(&self.features);
+        let reserved = shorthand_reserved(&self.tasks, &self.features);
         let feature_blocks: Vec<FeatureBlock> = self
             .features
             .iter()
@@ -302,14 +300,18 @@ impl<'a, 'v> Cmd<'a, 'v> {
         flags
     }
 
-    /// Resolve the selected task from parsed `matches`. Fails when a feature's
-    /// `--<name>` shorthand and its `--<name>:enabled` were both typed with
-    /// different values.
-    pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
-        let leaf = deepest_subcommand(&matches).ok_or(CmdError::NoTaskSelected)?;
-        let task_id = *leaf
-            .get_one::<usize>(TASK_ID_KEY)
-            .ok_or(CmdError::NoTaskSelected)?;
+    /// A usage error (exit 2, like clap's own) when a feature's `--<name>`
+    /// shorthand and its `--<name>:enabled` were both typed with different
+    /// values. `root` is the built command `matches` was parsed from; the
+    /// error carries the selected task's usage line.
+    pub fn feature_flag_conflict(
+        &self,
+        root: &mut Command,
+        matches: &ArgMatches,
+    ) -> Result<(), clap::Error> {
+        let Some(leaf) = deepest_subcommand(matches) else {
+            return Ok(());
+        };
         for feat in &self.features {
             let prefix = feat.name();
             let long_id = format!("{prefix}:enabled");
@@ -323,9 +325,31 @@ impl<'a, 'v> Cmd<'a, 'v> {
             if let Some(&long) = leaf.get_one::<bool>(&long_id)
                 && long != short
             {
-                return Err(CmdError::ConflictingFeatureFlags(prefix, short, long));
+                let mut cmd = root;
+                let mut at = matches;
+                while let Some((name, next)) = at.subcommand() {
+                    if cmd.find_subcommand(name).is_none() {
+                        break;
+                    }
+                    cmd = cmd.find_subcommand_mut(name).expect("checked above");
+                    at = next;
+                }
+                return Err(cmd.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    format!(
+                        "--{prefix}={short} conflicts with --{prefix}:enabled={long}; pass only one of them"
+                    ),
+                ));
             }
         }
+        Ok(())
+    }
+
+    pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
+        let leaf = deepest_subcommand(&matches).ok_or(CmdError::NoTaskSelected)?;
+        let task_id = *leaf
+            .get_one::<usize>(TASK_ID_KEY)
+            .ok_or(CmdError::NoTaskSelected)?;
         // Resolution order: --task:name wins; the deprecated --task-key is
         // accepted as an alias and always warns; otherwise the name defaults
         // to the task kind (the deepest selected subcommand name).
@@ -424,7 +448,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
     /// user passes back in). With a name, prints just that feature's flags. An
     /// unknown name lists the valid ones on stderr and exits 2.
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
-        let reserved = shorthand_reserved(&self.features);
+        let reserved = shorthand_reserved(&self.tasks, &self.features);
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
             .features
             .iter()
@@ -442,9 +466,17 @@ impl<'a, 'v> Cmd<'a, 'v> {
             }
             Some(name) => match blocks.iter().find(|(f, _)| f.name() == name) {
                 Some((feat, block)) => {
-                    render_feature_detail(version, *feat, block, self.aspect_root, self.modules)
-                        .print_help()
-                        .ok();
+                    let coverage = shorthand_coverage(block, &self.tasks);
+                    render_feature_detail(
+                        version,
+                        *feat,
+                        block,
+                        &coverage,
+                        self.aspect_root,
+                        self.modules,
+                    )
+                    .print_help()
+                    .ok();
                     ExitCode::SUCCESS
                 }
                 None => {
@@ -958,20 +990,55 @@ fn bucket(
         .find(|(_, arg)| arg.passthrough_position() == Some(position))?;
     let value_flags = arg
         .value_flags_from()
-        .map(|sibling| {
-            overrides.get(sibling).cloned().unwrap_or_else(|| {
-                task.args()
-                    .get(sibling)
-                    .and_then(Arg::string_list_default)
-                    .map(<[String]>::to_vec)
-                    .unwrap_or_default()
-            })
-        })
+        .map(|sibling| sibling_list(task, sibling, overrides).to_vec())
         .unwrap_or_default();
     Some(Bucket {
         channel: long_flag(Scope::Task, bucket, arg),
         value_flags,
     })
+}
+
+/// A passthrough bucket's sibling list arg: the repo's config.axl override
+/// when there is one, else its declared default.
+fn sibling_list<'a>(
+    task: &'a dyn TaskLike<'_>,
+    sibling: &str,
+    overrides: &'a HashMap<String, Vec<String>>,
+) -> &'a [String] {
+    overrides
+        .get(sibling)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| {
+            task.args()
+                .get(sibling)
+                .and_then(Arg::string_list_default)
+                .unwrap_or_default()
+        })
+}
+
+/// Call `f` with every spelling `task`'s `position` bucket forwards to the
+/// tool it wraps: its `value_flags_from` and `known_flags_from` lists.
+fn for_each_forwarded(
+    task: &dyn TaskLike<'_>,
+    position: PassthroughPosition,
+    overrides: &HashMap<String, Vec<String>>,
+    mut f: impl FnMut(&str),
+) {
+    let Some((_, arg)) = task
+        .args()
+        .iter()
+        .find(|(_, arg)| arg.passthrough_position() == Some(position))
+    else {
+        return;
+    };
+    for sibling in [arg.value_flags_from(), arg.known_flags_from()]
+        .into_iter()
+        .flatten()
+    {
+        sibling_list(task, sibling, overrides)
+            .iter()
+            .for_each(|flag| f(flag));
+    }
 }
 
 fn route_onto(channel: &str, token: &OsStr) -> OsString {
@@ -1412,10 +1479,13 @@ fn stringify_value(v: Value<'_>) -> String {
 // [`shorthand_arg`]) rather than an alias, so `merge_args` can resolve it to
 // `enabled` with the same precedence over config.axl, and `Cmd::dispatch` can
 // name both spellings when they disagree. A shorthand is skipped when its flag
-// is already spoken for: on every task when it is reserved by the CLI or a
-// feature arg's long flag ([`shorthand_reserved`]; `deployment` is taken by
-// its own `--deployment` arg), and on one task when that task's own args claim
-// it (`task_command`). `--<feature>:enabled` keeps working either way.
+// is already spoken for: on every task when it is the CLI's own, a feature
+// arg's long flag (`deployment` is taken by its own `--deployment` arg) or a
+// startup option a pre-command passthrough bucket forwards
+// ([`shorthand_reserved`]), and on one task when that task's own args claim it
+// or its post-command bucket forwards it ([`shorthand_taken_on`]): a feature
+// named `profile` leaves `aspect build --profile=p` to Bazel.
+// `--<feature>:enabled` keeps working either way.
 
 struct FeatureBlock {
     /// Args exposed as flags, with config.axl overrides baked into their defaults.
@@ -1430,15 +1500,23 @@ struct FeatureBlock {
 }
 
 /// Long flags (without `--`) no feature's shorthand may take on any task: the
-/// CLI's own (`--help`, `--version`, the `--task:*` options) and every
-/// feature arg's long flag, which a `long` override can leave unprefixed.
-fn shorthand_reserved(features: &[&dyn FeatureLike<'_>]) -> HashSet<String> {
+/// CLI's own (`--help`, `--version`, the `--task:*` options), every feature
+/// arg's long flag, which a `long` override can leave unprefixed, and every
+/// spelling a task's pre-command passthrough bucket forwards (Bazel's startup
+/// options). The last is global rather than per task because the router
+/// leaves a flag typed before the task name alone when any command in the
+/// tree declares it.
+fn shorthand_reserved(
+    tasks: &[&dyn TaskLike<'_>],
+    features: &[&dyn FeatureLike<'_>],
+) -> HashSet<String> {
     let mut reserved: HashSet<String> = ["help", "version"].map(str::to_owned).into();
     reserved.extend(
         task_option_args()
             .iter()
             .filter_map(|arg| arg.get_long().map(str::to_owned)),
     );
+    let names: HashSet<String> = features.iter().map(|f| f.name()).collect();
     for feat in features {
         let prefix = feat.name();
         reserved.extend(
@@ -1448,7 +1526,73 @@ fn shorthand_reserved(features: &[&dyn FeatureLike<'_>]) -> HashSet<String> {
                 .map(|(name, arg)| long_flag(Scope::Feature(&prefix), name, arg)),
         );
     }
+    for task in tasks {
+        let overrides = stringify_overrides(task.overrides());
+        for_each_forwarded(*task, PassthroughPosition::PreCommand, &overrides, |flag| {
+            if let Some(name) = flag.strip_prefix("--")
+                && names.contains(name)
+            {
+                reserved.insert(name.to_owned());
+            }
+        });
+    }
     reserved
+}
+
+/// The names in `wanted` (feature shorthands, without `--`) that `task` takes
+/// for itself: its own args' names and long flags, and the spellings its
+/// post-command passthrough bucket forwards, so `aspect build --profile=p`
+/// still reaches Bazel when a feature is named `profile`. `overrides` are the
+/// task's config.axl values, which can replace the forwarded lists.
+fn shorthand_taken_on(
+    task: &dyn TaskLike<'_>,
+    overrides: &HashMap<String, Vec<String>>,
+    wanted: &HashSet<&str>,
+) -> HashSet<String> {
+    let mut taken: HashSet<String> = claimed_by_task(task)
+        .into_iter()
+        .filter(|name| wanted.contains(name.as_str()))
+        .collect();
+    for_each_forwarded(task, PassthroughPosition::PostCommand, overrides, |flag| {
+        if let Some(name) = flag.strip_prefix("--")
+            && wanted.contains(name)
+        {
+            taken.insert(name.to_owned());
+        }
+    });
+    taken
+}
+
+/// A feature's shorthand as `aspect describe` and `aspect feature <name>`
+/// report it, with the commands it is not registered on (see
+/// [`shorthand_taken_on`]). `None` when it is reserved, or taken on every task.
+fn shorthand_coverage(
+    block: &FeatureBlock,
+    tasks: &[&dyn TaskLike<'_>],
+) -> (Option<String>, Vec<String>) {
+    let Some(shorthand) = &block.shorthand else {
+        return (None, vec![]);
+    };
+    let wanted: HashSet<&str> = [shorthand.as_str()].into();
+    let unavailable: Vec<String> = tasks
+        .iter()
+        .filter(|task| {
+            let overrides = stringify_overrides(task.overrides());
+            !shorthand_taken_on(**task, &overrides, &wanted).is_empty()
+        })
+        .map(|task| command_line(*task))
+        .collect();
+    if !tasks.is_empty() && unavailable.len() == tasks.len() {
+        return (None, vec![]);
+    }
+    (Some(shorthand.clone()), unavailable)
+}
+
+/// `aspect <group…> <kind>`, how a task is typed.
+fn command_line(task: &dyn TaskLike<'_>) -> String {
+    let mut path = task.group().clone();
+    path.push(task.kind());
+    format!("aspect {}", path.join(" "))
 }
 
 /// The Clap id of a feature's shorthand. `@` never appears in an arg's long
@@ -1833,7 +1977,8 @@ fn select_feature(full: &serde_json::Value, name: &str) -> Option<serde_json::Va
 /// set (see [`describe_config_arg`]); they are kept out of `args` / `flags` so
 /// every entry there stays something a caller can type. A feature's
 /// `shorthand` is its `--<name>` flag for `enabled` (null when skipped), and
-/// `shorthand_unavailable_on` the commands whose own args take that flag.
+/// `shorthand_unavailable_on` the commands that take that flag themselves or
+/// forward it to the tool they wrap.
 ///
 /// This exists because the Aspect surface is per-repo — a caller cannot know
 /// what `aspect <task>` means here without asking. One call answers it.
@@ -1887,11 +2032,12 @@ fn describe_json(
         })
         .collect();
 
-    let reserved = shorthand_reserved(features);
+    let reserved = shorthand_reserved(tasks, features);
     let described_features: Vec<serde_json::Value> = features
         .iter()
         .filter_map(|feat| {
             let block = feature_block(*feat, &reserved)?;
+            let (shorthand, unavailable) = shorthand_coverage(&block, tasks);
             // `feature_block` bakes scalar overrides into its schema but skips
             // list-valued ones, so re-apply them here for the same reason task
             // args do it: a caller must see the default execution will use, not
@@ -1916,22 +2062,8 @@ fn describe_json(
                 "summary": feat.summary(),
                 "description": feat.description(),
                 "defined_in": defined_in_label(feat.path(), aspect_root, modules),
-                "shorthand": block.shorthand.as_ref().map(|s| format!("--{s}")),
-                "shorthand_unavailable_on": block
-                    .shorthand
-                    .as_ref()
-                    .map(|s| {
-                        tasks
-                            .iter()
-                            .filter(|task| claimed_by_task(**task).contains(s))
-                            .map(|task| {
-                                let mut path = task.group().clone();
-                                path.push(task.kind());
-                                format!("aspect {}", path.join(" "))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                "shorthand": shorthand.as_ref().map(|s| format!("--{s}")),
+                "shorthand_unavailable_on": unavailable,
                 "flags": flags,
                 "config_args": block
                     .config_args
@@ -1994,10 +2126,13 @@ fn render_feature_list(
 /// the args only `.aspect/config.axl` can set (see [`config_args_section`]).
 /// The `--<name>` shorthand shares the `enabled` row (`--tips, --tips:enabled`);
 /// the command is only rendered, never parsed, so that row's long can carry both.
+/// `coverage` is [`shorthand_coverage`]'s answer: a shorthand some commands
+/// take for themselves gets a note naming them.
 fn render_feature_detail(
     version: &str,
     feat: &dyn FeatureLike<'_>,
     block: &FeatureBlock,
+    coverage: &(Option<String>, Vec<String>),
     aspect_root: &Path,
     modules: &[Mod],
 ) -> Command {
@@ -2040,14 +2175,36 @@ fn render_feature_detail(
         let mut clap_arg = arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg)
             .help_heading(block.heading.clone());
         if arg_name == "enabled"
-            && let Some(shorthand) = &block.shorthand
+            && let (Some(shorthand), unavailable) = coverage
         {
             let long = long_flag(Scope::Feature(&block.prefix), arg_name, arg);
             clap_arg = clap_arg.long(format!("{shorthand}, --{long}"));
+            if !unavailable.is_empty() {
+                clap_arg = clap_arg.help(format!(
+                    "{}\n--{shorthand} is left to {}, which take it as their own flag or forward it to the tool they wrap; use --{long} there.",
+                    arg.description().unwrap_or_default(),
+                    shorthand_unavailable_list(unavailable),
+                ));
+            }
         }
         cmd = cmd.arg(clap_arg);
     }
     cmd
+}
+
+/// `unavailable` commands for a help line: the first few, then a count.
+fn shorthand_unavailable_list(unavailable: &[String]) -> String {
+    const SHOWN: usize = 4;
+    let mut list = unavailable
+        .iter()
+        .take(SHOWN)
+        .map(|c| format!("`{c}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if unavailable.len() > SHOWN {
+        list.push_str(&format!(" and {} more", unavailable.len() - SHOWN));
+    }
+    list
 }
 
 // ── Config-only args ───────────────────────────────────────────────────────
@@ -2240,9 +2397,15 @@ fn task_command(
     // A task's own args win a collision: a feature arg whose long flag matches
     // a task arg's name or long (e.g. a `long`-overridden `--deployment` vs the
     // auth tasks' `deployment`) is skipped, and `merge_args` falls back to its
-    // schema default — the feature goes inert on that task. A feature's
-    // `--<name>` shorthand yields the same way, leaving `--<name>:enabled`.
+    // schema default - the feature goes inert on that task. A feature's
+    // `--<name>` shorthand yields the same way, and to the flags the task
+    // forwards to the tool it wraps, leaving `--<name>:enabled`.
     let claimed = claimed_by_task(task);
+    let wanted: HashSet<&str> = feature_blocks
+        .iter()
+        .filter_map(|block| block.shorthand.as_deref())
+        .collect();
+    let shorthands_taken = shorthand_taken_on(task, &overrides, &wanted);
     for block in feature_blocks {
         for (arg_name, arg) in block.args.iter() {
             if claimed.contains(&long_flag(Scope::Feature(&block.prefix), arg_name, arg)) {
@@ -2252,7 +2415,7 @@ fn task_command(
             cmd = cmd.arg(clap_arg);
         }
         if let Some(shorthand) = &block.shorthand
-            && !claimed.contains(shorthand)
+            && !shorthands_taken.contains(shorthand)
         {
             cmd = cmd.arg(shorthand_arg(shorthand));
         }
@@ -3310,10 +3473,17 @@ mod tests {
     /// the hand-written section's raw ANSI both removed.
     fn plain_feature_detail(f: &StubFeature) -> String {
         let block = feature_block(f, &HashSet::new()).unwrap();
-        let help = render_feature_detail("1.2.3", f, &block, Path::new("/repo"), &[])
-            .render_help()
-            .ansi()
-            .to_string();
+        let help = render_feature_detail(
+            "1.2.3",
+            f,
+            &block,
+            &(block.shorthand.clone(), vec![]),
+            Path::new("/repo"),
+            &[],
+        )
+        .render_help()
+        .ansi()
+        .to_string();
         strip_ansi(&help)
     }
 
@@ -3378,9 +3548,16 @@ mod tests {
     fn feature_detail_renders_flags_and_defined_in_line() {
         let f = stub_feature("ArtifactUpload");
         let block = feature_block(&f, &HashSet::new()).unwrap();
-        let help = render_feature_detail("1.2.3", &f, &block, Path::new("/repo"), &[])
-            .render_help()
-            .to_string();
+        let help = render_feature_detail(
+            "1.2.3",
+            &f,
+            &block,
+            &(block.shorthand.clone(), vec![]),
+            Path::new("/repo"),
+            &[],
+        )
+        .render_help()
+        .to_string();
         assert!(help.contains("Artifact Upload Options"), "heading missing");
         assert!(help.contains("artifact-upload:enabled"), "flag missing");
         let help = strip_ansi(&help);
@@ -3706,6 +3883,7 @@ mod tests {
                 Arg::Passthrough {
                     position: PassthroughPosition::PostCommand,
                     value_flags_from: None,
+                    known_flags_from: None,
                     description: Some("Other flags go to the tool.".to_owned()),
                 },
             );
@@ -3767,6 +3945,7 @@ mod tests {
             Arg::Passthrough {
                 position: PassthroughPosition::PostCommand,
                 value_flags_from: Some("value_flags".to_owned()),
+                known_flags_from: None,
                 description: Some("Other flags go to the tool.".to_owned()),
             },
         );
@@ -4246,19 +4425,23 @@ mod tests {
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
-        let root = cmd.build("0.0.0").expect("build ok");
-        let parse = |argv: &[&str]| {
-            cmd.dispatch(root.clone().try_get_matches_from(argv).expect("parse ok"))
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        let mut check = |argv: &[&str]| {
+            let matches = root.clone().try_get_matches_from(argv).expect("parse ok");
+            cmd.feature_flag_conflict(&mut root, &matches)
         };
-        let err = parse(&["aspect", "greet", "--tips=false", "--tips:enabled"])
-            .err()
-            .expect("conflict is an error")
-            .to_string();
-        assert_eq!(
-            err,
-            "--tips=false conflicts with --tips:enabled=true; pass only one of them"
+        let err = check(&["aspect", "greet", "--tips=false", "--tips:enabled"])
+            .expect_err("conflict is an error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert_eq!(err.exit_code(), 2, "a usage error, as clap's own are");
+        let text = err.render().to_string();
+        assert!(
+            text.contains("--tips=false conflicts with --tips:enabled=true; pass only one of them"),
+            "{text}"
         );
-        assert!(parse(&["aspect", "greet", "--tips", "--tips:enabled=true"]).is_ok());
+        assert!(text.contains("Usage: aspect greet"), "{text}");
+        assert!(check(&["aspect", "greet", "--tips", "--tips:enabled=true"]).is_ok());
     }
 
     /// The shorthand outranks a config.axl `enabled` the way `--tips:enabled`
@@ -4351,7 +4534,7 @@ mod tests {
         let help = stub_feature("Help");
         let tips = stub_feature("Tips");
         let features: Vec<&dyn FeatureLike> = vec![&deployment, &help, &tips];
-        let reserved = shorthand_reserved(&features);
+        let reserved = shorthand_reserved(&[], &features);
         let shorthand = |f: &StubFeature| feature_block(f, &reserved).unwrap().shorthand;
         assert_eq!(shorthand(&deployment), None);
         assert_eq!(shorthand(&help), None);
@@ -4380,6 +4563,163 @@ mod tests {
                 Some(true)
             );
         });
+    }
+
+    /// A task wrapping a tool, with both buckets: `vals` is the post-command
+    /// value-taking list, `known` (post-command) and `startup_known`
+    /// (pre-command) the value-less ones.
+    fn wrapping_task(
+        name: &str,
+        vals: &[&str],
+        known: &[&str],
+        startup_known: &[&str],
+    ) -> StubTask {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("targets".to_owned(), arg_positional());
+        args.insert("vals".to_owned(), arg_string_list(vals, true));
+        args.insert("known".to_owned(), arg_string_list(known, true));
+        args.insert(
+            "startup_known".to_owned(),
+            arg_string_list(startup_known, true),
+        );
+        args.insert("startup_vals".to_owned(), arg_string_list(&[], true));
+        for (bucket, position, vals_from, known_from) in [
+            ("post", PassthroughPosition::PostCommand, "vals", "known"),
+            (
+                "pre",
+                PassthroughPosition::PreCommand,
+                "startup_vals",
+                "startup_known",
+            ),
+        ] {
+            args.insert(
+                bucket.to_owned(),
+                Arg::Passthrough {
+                    position,
+                    value_flags_from: Some(vals_from.to_owned()),
+                    known_flags_from: Some(known_from.to_owned()),
+                    description: None,
+                },
+            );
+        }
+        stub_task(name, &[], args)
+    }
+
+    /// A feature named like a flag the task forwards keeps its shorthand off
+    /// that task, so `aspect build --profile=p` still reaches the wrapped tool
+    /// (bucket, not feature), while a task forwarding nothing still takes it.
+    #[test]
+    fn feature_shorthand_yields_to_forwarded_flags() {
+        let build = wrapping_task("build", &["--profile"], &["--stamp"], &[]);
+        let greet = stub_task("greet", &[], SmallMap::new());
+        let profile = stub_feature("Profile");
+        let stamp = stub_feature("Stamp");
+        let cmd = Cmd {
+            tasks: vec![&build as &dyn TaskLike, &greet],
+            features: vec![&profile as &dyn FeatureLike, &stamp],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        let argv = [
+            "aspect",
+            "build",
+            "--profile=/tmp/p.json",
+            "--stamp",
+            "//...",
+        ];
+        assert_eq!(
+            route_with(&cmd, &argv),
+            [
+                "aspect",
+                "build",
+                "--post=--profile=/tmp/p.json",
+                "--post=--stamp",
+                "//...",
+            ]
+        );
+        let matches = root
+            .clone()
+            .try_get_matches_from(["aspect", "greet", "--profile", "--stamp=false"])
+            .expect("the shorthands parse where nothing else takes them");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+        Heap::temp(|heap| {
+            let enabled = |f: &StubFeature| {
+                dispatch
+                    .feature_args(f, heap)
+                    .get("enabled")
+                    .and_then(|v| v.unpack_bool())
+            };
+            assert_eq!(enabled(&profile), Some(true));
+            assert_eq!(enabled(&stamp), Some(false));
+        });
+
+        let reserved = shorthand_reserved(&cmd.tasks, &cmd.features);
+        let block = feature_block(&profile, &reserved).unwrap();
+        assert_eq!(
+            shorthand_coverage(&block, &cmd.tasks),
+            (Some("profile".to_owned()), vec!["aspect build".to_owned()])
+        );
+        assert_eq!(
+            shorthand_coverage(&block, &[&build as &dyn TaskLike]),
+            (None, vec![]),
+            "taken on every task, it is not offered at all"
+        );
+        let help = strip_ansi(
+            &render_feature_detail(
+                "1.2.3",
+                &profile,
+                &block,
+                &shorthand_coverage(&block, &cmd.tasks),
+                Path::new("/repo"),
+                &[],
+            )
+            .render_help()
+            .ansi()
+            .to_string(),
+        );
+        assert!(
+            help.contains("--profile is left to `aspect build`"),
+            "{help}"
+        );
+    }
+
+    /// The forwarded lists are read as config.axl leaves them.
+    #[test]
+    fn feature_shorthand_follows_config_forwarded_flags() {
+        let build = wrapping_task("build", &[], &[], &[]);
+        let wanted: HashSet<&str> = ["profile", "tips"].into();
+        let overrides = HashMap::from([("vals".to_owned(), vec!["--profile".to_owned()])]);
+        assert_eq!(
+            shorthand_taken_on(&build, &overrides, &wanted),
+            HashSet::from(["profile".to_owned()])
+        );
+        assert!(shorthand_taken_on(&build, &HashMap::new(), &wanted).is_empty());
+    }
+
+    /// A startup option any task forwards is reserved on every task: the
+    /// router leaves a flag typed before the task name alone whenever any
+    /// command declares it, so `aspect --quiet build` must not see one.
+    #[test]
+    fn feature_shorthand_skips_forwarded_startup_flags() {
+        let build = wrapping_task("build", &[], &[], &["--quiet"]);
+        let greet = stub_task("greet", &[], SmallMap::new());
+        let quiet = stub_feature("Quiet");
+        let cmd = Cmd {
+            tasks: vec![&build as &dyn TaskLike, &greet],
+            features: vec![&quiet as &dyn FeatureLike],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let reserved = shorthand_reserved(&cmd.tasks, &cmd.features);
+        assert_eq!(feature_block(&quiet, &reserved).unwrap().shorthand, None);
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        assert_eq!(
+            route_with(&cmd, &["aspect", "--quiet", "build", "//..."]),
+            ["aspect", "build", "--pre=--quiet", "//..."]
+        );
     }
 
     /// `args.string(bare = …)` makes a valueless `--flag` legal — what lets `--remote`
@@ -4460,6 +4800,7 @@ mod tests {
         Arg::Passthrough {
             position,
             value_flags_from: None,
+            known_flags_from: None,
             description: None,
         }
     }
@@ -4590,6 +4931,7 @@ mod tests {
                 Arg::Passthrough {
                     position,
                     value_flags_from: Some("vals".to_owned()),
+                    known_flags_from: None,
                     description: None,
                 },
             );
@@ -4611,6 +4953,7 @@ mod tests {
             Arg::Passthrough {
                 position: PassthroughPosition::PostCommand,
                 value_flags_from: Some("bazel_value_flags".to_owned()),
+                known_flags_from: None,
                 description: None,
             },
         );
@@ -4893,6 +5236,7 @@ mod tests {
             Arg::Passthrough {
                 position: PassthroughPosition::PreCommand,
                 value_flags_from: Some("vals".to_owned()),
+                known_flags_from: None,
                 description: None,
             },
         );

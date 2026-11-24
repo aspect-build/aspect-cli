@@ -2,12 +2,13 @@
 //! and no feature's shorthand takes a flag something else already owns.
 //!
 //! Spawns the real CLI in scratch workspaces: one with only the builtins, one
-//! with a copy of this repo's `MODULE.aspect` and `.aspect/`, and one with a
-//! probe feature of its own.
+//! with a copy of this repo's `MODULE.aspect` and `.aspect/`, one with a probe
+//! feature of its own, and one whose features are named like Bazel flags, with
+//! basil as Bazel.
 
 mod common;
 
-use common::{aspect_cli, base_env};
+use common::{aspect_cli, base_env, basil_bin};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -21,6 +22,17 @@ const SKIPPED: &[(&str, &str)] = &[(
 )];
 
 const VALUE_FLAGS: &str = include_str!("../src/builtins/aspect/bazel/value_flags.axl");
+const NO_VALUE_FLAGS: &str = include_str!("../src/builtins/aspect/bazel/no_value_flags.axl");
+
+/// The long flags listed in a generated `bazel/*_flags.axl` file, command and
+/// startup lists alike.
+fn listed_flags(source: &str) -> BTreeSet<&str> {
+    source
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"')?.split('"').next())
+        .filter(|f| f.starts_with("--"))
+        .collect()
+}
 
 fn aspect(dir: &Path, args: &[&str]) -> Output {
     Command::new(aspect_cli())
@@ -119,15 +131,11 @@ fn no_feature_shorthand_collides() {
     .expect("MODULE.aspect");
     copy_tree(&source.join(".aspect"), &repo.path().join(".aspect"));
 
-    let bazel_value_flags: BTreeSet<&str> = VALUE_FLAGS
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix('"')?.split('"').next())
-        .filter(|f| f.starts_with("--"))
-        .collect();
-    assert!(
-        bazel_value_flags.contains("--jobs"),
-        "value_flags.axl parsed"
-    );
+    let mut bazel_flags = listed_flags(VALUE_FLAGS);
+    bazel_flags.extend(listed_flags(NO_VALUE_FLAGS));
+    for flag in ["--jobs", "--output_base", "--stamp", "--nostamp", "--quiet"] {
+        assert!(bazel_flags.contains(flag), "{flag} listed");
+    }
 
     let want_skipped: BTreeSet<&str> = SKIPPED.iter().map(|(name, _)| *name).collect();
     for dir in [builtins.path(), repo.path()] {
@@ -142,14 +150,14 @@ fn no_feature_shorthand_collides() {
         for (name, (flag, unavailable)) in &found {
             assert!(
                 unavailable.is_empty(),
-                "--{name} is a task's own flag on {unavailable:?}"
+                "--{name} is a task's own flag or a forwarded one on {unavailable:?}"
+            );
+            assert!(
+                !bazel_flags.contains(format!("--{name}").as_str()),
+                "--{name} is a Bazel command or startup flag"
             );
             if let Some(flag) = flag {
                 assert_eq!(flag, &format!("--{name}"));
-                assert!(
-                    !bazel_value_flags.contains(flag.as_str()),
-                    "--{name} is a Bazel flag"
-                );
             }
         }
     }
@@ -226,7 +234,7 @@ fn shorthand_turns_a_feature_on_and_off() {
 #[test]
 fn shorthand_conflicting_with_enabled_fails_naming_both() {
     let output = probe("", &["--probe", "--probe:enabled=false"]);
-    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.status.code(), Some(2), "a usage error: {output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--probe=true conflicts with --probe:enabled=false"),
@@ -251,4 +259,74 @@ fn feature_help_shows_the_shorthand_beside_enabled() {
         help.contains("\n      --deployment:enabled[=<deployment:enabled>]\n"),
         "{help}"
     );
+}
+
+const BAZEL_NAMED: &str = r#"
+def _impl(ctx):
+    print("%s ran" % ctx.args.enabled)
+
+Profile = feature(implementation = _impl, summary = "Named like a command flag.", enabled = False)
+Stamp = feature(implementation = _impl, summary = "Named like a boolean.", enabled = False)
+Quiet = feature(implementation = _impl, summary = "Named like a startup option.", enabled = False)
+"#;
+
+/// Features named after a Bazel command flag that takes a value, a boolean
+/// command flag and a startup option leave all three to Bazel: `aspect build`
+/// forwards each to basil, as typed, and none of the features turns on.
+#[test]
+fn a_feature_named_like_a_bazel_flag_leaves_it_to_bazel() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::write(
+        root.join("MODULE.aspect"),
+        ["Profile", "Stamp", "Quiet"]
+            .map(|f| format!("use_feature(\".aspect/bazel_named.axl\", \"{f}\")\n"))
+            .concat(),
+    )
+    .expect("MODULE.aspect");
+    std::fs::create_dir(root.join(".aspect")).expect(".aspect");
+    std::fs::write(root.join(".aspect/bazel_named.axl"), BAZEL_NAMED).expect("features");
+
+    let argv_log = root.join("argv.log");
+    let output = Command::new(aspect_cli())
+        .args([
+            "--quiet",
+            "build",
+            "--profile=/tmp/p.json",
+            "--stamp",
+            "--profile",
+            "/tmp/q.json",
+            "//...",
+        ])
+        .current_dir(root)
+        .env_clear()
+        .envs(base_env())
+        .env("ASPECT_CLI_CACHE", root.join("cache"))
+        .env("HOME", root.join("home"))
+        .env("BAZEL_REAL", basil_bin())
+        .env("BASIL_ARGV_LOG", &argv_log)
+        .output()
+        .expect("running aspect build");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("True ran"),
+        "no feature turned on: {output:?}"
+    );
+    let log = std::fs::read_to_string(&argv_log).expect("basil argv log");
+    for want in ["--quiet", "--profile=/tmp/p.json", "--stamp", "/tmp/q.json"] {
+        assert!(log.contains(want), "{want} reached Bazel: {log}");
+    }
+
+    let help = aspect(root, &["feature", "quiet"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help.contains("\n      --quiet:enabled[=<quiet:enabled>]\n"),
+        "a startup option is no shorthand anywhere: {help}"
+    );
+    let profile = json(aspect(root, &["describe", "feature profile"]));
+    let unavailable = profile["shorthand_unavailable_on"]
+        .as_array()
+        .expect("shorthand_unavailable_on");
+    assert!(unavailable.iter().any(|c| c == "aspect build"), "{profile}");
 }

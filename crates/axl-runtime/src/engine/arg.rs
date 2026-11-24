@@ -140,6 +140,12 @@ pub enum Arg {
         /// Reading it from a sibling arg rather than inline is what lets
         /// `config.axl` replace the list.
         value_flags_from: Option<String>,
+        /// Name of a sibling `args.string_list` arg listing the wrapped tool's
+        /// flags that take no separate value. Routing never needs it (such a
+        /// flag is collected alone either way); with `value_flags_from` it is
+        /// the set of spellings the bucket forwards, which a feature's bare
+        /// `--<name>` flag is kept off of.
+        known_flags_from: Option<String>,
         description: Option<String>,
     },
     StringList {
@@ -315,6 +321,17 @@ impl Arg {
             Self::Passthrough {
                 value_flags_from, ..
             } => value_flags_from.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The sibling arg an `args.passthrough()` reads its list of value-less
+    /// flags from, if it declares one.
+    pub fn known_flags_from(&self) -> Option<&str> {
+        match self {
+            Self::Passthrough {
+                known_flags_from, ..
+            } => known_flags_from.as_deref(),
             _ => None,
         }
     }
@@ -590,6 +607,12 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// would collect `--jobs` and leave `8` as a positional. Keeping the list in
     /// a sibling arg rather than inline is what lets `config.axl` replace it.
     ///
+    /// `known_flags_from` names a sibling `args.string_list` of the wrapped
+    /// tool's flags that take no separate value (`--stamp`, `--nostamp`). It
+    /// does not change routing. Together with `value_flags_from` it says which
+    /// spellings belong to the wrapped tool, so a feature's bare `--<name>`
+    /// flag is never registered where it would take one of them.
+    ///
     /// Nothing is rewritten on the way through: what the wrapped tool receives
     /// is what was typed.
     ///
@@ -619,6 +642,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn passthrough<'v>(
         #[starlark(require = named)] position: String,
         #[starlark(require = named, default = NoneOr::None)] value_flags_from: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] known_flags_from: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<Arg> {
         let Some(position) = PassthroughPosition::parse(&position) else {
@@ -634,6 +658,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(Arg::Passthrough {
             position,
             value_flags_from: value_flags_from.into_option(),
+            known_flags_from: known_flags_from.into_option(),
             description: description.into_option(),
         })
     }

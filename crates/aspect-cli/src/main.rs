@@ -323,6 +323,10 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 _ => {}
             }
 
+            if let Err(err) = cmd.feature_flag_conflict(&mut cmd_for_help, &matches) {
+                err.print().ok();
+                return Ok(ExitCode::from(err.exit_code() as u8));
+            }
             let dispatch = step("dispatch", || cmd.dispatch(matches))?;
 
             // Resolve the `Console` feature's templates before anything is
