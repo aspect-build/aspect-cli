@@ -756,8 +756,7 @@ def _test_terminal_format(_):
     _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "TIP[x] 🟡 warning: 3 more; the last: T")
     _eq("now", terminal_now_line("x", TIP_INFO, "T"), "TIP[x] 💬 note: now: T")
     _eq("hint", terminal_hint_lines(), [
-        "TIP[tips-hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips-hint`) or in `.aspect/config.axl`",
-        "  https://aspect.build/go/cli-tips-silence",
+        "TIP[tips-hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips-hint`) or in `.aspect/config.axl`; see https://aspect.build/go/cli-tips-silence",
     ])
 
 def _test_terminal_colour_and_console(ctx):

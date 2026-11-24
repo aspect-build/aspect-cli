@@ -32,6 +32,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// How many file links' URLs [`written_urls`] has written out in this
+/// process (Terminal.app's, which shows no OSC 8 link).
+static WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// How many file links' URLs this process has written beside their links.
+pub fn written() -> u64 {
+    WRITTEN.load(Ordering::Relaxed)
+}
 
 use regex::bytes::Regex;
 
@@ -747,6 +757,7 @@ pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
             (at, written_url(&url, styled, &active_style(&record[..at])))
         })
         .collect();
+    WRITTEN.fetch_add(inserts.len() as u64, Ordering::Relaxed);
     inserts.extend(underlines);
     inserts.sort_by_key(|(at, _)| *at);
     if inserts.is_empty() {
@@ -1870,6 +1881,20 @@ mod tests {
             Some("zed"),
             "kept in single quotes"
         );
+    }
+
+    #[test]
+    fn written_file_urls_are_counted_and_web_links_not() {
+        let before = super::written();
+        let file = "\x1b]8;;cursor://file/a.cc:1:1\x1b\\a.cc\x1b]8;;\x1b\\";
+        let web = "\x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\";
+        written_urls(format!("{file} and {web}").as_bytes(), false);
+        // Other tests write URLs too, concurrently: at least this one's.
+        assert!(super::written() >= before + 1);
+        let before = super::written();
+        written_urls(web.as_bytes(), false);
+        written_urls(b"no links", false);
+        assert!(super::written() >= before, "never down");
     }
 
     #[test]

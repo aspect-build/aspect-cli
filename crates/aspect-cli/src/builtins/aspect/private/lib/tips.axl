@@ -1079,14 +1079,34 @@ def terminal_now_line(id, severity, title, color_on = False, console = None):
     printed: its title now."""
     return _tip_head(id, severity, "now: " + title, color_on, console)
 
+# The id of the end-of-task tip saying how to open a link Terminal.app shows
+# written out.
+TERMINAL_APP_LINKS_ID = "terminal-app-links"
+
+def terminal_app_links_tip(ctx):
+    """In Terminal.app, once the run wrote a link's URL out (it shows no
+    clickable link), a note on how to open one, at the end of the task."""
+    if ctx.std.io.links_written == 0:
+        return
+    add_tip(
+        ctx,
+        id = TERMINAL_APP_LINKS_ID,
+        severity = TIP_NOTE,
+        title = "Control+click a link and choose Open URL, or Cmd+double-click it, to open it",
+        body = "Terminal.app shows no clickable links, so a link's URL is written beside it.\n" +
+               "A file's link opens in the editor `--console:file-hyperlink-format` names.",
+        surfaces = [SURFACE_CLI],
+        show = TIP_SHOW_END,
+    )
+
 # The id of the end-of-task line saying how to silence a tip.
 TIPS_HINT_ID = "tips-hint"
 
 def terminal_hint_lines(color_on = False, console = None):
-    """The end-of-task `tips-hint` tip: how to silence a tip, by flag (its
-    own id the example) or in `.aspect/config.axl`, the docs under it."""
-    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `.aspect/config.axl`" % TIPS_HINT_ID
-    return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, CLI_TIPS_SILENCE_URL, color_on, console)
+    """The end-of-task `tips-hint` tip, on one line: how to silence a tip, by
+    flag (its own id the example) or in `.aspect/config.axl`, and the docs."""
+    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `.aspect/config.axl`; see %s" % (TIPS_HINT_ID, CLI_TIPS_SILENCE_URL)
+    return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, "", color_on, console)
 
 def _console(ctx):
     """`ctx`'s console, through whose `tip` slot a tip renders, or None for a
@@ -1331,6 +1351,7 @@ def _tips_impl(ctx):
         once."""
         if not auto_print[0] or finished[0]:
             return
+        terminal_app_links_tip(task_ctx)
         finished[0] = True
         color_on = task_ctx.std.io.stderr.color
         for id in order:
