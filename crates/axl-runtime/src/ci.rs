@@ -11,7 +11,8 @@ use std::path::PathBuf;
 ///
 /// `CI` is the universal marker — every recognized host sets it — and the
 /// named vars cover hosts that historically didn't always set it.
-const CI_MARKERS: &[&str] = &["CI", "BUILDKITE", "GITHUB_ACTIONS", "CIRCLECI", "GITLAB_CI"];
+pub(crate) const CI_MARKERS: &[&str] =
+    &["CI", "BUILDKITE", "GITHUB_ACTIONS", "CIRCLECI", "GITLAB_CI"];
 
 /// True on any recognized CI host (Buildkite / GitHub Actions / CircleCI /
 /// GitLab CI / generic `CI=…`).
