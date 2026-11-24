@@ -464,21 +464,16 @@ struct DeploymentsConfig {
 }
 
 fn config_path() -> anyhow::Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to determine home directory"))?;
-    Ok(home.join(".aspect").join("config.json"))
+    crate::config_json::user_path()
 }
 
 fn load_config_file(path: &PathBuf) -> anyhow::Result<Vec<Deployment>> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            let cfg: DeploymentsConfig = serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?;
-            Ok(cfg.deployments)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(anyhow::anyhow!("failed to read {}: {}", path.display(), e)),
-    }
+    let Some(content) = crate::config_json::read(path)? else {
+        return Ok(Vec::new());
+    };
+    let cfg: DeploymentsConfig = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?;
+    Ok(cfg.deployments)
 }
 
 /// One config file in the overlay chain, in precedence order (repo before user).
@@ -1419,7 +1414,8 @@ fn keep_build_endpoints(refreshed: &mut Deployment, recorded: &Deployment) {
 }
 
 /// Serialize `deployments` to the user's `~/.aspect/config.json` (creating the
-/// directory), replacing the whole file. The built-in seed is not persisted —
+/// directory), replacing its `deployments` and keeping its other top-level keys
+/// (`editor`, see [`crate::config_json`]). The built-in seed is not persisted -
 /// only user-configured deployments live in the file (the seed is re-added by
 /// [`load_deployments`] on read).
 fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
@@ -1428,11 +1424,27 @@ fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("failed to create ~/.aspect directory: {}", e))?;
     }
-    let json = serde_json::to_string_pretty(&DeploymentsConfig { deployments })
-        .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))?;
+    let json = user_config_json(crate::config_json::read(&path)?.as_deref(), deployments)?;
     fs::write(&path, &json)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path.display(), e))?;
     Ok(())
+}
+
+/// The text of a user `config.json` holding `deployments`, beside the other
+/// top-level keys of `existing` (the file's text) when that is a JSON object.
+fn user_config_json(
+    existing: Option<&str>,
+    deployments: Vec<Deployment>,
+) -> anyhow::Result<String> {
+    let mut object = match existing.map(serde_json::from_str::<serde_json::Value>) {
+        Some(Ok(serde_json::Value::Object(object))) => object,
+        _ => serde_json::Map::new(),
+    };
+    let deployments = serde_json::to_value(&deployments)
+        .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))?;
+    object.insert("deployments".into(), deployments);
+    serde_json::to_string_pretty(&object)
+        .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))
 }
 
 /// Write (or replace by name) a deployment in the user's `~/.aspect/config.json`
@@ -5161,6 +5173,20 @@ mod tests {
             entries,
             user,
         }
+    }
+
+    #[test]
+    fn writing_deployments_keeps_the_user_configs_other_keys() {
+        let existing = r#"{"editor": "zed", "deployments": [{"name": "old"}]}"#;
+        let json = user_config_json(Some(existing), vec![dep("new", true)]).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(written["editor"], "zed");
+        assert_eq!(written["deployments"].as_array().unwrap().len(), 1);
+        assert_eq!(written["deployments"][0]["name"], "new");
+
+        let json = user_config_json(None, vec![dep("new", true)]).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(written.as_object().unwrap().len(), 1);
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod banner;
 pub mod builtins;
 pub mod ci;
 pub mod color;
+mod config_json;
 pub mod console;
 pub mod diag;
 pub mod docs;

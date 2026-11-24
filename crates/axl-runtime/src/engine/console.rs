@@ -37,8 +37,12 @@ use super::template::json_to_minijinja;
 /// none. A disabled feature gives the `full` layout and the environment's
 /// level. It also sets what links to files open, for the process
 /// (`file_hyperlink_format`, see `crate::out::set_link_format`), whether or not
-/// the feature is enabled. Fails on a malformed `templates`, `task_presets`,
-/// `task_templates`, `verbose` or `file_hyperlink_format` value and on everything [`Surface::resolve`] refuses. The surface carries a
+/// the feature is enabled; `user_editor` is the `editor` in the user's
+/// `~/.aspect/config.json` (`crate::out::user_link_format`), which beats a
+/// `config.axl`'s arg and loses to the command line and the environment.
+/// Fails on a malformed `templates`, `task_presets`, `task_templates`,
+/// `verbose` or `file_hyperlink_format` value and on everything
+/// [`Surface::resolve`] refuses. The surface carries a
 /// warning for each `task_presets` / `task_templates` key that is a near miss
 /// of one of `task_paths`, the command paths of the repo's tasks.
 pub fn from_feature_args(
@@ -46,8 +50,13 @@ pub fn from_feature_args(
     task: TaskIdentity,
     host: Host,
     task_paths: &[String],
+    user_editor: Option<Option<bazel::console::links::LinkFormat>>,
 ) -> Result<Surface, String> {
-    crate::out::set_link_format(file_hyperlink_format(args)?);
+    crate::out::set_link_format(file_hyperlink_format(
+        args,
+        crate::out::env_link_format(),
+        user_editor,
+    )?);
     if !args
         .get("enabled")
         .and_then(|v| v.unpack_bool())
@@ -113,10 +122,16 @@ pub fn from_feature_args(
 }
 
 /// What a link to a file opens, `None` for `auto` (`LinkFormat::auto`):
-/// the `file_hyperlink_format` arg typed on the command line, else
-/// `ASPECT_FILE_HYPERLINK_FORMAT`, else the arg a `config.axl` set.
+/// the `file_hyperlink_format` arg typed on the command line, else `env`
+/// (`ASPECT_FILE_HYPERLINK_FORMAT`, see `crate::out::env_link_format`), else
+/// `user` (the `editor` in `~/.aspect/config.json`, see
+/// `crate::out::user_link_format`), else the arg a `config.axl` set, else
+/// `auto`. Fails on an invalid arg or `env`; an invalid `editor` was warned
+/// about and reaches here as unset.
 fn file_hyperlink_format(
     args: &Arguments<'_>,
+    env: Option<Result<Option<bazel::console::links::LinkFormat>, String>>,
+    user: Option<Option<bazel::console::links::LinkFormat>>,
 ) -> Result<Option<bazel::console::links::LinkFormat>, String> {
     let arg = || match args
         .get("file_hyperlink_format")
@@ -130,8 +145,11 @@ fn file_hyperlink_format(
     if args.is_explicit_key("file_hyperlink_format") {
         return arg();
     }
-    match crate::out::env_link_format() {
-        Some(chosen) => chosen,
+    if let Some(chosen) = env {
+        return chosen;
+    }
+    match user {
+        Some(chosen) => Ok(chosen),
         None => arg(),
     }
 }
@@ -309,6 +327,7 @@ fn downcast(this: Value<'_>) -> anyhow::Result<&Console> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bazel::console::links::LinkFormat;
 
     fn task() -> TaskIdentity {
         TaskIdentity {
@@ -335,7 +354,7 @@ args = {{"templates": templates, "task_presets": task_presets, "task_templates":
             for (name, value) in DictRef::from_value(bound).unwrap().iter() {
                 args.insert(name.unpack_str().unwrap().into(), value);
             }
-            let surface = from_feature_args(&args, task(), Host::default(), &[])?;
+            let surface = from_feature_args(&args, task(), Host::default(), &[], None)?;
             Ok(surface.render(slot, minijinja::context! { text => "x" }))
         })
     }
@@ -430,10 +449,11 @@ task_templates = {"check": {"progress": "mine"}}"#;
         crate::test::eval("enabled = False").with_value("enabled", |enabled| {
             let args = Arguments::new();
             args.insert("enabled".into(), enabled);
-            let surface = from_feature_args(&args, task(), Host::default(), &[]).unwrap();
+            let surface = from_feature_args(&args, task(), Host::default(), &[], None).unwrap();
             assert_eq!(surface.preset(), "full");
         });
-        let surface = from_feature_args(&Arguments::new(), task(), Host::default(), &[]).unwrap();
+        let surface =
+            from_feature_args(&Arguments::new(), task(), Host::default(), &[], None).unwrap();
         assert_eq!(surface.preset(), DEFAULT_PRESET);
     }
 
@@ -480,7 +500,7 @@ task_templates = {"check": {"progress": "mine"}}"#;
                 verbose: env,
                 ..Host::default()
             };
-            from_feature_args(&args, task(), host, &[])
+            from_feature_args(&args, task(), host, &[], None)
         })
     }
 
@@ -569,6 +589,74 @@ task_templates = {"check": {"progress": "mine"}}"#;
         );
     }
 
+    /// [`file_hyperlink_format`] with the arg bound to `value` and marked as
+    /// `source` set it (`"cli"`, `"config"`, or `""` for the schema default).
+    fn link_format_from(
+        value: &str,
+        source: &str,
+        env: Option<Result<Option<LinkFormat>, String>>,
+        user: Option<Option<LinkFormat>>,
+    ) -> Result<Option<LinkFormat>, String> {
+        crate::test::eval(&format!("value = {value:?}")).with_value("value", |bound| {
+            let args = Arguments::new();
+            args.insert("file_hyperlink_format".into(), bound);
+            match source {
+                "cli" => args.mark_explicit("file_hyperlink_format".into()),
+                "config" => args.mark_configured("file_hyperlink_format".into()),
+                _ => {}
+            }
+            file_hyperlink_format(&args, env, user)
+        })
+    }
+
+    #[test]
+    fn file_hyperlink_format_takes_the_command_line_then_env_then_user_then_config() {
+        let format = |name| Some(LinkFormat::parse(name).unwrap());
+        let zed = Some(format("zed"));
+        assert_eq!(
+            link_format_from("cursor", "cli", Some(Ok(format("idea"))), zed.clone()),
+            Ok(format("cursor")),
+            "CLI > env, user"
+        );
+        assert_eq!(
+            link_format_from("auto", "cli", None, zed.clone()),
+            Ok(None),
+            "auto on the CLI is a choice"
+        );
+        assert_eq!(
+            link_format_from("cursor", "config", Some(Ok(format("idea"))), zed.clone()),
+            Ok(format("idea")),
+            "env > user, config"
+        );
+        assert_eq!(
+            link_format_from("cursor", "config", None, zed.clone()),
+            Ok(format("zed")),
+            "user > config"
+        );
+        assert_eq!(
+            link_format_from("cursor", "config", None, Some(None)),
+            Ok(None),
+            "the user's auto beats config"
+        );
+        assert_eq!(
+            link_format_from("cursor", "config", None, None),
+            Ok(format("cursor")),
+            "config with no user editor"
+        );
+        assert_eq!(
+            link_format_from("auto", "", None, None),
+            Ok(None),
+            "auto by default"
+        );
+        assert_eq!(
+            link_format_from("bogus", "config", None, zed),
+            Ok(format("zed")),
+            "an invalid config arg the user's editor beats is not read"
+        );
+        let err = link_format_from("bogus", "config", None, None).unwrap_err();
+        assert!(err.starts_with("Console file_hyperlink_format: "), "{err}");
+    }
+
     #[test]
     fn the_surface_carries_near_miss_warnings() {
         crate::test::eval(r#"task_presets = {"chek": "silent", "release-notes": "silent"}"#)
@@ -576,13 +664,14 @@ task_templates = {"check": {"progress": "mine"}}"#;
                 let args = Arguments::new();
                 args.insert("task_presets".into(), task_presets);
                 let paths = ["check".to_owned()];
-                let surface = from_feature_args(&args, task(), Host::default(), &paths).unwrap();
+                let surface =
+                    from_feature_args(&args, task(), Host::default(), &paths, None).unwrap();
                 assert_eq!(
                     surface.warnings(),
                     [r#"Console task_presets["chek"] names no task here; did you mean "check"?"#]
                 );
                 assert!(
-                    from_feature_args(&args, task(), Host::default(), &[])
+                    from_feature_args(&args, task(), Host::default(), &[], None)
                         .unwrap()
                         .warnings()
                         .is_empty()

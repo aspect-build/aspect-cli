@@ -731,7 +731,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// including the `agent` layout a coding agent gets. Color, Buildkite and
     /// coding-agent detection and the environment's verbose level come from
     /// the run's `Env` ([`Host::of`], which fails on an invalid
-    /// `ASPECT_VERBOSE`), the console's only view of its host. Also sets the
+    /// `ASPECT_VERBOSE`), the console's only view of its host; the `editor`
+    /// in the user's `~/.aspect/config.json` comes from
+    /// [`crate::out::user_link_format`]. Also sets the
     /// verbose level for the rest of the run ([`diag::set_verbose`]) as the
     /// resolved console says.
     pub fn resolve_console(
@@ -761,6 +763,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 identity,
                 host,
                 &self.task_paths(),
+                crate::out::user_link_format(),
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };

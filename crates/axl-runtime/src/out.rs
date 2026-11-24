@@ -87,7 +87,8 @@ pub(crate) fn terminal_links() -> bool {
 
 /// What a link to a file opens, as the Console feature's `file_hyperlink_format`
 /// says once a task resolves it ([`set_link_format`]); until then
-/// `ASPECT_FILE_HYPERLINK_FORMAT`; and for `auto`, the editor
+/// `ASPECT_FILE_HYPERLINK_FORMAT`, else the user's `editor`
+/// ([`user_link_format`]); and for `auto`, the editor
 /// `LinkFormat::auto` finds (its terminal's, `$VISUAL`/`$EDITOR`'s, one
 /// installed, on `PATH` or as a macOS app), else none.
 static LINK_FORMAT: std::sync::RwLock<Option<bazel::console::links::LinkFormat>> =
@@ -104,14 +105,51 @@ pub(crate) fn set_link_format(format: Option<bazel::console::links::LinkFormat>)
 }
 
 /// What a link to a file opens now; see [`LINK_FORMAT`]. Before a task
-/// resolves the Console, `ASPECT_FILE_HYPERLINK_FORMAT` when it is a format.
+/// resolves the Console, `ASPECT_FILE_HYPERLINK_FORMAT` when it is a format or
+/// `auto`, else the user's `editor`.
 pub(crate) fn link_format() -> bazel::console::links::LinkFormat {
     LINK_FORMAT
         .read()
         .ok()
         .and_then(|f| f.clone())
-        .or_else(|| env_link_format().and_then(Result::ok).flatten())
+        .or_else(|| match env_link_format() {
+            Some(Ok(format)) => format,
+            _ => user_link_format().flatten(),
+        })
         .unwrap_or_else(|| AUTO_LINK_FORMAT.clone())
+}
+
+/// The `editor` in the user's `~/.aspect/config.json`, read once for the
+/// process: `None` when it sets none, else a format or `None` for `auto`. An
+/// invalid one is a warning, once, and reads as unset.
+pub(crate) fn user_link_format() -> Option<Option<bazel::console::links::LinkFormat>> {
+    static USER: std::sync::LazyLock<Option<Option<bazel::console::links::LinkFormat>>> =
+        std::sync::LazyLock::new(|| {
+            let path = crate::config_json::user_path().ok()?;
+            editor_link_format(&path).unwrap_or_else(|warning| {
+                crate::diag::warn(&warning);
+                None
+            })
+        });
+    USER.clone()
+}
+
+/// The `editor` in the `config.json` at `path`: `None` when the file or the
+/// key is missing, else a format or `None` for `auto`, or a warning naming the
+/// file and key when the file is unreadable or the value is not a format.
+pub(crate) fn editor_link_format(
+    path: &std::path::Path,
+) -> Result<Option<Option<bazel::console::links::LinkFormat>>, String> {
+    let ignored = |e: String| format!("{e}; ignoring it");
+    let Some(value) = crate::config_json::editor(path).map_err(ignored)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "auto" => Ok(Some(None)),
+        value => bazel::console::links::LinkFormat::parse(value)
+            .map(|format| Some(Some(format)))
+            .map_err(|e| ignored(format!("{} \"editor\": {e}", path.display()))),
+    }
 }
 
 /// Whether links' URLs are written beside them too: Terminal.app, which
@@ -245,6 +283,42 @@ pub fn panicking_print_macros(sources: &include_dir::Dir<'_>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use bazel::console::links::LinkFormat;
+
+    #[test]
+    fn the_user_editor_is_a_format_auto_or_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(super::editor_link_format(&path), Ok(None), "missing file");
+        std::fs::write(&path, r#"{"deployments": []}"#).unwrap();
+        assert_eq!(super::editor_link_format(&path), Ok(None), "missing key");
+        std::fs::write(&path, r#"{"editor": "auto"}"#).unwrap();
+        assert_eq!(super::editor_link_format(&path), Ok(Some(None)));
+        std::fs::write(&path, r#"{"editor": "zed"}"#).unwrap();
+        assert_eq!(
+            super::editor_link_format(&path),
+            Ok(Some(Some(LinkFormat::parse("zed").unwrap())))
+        );
+        std::fs::write(&path, r#"{"editor": "myeditor://{path}"}"#).unwrap();
+        assert_eq!(
+            super::editor_link_format(&path),
+            Ok(Some(Some(LinkFormat::Template("myeditor://{path}".into()))))
+        );
+    }
+
+    #[test]
+    fn an_invalid_user_editor_is_a_warning_naming_the_file_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let file = path.display().to_string();
+        for content in [r#"{"editor": "nope"}"#, r#"{"editor": 1}"#, "{"] {
+            std::fs::write(&path, content).unwrap();
+            let warning = super::editor_link_format(&path).unwrap_err();
+            assert!(warning.contains(&file), "{content}: {warning}");
+            assert!(warning.contains("\"editor\""), "{content}: {warning}");
+        }
+    }
+
     #[test]
     fn no_panicking_print_macros() {
         static SRC: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src");
