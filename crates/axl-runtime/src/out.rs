@@ -105,26 +105,46 @@ pub(crate) fn set_link_format(format: Option<bazel::console::links::LinkFormat>)
 }
 
 /// What a link to a file opens now; see [`LINK_FORMAT`]. Before a task
-/// resolves the Console, `ASPECT_FILE_HYPERLINK_FORMAT` when it is a format or
-/// `auto`, else the user's `editor`.
+/// resolves the Console, [`unconfigured_link_format`] of the user's `editor`.
 pub(crate) fn link_format() -> bazel::console::links::LinkFormat {
     LINK_FORMAT
         .read()
         .ok()
         .and_then(|f| f.clone())
-        .or_else(|| match env_link_format() {
-            Some(Ok(format)) => format,
-            _ => user_link_format().flatten(),
-        })
+        .or_else(|| unconfigured_link_format(user_link_format()))
         .unwrap_or_else(|| AUTO_LINK_FORMAT.clone())
+}
+
+/// Make links to files in [`unconfigured_link_format`] of `user` from now
+/// on: for a task whose run has no Console feature to resolve them.
+pub(crate) fn set_unconfigured_link_format(
+    user: Option<Option<bazel::console::links::LinkFormat>>,
+) {
+    set_link_format(unconfigured_link_format(user));
+}
+
+/// What a link to a file opens with no Console arg to say:
+/// `ASPECT_FILE_HYPERLINK_FORMAT` when it is a format or `auto`, else `user`
+/// (the `editor` in the user's `~/.aspect/config.json`); `None` for `auto`.
+fn unconfigured_link_format(
+    user: Option<Option<bazel::console::links::LinkFormat>>,
+) -> Option<bazel::console::links::LinkFormat> {
+    match env_link_format() {
+        Some(Ok(format)) => format,
+        _ => user.flatten(),
+    }
 }
 
 /// The `editor` in the user's `~/.aspect/config.json`, read once for the
 /// process: `None` when it sets none, else a format or `None` for `auto`. An
-/// invalid one is a warning, once, and reads as unset.
+/// invalid one is a warning, once, and reads as unset. Unit tests read none,
+/// so they never depend on the real `HOME`.
 pub(crate) fn user_link_format() -> Option<Option<bazel::console::links::LinkFormat>> {
     static USER: std::sync::LazyLock<Option<Option<bazel::console::links::LinkFormat>>> =
         std::sync::LazyLock::new(|| {
+            if cfg!(test) {
+                return None;
+            }
             let path = crate::config_json::user_path().ok()?;
             editor_link_format(&path).unwrap_or_else(|warning| {
                 crate::diag::warn(&warning);
@@ -136,7 +156,8 @@ pub(crate) fn user_link_format() -> Option<Option<bazel::console::links::LinkFor
 
 /// The `editor` in the `config.json` at `path`: `None` when the file or the
 /// key is missing, else a format or `None` for `auto`, or a warning naming the
-/// file and key when the file is unreadable or the value is not a format.
+/// file and key when the file is unreadable or not a JSON object or the value
+/// is not a format.
 pub(crate) fn editor_link_format(
     path: &std::path::Path,
 ) -> Result<Option<Option<bazel::console::links::LinkFormat>>, String> {
@@ -311,7 +332,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let file = path.display().to_string();
-        for content in [r#"{"editor": "nope"}"#, r#"{"editor": 1}"#, "{"] {
+        for content in [r#"{"editor": "nope"}"#, r#"{"editor": 1}"#, "{", "[]"] {
             std::fs::write(&path, content).unwrap();
             let warning = super::editor_link_format(&path).unwrap_err();
             assert!(warning.contains(&file), "{content}: {warning}");

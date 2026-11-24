@@ -25,13 +25,20 @@ pub(crate) fn read(path: &Path) -> anyhow::Result<Option<String>> {
 
 /// The top-level `editor` string of the `config.json` at `path`: `None` when
 /// the file or the key is missing, an error naming the file and key when the
-/// file cannot be read or parsed or the value is not a string.
+/// file cannot be read or parsed, is not a JSON object, or the value is not a
+/// string.
 pub(crate) fn editor(path: &Path) -> Result<Option<String>, String> {
     let Some(content) = read(path).map_err(|e| format!("\"editor\": {e}"))? else {
         return Ok(None);
     };
     let json: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("failed to parse {} for \"editor\": {e}", path.display()))?;
+    if !json.is_object() {
+        return Err(format!(
+            "{} is not a JSON object, so has no \"editor\"",
+            path.display()
+        ));
+    }
     match json.get("editor") {
         None => Ok(None),
         Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
@@ -69,5 +76,11 @@ mod tests {
         let err = editor(&path).unwrap_err();
         assert!(err.starts_with("failed to parse"), "{err}");
         assert!(err.contains("\"editor\""), "{err}");
+        for root in ["[]", r#""zed""#, "null"] {
+            std::fs::write(&path, root).unwrap();
+            let err = editor(&path).unwrap_err();
+            assert!(err.contains("is not a JSON object"), "{root}: {err}");
+            assert!(err.contains("\"editor\""), "{root}: {err}");
+        }
     }
 }

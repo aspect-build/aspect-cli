@@ -1424,21 +1424,32 @@ fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("failed to create ~/.aspect directory: {}", e))?;
     }
-    let json = user_config_json(crate::config_json::read(&path)?.as_deref(), deployments)?;
+    let json = user_config_json(
+        &path,
+        crate::config_json::read(&path)?.as_deref(),
+        deployments,
+    )?;
     fs::write(&path, &json)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path.display(), e))?;
     Ok(())
 }
 
 /// The text of a user `config.json` holding `deployments`, beside the other
-/// top-level keys of `existing` (the file's text) when that is a JSON object.
+/// top-level keys of `existing` (the text of the file at `path`, `None` for no
+/// file). Fails when `existing` is not a JSON object, rather than overwrite a
+/// file whose other keys it cannot keep.
 fn user_config_json(
+    path: &std::path::Path,
     existing: Option<&str>,
     deployments: Vec<Deployment>,
 ) -> anyhow::Result<String> {
     let mut object = match existing.map(serde_json::from_str::<serde_json::Value>) {
+        None => serde_json::Map::new(),
         Some(Ok(serde_json::Value::Object(object))) => object,
-        _ => serde_json::Map::new(),
+        Some(Ok(_)) => anyhow::bail!("{} is not a JSON object; not writing it", path.display()),
+        Some(Err(e)) => {
+            anyhow::bail!("failed to parse {}: {e}; not writing it", path.display())
+        }
     };
     let deployments = serde_json::to_value(&deployments)
         .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))?;
@@ -5178,15 +5189,41 @@ mod tests {
     #[test]
     fn writing_deployments_keeps_the_user_configs_other_keys() {
         let existing = r#"{"editor": "zed", "deployments": [{"name": "old"}]}"#;
-        let json = user_config_json(Some(existing), vec![dep("new", true)]).unwrap();
+        let json = user_config_json(
+            std::path::Path::new("config.json"),
+            Some(existing),
+            vec![dep("new", true)],
+        )
+        .unwrap();
         let written: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(written["editor"], "zed");
         assert_eq!(written["deployments"].as_array().unwrap().len(), 1);
         assert_eq!(written["deployments"][0]["name"], "new");
 
-        let json = user_config_json(None, vec![dep("new", true)]).unwrap();
+        let json = user_config_json(
+            std::path::Path::new("config.json"),
+            None,
+            vec![dep("new", true)],
+        )
+        .unwrap();
         let written: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(written.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn writing_deployments_refuses_a_user_config_it_cannot_keep() {
+        for existing in ["{", "[]", r#""text""#] {
+            let err = user_config_json(
+                std::path::Path::new("config.json"),
+                Some(existing),
+                vec![dep("new", true)],
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not writing it"),
+                "{existing}: {err}"
+            );
+        }
     }
 
     #[test]
