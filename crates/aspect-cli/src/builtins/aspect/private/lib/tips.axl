@@ -22,7 +22,7 @@ The `type` field selects the engine for `title` / `body`:
 
 # Feature-disabled behavior
 
-When `Tips` is off, the trait's null-object defaults take over: `add_tip`
+When `Tips` is off, or the task doesn't declare `tips.TRAITS`, `add_tip`
 is a silent no-op and `collect_tips_sorted` returns []. Emit sites don't
 need to probe — the data flow just goes quiet.
 
@@ -900,7 +900,8 @@ def add_tip(
         tip = dict(common, title = title.format(**vars), body = body.format(**vars))
     else:
         tip = dict(common, title = title, body = body)
-    ctx.traits[_TipsTrait].add(ctx, tip)
+    if _TipsTrait in ctx.traits:
+        ctx.traits[_TipsTrait].add(ctx, tip)
 
 def collect_tips_sorted(ctx, limit = None, surface = None):
     """Return the task's tips filtered by `surface` (against each tip's
@@ -911,6 +912,8 @@ def collect_tips_sorted(ctx, limit = None, surface = None):
     `None` (default) skips filtering. See `tip_shows_on`. Pass `limit` to
     cap the result for space-constrained surfaces.
     """
+    if _TipsTrait not in ctx.traits:
+        return []
     filtered = [t for t in ctx.traits[_TipsTrait].collect() if tip_shows_on(t, surface)]
     out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
     if limit != None and limit >= 0:

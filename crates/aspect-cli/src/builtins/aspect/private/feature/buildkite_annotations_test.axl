@@ -395,7 +395,7 @@ def _assert_status_surface_hooks(ctx):
     """`status_surface_update` hooks decide publish / remove / restyle /
     rewrite; they chain in order and resolve to exactly what the caller
     writes. (The remove-latch — a removed surface never re-posts — lives in
-    feature state, covered by the stub-agent e2e runs, not here.)"""
+    feature state; `crates/aspect-cli/tests/buildkite_annotations.rs` covers it.)"""
 
     def _drop_passed(ctx, info):
         if info.final and info.status == "passed":
