@@ -1093,8 +1093,8 @@ def terminal_app_links_tip(ctx):
         id = TERMINAL_APP_LINKS_ID,
         severity = TIP_NOTE,
         title = "Control+click a link and choose Open URL, or Cmd+double-click it, to open it",
-        body = "Terminal.app shows no clickable links, so a link's URL is written beside it.\n" +
-               "A file's link opens in the editor `--console:file-hyperlink-format` names.",
+        body = "The macOS Terminal doesn't make links clickable, so each one's URL is printed after it.\n" +
+               "A file's URL opens in the editor `--console:file-hyperlink-format` names.",
         surfaces = [SURFACE_CLI],
         show = TIP_SHOW_END,
     )
