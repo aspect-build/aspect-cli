@@ -1,7 +1,7 @@
 """The `--output=json` contract below the results document: whether one was
 asked for, its schema version, and the document a task writes in its place
 when it ends before it has a result (a failed health check), as `main`
-writes one for a config error. Loads nothing, so `lifecycle.axl` can end a
+writes one for a config error, a feature's exit or a `fail()`. Loads nothing, so `lifecycle.axl` can end a
 task with it, below `results_json.axl`, which renders the result.
 """
 

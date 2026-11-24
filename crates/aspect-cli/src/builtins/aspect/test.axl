@@ -110,6 +110,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bz.finish(w)
     conclusion = rs.conclude(w, bz.targets)
 
+    # Before the coverage tool, which may fail to start.
+    results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
         if not report_path:
@@ -123,8 +125,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 # was also set, the copied file is identical, so it doesn't
                 # matter which one the tool reads.
                 _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
-
-    results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     return conclusion
 
 test = task(

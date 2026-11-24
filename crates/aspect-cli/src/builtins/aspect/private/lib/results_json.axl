@@ -9,8 +9,8 @@ separate it from a plain `json.encode(data)`:
     command crosses into the document; the resolved flag lists never do.
   - **Bounded size.** `test_details`, `target_kinds` and `passed_tests` grow
     with the build - a 5,000-test run carries ~5,000 entries in each. Failures
-    are reported in full (up to the accumulator's own caps, with `truncated`
-    saying so); passes are counts only.
+    are reported in full up to the accumulator's own caps, and failed targets
+    up to `_MAX_TARGETS`, with `truncated` saying so; passes are counts only.
   - **A stable contract.** The accumulator's key names are internal and move
     freely; these do not. `SCHEMA_VERSION` changes when they do.
 

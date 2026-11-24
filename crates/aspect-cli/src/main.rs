@@ -694,6 +694,33 @@ fn strip_error_prefix(message: &str) -> &str {
 /// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
 /// `--`. Read from the raw arguments because a config error stops the CLI
 /// before they are parsed.
+/// An error document on stdout, `{"schema_version", "error", "message"}`,
+/// for a run that asked for `--output=json` and ends on an error before its
+/// task wrote one: a caller reading stdout otherwise gets nothing to parse.
+/// Nothing when the task already wrote to stdout (a document, then a hook's
+/// failure), so stdout never holds two.
+fn json_error(error: &str, message: &str) {
+    if wants_json_output(std::env::args().skip(1)) && !axl_runtime::engine::stdout_written() {
+        outln!(
+            "{}",
+            serde_json::json!({
+                "schema_version": 1,
+                "error": error,
+                "message": strip_error_prefix(message),
+            })
+        );
+    }
+}
+
+/// A Starlark error's own line (`error: fail: ...`), without the traceback
+/// and source excerpt around it, or the whole text when it has none.
+fn error_line(text: &str) -> String {
+    text.lines()
+        .find_map(|line| line.strip_prefix("error: "))
+        .map(|line| line.strip_prefix("fail: ").unwrap_or(line).to_string())
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
 fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
     let args: Vec<String> = args.into_iter().take_while(|a| a != "--").collect();
     args.iter().enumerate().any(|(i, arg)| {
@@ -732,27 +759,23 @@ fn main() -> ExitCode {
                 // `{err:#}` walks the chain to the Starlark error, whose
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
+                if exit.code != 0 {
+                    json_error("task_exit", exit.message.as_deref().unwrap_or(""));
+                }
                 return ExitCode::from(exit.code);
             }
-            // A config error is reported as the failed config's own error,
-            // and as a document on stdout when one was asked for: a caller
-            // reading `--output=json` otherwise gets nothing to parse.
+            // A config error is reported as the failed config's own error.
             if err.downcast_ref::<ConfigError>().is_some() {
                 let message = format!("{:#}", err.root_cause());
                 errln!("error: {}", strip_error_prefix(&message));
-                if wants_json_output(std::env::args().skip(1)) {
-                    outln!(
-                        "{}",
-                        serde_json::json!({
-                            "schema_version": 1,
-                            "error": "config_error",
-                            "message": strip_error_prefix(&message),
-                        })
-                    );
-                }
+                json_error("config_error", &message);
                 return ExitCode::FAILURE;
             }
             errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
+            json_error(
+                "task_error",
+                &error_line(&format!("{:#}", err.root_cause())),
+            );
             ExitCode::FAILURE
         }
     }
@@ -1127,5 +1150,21 @@ mod degrade_policy_tests {
                 "{kind:?} is a rejection, not a help screen"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod json_error_tests {
+    use super::error_line;
+
+    #[test]
+    fn a_starlark_error_becomes_its_own_line() {
+        let text = "Traceback (most recent call last):\n  * x.axl:1, in f\n      fail(\"no\")\nerror: fail: --target-pattern-file: file not found: /nope\n   --> x.axl:1:1\n";
+        assert_eq!(
+            error_line(text),
+            "--target-pattern-file: file not found: /nope"
+        );
+        assert_eq!(error_line("error: bad thing"), "bad thing");
+        assert_eq!(error_line("  plain  "), "plain");
     }
 }

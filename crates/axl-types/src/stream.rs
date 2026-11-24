@@ -13,6 +13,17 @@ use std::io::Write;
 use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+
+/// Whether AXL wrote anything to this process's stdout
+/// (`ctx.std.io.stdout.write`).
+static STDOUT_WRITTEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether AXL has written to this process's stdout, so a caller that owes
+/// it a document (`--output=json`'s error) does not add a second.
+pub fn stdout_written() -> bool {
+    STDOUT_WRITTEN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 use allocative::Allocative;
 use dupe::Dupe;
@@ -500,6 +511,9 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
+                if !data.is_empty() {
+                    STDOUT_WRITTEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 match inner.lock().write(data) {
                     Ok(n) => {
                         if copy {
