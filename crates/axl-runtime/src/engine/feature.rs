@@ -418,7 +418,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// Every feature automatically gets an `enabled` CLI arg. It shows up as
     /// `--{name}:enabled` on the command line and is accessible as `ctx.args.enabled`
-    /// in the implementation. Set `enabled = False` for opt-in features.
+    /// in the implementation. Set `enabled = False` for opt-in features. The bare
+    /// `--{name}` is the same flag in short (`--{name}` turns it on, `--{name}=false`
+    /// off), unless a task or feature arg already owns that flag or a task forwards
+    /// it to the tool it wraps (a Bazel flag), where `--{name}` stays theirs.
     ///
     /// ## Naming
     ///

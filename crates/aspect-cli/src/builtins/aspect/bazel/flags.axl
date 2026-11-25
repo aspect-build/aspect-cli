@@ -11,7 +11,8 @@ startup flags, after it joins the command flags. `bazel_value_flags` — the
 generated `value_flags.axl` list, unioned across the supported Bazel majors and
 replaceable from `config.axl` — tells the router which flags take a separate
 value, so `-c opt` is collected as a pair instead of leaving `opt` behind as a
-target pattern.
+target pattern. `bazel_no_value_flags` (from `no_value_flags.axl`) lists the
+rest of Bazel's spellings, so a feature's bare `--<name>` flag never takes one.
 
 What a task types and what a feature injects are scoped differently. The user's
 flags are unscoped — typed for this invocation, they apply to every Bazel
@@ -124,6 +125,7 @@ deliberate.
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""
 
+load("@aspect//bazel/no_value_flags.axl", "BAZEL_NO_VALUE_FLAGS", "BAZEL_STARTUP_NO_VALUE_FLAGS")
 load("@aspect//bazel/trait.axl", "BazelTrait", "exit_codes")
 load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
 
@@ -145,11 +147,15 @@ _PASSTHROUGH_STARTUP_FLAGS_ARG = "bazel_passthrough_startup_flags"
 _PASSTHROUGH_ARGS = [_PASSTHROUGH_FLAGS_ARG, _PASSTHROUGH_STARTUP_FLAGS_ARG]
 _VALUE_FLAGS_ARG = "bazel_value_flags"
 _STARTUP_VALUE_FLAGS_ARG = "bazel_startup_value_flags"
+_NO_VALUE_FLAGS_ARG = "bazel_no_value_flags"
+_STARTUP_NO_VALUE_FLAGS_ARG = "bazel_startup_no_value_flags"
 
 def _passthrough_args(post_note: str = "") -> dict:
     """The two `args.passthrough()` buckets that let a plain Bazel flag be typed
     directly, plus the two lists they read arities from — command flags for the
-    post-command bucket, startup options for the pre-command one.
+    post-command bucket, startup options for the pre-command one. Also the two
+    lists of Bazel's value-less flags, which keep a feature's bare `--<name>`
+    flag off any spelling Bazel owns.
 
     Splat into a task's `args = {...}`. Included in `bazel_flags.args`, and exposed
     separately for a task that declares its own `bazel_flags` /
@@ -165,9 +171,15 @@ def _passthrough_args(post_note: str = "") -> dict:
             config_only = True,
             description = "Forwarded Bazel flags that take a separate value (`-c opt`), so the value is collected with its flag instead of being read as a target pattern. Mirrors Bazel's own arities; set from `.aspect/config.axl` to extend it for a wrapper's flags.",
         ),
+        _NO_VALUE_FLAGS_ARG: args.string_list(
+            default = BAZEL_NO_VALUE_FLAGS,
+            config_only = True,
+            description = "Forwarded Bazel flags that take no separate value (`--stamp`, `--nostamp`, `--remote_download_all`). No feature's bare `--<name>` flag is registered on a spelling listed here or in bazel_value_flags, so it reaches Bazel.",
+        ),
         _PASSTHROUGH_FLAGS_ARG: args.passthrough(
             position = "post_command",
             value_flags_from = _VALUE_FLAGS_ARG,
+            known_flags_from = _NO_VALUE_FLAGS_ARG,
             description = "A flag this task does not recognize is forwarded to Bazel rather than rejected. Typed after the task name it becomes a Bazel command option, so `aspect build --remote_download_all //...` runs `bazel build --remote_download_all //...`." + post_note,
         ),
         _STARTUP_VALUE_FLAGS_ARG: args.string_list(
@@ -175,9 +187,15 @@ def _passthrough_args(post_note: str = "") -> dict:
             config_only = True,
             description = "Forwarded Bazel startup options that take a separate value (`--output_base /tmp/o`), the pre-command counterpart of bazel_value_flags.",
         ),
+        _STARTUP_NO_VALUE_FLAGS_ARG: args.string_list(
+            default = BAZEL_STARTUP_NO_VALUE_FLAGS,
+            config_only = True,
+            description = "Forwarded Bazel startup options that take no separate value (`--batch`, `--quiet`), the pre-command counterpart of bazel_no_value_flags.",
+        ),
         _PASSTHROUGH_STARTUP_FLAGS_ARG: args.passthrough(
             position = "pre_command",
             value_flags_from = _STARTUP_VALUE_FLAGS_ARG,
+            known_flags_from = _STARTUP_NO_VALUE_FLAGS_ARG,
             description = "Typed before the task name, an unrecognized flag becomes a Bazel startup option — the same slot Bazel takes them in: `aspect --output_base=/tmp/o build //...`. Bazel's own spellings all work in both slots (`--output_base /tmp/o`, `-c opt`, `--jobs 8`, `--jobs=8`).",
         ),
     }
@@ -619,6 +637,8 @@ def _eviction_retry_flag(bazel_trait, rc, command: str, max_attempts: int) -> li
 bazel_flags = namespace(
     VALUE_FLAGS = BAZEL_VALUE_FLAGS,
     STARTUP_VALUE_FLAGS = BAZEL_STARTUP_VALUE_FLAGS,
+    NO_VALUE_FLAGS = BAZEL_NO_VALUE_FLAGS,
+    STARTUP_NO_VALUE_FLAGS = BAZEL_STARTUP_NO_VALUE_FLAGS,
     args = _flag_args,
     passthrough_args = _passthrough_args,
     resolve = _resolve_flags,

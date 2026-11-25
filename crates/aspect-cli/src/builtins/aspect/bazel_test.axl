@@ -9,6 +9,7 @@ Run with:
   aspect dev test-bazel-facade
 """
 
+load("@aspect//bazel/no_value_flags.axl", "BAZEL_NO_VALUE_FLAGS", "BAZEL_STARTUP_NO_VALUE_FLAGS")
 load("@aspect//bazel/value_flags.axl", "BAZEL_STARTUP_VALUE_FLAGS", "BAZEL_VALUE_FLAGS")
 load(
     "@aspect//bazel.axl",
@@ -26,6 +27,8 @@ _MEMBERS = {
     "bazel_announce": (bazel_announce, ["args", "resolve"]),
     "bazel_exec_log": (bazel_exec_log, ["Hook", "close", "open", "pump"]),
     "bazel_flags": (bazel_flags, [
+        "NO_VALUE_FLAGS",
+        "STARTUP_NO_VALUE_FLAGS",
         "STARTUP_VALUE_FLAGS",
         "VALUE_FLAGS",
         "args",
@@ -51,6 +54,8 @@ def _test_namespace_members(ctx):
 def _test_constants_and_types(ctx):
     _eq("bazel_flags.VALUE_FLAGS", bazel_flags.VALUE_FLAGS, BAZEL_VALUE_FLAGS)
     _eq("bazel_flags.STARTUP_VALUE_FLAGS", bazel_flags.STARTUP_VALUE_FLAGS, BAZEL_STARTUP_VALUE_FLAGS)
+    _eq("bazel_flags.NO_VALUE_FLAGS", bazel_flags.NO_VALUE_FLAGS, BAZEL_NO_VALUE_FLAGS)
+    _eq("bazel_flags.STARTUP_NO_VALUE_FLAGS", bazel_flags.STARTUP_NO_VALUE_FLAGS, BAZEL_STARTUP_NO_VALUE_FLAGS)
     _eq("bazel_exec_log.Hook", bazel_exec_log.Hook, ExecLogHook)
 
 def _test_invocation_args_bundle(ctx):
