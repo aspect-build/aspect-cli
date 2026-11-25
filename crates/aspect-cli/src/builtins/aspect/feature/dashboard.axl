@@ -36,14 +36,14 @@ It takes the screen when the task starts and shows:
     succeeded and wrote output instead (with `--dashboard:actions=all`);
   - Metrics: spawns and cache hits by runner, Bazel's action cache, tests,
     targets, time and memory, the slowest actions;
+  - Invocation: the command, ids, Bazel's version, the flags given,
+    workspace status and build metadata, what may be a secret redacted;
   - Tips: the task's tips the screen shows (`SURFACE_DASHBOARD`), the
     most urgent first, counted in the tab in the most urgent one's colour;
     the chosen one's body under it, and `s` silences it on this machine
     (`~/.aspect/config.json`, `silence_tip`) or undoes that, the row left
     muted saying so; the scrollback names what was silenced and how to undo
     it;
-  - Invocation: the command, ids, Bazel's version, the flags given,
-    workspace status and build metadata, what may be a secret redacted;
   - before any build, Failures, Metrics and Invocation muted, saying `No
     build yet`; with several builds, Metrics and Invocation show the newest,
     `<`/`>` another (`Metrics ▹ 1 of 2`), and Failures the newest's;
@@ -239,7 +239,7 @@ _HELP = [
     ("  ^T  ^B", "in the bar: match case (else a capital does), whole words"),
     ("  ^W", "in the bar: delete a word"),
     ("  ^U  Enter  Esc", "in the bar: clear; keep and close; clear and go back"),
-    ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation (or click one)"),
+    ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation, tips (or click one)"),
     ("Enter", "in the list: show the chosen log"),
     ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"),
     ("a  s", "the list: failures, or actions that wrote output; in Tips, silence the chosen tip on this machine, or undo it"),
@@ -3019,7 +3019,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     return _frame_of(state, out, rows, cols)
 
 # The main pane's tabs, by the number key that shows each.
-_TABS = [("console", "Console"), ("failures", "Failures"), ("tips", "Tips"), ("metrics", "Metrics"), ("invocation", "Invocation")]
+_TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"), ("invocation", "Invocation"), ("tips", "Tips")]
 
 # The tabs about a build, muted before one starts.
 _BUILD_TABS = ["failures", "metrics", "invocation"]
