@@ -158,13 +158,13 @@ _LINT_DETAILS = _ABORT_NOTICE + """{% if build_failed %}> ⚠️ The underlying 
 
 {% endif %}""" + _COMMANDS + """{% for group in groups %}{% if group.severity == "error" %}### {{ group.icon }} {{ group.count }} {{ group.label }}
 
-{% for row in group.rows %}- `{{ row.file }}:{{ row.line }}`{% if row.rule_display %} · `{{ row.rule_display }}`{% endif %}{% if row.message %} — {{ row.message }}{% endif %}{% if row.comment_url %} · [comment]({{ row.comment_url }}){% endif %}
+{% for row in group.rows %}- {{ row.anchor }}{% if row.rule_display %} · `{{ row.rule_display }}`{% endif %}{% if row.message %} — {{ row.message }}{% endif %}{% if row.comment_url %} · [comment]({{ row.comment_url }}){% endif %}
 {% endfor %}{% if group.overflow %}
 _… {{ group.overflow }} more {{ group.overflow_label }} not shown._
 {% endif %}
 {% endif %}{% endfor %}{% if nonblocking_summary %}<details><summary>{{ nonblocking_summary }}</summary>
 
-{% for group in groups %}{% if group.severity != "error" %}{% for row in group.rows %}- `{{ row.file }}:{{ row.line }}`{% if row.rule_display %} · `{{ row.rule_display }}`{% endif %}{% if row.message %} — {{ row.message }}{% endif %}
+{% for group in groups %}{% if group.severity != "error" %}{% for row in group.rows %}- {{ row.anchor }}{% if row.rule_display %} · `{{ row.rule_display }}`{% endif %}{% if row.message %} — {{ row.message }}{% endif %}
 {% endfor %}{% endif %}{% endfor %}
 </details>
 

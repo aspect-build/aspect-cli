@@ -643,7 +643,8 @@ data = {
 
   ┌─ Per-kind extensions (added by private/lib/<kind>_results.init_data) ───┐
   │ # lint     → data["lint"]                                          │
-  │   "diagnostics", "strategy", "build_failed", "linter_exit_code",   │
+  │   "diagnostics", "strategy", "strategies", "build_failed",         │
+  │   "linter_exit_code",                                              │
   │   "changed_files", "tools_run",                                    │
   │   "counts_by_severity", "counts_by_tool"                           │
   │ # format   → data["format"]                                        │

@@ -1,6 +1,8 @@
 """SARIF (Static Analysis Results Interchange Format) utilities.
 
-Provides parsing of raw SARIF JSON and conversion to GitHub PR review comments.
+Parses raw SARIF JSON into diagnostics and GitHub PR review comments, and
+places a diagnostic: `scope_files` (which changed files put it in a scoped
+strategy's scope) and `format_location` (how it renders).
 """
 
 def parse_sarif(content):
@@ -32,7 +34,7 @@ def _translate_sarif_level(level):
 def _result_has_fix(result):
     """Return True if the SARIF result carries an inline fix hint.
 
-    Mirrors the extraction logic in `sarif_result_to_comment` — relatedLocations
+    Shares `_is_fix_hint` with `sarif_result_to_comment`: relatedLocations
     with message exactly `try` or starting with `try ` describe a replacement
     that GithubLintComments turns into a GitHub suggestion block. Findings with
     fixes can ONLY be rendered as PR comments (the check-run annotations API
@@ -76,27 +78,72 @@ def _result_has_fix(result):
     independently of the SARIF stream).
     """
     for loc in result.get("relatedLocations", []):
-        msg = loc.get("message", {}).get("text", "")
-        if msg != "try" and not msg.startswith("try "):
-            continue
-        loc_region = loc.get("physicalLocation", {}).get("region", {})
-        if loc_region.get("byteOffset") == None or loc_region.get("byteLength") == None:
-            continue
-        return True
+        if _is_fix_hint(loc):
+            return True
     return False
+
+def _is_fix_hint(loc):
+    """True for a relatedLocation shaped as a `try "<replacement>"` byte-range fix.
+
+    The message is exactly `try` (replace with empty) or `try ` plus the quoted
+    replacement; a bare `startswith("try")` would also match words like "trying".
+    """
+    msg = loc.get("message", {}).get("text", "")
+    if msg != "try" and not msg.startswith("try "):
+        return False
+    loc_region = loc.get("physicalLocation", {}).get("region", {})
+    return loc_region.get("byteOffset") != None and loc_region.get("byteLength") != None
+
+def _related_files(result, file):
+    """Distinct relatedLocation uris other than `file`, skipping inline-fix hints.
+
+    Empty for rules_lint's Go-errorformat linters, which emit no
+    relatedLocations (see `_result_has_fix`); a SARIF producer that does emit
+    them gets related-file scoping.
+    """
+    out = []
+    for loc in result.get("relatedLocations", []):
+        if _is_fix_hint(loc):
+            continue
+        uri = loc.get("physicalLocation", {}).get("artifactLocation", {}).get("uri", "")
+        if uri and uri != file and uri not in out:
+            out.append(uri)
+    return out
 
 def parse_sarif_diagnostics(content):
     """Parse SARIF JSON into a flat list of diagnostic dicts.
 
     Returns:
         List of dicts with keys: tool, file, line, end_line, rule_id, severity,
-        message, has_fix.
+        message, has_fix, related_files.
 
     `end_line` falls back to `line` when SARIF only specifies startLine. `has_fix`
     is True when the result carries an inline-fix relatedLocation (see
     `_result_has_fix`).
+
+    A result with a file but no region is file-level (`line == 0`); a result
+    with no file has `file == ""`. `related_files` lists the other files named
+    by the result's relatedLocations.
     """
     return sarif_diagnostics(json.try_decode(content, {}))
+
+def _primary_location(result):
+    """`(uri, line, end_line)` of the result's first location.
+
+    `line` is 0 when the location has no region, and `uri` is "" when the
+    result names no file.
+    """
+    locations = result.get("locations") or []
+    if not locations:
+        return ("", 0, 0)
+    physical = locations[0].get("physicalLocation", {})
+    uri = physical.get("artifactLocation", {}).get("uri", "") or ""
+    if not uri:
+        return ("", 0, 0)
+    region = physical.get("region", {})
+    line = region.get("startLine", 0) or 0
+    end_line = region.get("endLine", line) or line
+    return (uri, line, end_line)
 
 def sarif_diagnostics(sarif):
     """Flatten an already-decoded SARIF dict into diagnostic dicts.
@@ -108,16 +155,7 @@ def sarif_diagnostics(sarif):
     for run in sarif.get("runs", []):
         tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")
         for result in run.get("results", []):
-            locations = result.get("locations", [])
-            if not locations:
-                continue
-            physical = locations[0].get("physicalLocation", {})
-            uri = physical.get("artifactLocation", {}).get("uri", "")
-            region = physical.get("region", {})
-            line = region.get("startLine", 0)
-            end_line = region.get("endLine", line) or line
-            if not uri or not line:
-                continue
+            uri, line, end_line = _primary_location(result)
             diagnostics.append({
                 "tool": tool_name,
                 "file": uri,
@@ -127,8 +165,35 @@ def sarif_diagnostics(sarif):
                 "severity": _translate_sarif_level(result.get("level", "warning")),
                 "message": result.get("message", {}).get("text", ""),
                 "has_fix": _result_has_fix(result),
+                "related_files": _related_files(result, uri),
             })
     return diagnostics
+
+def scope_files(d):
+    """Files whose change puts a diagnostic in a scoped strategy's scope: its own
+    file, plus its related files when it has no line to place in a hunk."""
+    own = [d["file"]] if d.get("file") else []
+    if d.get("line"):
+        return own
+    return own + (d.get("related_files") or [])
+
+_MAX_RELATED_SHOWN = 5
+
+def format_location(file, line, related_files, quote = lambda path: path, missing = "(no location)"):
+    """Render where a finding is: `file:line`, or `file` for a file-level finding,
+    or `missing` when there is no file. A finding without a line lists its
+    related files after it, the first few then `+N more`. `quote` wraps each
+    path, e.g. in backticks.
+    """
+    if file and line:
+        return quote("%s:%d" % (file, line))
+    text = quote(file) if file else missing
+    if related_files:
+        shown = [quote(f) for f in related_files[:_MAX_RELATED_SHOWN]]
+        if len(related_files) > _MAX_RELATED_SHOWN:
+            shown.append("+%d more" % (len(related_files) - _MAX_RELATED_SHOWN))
+        text += " (related: %s)" % ", ".join(shown)
+    return text
 
 def get_sarif_summary(sarif):
     """Return a human-readable summary of SARIF findings."""
@@ -193,30 +258,15 @@ def sarif_result_to_comment(result, tool_name):
         comment["start_line"] = start_line
         comment["start_side"] = "RIGHT"
 
-    # Extract inline fix hints from relatedLocations. The expected message
-    # format is exactly `try` (replace with empty) or `try "<replacement>"`
-    # (replace with the quoted text). A startswith("try") check would also
-    # match real words like "trying ..." so require the literal `try` token
-    # followed by either end-of-string or a space.
-    #
-    # Keep the predicate aligned with `_result_has_fix` so the diagnostic-level
-    # `has_fix` flag never disagrees with the comment-level `_fixes` list.
-    #
-    # DORMANT in practice — see the anchor docstring on `_result_has_fix`
-    # above for why no current rules_lint Go-errorformat linter emits
-    # the matching SARIF shape (tracked: https://github.com/aspect-build/rules_lint/issues/749).
-    # `_fixes` ends up absent on every comment from those linters; the
-    # loop below appends nothing.
+    # Inline fix hints; dormant for most linters (see `_result_has_fix`).
     fixes = []
     for loc in result.get("relatedLocations", []):
-        msg = loc.get("message", {}).get("text", "")
-        if msg != "try" and not msg.startswith("try "):
+        if not _is_fix_hint(loc):
             continue
-        loc_region = loc.get("physicalLocation", {}).get("region", {})
-        byte_offset = loc_region.get("byteOffset")
-        byte_length = loc_region.get("byteLength")
-        if byte_offset == None or byte_length == None:
-            continue
+        msg = loc["message"]["text"]
+        loc_region = loc["physicalLocation"]["region"]
+        byte_offset = loc_region["byteOffset"]
+        byte_length = loc_region["byteLength"]
         if msg == "try":
             replacement = ""
         else:

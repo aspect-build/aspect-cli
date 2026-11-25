@@ -22,6 +22,7 @@ load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("../private/lib/lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "suggestion_block")
+load("../private/lib/lint_results.axl", "diagnostics_by_anchor", "patch_linter")
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../private/lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
@@ -280,40 +281,21 @@ def _dedup_by_marker(comments, task_key):
 
 _SUGGESTION_SEVERITY_ICONS = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}
 
-def _tool_name_from_patch_path(filepath):
-    """Recover the linter display name from a rules_lint
-    `<target>.AspectRulesLint<Tool>.patch` filename; "Linter" fallback."""
-    name = filepath.rsplit("/", 1)[-1]
-    if name.endswith(".patch"):
-        name = name[:-len(".patch")]
-    idx = name.rfind(".AspectRulesLint")
-    if idx >= 0:
-        tail = name[idx + len(".AspectRulesLint"):]
-        if tail:
-            return tail
-    return "Linter"
-
 def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pending_patches):
     """Parse buffered `.patch` files into GitLab suggestion-block discussion
     comments — one per unified-diff edit block. Mirrors the GH feature's
-    correlation logic (same (file, line, tool) anchoring) but renders the
+    correlation logic (same `diagnostics_by_anchor` index) but renders the
     GitLab `suggestion:-X+Y` fence via the shared helper.
 
     Returns comment dicts {path, line, body, _severity}.
     """
     comments = []
-    diag_by_anchor = {}
-    for d in relevant_diagnostics:
-        f = d.get("file", "")
-        ln = d.get("line", 0) or 0
-        t = (d.get("tool", "") or "").lower()
-        if f and ln:
-            diag_by_anchor[(f, ln, t)] = d
+    diag_by_anchor = diagnostics_by_anchor(relevant_diagnostics)
     for entry in pending_patches:
         content = ctx.std.fs.read_to_string(entry["path"])
         if not content:
             continue
-        tool = _tool_name_from_patch_path(entry["name"])
+        tool = patch_linter(entry["name"])
         tool_key = tool.lower()
         for f in patch_parse(content):
             file_path = f["file"]

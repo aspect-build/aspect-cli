@@ -50,6 +50,7 @@ load("@aspect//lint.axl", "LintTrait")
 load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
+load("../private/lib/lint_results.axl", "detect_lint_tool", "diagnostics_by_anchor", "patch_linter")
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../private/lib/sarif.axl", "parse_sarif", "sarif_result_to_comment")
 
@@ -195,21 +196,6 @@ def _dedup_by_marker(comments, task_key):
         seen[marker] = True
         out.append(c)
     return out
-
-def _tool_name_from_patch_path(filepath):
-    """Extract the linter name from a rules_lint patch filename, e.g.
-    `hello.AspectRulesLintShellCheck.patch` → `ShellCheck`. Returns "Linter" when
-    the filename doesn't follow the convention.
-    """
-    name = filepath.rsplit("/", 1)[-1]
-    if name.endswith(".patch"):
-        name = name[:-len(".patch")]
-    idx = name.rfind(".AspectRulesLint")
-    if idx >= 0:
-        tail = name[idx + len(".AspectRulesLint"):]
-        if tail:
-            return tail
-    return "Linter"
 
 def _filter_for_destination(comments, destination):
     """Filter candidate review comments per `findings_destination`.
@@ -660,7 +646,7 @@ def _github_lint_impl(ctx: FeatureContext):
         """Per-`.patch` callback. Stash path AND Bazel output name; parse/post in
         `_lint_end` so patch comments share the cap/dedup logic with SARIF ones.
         `name` retains the `.AspectRulesLint<Tool>.patch` mnemonic (the resolved
-        filepath is content-hashed on CI) for `_tool_name_from_patch_path`.
+        filepath is content-hashed on CI) for `patch_linter`.
         """
         if gh["stale"]:
             return
@@ -670,35 +656,27 @@ def _github_lint_impl(ctx: FeatureContext):
         """Parse buffered patches into suggestion-block comments, one per edit
         block (contiguous +/- run within a hunk).
 
-        Correlation: when a SARIF diagnostic shares the hunk anchor's `(file, line)`,
-        copy its severity + rule_id onto the record; else `correlated = False`
+        Correlation: when a same-linter SARIF diagnostic (`diagnostics_by_anchor`)
+        sits on a line of the block's range, copy its severity + rule_id onto the
+        record; else `correlated = False`
         ("uncorrelated" — patch-only, or SARIF dropped upstream; see
         shellcheck-sarif-investigation.md). Each comment dict carries internal
         `_severity`, `_correlated`, `_rule_id`, `_hunk_start`, `_hunk_end`,
-        `_tool`, `_file` for the `_lint_end` bookkeeping that fills lint_trait.suggestions.
+        `_tool`, `_linter`, `_file` for the `_lint_end` bookkeeping that fills
+        lint_trait.suggestions.
         """
         comments = []
         task_key = ctx.task.name
 
-        # Index diagnostics by (file, line, tool) for correlation. `tool` keeps
-        # the match same-linter; case-folded since the BES mnemonic ("ShellCheck")
-        # and SARIF driver name ("shellcheck") disagree. No fuzzy match — a miss
-        # falls through to "uncorrelated" rather than mis-attributing across linters.
-        diag_by_anchor = {}
-        for d in relevant_diagnostics:
-            f = d.get("file", "")
-            ln = d.get("line", 0) or 0
-            t = (d.get("tool", "") or "").lower()
-            if f and ln:
-                diag_by_anchor[(f, ln, t)] = d
+        diag_by_anchor = diagnostics_by_anchor(relevant_diagnostics)
         for entry in state["pending_patches"]:
             content = ctx.std.fs.read_to_string(entry["path"])
             if not content:
                 continue
 
-            # Tool name from the BES `name` (retains the mnemonic), not the
-            # content-addressed filepath.
-            tool = _tool_name_from_patch_path(entry["name"])
+            # The BES `name` keeps the mnemonic; the filepath is content-addressed.
+            tool = patch_linter(entry["name"])
+            linter = detect_lint_tool(entry["name"])
             tool_key = tool.lower()
             for f in patch_parse(content):
                 file_path = f["file"]
@@ -782,6 +760,7 @@ def _github_lint_impl(ctx: FeatureContext):
                             "_correlated": correlated,
                             "_rule_id": sarif_rule_id,
                             "_tool": display_tool,
+                            "_linter": linter,
                             "_file": file_path,
                             "_hunk_start": start_line,
                             "_hunk_end": end_line,
@@ -879,6 +858,7 @@ def _github_lint_impl(ctx: FeatureContext):
                         continue
                     lint_trait.suggestions.append({
                         "tool": c.get("_tool", ""),
+                        "linter": c.get("_linter", ""),
                         "file": c.get("_file", ""),
                         "start_line": c.get("_hunk_start", 0),
                         "end_line": c.get("_hunk_end", 0),

@@ -12,7 +12,24 @@ load(
 load("@aspect//delivery.axl", delivery_METADATA_MAX_BYTES = "METADATA_MAX_BYTES", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_default_connect = "testonly_default_connect", delivery_delivered_dict = "testonly_delivered_dict", delivery_fire_target_hook = "testonly_fire_target_hook", delivery_fmt_elapsed = "fmt_elapsed", delivery_metadata_to_store = "testonly_metadata_to_store", delivery_prior_deliveries = "testonly_prior_deliveries", delivery_read_metadata_file = "testonly_read_metadata_file", delivery_record_build_failure = "testonly_record_build_failure", delivery_record_outcome = "testonly_record_outcome", delivery_resolve_skip_policies = "testonly_resolve_skip_policies", delivery_resolve_skip_policy = "testonly_resolve_skip_policy", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log", delivery_skip_delivery = "testonly_skip_delivery")
 load("@aspect//delivery_state.axl", "delivery_api", "delivery_state", "deliveryd")
 load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
-load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
+load(
+    "@aspect//lint.axl",
+    "StrategyHard",
+    "StrategyHoldTheLine",
+    "fails_on_severity",
+    "filter_all",
+    "filter_changeset",
+    "filter_hunks",
+    "gating_linter_errors",
+    "linter_error_message",
+    "parse_linter_strategies",
+    "parse_patch_hunks",
+    "report_diagnostics",
+    "resolve_strategy_overrides",
+    "strategy_lookup",
+    "unmatched_overrides",
+    lint_filter_suggestions_by_strategy = "testonly_filter_suggestions_by_strategy",
+)
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "TEMPLATE_SCOPE_KEYS", "resolve_templates", "snippet_budget_for")
@@ -28,12 +45,13 @@ load(
 load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand", "phases")
+load("@aspect//private/lib/lint_results.axl", lint_strategy_label = "strategy_label")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
-load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments", "scope_files")
 load("@aspect//private/lib/template_presets.axl", "TemplatePreset", "template_presets")
 load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
@@ -2890,6 +2908,132 @@ def test_lint_filters(tc: int) -> int:
     only_a = [{"file": "a.go", "line": 999, "severity": "error"}]  # line not in changed[0]["lines"]
     tc = test_case(tc, filter_changeset(only_a, changed) == only_a, "filter_changeset: file-level only, line numbers not gated here")
 
+    # Line-0 (file-level / location-less) diagnostics are in scope at file
+    # granularity: kept iff their file or a related file changed.
+    on_changed = {"file": "a.go", "line": 0, "related_files": []}
+    via_related = {"file": "copy/a.go", "line": 0, "related_files": ["c.go"]}
+    no_loc_related = {"file": "", "line": 0, "related_files": ["a.go"]}
+    unrelated = {"file": "b.go", "line": 0, "related_files": ["d.go"]}
+    no_loc = {"file": "", "line": 0, "related_files": []}
+    legacy = {"file": "a.go", "line": 0}  # synthetic callers omit related_files
+    file_level = [on_changed, via_related, no_loc_related, unrelated, no_loc, legacy]
+    for (name, f) in [("filter_hunks", filter_hunks), ("filter_changeset", filter_changeset)]:
+        kept = f(file_level, changed)
+        tc = test_case(tc, kept == [on_changed, via_related, no_loc_related, legacy], "%s: line-0 kept iff file or related file changed (got %r)" % (name, kept))
+        tc = test_case(tc, f(file_level, []) == [], "%s: line-0 dropped without change context" % name)
+    tc = test_case(tc, filter_all(file_level, changed) == file_level, "filter_all: keeps line-0 diagnostics")
+
+    # A related file never rescues a line outside the hunk window.
+    line_level = [
+        {"file": "a.go", "line": 1, "related_files": []},
+        {"file": "a.go", "line": 3, "related_files": ["c.go"]},
+        {"file": "b.go", "line": 2, "related_files": ["a.go"]},
+    ]
+    tc = test_case(tc, filter_hunks(line_level, changed) == [line_level[0]], "filter_hunks: line-level gating ignores related_files")
+
+    return tc
+
+def test_lint_per_linter_strategy(tc: int) -> int:
+    """Coverage for --linter-strategy: parsing, lookup, filtering, gating."""
+    overrides = parse_linter_strategies(["ruff=hard"])
+    tc = test_case(tc, overrides == {"ruff": "hard"}, "parse_linter_strategies: accepts known names")
+    tc = test_case(tc, parse_linter_strategies([]) == {}, "parse_linter_strategies: no entries")
+    tc = test_case(tc, parse_linter_strategies([" ESLint = soft "]) == {"ESLint": "soft"}, "parse_linter_strategies: trims both sides")
+    for bad, why in [("ruff", "no ="), ("=hard", "empty linter"), ("ruff=", "empty strategy")]:
+        err, _ = catch(parse_linter_strategies, [bad])
+        tc = test_case(tc, err != None and "<linter>=<strategy>" in err.message, "parse_linter_strategies: rejects %s" % why)
+    err, _ = catch(parse_linter_strategies, ["ruff=strict"])
+    tc = test_case(tc, err != None and "strict" in err.message, "parse_linter_strategies: rejects unknown strategy name")
+    err, _ = catch(parse_linter_strategies, ["ruff=hold-the-lne"])
+    tc = test_case(tc, err != None and "did you mean 'hold-the-line'" in err.message.replace('"', "'"), "parse_linter_strategies: suggests a near-miss strategy (got %r)" % (err.message if err else None))
+    err, _ = catch(parse_linter_strategies, ["ruff=hard=x"])
+    tc = test_case(tc, err != None and "hard=x" in err.message, "parse_linter_strategies: rejects a second =")
+    err, _ = catch(parse_linter_strategies, ["Ruff=hard", "ruff=soft"])
+    tc = test_case(tc, err != None and "twice" in err.message, "parse_linter_strategies: rejects linters differing only in case")
+
+    # Without change context, scoped overrides fall back to hard; soft and hard keep.
+    mixed = {"ruff": "hard", "eslint": "soft", "pylint": "hold-the-line", "mypy": "hold-the-file"}
+    tc = test_case(tc, resolve_strategy_overrides(mixed, unscoped = False) == mixed, "resolve_strategy_overrides: unchanged when scoped")
+    tc = test_case(
+        tc,
+        resolve_strategy_overrides(mixed, unscoped = True) == {"ruff": "hard", "eslint": "soft", "pylint": "hard", "mypy": "hard"},
+        "resolve_strategy_overrides: unscoped degrades hold-the-* only",
+    )
+
+    # Keys match rules_lint linter names case-insensitively.
+    strategy_for = strategy_lookup(StrategyHoldTheLine, overrides)
+    tc = test_case(tc, strategy_for("Ruff") == StrategyHard, "strategy_lookup: linter name matches case-insensitively")
+    tc = test_case(tc, strategy_for("ESLint") == StrategyHoldTheLine, "strategy_lookup: unlisted linter uses run strategy")
+    tc = test_case(tc, strategy_for("") == StrategyHoldTheLine, "strategy_lookup: unnamed linter uses run strategy")
+
+    # A report takes its rules_lint linter's strategy even when its SARIF driver
+    # name differs beyond case (`clang-tidy` from `AspectRulesLintClangTidy`).
+    changed = [{"file": "src/a.cc", "hunk_lines": [9]}]
+    clang_tidy = {"runs": [{"tool": {"driver": {"name": "clang-tidy"}}, "results": [
+        {"level": "error", "message": {"text": "in hunk"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/a.cc"}, "region": {"startLine": 10}}}]},
+        {"level": "error", "message": {"text": "unchanged file"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/b.cc"}, "region": {"startLine": 3}}}]},
+        {"level": "warning", "message": {"text": "file-level"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/c.cc"}}}]},
+    ]}]}
+    hard_for = strategy_lookup(StrategyHoldTheLine, {"clangtidy": "hard"})
+    kept = report_diagnostics(clang_tidy, "ClangTidy", hard_for, changed)
+    tc = test_case(tc, [d["message"] for d in kept] == ["in hunk", "unchanged file", "file-level"], "report_diagnostics: override applies by linter name, not SARIF driver name (got %r)" % kept)
+    tc = test_case(tc, all([d["linter"] == "ClangTidy" and d["tool"] == "clang-tidy" for d in kept]), "report_diagnostics: tags each diagnostic with its linter")
+    kept = report_diagnostics(clang_tidy, "ClangTidy", strategy_lookup(StrategyHoldTheLine, {}), changed)
+    tc = test_case(tc, [d["message"] for d in kept] == ["in hunk"], "report_diagnostics: no override = run strategy")
+
+    # Exit gating on severity uses each diagnostic's linter, not its SARIF tool.
+    diag = {"tool": "ruff", "linter": "Ruff", "severity": "error"}
+    soft_for = strategy_lookup(StrategyHoldTheLine, {"ruff": "soft"})
+    tc = test_case(tc, fails_on_severity(diag, strategy_for), "fails_on_severity: error fails under hard override")
+    tc = test_case(tc, not fails_on_severity(diag, soft_for), "fails_on_severity: soft override never fails")
+    tc = test_case(tc, not fails_on_severity(diag | {"severity": "warning"}, strategy_for), "fails_on_severity: warning does not fail")
+    tc = test_case(tc, fails_on_severity(diag | {"linter": "Pylint"}, soft_for), "fails_on_severity: keys on linter, not SARIF tool")
+
+    # A report whose name didn't parse has linter "": filtered and gated alike by
+    # the run strategy, even when its SARIF tool names an overridden linter.
+    unnamed = report_diagnostics(clang_tidy, "", hard_for, changed)
+    tc = test_case(tc, [d["message"] for d in unnamed] == ["in hunk"], "report_diagnostics: unnamed linter uses run strategy")
+    tc = test_case(tc, fails_on_severity({"tool": "ruff", "linter": "", "severity": "error"}, soft_for), "fails_on_severity: unnamed linter ignores a tool-keyed override")
+
+    # Keys naming no linter that ran are reported, case-insensitively.
+    tc = test_case(tc, unmatched_overrides({"rufff": "hard", "eslint": "soft"}, ["ESLint", "Ruff"]) == ["rufff"], "unmatched_overrides: flags the typo only")
+    tc = test_case(tc, unmatched_overrides({}, ["ESLint"]) == [], "unmatched_overrides: no overrides")
+
+    # Suggestions take their linter's strategy by `linter` alone; `tool` is the
+    # SARIF driver name when correlated, and a record without `linter` takes
+    # the run strategy.
+    suggestions = [
+        {"tool": "clang-tidy", "linter": "ClangTidy", "file": "src/b.cc", "start_line": 3, "end_line": 3},
+        {"tool": "ClangTidy", "file": "src/b.cc", "start_line": 4, "end_line": 4},
+        {"tool": "ruff", "linter": "Ruff", "file": "src/a.cc", "start_line": 10, "end_line": 10},
+        {"tool": "ruff", "linter": "Ruff", "file": "src/b.cc", "start_line": 5, "end_line": 5},
+    ]
+    kept = lint_filter_suggestions_by_strategy(suggestions, hard_for, changed)
+    tc = test_case(tc, kept == [suggestions[0], suggestions[2]], "filter_suggestions_by_strategy: override by linter, run strategy otherwise (got %r)" % kept)
+    tc = test_case(tc, lint_filter_suggestions_by_strategy([], hard_for, changed) == [], "filter_suggestions_by_strategy: empty")
+
+    # Exit gating on linter errors: only linters whose strategy fails on them.
+    tc = test_case(tc, gating_linter_errors({"ESLint": True}, strategy_for) == {}, "gating_linter_errors: hold-the-line linter error does not gate")
+    tc = test_case(tc, gating_linter_errors({"Ruff": True, "ESLint": True}, strategy_for) == {"Ruff": True}, "gating_linter_errors: hard override gates its own linter only")
+    tc = test_case(tc, gating_linter_errors({"": True}, strategy_for) == {}, "gating_linter_errors: unnamed failure judged by run strategy")
+    tc = test_case(tc, gating_linter_errors({"": True}, strategy_lookup(StrategyHard, {})) == {"": True}, "gating_linter_errors: unnamed failure gates under hard run")
+    tc = test_case(tc, linter_error_message({"": True, "Ruff": True}).startswith("Linter process(es) exited non-zero: Ruff."), "linter_error_message: unnamed key omitted from names")
+
+    # Labels show the overrides next to the run strategy.
+    tc = test_case(tc, lint_strategy_label("hold-the-line", {"ruff": "hard"}) == "hold-the-line (ruff: hard)", "strategy_label: renders overrides")
+    tc = test_case(tc, lint_strategy_label("hard", {}) == "hard", "strategy_label: no overrides")
+    tc = test_case(tc, lint_strategy_label("hard", {"ruff": "hard", "eslint": "soft"}) == "hard (eslint: soft)", "strategy_label: omits overrides equal to the run strategy")
+
+    # Locations.
+    tc = test_case(tc, format_location("a.ts", 3, []) == "a.ts:3", "format_location: line-level")
+    tc = test_case(tc, format_location("a.ts", 3, ["b.ts"]) == "a.ts:3", "format_location: related files only for line-less findings")
+    tc = test_case(tc, format_location("a.md", 0, ["b.md"]) == "a.md (related: b.md)", "format_location: file-level with related")
+    tc = test_case(tc, format_location("", 0, []) == "(no location)", "format_location: location-less")
+    tc = test_case(tc, format_location("a.md", 0, [], quote = lambda p: "`%s`" % p) == "`a.md`", "format_location: quote wraps paths")
+    many = ["r%d.md" % i for i in range(8)]
+    tc = test_case(tc, format_location("a.md", 0, many) == "a.md (related: r0.md, r1.md, r2.md, r3.md, r4.md, +3 more)", "format_location: caps related files")
+    tc = test_case(tc, scope_files({"file": "a.md", "line": 3, "related_files": ["b.md"]}) == ["a.md"], "scope_files: line finding scopes on its own file")
+    tc = test_case(tc, scope_files({"file": "a.md", "line": 0, "related_files": ["b.md"]}) == ["a.md", "b.md"], "scope_files: line-less finding adds related files")
     return tc
 
 def test_parse_patch_hunks(tc: int) -> int:
@@ -2934,19 +3078,19 @@ def test_parse_patch_hunks(tc: int) -> int:
 
 def test_linter_error_message(tc: int) -> int:
     """Coverage for lint.linter_error_message — the fail_on_linter_error text."""
-    single = linter_error_message({"PMD": True}, "hard")
+    single = linter_error_message({"PMD": True})
     tc = test_case(tc, "exited non-zero: PMD." in single, "linter_error_message: names the single tool")
-    tc = test_case(tc, "strategy=hard" in single, "linter_error_message: includes strategy")
+    tc = test_case(tc, "hard strategy" in single, "linter_error_message: names the hard strategy")
     tc = test_case(tc, "🔬 Lint phase" in single, "linter_error_message: points at the raw output")
 
     # Multiple tools are sorted for a stable message.
-    multi = linter_error_message({"Ruff": True, "PMD": True}, "hard")
+    multi = linter_error_message({"Ruff": True, "PMD": True})
     tc = test_case(tc, "exited non-zero: PMD, Ruff." in multi, "linter_error_message: sorts multiple tools")
 
     # Empty set (unparsable BES name) → unnamed fallback, still actionable.
-    none = linter_error_message({}, "hard")
+    none = linter_error_message({})
     tc = test_case(tc, none.startswith("A linter process exited non-zero."), "linter_error_message: unnamed fallback")
-    tc = test_case(tc, "strategy=hard" in none, "linter_error_message: fallback keeps strategy")
+    tc = test_case(tc, "hard strategy" in none, "linter_error_message: fallback names the hard strategy")
 
     return tc
 
@@ -3482,6 +3626,32 @@ def test_sarif_lib(tc: int) -> int:
     # Result without locations should be skipped.
     no_loc = """{"runs":[{"tool":{"driver":{"name":"x"}},"results":[{"level":"error","message":{"text":"oops"}}]}]}"""
     tc = test_case(tc, sarif_to_review_comments(no_loc) == [], "sarif_to_review_comments: result without location dropped")
+
+    # File-level (no region) and location-less results stay diagnostics at line 0
+    # but never become review comments. Plain relatedLocations feed related_files
+    # and are not fix hints; a `try` byte-range hint is excluded from them.
+    file_level = """{"runs":[{"tool":{"driver":{"name":"buf"}},"results":[
+      {"ruleId":"FILE_SAME_PACKAGE","level":"error","message":{"text":"package differs from its siblings"},
+       "locations":[{"physicalLocation":{"artifactLocation":{"uri":"proto/b/v1/b.proto"}}}],
+       "relatedLocations":[
+         {"id":0,"physicalLocation":{"artifactLocation":{"uri":"proto/a/v1/a.proto"}},"message":{"text":"sibling"}},
+         {"id":1,"physicalLocation":{"artifactLocation":{"uri":"proto/a/v1/a.proto"}},"message":{"text":"duplicate"}},
+         {"id":2,"physicalLocation":{"artifactLocation":{"uri":"x.proto"},"region":{"byteOffset":1,"byteLength":2}},"message":{"text":"try \\"y\\""}}
+       ]},
+      {"ruleId":"orphan","level":"warning","message":{"text":"no anchor"},
+       "relatedLocations":[{"physicalLocation":{"artifactLocation":{"uri":"buf.yaml"}},"message":{"text":"see"}}]},
+      {"ruleId":"logical","level":"note","message":{"text":"logical only"},"locations":[{"logicalLocations":[{"name":"x"}]}]}
+    ]}]}"""
+    fl = parse_sarif_diagnostics(file_level)
+    tc = test_case(tc, len(fl) == 3, "sarif_diagnostics: keeps region-less + location-less results (got %d)" % len(fl))
+    tc = test_case(tc, fl[0]["file"] == "proto/b/v1/b.proto" and fl[0]["line"] == 0 and fl[0]["end_line"] == 0, "sarif_diagnostics: region-less result is file-level line 0")
+    tc = test_case(tc, fl[0]["related_files"] == ["proto/a/v1/a.proto"], "sarif_diagnostics: related_files deduped, fix hint excluded (got %r)" % fl[0]["related_files"])
+    tc = test_case(tc, fl[0]["has_fix"], "sarif_diagnostics: try byte-range hint still sets has_fix")
+    tc = test_case(tc, fl[1]["file"] == "" and fl[1]["line"] == 0, "sarif_diagnostics: location-less result kept with file ''")
+    tc = test_case(tc, fl[1]["related_files"] == ["buf.yaml"] and not fl[1]["has_fix"], "sarif_diagnostics: plain related location is not a fix")
+    tc = test_case(tc, fl[2]["file"] == "" and fl[2]["severity"] == "info", "sarif_diagnostics: location without uri is location-less")
+    tc = test_case(tc, sarif_to_review_comments(file_level) == [], "sarif_to_review_comments: file-level results never comment")
+    tc = test_case(tc, all([d["related_files"] == [] for d in diags]), "sarif_diagnostics: related_files defaults to []")
 
     # get_sarif_summary
     sarif_text = """{"runs":[
@@ -4299,6 +4469,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_json_try_decode(tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
+    tc = test_lint_per_linter_strategy(tc)
     tc = test_parse_patch_hunks(tc)
     tc = test_linter_error_message(tc)
     tc = test_fmt_elapsed(tc)
