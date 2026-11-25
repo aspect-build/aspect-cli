@@ -166,16 +166,22 @@ def scope_files(d):
         return own
     return own + (d.get("related_files") or [])
 
+_MAX_RELATED_SHOWN = 5
+
 def format_location(file, line, related_files, quote = lambda path: path, missing = "(no location)"):
     """Render where a finding is: `file:line`, or `file` for a file-level finding,
     or `missing` when there is no file. A finding without a line lists its
-    related files after it. `quote` wraps each path, e.g. in backticks.
+    related files after it, the first few then `+N more`. `quote` wraps each
+    path, e.g. in backticks.
     """
     if file and line:
         return quote("%s:%d" % (file, line))
     text = quote(file) if file else missing
     if related_files:
-        text += " (related: %s)" % ", ".join([quote(f) for f in related_files])
+        shown = [quote(f) for f in related_files[:_MAX_RELATED_SHOWN]]
+        if len(related_files) > _MAX_RELATED_SHOWN:
+            shown.append("+%d more" % (len(related_files) - _MAX_RELATED_SHOWN))
+        text += " (related: %s)" % ", ".join(shown)
     return text
 
 def get_sarif_summary(sarif):

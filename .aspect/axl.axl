@@ -2939,6 +2939,8 @@ def test_lint_per_linter_strategy(tc: int) -> int:
     tc = test_case(tc, resolve_strategy_overrides({}, unscoped = False) == {}, "resolve_strategy_overrides: empty map")
     err, _ = catch(resolve_strategy_overrides, {"ruff": "strict"}, False)
     tc = test_case(tc, err != None and "strict" in err.message, "resolve_strategy_overrides: rejects unknown strategy name")
+    err, _ = catch(resolve_strategy_overrides, {"Ruff": "hard", "ruff": "soft"}, False)
+    tc = test_case(tc, err != None and "twice" in err.message, "resolve_strategy_overrides: rejects keys differing only in case")
 
     # Without change context, scoped overrides fall back to hard; soft and hard keep.
     mixed = {"ruff": "hard", "eslint": "soft", "pylint": "hold-the-line", "mypy": "hold-the-file"}
@@ -2999,6 +3001,8 @@ def test_lint_per_linter_strategy(tc: int) -> int:
     tc = test_case(tc, format_location("a.md", 0, ["b.md"]) == "a.md (related: b.md)", "format_location: file-level with related")
     tc = test_case(tc, format_location("", 0, []) == "(no location)", "format_location: location-less")
     tc = test_case(tc, format_location("a.md", 0, [], quote = lambda p: "`%s`" % p) == "`a.md`", "format_location: quote wraps paths")
+    many = ["r%d.md" % i for i in range(8)]
+    tc = test_case(tc, format_location("a.md", 0, many) == "a.md (related: r0.md, r1.md, r2.md, r3.md, r4.md, +3 more)", "format_location: caps related files")
     tc = test_case(tc, scope_files({"file": "a.md", "line": 3, "related_files": ["b.md"]}) == ["a.md"], "scope_files: line finding scopes on its own file")
     tc = test_case(tc, scope_files({"file": "a.md", "line": 0, "related_files": ["b.md"]}) == ["a.md", "b.md"], "scope_files: line-less finding adds related files")
     return tc

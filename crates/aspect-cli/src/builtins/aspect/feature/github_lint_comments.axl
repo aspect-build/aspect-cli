@@ -675,7 +675,7 @@ def _github_lint_impl(ctx: FeatureContext):
         ("uncorrelated" — patch-only, or SARIF dropped upstream; see
         shellcheck-sarif-investigation.md). Each comment dict carries internal
         `_severity`, `_correlated`, `_rule_id`, `_hunk_start`, `_hunk_end`,
-        `_tool`, `_file` for the `_lint_end` bookkeeping that fills lint_trait.suggestions.
+        `_tool`, `_linter`, `_file` for the `_lint_end` bookkeeping that fills lint_trait.suggestions.
         """
         comments = []
         task_key = ctx.task.name
@@ -782,6 +782,7 @@ def _github_lint_impl(ctx: FeatureContext):
                             "_correlated": correlated,
                             "_rule_id": sarif_rule_id,
                             "_tool": display_tool,
+                            "_linter": tool,
                             "_file": file_path,
                             "_hunk_start": start_line,
                             "_hunk_end": end_line,
@@ -879,6 +880,7 @@ def _github_lint_impl(ctx: FeatureContext):
                         continue
                     lint_trait.suggestions.append({
                         "tool": c.get("_tool", ""),
+                        "linter": c.get("_linter", ""),
                         "file": c.get("_file", ""),
                         "start_line": c.get("_hunk_start", 0),
                         "end_line": c.get("_hunk_end", 0),

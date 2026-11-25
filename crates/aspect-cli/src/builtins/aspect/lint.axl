@@ -188,7 +188,9 @@ def _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files):
 
 def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
     """Drop suggestions whose anchor `(file, end_line || start_line)` is out of
-    their linter's scope, so gating matches diagnostics.
+    their linter's scope, so gating matches diagnostics. The strategy is looked
+    up by the rules_lint `linter` name, as for diagnostics and patches, since
+    `tool` carries the SARIF driver name when the suggestion is correlated.
     """
     kept = []
     for s in suggestions or []:
@@ -196,7 +198,7 @@ def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
             "file": s.get("file", "") or "",
             "line": s.get("end_line", 0) or s.get("start_line", 0) or 0,
         }
-        if strategy_for(s.get("tool", "")).filter([anchor], changed_files):
+        if strategy_for(s.get("linter") or s.get("tool", "")).filter([anchor], changed_files):
             kept.append(s)
     return kept
 
@@ -207,7 +209,8 @@ def report_diagnostics(sarif, linter, strategy_for, changed_files):
     return strategy_for(linter).filter(diagnostics, changed_files)
 
 def filter_changeset(diagnostics, changed_files):
-    """Keep ALL diagnostics from any changed file (file-level).
+    """Keep ALL diagnostics from any changed file (file-level), plus line-less
+    diagnostics whose related file changed (see `scope_files`).
 
     Looser than `filter_hunks`: findings on unchanged lines of a changed file
     are kept. Such findings can't post as PR comments (GitHub 422s lines outside
@@ -324,7 +327,9 @@ LintTrait = trait(
 
     # Suggested-fix comment records posted by GithubLintComments during lint_end,
     # threaded into data["lint"]["suggestions"]. Each record:
-    #   {tool, file, start_line, end_line (1-based new-side incl),
+    #   {tool (SARIF driver name when correlated, else the linter name),
+    #    linter (rules_lint linter name, the LintTrait.strategies key),
+    #    file, start_line, end_line (1-based new-side incl),
     #    severity ("error"|"warning"|"info"|"" uncorrelated),
     #    rule_id (SARIF ruleId or ""), correlated (bool: SARIF diag on same
     #    (file,line)), comment_url (html_url; "" when post failed or deduped)}
@@ -351,12 +356,20 @@ def validate_findings_destination(value):
 def resolve_strategy_overrides(overrides, unscoped):
     """Validate `LintTrait.strategies` and return the overrides in effect.
 
-    Fails on an unknown strategy name. Without change context (`unscoped`) the
+    Fails on an unknown strategy name, and on two keys naming the same linter
+    (keys match case-insensitively). Without change context (`unscoped`) the
     run falls back to `hard`, and so do `hold-the-line` / `hold-the-file`
     overrides, which have nothing to scope against.
     """
     effective = {}
+    seen = {}
     for linter, name in overrides.items():
+        if linter.lower() in seen:
+            fail(
+                "lint: LintTrait.strategies names one linter twice: %r and %r - keys match case-insensitively" %
+                (seen[linter.lower()], linter),
+            )
+        seen[linter.lower()] = linter
         if name not in _STRATEGIES:
             fail(
                 "lint: invalid LintTrait.strategies[%r]=%r — expected one of %s" %
@@ -1140,7 +1153,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     _print_linters_run(ctx, data["lint"]["tools_run"])
     unmatched = unmatched_overrides(strategy_overrides, data["lint"]["tools_run"])
     if unmatched and lint_tools_run and not build_failed:
-        warn(ctx.std, "LintTrait.strategies names linters that did not run: %s. Keys match the names under 🧹 Linters." % ", ".join(unmatched))
+        # A note, not a warning: a run that lints only some targets leaves
+        # correctly spelled keys unmatched too.
+        print("   LintTrait.strategies: no reports this run from %s (keys match the names above)" % ", ".join(unmatched))
 
     # Print the post-filter subset (drives exit code / PR / annotations), distinct
     # from the high-volume raw output streamed during the Lint phase.
