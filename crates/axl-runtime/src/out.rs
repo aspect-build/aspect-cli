@@ -1246,8 +1246,7 @@ pub(crate) fn editor_link_format(
     if named_only && !repository_may_choose(&value, &format) {
         return Err(ignored(format!(
             "{} \"editor\": a repository's config.json takes auto, none or an editor's name, \
-             not {value:?}; a file:// link or a URL template belongs in your own \
-             ~/.aspect/config.json",
+             not {value:?}; a URL template belongs in your own ~/.aspect/config.json",
             path.display()
         )));
     }
@@ -1255,16 +1254,13 @@ pub(crate) fn editor_link_format(
 }
 
 /// Whether a repository's `config.json` may choose `value` (parsed as
-/// `format`): `none`, or a named format whose link is not `file://`. A
-/// `file://` link opens the file with the system's handler, which runs an
-/// executable one (a `.command`, an `.app`), whatever alias names it; a URL
-/// template may name any scheme.
+/// `format`): `none` or an editor's name, never a URL template, which may
+/// name any scheme.
 fn repository_may_choose(value: &str, format: &bazel::console::links::LinkFormat) -> bool {
     use bazel::console::links::LinkFormat;
-    let named = LinkFormat::ALIASES.iter().any(|(name, _)| *name == value);
     match format {
         LinkFormat::None => true,
-        LinkFormat::Template(template) => named && !template.starts_with("file://"),
+        LinkFormat::Template(_) => LinkFormat::ALIASES.iter().any(|(name, _)| *name == value),
     }
 }
 
@@ -1485,27 +1481,15 @@ mod tests {
             std::fs::write(&path, format!(r#"{{"editor": "{named}"}}"#)).unwrap();
             assert!(super::editor_link_format(&path, true).is_ok(), "{named}");
         }
-        // Every alias whose link is file://, by what it resolves to.
-        let file_aliases: Vec<&str> = LinkFormat::ALIASES
-            .iter()
-            .filter(|(_, template)| template.starts_with("file://"))
-            .map(|(name, _)| *name)
-            .collect();
-        assert!(file_aliases.contains(&"file") && file_aliases.contains(&"kitty"));
-        for alias in file_aliases {
-            std::fs::write(&path, format!(r#"{{"editor": "{alias}"}}"#)).unwrap();
-            let warning = super::editor_link_format(&path, true).unwrap_err();
-            assert!(warning.contains(&format!("not \"{alias}\"")), "{warning}");
-            assert!(
-                super::editor_link_format(&path, false).is_ok(),
-                "the user's may be {alias}"
-            );
+        for refused in ["file", "kitty", "file://{path}"] {
+            std::fs::write(&path, format!(r#"{{"editor": "{refused}"}}"#)).unwrap();
+            for named_only in [true, false] {
+                assert!(
+                    super::editor_link_format(&path, named_only).is_err(),
+                    "{refused} is no one's"
+                );
+            }
         }
-        std::fs::write(&path, r#"{"editor": "file://{path}"}"#).unwrap();
-        assert!(
-            super::editor_link_format(&path, true).is_err(),
-            "a file:// template"
-        );
         std::fs::write(&path, r#"{"editor": "myeditor://{path}"}"#).unwrap();
         let warning = super::editor_link_format(&path, true).unwrap_err();
         assert!(warning.contains("not \"myeditor://{path}\""), "{warning}");

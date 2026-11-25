@@ -101,10 +101,8 @@ job's, or `TERM` is `dumb`. What a path's link opens is `file_hyperlink_format`:
 your own choice is `"editor": "cursor"` in `~/.aspect/config.json` (or
 `ASPECT_FILE_HYPERLINK_FORMAT=cursor` in your shell's profile), which beats a
 team default of `"editor"` in the repository's `.aspect/config.json` (an
-editor's name, `auto` or `none` there, never a format whose link is
-`file://`, such as `file` or `kitty`, whose handler runs an executable file,
-or a URL template, so a cloned repository cannot make a click open a scheme
-of its choosing), which beats
+editor's name, `auto` or `none` there, never a URL template, so a cloned
+repository cannot make a click open a scheme of its choosing), which beats
 `ctx.features[Console].args.file_hyperlink_format = "cursor"` in any
 `config.axl`: the repository's, as below, or your own `~/.aspect/config.axl`.
 By default, your editor at the line, the one whose terminal this is, else the

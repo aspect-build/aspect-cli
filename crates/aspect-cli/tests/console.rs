@@ -829,10 +829,9 @@ fn a_repositorys_editor_is_a_default_under_the_users() {
     assert!(warning.contains(REPO_CONFIG_JSON), "{warning}");
     assert!(config_format_refused(&output), "falls back to config.axl");
 
-    // A repository's data file names an editor, never a file:// link (whose
-    // handler runs an executable file), by any alias, or a URL template,
-    // which stay the user's.
-    for refused in ["myeditor://{path}", "file", "kitty"] {
+    // A repository's data file names an editor, never a URL template, which
+    // stays the user's.
+    for refused in ["myeditor://{path}"] {
         let json = format!(r#"{{"editor": "{refused}"}}"#);
         let repo = [(REPO_CONFIG_JSON, json.as_str())];
         let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &repo);
