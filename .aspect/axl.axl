@@ -22,6 +22,7 @@ load(
     "filter_hunks",
     "gating_linter_errors",
     "linter_error_message",
+    "parse_linter_strategies",
     "parse_patch_hunks",
     "report_diagnostics",
     "resolve_strategy_overrides",
@@ -2933,14 +2934,18 @@ def test_lint_filters(tc: int) -> int:
     return tc
 
 def test_lint_per_linter_strategy(tc: int) -> int:
-    """Coverage for LintTrait.strategies: validation, lookup, filtering, gating."""
-    overrides = resolve_strategy_overrides({"ruff": "hard"}, unscoped = False)
-    tc = test_case(tc, overrides == {"ruff": "hard"}, "resolve_strategy_overrides: accepts known names")
-    tc = test_case(tc, resolve_strategy_overrides({}, unscoped = False) == {}, "resolve_strategy_overrides: empty map")
-    err, _ = catch(resolve_strategy_overrides, {"ruff": "strict"}, False)
-    tc = test_case(tc, err != None and "strict" in err.message, "resolve_strategy_overrides: rejects unknown strategy name")
-    err, _ = catch(resolve_strategy_overrides, {"Ruff": "hard", "ruff": "soft"}, False)
-    tc = test_case(tc, err != None and "twice" in err.message, "resolve_strategy_overrides: rejects keys differing only in case")
+    """Coverage for --linter-strategy: parsing, lookup, filtering, gating."""
+    overrides = parse_linter_strategies(["ruff=hard"])
+    tc = test_case(tc, overrides == {"ruff": "hard"}, "parse_linter_strategies: accepts known names")
+    tc = test_case(tc, parse_linter_strategies([]) == {}, "parse_linter_strategies: no entries")
+    tc = test_case(tc, parse_linter_strategies([" ESLint = soft "]) == {"ESLint": "soft"}, "parse_linter_strategies: trims both sides")
+    for bad, why in [("ruff", "no ="), ("=hard", "empty linter"), ("ruff=", "empty strategy")]:
+        err, _ = catch(parse_linter_strategies, [bad])
+        tc = test_case(tc, err != None and "<linter>=<strategy>" in err.message, "parse_linter_strategies: rejects %s" % why)
+    err, _ = catch(parse_linter_strategies, ["ruff=strict"])
+    tc = test_case(tc, err != None and "strict" in err.message, "parse_linter_strategies: rejects unknown strategy name")
+    err, _ = catch(parse_linter_strategies, ["Ruff=hard", "ruff=soft"])
+    tc = test_case(tc, err != None and "twice" in err.message, "parse_linter_strategies: rejects linters differing only in case")
 
     # Without change context, scoped overrides fall back to hard; soft and hard keep.
     mixed = {"ruff": "hard", "eslint": "soft", "pylint": "hold-the-line", "mypy": "hold-the-file"}

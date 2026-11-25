@@ -118,7 +118,7 @@ def init_data():
     r["lint"] = {
         # flat list of {tool, file, line, rule_id, severity, message?, related_files?,
         # linter?}; line 0 = file-level finding, file "" = no location. `tool` is the
-        # SARIF driver name, `linter` the rules_lint name that LintTrait.strategies keys on.
+        # SARIF driver name, `linter` the rules_lint name that --linter-strategy keys on.
         "diagnostics": [],
         "strategy": "",  # "soft" | "hard" | "hold-the-line" | "hold-the-file" | ""
         "strategies": {},  # per-linter overrides in effect: {linter name: strategy name}

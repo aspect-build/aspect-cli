@@ -294,11 +294,6 @@ LintTrait = trait(
     # module docstring of feature/github_lint_comments.axl for the state machine.
     findings_destination = attr(str, default = "auto"),
 
-    # Per-linter `--strategy` overrides, e.g. {"ruff": "hard"}. Keys are rules_lint
-    # linter names as listed under 🧹 Linters (`Ruff` for the `AspectRulesLintRuff`
-    # mnemonic), matched case-insensitively. Unlisted linters use `--strategy`.
-    strategies = attr(dict[str, str], default = {}),
-
     # Lifecycle hooks. Each is a list of callables; features append to compose.
 
     # Once before the build, after changed_files is set. (ctx) -> None
@@ -332,7 +327,7 @@ LintTrait = trait(
     # Suggested-fix comment records posted by GithubLintComments during lint_end,
     # threaded into data["lint"]["suggestions"]. Each record:
     #   {tool (SARIF driver name when correlated, else the linter name),
-    #    linter (rules_lint linter name, the LintTrait.strategies key),
+    #    linter (rules_lint linter name, the --linter-strategy key),
     #    file, start_line, end_line (1-based new-side incl),
     #    severity ("error"|"warning"|"info"|"" uncorrelated),
     #    rule_id (SARIF ruleId or ""), correlated (bool: same linter's SARIF
@@ -358,32 +353,47 @@ def validate_findings_destination(value):
         )
     return value
 
-def resolve_strategy_overrides(overrides, unscoped):
-    """Validate `LintTrait.strategies` and return the overrides in effect.
+def parse_linter_strategies(entries):
+    """Parse `--linter-strategy` entries (`<linter>=<strategy>`) into a
+    `{linter: strategy}` dict.
 
-    Fails on an unknown strategy name, and on two keys naming the same linter
-    (keys match case-insensitively). Without change context (`unscoped`) the
-    run falls back to `hard`, and so do `hold-the-line` / `hold-the-file`
-    overrides, which have nothing to scope against.
+    Fails on an entry without `=` or with an empty side, an unknown strategy
+    name, or two entries naming one linter (linter names match
+    case-insensitively).
     """
-    effective = {}
+    overrides = {}
     seen = {}
-    for linter, name in overrides.items():
+    for entry in entries:
+        linter, sep, name = entry.partition("=")
+        linter = linter.strip()
+        name = name.strip()
+        if not sep or not linter or not name:
+            fail("lint: invalid --linter-strategy=%r - expected <linter>=<strategy>, e.g. ruff=hard" % entry)
+        if name not in _STRATEGIES:
+            fail(
+                "lint: invalid --linter-strategy=%r - expected a strategy of %s" %
+                (entry, ", ".join(_STRATEGIES.keys())),
+            )
         if linter.lower() in seen:
             fail(
-                "lint: LintTrait.strategies names one linter twice: %r and %r - keys match case-insensitively" %
+                "lint: --linter-strategy names one linter twice: %r and %r - linter names match case-insensitively" %
                 (seen[linter.lower()], linter),
             )
         seen[linter.lower()] = linter
-        if name not in _STRATEGIES:
-            fail(
-                "lint: invalid LintTrait.strategies[%r]=%r - expected one of %s" %
-                (linter, name, ", ".join(_STRATEGIES.keys())),
-            )
-        if unscoped and name in ("hold-the-line", "hold-the-file"):
-            name = "hard"
-        effective[linter] = name
-    return effective
+        overrides[linter] = name
+    return overrides
+
+def resolve_strategy_overrides(overrides, unscoped):
+    """Return the per-linter overrides in effect. Without change context
+    (`unscoped`) the run falls back to `hard`, and so do `hold-the-line` /
+    `hold-the-file` overrides, which have nothing to scope against.
+    """
+    if not unscoped:
+        return dict(overrides)
+    return {
+        linter: "hard" if name in ("hold-the-line", "hold-the-file") else name
+        for linter, name in overrides.items()
+    }
 
 def strategy_lookup(run_strategy, overrides):
     """Return `linter -> Strategy`: the override for that rules_lint linter name,
@@ -803,7 +813,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Validate up front so a typo doesn't fail after the build has run.
     validate_findings_destination(lint_trait.findings_destination)
-    strategy_overrides = resolve_strategy_overrides(lint_trait.strategies, unscoped = False)
+    strategy_overrides = parse_linter_strategies(ctx.args.linter_strategies)
 
     data = lint_init_data()
     ph = phases.new(ctx, data)
@@ -1162,7 +1172,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if unmatched and lint_tools_run and not build_failed:
         # A note, not a warning: a run that lints only some targets leaves
         # correctly spelled keys unmatched too.
-        print("   LintTrait.strategies: no output this run from %s (keys match the names above)" % ", ".join(unmatched))
+        print("   --linter-strategy: no output this run from %s (linter names match the ones above)" % ", ".join(unmatched))
 
     # Print the post-filter subset (drives exit code / PR / annotations), distinct
     # from the high-volume raw output streamed during the Lint phase.
@@ -1218,6 +1228,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # a fix command for patches the strategy excluded.
     repro_flags = explicit_flags(ctx, [
         ("strategy", "--strategy"),
+        ("linter_strategies", "--linter-strategy"),
         ("aspects", "--aspect"),
         ("merge_base", "--merge-base"),
         ("target_pattern_file", "--target-pattern-file"),
@@ -1315,8 +1326,19 @@ lint = task(
                 "window (broader; rendered details list these but per-line " +
                 "surfaces can't show them). 'hard': fails on any error and " +
                 "on linter-process failure. 'soft': surfaces diagnostics " +
-                "without ever failing. `LintTrait.strategies` overrides " +
+                "without ever failing. `--linter-strategy` overrides " +
                 "this per linter."
+            ),
+        ),
+        "linter_strategies": args.string_list(
+            long = "linter-strategy",
+            description = (
+                "Per-linter --strategy override as <linter>=<strategy>, " +
+                "e.g. ruff=hard. Repeat for more linters. <linter> is a " +
+                "rules_lint linter name as listed under 🧹 Linters " +
+                "(Ruff for AspectRulesLintRuff), matched case-insensitively; " +
+                "the override covers that linter's findings, patches, " +
+                "suggestions and process failures."
             ),
         ),
         "base_ref": args.string(
