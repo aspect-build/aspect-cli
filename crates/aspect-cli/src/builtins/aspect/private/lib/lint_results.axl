@@ -623,9 +623,9 @@ def _suggestions_for_template(suggestions, data):
     """Decorate raw suggestion records with template fields (icon, label, line
     span, link text).
 
-    Severity: uses the record's `severity` first, else a late lookup against the
-    diagnostics at the `(file, end_line)` anchor — catches posting-time correlation
-    misses (e.g. multi-line hunk end_line off by one). Sort: severity rank (error →
+    Severity: uses the record's `severity` first, else the same linter's
+    diagnostic at the record's `end_line`, then `start_line`, for records posted
+    without one. Sort: severity rank (error →
     warning → info) then file; uncorrelated suggestions sink to the bottom.
     """
 

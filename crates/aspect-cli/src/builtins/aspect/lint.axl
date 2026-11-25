@@ -189,8 +189,8 @@ def _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files):
 def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
     """Drop suggestions whose anchor `(file, end_line || start_line)` is out of
     their linter's scope, so gating matches diagnostics. Like diagnostics and
-    patches, the strategy is looked up by the rules_lint `linter` name alone
-    (`tool` is the SARIF driver name when correlated); "" takes the run strategy.
+    patches, the strategy is looked up by the `linter` name alone; "" takes the
+    run strategy.
     """
     by_linter = {}
     for i, s in enumerate(suggestions or []):
@@ -760,7 +760,8 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy_for
     has been unreadable across passes; a file pending longer than
     `_PENDING_READ_WARN_MS` gets a one-time warning naming it, so a stuck
     remote-cache read is visible in the log while the task is still running.
-    `failed_linters` accumulates tool names whose `.exit_code` was non-zero.
+    `failed_linters` accumulates linter names whose `.exit_code` was non-zero
+    ("" when the name didn't parse).
     """
     still_pending = []
     interesting = False

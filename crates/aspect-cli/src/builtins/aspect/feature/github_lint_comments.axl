@@ -656,12 +656,14 @@ def _github_lint_impl(ctx: FeatureContext):
         """Parse buffered patches into suggestion-block comments, one per edit
         block (contiguous +/- run within a hunk).
 
-        Correlation: when a SARIF diagnostic shares the hunk anchor's `(file, line)`,
-        copy its severity + rule_id onto the record; else `correlated = False`
+        Correlation: when a same-linter SARIF diagnostic (`diagnostics_by_anchor`)
+        sits on a line of the block's range, copy its severity + rule_id onto the
+        record; else `correlated = False`
         ("uncorrelated" — patch-only, or SARIF dropped upstream; see
         shellcheck-sarif-investigation.md). Each comment dict carries internal
         `_severity`, `_correlated`, `_rule_id`, `_hunk_start`, `_hunk_end`,
-        `_tool`, `_linter`, `_file` for the `_lint_end` bookkeeping that fills lint_trait.suggestions.
+        `_tool`, `_linter`, `_file` for the `_lint_end` bookkeeping that fills
+        lint_trait.suggestions.
         """
         comments = []
         task_key = ctx.task.name
