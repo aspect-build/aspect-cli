@@ -3753,8 +3753,8 @@ def _dashboard_impl(ctx: FeatureContext):
             # The task's output from its start, before any of Bazel's lines;
             # already on the main screen, so not replayed on leaving.
             early = state["screen"].earlier()
-            _add_lines([line for line, _, _ in early], [links for _, links, _ in early], [coloured for _, _, coloured in early], cli = True)
             state["seeded"] = state.get("seeded", 0) + len(early)
+            _add_lines([line for line, _, _ in early], [links for _, links, _ in early], [coloured for _, _, coloured in early], cli = True)
 
             # The mouse taken unless asked not to (`m` outlives a screen the
             # runtime took back), and its wheel as arrows while it is the
