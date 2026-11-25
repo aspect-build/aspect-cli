@@ -1,0 +1,43 @@
+"""The `--output=json` / `--output=ndjson` contract below the results
+document: which was asked for, its schema version, and the document a task
+writes in its place when it ends before it has a result (a failed health
+check, or `gazelle --watch` refusing JSON), as `main` writes one for a
+config error, a feature's exit, a `fail()`, a feature flag conflict or a
+cancel. Loads nothing, so `lifecycle.axl` can end a task with it, below
+`results_json.axl`, which renders the result.
+"""
+
+# Bumped whenever a key in a document is renamed, removed, or changes
+# meaning. Additive keys do not bump it: consumers tolerate unknown fields.
+SCHEMA_VERSION = 1
+
+OUTPUT_TEXT = "text"
+OUTPUT_JSON = "json"
+OUTPUT_NDJSON = "ndjson"
+
+def wants_json(args) -> bool:
+    """True when this invocation asked for JSON on stdout, the document
+    (`json`) or its stream (`ndjson`): stdout is then the CLI's alone.
+    `args` is `ctx.args`, whose type is not expressible here. False for a
+    task that declares no `--output` at all, so callers need no guard of
+    their own."""
+    return getattr(args, "output", OUTPUT_TEXT) in (OUTPUT_JSON, OUTPUT_NDJSON)
+
+def wants_ndjson(args) -> bool:
+    """True when this invocation asked for the stream: a line per failure as
+    it is seen, then the document as the last line."""
+    return getattr(args, "output", OUTPUT_TEXT) == OUTPUT_NDJSON
+
+def emit_error(ctx, error: str, message: str) -> None:
+    """Write `{"schema_version", "error", "message"}` to stdout under
+    `--output=json` (with `"type": "error"` as a line of `ndjson`), for a
+    task ending before it has a result: `error` names why (`health_check`),
+    `message` says what. Nothing under `text`."""
+    if not wants_json(ctx.args):
+        return
+    doc = {"schema_version": SCHEMA_VERSION, "error": error, "message": message}
+    if wants_ndjson(ctx.args):
+        # Compact and led by `"type"`: the runtime's `ends_stream`
+        # recognizes the stream's end by that prefix.
+        doc = {"type": "error"} | doc
+    ctx.std.io.stdout.write(json.encode(doc) + "\n")

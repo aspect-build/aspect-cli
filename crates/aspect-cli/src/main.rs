@@ -287,6 +287,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 }
             };
 
+            TASK_JSON_OUTPUT.store(
+                task_json_output(&root_cmd, &matches) as u8,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
             // Everything past here either reports the CLI's own surface or
             // dispatches a task; see `Unloadable` for which may run degraded.
             if !unloadable.is_empty() {
@@ -325,6 +330,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             if let Err(err) = cmd.feature_flag_conflict(&mut cmd_for_help, &matches) {
                 err.print().ok();
+                json_error("usage", &error_line(&err.to_string()), true);
                 return Ok(ExitCode::from(err.exit_code() as u8));
             }
             let dispatch = step("dispatch", || cmd.dispatch(matches))?;
@@ -362,18 +368,19 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // No-op (and disables further OTel work for the rest of the run)
             // if no exporter was registered.
             let mut exporters = mpe.drain_exporters();
-            // These tasks' stdout carries a protocol payload another program
-            // parses, so a configured stdout telemetry sink would interleave
-            // with it and corrupt it. Redirect such sinks to stderr for them;
-            // every other configuration is untouched.
-            if let Some(owner) = stdout_protocol_owner(&dispatch.task_kind) {
+            // Some tasks' stdout (and any under `--output=json` or `ndjson`)
+            // carries a payload another program parses, so a configured
+            // stdout telemetry sink would interleave with it and corrupt it.
+            // Redirect such sinks to stderr for them; every other
+            // configuration is untouched.
+            if let Some(owner) = stdout_protocol_owner(&dispatch.task_kind, task_json()) {
                 use axl_runtime::engine::telemetry::{ExporterSpec, FileDestination};
                 for spec in &mut exporters {
                     if let ExporterSpec::File(file) = spec {
                         if file.destination == FileDestination::Stdout {
                             errln!(
                                 "warning: a stdout telemetry exporter is configured, but \
-                                 {owner} — redirecting it to stderr."
+                                 {owner}, so it writes to stderr instead."
                             );
                             file.destination = FileDestination::Stderr;
                         }
@@ -409,6 +416,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 task_start.elapsed(),
             );
             let exit = exit.map_err(anyhow::Error::from)?;
+            if let Some(why) = cancelled() {
+                json_error("aborted", why, true);
+            }
 
             mpe.finish();
             Ok(ExitCode::from(exit.unwrap_or(0)))
@@ -466,14 +476,19 @@ fn report_startup(root_span: &tracing::Span, task_kind: &str) {
 }
 
 /// For a task whose stdout is a machine-parsed protocol payload rather than
-/// console output, a phrase naming what owns it — otherwise `None`.
-fn stdout_protocol_owner(task_kind: &str) -> Option<&'static str> {
+/// console output (its kind's, or the `json` the parsed task's `--output`
+/// asked for), a phrase naming what owns it, otherwise `None`.
+fn stdout_protocol_owner(task_kind: &str, json: JsonOutput) -> Option<&'static str> {
     match task_kind {
         "mcp" => Some("`aspect mcp` owns stdout for the MCP protocol"),
         "workspace-data" => {
             Some("`aspect setup workspace-data` owns stdout for Bazel's workspace status")
         }
-        _ => None,
+        _ => match json {
+            JsonOutput::None => None,
+            JsonOutput::Document => Some("`--output=json` owns stdout for its document"),
+            JsonOutput::Stream => Some("`--output=ndjson` owns stdout for its stream"),
+        },
     }
 }
 
@@ -691,15 +706,143 @@ fn strip_error_prefix(message: &str) -> &str {
     message.trim_start_matches("error: ")
 }
 
-/// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
-/// `--`. Read from the raw arguments because a config error stops the CLI
-/// before they are parsed.
-fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
+/// What `--output` asked of stdout: nothing, the document (`json`) or its
+/// stream (`ndjson`), whose every line carries a `type`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JsonOutput {
+    None = 0,
+    Document = 1,
+    Stream = 2,
+}
+
+impl JsonOutput {
+    fn of(value: &str) -> Self {
+        match value {
+            "json" => JsonOutput::Document,
+            "ndjson" => JsonOutput::Stream,
+            _ => JsonOutput::None,
+        }
+    }
+}
+
+/// The parsed task's [`JsonOutput`], set once the command line parses
+/// ([`task_json_output`]).
+static TASK_JSON_OUTPUT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The parsed task's [`JsonOutput`]: [`JsonOutput::None`] before the command
+/// line parses.
+fn task_json() -> JsonOutput {
+    match TASK_JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => JsonOutput::Document,
+        2 => JsonOutput::Stream,
+        _ => JsonOutput::None,
+    }
+}
+
+/// The [`JsonOutput`] the leaf task `matches` selected was given, when it
+/// takes `--output` as a choice of `text` and `json` (`results_json.
+/// output_arg()`'s, with `ndjson`, or `gc`'s), not a file path as `setup
+/// bazelrc`'s.
+fn task_json_output(cmd: &clap::Command, matches: &clap::ArgMatches) -> JsonOutput {
+    if let Some((name, sub)) = matches.subcommand() {
+        return cmd
+            .find_subcommand(name)
+            .map_or(JsonOutput::None, |c| task_json_output(c, sub));
+    }
+    let choice = cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "output")
+        .is_some_and(|a| {
+            let values: Vec<String> = a
+                .get_possible_values()
+                .iter()
+                .map(|v| v.get_name().to_string())
+                .collect();
+            values.iter().any(|v| v == "json") && values.iter().any(|v| v == "text")
+        });
+    if !choice {
+        return JsonOutput::None;
+    }
+    matches
+        .try_get_one::<String>("output")
+        .ok()
+        .flatten()
+        .map_or(JsonOutput::None, |v| JsonOutput::of(v))
+}
+
+/// An error document on stdout, `{"schema_version", "error", "message"}`
+/// (a line of `"type": "error"` in the `ndjson` stream), for a run that
+/// asked for JSON and ends on an error: a caller reading stdout otherwise
+/// gets nothing to parse, or a stream with no end. A config error is judged
+/// from the raw arguments (`json_output_of`), as it stops the CLI before any
+/// task parses, so every `--output=json` or `ndjson` ahead of `--` gets one,
+/// whatever its task makes of `--output` (`setup bazelrc`'s path, `run` or
+/// `version`, which take none of these). Any other error is judged from the
+/// parsed task (`parsed`), whose `--output` must be a `text`/`json` choice
+/// ([`task_json_output`]). Nothing for a
+/// document when the task already wrote to stdout (a document, then a
+/// hook's failure), nor for a stream that already had its last line, so
+/// stdout never holds two ends.
+fn json_error(error: &str, message: &str, parsed: bool) {
+    let asked = if parsed {
+        task_json()
+    } else {
+        json_output_of(std::env::args().skip(1))
+    };
+    let ended = match asked {
+        JsonOutput::None => true,
+        JsonOutput::Document => axl_runtime::engine::stdout_written(),
+        // An error ends a stream its lines have begun.
+        JsonOutput::Stream => axl_runtime::engine::stdout_ended(),
+    };
+    if ended {
+        return;
+    }
+    let mut doc = serde_json::Map::new();
+    if asked == JsonOutput::Stream {
+        doc.insert("type".into(), "error".into());
+    }
+    doc.insert("schema_version".into(), 1.into());
+    doc.insert("error".into(), error.into());
+    doc.insert("message".into(), strip_error_prefix(message).into());
+    outln!("{}", serde_json::Value::Object(doc));
+}
+
+/// Why the run was cancelled (`interrupted`, `terminated`, or `cancelled`
+/// when AXL cancelled it itself), or `None` when it was not. A cancelled run
+/// that ends without its document gets `json_error`'s `aborted`, whatever
+/// its exit code, so a stream always has its last line.
+fn cancelled() -> Option<&'static str> {
+    let signals = Signals::global();
+    signals
+        .root()
+        .is_cancelled()
+        .then(|| signals.kind().map_or("cancelled", |kind| kind.message()))
+}
+
+/// A Starlark error's own line (`error: fail: ...`), without the traceback
+/// and source excerpt around it, or the whole text when it has none.
+fn error_line(text: &str) -> String {
+    text.lines()
+        .find_map(|line| line.strip_prefix("error: "))
+        .map(|line| line.strip_prefix("fail: ").unwrap_or(line).to_string())
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
+/// The [`JsonOutput`] `args` ask for with `--output=<v>` (or `--output
+/// <v>`) ahead of any `--`, the last one winning as with Clap. Read from the raw arguments because a config
+/// error stops the CLI before they are parsed.
+fn json_output_of(args: impl IntoIterator<Item = String>) -> JsonOutput {
     let args: Vec<String> = args.into_iter().take_while(|a| a != "--").collect();
-    args.iter().enumerate().any(|(i, arg)| {
-        arg == "--output=json"
-            || (arg == "--output" && args.get(i + 1).is_some_and(|v| v == "json"))
-    })
+    args.iter()
+        .enumerate()
+        .filter_map(|(i, arg)| match arg.strip_prefix("--output=") {
+            Some(v) => Some(JsonOutput::of(v)),
+            None if arg == "--output" => args.get(i + 1).map(|v| JsonOutput::of(v)),
+            None => None,
+        })
+        .last()
+        .unwrap_or(JsonOutput::None)
 }
 
 fn main() -> ExitCode {
@@ -732,27 +875,31 @@ fn main() -> ExitCode {
                 // `{err:#}` walks the chain to the Starlark error, whose
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
+                match cancelled() {
+                    Some(why) => json_error("aborted", why, true),
+                    None if exit.code != 0 => {
+                        json_error("task_exit", exit.message.as_deref().unwrap_or(""), true)
+                    }
+                    None => {}
+                }
                 return ExitCode::from(exit.code);
             }
-            // A config error is reported as the failed config's own error,
-            // and as a document on stdout when one was asked for: a caller
-            // reading `--output=json` otherwise gets nothing to parse.
+            // A config error is reported as the failed config's own error.
             if err.downcast_ref::<ConfigError>().is_some() {
                 let message = format!("{:#}", err.root_cause());
                 errln!("error: {}", strip_error_prefix(&message));
-                if wants_json_output(std::env::args().skip(1)) {
-                    outln!(
-                        "{}",
-                        serde_json::json!({
-                            "schema_version": 1,
-                            "error": "config_error",
-                            "message": strip_error_prefix(&message),
-                        })
-                    );
-                }
+                json_error("config_error", &error_line(&message), false);
                 return ExitCode::FAILURE;
             }
             errln!("error: {}", strip_error_prefix(&format!("{err:?}")));
+            match cancelled() {
+                Some(why) => json_error("aborted", why, true),
+                None => json_error(
+                    "task_error",
+                    &error_line(&format!("{:#}", err.root_cause())),
+                    true,
+                ),
+            }
             ExitCode::FAILURE
         }
     }
@@ -1042,7 +1189,7 @@ mod print_macro_guard {
 
 #[cfg(test)]
 mod config_error_tests {
-    use super::wants_json_output;
+    use super::{JsonOutput, json_output_of};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|a| a.to_string()).collect()
@@ -1050,15 +1197,84 @@ mod config_error_tests {
 
     #[test]
     fn json_output_is_recognised_in_both_spellings() {
-        assert!(wants_json_output(args(&["gc", "--output=json"])));
-        assert!(wants_json_output(args(&["gc", "--output", "json"])));
-        assert!(!wants_json_output(args(&["gc", "--output=text"])));
-        assert!(!wants_json_output(args(&["gc", "--output"])));
+        assert_eq!(
+            json_output_of(args(&["gc", "--output=json"])),
+            JsonOutput::Document
+        );
+        assert_eq!(
+            json_output_of(args(&["gc", "--output", "json"])),
+            JsonOutput::Document
+        );
+        assert_eq!(
+            json_output_of(args(&["build", "--output=ndjson"])),
+            JsonOutput::Stream
+        );
+        assert_eq!(
+            json_output_of(args(&["build", "--output", "ndjson"])),
+            JsonOutput::Stream
+        );
+        assert_eq!(
+            json_output_of(args(&["gc", "--output=text"])),
+            JsonOutput::None
+        );
+        assert_eq!(json_output_of(args(&["gc", "--output"])), JsonOutput::None);
+    }
+
+    #[test]
+    fn a_task_with_a_text_or_json_output_is_judged_from_its_parse() {
+        use super::task_json_output;
+        let output = |values: &[&'static str]| {
+            clap::Command::new("aspect").subcommand(
+                clap::Command::new("t").arg(
+                    clap::Arg::new("output")
+                        .long("output")
+                        .value_parser(clap::builder::PossibleValuesParser::new(values.to_vec())),
+                ),
+            )
+        };
+        let judged = |values: &[&'static str], given: &str| {
+            let mut cmd = output(values);
+            let matches = cmd
+                .try_get_matches_from_mut(["aspect", "t", &format!("--output={given}")])
+                .unwrap();
+            task_json_output(&cmd, &matches)
+        };
+        assert_eq!(
+            judged(&["text", "json", "ndjson"], "ndjson"),
+            JsonOutput::Stream
+        );
+        assert_eq!(judged(&["text", "json"], "json"), JsonOutput::Document);
+        assert_eq!(judged(&["text", "json"], "text"), JsonOutput::None);
+        let mut path = clap::Command::new("aspect")
+            .subcommand(clap::Command::new("t").arg(clap::Arg::new("output").long("output")));
+        let matches = path
+            .try_get_matches_from_mut(["aspect", "t", "--output=json"])
+            .unwrap();
+        assert_eq!(
+            task_json_output(&path, &matches),
+            JsonOutput::None,
+            "a path, not a choice"
+        );
+    }
+
+    #[test]
+    fn the_last_output_wins() {
+        assert_eq!(
+            json_output_of(args(&["build", "--output=json", "--output=text"])),
+            JsonOutput::None
+        );
+        assert_eq!(
+            json_output_of(args(&["build", "--output=text", "--output=ndjson"])),
+            JsonOutput::Stream
+        );
     }
 
     #[test]
     fn arguments_after_a_double_dash_are_not_ours() {
-        assert!(!wants_json_output(args(&["build", "--", "--output=json"])));
+        assert_eq!(
+            json_output_of(args(&["build", "--", "--output=json"])),
+            JsonOutput::None
+        );
     }
 }
 
@@ -1127,5 +1343,29 @@ mod degrade_policy_tests {
                 "{kind:?} is a rejection, not a help screen"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod json_error_tests {
+    use super::{JsonOutput, error_line, stdout_protocol_owner};
+
+    #[test]
+    fn json_output_owns_stdout_for_any_task() {
+        assert!(stdout_protocol_owner("build", JsonOutput::None).is_none());
+        assert!(stdout_protocol_owner("build", JsonOutput::Document).is_some());
+        assert!(stdout_protocol_owner("test", JsonOutput::Stream).is_some());
+        assert!(stdout_protocol_owner("mcp", JsonOutput::None).is_some());
+    }
+
+    #[test]
+    fn a_starlark_error_becomes_its_own_line() {
+        let text = "Traceback (most recent call last):\n  * x.axl:1, in f\n      fail(\"no\")\nerror: fail: --target-pattern-file: file not found: /nope\n   --> x.axl:1:1\n";
+        assert_eq!(
+            error_line(text),
+            "--target-pattern-file: file not found: /nope"
+        );
+        assert_eq!(error_line("error: bad thing"), "bad thing");
+        assert_eq!(error_line("  plain  "), "plain");
     }
 }

@@ -29,7 +29,8 @@
 //! erases could arrive after a stdout line and wipe it (the test summary,
 //! say). [`open_with_stdout`] therefore gives the child the capture as its
 //! stdout too, so both are one ordered stream, for a caller whose stdout and
-//! stderr are the same file: one terminal, or one pipe after `2>&1`.
+//! stderr are the same file (one terminal, or one pipe after `2>&1`), or who
+//! sends the child's stdout to its own stderr.
 
 use std::fs::File;
 use std::io;
@@ -63,8 +64,9 @@ pub struct Capture {
 }
 
 /// [`open`], plus the same capture as the child's stdout when `stdout` asks
-/// for it. Only for a caller whose stdout and stderr are the same file, since
-/// what the capture reads is forwarded to stderr.
+/// for it. Only for a caller whose stdout and stderr are the same file, or
+/// who sends the child's stdout to its stderr, since what the capture reads
+/// is forwarded to stderr.
 pub fn open_with_stdout(mode: Mode, stdout: bool) -> io::Result<Capture> {
     let (writer, reader, is_pty) = open_fds_kind(mode)?;
     let child_stdout = match stdout {

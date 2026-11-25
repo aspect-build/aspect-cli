@@ -13,6 +13,34 @@ use std::io::Write;
 use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+
+/// Whether AXL wrote anything to this process's stdout
+/// (`ctx.std.io.stdout.write`).
+static STDOUT_WRITTEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether AXL has written to this process's stdout, so a caller that owes
+/// it a document (`--output=json`'s error) does not add a second.
+pub fn stdout_written() -> bool {
+    STDOUT_WRITTEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether AXL wrote a stream's last line to stdout (`--output=ndjson`'s
+/// `result` or `error`).
+static STDOUT_ENDED: AtomicBool = AtomicBool::new(false);
+
+/// Whether an `--output=ndjson` stream on stdout has had its last line, so
+/// an error after it adds no second; before it, one is the stream's end.
+pub fn stdout_ended() -> bool {
+    STDOUT_ENDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether `data` is a stream's last line: `result` or `error` typed, written
+/// compact with `type` its first key, as `results_json.emit` and
+/// `emit_error` write it.
+fn ends_stream(data: &[u8]) -> bool {
+    data.starts_with(br#"{"type":"result""#) || data.starts_with(br#"{"type":"error""#)
+}
 
 use allocative::Allocative;
 use dupe::Dupe;
@@ -500,6 +528,12 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
+                if !data.is_empty() {
+                    STDOUT_WRITTEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if ends_stream(data) {
+                    STDOUT_ENDED.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 match inner.lock().write(data) {
                     Ok(n) => {
                         if copy {
@@ -653,5 +687,18 @@ mod broken_pipe_tests {
     #[test]
     fn success_passes_through() {
         assert!(ignore_broken_pipe(Ok(())).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod stream_end_tests {
+    use super::ends_stream;
+
+    #[test]
+    fn a_result_or_error_line_ends_a_stream() {
+        assert!(ends_stream(br#"{"type":"result","schema_version":1}"#));
+        assert!(ends_stream(br#"{"type":"error","error":"task_error"}"#));
+        assert!(!ends_stream(br#"{"type":"attempt","attempt":0}"#));
+        assert!(!ends_stream(br#"{"schema_version":1,"error":"x"}"#));
     }
 }

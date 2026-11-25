@@ -27,7 +27,7 @@ can match any severity. Every line hidden is in the raw log the summary
 names.
 
 Bazel is always captured with its curses UI, which ends each action's output
-for the stages. Where curses is not shown (stdout or stderr not a terminal,
+for the stages. Where curses is not shown (where Bazel's stdout lands, or stderr, not a terminal,
 or the user's `--curses=no`), the console is rendered to plain lines and the
 stages run on those; Bazel's status line comes through every few seconds.
 The `agent` profile, for a coding agent reading the console, shows plain
@@ -214,8 +214,9 @@ def processor_for(trait, stdout_is_tty: bool, stderr_is_tty: bool, extra = [], c
     Nothing is shown for a `trait.output_display` of `none`: a feature draws
     the screen itself. Otherwise what is shown is Bazel's curses UI as
     `curses`, the user's own `--curses`, says; else as `trait.output_display`
-    does (`curses` or `lines`); else, for `auto`, when the task's stdout and
-    stderr are both terminals, since Bazel decides colour and its live UI for
+    does (`curses` or `lines`); else, for `auto`, when where Bazel's stdout
+    lands (the first argument: the task's stdout, or its stderr when it is
+    sent there) and the task's stderr are both terminals, since Bazel decides colour and its live UI for
     both. Plain lines carry Bazel's status line every few seconds unless
     `trait.output_progress` is False, or `show_progress`, the user's own
     `--show_progress`, is, which shows plain lines in place of curses too. Colour shows as `color`, the user's own

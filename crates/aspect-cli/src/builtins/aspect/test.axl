@@ -8,6 +8,7 @@ load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/tips.axl", "tips")
 
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
@@ -51,8 +52,8 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
 
     If no placeholder appears anywhere, the report path is appended as the
     last positional argument so simple tools like `genhtml` work without
-    extra ceremony. A non-zero exit code from the tool is surfaced as a
-    warning — it does not fail the test task, so uploaders (e.g. codecov)
+    extra ceremony. A tool not found, or a non-zero exit code from it, is
+    surfaced as a warning - it does not fail the test task, so uploaders (e.g. codecov)
     can still publish partial coverage when some tests failed.
     """
     bin, bin_matched = _substitute(bin, report_path)
@@ -65,8 +66,14 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
     if not any_match:
         final_args.append(report_path)
 
+    if ctx.std.process.which(bin) == None:
+        ctx.std.io.stderr.write(
+            "--coverage-tool: '" + bin + "' not found (continuing; tool failure does not fail the test task)\n",
+        )
+        return
     print("Running coverage tool: " + bin + " " + " ".join(final_args))
-    status = ctx.std.process.command(bin).args(final_args).spawn().wait()
+    status = ctx.std.process.command(bin).args(final_args) \
+        .stdout(results_json.child_stdout(ctx.std.io, ctx.args)).spawn().wait()
     if not status.success:
         ctx.std.io.stderr.write(
             "--coverage-tool: '" + bin + "' exited with code " + str(exit_code_of(status)) +
@@ -81,7 +88,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    bz = bazel_invocation.test(ctx)
+    bz = bazel_invocation.test(ctx, stdout = results_json.child_stdout(ctx.std.io, ctx.args))
     rs = results.test(ctx, report_uploader = lambda data, status, command, targets: artifacts.upload_report(
         ctx,
         data,
@@ -94,13 +101,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bz.start()
 
     w = None
+    live = results_json.live(ctx)  # --output=ndjson's lines
     for i in bz.attempts:
         rs.attempt(i, prior = w)
+        live.attempt(i)
         sp = bz.spawn(i, events = results.KINDS if rs.live else False)
         rs.invocation(sp)
         for event in sp.events:
             sp.on_event(event)  # build_event, exec_log_event, output_intercept and output_frame hooks
             rs.process(event)
+            live.update(rs.data)
         w = sp.wait()
         if w.success or not bz.should_retry(sp, w):
             break
@@ -122,6 +132,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 # matter which one the tool reads.
                 _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
 
+    # After the coverage tool: one that fails to start ends the run, and
+    # `main`'s error document then matches its exit.
+    results_json.emit(ctx, rs.data, "test", rs.final_status(), conclusion.exit_code)
     return conclusion
 
 test = task(
@@ -145,7 +158,7 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-    } | bazel_invocation.targets_arg("test") | bazel_invocation.args("the test invocation") | repro_flavor_args(),
+    } | bazel_invocation.targets_arg("test") | bazel_invocation.args("the test invocation") | repro_flavor_args() | results_json.output_arg(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

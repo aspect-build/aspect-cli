@@ -8,6 +8,7 @@ load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
+load("./private/lib/results_json.axl", "results_json")
 load("./private/lib/tips.axl", "tips")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -16,7 +17,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # immutable record. Deployment endpoints/auth are injected by the Deployment
     # feature through the trait (see `feature/deployment.axl`). The whole flow is
     # visible below as thin verbs over the handle.
-    bz = bazel_invocation.build(ctx)
+    bz = bazel_invocation.build(ctx, stdout = results_json.child_stdout(ctx.std.io, ctx.args))
     rs = results.build(ctx, report_uploader = lambda data, status, command, targets: artifacts.upload_report(
         ctx,
         data,
@@ -31,22 +32,27 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bz.start()  # --cancel
 
     w = None
+    live = results_json.live(ctx)  # --output=ndjson's lines
     for i in bz.attempts:  # `i` is the single source of truth for the attempt index
         rs.attempt(i, prior = w)
+        live.attempt(i)
         sp = bz.spawn(i, events = results.KINDS if rs.live else False)
         rs.invocation(sp)
         for event in sp.events:  # BuildEvent | None (None = quiet-tick heartbeat)
             sp.on_event(event)  # build_event, exec_log_event, output_intercept and output_frame hooks
             rs.process(event)
+            live.update(rs.data)
         w = sp.wait()  # bazel_attempt_end hooks
         if w.success or not bz.should_retry(sp, w):
             break
 
     bz.finish(w)  # BES summary + build_end + code coercion
-    return rs.conclude(w, bz.targets)
+    conclusion = rs.conclude(w, bz.targets)
+    results_json.emit(ctx, rs.data, "build", rs.final_status(), conclusion.exit_code)
+    return conclusion
 
 build = task(
-    args = bazel_invocation.targets_arg("build") | bazel_invocation.args("the build") | repro_flavor_args(),
+    args = bazel_invocation.targets_arg("build") | bazel_invocation.args("the build") | repro_flavor_args() | results_json.output_arg(),
     show_task_options = True,
     summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     traits = [

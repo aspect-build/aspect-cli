@@ -62,6 +62,7 @@ load(
 )
 load("./lifecycle.axl", "Phases", "phases")
 load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_action_snippet", "extract_junit_failure", "extract_snippet", "has_snippet")
+load("./output_json.axl", "wants_json")
 load("./path_glob.axl", "match_path")
 load("./report.axl", "REPORT_ARTIFACT_KIND")
 load(
@@ -429,11 +430,14 @@ def _repro_with_prefix(prefix, labels, max_chars):
         return ("", 0)
     return (base + " ".join(included), len(included))
 
-# Keys a task resolves before the build and `process_event` must not clobber
-# when `build_started` resets the accumulator for a new (or retried) stream.
-# All three feed the Aspect Web UI link — two identify the invocation, one is its
-# base URL off a runner; see `resolve_aspect_url`.
-_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url"]
+# Keys a task resolves before the build that neither `process_event`'s
+# `build_started` reset nor a retry's fresh accumulator (`attempt`) may
+# clobber. Three feed the Aspect Web UI link (two identify the invocation, one
+# is its base URL off a runner; see `resolve_aspect_url`); `target_pattern`
+# feeds the explicit command and the `--output=json` document;
+# `bazel_attempts`, the earlier attempts a retry archives, feeds the report
+# and the retry rows.
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url", "target_pattern", "bazel_attempts"]
 
 def init_data():
     """Create a fresh data accumulator.
@@ -444,7 +448,7 @@ def init_data():
     See `crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md` for the schema.
 
     `_TASK_OWNED_KEYS` names the root scalars that survive a `build_started`
-    reset.
+    reset and a retry.
     """
     return {
         # start/finish ms since epoch. build/test: from BES (process_event).
@@ -626,7 +630,8 @@ def init_data():
             },
 
             # `aborted` comes from BuildFinished's exit code (see the
-            # `build_finished` arm of `process_event`). The reason/description
+            # `build_finished` arm of `process_event`), or from `conclude`
+            # when a cancel ended Bazel before that (`_ended_by_cancel`). The reason/description
             # are detail text for the rendered notice, taken from the last
             # `Aborted` payload seen; they never decide the verdict, so they
             # may be populated on a build that is not aborted (a skipped
@@ -2723,6 +2728,24 @@ def _assemble_explicit_command(build_command, target_pattern, explicit_cmd_line,
 
     long_form = _format_shell_command(head, flags, target_tokens)
     return {"short": short, "long": long_form}
+
+def redacted_explicit_command(data: dict) -> dict:
+    """The user-typed bazel command as `{"short", "long"}`, credential-redacted
+    and shell-quoted - the same pair the rendered surfaces show, resolved from
+    `data` alone.
+
+    For consumers outside the renderers (`lib/results_json.axl`). The resolved
+    post-bazelrc flag lists stay private on purpose: they are large, and reaching
+    them without `_redact_args` is how a `--remote_header` escapes.
+    """
+    bz = data.get("bazel", {}) or {}
+    opts = bz.get("options_parsed", {}) or {}
+    return _assemble_explicit_command(
+        bz.get("build_command", ""),
+        data.get("target_pattern", ""),
+        opts.get("explicit_cmd_line", []),
+        _allow_env_patterns(bz.get("metadata", {})),
+    )
 
 def _sorted_dedup(args, allow_env):
     """Redact + sort + dedup + shell-quote, for browseable option lists. Sort is
@@ -5082,7 +5105,8 @@ def _pick_status(command, data, had_failure, terminal):
     a flaky-only test outcome flips to `warning`.
 
     Aborted outranking `failed` is deliberate. The flag is only set when Bazel
-    exited INTERRUPTED, where whatever failure was already recorded is a
+    exited INTERRUPTED, or a cancel ended it before that verdict
+    (`_ended_by_cancel`), where whatever failure was already recorded is a
     consequence of the interrupt and "the build never finished" is the
     actionable fact. It also keeps the status consistent with
     `compute_invocation_state`, which returns the Aborted title label
@@ -5095,6 +5119,21 @@ def _pick_status(command, data, had_failure, terminal):
     if command == "test" and data.get("bazel", {}).get("flaky_test_total", 0) > 0:
         return "warning"
     return "passed" if terminal else "running"
+
+def _ended_by_cancel(success, code, data, cancelled):
+    """Whether a cancel ended Bazel before its own verdict: the run was
+    cancelled, Bazel failed, no `BuildFinished` was seen (it says INTERRUPTED
+    itself, see `process_event`) and the exit code is no verdict either (8,
+    or 128 and up: a signal's, or 255). A cancel just after the client spawns
+    is one; a build that failed (1, 3, 4, ...) and was cancelled during its
+    tail stays failed."""
+    if success or not cancelled or data.get("finish_time_ms", 0):
+        return False
+    return code == exit_codes.INTERRUPTED or code >= 128
+
+def ended_by_cancel(success, code, data, cancelled):
+    """Public test hook; see `_ended_by_cancel`."""
+    return _ended_by_cancel(success, code, data, cancelled)
 
 def pick_status(command, data, had_failure, terminal):
     """Public test hook; see `_pick_status`."""
@@ -5225,8 +5264,10 @@ def _results_new(ctx, command, report_uploader = None):
         "last_monotonic": 0.0,
         "attempts": 0,
         "label": "",
-        "bazel_streams_bes": False,
-        "results_url": "",
+        # Set by conclude(); read back through the handle by tasks that emit a
+        # `--output=json` document, which needs the terminal status the
+        # TaskConclusion does not carry.
+        "final_status": "",
     }
 
     def _emit(status, priority):
@@ -5245,12 +5286,15 @@ def _results_new(ctx, command, report_uploader = None):
         # (`use_rc`); the health checks in setup_surface read it via ctx.bazel.
         _ = rc
 
-        # Properties of the resolved flags, so they hold for every attempt; `m`
-        # keeps them to restore onto each retry's fresh `data`.
-        m["bazel_streams_bes"] = bazel_streams_bes
-        m["results_url"] = results_url
+        # Properties of the resolved flags, so they hold for every attempt:
+        # task-owned keys, which each retry's fresh `data` keeps.
         data["bes_streamed_by_bazel"] = bazel_streams_bes
         data["aspect_results_url"] = results_url
+
+        # The surfaces read the pattern off their own `subject`; `data` carries
+        # it for everything else (the redacted explicit command, the
+        # `--output=json` document), which is what init_data() already promises.
+        data["target_pattern"] = " ".join(targets)
         ph.setup_surface(" ".join(targets), "bazel_results")
 
     def attempt(index, prior = None):
@@ -5266,10 +5310,12 @@ def _results_new(ctx, command, report_uploader = None):
             # ran human attempt `index`.
             prior_code = exit_code_of(prior) if prior != None else 1
             prior_attempts = archive_bazel_attempt(data, index, prior_code)
+
+            # Less the sink id: each attempt's spawn mints its own (`invocation`).
+            preserved = {k: data[k] for k in _TASK_OWNED_KEYS if k in data and k != "sink_invocation_id"}
             ph.reset(init_data())
+            data.update(preserved)
             data["bazel_attempts"] = prior_attempts
-            data["bes_streamed_by_bazel"] = m["bazel_streams_bes"]
-            data["aspect_results_url"] = m["results_url"]
             m["first"] = True
             phase_id = command + "_retry_" + str(index + 1)
             m["label"] = "Retrying bazel " + command + "... (attempt " + str(index + 1) + ")"
@@ -5317,12 +5363,16 @@ def _results_new(ctx, command, report_uploader = None):
         # would report.
         code = 0 if w.success else exit_code_of(w)
 
+        if _ended_by_cancel(w.success, code, data, ctx.cancellation.root.cancelled):
+            data["bazel"]["aborted"] = True
+
         # If retries occurred, append the final attempt so `bazel_attempts` holds
         # the full ordered history (failed priors + final).
         if data.get("bazel_attempts"):
             archive_bazel_attempt(data, m["attempts"], code)
 
         final_status = _pick_status(command, data, had_failure = not w.success, terminal = True)
+        m["final_status"] = final_status
 
         # Per-subcommand + per-failure repro commands, flavor-gated. Keyed by the
         # subcommand that REPRODUCES each failure (a test that failed to build
@@ -5380,14 +5430,16 @@ def _results_new(ctx, command, report_uploader = None):
     return struct(
         ph = ph,
         data = data,
-        # Emit BES events only when a status surface is listening (no
-        # surfaces → bazel runs with no BEP file).
-        live = bool(ctx.traits[Phases].task_update),
+        # Emit BES events only when a status surface or the JSON output
+        # reads them (neither → bazel runs with no BEP file).
+        live = bool(ctx.traits[Phases].task_update) or wants_json(ctx.args),
         setup = setup,
         attempt = attempt,
         invocation = invocation,
         process = process,
         conclude = conclude,
+        # Terminal lifecycle status, "" until conclude() has run.
+        final_status = lambda: m["final_status"],
     )
 
 results = namespace(

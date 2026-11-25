@@ -8,6 +8,9 @@
 //!   show up unchanged and late: both the rewritten output and the elapsed
 //!   time say the drain happened.
 //! * A cancelled build still forwards what Bazel prints while it winds down.
+//! * Under `--output=json` and `ndjson` stdout carries only the document or
+//!   the stream, error documents included: a stdout telemetry exporter moves
+//!   to stderr, and a config error, a flag conflict or a cancel says so.
 
 #![cfg(unix)]
 
@@ -509,6 +512,453 @@ def config(ctx: ConfigContext):
         at("FAIL: //pkg:t"),
     ];
     assert!(order.is_sorted(), "out of order:\n{merged}");
+}
+
+/// Under `--output=json` Bazel's stdout goes to our stderr, into the
+/// console's capture of it, so it keeps Bazel's order there and our stdout is
+/// only the document.
+#[test]
+fn a_json_build_keeps_bazels_order_on_stderr() {
+    let dir = workspace("config.axl", |_| {
+        r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario=merged_console")
+"#
+        .to_string()
+    });
+    let (out, err) = (dir.path().join("out.json"), dir.path().join("err.txt"));
+    let status = aspect(dir.path(), "build")
+        .arg("--output=json")
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(&err).unwrap())
+        .status()
+        .expect("running aspect build");
+    let (out, err) = (
+        std::fs::read_to_string(&out).unwrap(),
+        std::fs::read_to_string(&err).unwrap(),
+    );
+    assert!(status.success(), "{err}");
+    let doc: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("{e}: stdout is not one document:\n{out}"));
+    assert!(doc.get("schema_version").is_some(), "{out}");
+    let at = |needle: &str| {
+        err.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} missing from:\n{err}"))
+    };
+    let order = [
+        at("INFO: From Testing //pkg:t:"),
+        at("==== Test output for //pkg:t:"),
+        at("failing output"),
+        at("FAIL: //pkg:t"),
+    ];
+    assert!(order.is_sorted(), "out of order:\n{err}");
+    assert!(!err.contains('\x1b'), "no colour in a file:\n{err}");
+}
+
+/// `--output=ndjson` streams: every stdout line is a JSON object with a
+/// `type`, the first the attempt, a failed action's line before the end,
+/// and the document last, as `"type": "result"`.
+#[test]
+fn an_ndjson_build_streams_its_failures_then_the_document() {
+    let dir = workspace("config.axl", |_| {
+        r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario=action_and_test_logs")
+"#
+        .to_string()
+    });
+    let (out, err) = (dir.path().join("out.ndjson"), dir.path().join("err.txt"));
+    let status = aspect(dir.path(), "build")
+        .arg("--output=ndjson")
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(&err).unwrap())
+        .status()
+        .expect("running aspect build");
+    let (out, err) = (
+        std::fs::read_to_string(&out).unwrap(),
+        std::fs::read_to_string(&err).unwrap(),
+    );
+    assert!(!status.success(), "the scenario fails: {err}");
+    let lines: Vec<serde_json::Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: not a JSON line: {l}")))
+        .collect();
+    let types: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+    assert_eq!(types, ["attempt", "action_failed", "result"], "{out}");
+    assert_eq!(lines[1]["label"], "//pkg:broken", "{out}");
+    assert!(
+        lines[1]["stderr_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("stderr-1"),
+        "{out}"
+    );
+    assert_eq!(lines[2]["status"], "failed", "{out}");
+    assert_eq!(
+        lines[2]["failures"]["actions"][0]["label"], "//pkg:broken",
+        "{out}"
+    );
+}
+
+/// An `--output=ndjson` stream a failure cuts short still ends: with Bazel
+/// not there to start, its attempt line is followed by an `error` line, as
+/// `--output=json` gets an error document.
+#[test]
+fn an_ndjson_stream_an_error_cuts_short_ends_with_the_error() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    for (output, want) in [
+        ("ndjson", vec!["attempt", "error"]),
+        ("json", vec!["task_error"]),
+    ] {
+        let out = aspect(dir.path(), "build")
+            .arg(format!("--output={output}"))
+            .env("BAZEL_REAL", dir.path().join("no-bazel"))
+            .output()
+            .expect("running aspect build");
+        assert!(!out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect();
+        let got: Vec<&str> = lines
+            .iter()
+            .map(|l| l["type"].as_str().or(l["error"].as_str()).unwrap())
+            .collect();
+        assert_eq!(got, want, "{output}: {stdout}");
+    }
+}
+
+/// `gazelle --watch` refuses JSON output, and says so on stdout too.
+#[test]
+fn gazelle_watch_refuses_json_output_with_a_document() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    for output in ["json", "ndjson"] {
+        let out = aspect(dir.path(), "gazelle")
+            .args(["--watch", &format!("--output={output}")])
+            .output()
+            .expect("running aspect gazelle");
+        assert_eq!(out.status.code(), Some(2), "a usage error: {out:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+        assert_eq!(doc["error"], "usage", "{doc}");
+        assert_eq!(doc.get("type").is_some(), output == "ndjson", "{doc}");
+    }
+}
+
+/// A retried build keeps what the task set before each attempt: the
+/// document its targets, and the final update both attempts, though attempt
+/// 2's `BuildStarted` resets the accumulator.
+#[test]
+fn a_retried_build_keeps_its_targets_and_attempts() {
+    let dir = workspace("config.axl", |_| {
+        r#"load("@aspect//traits.axl", "BazelTrait", "Phases")
+
+def _final(ctx, update):
+    if update.final and update.kind == "bazel_results":
+        print("final attempts=%d" % len(update.data.get("bazel_attempts", [])))
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario=cache_evicted_once")
+    ctx.traits[Phases].task_update.append(_final)
+"#
+        .to_string()
+    });
+    let out = aspect(dir.path(), "build")
+        .args(["--output=json", "--bazel-retry-attempts=2", "//pkg:broken"])
+        .env("BASIL_EVICTED_ONCE", dir.path().join("evicted"))
+        .output()
+        .expect("running aspect build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert!(
+        stderr.contains("Retrying bazel build"),
+        "the build was retried: {stderr}"
+    );
+    // The explicit command is built from it, and basil reports no command.
+    assert_eq!(doc["target_pattern"], "//pkg:broken", "{doc}");
+    assert!(stderr.contains("final attempts=2"), "{stderr}");
+}
+
+/// A feature's `--<name>` disagreeing with its `--<name>:enabled` is a usage
+/// error, and says so on stdout too.
+#[test]
+fn a_feature_flag_conflict_under_json_output_gets_a_usage_document() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    for output in ["json", "ndjson"] {
+        let out = aspect(dir.path(), "build")
+            .args([
+                "--tips=false",
+                "--tips:enabled=true",
+                &format!("--output={output}"),
+            ])
+            .output()
+            .expect("running aspect build");
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+        assert_eq!(doc["error"], "usage", "{doc}");
+        assert_eq!(
+            doc["message"],
+            "--tips=false conflicts with --tips:enabled=true; pass only one of them",
+            "{doc}"
+        );
+        assert_eq!(doc.get("type").is_some(), output == "ndjson", "{doc}");
+    }
+}
+
+/// Every line of `stdout` as JSON, panicking on one that is not.
+fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect()
+}
+
+/// A stdout telemetry exporter would interleave its records with the
+/// document, so under JSON output it writes to stderr instead.
+#[test]
+fn a_stdout_telemetry_exporter_moves_off_a_json_stdout() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    ctx.telemetry.exporters.add(file = \"stdout\", format = \"jsonl\", signals = [\"logs\"])\n"
+            .to_string()
+    });
+    for output in ["json", "ndjson"] {
+        let out = aspect(dir.path(), "build")
+            .arg(format!("--output={output}"))
+            .output()
+            .expect("running aspect build");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let lines = if output == "json" {
+            vec![
+                serde_json::from_slice(&out.stdout)
+                    .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout))),
+            ]
+        } else {
+            json_lines(&out.stdout)
+        };
+        let last = lines.last().expect("a document");
+        assert_eq!(last["status"], "passed", "{output}: {last}");
+        assert!(
+            lines.iter().all(|l| l.get("kind").is_none()),
+            "{output}: no telemetry record on stdout: {lines:?}"
+        );
+        assert!(
+            stderr.contains(&format!("`--output={output}` owns stdout")),
+            "{output}: {stderr}"
+        );
+    }
+}
+
+/// A failing `config.axl` gets a `config_error` document whose message is
+/// the error's own line, without its traceback.
+#[test]
+fn a_config_error_document_carries_the_errors_own_line() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    fail(\"no good\")\n".to_string()
+    });
+    let out = aspect(dir.path(), "build")
+        .arg("--output=json")
+        .output()
+        .expect("running aspect build");
+    assert!(!out.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(doc["error"], "config_error", "{doc}");
+    assert_eq!(doc["message"], "no good", "{doc}");
+}
+
+/// A `BAZEL_REAL` that, given `verb`, touches `marker` and sleeps until
+/// stopped, and otherwise runs basil.
+fn stalling_bazel(dir: &Path, verb: &str, marker: &Path) -> std::path::PathBuf {
+    let wrapper = dir.join(format!("bazel-stalls-on-{verb}.sh"));
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = {verb} ]; then touch \"{}\"; exec sleep 60; fi\ndone\nexec \"{}\" \"$@\"\n",
+            marker.display(),
+            basil_bin()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wrapper
+}
+
+/// Spawn `cmd`, SIGINT it once `marker` exists, and return its exit code,
+/// stdout and stderr.
+fn interrupt_once(mut cmd: Command, marker: &Path) -> (Option<i32>, Vec<u8>, String) {
+    let _ = std::fs::remove_file(marker);
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawning aspect");
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr_pipe.read_to_string(&mut text);
+        text
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            marker.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: signalling a child this test spawned and has not reaped.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    let status = child.wait().unwrap();
+    (status.code(), stdout, stderr.join().unwrap())
+}
+
+/// A cancel while `bazel info` runs, before the build starts, ends with an
+/// `aborted` document and the cancel's exit code.
+#[test]
+fn a_cancel_before_the_build_gets_an_aborted_document() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    let started = dir.path().join("info-started");
+    let wrapper = stalling_bazel(dir.path(), "info", &started);
+    for output in ["json", "ndjson"] {
+        let mut cmd = aspect(dir.path(), "build");
+        cmd.arg(format!("--output={output}"))
+            .env("BAZEL_REAL", &wrapper);
+        let (code, stdout, _) = interrupt_once(cmd, &started);
+        assert_eq!(code, Some(130), "{output}");
+        let lines = json_lines(&stdout);
+        let last = lines.last().expect("an error document");
+        assert_eq!(last["error"], "aborted", "{output}: {lines:?}");
+        assert_eq!(last["message"], "interrupted", "{output}: {lines:?}");
+        assert_eq!(last.get("type").is_some(), output == "ndjson", "{last}");
+    }
+}
+
+/// A cancel that ends the Bazel client before it reports INTERRUPTED (one
+/// just after it spawns) still reads as aborted: in the document, and in the
+/// text bookend.
+#[test]
+fn a_cancel_as_the_client_starts_reports_aborted() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    let started = dir.path().join("build-started");
+    let wrapper = stalling_bazel(dir.path(), "build", &started);
+    let mut cmd = aspect(dir.path(), "build");
+    cmd.arg("--output=json").env("BAZEL_REAL", &wrapper);
+    let (_, stdout, stderr) = interrupt_once(cmd, &started);
+    let doc: serde_json::Value = serde_json::from_slice(&stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&stdout)));
+    assert_eq!(doc["status"], "aborted", "{doc}\n{stderr}");
+    assert!(stderr.contains("Invocation disconnected"), "{stderr}");
+    assert!(!stderr.contains("Failed to build"), "{stderr}");
+}
+
+/// A build that failed on its own and is cancelled during its tail (Ctrl+C
+/// after the error, a CI cancel once a sibling failed) stays failed: Bazel
+/// reached its verdict, so the cancel does not relabel it aborted.
+#[test]
+fn a_cancel_after_bazels_verdict_keeps_the_failure() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    let finished = dir.path().join("build-finished");
+    let wrapper = dir.path().join("bazel-lingers.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n\"{basil}\" \"$@\" --scenario=nonzero_exit\ncode=$?\nfor a in \"$@\"; do\n  if [ \"$a\" = build ]; then\n    touch \"{marker}\"\n    trap 'exit $code' INT TERM\n    sleep 3 & wait $!\n  fi\ndone\nexit $code\n",
+            basil = basil_bin(),
+            marker = finished.display(),
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cmd = aspect(dir.path(), "build");
+    cmd.arg("--output=json").env("BAZEL_REAL", &wrapper);
+    let (code, stdout, stderr) = interrupt_once(cmd, &finished);
+    let doc: serde_json::Value = serde_json::from_slice(&stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&stdout)));
+    assert_eq!(doc["status"], "failed", "{doc}\n{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(!stderr.contains("Invocation disconnected"), "{stderr}");
+}
+
+/// A task that handles the cancel and returns 0 keeps its exit code, and
+/// stdout still gets its end: an `aborted` document, or the stream's last
+/// line.
+#[test]
+fn a_cancelled_task_that_returns_zero_still_ends_its_output() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let marker = dir.path().join("task-started");
+    let root = dir.path();
+    std::fs::write(root.join("MODULE.bazel"), "").unwrap();
+    std::fs::write(root.join("MODULE.aspect"), "").unwrap();
+    std::fs::create_dir(root.join(".aspect")).unwrap();
+    std::fs::write(
+        root.join(".aspect").join("fixture.axl"),
+        format!(
+            r#"load("@std//time.axl", "sleep")
+
+def _impl(ctx):
+    ctx.std.fs.write("{}", "")
+    for _ in range(6000):
+        if ctx.cancellation.root.cancelled:
+            return 0
+        sleep(10)
+    return 1
+
+patient = task(
+    implementation = _impl,
+    summary = "Wait for a cancel, then succeed.",
+    args = {{"output": args.string(default = "text", values = ["text", "json", "ndjson"])}},
+)
+"#,
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for output in ["json", "ndjson"] {
+        let mut cmd = aspect(root, "patient");
+        cmd.arg(format!("--output={output}"));
+        let (code, stdout, stderr) = interrupt_once(cmd, &marker);
+        assert_eq!(code, Some(0), "{output}: {stderr}");
+        let lines = json_lines(&stdout);
+        assert_eq!(lines.len(), 1, "{output}: {lines:?}");
+        assert_eq!(lines[0]["error"], "aborted", "{output}: {lines:?}");
+        assert_eq!(
+            lines[0].get("type").is_some(),
+            output == "ndjson",
+            "{lines:?}"
+        );
+    }
 }
 
 /// A graceful cancel waits for the client, and the console with it: the

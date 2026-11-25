@@ -306,7 +306,8 @@ fn intercepted_line_methods(registry: &mut MethodsBuilder) {
 
 /// What the running task's `BazelTrait` (the trait with its `output_*`
 /// fields, [`CONSOLE_FIELDS`]) says about the console: the stages a build
-/// with no `output =` and no redirected stdout or stderr is processed with,
+/// with no `output =`, no redirected stderr and stdout sent to this process's
+/// stdout or stderr is processed with,
 /// and the hooks every build's console calls. Read from the task context the runtime records
 /// ([`crate::engine::module_values::task_context`]); a task without the trait has
 /// none of it.
@@ -461,8 +462,9 @@ impl<'v> TraitConsole<'v> {
 const STATUS_EVERY: Duration = Duration::from_secs(5);
 
 /// What a console processor is made from: `processor(...)`'s arguments, and
-/// what a build without `output =` or a redirect takes from the trait and
-/// the user's flags.
+/// what a build without `output =`, with stderr left alone and stdout sent to
+/// this process's stdout or stderr, takes from the trait and the user's
+/// flags.
 pub(crate) struct ProcessorSettings {
     /// What is shown; the user's `--curses` already applied
     /// ([`DisplayMode::unless_user_chose`]).
@@ -474,6 +476,9 @@ pub(crate) struct ProcessorSettings {
     pub show_colour: Option<bool>,
     /// In rendered lines, Bazel's status line every few seconds.
     pub progress: bool,
+    /// Whether where Bazel's stdout lands is a terminal, for `auto`; None:
+    /// this process's stdout.
+    pub stdout_tty: Option<bool>,
 }
 
 /// The console processor `processor(...)` makes; see its docs.
@@ -482,7 +487,11 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     let curses_out = match s.display {
         DisplayMode::Curses => true,
         DisplayMode::Lines | DisplayMode::None => false,
-        DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
+        DisplayMode::Auto => {
+            s.stdout_tty
+                .unwrap_or_else(|| std::io::stdout().is_terminal())
+                && stderr_tty
+        }
     };
     let style = if crate::color::console_supports_color() {
         Style::dim()
@@ -534,8 +543,9 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
 /// made, so a processor's own is `Curses`, `Lines` or `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
-    /// `curses` when this process's stdout and stderr are both terminals,
-    /// else `lines`.
+    /// `curses` when where Bazel's stdout lands (this process's stdout, or
+    /// its stderr when sent there) and this process's stderr are both
+    /// terminals, else `lines`.
     Auto,
     /// Bazel's curses UI, as it drew it.
     Curses,
@@ -635,9 +645,10 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// A console processor. Pass it as `output =` to `ctx.bazel.build` or
     /// `ctx.bazel.test`: the client's stderr is then captured, run through
     /// `stages` and forwarded to this process's stderr, instead of being
-    /// inherited. A build given none, and redirecting neither stdout nor
-    /// stderr, is processed with the task's `BazelTrait.output_stages`, when
-    /// it has any.
+    /// inherited. A build given none, leaving stderr alone and sending stdout
+    /// to `ctx.std.io.stdout` or `ctx.std.io.stderr` (or not redirecting it),
+    /// is processed with the task's `BazelTrait.output_stages`, when it has
+    /// any.
     ///
     /// Bazel is always asked for its curses UI (`--curses=yes`), and for
     /// colour unless `color = False`:
@@ -667,7 +678,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///
     /// A processor with a stage that changes what is shown keeps the console
     /// as Bazel wrote it (its stderr, and its stdout when the two are one
-    /// file) in a raw log (`build.output_log`), and ends the
+    /// file or it is sent to stderr) in a raw log (`build.output_log`), and ends the
     /// console with a summary naming it: how many lines were hidden, and for
     /// each kind `collapse_similar` folded, a file beside the log with every
     /// message of that kind. On a terminal those paths are links, as are
@@ -732,6 +743,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
             colour: color.into_option(),
             show_colour: show_color.into_option(),
             progress,
+            stdout_tty: None,
         });
         Ok(OutputProcessor { config })
     }

@@ -1,0 +1,420 @@
+"""Unit tests for lib/results_json.axl - the `--output=json` document.
+
+Run with:
+  aspect dev test-results-json
+
+The invariants worth a test are the three that separate `document()` from a
+plain `json.encode(data)`: credentials never reach the document, unbounded
+accumulator fields never reach it, and a capped list is reported as capped.
+
+`document()` takes `env` rather than a whole context, so the tests drive it
+with the test task's own `ctx.std.env`.
+"""
+
+load("./bazel_results.axl", "init_data")
+load("./lifecycle.axl", "ReproFixCommand")
+load("./output_json.axl", "emit_error")
+load("./results_json.axl", "results_json")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _true(label, got):
+    if not got:
+        fail("%s: expected True, got %r" % (label, got))
+
+def _data_with_secrets():
+    """An accumulator carrying the two credential shapes the redactor knows:
+    a secret-named `--action_env` value and a URL with inline userinfo."""
+    d = init_data()
+    d["target_pattern"] = "//..."
+    d["bazel"]["build_command"] = "build"
+    d["bazel"]["options_parsed"] = {
+        "explicit_cmd_line": [
+            "--action_env=MY_DB_PASSWORD=hunter2",
+            "--remote_header=Authorization=Bearer abc123",
+            "--action_env=GIT_URL=https://user:tok@github.com/acme/x.git",
+            "--keep_going",
+        ],
+        "startup_options": ["--host_jvm_args=-Xmx2g"],
+        "cmd_line": ["--action_env=MY_DB_PASSWORD=hunter2", "--keep_going"],
+    }
+    return d
+
+def _test_secrets_never_reach_the_document(ctx):
+    doc = results_json.document(ctx.std.env, _data_with_secrets(), "build", "failed", 1)
+    blob = json.encode(doc)
+    for secret in ["hunter2", "abc123", "user:tok"]:
+        if secret in blob:
+            fail("redaction: %r leaked into the document" % secret)
+    _true("redaction marker present", "<REDACTED>" in blob)
+
+def _test_resolved_flag_lists_are_not_exposed(ctx):
+    """`startup_options` / `cmd_line` are large and only ever redacted at render
+    time; the document must not carry them under any key."""
+    doc = results_json.document(ctx.std.env, _data_with_secrets(), "build", "failed", 1)
+    blob = json.encode(doc)
+    _eq("startup_options absent", "host_jvm_args" in blob, False)
+    _eq("cmd_line absent", "cmd_line" in blob, False)
+
+def _test_unbounded_fields_are_not_exposed(ctx):
+    """`target_kinds`, `test_details` and `passed_tests` scale with the build -
+    5,000 tests means 5,000 entries each. Only counts may cross."""
+    d = init_data()
+    for i in range(300):
+        label = "//pkg:t%d" % i
+        d["bazel"]["target_kinds"][label] = "sh_test"
+        d["bazel"]["test_details"][label] = {"log_path": "/tmp/%d.log" % i, "xml_path": "", "duration_ms": 1}
+        d["bazel"]["passed_tests"].append({"label": label, "cached": False, "duration_ms": 1})
+        d["bazel"]["built_targets"].append({"label": label})
+    d["bazel"]["passed_test_total"] = 300
+
+    doc = results_json.document(ctx.std.env, d, "test", "passed", 0)
+    blob = json.encode(doc)
+    _eq("passing labels absent", "//pkg:t7" in blob, False)
+    _eq("target_kinds absent", "target_kinds" in blob, False)
+    _eq("built_targets absent", "built_targets" in blob, False)
+    _eq("passes survive as a count", doc["counts"]["tests_passed"], 300)
+
+def _test_failures_carry_their_local_log_paths(ctx):
+    """The point of the document: a reader opens the testlog directly instead
+    of scraping the build log."""
+    d = init_data()
+    d["bazel"]["failed_tests"].append({
+        "label": "//pkg:broken",
+        "cached": False,
+        "duration_ms": 42,
+        "kind": "sh_test",
+        "status": "FAILED",
+    })
+    d["bazel"]["failed_test_total"] = 1
+    d["bazel"]["test_details"]["//pkg:broken"] = {
+        "log_path": "/tmp/testlogs/broken/test.log",
+        "xml_path": "/tmp/testlogs/broken/test.xml",
+        "duration_ms": 42,
+    }
+
+    doc = results_json.document(ctx.std.env, d, "test", "failed", 3)
+    failed = doc["failures"]["tests"]
+    _eq("one failed test", len(failed), 1)
+    _eq("label", failed[0]["label"], "//pkg:broken")
+    _eq("log path joined from test_details", failed[0]["log_path"], "/tmp/testlogs/broken/test.log")
+    _eq("xml path joined from test_details", failed[0]["xml_path"], "/tmp/testlogs/broken/test.xml")
+    _eq("status carried", failed[0]["status"], "FAILED")
+
+def _test_missing_test_details_leave_empty_paths(ctx):
+    """A test that ran remotely has no local outputs; the row still appears."""
+    d = init_data()
+    d["bazel"]["failed_tests"].append({"label": "//pkg:remote", "cached": False, "duration_ms": 0, "kind": "", "status": "FAILED"})
+    d["bazel"]["failed_test_total"] = 1
+
+    doc = results_json.document(ctx.std.env, d, "test", "failed", 3)
+    _eq("empty log path", doc["failures"]["tests"][0]["log_path"], "")
+    _eq("row still present", len(doc["failures"]["tests"]), 1)
+
+def _test_truncation_is_reported(ctx):
+    """The accumulator caps detail lists but keeps uncapped totals. A consumer
+    seeing 2 of 400 failures with no signal is the bug this guards."""
+    d = init_data()
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": ["CppCompile"], "stderr_path": "/tmp/a.err"})
+    d["bazel"]["failed_actions"].append({"label": "//c:d", "mnemonics": ["Javac"], "stderr_path": ""})
+    d["bazel"]["failed_actions_total"] = 400
+    d["bazel"]["failed_action_labels"] = ["//a:b", "//c:d"] + ["//x:t%d" % i for i in range(398)]
+    d["bazel"]["failed_tests"].append({"label": "//e:f", "cached": False, "duration_ms": 0, "kind": "", "status": "FAILED"})
+    d["bazel"]["failed_test_total"] = 150
+
+    doc = results_json.document(ctx.std.env, d, "test", "failed", 3)
+    _true("actions flagged truncated", doc["failures"]["truncated"]["actions"])
+    _true("tests flagged truncated", doc["failures"]["truncated"]["tests"])
+    _eq("flaky not truncated", doc["failures"]["truncated"]["flaky_tests"], False)
+    _eq("listed actions", len(doc["failures"]["actions"]), 2)
+    _eq("mnemonics preserved", doc["failures"]["actions"][0]["mnemonics"], ["CppCompile"])
+
+def _test_untruncated_lists_are_not_flagged(ctx):
+    d = init_data()
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stderr_path": ""})
+    d["bazel"]["failed_actions_total"] = 1
+    d["bazel"]["failed_action_labels"] = ["//a:b"]
+
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("not flagged", doc["failures"]["truncated"]["actions"], False)
+
+def _test_one_target_failing_several_actions_is_not_truncation(ctx):
+    """`failed_actions` merges a label's actions into one entry, so a target
+    failing CppCompile and CppLink is two actions but one complete entry."""
+    d = init_data()
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": ["CppCompile", "CppLink"], "stderr_path": ""})
+    d["bazel"]["failed_actions_total"] = 2
+    d["bazel"]["failed_action_labels"] = ["//a:b"]
+
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("not flagged", doc["failures"]["truncated"]["actions"], False)
+
+def _test_repro_commands_become_objects(ctx):
+    """`ReproFixCommand` is a record; `_hooked` is producer bookkeeping and
+    stays out of the contract."""
+    d = init_data()
+    d["repro_commands"].append(ReproFixCommand(
+        command = "bazel test //pkg:broken",
+        description = "vanilla bazel",
+        slug = "test-repro-vanilla-bazel",
+        target = "//pkg:broken",
+    ))
+    d["fix_commands"].append(ReproFixCommand(command = "aspect format", slug = "format-fix"))
+
+    doc = results_json.document(ctx.std.env, d, "test", "failed", 3)
+    _eq("repro command", doc["repro_commands"][0]["command"], "bazel test //pkg:broken")
+    _eq("repro slug", doc["repro_commands"][0]["slug"], "test-repro-vanilla-bazel")
+    _eq("repro target", doc["repro_commands"][0]["target"], "//pkg:broken")
+    _eq("fix command", doc["fix_commands"][0]["command"], "aspect format")
+    _eq("_hooked not exposed", "_hooked" in json.encode(doc), False)
+
+def _test_duration_needs_both_timestamps(ctx):
+    """A task killed before `build_finished` has a start and no finish; the
+    subtraction would report a negative age."""
+    d = init_data()
+    d["start_time_ms"] = 1000
+    doc = results_json.document(ctx.std.env, d, "build", "aborted", 1)
+    _eq("no duration without a finish", doc["duration_ms"], 0)
+
+    d["finish_time_ms"] = 3500
+    doc = results_json.document(ctx.std.env, d, "build", "passed", 0)
+    _eq("duration from both", doc["duration_ms"], 2500)
+
+def _test_aborted_key_only_when_aborted(ctx):
+    d = init_data()
+    _eq("absent on a normal run", "aborted" in results_json.document(ctx.std.env, d, "build", "passed", 0), False)
+
+    d["bazel"]["aborted"] = True
+    d["bazel"]["abort_reason"] = "interrupted"
+    d["bazel"]["abort_description"] = "build interrupted"
+    doc = results_json.document(ctx.std.env, d, "build", "aborted", 8)
+    _eq("reason", doc["aborted"]["reason"], "interrupted")
+    _eq("description", doc["aborted"]["description"], "build interrupted")
+
+def _test_envelope_fields(ctx):
+    d = init_data()
+    d["target_pattern"] = "//foo/..."
+    doc = results_json.document(ctx.std.env, d, "lint", "warning", 0)
+    _eq("schema version", doc["schema_version"], results_json.SCHEMA_VERSION)
+    _eq("task", doc["task"], "lint")
+    _eq("status", doc["status"], "warning")
+    _eq("exit code", doc["exit_code"], 0)
+    _eq("target pattern", doc["target_pattern"], "//foo/...")
+
+def _test_wants_json_defaults_off(ctx):
+    """A task that declares no `--output` must not trip the emit path."""
+    _eq("absent arg → text", results_json.wants_json(struct()), False)
+    _eq("text", results_json.wants_json(struct(output = "text")), False)
+    _eq("json", results_json.wants_json(struct(output = "json")), True)
+
+def _test_document_is_encodable(ctx):
+    """The whole point is that it serializes; a record that slipped through
+    would fail here rather than at the end of someone's build."""
+    doc = results_json.document(ctx.std.env, _data_with_secrets(), "build", "failed", 1)
+    _true("round-trips", json.decode(json.encode(doc))["task"] == "build")
+
+def _test_child_stdout_keeps_the_document_alone_on_stdout(ctx):
+    """Every spawned child routes through this. Getting it backwards puts
+    Bazel's result summary inside the document, which stops being JSON - and
+    nothing downstream would catch that.
+    """
+
+    # Two `Writable`s for the same stream are distinct values, so these compare
+    # the stream each handle names rather than the handle itself.
+    io = ctx.std.io
+    _eq("text keeps stdout", str(results_json.child_stdout(io, struct(output = "text"))), str(io.stdout))
+    _eq("json diverts to stderr", str(results_json.child_stdout(io, struct(output = "json"))), str(io.stderr))
+    _eq("no --output at all", str(results_json.child_stdout(io, struct())), str(io.stdout))
+
+def _test_output_arg_contributes_exactly_one_flag(ctx):
+    """Five tasks splat this into their own args. A second key would collide
+    with whatever a task already calls it, and a renamed one would silently
+    take `--output` away from all of them. (`args.Arg` is opaque from AXL, so
+    the default and the accepted values are covered by `wants_json` instead.)
+    """
+    _eq("one arg named output", sorted(results_json.output_arg().keys()), ["output"])
+
+def _test_counts_and_timing_default_to_zero(ctx):
+    """A task that never reached Bazel still emits the full envelope: a
+    consumer indexing `counts.tests_failed` must not have to guard for absence.
+    """
+    doc = results_json.document(ctx.std.env, init_data(), "build", "aborted", 1)
+    for key in ["targets_configured", "targets_completed", "tests_failed", "tests_passed"]:
+        _eq("counts." + key, doc["counts"][key], 0)
+    for key in ["wall_time_ms", "critical_path_ms"]:
+        _eq("timing." + key, doc["timing"][key], 0)
+    _eq("no failures", doc["failures"]["tests"], [])
+    _eq("nothing truncated", doc["failures"]["truncated"]["tests"], False)
+
+def _test_an_action_names_both_its_streams(ctx):
+    """An action's stdout is where some tools (tsc) write their errors, so it
+    crosses beside its stderr."""
+    d = init_data()
+    d["bazel"]["failed_actions"].append({"label": "//a:gen", "mnemonics": ["Genrule"], "stdout_path": "/out/a/gen.stdout", "stderr_path": ""})
+    d["bazel"]["failed_action_labels"] = ["//a:gen"]
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("stdout path", doc["failures"]["actions"][0]["stdout_path"], "/out/a/gen.stdout")
+    _eq("stderr path", doc["failures"]["actions"][0]["stderr_path"], "")
+
+def _test_failed_targets_are_capped(ctx):
+    """The failed targets of a broken shared dependency can run to thousands;
+    the document lists the first ones and says it cut the list."""
+    d = init_data()
+    d["bazel"]["failed_targets"] = [{"label": "//t:%d" % i, "kind": "cc_library"} for i in range(1005)]
+    doc = results_json.document(ctx.std.env, d, "build", "failed", 1)
+    _eq("capped", len(doc["failures"]["targets"]), 1000)
+    _true("flagged", doc["failures"]["truncated"]["targets"])
+    d["bazel"]["failed_targets"] = d["bazel"]["failed_targets"][:3]
+    _eq("not flagged", results_json.document(ctx.std.env, d, "build", "failed", 1)["failures"]["truncated"]["targets"], False)
+
+def _test_an_error_document_only_under_json(ctx):
+    """A task ending before its result (a failed health check) writes an
+    error document under `--output=json`, and nothing under `text`."""
+    written = []
+    fake = struct(
+        args = struct(output = "json"),
+        std = struct(io = struct(stdout = struct(write = lambda s: written.append(s)))),
+    )
+    emit_error(fake, "health_check", "disk full")
+    _eq("one line", len(written), 1)
+    doc = json.decode(written[0])
+    _eq("shape", (doc["schema_version"], doc["error"], doc["message"]), (1, "health_check", "disk full"))
+    written.clear()
+    emit_error(struct(args = struct(output = "text"), std = fake.std), "health_check", "disk full")
+    _eq("nothing under text", written, [])
+
+def _fake(output):
+    """A ctx with `args.output` and a stdout that keeps what is written."""
+    written = []
+    ctx = struct(
+        args = struct(output = output),
+        std = struct(io = struct(stdout = struct(write = lambda t: written.append(t), flush = lambda: None))),
+    )
+    return ctx, written
+
+def _lines(written):
+    return [json.decode(w) for w in written]
+
+def _test_ndjson_streams_each_failure_once(ctx):
+    """A line per failure as the accumulator records it, each once, tagged
+    with its attempt; the lists the document renders, rendered the same."""
+    fake, written = _fake("ndjson")
+    live = results_json.live(fake)
+    d = init_data()
+    live.attempt(0)
+    live.update(d)
+    _eq("the attempt first", _lines(written), [{"type": "attempt", "schema_version": 1, "attempt": 0}])
+    written.clear()
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": ["CppCompile"], "stdout_path": "", "stderr_path": "/e"})
+    live.update(d)
+    live.update(d)
+    d["bazel"]["failed_targets"].append({"label": "//a:b", "kind": "cc_library"})
+    d["bazel"]["failed_tests"].append({"label": "//t:x", "status": "FAILED", "kind": "sh_test", "cached": False, "duration_ms": 5})
+    d["bazel"]["test_details"]["//t:x"] = {"log_path": "/t.log", "xml_path": "/t.xml"}
+    d["bazel"]["flaky_tests"].append({"label": "//t:y", "kind": "sh_test", "cached": False, "duration_ms": 1})
+    live.update(d)
+    got = _lines(written)
+    _eq("types, each once", [l["type"] for l in got], ["action_failed", "target_failed", "test_failed", "test_flaky"])
+    _eq("an action as the document has it", got[0], {"type": "action_failed", "attempt": 0, "label": "//a:b", "mnemonics": ["CppCompile"], "stdout_path": "", "stderr_path": "/e"})
+    _eq("a test with its log", (got[2]["label"], got[2]["log_path"], got[2]["attempt"]), ("//t:x", "/t.log", 0))
+
+def _test_ndjson_starts_over_with_a_retry(ctx):
+    """A retried attempt's failures are streamed again, under its index,
+    after the accumulator started over."""
+    fake, written = _fake("ndjson")
+    live = results_json.live(fake)
+    d = init_data()
+    live.attempt(0)
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stdout_path": "", "stderr_path": ""})
+    live.update(d)
+    written.clear()
+    d = init_data()
+    live.attempt(1)
+    d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stdout_path": "", "stderr_path": ""})
+    live.update(d)
+    _eq("the attempt, then its own failure", [(l["type"], l["attempt"]) for l in _lines(written)], [("attempt", 1), ("action_failed", 1)])
+
+def _test_ndjson_starts_over_when_the_lists_do(ctx):
+    """A `build_started` mid-attempt empties the accumulator's lists: what
+    follows is streamed from the start."""
+    fake, written = _fake("ndjson")
+    live = results_json.live(fake)
+    d = init_data()
+    d["bazel"]["failed_targets"] = [{"label": "//a", "kind": ""}, {"label": "//b", "kind": ""}]
+    live.update(d)
+    written.clear()
+    d["bazel"]["failed_targets"] = [{"label": "//c", "kind": ""}]
+    live.update(d)
+    _eq("the new list's entry", [l["label"] for l in _lines(written)], ["//c"])
+
+def _test_only_ndjson_streams(ctx):
+    """`json` and `text` write nothing before the end."""
+    for output in ["json", "text"]:
+        fake, written = _fake(output)
+        live = results_json.live(fake)
+        d = init_data()
+        live.attempt(0)
+        d["bazel"]["failed_actions"].append({"label": "//a:b", "mnemonics": [], "stdout_path": "", "stderr_path": ""})
+        live.update(d)
+        _eq("nothing streamed under " + output, written, [])
+
+def _test_ndjson_ends_with_the_document_as_a_line(ctx):
+    """The stream's last line is the document, typed `result`, on one line;
+    `json` writes the same document indented."""
+    fake, written = _fake("ndjson")
+    fake = struct(args = fake.args, std = struct(io = fake.std.io, env = ctx.std.env))
+    results_json.emit(fake, init_data(), "build", "passed", 0)
+    _eq("one line", (len(written), written[0].count("\n")), (1, 1))
+    doc = json.decode(written[0])
+    _eq("typed and whole", (doc["type"], doc["task"], doc["exit_code"]), ("result", "build", 0))
+
+def _test_an_ndjson_error_is_typed(ctx):
+    """Under `ndjson` the error document is a line of the stream, typed."""
+    fake, written = _fake("ndjson")
+    emit_error(fake, "health_check", "disk full")
+    _eq("typed", json.decode(written[0]), {"type": "error", "schema_version": 1, "error": "health_check", "message": "disk full"})
+
+_UNIT_TESTS = [
+    _test_ndjson_streams_each_failure_once,
+    _test_ndjson_starts_over_with_a_retry,
+    _test_ndjson_starts_over_when_the_lists_do,
+    _test_only_ndjson_streams,
+    _test_ndjson_ends_with_the_document_as_a_line,
+    _test_an_ndjson_error_is_typed,
+    _test_an_action_names_both_its_streams,
+    _test_failed_targets_are_capped,
+    _test_an_error_document_only_under_json,
+    _test_secrets_never_reach_the_document,
+    _test_resolved_flag_lists_are_not_exposed,
+    _test_unbounded_fields_are_not_exposed,
+    _test_failures_carry_their_local_log_paths,
+    _test_missing_test_details_leave_empty_paths,
+    _test_truncation_is_reported,
+    _test_untruncated_lists_are_not_flagged,
+    _test_one_target_failing_several_actions_is_not_truncation,
+    _test_repro_commands_become_objects,
+    _test_duration_needs_both_timestamps,
+    _test_aborted_key_only_when_aborted,
+    _test_envelope_fields,
+    _test_wants_json_defaults_off,
+    _test_document_is_encodable,
+    _test_child_stdout_keeps_the_document_alone_on_stdout,
+    _test_output_arg_contributes_exactly_one_flag,
+    _test_counts_and_timing_default_to_zero,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("results_json.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+results_json_tests = task(
+    summary = "Run the results JSON document AXL unit tests.",
+    kind = "test-results-json",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

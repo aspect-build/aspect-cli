@@ -9,7 +9,7 @@ Two task implementations live here:
 """
 
 load("@aspect//bazel/trait.axl", "exit_codes")
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "pick_status", "process_event", "redact_flags", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "cached_tests_sentence", "common_label_root", "compute_invocation_state", "conclusion", "distinct_bes_url", "ended_by_cancel", "failed_labels_by_subcommand", "init_data", "invocation_state_counts", "local_output_path", "overflow_note", "pick_status", "process_event", "redact_flags", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets", "strip_url_creds", "testlog_path", "testlogs_dir", "truncate_label")
 load("./check_dispatch.axl", "SURFACE_STATUS_CHECK", "resolve_templates", "snippet_budget_for")
 load("./lifecycle.axl", "ReproFixCommand")
 load("./report.axl", "SCHEMA_VERSION", "build_report")
@@ -1533,12 +1533,14 @@ def _test_build_started_preserves_bazel_streamed(ctx):
     """`process_event`'s build_started reset wipes top-level state for the new
     stream; `bes_streamed_by_bazel` is task-managed and set before the event, so
     like `sink_invocation_id` it must survive — otherwise a retry silently drops
-    the Aspect link.
+    the Aspect link. So must `bazel_attempts`, the earlier attempts a retry
+    archives before its stream starts.
 
     `bes_get` is a `getattr`, so a struct stands in for the BES event."""
     data = init_data()
     data["sink_invocation_id"] = "sink-1"
     data["bes_streamed_by_bazel"] = True
+    data["bazel_attempts"] = [{"attempt": 1, "exit_code": 39, "sink_invocation_id": "sink-0"}]
     process_event(data, struct(
         kind = "build_started",
         payload = struct(
@@ -1550,6 +1552,7 @@ def _test_build_started_preserves_bazel_streamed(ctx):
     ), None)
     _eq("sink id preserved", data["sink_invocation_id"], "sink-1")
     _eq("bazel-streamed flag preserved", data["bes_streamed_by_bazel"], True)
+    _eq("a retry's earlier attempts preserved", len(data["bazel_attempts"]), 1)
     _eq("bazel invocation id captured", data["bazel"]["invocation_id"], "bazel-uuid-1")
 
 def _test_render_bes_url(ctx):
@@ -1777,6 +1780,26 @@ def _test_interrupt_exit_code_aborts_the_build(ctx):
     _eq("status is aborted", pick_status("build", data, had_failure = True, terminal = True), "aborted")
     _eq("title reports the abort", compute_invocation_state(data, "aborted"), "Invocation disconnected")
     _eq("finish time still captured", data["finish_time_ms"], 1700000000000)
+
+def _test_a_cancel_aborts_only_a_build_without_its_verdict(ctx):
+    """A cancel relabels a failed run as aborted only when Bazel never
+    reached its own verdict: no `BuildFinished`, and an exit code that is
+    none (8, a signal's, 255). A real failure cancelled in its tail stays
+    failed."""
+    _ = ctx
+    fresh = init_data()
+    _eq("cancelled as the client spawns", ended_by_cancel(False, 130, fresh, True), True)
+    _eq("Bazel's own interrupt code", ended_by_cancel(False, exit_codes.INTERRUPTED, fresh, True), True)
+    _eq("a SIGTERM's", ended_by_cancel(False, 143, fresh, True), True)
+    _eq("255", ended_by_cancel(False, 255, fresh, True), True)
+    _eq("a build failure is a verdict", ended_by_cancel(False, exit_codes.BUILD_FAILURE, fresh, True), False)
+    _eq("a test failure is a verdict", ended_by_cancel(False, 3, fresh, True), False)
+    _eq("no tests is a verdict", ended_by_cancel(False, 4, fresh, True), False)
+    _eq("not cancelled", ended_by_cancel(False, 130, fresh, False), False)
+    _eq("a success", ended_by_cancel(True, 0, fresh, True), False)
+    finished = init_data()
+    process_event(finished, _finished_event(exit_codes.BUILD_FAILURE), None)
+    _eq("BuildFinished decides", ended_by_cancel(False, 130, finished, True), False)
 
 def _test_nokeep_going_interrupt_aborts_despite_an_incomplete_reason(ctx):
     """The case a reason-driven trigger cannot see. Under `--nokeep_going`
@@ -2464,6 +2487,7 @@ _UNIT_TESTS = [
     _test_ordinary_nokeep_going_failure_is_not_an_abort,
     _test_only_the_interrupt_exit_code_aborts_the_build,
     _test_abort_reason_never_decides_the_verdict,
+    _test_a_cancel_aborts_only_a_build_without_its_verdict,
     _test_nobuild_abort_reason_leaves_the_build_green,
     _test_skipped_target_counts_as_skipped_and_not_as_an_abort,
     _test_per_label_abort_root_causes_still_read_failed,

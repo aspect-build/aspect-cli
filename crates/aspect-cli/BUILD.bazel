@@ -323,6 +323,7 @@ rust_test(
     deps = [
         "//crates/axl-runtime",
         "@crates//:libc",
+        "@crates//:serde_json",
         "@crates//:tempfile",
     ],
 )

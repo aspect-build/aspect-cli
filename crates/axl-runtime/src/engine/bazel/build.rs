@@ -12,7 +12,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use allocative::Allocative;
-use axl_types::stream::Writable;
 use derive_more::Display;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -101,52 +100,6 @@ fn subscriber<T: Send + Clone>(
     log: &str,
 ) -> io::Result<Receiver<T>> {
     receiver.ok_or_else(|| io::Error::other(format!("{log} stream has no subscriber to clone")))
-}
-
-/// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
-/// as a child's stdio slot.
-///
-/// Parent stdio handles (`Writable::Stdout`/`Stderr`/`ChildStdin`) get their
-/// underlying fd duplicated so cross-wiring (e.g. `stdout = ctx.std.io.stderr`)
-/// works and the original handle stays usable from Starlark. `Writable::File`
-/// is `try_clone`d for the same reason.
-pub fn writable_to_stdio(w: &Writable) -> io::Result<Stdio> {
-    let closed = || io::Error::other("writable stream is closed");
-    match w {
-        Writable::Stdout(arc, _) => {
-            let guard = arc.lock().unwrap();
-            let borrowed = guard.borrow();
-            let s = borrowed.as_ref().ok_or_else(closed)?;
-            dup_fd(s)
-        }
-        Writable::Stderr(arc, _) => {
-            let guard = arc.lock().unwrap();
-            let borrowed = guard.borrow();
-            let s = borrowed.as_ref().ok_or_else(closed)?;
-            dup_fd(s)
-        }
-        Writable::ChildStdin(arc) => {
-            let guard = arc.lock().unwrap();
-            let borrowed = guard.borrow();
-            let s = borrowed.as_ref().ok_or_else(closed)?;
-            dup_fd(s)
-        }
-        Writable::File(arc) => {
-            let guard = arc.lock().unwrap();
-            let file = guard.as_ref().ok_or_else(closed)?;
-            Ok(Stdio::from(file.try_clone()?))
-        }
-    }
-}
-
-#[cfg(unix)]
-fn dup_fd<H: std::os::fd::AsFd>(h: &H) -> io::Result<Stdio> {
-    Ok(Stdio::from(h.as_fd().try_clone_to_owned()?))
-}
-
-#[cfg(windows)]
-fn dup_fd<H: std::os::windows::io::AsHandle>(h: &H) -> io::Result<Stdio> {
-    Ok(Stdio::from(h.as_handle().try_clone_to_owned()?))
 }
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
@@ -880,18 +833,33 @@ impl Drop for Abandon {
     }
 }
 
+/// Where a build's stdout goes, as its console capture sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StdoutTo {
+    /// This process's stdout: inherited, or given as `ctx.std.io.stdout`.
+    Ours,
+    /// This process's stderr (`--output=json`, keeping stdout for a
+    /// document): under a capture, the stderr's own, so it keeps Bazel's
+    /// order and the colour shown.
+    Stderr,
+    /// Anything else, which the call wired itself.
+    Elsewhere,
+}
+
 impl Console {
-    /// The client's stderr and, when it is inherited, its stdout (see
-    /// [`bazel::console::capture`]: the same capture when stdout is stderr's
-    /// file, a pipe of its own otherwise), and the forwarders reading them
-    /// into this process's from their own threads, so a task's own lines
-    /// interleave with them by whole line.
+    /// The client's stderr and, when it goes to this process's stdout or
+    /// stderr, its stdout (see [`bazel::console::capture`]: the same capture
+    /// when stdout is stderr's file or is sent to stderr, a pipe of its own
+    /// otherwise), and the forwarders reading them into this process's from
+    /// their own threads, so a task's own lines interleave with them by whole
+    /// line.
     fn start(
         config: &bazel::console::Config,
-        stdout_inherited: bool,
+        stdout_to: StdoutTo,
     ) -> io::Result<(Stdio, Option<Stdio>, Console)> {
         use bazel::console::capture;
-        let share_stdout = stdout_inherited && capture::stdout_is_stderrs_file();
+        let share_stdout = stdout_to == StdoutTo::Stderr
+            || (stdout_to == StdoutTo::Ours && capture::stdout_is_stderrs_file());
         let capture::Capture {
             stderr: child_stderr,
             stdout: shared_stdout,
@@ -943,7 +911,7 @@ impl Console {
         )?;
         let (child_stdout, stdout) = match shared_stdout {
             Some(shared) => (Some(shared), None),
-            None if stdout_inherited => {
+            None if stdout_to == StdoutTo::Ours => {
                 let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
                 let after = forwarder.ordered_after(Box::new(std::io::stdout()), probe.into());
@@ -1357,7 +1325,7 @@ impl Build {
         stdout: Stdio,
         stderr: Stdio,
         console: Option<bazel::console::Config>,
-        stdout_inherited: bool,
+        stdout_to: StdoutTo,
         directory: Option<String>,
         announce: AnnounceSpawn,
         signals: Arc<Signals>,
@@ -1421,9 +1389,17 @@ impl Build {
         // still writing after the client has gone, or, at a retry, the abandoned
         // attempt's file if the server is still writing it once the next has
         // started.
+        // A cancel that killed `bazel info` ends the task as a cancel does.
         let (pid, version) =
             bazel::server::Server::new(&super::runner::CancellableRunner(&signals), &startup_flags)
-                .info()?;
+                .info()
+                .map_err(|e| {
+                    if signals.root().is_cancelled() {
+                        io::Error::other(signals.exit_for())
+                    } else {
+                        e
+                    }
+                })?;
         let recording = recording && writes_execution_log(false, true, version.as_ref());
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.
@@ -1626,8 +1602,7 @@ impl Build {
 
         let console = match console {
             Some(config) => {
-                let (child_stderr, child_stdout, console) =
-                    Console::start(&config, stdout_inherited)?;
+                let (child_stderr, child_stdout, console) = Console::start(&config, stdout_to)?;
                 cmd.stdout(child_stdout.unwrap_or(stdout));
                 cmd.stderr(child_stderr);
                 Some(console)
