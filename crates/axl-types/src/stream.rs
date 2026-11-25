@@ -186,6 +186,32 @@ impl From<Stdin> for Readable {
     }
 }
 
+/// What a read of stdin on a terminal runs around itself: a full screen
+/// holding the terminal gives it back for the read (`suspend`, which says
+/// whether it did) and takes it again after (`resume`).
+static TERMINAL_INPUT: std::sync::OnceLock<(fn() -> bool, fn())> = std::sync::OnceLock::new();
+
+/// Set what a read of stdin on a terminal runs around itself
+/// ([`TERMINAL_INPUT`]); the first call wins.
+pub fn set_terminal_input(suspend: fn() -> bool, resume: fn()) {
+    let _ = TERMINAL_INPUT.set((suspend, resume));
+}
+
+/// Run `read`, a read of stdin, with the terminal given back to it when
+/// stdin is one and a screen holds it.
+fn with_terminal_input<T>(read: impl FnOnce() -> T) -> T {
+    use std::io::IsTerminal;
+    let hooks = TERMINAL_INPUT
+        .get()
+        .filter(|_| std::io::stdin().is_terminal());
+    let suspended = hooks.is_some_and(|(suspend, _)| suspend());
+    let got = read();
+    if let (true, Some((_, resume))) = (suspended, hooks) {
+        resume();
+    }
+    got
+}
+
 impl Readable {
     /// Install the check every blocking stdin read makes first. A no-op for
     /// any other source.
@@ -343,7 +369,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
             let mut buf = Vec::new();
             match &*io {
                 Readable::Stdin(stdin) => {
-                    (&**stdin).read_to_end(&mut buf)?;
+                    with_terminal_input(|| (&**stdin).read_to_end(&mut buf))?;
                 }
                 Readable::ChildStderr(stderr) => {
                     stderr.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
@@ -360,7 +386,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
             // Read up to size bytes
             let mut buf = vec![0u8; size as usize];
             let bytes_read = match &*io {
-                Readable::Stdin(stdin) => (&**stdin).read(&mut buf)?,
+                Readable::Stdin(stdin) => with_terminal_input(|| (&**stdin).read(&mut buf))?,
                 Readable::ChildStderr(stderr) => {
                     stderr.lock().unwrap().borrow_mut().read(&mut buf)?
                 }
@@ -381,7 +407,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
         let io = this.downcast_ref_err::<Readable>().into_anyhow_result()?;
         let mut buf = String::new();
         let _size = match &*io {
-            Readable::Stdin(stdin) => (&**stdin).read_to_string(&mut buf)?,
+            Readable::Stdin(stdin) => with_terminal_input(|| (&**stdin).read_to_string(&mut buf))?,
             Readable::ChildStderr(stderr) => stderr
                 .lock()
                 .unwrap()

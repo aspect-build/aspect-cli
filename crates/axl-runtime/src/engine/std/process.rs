@@ -70,6 +70,8 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
         Ok(Command {
             inner: RefCell::new(process::Command::new(program.as_str())),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
         })
     }
 
@@ -145,6 +147,21 @@ pub struct Command {
     inner: RefCell<process::Command>,
     #[allocative(skip)]
     process_group: Cell<Option<i32>>,
+    /// Marked `interactive(True)`: given the real terminal (see [`Command::try_spawn`]).
+    #[allocative(skip)]
+    interactive: Cell<bool>,
+    /// Which of its streams the task chose itself.
+    #[allocative(skip)]
+    chosen: Cell<Chosen>,
+}
+
+/// Which of a command's streams the task set (`stdin()`, `stdout()`,
+/// `stderr()`); the others are the runtime's to choose.
+#[derive(Debug, Clone, Copy, Default)]
+struct Chosen {
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
 }
 
 impl Command {
@@ -155,7 +172,78 @@ impl Command {
         Self {
             inner: RefCell::new(inner),
             process_group: Cell::new(own_group.then_some(0)),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
         }
+    }
+
+    /// Choose what the task left to the runtime for an unmarked child: stdin
+    /// from `/dev/null`, stdout and stderr piped (to [`forward`]), colour
+    /// forced on when the CLI's own stderr shows it (unless the task set
+    /// `FORCE_COLOR` or `CLICOLOR_FORCE` itself), and while a full screen
+    /// holds the terminal, no controlling terminal. Which of stdout and
+    /// stderr are piped.
+    fn unmarked(&self) -> (bool, bool) {
+        let chosen = self.chosen.get();
+        let mut cmd = self.inner.borrow_mut();
+        if !chosen.stdin {
+            cmd.stdin(Stdio::null());
+        }
+        if !chosen.stdout {
+            cmd.stdout(Stdio::piped());
+        }
+        if !chosen.stderr {
+            cmd.stderr(Stdio::piped());
+        }
+        if crate::color::console_supports_color() {
+            let set: Vec<String> = cmd
+                .get_envs()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect();
+            for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
+                if !set.iter().any(|k| k == var) {
+                    cmd.env(var, "1");
+                }
+            }
+        }
+        #[cfg(unix)]
+        if crate::engine::std::term::screen_holds_terminal() {
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            // Dropping the controlling terminal leaves the process groups
+            // as they are, so cancellation reaches the child as before.
+            unsafe {
+                cmd.pre_exec(|| {
+                    let fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+                    if fd >= 0 {
+                        libc::ioctl(fd, libc::TIOCNOTTY as _);
+                        libc::close(fd);
+                    }
+                    Ok(())
+                });
+            }
+        }
+        (!chosen.stdout, !chosen.stderr)
+    }
+
+    /// The command for a marker line: its program and arguments, redacted
+    /// as a bazel command echoed to a log is, cut to [`SUMMARY_WIDTH`].
+    fn summary(&self) -> String {
+        let cmd = self.inner.borrow();
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let mut line = std::iter::once(program)
+            .chain(bazel::bes::redact::redact_command_args(
+                args.iter().map(String::as_str),
+            ))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if line.chars().count() > SUMMARY_WIDTH {
+            line = line.chars().take(SUMMARY_WIDTH - 1).collect::<String>() + "…";
+        }
+        line
     }
 
     /// Only the executable is safe to include in errors: arguments and
@@ -179,6 +267,24 @@ impl Command {
             Some(token) => token.inner().clone(),
             None => signals.default_binding(),
         };
+        let interactive = self.interactive.get();
+        let (forward_out, forward_err) = if interactive {
+            (false, false)
+        } else {
+            self.unmarked()
+        };
+        let marked = interactive.then(|| {
+            let summary = self.summary();
+            crate::errln!(
+                "{}",
+                marker_line(&format!("{summary} runs interactively"), false)
+            );
+            (
+                summary,
+                std::time::Instant::now(),
+                crate::engine::std::term::suspend(),
+            )
+        });
         // The spawn's borrow of `inner` ends with this statement, before
         // `describe` borrows it again for the error.
         let spawned = children::spawn(
@@ -188,11 +294,31 @@ impl Command {
             self.process_group.get(),
             children::Kind::Process,
         );
-        let (child, bound) =
-            spawned.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))?;
+        let (mut child, bound) = match spawned {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                if marked.as_ref().is_some_and(|(_, _, suspended)| *suspended) {
+                    crate::engine::std::term::resume();
+                }
+                return Err(anyhow!(
+                    "failed to spawn command {}: {}",
+                    self.describe(),
+                    e
+                ));
+            }
+        };
+        let mut forwarders = vec![];
+        if forward_out && let Some(out) = child.stdout.take() {
+            forwarders.push(forward(out, false));
+        }
+        if forward_err && let Some(err) = child.stderr.take() {
+            forwarders.push(forward(err, true));
+        }
         Ok(Child {
             inner: RefCell::new(Some(child)),
             bound,
+            forwarders: RefCell::new(forwarders),
+            interactive: RefCell::new(marked),
         })
     }
 
@@ -207,6 +333,49 @@ impl Command {
             .map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))?
             .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))
     }
+}
+
+/// The widest a marker line names its command.
+const SUMMARY_WIDTH: usize = 60;
+
+/// A muted `› text` line, as the console's updates are, in `error` for one
+/// saying something failed; plain without colour.
+fn marker_line(text: &str, failed: bool) -> String {
+    let palette = crate::color::console_supports_color().then(crate::theme::of_process);
+    let sgr = palette
+        .map(|p| p.sgr(if failed { "error" } else { "muted" }))
+        .unwrap_or_default();
+    if sgr.is_empty() {
+        format!("› {text}")
+    } else {
+        format!("{sgr}› {text}{}", aspect_theme::RESET)
+    }
+}
+
+/// Pass what a child writes to `pipe` on to the CLI's stderr (or stdout),
+/// copied to the task's output as the CLI's own writes are; a thread, joined
+/// once the child's wait ends.
+fn forward(
+    mut pipe: impl std::io::Read + Send + 'static,
+    stderr: bool,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let _ = if stderr {
+                        std::io::stderr().lock().write_all(&buf[..n])
+                    } else {
+                        std::io::stdout().lock().write_all(&buf[..n])
+                    };
+                    crate::out::copy_output(&buf[..n]);
+                }
+            }
+        }
+    })
 }
 
 impl<'v> AllocValue<'v> for Command {
@@ -315,6 +484,27 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Mark the child interactive: it may prompt, so it gets the real
+    /// terminal on stdin, stdout and stderr. While a full screen (the
+    /// Dashboard) holds the terminal, the screen is given back for it as
+    /// it starts and taken again as its wait ends. Its output is then the
+    /// terminal's alone: a muted `› <program> runs interactively` line and
+    /// `› … ran interactively (exit N, 1.2s); its output is in the
+    /// terminal` after it are what the task's output keeps. An unmarked
+    /// child has no terminal: stdin from `/dev/null`, stdout and stderr
+    /// piped through the CLI (copied to the task's output, then passed on),
+    /// and while a full screen holds the terminal, no controlling terminal
+    /// either, so a surprise prompt fails rather than hangs. Mark a spawn
+    /// interactive if it may prompt.
+    fn interactive<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] on: bool,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.interactive.set(on);
+        Ok(this)
+    }
+
     /// Configuration for the child process's standard input (stdin) handle.
     ///
     /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
@@ -324,6 +514,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] io: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.chosen.set(Chosen {
+            stdin: true,
+            ..cmd.chosen.get()
+        });
         match io.as_str() {
             "null" => cmd.inner.borrow_mut().stdin(Stdio::null()),
             "piped" => cmd.inner.borrow_mut().stdin(Stdio::piped()),
@@ -347,6 +541,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.chosen.set(Chosen {
+            stdout: true,
+            ..cmd.chosen.get()
+        });
         cmd.inner.borrow_mut().stdout(stdio_from(io, "stdout")?);
         Ok(this)
     }
@@ -362,6 +560,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.chosen.set(Chosen {
+            stderr: true,
+            ..cmd.chosen.get()
+        });
         cmd.inner.borrow_mut().stderr(stdio_from(io, "stderr")?);
         Ok(this)
     }
@@ -418,6 +620,13 @@ pub struct Child {
     /// The child's binding to its cancellation token; `child.cancellation`.
     #[allocative(skip)]
     bound: Bound,
+    /// The threads passing on its piped stdout and stderr ([`forward`]).
+    #[allocative(skip)]
+    forwarders: RefCell<Vec<std::thread::JoinHandle<()>>>,
+    /// An interactive child's command, start, and whether it suspended a
+    /// screen: for the line after it, and to take the screen again.
+    #[allocative(skip)]
+    interactive: RefCell<Option<(String, std::time::Instant, bool)>>,
 }
 
 impl Child {
@@ -427,14 +636,44 @@ impl Child {
         Self {
             inner: RefCell::new(Some(child)),
             bound,
+            forwarders: RefCell::new(vec![]),
+            interactive: RefCell::new(None),
         }
     }
 
     /// Wait for the child to exit, a safe point: once the root is cancelled
     /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
-    /// first.
+    /// first. Once it has exited, what it wrote is passed on in full, and an
+    /// interactive one's screen taken again and its line written.
     fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Option<process::ExitStatus>> {
-        children::wait(&self.inner, &self.bound, timeout)
+        let status = children::wait(&self.inner, &self.bound, timeout)?;
+        if let Some(status) = &status {
+            self.ended(status);
+        }
+        Ok(status)
+    }
+
+    /// What follows the child's exit: its output passed on, and an
+    /// interactive one's screen back and the line after it.
+    fn ended(&self, status: &process::ExitStatus) {
+        for f in self.forwarders.borrow_mut().drain(..) {
+            let _ = f.join();
+        }
+        if let Some((summary, started, suspended)) = self.interactive.borrow_mut().take() {
+            if suspended {
+                crate::engine::std::term::resume();
+            }
+            let code = status
+                .code()
+                .map_or_else(|| "signal".to_string(), |c| c.to_string());
+            let took = started.elapsed();
+            let text = format!(
+                "{summary} ran interactively (exit {code}, {}.{}s); its output is in the terminal",
+                took.as_secs(),
+                took.subsec_millis() / 100
+            );
+            crate::errln!("{}", marker_line(&text, !status.success()));
+        }
     }
 
     /// [`Child::wait`], running the task's idle hooks every
@@ -704,15 +943,13 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("child is no longer active"))?;
-        if has_idle(eval) {
-            return Ok(Output(children::wait_with_output_while(
-                inner,
-                &child.bound,
-                IDLE_EVERY,
-                || idle(eval),
-            )?));
-        }
-        Ok(Output(children::wait_with_output(inner, &child.bound)?))
+        let output = if has_idle(eval) {
+            children::wait_with_output_while(inner, &child.bound, IDLE_EVERY, || idle(eval))?
+        } else {
+            children::wait_with_output(inner, &child.bound)?
+        };
+        child.ended(&output.status);
+        Ok(Output(output))
     }
 }
 
@@ -834,12 +1071,72 @@ pub(crate) fn output_methods(registry: &mut MethodsBuilder) {
 mod tests {
     use super::*;
 
+    /// A task's run of `script` under `sh`, as `command(...)` spawns it,
+    /// `chain` appended to the command; what the script wrote to its file.
+    fn run_child(script: &str, chain: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        let path = path.display();
+        let result = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    ctx.std.process.command("sh").args(["-c", """{script}""", "sh", "{path}"]){chain}.spawn().wait()
+    return 0
+
+t = task(implementation = _impl)
+"#
+        ))
+        .run_task(0);
+        assert_eq!(result.expect("run_task"), Some(0));
+        std::fs::read_to_string(dir.path().join("out")).unwrap_or_default()
+    }
+
+    /// An unmarked child reads no terminal: stdin is `/dev/null`, at its end
+    /// at once.
+    #[test]
+    fn an_unmarked_child_reads_dev_null() {
+        let got = run_child(
+            r#"if [ -t 0 ]; then echo tty; else echo notty; fi > "$1"; if read x; then echo read >> "$1"; else echo eof >> "$1"; fi"#,
+            "",
+        );
+        assert_eq!(got, "notty\neof\n");
+    }
+
+    /// A task's own `FORCE_COLOR` is the child's, never overridden.
+    #[test]
+    fn a_tasks_own_force_color_is_kept() {
+        let got = run_child(r#"echo "$FORCE_COLOR" > $1"#, r#".env("FORCE_COLOR", "0")"#);
+        assert_eq!(got, "0\n");
+    }
+
+    /// An interactive child's marker names its command redacted, cut to fit.
+    #[test]
+    fn a_marker_names_the_command_redacted_and_cut() {
+        let cmd = Command::from_std(process::Command::new("bazel"), false);
+        cmd.inner
+            .borrow_mut()
+            .args(["build", "--remote_header=x-api-key=s3cret", "//..."]);
+        let summary = cmd.summary();
+        assert!(!summary.contains("s3cret"), "{summary}");
+        assert!(
+            summary.starts_with("bazel build --remote_header="),
+            "{summary}"
+        );
+        cmd.inner
+            .borrow_mut()
+            .args(std::iter::repeat_n("//pkg:target", 20));
+        assert_eq!(cmd.summary().chars().count(), SUMMARY_WIDTH);
+        assert!(cmd.summary().ends_with('…'));
+    }
+
     #[test]
     fn spawn_error_excludes_sensitive_args() {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
         };
         cmd.inner.borrow_mut().args([
             "--aws-sigv4",
@@ -866,6 +1163,8 @@ mod tests {
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
         };
         cmd.inner
             .borrow_mut()
@@ -884,6 +1183,8 @@ mod tests {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
         };
         cmd.inner
             .borrow_mut()

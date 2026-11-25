@@ -5,7 +5,10 @@ The task history (`aspect/history/` in the user cache, or
 event stream already, and the task's whole output as it was shown, its
 secret flag values redacted: `output.log` plain, for editors, `grep` and
 agents, and `output.ansi` with its colour kept, for a pager that shows it
-(`less -R`). What a child writes to a stream it inherited is not kept: `bazel
+(`less -R`). A child the task spawns (`ctx.std.process.command`) is kept:
+its stdout and stderr are piped through the CLI, unless it is marked
+`interactive(True)`, which gets the terminal and only a line before and after
+it in the output. What writes to a stream it inherited is not kept: `bazel
 run`'s program, and a build without a console processor (a task's
 `ctx.bazel.build` without `output =`), which writes to the terminal directly.
 This feature adds, off by default:

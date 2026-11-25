@@ -61,9 +61,17 @@ struct Held {
     alt_screen: bool,
     tty: File,
     saved_termios: Termios,
-    /// The process's stdout and stderr, captured.
-    stdout: Redirect,
-    stderr: Redirect,
+    /// The modes the screen reads keys in, for a resume to set again.
+    cbreak: Termios,
+    /// The process's stdout and stderr, captured; None while suspended.
+    stdout: Option<Redirect>,
+    stderr: Option<Redirect>,
+    /// The last frame written, drawn again on a resume.
+    last_frame: Vec<u8>,
+    /// Whether `mouse(True)` took the mouse, for a resume to take it again.
+    mouse_on: bool,
+    /// Given back for a prompt or an interactive child ([`suspend`]).
+    suspended: bool,
     capture: Arc<Feed>,
     /// What the task wrote before Bazel's console began, for `earlier()`.
     earlier: Vec<u8>,
@@ -585,13 +593,18 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         stderr.saved.as_raw_fd(),
     );
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    axl_types::stream::set_terminal_input(suspend, resume);
     *held = Some(Held {
         generation,
         alt_screen,
         tty,
         saved_termios,
-        stdout,
-        stderr,
+        cbreak,
+        stdout: Some(stdout),
+        stderr: Some(stderr),
+        last_frame: vec![],
+        mouse_on: false,
+        suspended: false,
         capture,
         earlier,
         keys: Keys {
@@ -755,6 +768,101 @@ pub fn release_all() -> bool {
     }
 }
 
+/// Give a held screen of its own back for a while, for something that needs
+/// the real terminal (a prompt reading stdin, an interactive child): the
+/// task's output so far dumped to it ([`dump_output`]), the main screen, its
+/// modes and stdout and stderr back, the capture's copies stopped. Whether
+/// one was given back, for [`resume`]. A screen already suspended, one not
+/// of its own, or none: false.
+pub(crate) fn suspend() -> bool {
+    {
+        let mut held = HELD.lock().unwrap();
+        let Some(h) = held.as_mut().filter(|h| h.alt_screen && !h.suspended) else {
+            return false;
+        };
+        for r in [&h.stdout, &h.stderr].into_iter().flatten() {
+            r.put_back();
+        }
+        let _ = h.tty.write_all(leave_sequence(true));
+        let _ = h.tty.write_all(wheel_restore());
+        let _ = h.tty.flush();
+        let _ = termios::tcsetattr(&h.tty, SetArg::TCSANOW, &h.saved_termios);
+        CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
+        mark_captured(None);
+        // What the capture read before now stays in its feed, for the screen.
+        for r in [h.stdout.take(), h.stderr.take()].into_iter().flatten() {
+            r.finish(false);
+        }
+        crate::out::set_capture_copies(false);
+        h.suspended = true;
+    }
+    dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
+    true
+}
+
+/// Whether a full screen of its own holds the terminal now, not given back:
+/// a child spawned meanwhile has no terminal of its own.
+pub(crate) fn screen_holds_terminal() -> bool {
+    HELD.lock()
+        .ok()
+        .is_some_and(|h| h.as_ref().is_some_and(|h| h.alt_screen && !h.suspended))
+}
+
+/// Take a screen [`suspend`] gave back again: its modes, the alternate
+/// screen, the mouse when it had it, stdout and stderr captured again, its
+/// last frame drawn, and a dump on leaving from here on. A no-op unless one
+/// is suspended.
+pub(crate) fn resume() {
+    let mut held = HELD.lock().unwrap();
+    let Some(h) = held.as_mut().filter(|h| h.suspended) else {
+        return;
+    };
+    *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
+    crate::out::set_capture_copies(true);
+    match (
+        Redirect::new(1, h.capture.clone(), Source::Stdout),
+        Redirect::new(2, h.capture.clone(), Source::Stderr),
+    ) {
+        (Ok(out), Ok(err)) => {
+            h.stdout = Some(out);
+            h.stderr = Some(err);
+        }
+        (out, err) => {
+            // Without its captures the screen would be drawn over: it stays
+            // given back, the task's lines going to the terminal.
+            for r in [out.ok(), err.ok()].into_iter().flatten() {
+                r.restore();
+            }
+            crate::out::set_capture_copies(false);
+            return;
+        }
+    }
+    let _ = termios::tcsetattr(&h.tty, SetArg::TCSANOW, &h.cbreak);
+    let mut enter = b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H".to_vec();
+    if h.mouse_on {
+        enter.extend_from_slice(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+    }
+    enter.extend_from_slice(&synchronized(&h.last_frame));
+    let _ = h.tty.write_all(&enter).and_then(|()| h.tty.flush());
+    {
+        use std::io::IsTerminal;
+        mark_captured(Some((
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        )));
+    }
+    if let (Some(out), Some(err)) = (&h.stdout, &h.stderr) {
+        remember_for_crash(
+            h.tty.as_raw_fd(),
+            &h.saved_termios,
+            true,
+            out.saved.as_raw_fd(),
+            err.saved.as_raw_fd(),
+        );
+    }
+    h.suspended = false;
+}
+
 /// [`release_all`] for `held`: the task's output since the screen was
 /// taken written from `output.ansi` ([`dump_output`]) when there is one to
 /// write, else what was captured replayed. Whether one was held.
@@ -846,11 +954,15 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
         return vec![];
     };
     // SAFETY: isatty on a descriptor the redirect owns.
-    let stdout_tty = unsafe { libc::isatty(held.stdout.saved.as_raw_fd()) } == 1;
+    let stdout_tty = held
+        .stdout
+        .as_ref()
+        .is_none_or(|r| unsafe { libc::isatty(r.saved.as_raw_fd()) } == 1);
     // Both descriptors back first, so a crash during the replays below
     // reports to the terminal.
-    held.stdout.put_back();
-    held.stderr.put_back();
+    for r in [&held.stdout, &held.stderr].into_iter().flatten() {
+        r.put_back();
+    }
     let leave = leave_sequence(held.alt_screen);
     let _ = held.tty.write_all(leave);
     let _ = held.tty.write_all(wheel_restore());
@@ -860,8 +972,12 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
     let _ = termios::tcsetattr(&held.tty, SetArg::TCSAFLUSH, &held.saved_termios);
     CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
     mark_captured(None);
-    held.stdout.finish(replay_stderr || !stdout_tty);
-    held.stderr.finish(replay_stderr);
+    if let Some(r) = held.stdout.take() {
+        r.finish(replay_stderr || !stdout_tty);
+    }
+    if let Some(r) = held.stderr.take() {
+        r.finish(replay_stderr);
+    }
     crate::out::set_capture_copies(false);
     if replay_stderr {
         return vec![];
@@ -1515,6 +1631,10 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] text: &str,
     ) -> anyhow::Result<NoneType> {
         with_held(this, |h| {
+            h.last_frame = text.as_bytes().to_vec();
+            if h.suspended {
+                return Ok(NoneType);
+            }
             gone_is_fine(
                 h.tty
                     .write_all(&synchronized(text.as_bytes()))
@@ -1558,6 +1678,10 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms as u64);
         loop {
             let (fd, got, gone) = with_held(this, |h| {
+                // Given back, the keys are the prompt's or the child's.
+                if h.suspended {
+                    return Ok((h.tty.as_raw_fd(), None, true));
+                }
                 let got = h.keys.take(&mut h.tty)?;
                 Ok((h.tty.as_raw_fd(), got, h.keys.gone))
             })?;
@@ -1736,6 +1860,10 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] enabled: bool,
     ) -> anyhow::Result<NoneType> {
         with_held(this, |h| {
+            h.mouse_on = enabled;
+            if h.suspended {
+                return Ok(NoneType);
+            }
             let set: &[u8] = if enabled {
                 b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
             } else {

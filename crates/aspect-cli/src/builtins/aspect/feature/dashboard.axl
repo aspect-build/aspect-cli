@@ -112,6 +112,13 @@ How it is built:
    the terminal back (`screen.release(replay_stderr = False)`), then
    writes the console as it showed it (`replay_lines`) and the summary.
 
+A prompt reading stdin on the terminal, and a child marked
+`interactive(True)` (`ctx.std.process.command`), get the terminal back for
+as long as they run: the task's output so far goes to the scrollback, and
+the screen comes back, redrawn, after. An unmarked child gets no terminal
+while the screen is up (stdin from `/dev/null`, no controlling terminal), so
+mark a spawn interactive if it may prompt.
+
 On a terminal only, and never on CI; any other task keeps its console,
 saying so in a line on stderr. Under a coding agent, with `TERM` dumb or
 unset, or on a terminal under 40x12, it stays off even when enabled, saying
