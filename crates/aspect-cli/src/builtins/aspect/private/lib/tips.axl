@@ -1348,8 +1348,9 @@ def _tips_impl(ctx):
     post-task hook, so it runs however the task ended."""
     state = []
 
-    # What silencing an id set aside: its stored tips, its `shows` entry,
-    # and whether it was in `order`, given back when it is unsilenced.
+    # What silencing an id set aside: its stored tips with where they were,
+    # its `shows` entry and its place in `order` (-1 if none), given back
+    # where they were when it is unsilenced.
     aside = {}
 
     found = ctx.aspect.tips.config_silence()
@@ -1660,7 +1661,7 @@ def _tips_impl(ctx):
                 sources.pop(id)
         if id in sources and id not in silenced:
             silenced.append(id)
-            aside[id] = ([t for t in state if t["id"] == id], shows.get(id), id in order)
+            aside[id] = ([(i, t) for i, t in enumerate(state) if t["id"] == id], shows.get(id), order.index(id) if id in order else -1)
             kept = [t for t in state if t["id"] != id]
             state.clear()
             state.extend(kept)
@@ -1669,10 +1670,12 @@ def _tips_impl(ctx):
                 shows.pop(id)
         elif id not in sources and id in silenced:
             silenced.remove(id)
-            tips, show, ordered = aside.pop(id, ([], None, False))
-            state.extend([t for t in tips if t not in state])
-            if ordered and id not in order:
-                order.append(id)
+            tips, show, at = aside.pop(id, ([], None, -1))
+            for i, t in tips:
+                if t not in state:
+                    state.insert(min(i, len(state)), t)
+            if at >= 0 and id not in order:
+                order.insert(min(at, len(order)), id)
                 shows[id] = show
 
     def _set_auto_print(v):

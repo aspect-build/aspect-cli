@@ -1156,8 +1156,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         )
         for patch in scoped_patches:
             # Never a question (no terminal answers it): a hunk that looks
-            # applied already is skipped, not reversed. BSD and GNU patch both.
-            ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
+            # applied already is skipped, not reversed, and leaves no reject
+            # file in the tree. BSD and GNU patch both.
+            ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--reject-file=/dev/null").arg("--input=" + patch) \
                 .current_dir(ctx.std.env.current_dir()).spawn().wait()
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
