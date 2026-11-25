@@ -922,7 +922,7 @@ fn stop_with_the_screen() {
             // SAFETY: a handler that only calls write(2).
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = on_tstp as usize;
+                action.sa_sigaction = on_tstp as *const () as usize;
                 action.sa_flags = libc::SA_RESTART;
                 libc::sigemptyset(&mut action.sa_mask);
                 libc::sigaction(libc::SIGTSTP, &action, std::ptr::null_mut());
