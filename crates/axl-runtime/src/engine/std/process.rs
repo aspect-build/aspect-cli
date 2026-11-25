@@ -398,6 +398,13 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<ExitStatus> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        if crate::engine::task_hooks::has_idle(eval) {
+            let child = cmd.try_spawn(&Env::from_eval(eval)?.signals, cancellation)?;
+            let status = child
+                .wait_idle(None, eval)?
+                .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))?;
+            return Ok(ExitStatus(status));
+        }
         let status = cmd.try_status(&Env::from_eval(eval)?.signals, cancellation)?;
         Ok(ExitStatus(status))
     }
@@ -428,6 +435,34 @@ impl Child {
     /// first.
     fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Option<process::ExitStatus>> {
         children::wait(&self.inner, &self.bound, timeout)
+    }
+
+    /// [`Child::wait`], running the task's idle hooks every
+    /// [`IDLE_EVERY`](crate::engine::task_hooks::IDLE_EVERY) meanwhile when
+    /// it has any.
+    fn wait_idle<'v>(
+        &self,
+        timeout: Option<Duration>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> std::io::Result<Option<process::ExitStatus>> {
+        use crate::engine::task_hooks::{IDLE_EVERY, has_idle, idle};
+        if !has_idle(eval) {
+            return self.wait(timeout);
+        }
+        let deadline = timeout.map(|t| std::time::Instant::now() + t);
+        loop {
+            let slice = deadline.map_or(IDLE_EVERY, |d| {
+                d.saturating_duration_since(std::time::Instant::now())
+                    .min(IDLE_EVERY)
+            });
+            if let Some(status) = self.wait(Some(slice))? {
+                return Ok(Some(status));
+            }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(None);
+            }
+            idle(eval);
+        }
     }
 
     /// [`Child::wait`], for runtime code outside this module.
@@ -597,11 +632,15 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     ///
     /// The wait ends the task instead if `ctx.cancellation.root` is
     /// cancelled meanwhile and no `intercept()` is in effect; the child is
-    /// already stopping by then.
-    fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
+    /// already stopping by then. The task's idle hooks (`ctx.hooks.idle`)
+    /// run meanwhile, as in every wait on a child.
+    fn wait<'v>(
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<ExitStatus> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         child
-            .wait(None)?
+            .wait_idle(None, eval)?
             .map(ExitStatus)
             .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))
     }
@@ -617,8 +656,9 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     fn try_wait<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = 0)] timeout_ms: i32,
-        heap: values::Heap<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::Value<'v>> {
+        let heap = eval.heap();
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         if timeout_ms < 0 {
             anyhow::bail!("timeout_ms must not be negative: {timeout_ms}");
@@ -630,7 +670,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
                 .ok_or(anyhow::anyhow!("child is no longer active"))?;
             children::try_wait(inner, &child.bound)?
         } else {
-            child.wait(Some(Duration::from_millis(timeout_ms as u64)))?
+            child.wait_idle(Some(Duration::from_millis(timeout_ms as u64)), eval)?
         };
         Ok(match status {
             None => values::Value::new_none(),
@@ -654,12 +694,24 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// In order to capture the output into this `Result<Output>` it is
     /// necessary to create new pipes between parent and child. Use
     /// `stdout('piped')` or `stderr('piped')`, respectively.
-    fn wait_with_output<'v>(this: values::Value<'v>) -> anyhow::Result<Output> {
+    fn wait_with_output<'v>(
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Output> {
+        use crate::engine::task_hooks::{IDLE_EVERY, has_idle, idle};
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         let inner = child
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("child is no longer active"))?;
+        if has_idle(eval) {
+            return Ok(Output(children::wait_with_output_while(
+                inner,
+                &child.bound,
+                IDLE_EVERY,
+                || idle(eval),
+            )?));
+        }
         Ok(Output(children::wait_with_output(inner, &child.bound)?))
     }
 }

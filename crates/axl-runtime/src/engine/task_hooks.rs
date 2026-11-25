@@ -46,14 +46,28 @@ pub struct TaskHooks<'v> {
     #[allocative(skip)]
     post: RefCell<Vec<Value<'v>>>,
     #[allocative(skip)]
+    idle: RefCell<Vec<Value<'v>>>,
+    /// When the idle hooks last ran, for their cadence ([`IDLE_EVERY`]).
+    #[allocative(skip)]
+    last_idle: Cell<Option<std::time::Instant>>,
+    /// While the idle hooks run: a wait inside one runs none.
+    #[allocative(skip)]
+    in_idle: Cell<bool>,
+    #[allocative(skip)]
     started: Cell<bool>,
 }
+
+/// How often the idle hooks run while the task blocks in the runtime.
+pub(crate) const IDLE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl<'v> TaskHooks<'v> {
     pub fn alloc(heap: Heap<'v>) -> Value<'v> {
         heap.alloc(TaskHooks {
             pre: RefCell::new(Vec::new()),
             post: RefCell::new(Vec::new()),
+            idle: RefCell::new(Vec::new()),
+            last_idle: Cell::new(None),
+            in_idle: Cell::new(false),
             started: Cell::new(false),
         })
     }
@@ -96,6 +110,50 @@ impl<'v> TaskHooks<'v> {
     }
 }
 
+/// The running task's hooks, when `eval` runs one.
+fn of<'v>(eval: &Evaluator<'v, '_, '_>) -> Option<(Value<'v>, &'v TaskHooks<'v>)> {
+    let ctx = crate::engine::module_values::task_context(eval)?;
+    let hooks = ctx
+        .downcast_ref::<crate::engine::task_context::TaskContext>()?
+        .hooks();
+    Some((ctx, hooks.downcast_ref::<TaskHooks>()?))
+}
+
+/// Whether the running task has idle hooks to run while it blocks: a
+/// blocking call then waits in [`IDLE_EVERY`] slices, calling [`idle`]
+/// between them.
+pub(crate) fn has_idle(eval: &Evaluator<'_, '_, '_>) -> bool {
+    of(eval).is_some_and(|(_, h)| !h.idle.borrow().is_empty() && !h.in_idle.get())
+}
+
+/// Run the task's idle hooks when [`IDLE_EVERY`] has passed since they last
+/// ran, never inside one. A hook that fails is reported and the idle hooks
+/// are dropped: a broken one would fail every tick.
+pub(crate) fn idle<'v>(eval: &mut Evaluator<'v, '_, '_>) {
+    let Some((ctx, hooks)) = of(eval) else {
+        return;
+    };
+    if hooks.in_idle.get()
+        || hooks
+            .last_idle
+            .get()
+            .is_some_and(|t| t.elapsed() < IDLE_EVERY)
+    {
+        return;
+    }
+    hooks.last_idle.set(Some(std::time::Instant::now()));
+    hooks.in_idle.set(true);
+    let callables = hooks.idle.borrow().clone();
+    for hook in callables {
+        if let Err(e) = eval.eval_function(hook, &[ctx], &[]) {
+            report_callback_failure("idle hook", &e);
+            hooks.idle.borrow_mut().clear();
+            break;
+        }
+    }
+    hooks.in_idle.set(false);
+}
+
 /// Report a failure in a callback that runs after the task body ended, such
 /// as a post-task hook or a `ctx.defer` callback: a `WARNING:` line with the
 /// error's summary, and the traceback under `ASPECT_DEBUG`. The task's exit
@@ -111,6 +169,9 @@ unsafe impl<'v> Trace<'v> for TaskHooks<'v> {
             hook.trace(tracer);
         }
         for hook in self.post.get_mut().iter_mut() {
+            hook.trace(tracer);
+        }
+        for hook in self.idle.get_mut().iter_mut() {
             hook.trace(tracer);
         }
     }
@@ -200,6 +261,19 @@ fn task_hooks_methods(registry: &mut MethodsBuilder) {
         live(this)?.post.borrow_mut().push(callable);
         Ok(NoneType)
     }
+
+    /// Run `callable(ctx)` about every 100ms while the task blocks in the
+    /// runtime: waiting on a child process (`wait`, `try_wait` with a
+    /// timeout, `wait_with_output`, `status`) or in `sleep`. For a screen
+    /// that redraws while nothing else calls it. Never inside an idle hook;
+    /// one that fails is reported and the idle hooks stop.
+    fn idle<'v>(
+        this: Value<'v>,
+        #[starlark(require = pos)] callable: Value<'v>,
+    ) -> starlark::Result<NoneType> {
+        live(this)?.idle.borrow_mut().push(callable);
+        Ok(NoneType)
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +341,79 @@ t = task(implementation = _impl)
             .with_features(&["Hooks"])
             .run_task(0);
         (result, trace.read())
+    }
+
+    /// Idle hooks run while the task sleeps or waits on a child, in slices,
+    /// and never inside one another: a sleep in one runs none.
+    #[test]
+    fn idle_hooks_run_while_the_task_blocks() {
+        let trace = Trace::new();
+        let path = &trace.path;
+        let result = crate::test::eval(&format!(
+            r#"
+load("@std//time.axl", "sleep")
+
+def _idle(ctx):
+    ctx.std.fs.try_append("{path}", "i")
+    sleep(10)
+
+def _feature(ctx):
+    ctx.hooks.idle(_idle)
+
+def _impl(ctx):
+    sleep(450)
+    ctx.std.fs.try_append("{path}", "|")
+    ctx.std.process.command("sleep").args(["0.45"]).spawn().wait()
+    ctx.std.fs.try_append("{path}", "|")
+    ctx.std.process.command("sleep").args(["0.45"]).stdout("piped").spawn().wait_with_output()
+    return 0
+
+Hooks = feature(implementation = _feature)
+t = task(implementation = _impl)
+"#
+        ))
+        .with_features(&["Hooks"])
+        .run_task(0);
+        assert_eq!(result.expect("run_task"), Some(0));
+        let trace = trace.read();
+        let parts: Vec<&str> = trace.split('|').collect();
+        assert_eq!(parts.len(), 3, "{trace}");
+        for (i, part) in parts.iter().enumerate() {
+            assert!(
+                (2..=6).contains(&part.len()) && part.chars().all(|c| c == 'i'),
+                "wait {i}: about one idle call per 100ms, none nested: {trace:?}"
+            );
+        }
+    }
+
+    /// An idle hook that fails is reported once and the idle hooks stop.
+    #[test]
+    fn a_failing_idle_hook_stops_the_idle_hooks() {
+        let trace = Trace::new();
+        let path = &trace.path;
+        let result = crate::test::eval(&format!(
+            r#"
+load("@std//time.axl", "sleep")
+
+def _idle(ctx):
+    ctx.std.fs.try_append("{path}", "i")
+    fail("no")
+
+def _feature(ctx):
+    ctx.hooks.idle(_idle)
+
+def _impl(ctx):
+    sleep(450)
+    return 0
+
+Hooks = feature(implementation = _feature)
+t = task(implementation = _impl)
+"#
+        ))
+        .with_features(&["Hooks"])
+        .run_task(0);
+        assert_eq!(result.expect("run_task"), Some(0));
+        assert_eq!(trace.read(), "i");
     }
 
     #[test]

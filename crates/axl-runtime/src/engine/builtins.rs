@@ -428,7 +428,8 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// Returns `None`. The sleep is synchronous; the calling task's thread
     /// is parked for the full duration. It is a safe point: once
     /// `ctx.cancellation.root` is cancelled the task exits instead, unless
-    /// `intercept()` is in effect.
+    /// `intercept()` is in effect. The task's idle hooks (`ctx.hooks.idle`)
+    /// run meanwhile.
     ///
     /// # Examples
     ///
@@ -442,10 +443,22 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<starlark::values::none::NoneType> {
         let _ = this;
-        sleep(
-            &Env::from_eval(eval)?.signals,
-            Duration::from_millis(ms as u64),
-        )?;
+        let signals = Env::from_eval(eval)?.signals.clone();
+        let total = Duration::from_millis(ms as u64);
+        if !crate::engine::task_hooks::has_idle(eval) {
+            sleep(&signals, total)?;
+            return Ok(starlark::values::none::NoneType);
+        }
+        // In slices, the task's idle hooks between them.
+        let end = Instant::now() + total;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            sleep(&signals, left.min(crate::engine::task_hooks::IDLE_EVERY))?;
+            crate::engine::task_hooks::idle(eval);
+        }
         Ok(starlark::values::none::NoneType)
     }
 
