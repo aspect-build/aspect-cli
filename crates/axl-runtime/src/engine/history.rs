@@ -35,7 +35,7 @@
 //! the record written within a week). Past that, a run elsewhere that has
 //! gone longer than the guard without writing, and is not among the newest
 //! kept, can lose its files; its record, written again later, stays evicted. Entries with
-//! no build's files (a task that never built, one evicted) count toward neither
+//! only a record (one evicted, or a task whose output could not be kept) count toward neither
 //! the budget nor `keep`; they are capped apart, by [`Retention::records`] and
 //! [`Retention::record_age`] ([`prune_records`]), also at the end of a run
 //! that started no prune. Dotfiles at the root serve the prune: `.pruned`
@@ -97,9 +97,8 @@ pub struct Retention {
     /// measured again. Far longer than `guard`, so a build that went quiet and
     /// wrote again is still measured.
     pub settle: Duration,
-    /// The most records kept of runs with no build's files
-    /// (ones that never built, and ones whose files a prune removed), the
-    /// most recently started first.
+    /// The most records kept of runs with no files besides their record
+    /// (ones whose files a prune removed), the most recently started first.
     pub records: usize,
     /// Such a record older than this goes, by its start.
     pub record_age: Duration,
@@ -654,10 +653,14 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
     prune_records(root, retention, current);
 }
 
-/// Whether the entry at `dir` holds a build's files, or only its record (a
-/// task that never built, or one evicted).
+/// Whether the entry at `dir` holds files besides its record: a build's, or
+/// the task's output (`output.log`, `output.ansi`). One without (evicted,
+/// or a task whose output could not be kept) has only its record.
 fn holds_files(dir: &Path) -> bool {
     dir.join(BAZEL_DIR).is_dir()
+        || [crate::out::OUTPUT_LOG, crate::out::OUTPUT_ANSI]
+            .iter()
+            .any(|name| dir.join(name).is_file())
 }
 
 /// Remove an entry's files but its record, which is kept, its command line
@@ -1105,6 +1108,34 @@ mod tests {
                     .exists()
             );
         }
+    }
+
+    /// A task's output files are files too: an entry with them and no build
+    /// is under the budget, and evicted like one with a build's.
+    #[test]
+    fn output_files_count_toward_the_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join(name(1));
+        with_record(&old, OLD);
+        for file in [crate::out::OUTPUT_LOG, crate::out::OUTPUT_ANSI] {
+            fs::write(old.join(file), vec![b'x'; 1000]).unwrap();
+            let when = SystemTime::now() - OLD;
+            fs::File::open(old.join(file))
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        fs::File::open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - OLD)
+            .unwrap();
+        assert!(holds_files(&old));
+        let h = history(root.path(), 1, 0);
+        h.begin(&id(99));
+        next(&h);
+        assert!(!old.join(crate::out::OUTPUT_LOG).exists());
+        assert!(old.join(task_record::FILE_NAME).exists());
+        assert!(!holds_files(&old));
     }
 
     /// Records past the count, or started too long ago, go; one written
