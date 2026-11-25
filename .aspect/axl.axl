@@ -3006,6 +3006,7 @@ def test_lint_per_linter_strategy(tc: int) -> int:
     # Labels show the overrides next to the run strategy.
     tc = test_case(tc, lint_strategy_label("hold-the-line", {"ruff": "hard"}) == "hold-the-line (ruff: hard)", "strategy_label: renders overrides")
     tc = test_case(tc, lint_strategy_label("hard", {}) == "hard", "strategy_label: no overrides")
+    tc = test_case(tc, lint_strategy_label("hard", {"ruff": "hard", "eslint": "soft"}) == "hard (eslint: soft)", "strategy_label: omits overrides equal to the run strategy")
 
     # Locations.
     tc = test_case(tc, format_location("a.ts", 3, []) == "a.ts:3", "format_location: line-level")
@@ -3063,7 +3064,7 @@ def test_linter_error_message(tc: int) -> int:
     """Coverage for lint.linter_error_message — the fail_on_linter_error text."""
     single = linter_error_message({"PMD": True})
     tc = test_case(tc, "exited non-zero: PMD." in single, "linter_error_message: names the single tool")
-    tc = test_case(tc, "strategy=hard" in single, "linter_error_message: includes strategy")
+    tc = test_case(tc, "hard strategy" in single, "linter_error_message: names the hard strategy")
     tc = test_case(tc, "🔬 Lint phase" in single, "linter_error_message: points at the raw output")
 
     # Multiple tools are sorted for a stable message.
@@ -3073,7 +3074,7 @@ def test_linter_error_message(tc: int) -> int:
     # Empty set (unparsable BES name) → unnamed fallback, still actionable.
     none = linter_error_message({})
     tc = test_case(tc, none.startswith("A linter process exited non-zero."), "linter_error_message: unnamed fallback")
-    tc = test_case(tc, "strategy=hard" in none, "linter_error_message: fallback keeps strategy")
+    tc = test_case(tc, "hard strategy" in none, "linter_error_message: fallback names the hard strategy")
 
     return tc
 

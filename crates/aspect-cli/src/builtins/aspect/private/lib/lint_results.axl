@@ -419,6 +419,24 @@ def linter_key(record):
     """
     return (record.get("linter") or record.get("tool") or "").lower()
 
+def patch_linter(name):
+    """rules_lint linter name of a `.patch` BES output name, for display, e.g.
+    `hello.AspectRulesLintShellCheck.patch` -> `ShellCheck`; "Linter" when the
+    name doesn't follow the convention."""
+    return detect_lint_tool(name) or "Linter"
+
+def diagnostics_by_anchor(diagnostics):
+    """Index line-level diagnostics by `(file, line, linter_key)`, so a patch
+    correlates only with its own linter's finding at the same line. A miss stays
+    uncorrelated rather than mis-attributing across linters."""
+    out = {}
+    for d in diagnostics:
+        f = d.get("file", "")
+        ln = d.get("line", 0) or 0
+        if f and ln:
+            out[(f, ln, linter_key(d))] = d
+    return out
+
 def linter_rows(data):
     """Per-linter aggregate rows `{tool: {errors, warnings, infos, fixes}}`.
 
@@ -529,14 +547,15 @@ def _groups_for_template(groups):
     return out
 
 def strategy_label(strategy, overrides):
-    """Run strategy plus per-linter overrides, e.g. `hold-the-line (ruff: hard)`."""
-    if not overrides:
+    """Run strategy plus the per-linter overrides that differ from it, e.g.
+    `hold-the-line (ruff: hard)`."""
+    pairs = ["%s: %s" % (name, overrides[name]) for name in sorted(overrides.keys()) if overrides[name] != strategy]
+    if not pairs:
         return strategy
-    pairs = ["%s: %s" % (name, overrides[name]) for name in sorted(overrides.keys())]
     return "%s (%s)" % (strategy, ", ".join(pairs))
 
 def _config_items(data):
-    """Build the Configuration row: `Strategy: <name>[ (<linter>: <name>, …)][ — filtered
+    """Build the Configuration row: `Strategy: <name>[ (<linter>: <name>, ...)][ - filtered
     to N changed files]`, surfacing the pass/fail-driving choice in the summary rather
     than the details body.
     """
@@ -609,14 +628,11 @@ def _suggestions_for_template(suggestions, data):
     warning → info) then file; uncorrelated suggestions sink to the bottom.
     """
 
-    # Severity of the same linter's diagnostic at (file, line), to recover
-    # severity on uncorrelated records.
-    sev_by_anchor = {}
-    for d in data["lint"].get("diagnostics", []) or []:
-        f = d.get("file", "")
-        ln = d.get("line", 0) or 0
-        if f and ln:
-            sev_by_anchor[(f, ln, linter_key(d))] = d.get("severity", "") or ""
+    # Recovers severity on uncorrelated records.
+    sev_by_anchor = {
+        anchor: d.get("severity", "") or ""
+        for anchor, d in diagnostics_by_anchor(data["lint"].get("diagnostics", []) or []).items()
+    }
 
     out = []
     for s in suggestions:

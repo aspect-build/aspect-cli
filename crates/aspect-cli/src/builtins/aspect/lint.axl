@@ -32,7 +32,7 @@ load("./private/lib/environment.axl", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
-load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
+load("./private/lib/lint_results.axl", "detect_lint_tool", "linter_key", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_sarif", "sarif_diagnostics", "scope_files")
 load("./private/lib/tar.axl", "tar_create")
@@ -159,10 +159,9 @@ def _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files):
     `patches` holds `{"path", "name"}` entries; the linter comes from the
     rules_lint mnemonic in `name`. Synthesizes a diagnostic at every line of
     each hunk's post-fix range and keeps the patch iff any survives that
-    linter's strategy filter. Unparseable patches
-    default-keep (no hunks ⇒ can't filter); unreadable patches (transient FUSE
-    read failure) drop with a warning — downstream tar/apply would fail on
-    them anyway. soft/hard keep all; hold-the-file keeps patches touching a
+    linter's strategy filter. Unparseable patches default-keep (no hunks, so
+    nothing to filter); unreadable patches (transient FUSE read failure) drop
+    with a warning, since downstream tar/apply would fail on them anyway. soft/hard keep all; hold-the-file keeps patches touching a
     changed file; hold-the-line requires hunk overlap.
     """
     if not patches:
@@ -189,8 +188,8 @@ def _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files):
 def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
     """Drop suggestions whose anchor `(file, end_line || start_line)` is out of
     their linter's scope, so gating matches diagnostics. The strategy is looked
-    up by the rules_lint `linter` name, as for diagnostics and patches, since
-    `tool` carries the SARIF driver name when the suggestion is correlated.
+    up by `linter_key` (the rules_lint `linter` name, else `tool`), as for
+    diagnostics, since `tool` carries the SARIF driver name when correlated.
     """
     by_linter = {}
     for i, s in enumerate(suggestions or []):
@@ -199,7 +198,7 @@ def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
             "line": s.get("end_line", 0) or s.get("start_line", 0) or 0,
             "_index": i,
         }
-        by_linter.setdefault(s.get("linter") or s.get("tool", ""), []).append(anchor)
+        by_linter.setdefault(linter_key(s), []).append(anchor)
     kept_indexes = {}
     for linter, anchors in by_linter.items():
         for a in strategy_for(linter).filter(anchors, changed_files):
@@ -335,8 +334,8 @@ LintTrait = trait(
     #    linter (rules_lint linter name, the LintTrait.strategies key),
     #    file, start_line, end_line (1-based new-side incl),
     #    severity ("error"|"warning"|"info"|"" uncorrelated),
-    #    rule_id (SARIF ruleId or ""), correlated (bool: SARIF diag on same
-    #    (file,line)), comment_url (html_url; "" when post failed or deduped)}
+    #    rule_id (SARIF ruleId or ""), correlated (bool: same linter's SARIF
+    #    diag on the same (file, line)), comment_url (html_url; "" when post failed or deduped)}
     suggestions = attr(list, default = []),
 
     # `(file, line) → comment_url` for every posted SARIF-derived comment, so the
@@ -413,7 +412,7 @@ def linter_error_message(failed_linters):
 
     `failed_linters` is a set-like dict of linter names; "" stands for a
     failure whose name didn't parse, and with no named linter the message
-    stays unnamed. Only `hard` fails on linter errors, so the message names it.
+    stays unnamed.
     """
     names = sorted([t for t in failed_linters.keys() if t])
     if names:
@@ -422,12 +421,12 @@ def linter_error_message(failed_linters):
         head = "A linter process exited non-zero."
     return (
         "%s See the linter output under the 🔬 Lint phase above for details. " % head +
-        "(strategy=hard fails on any linter error.)"
+        "(Linters under the hard strategy fail on any linter error.)"
     )
 
 def fails_on_severity(d, strategy_for):
     """True when the diagnostic's severity fails its linter's strategy."""
-    fail_on = strategy_for(d.get("linter", "")).fail_on_severity
+    fail_on = strategy_for(linter_key(d)).fail_on_severity
     return fail_on != None and d.get("severity", "") == fail_on
 
 def gating_linter_errors(failed_linters, strategy_for):
@@ -743,8 +742,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_file
 def _record_lint_result(result, failed_linters):
     """Fold one non-None `_try_process_lint_file` result into `failed_linters`
     (a set-like dict of tool names that exited non-zero; "" when the name
-    didn't parse) and return
-    `(interesting, exit_nonzero)`. Shared by the live BES loop and the
+    didn't parse) and return `(interesting, exit_nonzero)`. Shared by the live BES loop and the
     post-build drain so both treat a result identically.
     """
     if result["linter_exit_code"] != 0:
@@ -808,6 +806,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["lint"]["strategy"] = _strategy_name(strategy)
+    data["lint"]["strategies"] = strategy_overrides
 
     # Refined once the rc is parsed and a forwarded `--target_pattern_file` can count.
     data["target_pattern"] = " ".join(resolve_targets(ctx, None, "build")[0])
@@ -1203,8 +1202,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         exit_code = 1
     elif gating_errors:
         # Without this the path surfaces nothing: a linter that crashed without
-        # emitting findings would fail with an unexplained exit 1. Only `hard`
-        # fails on linter errors.
+        # emitting findings would fail with an unexplained exit 1.
         error(ctx.std, linter_error_message(gating_errors))
         exit_code = 1
     else:

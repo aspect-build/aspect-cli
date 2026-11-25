@@ -11,14 +11,10 @@ so both features stay byte-identical and a single test covers them:
     (replaces `current-X` through `current+Y`).
   * Diff-window lookup (`DiffWindow`) — whether a review comment's
     anchor range falls where the host can display it.
-  * Patch correlation (`patch_linter`, `diagnostics_by_anchor`) — tying a
-    `.patch` suggestion to the same linter's diagnostic at its line.
 
 The orchestration (discovery, dedup state machine, API calls) stays in
 each feature file — it's API-coupled and not shareable as-is.
 """
-
-load("./lint_results.axl", "detect_lint_tool", "linter_key")
 
 _MARKER_PREFIX = "<!-- aspect-lint:"
 _MARKER_SUFFIX = " -->"
@@ -185,21 +181,3 @@ def can_attempt_comment(window: DiffWindow, path: str, line: int, start_line = N
         if (current_line - 1) not in lines:
             return False
     return True
-
-def patch_linter(name):
-    """rules_lint linter name of a `.patch` BES output name, e.g.
-    `hello.AspectRulesLintShellCheck.patch` -> `ShellCheck`; "Linter" when the
-    name doesn't follow the convention."""
-    return detect_lint_tool(name) or "Linter"
-
-def diagnostics_by_anchor(diagnostics):
-    """Index line-level diagnostics by `(file, line, linter_key)`, so a patch
-    correlates only with its own linter's finding at the same line. A miss stays
-    uncorrelated rather than mis-attributing across linters."""
-    out = {}
-    for d in diagnostics:
-        f = d.get("file", "")
-        ln = d.get("line", 0) or 0
-        if f and ln:
-            out[(f, ln, linter_key(d))] = d
-    return out
