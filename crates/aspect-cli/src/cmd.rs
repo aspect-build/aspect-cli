@@ -6,7 +6,10 @@
 //!   filesystem context. `build()` produces the Clap [`Command`].
 //!   `route_unrecognized_flags()` pre-processes argv so flags the selected task
 //!   does not declare reach its `args.passthrough()` buckets instead of failing
-//!   the parse. `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
+//!   the parse. `feature_flag_conflict()`, which `main` calls before
+//!   dispatching, fails a command line whose `--<name>` and `--<name>:enabled`
+//!   disagree with a clap usage error (exit 2). `dispatch()` turns parsed
+//!   [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
 //!   and for the feature args only `.aspect/config.axl` can set. A feature's
@@ -1477,8 +1480,9 @@ fn stringify_value(v: Value<'_>) -> String {
 // feature: `--tips` is `--tips:enabled=true`, `--tips=false` is
 // `--tips:enabled=false`. It is its own hidden Clap arg (see
 // [`shorthand_arg`]) rather than an alias, so `merge_args` can resolve it to
-// `enabled` with the same precedence over config.axl, and `Cmd::dispatch` can
-// name both spellings when they disagree. A shorthand is skipped when its flag
+// `enabled` with the same precedence over config.axl, and
+// `Cmd::feature_flag_conflict` can name both spellings when they disagree (a
+// clap usage error, exit 2). A shorthand is skipped when its flag
 // is already spoken for: on every task when it is the CLI's own, a feature
 // arg's long flag (`deployment` is taken by its own `--deployment` arg) or a
 // startup option a pre-command passthrough bucket forwards
