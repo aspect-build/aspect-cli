@@ -2087,9 +2087,11 @@ mod tests {
             let count = bazel::console::links::WrittenCount::default();
             let mut linker = bazel::console::links::Linker::new(vec![dir.path().to_path_buf()])
                 .with_files(
-                    bazel::console::links::FileLinks::file()
-                        .written(written)
-                        .counted(count.clone()),
+                    bazel::console::links::FileLinks::new(
+                        bazel::console::links::LinkFormat::parse("vscode").unwrap(),
+                    )
+                    .written(written)
+                    .counted(count.clone()),
                 );
             linker.link_written(b"see a.txt:1");
             linker.link_written(b"nothing to link here");
@@ -2102,7 +2104,7 @@ mod tests {
     #[test]
     fn a_seeded_url_is_a_link_in_the_feed() {
         let mut linker = bazel::console::links::Linker::new(vec![std::env::temp_dir()])
-            .with_files(bazel::console::links::FileLinks::file().written(false));
+            .with_files(bazel::console::links::FileLinks::none().written(false));
         let line = linker.link_written(b"Aspect CLI - https://aspect.build/go/cli");
         assert!(
             !String::from_utf8_lossy(&line).contains("<https"),

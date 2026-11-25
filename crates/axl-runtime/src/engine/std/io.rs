@@ -141,14 +141,15 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
             bazel::console::links::LinkFormat::parse(format).map_err(anyhow::Error::msg)?
         };
         let url = bazel::console::links::FileLinks::new(format)
-            .url(std::path::Path::new(path), (Some(line), None));
+            .url(std::path::Path::new(path), (Some(line), None))
+            .filter(|url| !url.starts_with("file:"));
         Ok(values::none::NoneOr::from_option(url))
     }
 
     /// The file and line a link to a file names, `(path, line)`, read back
     /// from its URL by the console's format (`editor()`) or any editor's
-    /// alias (`file://` among them), or None for any other URL (a web
-    /// page's). For a screen that shows the file itself.
+    /// alias, or None for any other URL (a web page's, a `file://` one). For
+    /// a screen that shows the file itself.
     fn editor_target<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] url: &str,
@@ -158,19 +159,6 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
             url,
             &crate::out::link_format(),
         )))
-    }
-
-    /// Whether the system would run `path` rather than show it, were a
-    /// `file://` URL to it opened (`open`, `xdg-open`): after its symlinks,
-    /// a directory (an app or other bundle), an executable, or a file of a
-    /// kind that runs, installs or points elsewhere (`.command`, `.pkg`,
-    /// `.webloc`, ...). True for a path that cannot be read.
-    fn runs_when_opened<'v>(
-        this: values::Value<'v>,
-        #[starlark(require = pos)] path: &str,
-    ) -> anyhow::Result<bool> {
-        this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
-        Ok(runs_when_opened(std::path::Path::new(path)))
     }
 
     /// The editors installed here a link to a file can open in, as
@@ -183,37 +171,6 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
             .map(|(_, alias)| (alias.to_string(), editor_name(alias).to_string()))
             .collect())
     }
-}
-
-/// Kinds of file the system runs, installs or follows when it opens one.
-const RUN_WHEN_OPENED: &[&str] = &[
-    "command", "tool", "app", "terminal", "scpt", "scptd", "workflow", "action", "pkg", "mpkg",
-    "prefpane", "saver", "jar", "fileloc", "webloc", "inetloc", "desktop", "exe", "bat", "cmd",
-    "com", "msi", "lnk", "url", "ps1", "vbs", "appimage", "run",
-];
-
-/// [`runs_when_opened`](stdio_methods)'s answer.
-fn runs_when_opened(path: &std::path::Path) -> bool {
-    let Ok(real) = std::fs::canonicalize(path) else {
-        return true;
-    };
-    let Ok(meta) = std::fs::metadata(&real) else {
-        return true;
-    };
-    if !meta.is_file() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if meta.permissions().mode() & 0o111 != 0 {
-            return true;
-        }
-    }
-    [path, real.as_path()].iter().any(|p| {
-        p.extension()
-            .is_some_and(|e| RUN_WHEN_OPENED.contains(&e.to_string_lossy().to_lowercase().as_str()))
-    })
 }
 
 /// [`editor_target`](stdio_methods): `url` matched against `format`'s
@@ -326,30 +283,10 @@ mod editor_tests {
         );
         assert_eq!(
             target_of("file://host/w/log.txt", &cursor),
-            Some(("/w/log.txt".into(), 1))
+            None,
+            "no editor's: the console makes no file:// link"
         );
         assert_eq!(target_of("https://x.test/a", &cursor), None);
-    }
-
-    #[test]
-    fn what_the_system_would_run_is_known() {
-        let dir = tempfile::tempdir().unwrap();
-        let text = dir.path().join("notes.txt");
-        std::fs::write(&text, "x").unwrap();
-        assert!(!super::runs_when_opened(&text));
-        let command = dir.path().join("x.command");
-        std::fs::write(&command, "x").unwrap();
-        assert!(super::runs_when_opened(&command));
-        let disguised = dir.path().join("readme.txt");
-        std::os::unix::fs::symlink(&command, &disguised).unwrap();
-        assert!(super::runs_when_opened(&disguised), "a symlink to one");
-        let script = dir.path().join("run.sh");
-        std::fs::write(&script, "x").unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(super::runs_when_opened(&script), "an executable");
-        assert!(super::runs_when_opened(dir.path()), "a directory");
-        assert!(super::runs_when_opened(&dir.path().join("gone")), "missing");
     }
 
     #[test]

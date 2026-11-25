@@ -695,7 +695,7 @@ def _impl(ctx: TaskContext) -> int:
     browse.update(task = "test", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [], errors = [])
     _open_view = on_key(browse, "enter", 10)
     drawn = render(browse, 100, 30)
-    for want in ["› //t:t ", "Esc back", "FAIL: boom"]:
+    for want in ["▹ //t:t ", "Esc back", "FAIL: boom"]:
         if want not in _visible(drawn):
             fail("render: %r missing from the log view:\n%s" % (want, drawn))
 
@@ -1317,7 +1317,7 @@ def _impl(ctx: TaskContext) -> int:
     view = peek["view"]
     _eq("its title, and the line marked", (view["title"], [l for l in view["lines"] if l.startswith("▸")]), ("main.rs:100", ["▸  100  fn f100() { let x = 100; }"]))
     drawn = render(peek, 100, 24)
-    _eq("in the middle, titled", ("▸  100" in ctx.std.re.compile(ANSI).replace(drawn, ""), "Console › main.rs:100" in _visible(drawn)), (True, True))
+    _eq("in the middle, titled", ("▸  100" in ctx.std.re.compile(ANSI).replace(drawn, ""), "Console ▹ main.rs:100" in _visible(drawn)), (True, True))
     _eq("highlighted", "\x1b[38;5;" in drawn, True)
 
     # The keys over a peek: the key list, every row the screen's width, and
@@ -1426,7 +1426,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("a status value under a secret's name", "tok-123" in "\n".join([_visible(l) for l in invocation_lines(status)]), False)
     _eq("a minified line is left plain", highlightable(["x" * 5000]), False)
     _eq("ordinary lines are highlighted", highlightable(["x = 1"] * 100), True)
-    _eq("a .command file is not opened", open_in_editor(dict(_screen(ctx, ["x"]), io = struct(editor_url = lambda p, line, format: "file://" + p, editors = lambda: [("file", "Files")], editor = lambda: ("file", "Files"), runs_when_opened = lambda p: p.endswith(".command"))), "/tmp/x.command").startswith("not opened"), True)
+    _eq("never a file:// link", open_in_editor(dict(_screen(ctx, ["x"]), io = struct(editor_url = lambda p, line, format: "file://" + p, editors = lambda: [], editor = lambda: ("vscode", "VS Code"))), "/tmp/x.command").startswith("no editor"), True)
 
     # An empty Failures tab: ↓ and Enter do nothing; `a` there keeps the
     # tab's keys.
@@ -1444,26 +1444,26 @@ def _impl(ctx: TaskContext) -> int:
 
     tri = _screen(ctx, ["ERROR: x"], fails = [_attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:b", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {("//t:a", "c", 1, 1): 2, ("//t:b", "c", 1, 1): 1})
     on_key(tri, "]", 10)
-    _eq("] opens the log in Failures, its attempt named", (tri["tab"], crumbs(tri)), ("failures", ["//t:a › attempt 1/2"]))
+    _eq("] opens the log in Failures, its attempt named", (tri["tab"], crumbs(tri)), ("failures", ["//t:a ▹ attempt 1/2"]))
     on_key(tri, "}", 10)
-    _eq("} its next attempt", crumbs(tri), ["//t:a › attempt 2/2"])
+    _eq("} its next attempt", crumbs(tri), ["//t:a ▹ attempt 2/2"])
     on_key(tri, "{", 10)
-    _eq("{ back", crumbs(tri), ["//t:a › attempt 1/2"])
+    _eq("{ back", crumbs(tri), ["//t:a ▹ attempt 1/2"])
     src = ctx.std.fs.mkdtemp() + "/a.py"
     ctx.std.fs.write(src, "x = 1\n" * 20)
     open_peek(tri, src, 12)
-    _eq("a peek from the log, one deeper, in the same tab", (tri["tab"], crumbs(tri)), ("failures", ["//t:a › attempt 1/2", "a.py:12"]))
+    _eq("a peek from the log, one deeper, in the same tab", (tri["tab"], crumbs(tri)), ("failures", ["//t:a ▹ attempt 1/2", "a.py:12"]))
     tab_bar = _visible(render(tri, 120, 30))
-    if "Failures ✗" not in tab_bar or "› //t:a › attempt 1/2 › a.py:12" not in tab_bar:
+    if "Failures ✗" not in tab_bar or "▹ //t:a ▹ attempt 1/2 ▹ a.py:12" not in tab_bar:
         fail("render: the tab bar names the open view:\n" + tab_bar)
     crumb = [(a, b) for a, b, t in tri["tab_spans"] if t == ("crumb", 1)]
     _eq("the log's crumb can be clicked", len(crumb), 1)
     on_key(tri, "mouse-press:%d:%d" % (crumb[0][0], tri["tab_row"]), 10)
     on_key(tri, "mouse-release:%d:%d" % (crumb[0][0], tri["tab_row"]), 10)
-    _eq("a crumb's click goes back to it", crumbs(tri), ["//t:a › attempt 1/2"])
+    _eq("a crumb's click goes back to it", crumbs(tri), ["//t:a ▹ attempt 1/2"])
     open_peek(tri, src, 3)
     on_key(tri, "]", 10)
-    _eq("] steps sideways, through each attempt, the peek gone", crumbs(tri), ["//t:a › attempt 2/2"])
+    _eq("] steps sideways, through each attempt, the peek gone", crumbs(tri), ["//t:a ▹ attempt 2/2"])
     on_key(tri, "]", 10)
     _eq("] to the next target", crumbs(tri), ["//t:b"])
     narrow = _visible(render(tri, 30, 20)).split("\n")
@@ -1501,7 +1501,7 @@ def _impl(ctx: TaskContext) -> int:
     for _ in range(4):
         on_key(runs, "}", 10)
         seen.append(crumbs(runs)[-1])
-    _eq("} steps each run, round to the first", seen, ["//t:r › run 2/3", "//t:r › run 3/3", "//t:r › run 1/3", "//t:r › run 2/3"])
+    _eq("} steps each run, round to the first", seen, ["//t:r ▹ run 2/3", "//t:r ▹ run 3/3", "//t:r ▹ run 1/3", "//t:r ▹ run 2/3"])
 
     # The CLI's version at the keys row's right end, with room for the keys.
     versioned = _screen(ctx, ["x"], cli_version = "2026.47.3")
@@ -1556,7 +1556,7 @@ def _impl(ctx: TaskContext) -> int:
     # Before any build: the header names the task's phase, no progress row
     # and no build panes, the build tabs muted and saying so.
     early = _screen(ctx, [], building = False, task = "lint")
-    add_lines(early, ["▸ Running lint task", "", "▸ Setup", "› Running setup"], None, None, cli = True)
+    add_lines(early, ["▸ Running lint task", "", "▸ Setup", "▹ Running setup"], None, None, cli = True)
     _eq("the phase from the CLI's lines", phase_status(early), "Setup · Running setup")
     _eq("nothing built yet", built(early), False)
     rows = _visible(render(early, 100, 24)).split("\n")

@@ -22,7 +22,7 @@ It takes the screen when the task starts and shows:
     truth (actions' from the compact execution log, tests' from their
     results), and the failures counted (a click shows them);
 - the main pane's tabs, always in one order, the shown one named by what is
-  open in it (`Failures ✗1 › //pkg:t › attempt 1/2 › a.py:12`):
+  open in it (`Failures ✗1 ▹ //pkg:t ▹ attempt 1/2 ▹ a.py:12`):
   - Console: the task's whole output, from its start (what the CLI wrote
     before Bazel's console began, then Bazel's, then the CLI's own lines,
     as written), scrollable, in the colours it was written in (the theme's,
@@ -46,7 +46,7 @@ It takes the screen when the task starts and shows:
     workspace status and build metadata, what may be a secret redacted;
   - before any build, Failures, Metrics and Invocation muted, saying `No
     build yet`; with several builds, Metrics and Invocation show the newest,
-    `<`/`>` another (`Metrics › 1 of 2`), and Failures the newest's;
+    `<`/`>` another (`Metrics ▹ 1 of 2`), and Failures the newest's;
 - a row of the keys for what has focus, and `?` for all of them (`_HELP`).
 
 The keys, as in `less`, lazygit and Claude Code's transcript: `↑`/`↓` or
@@ -2097,8 +2097,8 @@ _KEEP_EDITOR = "to keep it, set ctx.features[Console].args.file_hyperlink_format
 
 def open_in_editor(state: dict, path: str, line = 1) -> str:
     """Open `path` at `line` in `_editor`'s editor; what happened, for the
-    keys row. A `file://` URL to a file the system would run
-    (`std.io.runs_when_opened`) is not opened."""
+    keys row. An editor's link only: never a `file://` one, which would have
+    the system run the file."""
     io = state.get("io")
     if io == None or not path:
         return "no file to open"
@@ -2106,8 +2106,8 @@ def open_in_editor(state: dict, path: str, line = 1) -> str:
     url = io.editor_url(path, line = line, format = "" if alias in ("none", "template") else alias) if alias != "none" else None
     if url == None:
         return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
-    if url.startswith("file:") and io.runs_when_opened(path):
-        return "not opened: the system would run %s; O picks an editor" % path.rpartition("/")[2]
+    if url.startswith("file:"):
+        return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
     return open_link(state, url, trusted = True).replace("opened " + url, "opened in " + name)
 
 def next_editor(state: dict) -> str:
@@ -2315,7 +2315,7 @@ def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, 
     body = mark_cells(body, link_marks(text, links, width - 4))
 
     # The current match marked by its row's left edge, as the scrollbar's
-    # thumb marks the view: `›` begins the CLI's own update lines.
+    # thumb marks the view: `▹` begins the CLI's own update lines.
     left = (_c("marker") + "┃" if mark else _c("border") + "│") + _RESET + " "
     return left + body + (" " + edge if edge != None else _c("border") + " │" + _RESET)
 
@@ -2479,13 +2479,13 @@ def _plain(s: str) -> str:
 def note_phase(state: dict, line: str):
     """The task's phase and its latest update from one of the CLI's own
     lines, for the header while no build runs: `▸ Title` starts a phase (not
-    the task's own `▸ Running …` line), `› text` updates it."""
+    the task's own `▸ Running …` line), `▹ text` updates it."""
     text = _plain(line).strip(" ")
     if text.startswith("▸ ") and not text.startswith("▸ Running "):
         state["phase_title"] = text[len("▸ "):]
         state["phase_text"] = ""
-    elif text.startswith("› "):
-        state["phase_text"] = text[len("› "):]
+    elif text.startswith("▹ "):
+        state["phase_text"] = text[len("▹ "):]
 
 def phase_status(state: dict) -> str:
     """What the header's right end says. While a build runs, how far it is,
@@ -3037,7 +3037,7 @@ def _shown_parts(parts: list, room: int) -> list:
     if len(parts) > 1:
         tries.append([("…", None), whole[-1]])
     for parts_tried in tries:
-        if 2 + text_width(" › ".join([p for p, _ in parts_tried])) <= room:
+        if 2 + text_width(" ▹ ".join([p for p, _ in parts_tried])) <= room:
             return parts_tried
     return [(_tail(parts[-1], max(1, room - 2)), len(parts) - 1)]
 
@@ -3060,7 +3060,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
         names[tab] = name
     muted = [] if built(state) else _BUILD_TABS
     parts = [names[shown]] + crumbs(state)
-    whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " › ".join(parts) + " ")
+    whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " ▹ ".join(parts) + " ")
     tabs = [t for t, _ in _TABS] if whole <= cols else [shown]
     text = _c("border") + "┌─" + _RESET
     at = 2
@@ -3081,7 +3081,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
         at += 1
         for k, (part, level) in enumerate(drawn):
             if k:
-                text += " › "
+                text += " ▹ "
                 at += 3
             last = k == len(drawn) - 1
             width = text_width(part)
@@ -3219,7 +3219,7 @@ def _crumb(state: dict, view: dict) -> str:
     if view.get("peek") or record == None:
         return view["title"]
     if record["kind"] != "test":
-        return record["label"] + (" › " + record["detail"] if record.get("detail") else "")
+        return record["label"] + (" ▹ " + record["detail"] if record.get("detail") else "")
     key = (record["label"], record["config"])
     runs, shards = state["test_counts"].get(key, (0, 0))
     seen_runs, seen_shards = state["spread"].get(key, (1, 1))
@@ -3232,7 +3232,7 @@ def _crumb(state: dict, view: dict) -> str:
         parts.append("run %d/%d" % (record["run"], runs))
     if attempts > 1:
         parts.append("attempt %d/%d" % (record["attempt"], attempts))
-    return " › ".join(parts)
+    return " ▹ ".join(parts)
 
 def _shown_record(state: dict):
     """The failure whose log the shown tab has open, under any file

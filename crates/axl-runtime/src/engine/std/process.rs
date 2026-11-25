@@ -437,7 +437,7 @@ impl Command {
     }
 }
 
-/// A muted `› text` line, as the console's updates are, in `error` for one
+/// A muted `▹ text` line, as the console's updates are, in `error` for one
 /// saying something failed; plain without colour.
 fn marker_line(text: &str, failed: bool) -> String {
     let palette = crate::color::console_supports_color().then(crate::theme::of_process);
@@ -445,9 +445,9 @@ fn marker_line(text: &str, failed: bool) -> String {
         .map(|p| p.sgr(if failed { "error" } else { "muted" }))
         .unwrap_or_default();
     if sgr.is_empty() {
-        format!("› {text}")
+        format!("▹ {text}")
     } else {
-        format!("{sgr}› {text}{}", aspect_theme::RESET)
+        format!("{sgr}▹ {text}{}", aspect_theme::RESET)
     }
 }
 
@@ -717,8 +717,8 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// terminal on stdin, stdout and stderr. While a full screen (the
     /// Dashboard) holds the terminal, the screen is given back for it as
     /// it starts and taken again as its wait ends. Its output is then the
-    /// terminal's alone: a muted `› <program> runs interactively` line and
-    /// `› … ran interactively (exit N, 1.2s); its output is in the
+    /// terminal's alone: a muted `▹ <program> runs interactively` line and
+    /// `▹ … ran interactively (exit N, 1.2s); its output is in the
     /// terminal` after it are what the task's output keeps. An unmarked
     /// child has no terminal: stdin from `/dev/null`, stdout and stderr
     /// piped through the CLI (copied to the task's output, then passed on),
