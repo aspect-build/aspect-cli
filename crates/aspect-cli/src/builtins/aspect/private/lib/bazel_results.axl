@@ -430,10 +430,11 @@ def _repro_with_prefix(prefix, labels, max_chars):
         return ("", 0)
     return (base + " ".join(included), len(included))
 
-# Keys a task resolves before the build and `process_event` must not clobber
-# when `build_started` resets the accumulator for a new (or retried) stream.
-# All three feed the Aspect Web UI link — two identify the invocation, one is its
-# base URL off a runner; see `resolve_aspect_url`.
+# Keys a task resolves before the build that neither `process_event`'s
+# `build_started` reset nor a retry's fresh accumulator (`attempt`) may
+# clobber. Three feed the Aspect Web UI link (two identify the invocation, one
+# is its base URL off a runner; see `resolve_aspect_url`); `target_pattern`
+# feeds the explicit command and the `--output=json` document.
 _TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url", "target_pattern"]
 
 def init_data():
@@ -445,7 +446,7 @@ def init_data():
     See `crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md` for the schema.
 
     `_TASK_OWNED_KEYS` names the root scalars that survive a `build_started`
-    reset.
+    reset and a retry.
     """
     return {
         # start/finish ms since epoch. build/test: from BES (process_event).
@@ -5261,8 +5262,6 @@ def _results_new(ctx, command, report_uploader = None):
         "last_monotonic": 0.0,
         "attempts": 0,
         "label": "",
-        "bazel_streams_bes": False,
-        "results_url": "",
         # Set by conclude(); read back through the handle by tasks that emit a
         # `--output=json` document, which needs the terminal status the
         # TaskConclusion does not carry.
@@ -5285,10 +5284,8 @@ def _results_new(ctx, command, report_uploader = None):
         # (`use_rc`); the health checks in setup_surface read it via ctx.bazel.
         _ = rc
 
-        # Properties of the resolved flags, so they hold for every attempt; `m`
-        # keeps them to restore onto each retry's fresh `data`.
-        m["bazel_streams_bes"] = bazel_streams_bes
-        m["results_url"] = results_url
+        # Properties of the resolved flags, so they hold for every attempt:
+        # task-owned keys, which each retry's fresh `data` keeps.
         data["bes_streamed_by_bazel"] = bazel_streams_bes
         data["aspect_results_url"] = results_url
 
@@ -5311,10 +5308,12 @@ def _results_new(ctx, command, report_uploader = None):
             # ran human attempt `index`.
             prior_code = exit_code_of(prior) if prior != None else 1
             prior_attempts = archive_bazel_attempt(data, index, prior_code)
+
+            # Less the sink id: each attempt's spawn mints its own (`invocation`).
+            preserved = {k: data[k] for k in _TASK_OWNED_KEYS if k in data and k != "sink_invocation_id"}
             ph.reset(init_data())
+            data.update(preserved)
             data["bazel_attempts"] = prior_attempts
-            data["bes_streamed_by_bazel"] = m["bazel_streams_bes"]
-            data["aspect_results_url"] = m["results_url"]
             m["first"] = True
             phase_id = command + "_retry_" + str(index + 1)
             m["label"] = "Retrying bazel " + command + "... (attempt " + str(index + 1) + ")"

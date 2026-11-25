@@ -652,6 +652,35 @@ fn gazelle_watch_refuses_json_output_with_a_document() {
     }
 }
 
+/// A retried build's document keeps the targets: the retry's fresh
+/// accumulator keeps every key the task set before the build.
+#[test]
+fn a_retried_builds_document_keeps_its_targets() {
+    let dir = workspace("config.axl", |_| {
+        r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario=cache_evicted_once")
+"#
+        .to_string()
+    });
+    let out = aspect(dir.path(), "build")
+        .args(["--output=json", "--bazel-retry-attempts=2", "//pkg:broken"])
+        .env("BASIL_EVICTED_ONCE", dir.path().join("evicted"))
+        .output()
+        .expect("running aspect build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert!(
+        stderr.contains("Retrying bazel build"),
+        "the build was retried: {stderr}"
+    );
+    // The explicit command is built from it, and basil reports no command.
+    assert_eq!(doc["target_pattern"], "//pkg:broken", "{doc}");
+}
+
 /// A feature's `--<name>` disagreeing with its `--<name>:enabled` is a usage
 /// error, and says so on stdout too.
 #[test]
