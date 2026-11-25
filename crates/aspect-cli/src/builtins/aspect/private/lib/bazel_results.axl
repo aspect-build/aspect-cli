@@ -434,8 +434,10 @@ def _repro_with_prefix(prefix, labels, max_chars):
 # `build_started` reset nor a retry's fresh accumulator (`attempt`) may
 # clobber. Three feed the Aspect Web UI link (two identify the invocation, one
 # is its base URL off a runner; see `resolve_aspect_url`); `target_pattern`
-# feeds the explicit command and the `--output=json` document.
-_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url", "target_pattern"]
+# feeds the explicit command and the `--output=json` document;
+# `bazel_attempts`, the earlier attempts a retry archives, feeds the report
+# and the retry rows.
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url", "target_pattern", "bazel_attempts"]
 
 def init_data():
     """Create a fresh data accumulator.

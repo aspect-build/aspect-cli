@@ -652,15 +652,21 @@ fn gazelle_watch_refuses_json_output_with_a_document() {
     }
 }
 
-/// A retried build's document keeps the targets: the retry's fresh
-/// accumulator keeps every key the task set before the build.
+/// A retried build keeps what the task set before each attempt: the
+/// document its targets, and the final update both attempts, though attempt
+/// 2's `BuildStarted` resets the accumulator.
 #[test]
-fn a_retried_builds_document_keeps_its_targets() {
+fn a_retried_build_keeps_its_targets_and_attempts() {
     let dir = workspace("config.axl", |_| {
-        r#"load("@aspect//traits.axl", "BazelTrait")
+        r#"load("@aspect//traits.axl", "BazelTrait", "Phases")
+
+def _final(ctx, update):
+    if update.final and update.kind == "bazel_results":
+        print("final attempts=%d" % len(update.data.get("bazel_attempts", [])))
 
 def config(ctx: ConfigContext):
     ctx.traits[BazelTrait].extra_flags.append("--scenario=cache_evicted_once")
+    ctx.traits[Phases].task_update.append(_final)
 "#
         .to_string()
     });
@@ -679,6 +685,7 @@ def config(ctx: ConfigContext):
     );
     // The explicit command is built from it, and basil reports no command.
     assert_eq!(doc["target_pattern"], "//pkg:broken", "{doc}");
+    assert!(stderr.contains("final attempts=2"), "{stderr}");
 }
 
 /// A feature's `--<name>` disagreeing with its `--<name>:enabled` is a usage

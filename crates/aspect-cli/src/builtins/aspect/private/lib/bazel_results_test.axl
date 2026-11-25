@@ -1533,12 +1533,14 @@ def _test_build_started_preserves_bazel_streamed(ctx):
     """`process_event`'s build_started reset wipes top-level state for the new
     stream; `bes_streamed_by_bazel` is task-managed and set before the event, so
     like `sink_invocation_id` it must survive — otherwise a retry silently drops
-    the Aspect link.
+    the Aspect link. So must `bazel_attempts`, the earlier attempts a retry
+    archives before its stream starts.
 
     `bes_get` is a `getattr`, so a struct stands in for the BES event."""
     data = init_data()
     data["sink_invocation_id"] = "sink-1"
     data["bes_streamed_by_bazel"] = True
+    data["bazel_attempts"] = [{"attempt": 1, "exit_code": 39, "sink_invocation_id": "sink-0"}]
     process_event(data, struct(
         kind = "build_started",
         payload = struct(
@@ -1550,6 +1552,7 @@ def _test_build_started_preserves_bazel_streamed(ctx):
     ), None)
     _eq("sink id preserved", data["sink_invocation_id"], "sink-1")
     _eq("bazel-streamed flag preserved", data["bes_streamed_by_bazel"], True)
+    _eq("a retry's earlier attempts preserved", len(data["bazel_attempts"]), 1)
     _eq("bazel invocation id captured", data["bazel"]["invocation_id"], "bazel-uuid-1")
 
 def _test_render_bes_url(ctx):
