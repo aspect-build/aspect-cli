@@ -130,6 +130,20 @@ rust_test(
 )
 
 rust_test(
+    name = "child_output_test",
+    srcs = ["tests/child_output.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/child_output.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "@crates//:libc",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "console_test",
     srcs = ["tests/console.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/console.rs",

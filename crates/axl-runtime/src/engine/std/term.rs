@@ -337,6 +337,36 @@ fn tty_readable(fd: RawFd, timeout: Duration) -> bool {
 
 /// Whether `fd` takes a write within `timeout`; a descriptor `select` cannot
 /// watch is written to anyway.
+/// Write all of `bytes` to `fd`, waiting as long as it takes, but never
+/// inside a `write` that blocks: each chunk of at most [`WRITE_CHUNK`] once
+/// `fd` is writable. A take's `dup2` over `fd` waits out a write in flight
+/// on it on macOS, so a forwarder to a pipe nobody reads, blocked in one,
+/// would hold up the take, and every stream fed to the screen with it.
+pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        if !writable(fd, Duration::from_millis(100)) {
+            continue;
+        }
+        let chunk = &bytes[..bytes.len().min(WRITE_CHUNK)];
+        // SAFETY: a write from a live slice to a descriptor the caller names.
+        let n = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
+        match n {
+            0 => return Err(std::io::ErrorKind::WriteZero.into()),
+            n if n > 0 => bytes = &bytes[n as usize..],
+            _ => {
+                let e = std::io::Error::last_os_error();
+                if !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn writable(fd: RawFd, timeout: Duration) -> bool {
     select_one(fd, timeout, true).unwrap_or(true)
 }
@@ -501,6 +531,9 @@ fn osc11_reply(bytes: &[u8]) -> Option<(std::ops::Range<usize>, Option<bool>)> {
 /// Take the terminal; see the module docs. Its generation. Refused while
 /// this process runs in the background (another job has the terminal).
 fn take(alt_screen: bool) -> anyhow::Result<u64> {
+    // Stdout is not flushed: a forwarder blocked writing to a stdout nobody
+    // reads holds its lock, and the take would wait on it. What is still
+    // buffered goes to the capture, and out with it on release.
     let mut held = HELD.lock().unwrap();
     if held.is_some() {
         anyhow::bail!("the terminal is already taken");
@@ -532,7 +565,6 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         e
     };
 
-    let _ = std::io::stdout().flush();
     {
         use std::io::IsTerminal;
         mark_captured(Some((
@@ -767,16 +799,10 @@ pub fn restore_terminal_after_crash() {
 pub fn release_all() -> bool {
     let deadline = std::time::Instant::now() + Duration::from_millis(500);
     // No forwarder writes into the replay (see [`OUTPUT_ORDER`]), unless one
-    // holds it past the deadline (a stdout that takes nothing).
-    let _order = loop {
-        match OUTPUT_ORDER.try_lock() {
-            Ok(g) => break Some(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => break Some(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(std::sync::TryLockError::WouldBlock) => break None,
-        }
+    // holds a lock past the deadline.
+    let mut order = Order {
+        _out: lock_until(&OUTPUT_ORDER[0], deadline),
+        err: lock_until(&OUTPUT_ORDER[1], deadline),
     };
     loop {
         match HELD.try_lock() {
@@ -784,10 +810,10 @@ pub fn release_all() -> bool {
             Ok(mut held) => {
                 let mine = held.take();
                 drop(held);
-                return release_dumping(mine);
+                return release_dumping(mine, &mut order);
             }
             Err(std::sync::TryLockError::Poisoned(p)) => {
-                return release_dumping(p.into_inner().take());
+                return release_dumping(p.into_inner().take(), &mut order);
             }
             Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -809,7 +835,7 @@ pub fn release_all() -> bool {
 /// One not of its own, or none: false.
 pub(crate) fn suspend() -> bool {
     {
-        let _order = OUTPUT_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+        let _order = Order::lock();
         let mut held = HELD.lock().unwrap();
         let Some(h) = held.as_mut().filter(|h| h.alt_screen) else {
             return false;
@@ -841,17 +867,64 @@ pub(crate) fn suspend() -> bool {
     true
 }
 
-/// Held by a release from before the screen is taken out of `HELD` until
-/// its capture is replayed, and by a forwarder while it decides a chunk's
-/// route and feeds a screen ([`forwarding`]), never across a write to the
-/// terminal: so a child's output never lands inside the replay, nor goes
-/// through the capture's pipe as the screen goes, where it would be copied
-/// twice, and a stream nobody reads stalls no one else.
-static OUTPUT_ORDER: Mutex<()> = Mutex::new(());
+/// Stdout's and stderr's: each held by a release from before the screen is
+/// taken out of `HELD` until that stream's capture is replayed, and by a
+/// forwarder to that stream while it decides a chunk's route and feeds a
+/// screen ([`forwarding`]), never across a write to the terminal: so a
+/// child's output never lands inside the replay, nor goes through the
+/// capture's pipe as the screen goes, where it would be copied twice, and a
+/// stream nobody reads stalls no one else (stderr's is let go before
+/// stdout's replay, unless the two are one file).
+static OUTPUT_ORDER: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
 
-/// Run `f`, a forwarder's handling of one chunk, between releases.
-pub(crate) fn forwarding<T>(f: impl FnOnce() -> T) -> T {
-    let _order = OUTPUT_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+/// [`OUTPUT_ORDER`] as a release holds it, a lock it gave up on `None`.
+struct Order {
+    _out: Option<std::sync::MutexGuard<'static, ()>>,
+    err: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl Order {
+    /// Both, stdout's first, as every release takes them.
+    fn lock() -> Order {
+        let lock = |m: &'static Mutex<()>| Some(m.lock().unwrap_or_else(|p| p.into_inner()));
+        Order {
+            _out: lock(&OUTPUT_ORDER[0]),
+            err: lock(&OUTPUT_ORDER[1]),
+        }
+    }
+
+    /// Neither: for a release nothing else can be writing beside.
+    fn none() -> Order {
+        Order {
+            _out: None,
+            err: None,
+        }
+    }
+}
+
+/// `m` locked, or None when it is still held at `deadline`.
+fn lock_until(
+    m: &'static Mutex<()>,
+    deadline: std::time::Instant,
+) -> Option<std::sync::MutexGuard<'static, ()>> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// Run `f`, a forwarder's handling of one chunk to stderr (or stdout),
+/// between that stream's releases.
+pub(crate) fn forwarding<T>(stderr: bool, f: impl FnOnce() -> T) -> T {
+    let _order = OUTPUT_ORDER[stderr as usize]
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     f()
 }
 
@@ -1035,10 +1108,10 @@ pub(crate) fn resume() {
 /// [`release_all`] for `held`: the task's output since the screen was
 /// taken written from `output.ansi` ([`dump_output`]) when there is one to
 /// write, else what was captured replayed. Whether one was held.
-fn release_dumping(held: Option<Held>) -> bool {
+fn release_dumping(held: Option<Held>, order: &mut Order) -> bool {
     let was = held.is_some();
     let dumping = was && dump_ready();
-    let _ = release(held, !dumping);
+    let _ = release(held, !dumping, order);
     if dumping {
         dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
     }
@@ -1058,15 +1131,16 @@ fn dump_ready() -> bool {
     DUMP_MARK.lock().unwrap().is_some() && crate::out::output_ansi_mark().is_some()
 }
 
-/// Write the task's output since the mark ([`DUMP_MARK`]) to stderr in one
-/// write, as `output.ansi` keeps it, its links made again as the CLI's own
+/// Write the task's output since the mark ([`DUMP_MARK`]) to stderr, as
+/// `output.ansi` keeps it, its links made again as the CLI's own
 /// lines make them (the file keeps colour, not links; Bazel's lines are kept
 /// before their URLs are written), but for a line holding a URL already
 /// where the terminal shows them as text (the CLI's own lines write
 /// theirs). Its newest `max_lines`,
 /// after a line `older` gives, `{n}` the count of those it leaves out.
-/// Not copied to the output files, which hold it. Whether it wrote: never a
-/// second time, nor without a mark or the task's files.
+/// Not copied to the output files, which hold it; what stderr takes nothing
+/// of for `STALL_LIMIT` is dropped. Whether it wrote: never a second time,
+/// nor without a mark or the task's files.
 pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
     let Some(mark) = DUMP_MARK.lock().unwrap().take() else {
         return false;
@@ -1085,10 +1159,12 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
         }
     });
     DUMP_WRITTEN.fetch_add(crate::out::links_written() - before, Ordering::SeqCst);
-    use std::io::Write as _;
-    let mut err = std::io::stderr().lock();
-    let _ = err.write_all(out.as_bytes());
-    let _ = err.flush();
+    // Not through `std::io::stderr()`: a forwarder blocked writing to a
+    // stderr nobody reads holds its lock, and this can run under
+    // `OUTPUT_ORDER` (the exit's release). Bounded as the replay is.
+    // SAFETY: fd 2 stays open; ManuallyDrop never closes it.
+    let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
+    write_patiently(&mut err, out.as_bytes());
     true
 }
 
@@ -1125,8 +1201,10 @@ fn dump_text(text: &str, max_lines: usize, older: &str, link: impl Fn(&str) -> S
 /// `replay_stderr`. Without it, stdout's is written only where stdout is
 /// not the terminal (a screen that shows what it captured has shown that
 /// too), and what the captures still held, read as they stopped, is
-/// returned as lines for the screen to write itself.
-fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
+/// returned as lines for the screen to write itself. Stderr's capture goes
+/// first, and its lock in `order` is let go before stdout's replay when the
+/// two are different files: a stdout nobody reads holds up stdout alone.
+fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<String> {
     let Some(mut held) = held else {
         return vec![];
     };
@@ -1150,16 +1228,44 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
     let _ = termios::tcsetattr(&held.tty, SetArg::TCSAFLUSH, &held.saved_termios);
     CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
     mark_captured(None);
-    if let Some(r) = held.stdout.take() {
+    let one_file = match (&held.stdout, &held.stderr) {
+        (Some(o), Some(e)) => same_file(o.saved.as_raw_fd(), e.saved.as_raw_fd()),
+        _ => false,
+    };
+    let stdout = held.stdout.take();
+    if one_file && let Some(r) = stdout {
         r.finish(replay_stderr || !stdout_tty);
-    }
-    if let Some(r) = held.stderr.take() {
-        r.finish(replay_stderr);
+        if let Some(r) = held.stderr.take() {
+            r.finish(replay_stderr);
+        }
+    } else {
+        if let Some(r) = held.stderr.take() {
+            r.finish(replay_stderr);
+        }
+        order.err = None;
+        if let Some(r) = stdout {
+            r.finish(replay_stderr || !stdout_tty);
+        }
     }
     if replay_stderr {
         return vec![];
     }
     held.capture.drain().colours
+}
+
+/// Whether descriptors `a` and `b` are one file (a terminal, or `2>&1`).
+fn same_file(a: RawFd, b: RawFd) -> bool {
+    // SAFETY: fstat into zeroed stat buffers, on descriptors the caller owns.
+    unsafe {
+        let (mut x, mut y) = (
+            std::mem::zeroed::<libc::stat>(),
+            std::mem::zeroed::<libc::stat>(),
+        );
+        libc::fstat(a, &mut x) == 0
+            && libc::fstat(b, &mut y) == 0
+            && x.st_dev == y.st_dev
+            && x.st_ino == y.st_ino
+    }
 }
 
 /// `frame` as one synchronized update (DEC mode 2026): the terminal holds
@@ -1262,7 +1368,7 @@ fn install_panic_hook() {
             if cfg!(panic = "abort") {
                 match HELD.try_lock() {
                     Ok(mut held) => {
-                        let _ = release(held.take(), true);
+                        let _ = release(held.take(), true, &mut Order::none());
                     }
                     Err(_) => restore_terminal_after_crash(),
                 }
@@ -1979,12 +2085,12 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         let generation = generation_of(this)?;
         // No forwarder writes while the screen goes and its capture is
         // replayed: its lines would land inside the replay's.
-        let _order = OUTPUT_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+        let mut order = Order::lock();
         let mut held = HELD.lock().unwrap();
         if held.as_ref().is_some_and(|h| h.generation == generation) {
             let mine = held.take();
             drop(held);
-            return Ok(release(mine, replay_stderr));
+            return Ok(release(mine, replay_stderr, &mut order));
         }
         Ok(vec![])
     }

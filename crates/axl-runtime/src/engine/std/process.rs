@@ -548,13 +548,16 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
         // Not yet copied; its first `shown` bytes written out already.
         let mut line = Vec::new();
         let mut shown = 0;
+        // Under the stream's lock, so the CLI's own writes keep their place,
+        // but never blocked inside a write (see `write_when_writable`).
         let show = |bytes: &[u8]| -> std::io::Result<()> {
+            use crate::engine::std::term::write_when_writable;
             if stderr {
-                let mut err = std::io::stderr().lock();
-                err.write_all(bytes).and_then(|()| err.flush())
+                let _err = std::io::stderr().lock();
+                write_when_writable(2, bytes)
             } else {
                 let mut out = std::io::stdout().lock();
-                out.write_all(bytes).and_then(|()| out.flush())
+                out.flush().and_then(|()| write_when_writable(1, bytes))
             }
         };
         loop {
@@ -578,7 +581,7 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
                     // lock, which a release holds while it replays; a write to
                     // the terminal is made after, without it, so a stream
                     // nobody reads holds up only this child's output.
-                    let fed = crate::engine::std::term::forwarding(|| {
+                    let fed = crate::engine::std::term::forwarding(stderr, || {
                         crate::engine::std::term::feed_screen(
                             stderr,
                             &line[..whole.unwrap_or(0)],
@@ -607,7 +610,7 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
         if !line.is_empty() {
             let mut ended = line.clone();
             ended.push(b'\n');
-            let fed = crate::engine::std::term::forwarding(|| {
+            let fed = crate::engine::std::term::forwarding(stderr, || {
                 crate::engine::std::term::feed_screen(stderr, &ended, shown)
             });
             if !fed {
