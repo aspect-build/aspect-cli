@@ -381,17 +381,20 @@ impl Config {
     }
 
     /// A [`links::Linker`] for what is shown, when [`Config::links`] asks for
-    /// one and something is shown.
-    fn linker(&self) -> Option<links::Linker> {
+    /// one and something is shown, counting the URLs it writes in `written`.
+    fn linker(&self, written: &links::WrittenCount) -> Option<links::Linker> {
         let bases = self.links.clone()?;
-        (self.output != Output::Hidden).then(|| links::Linker::new(bases).with_files(self.files()))
+        (self.output != Output::Hidden)
+            .then(|| links::Linker::new(bases).with_files(self.files(written)))
     }
 
-    /// How this pipeline's links to files are made.
-    fn files(&self) -> links::FileLinks {
+    /// How this pipeline's links to files are made, the URLs they write out
+    /// counted in `written`, which all of a pipeline's share.
+    fn files(&self, written: &links::WrittenCount) -> links::FileLinks {
         links::FileLinks::new(self.link_format.clone())
             .written(self.link_text)
             .styled(!self.strip_colour)
+            .counted(written.clone())
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
@@ -462,6 +465,7 @@ impl Config {
         let pty = self.shows_curses();
         let observations = Arc::new(Observations::default());
         let stats = Arc::new(Stats::default());
+        let written = links::WrittenCount::default();
         let (events_tx, events) = if self.intercepts() {
             let (tx, rx) = mpsc::channel();
             (Some(tx), Some(rx))
@@ -478,9 +482,11 @@ impl Config {
         // What `relativize_paths` links its paths with: Bazel's execroot
         // paths are the workspace's the build runs in, the first link base.
         let link_to = || {
-            let workspace = self.linker().and(self.links.as_ref()?.first().cloned())?;
+            let workspace = self
+                .linker(&written)
+                .and(self.links.as_ref()?.first().cloned())?;
             Some(filters::LinkTo {
-                files: self.files(),
+                files: self.files(&written),
                 workspace,
             })
         };
@@ -526,7 +532,7 @@ impl Config {
                 ),
                 Stage::Drop(patterns) => Box::new(DropLines::new(patterns, pty, stats.clone())),
                 Stage::RecapErrors { max, after } => Box::new(
-                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker()),
+                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker(&written)),
                 ),
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
@@ -539,7 +545,7 @@ impl Config {
             };
             chain.push(stage);
         }
-        if let Some(linker) = self.linker() {
+        if let Some(linker) = self.linker(&written) {
             chain.push(Box::new(links::Links::new(linker).under_pty(pty)));
         }
         if let Some(l) = &log {
@@ -556,7 +562,7 @@ impl Config {
                 stats,
                 state,
                 self.style.clone(),
-                self.linker().map(|_| self.files()),
+                self.linker(&written).map(|_| self.files(&written)),
             )));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
@@ -569,6 +575,7 @@ impl Config {
             log,
             shape,
             feed,
+            links_written: written,
         }
     }
 }
@@ -586,6 +593,9 @@ pub struct Pipeline {
     /// What is shown, for a caller drawing its own screen: with
     /// [`Output::Hidden`].
     pub feed: Option<Arc<feed::Feed>>,
+    /// The URLs its links have written out beside them (the macOS
+    /// Terminal's): a console line's, the recap's and the summary's paths.
+    pub links_written: links::WrittenCount,
 }
 
 #[cfg(test)]
@@ -1167,6 +1177,31 @@ mod tests {
             "WARNING: same 1\nWARNING: same 2\n  body of 2\n",
             "the line under the dropped one is not the warning's"
         );
+    }
+
+    /// A pipeline counts the URLs its links write out beside them (the macOS
+    /// Terminal's) on its own, apart from another's.
+    #[test]
+    fn a_pipeline_counts_the_link_urls_it_writes_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.cc"), "").unwrap();
+        let mut config = Config::new(Mode::Pipe, vec![], Style::default());
+        config.links = Some(vec![dir.path().to_path_buf()]);
+        config.link_text = true;
+        let (_, pipeline) = run(&config, b"ERROR: a.cc:3:1: bad\nsee https://x.test\n");
+        assert_eq!(
+            pipeline.links_written.get(),
+            1,
+            "the file's URL, not the web one's"
+        );
+        assert_eq!(
+            config.pipeline().links_written.get(),
+            0,
+            "a new pipeline starts at none"
+        );
+        config.link_text = false;
+        let (_, pipeline) = run(&config, b"ERROR: a.cc:3:1: bad\n");
+        assert_eq!(pipeline.links_written.get(), 0, "with no URL written out");
     }
 
     /// A redaction hook dropping every `Fetching` line of a real PTY console

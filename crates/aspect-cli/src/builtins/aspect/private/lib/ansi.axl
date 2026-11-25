@@ -37,9 +37,23 @@ def _highlight_style(std, enabled: bool = True) -> str:
         return ""
     return _seq(color_arg)
 
+# Around text `print()` never links (`unlinked`): APC strings, which the
+# runtime's linker takes out, and a terminal ignores.
+_UNLINKED_START = "\x1b_aspect:unlinked\x1b\\"
+_UNLINKED_END = "\x1b_aspect:/unlinked\x1b\\"
+
+def _unlinked(text: str) -> str:
+    """`text` that `print()` never links: a path that is a word to type
+    (`.aspect/config.axl` in a hint), not a place to open; URLs in it too.
+    The markers are invisible and go when printed; `strip` takes them out
+    of text bound anywhere else."""
+    return _UNLINKED_START + text + _UNLINKED_END
+
 def _strip(text: str) -> str:
-    """`text` with ANSI CSI (`\\x1b[`…final-byte) and OSC (`\\x1b]`…BEL) escapes
-    removed. Character walk — the runtime has no regex module."""
+    """`text` with ANSI CSI (`\\x1b[`…final-byte) and OSC (`\\x1b]`…BEL) escapes,
+    and `unlinked`'s markers, removed. Character walk — the runtime has no
+    regex module."""
+    text = text.replace(_UNLINKED_START, "").replace(_UNLINKED_END, "")
     if not text or "\x1b" not in text:
         return text
     out = []
@@ -100,5 +114,6 @@ ansi = namespace(
     seq = _seq,
     style = _style,
     strip = _strip,
+    unlinked = _unlinked,
     highlight_style = _highlight_style,
 )

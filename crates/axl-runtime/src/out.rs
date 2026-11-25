@@ -1264,7 +1264,8 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
     });
 
 /// `line` with its URLs and paths linked as AXL `print()`'s are, for a line
-/// the runtime writes itself (the banner); as it is off a person's terminal.
+/// the runtime writes itself (the banner); off a person's terminal, as it is
+/// but for `ansi.unlinked`'s markers ([`bazel::console::links::strip_unlinked`]).
 pub(crate) fn linked(line: &str) -> String {
     match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
         Some(mut linker) => {
@@ -1272,7 +1273,8 @@ pub(crate) fn linked(line: &str) -> String {
             String::from_utf8(linker.link_written(line.as_bytes()))
                 .unwrap_or_else(|_| line.to_string())
         }
-        None => line.to_string(),
+        None => String::from_utf8_lossy(&bazel::console::links::strip_unlinked(line.as_bytes()))
+            .into_owned(),
     }
 }
 
@@ -1287,7 +1289,10 @@ impl starlark::PrintHandler for TolerantPrintHandler {
                 let _ = std::io::stderr().write_all(&line);
                 copy_output(&line);
             }
-            None => errln!("{text}"),
+            None => {
+                let text = bazel::console::links::strip_unlinked(text.as_bytes());
+                errln!("{}", String::from_utf8_lossy(&text));
+            }
         }
         Ok(())
     }
