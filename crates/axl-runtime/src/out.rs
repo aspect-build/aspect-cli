@@ -1116,7 +1116,7 @@ pub struct TolerantPrintHandler;
 
 /// Whether this process's stderr is a person's terminal that shows links:
 /// a TTY with a `TERM` other than `dumb` (which writes an escape as text),
-/// not a CI job's (a `file://` link names the runner's disk, and a log
+/// not a CI job's (a file's link names the runner's disk, and a log
 /// viewer may show the escape), and no coding agent reading it (its
 /// environment set, as the Console feature's `auto` profile checks), which
 /// gets each path once, plain.
@@ -1308,7 +1308,7 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(
             bazel::console::links::Linker::new(vec![base]).with_files(
-                bazel::console::links::FileLinks::file()
+                bazel::console::links::FileLinks::none()
                     .written(links_as_text())
                     .styled(crate::color::console_supports_color()),
             ),

@@ -3,9 +3,9 @@
 //! its width.
 //!
 //! [`Linker::link`] links each `http://` or `https://` URL to itself, and
-//! each path to a file that exists as its [`LinkFormat`] says (a directory
-//! only under a `file://` format, which an editor would open as a folder;
-//! nothing under `none`): an absolute path as written, a relative one
+//! each path to a file that exists as its [`LinkFormat`] says (never a
+//! directory, which an editor would open as a folder; nothing under
+//! `none`): an absolute path as written, a relative one
 //! (`src/a.cc:3:4`, `BUILD.bazel`) from the first of the linker's
 //! directories it exists under. For Bazel's console those are the
 //! workspace the build runs in, which Bazel's own paths are relative to,
@@ -19,16 +19,22 @@
 //! runs). A response file's path
 //! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not
 //! a `:line:col` after it. A path to nothing (a sandbox gone with its
-//! action, a label, prose) or cut short (`src/a.c…`) is left alone. A URL
-//! ends before trailing punctuation, a bracket that closes none of its own,
-//! and a `…` that marks it cut.
+//! action, a label, prose) or cut short (`src/a.c…`) is left alone. A
+//! binary file (a compiled program, or anything not text), a FIFO, socket
+//! or device file, or anything under the system's own directories
+//! (`/bin/bash` in a genrule's command), is never linked: there is nothing
+//! in it to read. A script a repository keeps (`tools/lint.sh`) is linked,
+//! as an editor only shows it. The check is when the link is made: a file
+//! changed after is not relinked. A URL ends before trailing punctuation, a bracket that closes
+//! none of its own, and a `…` that marks it cut.
 //!
 //! What a file's link opens is a [`LinkFormat`], as ripgrep's
 //! `--hyperlink-format` is: an editor's URL scheme
 //! (`vscode://file{path}:{line}:{column}`) at the line and column that
 //! follow the path (`:12:3`, `(12,3)`, a Starlark traceback's
-//! `", line 12, column 3`), `file://` (what the system opens a file with, at
-//! no line), or none, which links URLs alone. [`LinkFormat::auto`] finds
+//! `", line 12, column 3`), or none, which links URLs alone. Never
+//! `file://`, which has the system open the file with whatever it picks,
+//! and run one it runs ([`LinkFormat::parse`] refuses it). [`LinkFormat::auto`] finds
 //! the editor. Where a terminal shows no OSC 8 link but opens a URL written
 //! out (Terminal.app), each link's URL is written beside it too
 //! ([`FileLinks::text`]).
@@ -89,8 +95,8 @@ pub(crate) fn is_path_byte(b: u8) -> bool {
 /// short enough that a file made since is linked.
 const MISS_FOR: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How many paths a [`Linker`] remembers resolving before forgetting them
-/// all.
+/// How many paths a [`Linker`] remembers resolving, and [`never_linked`] judging,
+/// before forgetting them all.
 const REMEMBERED: usize = 4096;
 
 /// The longest record linked: a longer one (a command line) is left as it is.
@@ -132,7 +138,6 @@ impl LinkFormat {
     /// The names [`LinkFormat::parse`] takes, ripgrep's, each with the
     /// template it stands for.
     pub const ALIASES: &[(&str, &str)] = &[
-        ("file", "file://{host}{path}"),
         ("vscode", "vscode://file{path}:{line}:{column}"),
         (
             "vscode-insiders",
@@ -153,13 +158,31 @@ impl LinkFormat {
             "textmate",
             "txmt://open?url=file://{path}&line={line}&column={column}",
         ),
-        ("kitty", "file://{host}{path}#{line}"),
     ];
 
-    /// `none`, an alias, or a template naming `{path}`.
+    /// `none`, an alias, or a template naming `{path}`. Never a `file://`
+    /// one (`file`, kitty's): the system would open the file with whatever
+    /// it picks, and run one it runs; a file opens in an editor or not at
+    /// all.
     pub fn parse(value: &str) -> Result<LinkFormat, String> {
         if value == "none" {
             return Ok(LinkFormat::None);
+        }
+        if value == "file"
+            || value == "kitty"
+            || value
+                .get(..5)
+                .is_some_and(|s| s.eq_ignore_ascii_case("file:"))
+        {
+            return Err(format!(
+                "{value:?} is not a hyperlink format: a file:// link has the system open the file, \
+                 which may run it; name an editor ({}), or none",
+                Self::ALIASES
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         if let Some((_, template)) = Self::ALIASES.iter().find(|(name, _)| *name == value) {
             return Ok(LinkFormat::Template(template.to_string()));
@@ -203,8 +226,7 @@ impl LinkFormat {
     ///   it is one of [`LinkFormat::EDITORS`]; a terminal editor (`vim`)
     ///   cannot be opened by a click;
     /// - the first of [`LinkFormat::EDITORS`] `installed` ([`installed`]);
-    /// - none: a `file://` link opens whatever the system picks, at no
-    ///   line.
+    /// - none.
     pub fn auto(
         var: impl Fn(&str) -> Option<std::ffi::OsString>,
         installed: impl Fn(&str) -> bool,
@@ -396,9 +418,9 @@ pub struct FileLinks {
 }
 
 impl FileLinks {
-    /// `file://` links on this host, for a caller that does not choose.
-    pub fn file() -> FileLinks {
-        FileLinks::new(LinkFormat::parse("file").expect("an alias"))
+    /// No file links, for a caller that does not choose.
+    pub fn none() -> FileLinks {
+        FileLinks::new(LinkFormat::None)
     }
 
     pub fn new(format: LinkFormat) -> FileLinks {
@@ -449,14 +471,15 @@ impl FileLinks {
         out
     }
 
-    /// The URL a link to `path` opens, at `at` (line, column) when the text
-    /// says, or None when files are not linked, or for a directory in an
-    /// editor, which would open it as a folder.
+    /// The URL a link to `path` opens in an editor, at `at` (line, column)
+    /// when the text says, or None when files are not linked, for a
+    /// directory, which an editor would open as a folder, and for a path
+    /// never linked ([`never_linked`]).
     pub fn url(&self, path: &Path, at: (Option<u32>, Option<u32>)) -> Option<String> {
         let LinkFormat::Template(template) = &self.format else {
             return None;
         };
-        if !template.starts_with("file://") && path.is_dir() {
+        if path.is_dir() || never_linked(path) {
             return None;
         }
         Some(
@@ -466,6 +489,85 @@ impl FileLinks {
                 .replace("{line}", &at.0.unwrap_or(1).to_string())
                 .replace("{column}", &at.1.unwrap_or(1).to_string()),
         )
+    }
+}
+
+/// The system's own directories, whose files a console names as commands
+/// (`/bin/bash` in a genrule's command line), never to open.
+const SYSTEM_DIRS: [&str; 9] = [
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/libexec",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/System",
+];
+
+/// How long a path's [`never_linked`] answer holds: a busy console names
+/// the same files again and again, and a file changed since is seen soon.
+const VERDICT_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+static VERDICTS: LazyLock<std::sync::Mutex<HashMap<PathBuf, (bool, std::time::Instant)>>> =
+    LazyLock::new(Default::default);
+
+/// Whether `path` is never linked: a binary file ([`binary`], after its
+/// symlinks), a FIFO, socket or device file, or anything in or under
+/// [`SYSTEM_DIRS`], as written or after its symlinks. Remembered for
+/// [`VERDICT_FOR`].
+fn never_linked(path: &Path) -> bool {
+    if let Ok(verdicts) = VERDICTS.lock()
+        && let Some((verdict, at)) = verdicts.get(path)
+        && at.elapsed() < VERDICT_FOR
+    {
+        return *verdict;
+    }
+    let verdict = looked_up(path);
+    if let Ok(mut verdicts) = VERDICTS.lock() {
+        if verdicts.len() >= REMEMBERED {
+            verdicts.clear();
+        }
+        verdicts.insert(path.to_path_buf(), (verdict, std::time::Instant::now()));
+    }
+    verdict
+}
+
+fn looked_up(path: &Path) -> bool {
+    let in_system = |p: &Path| SYSTEM_DIRS.iter().any(|d| p.starts_with(d));
+    let real = std::fs::canonicalize(path).ok();
+    let meta = std::fs::metadata(path).ok();
+    let file = meta.as_ref().is_some_and(|m| m.is_file());
+    let special = meta.as_ref().is_some_and(|m| !m.is_file() && !m.is_dir());
+    in_system(path) || real.as_deref().is_some_and(in_system) || special || file && binary(path)
+}
+
+/// How much of a file [`binary`] reads.
+const SNIFFED: usize = 8192;
+
+/// Whether the file at `path` is not text, as git judges: a NUL in its
+/// first [`SNIFFED`] bytes (a compiled program, an archive, an image).
+/// An unreadable file is not text to show either, nor one that is no
+/// longer a regular file when opened (non-blocking, so a FIFO swapped in
+/// never stalls the console).
+fn binary(path: &Path) -> bool {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut head = Vec::with_capacity(SNIFFED);
+    let read = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .and_then(|f| {
+            if !f.metadata()?.is_file() {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            f.take(SNIFFED as u64).read_to_end(&mut head)
+        });
+    match read {
+        Ok(_) => head.contains(&0),
+        Err(_) => true,
     }
 }
 
@@ -518,7 +620,7 @@ impl Linker {
     pub fn new(bases: Vec<PathBuf>) -> Self {
         Self {
             bases,
-            files: FileLinks::file(),
+            files: FileLinks::none(),
             resolved: HashMap::new(),
         }
     }
@@ -546,9 +648,9 @@ impl Linker {
     }
 
     /// `record` with each URL and each path to something that exists
-    /// linked; escape sequences, and text already linked, kept as they are,
-    /// but for [`UNLINKED_START`] and [`UNLINKED_END`], which go, the text
-    /// between them left unlinked.
+    /// linked, but what [`FileLinks::url`] refuses; escape sequences, and
+    /// text already linked, kept as they are, but for [`UNLINKED_START`] and
+    /// [`UNLINKED_END`], which go, the text between them left unlinked.
     pub fn link(&mut self, record: &[u8]) -> Vec<u8> {
         self.link_with(record, &[])
     }
@@ -978,11 +1080,6 @@ pub fn osc8(url: &str, shown: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `path` as a `file://` URL on `host`, percent-encoded.
-pub fn file_url(host: &str, path: &Path) -> String {
-    format!("file://{host}{}", encoded_path(path))
-}
-
 /// `path`, percent-encoded for a URL.
 fn encoded_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
@@ -998,7 +1095,8 @@ fn encoded_path(path: &Path) -> String {
 }
 
 /// `path` as an OSC 8 hyperlink to it as `files` says, its text the path
-/// itself; just the path when files are not linked. `restore` is the style
+/// itself; just the path when files are not linked or this one never is
+/// ([`FileLinks::url`]). `restore` is the style
 /// of the text around it, taken up again after a styled written URL.
 pub fn file_link(files: &FileLinks, path: &Path, restore: &str) -> String {
     let shown = path.display().to_string();
@@ -1031,10 +1129,15 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/a.cc"), "").unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
-        let mut l = Linker::new(vec![dir.path().to_path_buf()]);
+        let mut l = Linker::new(vec![dir.path().to_path_buf()])
+            .with_files(FileLinks::new(LinkFormat::parse(EDIT).unwrap()));
         l.files.host = String::new();
         (dir, l)
     }
+
+    /// An editor's format with no line, so a test's expected link is the
+    /// path alone.
+    const EDIT: &str = "edit://{path}";
 
     fn link(l: &mut Linker, s: &str) -> String {
         String::from_utf8(l.link(s.as_bytes())).unwrap()
@@ -1042,7 +1145,7 @@ mod tests {
 
     fn file(dir: &Path, rel: &str, shown: &str) -> String {
         format!(
-            "\x1b]8;;file://{}/{rel}\x1b\\{shown}\x1b]8;;\x1b\\",
+            "\x1b]8;;edit://{}/{rel}\x1b\\{shown}\x1b]8;;\x1b\\",
             dir.display()
         )
     }
@@ -1071,6 +1174,42 @@ mod tests {
         );
     }
 
+    /// A binary file, a symlink to one, a FIFO and anything under the
+    /// system's own directories are never linked; a repository's script is.
+    #[test]
+    fn a_binary_or_a_system_path_is_never_linked() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut l) = linker();
+        let script = dir.path().join("src/run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = dir.path().join("src/prog");
+        std::fs::write(&program, b"\x7fELF\x02\x01\x01\0\0\0").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&program, dir.path().join("src/run")).unwrap();
+        let cmd = "ERROR: x: /bin/bash -c 'src/run.sh; src/prog; src/run; src/a.cc'";
+        assert_eq!(
+            link(&mut l, cmd),
+            format!(
+                "ERROR: x: /bin/bash -c '{}; src/prog; src/run; {}'",
+                file(dir.path(), "src/run.sh", "src/run.sh"),
+                file(dir.path(), "src/a.cc", "src/a.cc")
+            )
+        );
+        for path in ["/bin/bash", "/usr/bin/env", "/bin", "/dev/null"] {
+            assert!(super::never_linked(Path::new(path)), "{path}");
+        }
+        assert!(super::never_linked(&program));
+        let fifo = dir.path().join("src/pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert!(
+            super::never_linked(&fifo),
+            "a FIFO, and its check never blocks"
+        );
+        assert!(!super::never_linked(&script));
+        assert!(!super::never_linked(&dir.path().join("src/a.cc")));
+    }
+
     #[test]
     fn unlinked_text_is_never_linked_and_its_markers_go() {
         let (_dir, mut l) = linker();
@@ -1089,7 +1228,7 @@ mod tests {
             out.starts_with("edit src/a.cc https://x.test/b or "),
             "{out:?}"
         );
-        assert_eq!(out.matches("\x1b]8;;file://").count(), 1, "{out:?}");
+        assert_eq!(out.matches("\x1b]8;;edit://").count(), 1, "{out:?}");
         assert!(out.contains("\x1b]8;;https://x.test/a"), "{out:?}");
         assert!(!out.contains("\x1b]8;;https://x.test/b"), "{out:?}");
         assert!(!out.contains("aspect:"), "the markers go: {out:?}");
@@ -1212,7 +1351,8 @@ mod tests {
         std::fs::write(root.path().join("src/a.ts"), "").unwrap();
         std::fs::write(root.path().join("pkg/src/a.ts"), "").unwrap();
         std::fs::write(root.path().join("pkg/only.ts"), "").unwrap();
-        let mut l = Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")]);
+        let mut l = Linker::new(vec![root.path().to_path_buf(), root.path().join("pkg")])
+            .with_files(FileLinks::new(LinkFormat::parse(EDIT).unwrap()));
         l.files.host = String::new();
         assert_eq!(
             link(&mut l, "src/a.ts:3"),
@@ -1267,7 +1407,7 @@ mod tests {
                 .linking(Some(LinkTo {
                     files: FileLinks {
                         host: String::new(),
-                        format: LinkFormat::parse("file").unwrap(),
+                        format: LinkFormat::parse(EDIT).unwrap(),
                         text: false,
                         styled: false,
                         written: WrittenCount::default(),
@@ -1276,7 +1416,8 @@ mod tests {
                 }))
             })
             .collect();
-        let mut linker = Linker::new(vec![ws.clone(), dir.path().to_path_buf()]);
+        let mut linker = Linker::new(vec![ws.clone(), dir.path().to_path_buf()])
+            .with_files(FileLinks::new(LinkFormat::parse(EDIT).unwrap()));
         linker.files.host = String::new();
         let mut links = Links::new(linker);
         let run = move |line: &str| {
@@ -1426,7 +1567,8 @@ mod tests {
         );
         let shown = run("ERROR: $T/pkg/BUILD.bazel:1: x");
         let known = links_in(shown.as_bytes());
-        let mut l = Linker::new(vec![dir.path().to_path_buf()]);
+        let mut l = Linker::new(vec![dir.path().to_path_buf()])
+            .with_files(FileLinks::new(LinkFormat::parse(EDIT).unwrap()));
         l.files.host = String::new();
         let quoted = String::from_utf8(l.link_with(b"ERROR: BUILD.bazel:1: x", &known)).unwrap();
         assert_eq!(
@@ -1491,10 +1633,14 @@ mod tests {
             url("cursor", (Some(3), None)).as_deref(),
             Some("cursor://file/w/a%20b.ts:3:1")
         );
+        for f in ["file", "kitty", "file://{host}{path}", "FILE:///{path}"] {
+            let err = LinkFormat::parse(f).unwrap_err();
+            assert!(err.contains("may run it"), "{f}: {err}");
+        }
         assert_eq!(
-            url("file", (Some(3), Some(4))).as_deref(),
-            Some("file://h/w/a%20b.ts"),
-            "no line in a file URL"
+            url("txmt://open?url=file://{path}", (None, None)).as_deref(),
+            Some("txmt://open?url=file:///w/a%20b.ts"),
+            "an editor's own scheme may carry a file URL"
         );
         assert_eq!(
             url("idea://open?file={path}&line={line}", (Some(9), None)).as_deref(),
@@ -1504,7 +1650,7 @@ mod tests {
         assert!(
             LinkFormat::parse("vscod")
                 .unwrap_err()
-                .contains("expected auto, none, file, vscode")
+                .contains("expected auto, none, vscode")
         );
     }
 
@@ -1642,13 +1788,6 @@ mod tests {
                 .unwrap()
                 .contains("\x1b]8"),
             "no editor link to a directory"
-        );
-        l.set_format(LinkFormat::parse("file").unwrap());
-        assert!(
-            String::from_utf8(l.link(b"see src/ there"))
-                .unwrap()
-                .contains("\x1b]8"),
-            "a file link to one"
         );
     }
 
@@ -1868,11 +2007,13 @@ mod tests {
 
     #[test]
     fn a_styled_file_link_takes_up_the_style_around_it_again() {
-        let files = FileLinks::file().written(true).styled(true);
+        let files = FileLinks::new(LinkFormat::parse(EDIT).unwrap())
+            .written(true)
+            .styled(true);
         let link = file_link(&files, Path::new("/tmp/a.log"), "\x1b[38;5;244m");
         assert!(link.ends_with("\x1b[24m>\x1b[0m\x1b[38;5;244m"), "{link:?}");
         let plain = file_link(
-            &FileLinks::file().written(true),
+            &FileLinks::new(LinkFormat::parse(EDIT).unwrap()).written(true),
             Path::new("/tmp/a.log"),
             "\x1b[2m",
         );
@@ -1944,7 +2085,8 @@ mod tests {
             files: files.clone(),
             workspace: root.path().to_path_buf(),
         }));
-        let mut linker = Linker::new(vec![root.path().to_path_buf()]);
+        let mut linker = Linker::new(vec![root.path().to_path_buf()])
+            .with_files(FileLinks::new(LinkFormat::parse(EDIT).unwrap()));
         linker.files = files;
         let mut links = Links::new(linker);
         let shown = rel
@@ -1975,7 +2117,7 @@ mod tests {
     fn links_count_the_urls_they_write_out_together() {
         let file = "\x1b]8;;cursor://file/a.cc:1:1\x1b\\a.cc\x1b]8;;\x1b\\";
         let web = "\x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\";
-        let files = FileLinks::file().written(true);
+        let files = FileLinks::new(LinkFormat::parse(EDIT).unwrap()).written(true);
         let summary = files.clone();
         files.write_urls(format!("{file} and {web}").as_bytes());
         assert_eq!(
@@ -1993,7 +2135,7 @@ mod tests {
             "a summary path's, counted with the line's"
         );
         assert_eq!(
-            FileLinks::file().written.get(),
+            FileLinks::none().written.get(),
             0,
             "another pipeline's links count apart"
         );
@@ -2030,13 +2172,5 @@ mod tests {
         );
         assert_eq!(editor_command("env FOO=1 zed").as_deref(), Some("zed"));
         assert_eq!(editor_command("  ").as_deref(), None);
-    }
-
-    #[test]
-    fn a_file_url_is_percent_encoded() {
-        assert_eq!(
-            file_url("h", Path::new("/tmp/a b.log")),
-            "file://h/tmp/a%20b.log"
-        );
     }
 }

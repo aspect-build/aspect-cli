@@ -952,11 +952,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
-            super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
+            super::super::links::Linker::new(vec![dir.path().to_path_buf()]).with_files(
+                super::super::links::FileLinks::new(
+                    super::super::links::LinkFormat::parse("file-test://{path}").unwrap(),
+                ),
+            ),
         ));
         let out = feed(&mut p, &["ERROR: BUILD.bazel:1:1: see https://x.test/why"]);
         assert!(
-            out.starts_with("INFO: Errors Bazel reported:\n  ERROR: \x1b]8;;file://"),
+            out.starts_with("INFO: Errors Bazel reported:\n  ERROR: \x1b]8;;file-test://"),
             "{out:?}"
         );
         assert!(
@@ -978,7 +982,11 @@ mod tests {
             std::fs::write(at, "").unwrap();
         }
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(
-            super::super::links::Linker::new(vec![dir.path().to_path_buf()]),
+            super::super::links::Linker::new(vec![dir.path().to_path_buf()]).with_files(
+                super::super::links::FileLinks::new(
+                    super::super::links::LinkFormat::parse("file-test://{path}").unwrap(),
+                ),
+            ),
         ));
         let pkg = dir.path().join("pkg/src/a.ts").display().to_string();
         let linked = format!("\x1b]8;;file://{pkg}\x1b\\src/a.ts\x1b]8;;\x1b\\:1: absolute");
@@ -1012,12 +1020,15 @@ mod tests {
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, "").unwrap();
         }
-        let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()]);
+        let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()])
+            .with_files(super::super::links::FileLinks::new(
+                super::super::links::LinkFormat::parse("file-test://{path}").unwrap(),
+            ));
         linker.files.host = String::new();
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(linker));
         let link = |rel: &str, shown: &str| {
             format!(
-                "\x1b]8;;file://{}/{rel}\x1b\\{shown}\x1b]8;;\x1b\\",
+                "\x1b]8;;file-test://{}/{rel}\x1b\\{shown}\x1b]8;;\x1b\\",
                 dir.path().display()
             )
         };
@@ -1066,11 +1077,14 @@ mod tests {
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, "").unwrap();
         }
-        let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()]);
+        let mut linker = super::super::links::Linker::new(vec![dir.path().to_path_buf()])
+            .with_files(super::super::links::FileLinks::new(
+                super::super::links::LinkFormat::parse("file-test://{path}").unwrap(),
+            ));
         linker.files.host = String::new();
         let mut p = RecapErrors::new(5, 0, Style::default()).linking(Some(linker));
         let pkg = format!(
-            "\x1b]8;;file://{}/pkg/src/a.ts\x1b\\src/a.ts\x1b]8;;\x1b\\",
+            "\x1b]8;;file-test://{}/pkg/src/a.ts\x1b\\src/a.ts\x1b]8;;\x1b\\",
             dir.path().display()
         );
         let mut record = b"\x1b[31mERROR: \x1b[0mcaf\xe9 ".to_vec();
@@ -1118,9 +1132,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("console.log");
         std::fs::write(&log, "").unwrap();
-        let links = crate::console::links::FileLinks::file()
-            .written(true)
-            .styled(true);
+        let links = crate::console::links::FileLinks::new(
+            crate::console::links::LinkFormat::parse("vscode").unwrap(),
+        )
+        .written(true)
+        .styled(true);
         let mut p = Summary::new(
             Arc::new(Stats::default()),
             RawLogState::Kept(log, Default::default()),
@@ -1246,10 +1262,11 @@ mod tests {
 
     #[test]
     fn a_link_names_the_path_it_shows() {
-        let link = file_link(&FileLinks::file(), Path::new("/tmp/a b.log"), "");
-        assert!(link.starts_with("\x1b]8;;file://"), "{link:?}");
+        let files = FileLinks::new(crate::console::links::LinkFormat::parse("vscode").unwrap());
+        let link = file_link(&files, Path::new("/tmp/a b.log"), "");
+        assert!(link.starts_with("\x1b]8;;vscode://file"), "{link:?}");
         assert!(
-            link.contains("/tmp/a%20b.log\x1b\\/tmp/a b.log\x1b]8;;\x1b\\"),
+            link.contains("/tmp/a%20b.log:1:1\x1b\\/tmp/a b.log\x1b]8;;\x1b\\"),
             "{link:?}"
         );
     }
