@@ -17,6 +17,7 @@ load("@aspect//format.axl", "format")
 load("@aspect//gc_test.axl", "gc_tests")
 load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
 load("@aspect//history_test.axl", "history_tests")
+load("@aspect//lint_patch_test.axl", "lint_patch_tests")
 load("@aspect//output_bases_test.axl", "output_bases_tests")
 load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/circleci_test_results_test.axl", "circleci_test_results_tests")
@@ -731,6 +732,11 @@ def config(ctx: ConfigContext):
     # zero-aspect safeguard keys off so unrelated outputs can't bypass the check.
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
+
+    # Auto-fix patches: a file not UTF-8, a removed file, the user's own
+    # .orig and .rej left alone.
+    # Run with: aspect dev test-lint-patch
+    ctx.tasks.add(lint_patch_tests)
 
     # Run with: aspect dev test-lint-comments
     ctx.tasks.add(lint_comments_tests)

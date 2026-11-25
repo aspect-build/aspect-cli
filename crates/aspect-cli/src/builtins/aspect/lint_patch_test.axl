@@ -1,0 +1,56 @@
+"""Tests for lint's auto-fix patching (`apply_fix_patch`): a file that is
+not UTF-8, a hunk that removes a file, the user's own `.orig` and `.rej`
+files left alone, a hunk that fails, and a patch applied twice.
+
+    aspect dev test-lint-patch
+"""
+
+load("@aspect//lint.axl", "apply_fix_patch", "patched_files")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _sh(ctx, cwd, script):
+    ctx.std.process.command("sh").args(["-c", script]).current_dir(cwd).spawn().wait()
+
+def _impl(ctx: TaskContext) -> int:
+    fs = ctx.std.fs
+    _eq("both sides named, /dev/null not", patched_files("--- a/x.txt\n+++ /dev/null\n--- /dev/null\n+++ b/y.txt\n"), ["x.txt", "y.txt"])
+
+    tree = fs.mkdtemp()
+    _sh(ctx, tree, """
+mkdir -p src
+printf 'caf\\351\\n' > src/latin1.txt
+printf 'old\\n' > src/a.txt
+printf 'bye\\n' > src/gone.txt
+printf 'keep\\n' > src/b.txt
+printf 'user orig\\n' > src/a.txt.orig
+printf 'user rej\\n' > src/b.txt.rej
+{
+  printf -- '--- a/src/latin1.txt\\n+++ b/src/latin1.txt\\n@@ -1 +1 @@\\n-caf\\351\\n+cafe\\n'
+  printf -- '--- a/src/a.txt\\n+++ b/src/a.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n'
+  printf -- '--- a/src/gone.txt\\n+++ /dev/null\\n@@ -1 +0,0 @@\\n-bye\\n'
+  printf -- '--- a/src/b.txt\\n+++ b/src/b.txt\\n@@ -1 +1 @@\\n-nope\\n+never\\n'
+} > ../fix.patch
+""")
+    patch = tree.rpartition("/")[0] + "/fix.patch"
+    for run in ("first", "again"):
+        apply_fix_patch(ctx, patch, cwd = tree)
+        _eq("%s: a file not UTF-8 patched" % run, fs.read_to_string(tree + "/src/latin1.txt"), "cafe\n")
+        _eq("%s: patched" % run, fs.read_to_string(tree + "/src/a.txt"), "new\n")
+        _eq("%s: a removed file removed" % run, fs.exists(tree + "/src/gone.txt"), False)
+        _eq("%s: a failed hunk leaves the file" % run, fs.read_to_string(tree + "/src/b.txt"), "keep\n")
+        _eq("%s: the user's .orig untouched" % run, fs.read_to_string(tree + "/src/a.txt.orig"), "user orig\n")
+        _eq("%s: the user's .rej untouched" % run, fs.read_to_string(tree + "/src/b.txt.rej"), "user rej\n")
+        _eq("%s: no new .orig or .rej" % run, sorted([e.path.rpartition("/")[2] for e in fs.read_dir(tree + "/src")]), sorted(["a.txt", "a.txt.orig", "b.txt", "b.txt.rej", "latin1.txt"]))
+    print("lint_patch_test.axl: OK")
+    return 0
+
+lint_patch_tests = task(
+    summary = "Run the lint auto-fix patching AXL unit tests.",
+    kind = "test-lint-patch",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)
