@@ -59,22 +59,35 @@ def _patched_files(text: str) -> list:
 def _apply_patch(ctx, patch: str):
     """Apply one auto-fix patch with `patch -p1`, asking nothing (no
     terminal answers it): a hunk that looks applied already is skipped, not
-    reversed (`--forward --batch`, BSD and GNU patch both). The `.rej` and
-    `.orig` files it leaves beside the files it patches are removed, only
-    those it made; what patch says goes to the task's output, as any
-    child's does."""
+    reversed (`--forward --batch`, BSD and GNU patch both). It is applied to
+    copies of the files it names in a directory of its own, and only those
+    files come back: patch's `.rej` and `.orig` files never land beside the
+    user's (BSD patch writes a second file's rejects there whatever `-r`
+    says, over any the user had). What patch says goes to the task's output,
+    as any child's does."""
     cwd = ctx.std.env.current_dir()
     fs = ctx.std.fs
-    leftovers = []
-    for path in _patched_files(fs.read_to_string(patch)):
-        for suffix in (".rej", ".orig"):
-            leftovers.append(cwd + "/" + path + suffix)
-    before = {p: True for p in leftovers if fs.exists(p)}
+    work = fs.mkdtemp()
+    paths = _patched_files(fs.read_to_string(patch))
+    for path in paths:
+        if fs.exists(cwd + "/" + path):
+            parent = path.rpartition("/")[0]
+            if parent:
+                fs.create_dir_all(work + "/" + parent)
+            fs.copy(cwd + "/" + path, work + "/" + path)
     ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
-        .current_dir(cwd).spawn().wait()
-    for p in leftovers:
-        if p not in before and fs.exists(p):
-            fs.remove_file(p)
+        .current_dir(work).spawn().wait()
+    for path in paths:
+        patched = work + "/" + path
+        if not fs.exists(patched):
+            continue
+        if fs.exists(cwd + "/" + path) and fs.read_to_string(patched) == fs.read_to_string(cwd + "/" + path):
+            continue
+        parent = path.rpartition("/")[0]
+        if parent:
+            fs.create_dir_all(cwd + "/" + parent)
+        fs.copy(patched, cwd + "/" + path)
+    fs.remove_dir_all(work)
 
 # Poll budget for pending lint files after build.wait(): remote downloads are
 # async and the BES event can arrive before the file lands. 30s is generous.

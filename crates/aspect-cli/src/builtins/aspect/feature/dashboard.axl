@@ -2522,6 +2522,12 @@ def build_outcome(inv: dict) -> str:
     name = str(_get(_get(finished, "exit_code"), "name", "") or "")
     return "interrupted" if name == "INTERRUPTED" else ""
 
+def build_succeeded(inv: dict) -> bool:
+    """Whether a build's `BuildFinished` says it succeeded: one that crashed
+    or was cut off without it, or was interrupted, did not."""
+    finished = inv.get("build_finished")
+    return finished != None and str(_get(_get(finished, "exit_code"), "name", "") or "") == "SUCCESS"
+
 def actions_run(inv: dict):
     """How many actions a build ran, from its `BuildMetrics` (the BES's
     `action_summary.actions_executed`), or None without them."""
@@ -2539,7 +2545,8 @@ def fold_build(state: dict, now_ms: int):
         run = actions_run(state.get("inv") or {}),
         failed = failed,
         blocked = blocked,
-        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed"),
+        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and build_succeeded(state.get("inv") or {}),
+        outcome = build_outcome(state.get("inv") or {}),
         ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
         snapshot = {k: state.get(k) for k in _BUILD_KEYS},
     ))
@@ -2559,6 +2566,8 @@ def build_row(build: dict, cols: int) -> str:
         parts.append(_c("error") + "✗%d" % build["failed"] + _RESET + _c("muted"))
     if build["blocked"]:
         parts.append("○%d" % build["blocked"])
+    if build.get("outcome"):
+        parts.append(build["outcome"])
     parts.append(elapsed(build["ms"]))
     row = " " + mark + _RESET + " " + _c("muted") + " · ".join(parts)
     return _cut_escaped(row, cols) + _RESET
@@ -2611,7 +2620,9 @@ def _top(state: dict, cols: int, rows: int) -> list:
     if text_width(title) < cols:
         title += " "
     room = max(0, cols - text_width(title))
-    right = _middle(shown, max(0, room - 2)) + " " if room > 2 and shown else ""
+
+    # Whole or not at all: a status cut to a bare number says nothing.
+    right = shown + " " if shown and text_width(shown) <= room - 2 else ""
 
     # A status bar: the whole row in the theme's `status_bar`.
     out.append(_c("status_bar") + title + " " * max(0, room - text_width(right)) + right + _RESET)

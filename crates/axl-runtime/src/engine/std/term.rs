@@ -766,6 +766,18 @@ pub fn restore_terminal_after_crash() {
 /// in a write) gets the crash path's restore instead, with nothing replayed.
 pub fn release_all() -> bool {
     let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    // No forwarder writes into the replay (see [`OUTPUT_ORDER`]), unless one
+    // holds it past the deadline (a stdout that takes nothing).
+    let _order = loop {
+        match OUTPUT_ORDER.try_lock() {
+            Ok(g) => break Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => break Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => break None,
+        }
+    };
     loop {
         match HELD.try_lock() {
             // The replay runs with the lock let go.
@@ -797,6 +809,7 @@ pub fn release_all() -> bool {
 /// One not of its own, or none: false.
 pub(crate) fn suspend() -> bool {
     {
+        let _order = OUTPUT_ORDER.lock().unwrap_or_else(|p| p.into_inner());
         let mut held = HELD.lock().unwrap();
         let Some(h) = held.as_mut().filter(|h| h.alt_screen) else {
             return false;
@@ -828,14 +841,28 @@ pub(crate) fn suspend() -> bool {
     true
 }
 
+/// Held by a release from before the screen is taken out of `HELD` until
+/// its capture is replayed, and by a forwarder for each chunk it feeds a
+/// screen or shows ([`forwarding`]): so a child's output never lands inside
+/// the replay, nor goes through the capture's pipe as the screen goes, where
+/// it would be copied twice.
+static OUTPUT_ORDER: Mutex<()> = Mutex::new(());
+
+/// Run `f`, a forwarder's handling of one chunk, between releases.
+pub(crate) fn forwarding<T>(f: impl FnOnce() -> T) -> T {
+    let _order = OUTPUT_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+    f()
+}
+
 /// Hand `bytes` (whole lines) a child wrote to the screen holding the
 /// terminal, as its stderr (or stdout) capture would: a forwarder's lines
 /// go to the screen's console here, and are kept for its replay as the
 /// capture's are, not through the process's own stderr, where the capture
 /// would copy them a second time and splice them with the CLI's. Whether a
 /// screen took them (one of its own, not given back); `bytes` empty asks
-/// only that.
-pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) -> bool {
+/// only that. Its first `shown` bytes, a line's start written before the
+/// screen was taken, are on the main screen already: not kept to replay.
+pub(crate) fn feed_screen(stderr: bool, bytes: &[u8], shown: usize) -> bool {
     let Ok(held) = HELD.lock() else {
         return false;
     };
@@ -852,7 +879,10 @@ pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) -> bool {
             bytes,
         );
         if let Some(r) = if stderr { &h.stderr } else { &h.stdout } {
-            keep(&mut r.written.lock().unwrap(), bytes);
+            keep(
+                &mut r.written.lock().unwrap(),
+                &bytes[shown.min(bytes.len())..],
+            );
         }
     }
     true
@@ -1946,6 +1976,9 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = true)] replay_stderr: bool,
     ) -> anyhow::Result<Vec<String>> {
         let generation = generation_of(this)?;
+        // No forwarder writes while the screen goes and its capture is
+        // replayed: its lines would land inside the replay's.
+        let _order = OUTPUT_ORDER.lock().unwrap_or_else(|p| p.into_inner());
         let mut held = HELD.lock().unwrap();
         if held.as_ref().is_some_and(|h| h.generation == generation) {
             let mine = held.take();

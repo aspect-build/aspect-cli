@@ -1581,7 +1581,7 @@ def _impl(ctx: TaskContext) -> int:
     fold_build(many_builds, 13000)
     many_builds["building"] = False
     many_builds["progress"] = []
-    _eq("folded: its failures and time, no progress count", _visible(build_row(many_builds["builds"][0], 100)), " ✗ bazel · ✗1 · 12s")
+    _eq("folded: its failures, outcome and time, no progress count", _visible(build_row(many_builds["builds"][0], 100)), " ✗ bazel · ✗1 · ended without a result · 12s")
     _eq("between builds, folded", panes_shown(many_builds), False)
     _eq("the console is the task's, kept", many_builds["log"], ["one"])
     folded_rows = _visible(render(many_builds, 100, 24)).split("\n")
@@ -1719,6 +1719,20 @@ def _impl(ctx: TaskContext) -> int:
     finished = _screen(ctx, ["x"], ended = True, verdict = False)
     row = _visible(keys_row(finished, 120))
     _eq("how to leave the finished screen", (row.startswith(" Done ✗"), "q, Enter or Esc to leave" in row), (True, True))
+
+    # A build that crashed without a result, or was interrupted, folds as
+    # not ok, saying so; only BuildFinished's SUCCESS folds as ✓.
+    for name, mark, said in [(None, "✗", "ended without a result"), ("INTERRUPTED", "✗", "interrupted"), ("SUCCESS", "✓", "")]:
+        inv = {} if name == None else {"build_finished": struct(exit_code = struct(name = name, code = 0))}
+        crashed = _screen(ctx, ["x"], inv = inv)
+        fold_build(crashed, 0)
+        row = _visible(build_row(crashed["builds"][0], 100))
+        _eq("folded %s" % name, (row.startswith(" " + mark), (said in row) if said else True), (True, True))
+
+    # A header too narrow for the status leaves it out, never cut to a number.
+    narrow = _screen(ctx, ["x"], progress = ["[1,204 / 9,000] 1 action running"])
+    head = _visible(render(narrow, 40, 24)).split("\n")[0]
+    _eq("no cut status", ("actions done" in head) or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
 
     print("dashboard_test.axl: OK")
     return 0
