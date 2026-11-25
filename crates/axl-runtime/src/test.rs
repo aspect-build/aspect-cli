@@ -62,7 +62,10 @@ fn raise_first(failures: PhaseFailures) -> anyhow::Result<()> {
 /// inherited: under `cargo test &` that is "ignored", which a `sleep` keeps
 /// and a shell cannot undo (it silently skips `trap ... INT` for a signal
 /// ignored on entry), so every test that interrupts a child fails or hangs.
-/// Each helper that spawns children calls this first.
+///
+/// [`eval`] and the `engine::children` tests' runtime helper call it. A test
+/// that spawns a child some other way and then signals it must call it
+/// before the spawn.
 #[cfg(unix)]
 pub(crate) fn default_sigint() {
     static ONCE: std::sync::Once = std::sync::Once::new();

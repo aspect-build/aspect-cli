@@ -67,7 +67,6 @@ use std::time::Duration;
 use aspect_telemetry::{
     cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
-use axl_runtime::ci::on_recognized_ci;
 use axl_runtime::eval::{AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPhaseEval};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
@@ -763,9 +762,9 @@ fn main() -> ExitCode {
 /// to drain; short enough, with the exit window after it, to fit the CI cancel
 /// windows (the Buildkite agent SIGKILLs 9s after its SIGTERM, GitHub Actions
 /// escalates 7.5s after its SIGINT). On CI the process is gone by
-/// `body_grace() + exit_drain()` = 6s, 1.5s inside the tighter of the two.
-fn body_grace() -> Duration {
-    if on_recognized_ci() {
+/// `body_grace(true) + exit_drain()` = 6s, 1.5s inside the tighter of the two.
+fn body_grace(on_ci: bool) -> Duration {
+    if on_ci {
         Duration::from_secs(2)
     } else {
         Duration::from_secs(5)
@@ -817,7 +816,7 @@ fn install_signal_watcher() {
         errln!("aspect-cli: {}, stopping…", first.message());
 
         let grace = if signals.has_live_children() {
-            body_grace()
+            body_grace(signals.on_ci())
         } else {
             PROMPT_GRACE
         };
@@ -834,7 +833,7 @@ fn install_signal_watcher() {
                 }
             }
         };
-        let killed = signals.kill_all(on_recognized_ci());
+        let killed = signals.kill_all(signals.on_ci());
         if killed > 0 {
             errln!("aspect-cli: killed {killed} child process(es) that were still running");
         }

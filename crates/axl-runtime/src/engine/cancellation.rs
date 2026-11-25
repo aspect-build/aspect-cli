@@ -110,6 +110,7 @@ impl std::fmt::Debug for Signals {
             .field("root_cancelled", &self.root.is_cancelled())
             .field("kind", &self.kind())
             .field("count", &self.count.load(Ordering::SeqCst))
+            .field("on_ci", &self.on_ci)
             .finish()
     }
 }
