@@ -98,6 +98,9 @@ pub struct Signals {
     /// are running: blocking builtins block normally again so cleanup can
     /// wait on things.
     unwinding: AtomicBool,
+    /// Running on a recognized CI host, where a bazel client's stop sequence
+    /// ends after its second SIGINT (see `children::BAZEL_SIGINT_TICK`).
+    on_ci: bool,
     stops: Mutex<Vec<Arc<Stop>>>,
 }
 
@@ -112,7 +115,13 @@ impl std::fmt::Debug for Signals {
 }
 
 impl Signals {
+    /// A fresh state, on CI when [`crate::ci::on_recognized_ci`] says so.
     pub fn new() -> Arc<Self> {
+        Self::with_ci(crate::ci::on_recognized_ci())
+    }
+
+    /// A fresh state that is on CI exactly when `on_ci` is set.
+    pub(crate) fn with_ci(on_ci: bool) -> Arc<Self> {
         Arc::new(Self {
             root: CancellationToken::new(),
             force: CancellationToken::new(),
@@ -120,6 +129,7 @@ impl Signals {
             count: AtomicU32::new(0),
             group_signalled: AtomicBool::new(false),
             unwinding: AtomicBool::new(false),
+            on_ci,
             stops: Mutex::new(Vec::new()),
         })
     }
@@ -190,6 +200,11 @@ impl Signals {
 
     pub fn unwinding(&self) -> bool {
         self.unwinding.load(Ordering::SeqCst)
+    }
+
+    /// Whether the run is on a recognized CI host.
+    pub fn on_ci(&self) -> bool {
+        self.on_ci
     }
 
     /// Whether the body should end now: it was forced and the post-task hooks
@@ -539,28 +554,50 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_backstop_interrupts_a_spared_bazel_the_cancel_never_reached() {
+        use crate::engine::children::tests::sigint_client;
         use crate::engine::children::{Kind as ChildKind, bind};
+        use std::time::Instant;
 
+        fn give_up(child: &mut std::process::Child, msg: &str) -> ! {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{msg}");
+        }
+
+        crate::test::default_sigint();
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("interrupted");
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("trap 'touch \"$1\"; exit 0' INT; while :; do sleep 0.05; done")
-            .arg("sh")
-            .arg(&marker)
-            .spawn()
-            .unwrap();
+        let count = dir.path().join("count");
+        let ready = dir.path().join("ready");
+        let mut child = sigint_client(false, &count, &ready, 1).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            if Instant::now() >= deadline {
+                give_up(&mut child, "the client never installed its SIGINT handler");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let s = Signals::new();
         s.record(Kind::Terminate, Origin::Process);
         // Spawned after the root was cancelled: bound to a token of its own.
         let _bound = bind(&s, &s.default_binding(), child.id(), None, ChildKind::Bazel);
-        std::thread::sleep(std::time::Duration::from_millis(200));
 
         assert_eq!(s.kill_all(true), 0, "a spared bazel client is not killed");
-        let status = child.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                give_up(
+                    &mut child,
+                    "the spared bazel client never got the backstop's SIGINT",
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert!(
-            status.success() && marker.exists(),
-            "it was interrupted instead"
+            status.success(),
+            "the client did not exit through its SIGINT handler: {status:?}"
         );
     }
 

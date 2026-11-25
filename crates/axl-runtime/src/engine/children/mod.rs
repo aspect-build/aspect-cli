@@ -210,7 +210,7 @@ impl Stop {
             os::interrupt(target);
             sent += 1;
         }
-        if crate::ci::on_recognized_ci() {
+        if self.signals.on_ci() {
             return;
         }
         tokio::time::sleep(BAZEL_SIGINT_TICK).await;
@@ -482,9 +482,10 @@ fn join_drained(
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::engine::cancellation::{Kind as SignalKind, Origin};
+    use std::path::Path;
     use std::process::Stdio;
 
     fn sleeper(group: bool) -> Command {
@@ -500,10 +501,16 @@ mod tests {
         cmd
     }
 
+    /// Run `f` on a runtime with a fresh `Signals`, off CI.
     fn with_runtime<R>(f: impl FnOnce(Arc<Signals>) -> R) -> R {
+        with_runtime_on(false, f)
+    }
+
+    fn with_runtime_on<R>(on_ci: bool, f: impl FnOnce(Arc<Signals>) -> R) -> R {
+        crate::test::default_sigint();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _g = rt.enter();
-        f(Signals::new())
+        f(Signals::with_ci(on_ci))
     }
 
     #[test]
@@ -564,7 +571,7 @@ mod tests {
             let token = CancellationToken::new();
             let mut cmd = Command::new("sh");
             cmd.arg("-c")
-                .arg("sleep 30 & echo $! > \"$PID_FILE\"; wait")
+                .arg("sleep 30 & echo $! > \"$PID_FILE.tmp\"; mv \"$PID_FILE.tmp\" \"$PID_FILE\"; wait")
                 .env("PID_FILE", &pid_file)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -574,10 +581,11 @@ mod tests {
                 cmd.process_group(0);
             }
             let (child, bound) = spawn(&mut cmd, &signals, &token, Some(0), Kind::Process).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_secs(10);
             while !pid_file.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            // Renamed into place, so it is never read half written.
             let descendant: u32 = std::fs::read_to_string(&pid_file)
                 .expect("descendant pid file")
                 .trim()
@@ -630,98 +638,185 @@ mod tests {
         });
     }
 
+    const CLIENT_COUNT: &str = "AXL_TEST_SIGINT_CLIENT_COUNT";
+    const CLIENT_READY: &str = "AXL_TEST_SIGINT_CLIENT_READY";
+    const CLIENT_EXIT_AT: &str = "AXL_TEST_SIGINT_CLIENT_EXIT_AT";
+
+    /// A stand-in for a bazel client: this test binary running
+    /// [`sigint_client_main`], directly or, with `wrapped`, behind a shell that
+    /// runs it as its own child (`; true`, so the shell waits on it rather
+    /// than exec it). It counts the SIGINTs it receives into `count`,
+    /// creates `ready` once it counts, and exits 0 on the `exit_at`th.
+    ///
+    /// A signal handler counts every SIGINT. A shell `trap` does not: it
+    /// folds the SIGINTs that arrive while the shell is busy into one, and
+    /// one that lands just before a `wait` waits with it.
+    pub(crate) fn sigint_client(
+        wrapped: bool,
+        count: &Path,
+        ready: &Path,
+        exit_at: u32,
+    ) -> Command {
+        let exe = std::env::current_exe().expect("the test binary");
+        let args = [
+            "--ignored",
+            "--exact",
+            "engine::children::tests::sigint_client_main",
+            "--test-threads=1",
+            "-q",
+        ];
+        let mut cmd = if wrapped {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "\"$@\"; true", "sh"]).arg(exe).args(args);
+            cmd
+        } else {
+            let mut cmd = Command::new(exe);
+            cmd.args(args);
+            cmd
+        };
+        cmd.env(CLIENT_COUNT, count)
+            .env(CLIENT_READY, ready)
+            .env(CLIENT_EXIT_AT, exit_at.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd
+    }
+
+    /// The body of [`sigint_client`]; nothing without its environment.
+    #[test]
+    #[ignore = "the stand-in bazel client the SIGINT tests spawn"]
+    fn sigint_client_main() {
+        use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+        use std::sync::atomic::AtomicU32;
+
+        static RECEIVED: AtomicU32 = AtomicU32::new(0);
+        extern "C" fn on_sigint(_: nix::libc::c_int) {
+            RECEIVED.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let (Some(count), Some(ready), Some(exit_at)) = (
+            std::env::var_os(CLIENT_COUNT),
+            std::env::var_os(CLIENT_READY),
+            std::env::var(CLIENT_EXIT_AT)
+                .ok()
+                .and_then(|n| n.parse::<u32>().ok()),
+        ) else {
+            return;
+        };
+        let count = std::path::PathBuf::from(count);
+        let action = SigAction::new(
+            SigHandler::Handler(on_sigint),
+            SaFlags::SA_RESTART,
+            SigSet::empty(),
+        );
+        // SAFETY: the handler only bumps an atomic.
+        unsafe { sigaction(Signal::SIGINT, &action) }.expect("install the SIGINT handler");
+        std::fs::write(&ready, b"").expect("ready file");
+        let mut seen = 0;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            let received = RECEIVED.load(Ordering::SeqCst);
+            if received != seen {
+                seen = received;
+                let tmp = count.with_extension("tmp");
+                std::fs::write(&tmp, received.to_string()).expect("count file");
+                std::fs::rename(&tmp, &count).expect("count file");
+                if received >= exit_at {
+                    std::process::exit(0);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::process::exit(1);
+    }
+
+    /// Bound to a token as a bazel client, a [`sigint_client`] that exits on
+    /// its third SIGINT. Cancels the token once the client is ready and
+    /// checks the ladder: three SIGINTs and an exit, or on CI two SIGINTs and
+    /// a client left running. Returns the exit off CI. Every wait is bounded,
+    /// and a tree still running at the end is killed.
+    fn assert_ladder(on_ci: bool, wrapped: bool) -> Option<ExitStatus> {
+        with_runtime_on(on_ci, |signals| {
+            let dir = tempfile::tempdir().unwrap();
+            let count = dir.path().join("count");
+            let ready = dir.path().join("ready");
+            let token = CancellationToken::new();
+            let mut cmd = sigint_client(wrapped, &count, &ready, 3);
+            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Bazel).unwrap();
+            let tree = bound.target();
+            let cell = RefCell::new(Some(child));
+            let sent = || -> u32 {
+                std::fs::read_to_string(&count)
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0)
+            };
+            let cleanup = || {
+                if !bound.exited() {
+                    os::kill(tree);
+                    let _ = wait(&cell, &bound, Some(Duration::from_secs(5)));
+                }
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() {
+                if Instant::now() >= deadline {
+                    cleanup();
+                    panic!("the client never installed its SIGINT handler");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            token.cancel();
+            if !on_ci {
+                let status = wait(&cell, &bound, Some(Duration::from_secs(10))).unwrap();
+                if status.is_none() || sent() != 3 {
+                    let got = sent();
+                    cleanup();
+                    panic!("the client got {got} of the 3 SIGINTs, exit {status:?}");
+                }
+                return status;
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !(bound.stop.finished.load(Ordering::SeqCst) && sent() >= 2) {
+                if Instant::now() >= deadline {
+                    let got = sent();
+                    cleanup();
+                    panic!("the client got {got} of the 2 SIGINTs");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let status = wait(&cell, &bound, Some(Duration::from_millis(300))).unwrap();
+            let got = sent();
+            cleanup();
+            assert_eq!(got, 2, "SIGINTs the client got on CI");
+            assert!(status.is_none(), "the client is left to finish on CI");
+            None
+        })
+    }
+
+    #[test]
+    fn a_bazel_child_gets_bazels_sigint_ladder() {
+        let status = assert_ladder(false, false);
+        assert_eq!(status.unwrap().code(), Some(0));
+    }
+
+    #[test]
+    fn on_ci_a_bazel_child_gets_two_sigints_and_is_left_running() {
+        assert_ladder(true, false);
+    }
+
     /// A bazel client behind a wrapper script (a shell that runs it as its
     /// own child, as a `tools/bazel` that does not `exec` it does) still gets
     /// the ladder: a shell waiting on its foreground child would hold a
     /// SIGINT sent to it alone until the build ended.
     #[test]
     fn a_bazel_client_behind_a_wrapper_gets_the_ladder() {
-        with_runtime(|signals| {
-            let dir = tempfile::tempdir().unwrap();
-            let count = dir.path().join("count");
-            let token = CancellationToken::new();
-            let ready = dir.path().join("ready");
-            let client = "n=0; trap 'n=$((n+1)); echo $n > \"$COUNT\"; [ $n -ge 3 ] && exit 0' INT; touch \"$READY\"; while :; do sleep 0.05; done";
-            let mut cmd = Command::new("sh");
-            // `; true`, so the wrapper waits on the client rather than exec it.
-            cmd.arg("-c")
-                .arg("sh -c \"$CLIENT\"; true")
-                .env("CLIENT", client)
-                .env("COUNT", &count)
-                .env("READY", &ready)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Bazel).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !ready.exists() {
-                assert!(Instant::now() < deadline, "the client never started");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            token.cancel();
-            let cell = RefCell::new(Some(child));
-            // On CI the ladder stops after two SIGINTs and leaves the client.
-            let timeout = if crate::ci::on_recognized_ci() { 1 } else { 5 };
-            let status = wait(&cell, &bound, Some(Duration::from_secs(timeout))).unwrap();
-            let sent: u32 = std::fs::read_to_string(&count)
-                .expect("the client behind the wrapper got a SIGINT")
-                .trim()
-                .parse()
-                .unwrap();
-            if crate::ci::on_recognized_ci() {
-                assert_eq!(sent, 2);
-                assert!(status.is_none(), "the client is left to finish");
-                let mut guard = cell.borrow_mut();
-                let child = guard.as_mut().unwrap();
-                // The whole tree, before the wrapper goes and its client is
-                // handed to init.
-                os::kill(Target::Tree(child.id()));
-                let _ = child.wait();
-            } else {
-                assert_eq!(sent, 3);
-                assert!(status.is_some(), "the wrapper exits with its client");
-            }
-        });
+        assert!(assert_ladder(false, true).is_some());
     }
 
-    /// A stand-in for the bazel client: counts the SIGINTs it receives and
-    /// exits on the third, as bazel's `KillServerProcess` rung would.
     #[test]
-    fn a_bazel_child_gets_bazels_sigint_ladder() {
-        with_runtime(|signals| {
-            let dir = tempfile::tempdir().unwrap();
-            let count = dir.path().join("count");
-            let token = CancellationToken::new();
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c")
-                .arg("n=0; trap 'n=$((n+1)); echo $n > \"$COUNT\"; [ $n -ge 3 ] && exit 0' INT; while :; do sleep 0.05; done")
-                .env("COUNT", &count)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            let (child, bound) = spawn(&mut cmd, &signals, &token, None, Kind::Bazel).unwrap();
-            std::thread::sleep(Duration::from_millis(300));
-            token.cancel();
-            let cell = RefCell::new(Some(child));
-            let status = wait(&cell, &bound, Some(Duration::from_secs(5))).unwrap();
-            let sent: u32 = std::fs::read_to_string(&count)
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            if crate::ci::on_recognized_ci() {
-                // Two graceful SIGINTs, then nothing: the client is left to finish.
-                assert_eq!(sent, 2);
-                assert!(status.is_none());
-                let mut guard = cell.borrow_mut();
-                let child = guard.as_mut().unwrap();
-                child.kill().unwrap();
-                child.wait().unwrap();
-            } else {
-                assert_eq!(sent, 3);
-                assert_eq!(status.expect("exits on the third rung").code(), Some(0));
-            }
-        });
+    fn on_ci_a_bazel_client_behind_a_wrapper_gets_two_sigints() {
+        assert_ladder(true, true);
     }
 
     /// A binding stays known to the backstop for as long as its child is
