@@ -4386,7 +4386,7 @@ def _dashboard_impl(ctx: FeatureContext):
             err.write(line + "\n")
         gone = sorted(state.get("silenced_tips", {}).keys())
         if gone:
-            err.write(_c("muted") + "Silenced on this machine: %s · undo: aspect tips unsilence <id>" % ", ".join(gone) + _RESET + "\n")
+            err.write(_c("muted") + "Silenced on this machine: %s · undo: take it out of tips.silence in ~/.aspect/config.json" % ", ".join(gone) + _RESET + "\n")
 
     t = ctx.traits[BazelTrait]
     t.output_display = "none"
