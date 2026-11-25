@@ -179,6 +179,21 @@ rust_test(
 )
 
 rust_test(
+    name = "tips_silence_test",
+    srcs = ["tests/tips_silence.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/tips_silence.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "worktree_color_test",
     srcs = ["tests/worktree_color.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/worktree_color.rs",

@@ -19,6 +19,7 @@ use_task("init.axl", "init")
 use_task("mcp.axl", "mcp")
 use_task("gc.axl", "gc")
 use_task("history.axl", "history_list", "history_show")
+use_task("tips_silence.axl", "tips_silence", "tips_unsilence", "tips_list")
 use_task(
     "worktree.axl",
     "add",

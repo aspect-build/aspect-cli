@@ -127,11 +127,12 @@ and underlined where colour is shown, and `https://` URLs are underlined.
 A tip is turned off by `--tips:silence=<id>` (repeat it for several; it
 joins a `config.axl`'s Tips `silence` rather than replacing it), a
 `config.axl`'s `silence`, or `{"tips": {"silence": ["<id>"]}}` in a
-`config.json`: yours in `~/.aspect/config.json` or the repository's
-`.aspect/config.json`; every list counts. The `config.axl` files are the
-exception: they run in turn and each assigns `silence`, so your
-`~/.aspect/config.axl`'s list replaces the repository's rather than
-joining it.
+`config.json`: yours in `~/.aspect/config.json` (`aspect tips silence <id>`
+adds one, `aspect tips unsilence <id>` takes it back, `aspect tips list`
+shows them all) or the repository's `.aspect/config.json`; every list
+counts. The `config.axl` files are the exception: they run in turn and each
+assigns `silence`, so your `~/.aspect/config.axl`'s list replaces the
+repository's rather than joining it.
 
 Tips of your own are rules next to the built-in ones;
 `--tips:surfaces=<id>=<surface>,...` moves one:

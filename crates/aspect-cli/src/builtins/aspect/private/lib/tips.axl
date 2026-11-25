@@ -41,9 +41,9 @@ CLI's own `INFO:` and `WARNING:` lines, and the severity's lowercase word,
 as rustc writes `warning` and `note`, reads without colour. The emoji is
 the status surfaces' but for a warning, 🟡 rather than ⚠️. When the task
 ends, a line per id counts what was not printed, and a last tip,
-`tips-hint` (itself silenceable), says how to silence a tip, on the
-command line, in `.aspect/config.axl` or for yourself in
-`~/.aspect/config.json`, and links the docs.
+`tips-hint` (itself silenceable), says how to silence a tip, for yourself
+(`aspect tips silence`), on the command line or in `.aspect/config.axl`,
+and links the docs.
 
 # Silencing
 
@@ -58,7 +58,8 @@ assign `silence` in turn, so the last one to (a `~/.aspect/config.axl`)
 replaces the others' list; `configured` sees only it. An id that is
 empty or holds whitespace or a comma (`checked_silence`) is a warning and
 silences nothing. `silence_tip` / `unsilence_tip` write the user's file
-only; `silenced_tips` says where each id comes from.
+only (`aspect tips silence|unsilence`); `silenced_tips` says where each id
+comes from.
 
 # Severities, most urgent first
 
@@ -999,7 +1000,7 @@ def silence_hint_line(id):
     silence knob. Returns `""` for blank ids. Shared by the check-run
     `TIPS_BLOCK` and PR-comment section so both stay aligned. It names the
     repository's knobs only: a CI run reads no developer's
-    `~/.aspect/config.json`, so silencing there is the terminal's."""
+    `~/.aspect/config.json`, so `aspect tips silence` is the terminal's."""
     if not id:
         return ""
     return '<sub>_Silence by setting `ctx.features[Tips].args.silence = ["%s", ...]` in `.aspect/config.axl` (load `Tips` from `@aspect//feature/tips.axl`), or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
@@ -1168,14 +1169,13 @@ def terminal_app_links_tip(ctx, written: int):
 TIPS_HINT_ID = "tips-hint"
 
 def terminal_hint_lines(color_on = False, console = None):
-    """The end-of-task `tips-hint` tip, on one line: how to silence a tip, by
-    flag (its own id the example), in `.aspect/config.axl` or for this user
-    in `~/.aspect/config.json`, files named to edit and so `unlinked`, and
-    the docs."""
-    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `%s`, or just for you in `%s`; see %s" % (
-        TIPS_HINT_ID,
-        ansi.unlinked(".aspect/config.axl"),
+    """The end-of-task `tips-hint` tip, on one line: how to silence a tip,
+    for this user (`aspect tips silence`, in `~/.aspect/config.json`), by
+    flag or in `.aspect/config.axl`, files named to edit and so `unlinked`,
+    and the docs."""
+    title = "Silence a tip with `aspect tips silence <id>` (yours, in `%s`), `--tips:silence=<id>` or `%s`; see %s" % (
         ansi.unlinked("~/.aspect/config.json"),
+        ansi.unlinked(".aspect/config.axl"),
         CLI_TIPS_SILENCE_URL,
     )
     return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, "", color_on, console)
@@ -1679,7 +1679,7 @@ Tips = feature(
     args = {
         "silence": args.string_list(
             default = [],
-            description = "Tip ids to suppress for this task. Set from config: `ctx.features[Tips].args.silence = [\"<id>\", ...]` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple; a comma is no separator, and an id holding one is a warning). The command line's ids join a config.axl's rather than replacing them, and both join `tips.silence` in ~/.aspect/config.json and in the repository's .aspect/config.json.",
+            description = "Tip ids to suppress for this task. Set from config: `ctx.features[Tips].args.silence = [\"<id>\", ...]` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple; a comma is no separator, and an id holding one is a warning). The command line's ids join a config.axl's rather than replacing them, and both join `tips.silence` in ~/.aspect/config.json (`aspect tips silence <id>`) and in the repository's .aspect/config.json.",
         ),
         "surfaces": args.string_list(
             default = [],

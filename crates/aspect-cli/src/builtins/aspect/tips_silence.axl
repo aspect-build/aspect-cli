@@ -1,0 +1,138 @@
+"""`aspect tips`: silence tips for yourself, undo it, and see what is silenced.
+
+    aspect tips silence <id>...
+    aspect tips unsilence <id>...
+    aspect tips list [--output=json]
+
+`silence` and `unsilence` add ids to and remove them from `tips.silence` in
+your `~/.aspect/config.json` (see `silence_tip` in `lib/tips.axl`), so they
+apply to you alone, in every repository; all the ids in one write, none if
+any is invalid. `list` shows each silenced id and where it is silenced:
+`user` (your `~/.aspect/config.json`), `repo` (the repository's
+`.aspect/config.json`), `config` (a `config.axl`, the repository's or
+`~/.aspect/config.axl`) or `flag` (`--tips:silence` on this command).
+"""
+
+load(
+    "./private/lib/environment.axl",
+    "error",
+)
+load(
+    "./private/lib/tips.axl",
+    "SILENCED_BY_CONFIG",
+    "SILENCED_BY_FLAG",
+    "SILENCED_BY_REPO",
+    "SILENCED_BY_USER",
+    "silence_tip",
+    "silenced_tips",
+    "tips",
+    "unsilence_tip",
+)
+
+_WHERE = {
+    SILENCED_BY_USER: "your ~/.aspect/config.json",
+    SILENCED_BY_REPO: "the repository's .aspect/config.json",
+    SILENCED_BY_CONFIG: "a config.axl (the repository's or ~/.aspect/config.axl)",
+    SILENCED_BY_FLAG: "--tips:silence",
+}
+
+def _sources(ctx) -> dict:
+    """Each silenced id and where from: the Tips feature's view of this task,
+    with the `config.json` files read again so they show when it is off."""
+    out = silenced_tips(ctx)
+    found = ctx.aspect.tips.config_silence()
+    for ids, source in [(found.user, SILENCED_BY_USER), (found.repo, SILENCED_BY_REPO)]:
+        for id in ids:
+            if source not in out.setdefault(id, []):
+                out[id].append(source)
+    return out
+
+def _silence_impl(ctx: TaskContext) -> int:
+    path = ctx.aspect.tips.user_config_path
+    before = _sources(ctx)
+    err = silence_tip(ctx, ctx.args.id)
+    if err != None:
+        error(ctx.std, err)
+        return 1
+    for id in ctx.args.id:
+        if SILENCED_BY_USER in before.get(id, []):
+            print("Tip '%s' is already silenced in %s." % (id, path))
+        else:
+            print("Silenced tip '%s' in %s. Undo with `aspect tips unsilence %s`." % (id, path, id))
+    return 0
+
+def _unsilence_impl(ctx: TaskContext) -> int:
+    path = ctx.aspect.tips.user_config_path
+    before = _sources(ctx)
+    err = unsilence_tip(ctx, ctx.args.id)
+    if err != None:
+        error(ctx.std, err)
+        return 1
+    after = _sources(ctx)
+    for id in ctx.args.id:
+        rest = [s for s in after.get(id, []) if s != SILENCED_BY_USER]
+        if SILENCED_BY_USER in before.get(id, []):
+            print("Unsilenced tip '%s' in %s." % (id, path))
+        else:
+            print("Tip '%s' is not silenced in %s." % (id, path))
+        if rest:
+            print("  It is still silenced by %s, which this does not change." % ", ".join([_WHERE[s] for s in rest]))
+    return 0
+
+def _list_impl(ctx: TaskContext) -> int:
+    sources = _sources(ctx)
+    if ctx.args.output == "json":
+        doc = {
+            "user_config": ctx.aspect.tips.user_config_path,
+            "silenced": [{"id": id, "sources": s} for id, s in sources.items()],
+        }
+        ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
+        return 0
+    if not sources:
+        print("No tips are silenced. Silence one with `aspect tips silence <id>`.")
+        return 0
+    width = max([len(id) for id in sources])
+    for id, s in sources.items():
+        print("%s  %s" % (id + " " * (width - len(id)), ", ".join(s)))
+    print("")
+    print("user: %s, repo: .aspect/config.json, config: a config.axl, flag: --tips:silence." % ctx.aspect.tips.user_config_path)
+    print("Undo a user silence with `aspect tips unsilence <id>`.")
+    return 0
+
+_ID = args.positional(minimum = 1, maximum = 64, description = "Tip ids, as a tip prints its own: `TIP[<id>]`.")
+
+tips_silence = task(
+    kind = "silence",
+    group = ["tips"],
+    summary = "Silence tips for yourself, in ~/.aspect/config.json.",
+    description = "Add tip ids to `tips.silence` in your ~/.aspect/config.json, so those tips no longer show for you, in any repository; other developers still get them. One write for all the ids, and none if any id is invalid. The file is rewritten as JSON with two-space indents, its keys kept in order. Undo with `aspect tips unsilence <id>`.",
+    implementation = _silence_impl,
+    traits = tips.TRAITS,
+    args = {"id": _ID},
+)
+
+tips_unsilence = task(
+    kind = "unsilence",
+    group = ["tips"],
+    summary = "Show tips you silenced again, removing them from ~/.aspect/config.json.",
+    description = "Remove tip ids from `tips.silence` in your ~/.aspect/config.json. A tip still silenced elsewhere (the repository's .aspect/config.json, a config.axl, or --tips:silence) stays silenced; `aspect tips list` shows where each is. Of the config.axl files, the last to assign `silence` wins: a ~/.aspect/config.axl's list replaces the repository's.",
+    implementation = _unsilence_impl,
+    traits = tips.TRAITS,
+    args = {"id": _ID},
+)
+
+tips_list = task(
+    kind = "list",
+    group = ["tips"],
+    summary = "List the silenced tips and where each is silenced.",
+    description = "List each silenced tip id and where it is silenced: `user` (your ~/.aspect/config.json), `repo` (the repository's .aspect/config.json), `config` (a .aspect/config.axl) or `flag` (--tips:silence).",
+    implementation = _list_impl,
+    traits = tips.TRAITS,
+    args = {
+        "output": args.string(
+            default = "text",
+            values = ["text", "json"],
+            description = "`text` for people, or `json`: `{user_config, silenced: [{id, sources}]}`.",
+        ),
+    },
+)
