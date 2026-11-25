@@ -8,7 +8,8 @@ colours a theme sets (see `docs/themes.md`):
   it also makes bold);
 - a ⚡️ (remote) or 🔨 (local) beside each running action;
 - each running action's elapsed seconds coloured by how long it has run,
-  from muted to `error`, in the theme's own roles.
+  from muted through `warning` and `error` to `label.error` past a minute,
+  in the theme's own roles.
 
     aspect build //... --flair=false
 
@@ -17,8 +18,8 @@ of Bazel's live progress area too; in plain lines there are none. A
 rewritten row stays one row: under a PTY a row made wider than Bazel drew it
 is cut to that many terminal columns, so a running action's marker takes the
 place of three of its indent's spaces. It adds nothing where stderr takes
-no colour (`std.io.stderr.color`: a pipe, a coding agent, `NO_COLOR`), so
-logs read by tools stay as Bazel wrote them.
+no colour (`std.io.stderr.color`: a pipe, a coding agent's capture,
+`NO_COLOR`), so logs read by tools stay as Bazel wrote them.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
