@@ -84,3 +84,19 @@ choose a version and do something like:
 git tag v2026.38.30
 git push origin v2026.38.30
 ```
+
+### Pre-releases
+
+Every push to `main` (and a manual run of the "Pre-release Build" workflow for a
+branch) replaces the rolling `prerelease/<branch>` release. For a build that
+stays put for longer testing, run the same "Tag a Release" workflow with
+**Cut a pre-release** checked. It tags `v<version>-pre` (for example
+`v2026.38.30-pre`) and publishes a GitHub pre-release, which is never marked
+latest, so `install.aspect.build`, Homebrew, and unpinned launchers ignore it.
+Testers opt in by pinning it in `.aspect/version.axl`:
+
+```python
+version("2026.38.30-pre")
+```
+
+Pushing a `v<version>-pre` tag by hand publishes a pre-release the same way.

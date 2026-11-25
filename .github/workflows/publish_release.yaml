@@ -6,9 +6,19 @@ on:
         description: 'The tag name for the release (e.g., v2024.1.0)'
         required: true
         type: string
+      prerelease:
+        description: 'Mark the release as a pre-release (tag ends in -pre)'
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - 'v202[0-9].[0-9]+.[0-9]+'
+      - 'v202[0-9].[0-9]+.[0-9]+-pre'
+env:
+  TAG: ${{ inputs.tag_name || github.ref_name }}
+  # A pushed `-pre` tag has no inputs, so the suffix decides there too.
+  PRERELEASE: ${{ inputs.prerelease || endsWith(github.ref_name, '-pre') }}
 permissions:
   id-token: write
   attestations: write
@@ -34,13 +44,15 @@ jobs:
       - name: Calculate shasum
         run: shasum -a 256 assets/* > sha256
       - name: Prepare workspace snippet
-        env:
-          TAG: ${{ inputs.tag_name || github.ref_name }}
         run: .github/workflows/install_snippet.sh > release_notes.txt
       - name: Create GitHub draft release and upload artifacts
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          prerelease: ${{ env.PRERELEASE }}
+          # Pre-releases must never become the "latest" release that
+          # install.aspect.build and unpinned launchers resolve.
+          make_latest: ${{ env.PRERELEASE == 'true' && 'false' || 'true' }}
           # Use GH feature to populate the changelog automatically
           generate_release_notes: true
           body_path: release_notes.txt

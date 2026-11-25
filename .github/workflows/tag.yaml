@@ -1,11 +1,23 @@
 # Tag a new release
 # This is easier than having to run manual `git` operations on a local clone,
 # and less error-prone (accidentally releasing with local state for example).
+#
+# With `prerelease` set, the tag is `v<version>-pre` and the GitHub release is
+# marked as a pre-release: a fixed tag that stays around for longer testing,
+# unlike the rolling `prerelease/<branch>` builds that are replaced on every
+# push. The launcher's unpinned "latest" lookup skips pre-releases, so only
+# repositories that pin `version("<version>-pre")` pick it up.
 name: Tag a Release
 on:
   # Allow devs to tag manually through the GitHub UI.
   # For example after landing a fix that customers are waiting for.
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Cut a pre-release (tag suffixed with -pre) instead of a release'
+        required: false
+        type: boolean
+        default: false
 jobs:
   tag:
     permissions:
@@ -19,9 +31,11 @@ jobs:
           # Need enough history to find the prior weekly tag
           fetch-depth: 0
       - id: push_tag
+        env:
+          SUFFIX: ${{ inputs.prerelease && '-pre' || '' }}
         run: |
-          tag="v$(./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION | cut -d' ' -f2)"
-          curl --request POST \
+          tag="v$(./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION | cut -d' ' -f2)${SUFFIX}"
+          curl --fail-with-body --request POST \
               --url https://api.github.com/repos/${{ github.repository }}/git/refs \
               --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
               --data @- << EOF
@@ -30,9 +44,10 @@ jobs:
               "sha": "${{ github.sha }}"
           }
           EOF
-          echo "new-tag=${tag}" >> $GITHUB_OUTPUT
+          echo "new-tag=${tag}" >> "$GITHUB_OUTPUT"
   release:
     needs: tag
     uses: ./.github/workflows/publish_release.yaml
     with:
       tag_name: ${{ needs.tag.outputs.new-tag }}
+      prerelease: ${{ inputs.prerelease }}
