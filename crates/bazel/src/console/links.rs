@@ -679,7 +679,7 @@ impl Linker {
             }
             if escape {
                 if let Some(url) = osc8_url(seg) {
-                    inside = !url.is_empty();
+                    let open = std::mem::replace(&mut inside, !url.is_empty());
                     // A tool's own file link: its file in the editor, or
                     // no link, never one the system opens.
                     if std::mem::take(&mut dropped) && url.is_empty() {
@@ -689,6 +689,10 @@ impl Linker {
                         match to {
                             Some(to) => out.extend(format!("\x1b]8;;{to}\x1b\\").bytes()),
                             None => {
+                                // A link switched to this one ends here.
+                                if open {
+                                    out.extend_from_slice(b"\x1b]8;;\x1b\\");
+                                }
                                 inside = false;
                                 dropped = true;
                             }
@@ -1317,8 +1321,9 @@ mod tests {
     }
 
     /// A link dropped, then another opened before its end, keeps that
-    /// one's end; and a record too long to link, or naming no path, still
-    /// has its own `file:` links judged.
+    /// one's end; one switched to a dropped link ends there; and a record
+    /// too long to link, or naming no path, still has its own `file:` links
+    /// judged.
     #[test]
     fn a_tools_file_link_dropped_keeps_the_next_links_end() {
         let (dir, mut l) = linker();
@@ -1330,6 +1335,13 @@ mod tests {
             );
             assert!(out.ends_with("N\x1b]8;;\x1b\\ y"), "{out:?}");
         }
+        assert_eq!(
+            link(
+                &mut l,
+                "x \x1b]8;;https://x.test/\x1b\\X\x1b]8;;file:///bin/ls\x1b\\ls\x1b]8;;\x1b\\ y"
+            ),
+            "x \x1b]8;;https://x.test/\x1b\\X\x1b]8;;\x1b\\ls y"
+        );
         let long = format!(
             "{} \x1b]8;;{a}\x1b\\A\x1b]8;;\x1b\\",
             "z".repeat(MAX_RECORD)
