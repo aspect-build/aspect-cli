@@ -202,8 +202,10 @@ impl Redirect {
         self.stop.store(true, Ordering::SeqCst);
         let open = self.reader.take().and_then(|r| r.join().ok().flatten());
         let written = std::mem::take(&mut *self.written.lock().unwrap());
+        let fd = self.fd;
         let mut out = File::from(self.saved);
         if replay {
+            let _turn = stream_write_bounded(fd);
             write_patiently(&mut out, newest(&written));
         }
         if let Some(mut pipe) = open {
@@ -214,7 +216,10 @@ impl Redirect {
                     loop {
                         match pipe.read(&mut buf) {
                             Ok(0) => return,
-                            Ok(n) => write_patiently(&mut out, &buf[..n]),
+                            Ok(n) => {
+                                let _turn = stream_write_bounded(fd);
+                                write_patiently(&mut out, &buf[..n])
+                            }
                             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                             Err(_) => return,
                         }
@@ -335,19 +340,39 @@ fn tty_readable(fd: RawFd, timeout: Duration) -> bool {
     select_one(fd, timeout, false).unwrap_or(false)
 }
 
-/// Whether `fd` takes a write within `timeout`; a descriptor `select` cannot
-/// watch is written to anyway.
+/// Held while a chunk is written to stdout (`[0]`) or stderr (`[1]`): by a
+/// forwarder for each chunk ([`write_when_writable`]), only once the stream
+/// takes it, and by a dump or a capture's replay for the whole of it, for at
+/// most [`STALL_LIMIT`] waiting: so neither splices the other's lines, and a
+/// stalled stream holds up neither for good.
+static STREAM_WRITE: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
+
+/// [`STREAM_WRITE`] for `fd` (1 or 2) for a whole dump or replay, given up
+/// after [`STALL_LIMIT`]; None for any other descriptor, or given up.
+fn stream_write_bounded(fd: RawFd) -> Option<std::sync::MutexGuard<'static, ()>> {
+    let lock = STREAM_WRITE.get((fd as usize).wrapping_sub(1))?;
+    lock_until(lock, std::time::Instant::now() + STALL_LIMIT)
+}
+
 /// Write all of `bytes` to `fd`, waiting as long as it takes, but never
 /// inside a `write` that blocks: each chunk of at most [`WRITE_CHUNK`] once
-/// `fd` is writable. A take's `dup2` over `fd` waits out a write in flight
-/// on it on macOS, so a forwarder to a pipe nobody reads, blocked in one,
-/// would hold up the take, and every stream fed to the screen with it.
+/// `fd` is writable, under its [`STREAM_WRITE`] for stdout and stderr. A
+/// take's `dup2` over `fd` waits out a write in flight on it on macOS, so a
+/// forwarder to a pipe nobody reads, blocked in one, would hold up the take,
+/// and every stream fed to the screen with it. A `select` that fails rather
+/// than waits (not a descriptor it can watch) gets the write anyway, which
+/// says why.
 pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
+    let wait = Duration::from_millis(100);
     while !bytes.is_empty() {
-        if !writable(fd, Duration::from_millis(100)) {
+        let asked = std::time::Instant::now();
+        if !writable(fd, wait) && asked.elapsed() >= wait {
             continue;
         }
         let chunk = &bytes[..bytes.len().min(WRITE_CHUNK)];
+        let _turn = STREAM_WRITE
+            .get((fd as usize).wrapping_sub(1))
+            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
         // SAFETY: a write from a live slice to a descriptor the caller names.
         let n = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
         match n {
@@ -367,6 +392,8 @@ pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Resul
     Ok(())
 }
 
+/// Whether `fd` takes a write within `timeout`; a descriptor `select` cannot
+/// watch is written to anyway.
 fn writable(fd: RawFd, timeout: Duration) -> bool {
     select_one(fd, timeout, true).unwrap_or(true)
 }
@@ -531,9 +558,10 @@ fn osc11_reply(bytes: &[u8]) -> Option<(std::ops::Range<usize>, Option<bool>)> {
 /// Take the terminal; see the module docs. Its generation. Refused while
 /// this process runs in the background (another job has the terminal).
 fn take(alt_screen: bool) -> anyhow::Result<u64> {
-    // Stdout is not flushed: a forwarder blocked writing to a stdout nobody
-    // reads holds its lock, and the take would wait on it. What is still
-    // buffered goes to the capture, and out with it on release.
+    // Stdout is not flushed: a forwarder waiting on a stdout nobody reads
+    // holds its lock, and the take would wait on it. A partial line still
+    // buffered goes out when a later write ends it: into the capture during
+    // the screen, else after the release, behind what was written meanwhile.
     let mut held = HELD.lock().unwrap();
     if held.is_some() {
         anyhow::bail!("the terminal is already taken");
@@ -1159,11 +1187,12 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
         }
     });
     DUMP_WRITTEN.fetch_add(crate::out::links_written() - before, Ordering::SeqCst);
-    // Not through `std::io::stderr()`: a forwarder blocked writing to a
-    // stderr nobody reads holds its lock, and this can run under
-    // `OUTPUT_ORDER` (the exit's release). Bounded as the replay is.
+    // Not through `std::io::stderr()`, whose lock a forwarder waiting on a
+    // stderr nobody reads holds; its `STREAM_WRITE` keeps the forwarders'
+    // chunks out of the dump instead. Bounded as the replay is.
     // SAFETY: fd 2 stays open; ManuallyDrop never closes it.
     let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
+    let _turn = stream_write_bounded(2);
     write_patiently(&mut err, out.as_bytes());
     true
 }
@@ -1253,10 +1282,15 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
     held.capture.drain().colours
 }
 
-/// Whether descriptors `a` and `b` are one file (a terminal, or `2>&1`).
+/// Whether descriptors `a` and `b` are one file (`2>&1`) or both terminals,
+/// taken as one (`/dev/tty` and the pty it is are two inodes).
 fn same_file(a: RawFd, b: RawFd) -> bool {
-    // SAFETY: fstat into zeroed stat buffers, on descriptors the caller owns.
+    // SAFETY: isatty, and fstat into zeroed stat buffers, on descriptors the
+    // caller owns.
     unsafe {
+        if libc::isatty(a) == 1 && libc::isatty(b) == 1 {
+            return true;
+        }
         let (mut x, mut y) = (
             std::mem::zeroed::<libc::stat>(),
             std::mem::zeroed::<libc::stat>(),
@@ -1847,8 +1881,9 @@ fn term_methods(registry: &mut MethodsBuilder) {
     /// output since it was taken, as the task's `output.ansi` keeps it
     /// (redacted, its colour kept, its links made again): the scrollback a
     /// run without the screen would have. Its newest `max_lines`, after a
-    /// line `older` gives (`{n}` the count left out). In one write, not
-    /// copied to the output files, which hold it. Whether it wrote: once
+    /// line `older` gives (`{n}` the count left out). Written in chunks, no
+    /// child's stderr lines between them, and given up after 2s of stderr
+    /// taking nothing; not copied to the output files, which hold it. Whether it wrote: once
     /// per screen, never without the task's files (the history off), when
     /// the screen's own lines are the fallback.
     fn dump_output<'v>(
