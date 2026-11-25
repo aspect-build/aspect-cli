@@ -563,7 +563,6 @@ cancelled = task(implementation = _impl)
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         cmd.env("BAZEL_REAL", &wrapper);
     }
-    let started = Instant::now();
     let mut child = cmd
         .env("CI", "true")
         .stdout(Stdio::null())
@@ -579,6 +578,8 @@ cancelled = task(implementation = _impl)
         }
         seen.push_str(&line);
     }
+    // From the interrupt, not start-up, which a loaded machine slows.
+    let interrupted = Instant::now();
     // SAFETY: signalling a child this test spawned and has not reaped.
     assert_eq!(
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
@@ -592,9 +593,9 @@ cancelled = task(implementation = _impl)
     );
     // Well inside the console's linger cap: the stream ended with the client.
     assert!(
-        started.elapsed() < Duration::from_secs(30),
+        interrupted.elapsed() < Duration::from_secs(30),
         "took {:?}:\n{seen}",
-        started.elapsed()
+        interrupted.elapsed()
     );
 }
 
