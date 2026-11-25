@@ -1,0 +1,85 @@
+"""`Flair`: an example plugin, after BuildBuddy's open-source
+[theme-modern](https://github.com/siggisim/theme-modern) and
+[theme-mono](https://github.com/siggisim/theme-mono) CLI plugins, as console
+stages. It adds what the CLI's themes leave alone, and changes none of the
+colours a theme sets (see `docs/themes.md`):
+
+- emoji on Bazel's closing lines (✅ ❌ 🧽 😡, ⏳ ⏰ on the timings, which
+  it also makes bold);
+- a ⚡️ (remote) or 🔨 (local) beside each running action;
+- each running action's elapsed seconds coloured by how long it has run,
+  from muted to `error`, in the theme's own roles.
+
+    aspect build //... --flair=false
+
+Everything is a `rewrite` stage, so where curses is shown it reaches the rows
+of Bazel's live progress area too; in plain lines there are none. A
+rewritten row stays one row: under a PTY a row made wider than Bazel drew it
+is cut to that many terminal columns, so a running action's marker takes the
+place of three of its indent's spaces. It adds nothing where stderr takes
+no colour (`std.io.stderr.color`: a pipe, a coding agent, `NO_COLOR`), so
+logs read by tools stay as Bazel wrote them.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+
+_RESET = "\x1b[0m"
+
+# The escapes a row starts with; `rewrite` sees them, the other stages do not.
+_LEAD = r"(?:\x1b\[[0-9;?]*[A-Za-z])*"
+
+# A running action's seconds, by how long it has run: disjoint bands, each
+# in a theme role.
+_BANDS = [
+    ("[0-4]", "muted"),
+    ("[5-9]|1[0-9]", "warning"),
+    ("[2-5][0-9]", "error"),
+    ("[6-9][0-9]|[1-9][0-9]{2,}", "label.error"),
+]
+
+def _running(emoji, tail):
+    """A running-action row (`    Compiling x; 12s remote`): three of its
+    indent's spaces become `emoji` (two columns) and a space, so the row
+    stays as wide as Bazel drew it."""
+    return bazel.output.rewrite(
+        r"^(" + _LEAD + r"\s*)\s\s\s([^\s⚡🔨]\S*)(" + tail + r")$",
+        "${1}" + emoji + " ${2}${3}",
+    )
+
+def _seconds(digits, sgr):
+    """The `; <n>s` of a row `_running` marked, its seconds coloured `sgr`."""
+    return bazel.output.rewrite(
+        r"^(.*(?:⚡️|🔨) .*?; )(" + digits + r")s(.*)$",
+        "${1}" + sgr + "${2}s" + _RESET + "${3}",
+    )
+
+def _stages(theme):
+    """The emoji stages, the bold timings and the running actions' seconds,
+    in `theme`'s roles."""
+    sgr = lambda role: theme.sgr(role, stream = True)
+    strong = sgr("strong")
+    stages = [
+        bazel.output.rewrite(r"(Build did NOT complete successfully)", "${1} ❌"),
+        bazel.output.rewrite(r"Build completed successfully, ", "Build completed successfully ✅ "),
+        bazel.output.rewrite(r"Starting clean\.", "Starting clean 🧽"),
+        bazel.output.rewrite(r"(build interrupted)", "${1} 😡"),
+        bazel.output.rewrite(
+            r"(Elapsed time: )([0-9.]+s)(, Critical Path: )([0-9.]+s)",
+            "${1}" + strong + "${2}" + _RESET + " ⏳${3}" + strong + "${4}" + _RESET + " ⏰",
+        ),
+        # Remote first: the 🔨 pattern leaves a row already marked alone.
+        _running("⚡️", r".*; [0-9]+s.* remote.*"),
+        _running("🔨", r".*; [0-9]+s.*"),
+    ]
+    return stages + [_seconds(d, sgr(role)) for d, role in _BANDS]
+
+def _flair_impl(ctx: FeatureContext):
+    if not ctx.std.io.stderr.color:
+        return
+    ctx.traits[BazelTrait].output_stages.extend(_stages(ctx.std.theme))
+
+Flair = feature(
+    display_name = "Console flair",
+    summary = "Emoji on Bazel's console and its running actions' seconds coloured by age, after BuildBuddy's theme-modern plugin: an example of `rewrite` stages that adds to the theme.",
+    implementation = _flair_impl,
+)
