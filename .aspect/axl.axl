@@ -2980,12 +2980,19 @@ def test_lint_per_linter_strategy(tc: int) -> int:
     tc = test_case(tc, not fails_on_severity(diag | {"severity": "warning"}, strategy_for), "fails_on_severity: warning does not fail")
     tc = test_case(tc, fails_on_severity(diag | {"linter": "Pylint"}, soft_for), "fails_on_severity: keys on linter, not SARIF tool")
 
+    # A report whose name didn't parse has linter "": filtered and gated alike by
+    # the run strategy, even when its SARIF tool names an overridden linter.
+    unnamed = report_diagnostics(clang_tidy, "", hard_for, changed)
+    tc = test_case(tc, [d["message"] for d in unnamed] == ["in hunk"], "report_diagnostics: unnamed linter uses run strategy")
+    tc = test_case(tc, fails_on_severity({"tool": "ruff", "linter": "", "severity": "error"}, soft_for), "fails_on_severity: unnamed linter ignores a tool-keyed override")
+
     # Keys naming no linter that ran are reported, case-insensitively.
     tc = test_case(tc, unmatched_overrides({"rufff": "hard", "eslint": "soft"}, ["ESLint", "Ruff"]) == ["rufff"], "unmatched_overrides: flags the typo only")
     tc = test_case(tc, unmatched_overrides({}, ["ESLint"]) == [], "unmatched_overrides: no overrides")
 
-    # Suggestions take their linter's strategy; `tool` is the SARIF driver name
-    # when correlated, so the lookup uses `linter`, falling back to `tool`.
+    # Suggestions take their linter's strategy by `linter` alone; `tool` is the
+    # SARIF driver name when correlated, and a record without `linter` takes
+    # the run strategy.
     suggestions = [
         {"tool": "clang-tidy", "linter": "ClangTidy", "file": "src/b.cc", "start_line": 3, "end_line": 3},
         {"tool": "ClangTidy", "file": "src/b.cc", "start_line": 4, "end_line": 4},
@@ -2993,7 +3000,7 @@ def test_lint_per_linter_strategy(tc: int) -> int:
         {"tool": "ruff", "linter": "Ruff", "file": "src/b.cc", "start_line": 5, "end_line": 5},
     ]
     kept = lint_filter_suggestions_by_strategy(suggestions, hard_for, changed)
-    tc = test_case(tc, kept == suggestions[:3], "filter_suggestions_by_strategy: override by linter, tool fallback, run strategy otherwise (got %r)" % kept)
+    tc = test_case(tc, kept == [suggestions[0], suggestions[2]], "filter_suggestions_by_strategy: override by linter, run strategy otherwise (got %r)" % kept)
     tc = test_case(tc, lint_filter_suggestions_by_strategy([], hard_for, changed) == [], "filter_suggestions_by_strategy: empty")
 
     # Exit gating on linter errors: only linters whose strategy fails on them.

@@ -111,7 +111,7 @@ Strategies (`--strategy=`):
 | `hard`          | any error or linter-process failure                                                   |
 | `soft`          | nothing (diagnostics still rendered)                                                  |
 
-Per-linter strategy — `LintTrait.strategies` overrides `--strategy` for the linters it names. Keys are the rules_lint linter names listed under 🧹 Linters (`ruff` matches `AspectRulesLintRuff`), case-insensitively, and the override applies to that linter's findings, patches, and process failures. An unknown strategy name, or two keys naming one linter, fails before the build, and a key naming a linter that produced no output this run is noted under 🧹 Linters. When change detection fails, `hold-the-line` and `hold-the-file` overrides fall back to `hard` along with the run. The Strategy row shows overrides, e.g. `hold-the-line (ruff: hard)`.
+Per-linter strategy — `LintTrait.strategies` overrides `--strategy` for the linters it names. Keys are the rules_lint linter names listed under 🧹 Linters (`ruff` matches `AspectRulesLintRuff`), case-insensitively, and the override applies to that linter's findings, patches, suggestions, and process failures. An unknown strategy name, or two keys naming one linter, fails before the build, and a key naming a linter that produced no output this run is noted under 🧹 Linters. When change detection fails, `hold-the-line` and `hold-the-file` overrides fall back to `hard` along with the run. The Strategy row shows the overrides that differ from `--strategy`, e.g. `hold-the-line (ruff: hard)`.
 
 ```python
 def config(ctx: ConfigContext):

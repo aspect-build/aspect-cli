@@ -555,9 +555,10 @@ def strategy_label(strategy, overrides):
     return "%s (%s)" % (strategy, ", ".join(pairs))
 
 def _config_items(data):
-    """Build the Configuration row: `Strategy: <name>[ (<linter>: <name>, ...)][ - filtered
-    to N changed files]`, surfacing the pass/fail-driving choice in the summary rather
-    than the details body.
+    """Build the Configuration row: `Strategy: <label>[ — filtered to N changed
+    files]`, with the label from `strategy_label`. The count shows when the run
+    strategy or any override is scoped. Surfaces the pass/fail-driving choice in the
+    summary rather than the details body.
     """
     strategy = data["lint"].get("strategy", "") or ""
     if not strategy:
