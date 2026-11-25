@@ -450,7 +450,11 @@ fn a_ctrl_z_dump_is_never_spliced_with_the_clis_lines() {
         std::process::Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim_start().starts_with('T'))
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim_start()
+                    .starts_with('T')
+            })
     };
     for _ in 0..3 {
         // SAFETY: signals to our own child.
