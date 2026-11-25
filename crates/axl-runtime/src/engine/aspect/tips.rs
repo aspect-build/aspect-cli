@@ -69,6 +69,13 @@ fn set<'v>(
 
 #[starlark_module]
 fn tips_methods(registry: &mut MethodsBuilder) {
+    /// The path of the user's `~/.aspect/config.json`, which `silence` and
+    /// `unsilence` write.
+    #[starlark(attribute)]
+    fn user_config_path<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<String> {
+        Ok(crate::config_json::user_path()?.display().to_string())
+    }
+
     /// Whether `id` can be a tip's id: not empty, and no whitespace or comma
     /// (`--tips:silence=a,b` is one id, so a comma is always a mistake).
     fn is_tip_id<'v>(

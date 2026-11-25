@@ -14,13 +14,15 @@ feature handle with a stable load path symmetric to the other features:
         ctx.features[Tips].enabled = False
 
 That silences a tip for everyone in the repository. To silence one for
-yourself alone, add its id to your `~/.aspect/config.json`:
+yourself alone, run `aspect tips silence <id>`: it adds the id to your
+`~/.aspect/config.json`,
 
     {"tips": {"silence": ["remote-miss", "terminal-app-links"]}}
 
-`silence_tip` and `unsilence_tip` in `lib/tips.axl` write it, rewriting
-the file as JSON with two-space indents, its keys kept in order. A
-repository's `.aspect/config.json` may hold a `tips.silence` list too. A tip is silenced
+which `aspect tips unsilence <id>` takes back and `aspect tips list` shows,
+with where each silence comes from. The file is rewritten as JSON with
+two-space indents, its keys kept in order. A repository's
+`.aspect/config.json` may hold a `tips.silence` list too. A tip is silenced
 by the union of every list: `--tips:silence` (repeated for several ids, a
 comma being no separator; it joins `config.axl`'s rather than replacing
 it), `config.axl`, and both `config.json` files. The `config.axl` files are
