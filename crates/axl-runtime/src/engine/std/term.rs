@@ -858,6 +858,28 @@ pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) -> bool {
     true
 }
 
+/// `bytes` (output.ansi's, which keeps colour, not links) with their links
+/// made again as the CLI's own lines make them, as OSC 8 links only: a
+/// screen opens a link itself, so no URL is written out beside it, even
+/// where the terminal shows them as text.
+fn relinked(bytes: &[u8]) -> Vec<u8> {
+    if !crate::out::terminal_links() {
+        return bytes.to_vec();
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.split_inclusive('\n') {
+        match line.strip_suffix('\n') {
+            Some(body) => {
+                out.push_str(&crate::out::linked_for_screen(body));
+                out.push('\n');
+            }
+            None => out.push_str(&crate::out::linked_for_screen(line)),
+        }
+    }
+    out.into_bytes()
+}
+
 /// Ctrl+Z (SIGTSTP) while a screen holds the terminal: the screen is given
 /// back first ([`suspend`]: the main screen, the shell's modes), then the
 /// process stops (SIGSTOP); once continued (`fg`) the screen is taken again,
@@ -1872,16 +1894,17 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     }
 
     /// What the task wrote before Bazel's console began, as `[line, links,
-    /// coloured]` like `output(with_colour = True)`: for a screen that shows
-    /// the task's output from its start, before any of Bazel's lines. Once:
-    /// a second call gives none.
+    /// coloured]` like `output(with_colour = True)`, its links made again
+    /// (the banner's URL among them): for a screen that shows the task's
+    /// output from its start, before any of Bazel's lines. Once: a second
+    /// call gives none.
     fn earlier<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let bytes = with_held(this, |h| Ok(std::mem::take(&mut h.earlier)))?;
         let feed = Feed::default();
-        feed.write(Source::Stderr, &bytes);
+        feed.write(Source::Stderr, &relinked(&bytes));
         feed.finish(Source::Stderr);
         let got = feed.drain();
         Ok(heap.alloc(serde_json::json!(
@@ -2035,6 +2058,30 @@ fn screen_methods(registry: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A seeded line's URL, linked as the screen's linker links it (no URL
+    /// written out), reaches the feed as a link the screen can open.
+    #[test]
+    fn a_seeded_url_is_a_link_in_the_feed() {
+        let mut linker = bazel::console::links::Linker::new(vec![std::env::temp_dir()])
+            .with_files(bazel::console::links::FileLinks::file().written(false));
+        let line = linker.link_written(b"Aspect CLI - https://aspect.build/go/cli");
+        assert!(
+            !String::from_utf8_lossy(&line).contains("<https"),
+            "no URL written out"
+        );
+        let feed = Feed::default();
+        feed.write(Source::Stderr, &[line, b"\n".to_vec()].concat());
+        let got = feed.drain();
+        assert_eq!(got.lines, ["Aspect CLI - https://aspect.build/go/cli"]);
+        assert!(
+            got.links[0]
+                .iter()
+                .any(|(_, _, url)| url == "https://aspect.build/go/cli"),
+            "{:?}",
+            got.links
+        );
+    }
 
     /// A dump keeps the newest lines, counts the rest on a line before
     /// them, and links each line without its end.

@@ -791,13 +791,13 @@ def _impl(ctx: TaskContext) -> int:
     # the console's scroll is left alone.
     helped = _screen(ctx, lines, scroll = 12)
     on_key(helped, "?", 10)
-    drawn = render(helped, 100, 31)
+    drawn = render(helped, 100, 30)
     if "Keys · ↑↓ scroll · any other key closes" not in drawn or "these keys" not in drawn:
         fail("render: ? should show the keys")
     on_key(helped, "wheel-up", 10)
     _eq("the wheel keeps the keys shown", (helped["help"], helped["scroll"]), (True, 12))
     small = _visible(render(dict(helped, progress = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]), 80, 16))
-    if "Running" in small or "… 16 more: ↓" not in small:
+    if "Running" in small or "… 15 more: ↓" not in small:
         fail("render: the keys take the screen, counting what does not fit:\n%s" % small)
     for _ in range(30):
         on_key(helped, "down", 10)
@@ -1581,7 +1581,7 @@ def _impl(ctx: TaskContext) -> int:
     fold_build(many_builds, 13000)
     many_builds["building"] = False
     many_builds["progress"] = []
-    _eq("folded: its counts, failures and time", _visible(build_row(many_builds["builds"][0], 100)), " ✗ bazel · 3/9 · ✗1 · 12s")
+    _eq("folded: its failures and time, no progress count", _visible(build_row(many_builds["builds"][0], 100)), " ✗ bazel · ✗1 · 12s")
     _eq("between builds, folded", panes_shown(many_builds), False)
     _eq("the console is the task's, kept", many_builds["log"], ["one"])
     folded_rows = _visible(render(many_builds, 100, 24)).split("\n")
@@ -1685,8 +1685,8 @@ def _impl(ctx: TaskContext) -> int:
     _eq("a failed save says why and changes nothing", ("couldn't save to ~/.aspect/config.json: read-only file" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), tips_count(tipped)), (True, 2))
     _eq("no tips", _visible(tips_lines(_screen(ctx, []), 96)[0]), "No tips")
 
-    # The progress row is there before Bazel counts its actions, so the
-    # panes under it never move down a row when it does.
+    # No progress row: the panes sit under the header whether or not Bazel
+    # has counted, and the header says how far it is.
     def _running_row(progress):
         rows = [_visible(r) for r in render(_screen(ctx, ["x"], progress = progress), 100, 30).split("\r\n")]
         return [i for i, r in enumerate(rows) if "Running (" in r]
@@ -1694,7 +1694,26 @@ def _impl(ctx: TaskContext) -> int:
     analyzing = _running_row(["Analyzing: 3 targets (2 packages loaded)", "    Compiling a.cc; 1s local"])
     counted = _running_row(["[1 / 14] 1 action running", "    Compiling a.cc; 1s local"])
     _eq("the panes stay put when the counts come", (len(analyzing), analyzing), (1, counted))
-    _eq("an empty bar until then", " - / - actions " in _visible(render(_screen(ctx, ["x"], progress = ["Analyzing: 3 targets"]), 100, 30)), True)
+    _eq("right under the header", analyzing, [1])
+    header = lambda progress: _visible(render(_screen(ctx, ["x"], progress = progress), 100, 30)).split("\n")[0]
+    _eq("before it counts, what it is doing", "analyzing" in header(["Analyzing: 3 targets"]), True)
+    _eq("then how far it is", "4 of 14 actions done" in header(["[4 / 14] 1 action running"]), True)
+
+    # Once a build ends nothing it last counted stays: not in the header,
+    # not in its folded row; only what ✔/✗ cannot say, from BuildFinished.
+    stale = _screen(ctx, ["x"], progress = ["[4 / 14] 1 action running"], task = "lint")
+    fold_build(stale, 0)
+    stale.update(building = False, ended = True, progress = [])
+    shown = _visible(render(stale, 100, 30))
+    _eq("no stale count after the end", ("4 of 14" in shown, "4/14" in shown), (False, False))
+    _eq("no BuildFinished: said", "ended without a result" in shown.split("\n")[0], True)
+    stale["builds"][-1]["snapshot"]["inv"] = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}
+    _eq("interrupted, from BuildFinished", "interrupted" in _visible(render(stale, 100, 30)).split("\n")[0], True)
+    stale["builds"][-1]["snapshot"]["inv"] = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))}
+    _eq("a success says nothing more", _visible(render(stale, 100, 30)).split("\n")[0].rstrip(" \r").endswith("0s"), True)
+    ran = _screen(ctx, ["x"], inv = {"build_metrics": struct(action_summary = struct(actions_executed = 1204))})
+    fold_build(ran, 0)
+    _eq("a folded build: the actions it ran", "1,204 actions run" in _visible(build_row(ran["builds"][0], 100)), True)
 
     print("dashboard_test.axl: OK")
     return 0

@@ -1380,6 +1380,28 @@ fn print_link_style() -> Option<bazel::console::links::LinkStyle> {
         .then(|| bazel::console::links::LinkStyle::of(&crate::theme::of_process()))
 }
 
+/// `line` with its URLs and paths linked as AXL `print()`'s are, but as
+/// OSC 8 links only, no URL written out beside one: for a screen, which
+/// opens a link itself. As it is off a person's terminal.
+pub(crate) fn linked_for_screen(line: &str) -> String {
+    static LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console::links::Linker>>> =
+        std::sync::LazyLock::new(|| {
+            let base = std::env::current_dir().ok()?;
+            Some(std::sync::Mutex::new(
+                bazel::console::links::Linker::new(vec![base])
+                    .with_files(bazel::console::links::FileLinks::file().written(false)),
+            ))
+        });
+    match LINKER.as_ref().and_then(|l| l.lock().ok()) {
+        Some(mut linker) if terminal_links() => {
+            linker.set_format(link_format());
+            String::from_utf8(linker.link_written(line.as_bytes()))
+                .unwrap_or_else(|_| line.to_string())
+        }
+        _ => line.to_string(),
+    }
+}
+
 /// `line` with its URLs and paths linked as AXL `print()`'s are, for a line
 /// the runtime writes itself (the banner); off a person's terminal, as it is
 /// but for `ansi.unlinked`'s markers ([`bazel::console::links::strip_unlinked`]).

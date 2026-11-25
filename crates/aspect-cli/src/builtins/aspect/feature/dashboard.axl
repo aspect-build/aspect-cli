@@ -2486,25 +2486,55 @@ def note_phase(state: dict, line: str):
         state["phase_text"] = text[len("› "):]
 
 def phase_status(state: dict) -> str:
-    """What the header's right end says: Bazel's status while a build runs,
-    else the task's phase and its latest update."""
-    if state.get("building") and state["progress"]:
-        return bazel_line(state["progress"][0])
+    """What the header's right end says. While a build runs, how far it is,
+    `4 of 14 actions done` from Bazel's progress line (its total grows as
+    Bazel finds more), or before it counts, what it is doing (`loading`,
+    `analyzing`, else `starting`). Once the task has ended, only what its
+    ✔/✗ cannot say, from the last build's `BuildFinished`: `interrupted`,
+    or `ended without a result` when none came; the Results pane has the
+    rest. Otherwise the task's phase and its latest update."""
+    if state.get("building"):
+        line = bazel_line(state["progress"][0]) if state["progress"] else ""
+        counts = progress_counts(line) if line else None
+        if counts:
+            return "%s of %s actions done" % (_thousands(counts[0]), _thousands(counts[1]))
+        lower = line.lower()
+        for word in ("analyzing", "loading"):
+            if word in lower:
+                return word
+        return "starting"
+    if state["ended"] and state.get("builds"):
+        return build_outcome(state["builds"][-1]["snapshot"].get("inv") or {})
     title = state.get("phase_title", "")
     text = state.get("phase_text", "")
     if title and text:
         return title + " · " + text
-    return title or text or (state["phase"] if state.get("building") else "")
+    return title or text
+
+def build_outcome(inv: dict) -> str:
+    """What a finished build's `BuildFinished` says that ✔/✗ cannot:
+    `interrupted`, `ended without a result` without one, else nothing."""
+    finished = inv.get("build_finished")
+    if finished == None:
+        return "ended without a result"
+    name = str(_get(_get(finished, "exit_code"), "name", "") or "")
+    return "interrupted" if name == "INTERRUPTED" else ""
+
+def actions_run(inv: dict):
+    """How many actions a build ran, from its `BuildMetrics` (the BES's
+    `action_summary.actions_executed`), or None without them."""
+    summary = _get(inv.get("build_metrics"), "action_summary")
+    executed = _get(summary, "actions_executed")
+    return executed if type(executed) == "int" else None
 
 def fold_build(state: dict, now_ms: int):
     """Keep the build that just ended as a folded row (`build_row`) and what
     its tabs show, for `<`/`>` to pick it again."""
-    counts = progress_counts(state["progress"][0]) if state["progress"] else state.get("last_counts")
     failed, blocked = _failure_counts(state)
     started = state.get("inv", {}).get("build_started")
     state.setdefault("builds", []).append(dict(
         command = str(_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
-        counts = counts,
+        run = actions_run(state.get("inv") or {}),
         failed = failed,
         blocked = blocked,
         ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed"),
@@ -2516,12 +2546,13 @@ def fold_build(state: dict, now_ms: int):
 _BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index"]
 
 def build_row(build: dict, cols: int) -> str:
-    """A folded build's row: its verdict, command, actions done, failures and
-    time, muted but for the counts' colours."""
+    """A folded build's row: its verdict, command, the actions it ran (its
+    `BuildMetrics`, never its last progress line), failures and time, muted
+    but for the counts' colours."""
     mark = (_c("verdict.success") + "✓") if build["ok"] else (_c("verdict.failure") + "✗")
     parts = [build["command"]]
-    if build["counts"]:
-        parts.append("%s/%s" % (_thousands(build["counts"][0]), _thousands(build["counts"][1])))
+    if build.get("run") != None:
+        parts.append("%s actions run" % _thousands(build["run"]))
     if build["failed"]:
         parts.append(_c("error") + "✗%d" % build["failed"] + _RESET + _c("muted"))
     if build["blocked"]:
@@ -2559,23 +2590,21 @@ def built(state: dict) -> bool:
     return bool(state.get("building") or state.get("builds") or state.get("fails") or state.get("outputs") or c.get("configured") or c.get("failures"))
 
 def _top(state: dict, cols: int, rows: int) -> list:
-    """The rows above the console: the header and, whenever the build panes
-    are open, the progress bar (empty until Bazel counts its actions, so
-    the panes never move down a row), then,
-    unless zoomed (`z`) or showing the keys (`?`), the links, and the running actions, oldest first
-    and coloured by age, beside the Results pane, the list (failures or
-    actions) under its counts."""
+    """The rows above the console: the header (the task, how long it has
+    run, and `phase_status`), then, unless zoomed (`z`) or showing the keys
+    (`?`), the builds that ended folded to a row each, and while the panes
+    are open, the links, and the running actions, oldest first and coloured
+    by age, beside the Results pane, the list (failures or actions) under
+    its counts."""
     out = []
 
     # Header.
     spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else ("✔" if state.get("verdict", True) else "✗")
     title = " %s aspect %s · %s " % (spin, state["task"], elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"])))
-    status = phase_status(state)
-    counts = progress_counts(status) if state.get("building") else None
+    shown = phase_status(state)
 
-    # The title first; Bazel's status in what is left, without the counts
-    # the bar under it shows.
-    shown = status.partition("] ")[2] if counts and "] " in status else status
+    # The task and how long it has run whole; the status in what is left,
+    # shortened first.
     title = fit(title, min(text_width(title), cols)).rstrip(" ")
     if text_width(title) < cols:
         title += " "
@@ -2584,11 +2613,6 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
     # A status bar: the whole row in the theme's `status_bar`.
     out.append(_c("status_bar") + title + " " * max(0, room - text_width(right)) + right + _RESET)
-    if counts or panes_shown(state):
-        done, total = counts or (None if state.get("building") else state.get("last_counts")) or (0, 0)
-        label = fit(" %d / %d actions " % (done, total) if total else " - / - actions ", cols)
-        width = max(0, cols - text_width(label))
-        out.append(_c("progress") + (bar(done, total, width) if total else "░" * width) + _RESET + label)
     if state.get("zoom") or state.get("help"):
         return out
 
@@ -4264,8 +4288,6 @@ def _dashboard_impl(ctx: FeatureContext):
         if screen == None or not screen.held:
             return
         state["cancelling"] = state["cancelling"] or task_ctx.cancellation.root.cancelled
-        if state["progress"]:
-            state["last_counts"] = progress_counts(state["progress"][0])
         state["build_failed"] = bool(build.output_fatal)
 
         # Folded to a row: the task goes on (`lint`'s reports, the next
