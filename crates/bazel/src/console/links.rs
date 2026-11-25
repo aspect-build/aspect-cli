@@ -12,7 +12,9 @@
 //! then the directory the task runs from. A path `relativize_paths` made
 //! relative it links itself, as only it knows the file (`BUILD.bazel` from
 //! a package directory is that package's), even one that does not exist:
-//! the linker leaves text already linked alone. A response file's path
+//! the linker leaves text already linked alone. A path in a code span
+//! (`` `.aspect/config.axl` ``) is text to type, not a place to open, and is
+//! left alone; a URL in one is still linked. A response file's path
 //! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not
 //! a `:line:col` after it. A path to nothing (a sandbox gone with its
 //! action, a label, prose) or cut short (`src/a.c…`) is left alone. A URL
@@ -485,8 +487,6 @@ pub struct Linker {
     /// What each path looked up names, by the path as written: the file, or
     /// None for nothing as of when it was looked up.
     resolved: HashMap<Vec<u8>, (Option<PathBuf>, std::time::Instant)>,
-    /// Whether paths are linked as well as URLs.
-    paths_too: bool,
 }
 
 impl Linker {
@@ -497,18 +497,7 @@ impl Linker {
             bases,
             files: FileLinks::file(),
             resolved: HashMap::new(),
-            paths_too: true,
         }
-    }
-
-    /// [`Linker::link_written`] with only its URLs linked: for text whose
-    /// paths are words to type rather than places to open (a tip's
-    /// `.aspect/config.axl`).
-    pub fn link_written_urls(&mut self, record: &[u8]) -> Vec<u8> {
-        self.paths_too = false;
-        let out = self.link_written(record);
-        self.paths_too = true;
-        out
     }
 
     /// This linker making its files' links as `files` says.
@@ -606,10 +595,6 @@ impl Linker {
         plain: &[u8],
         out: &mut Vec<u8>,
     ) {
-        if !self.paths_too {
-            out.extend_from_slice(text);
-            return;
-        }
         let mut at = 0;
         for m in PATH.find_iter(text) {
             if m.start() < at {
@@ -634,6 +619,10 @@ impl Linker {
             // After a `:` it is a label's target (`//pkg:BUILD`) or a URL's
             // rest, not a path of its own.
             if start > 0 && text[start - 1] == b':' {
+                continue;
+            }
+            // In a code span it is text to type, not a place to open.
+            if in_code_span(plain, base + start) {
                 continue;
             }
             // Cut short, it names some other file, if any.
@@ -852,6 +841,13 @@ fn active_style(text: &[u8]) -> Vec<u8> {
         style.extend_from_slice(seg);
     }
     style
+}
+
+/// Whether byte `at` of a record's text (`plain`) is inside a code span:
+/// after an odd number of backticks, with one more to close it.
+fn in_code_span(plain: &[u8], at: usize) -> bool {
+    let at = at.min(plain.len());
+    plain[..at].iter().filter(|&&b| b == b'`').count() % 2 == 1 && plain[at..].contains(&b'`')
 }
 
 /// The URL an OSC 8 sequence links to, empty for the one that ends a link,
@@ -1958,22 +1954,27 @@ mod tests {
     }
 
     #[test]
-    fn a_linker_can_leave_paths_alone_and_link_urls() {
+    fn a_path_in_a_code_span_is_text_to_type() {
         let (_dir, mut l) = linker();
-        let out =
-            String::from_utf8(l.link_written_urls(b"in src/a.cc see https://x.test/a")).unwrap();
+        let out = String::from_utf8(l.link(b"edit `src/a.cc` or src/a.cc, see `https://x.test/a`"))
+            .unwrap();
         assert!(
-            out.contains("in src/a.cc see "),
-            "the path stays plain: {out:?}"
+            out.contains("edit `src/a.cc` or "),
+            "the code span's path stays plain: {out:?}"
+        );
+        assert_eq!(
+            out.matches("\x1b]8;;file://").count(),
+            1,
+            "the bare path is linked: {out:?}"
         );
         assert!(
             out.contains("\x1b]8;;https://x.test/a"),
-            "the URL is linked: {out:?}"
+            "a URL in a code span is linked: {out:?}"
         );
-        let out = String::from_utf8(l.link_written(b"in src/a.cc")).unwrap();
+        let out = String::from_utf8(l.link(b"a ` before src/a.cc")).unwrap();
         assert!(
             out.contains("\x1b]8;;file://"),
-            "and paths link again after: {out:?}"
+            "an unclosed backtick opens no span: {out:?}"
         );
     }
 
