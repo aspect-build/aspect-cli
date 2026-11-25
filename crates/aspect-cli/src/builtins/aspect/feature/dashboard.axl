@@ -2603,15 +2603,14 @@ def _top(state: dict, cols: int, rows: int) -> list:
     if failed_n or blocked_n:
         failed_i = len(summary)
         summary.append("Failed   %s✗ %d%s%s" % (_c("error"), failed_n, _RESET, ("  ○ %d blocked" % blocked_n) if blocked_n else "") if wide else "%s✗%d%s ○%d" % (_c("error"), failed_n, _RESET, blocked_n))
-    least = min(4, limit)
 
-    # Clipped to the pane, the rest counted, Bazel's unlisted ones too, on
-    # a row of their own.
-    more = 1 if running > len(actions) and not finished else 0
-    pane = min(limit, max(least, min(max(len(actions) + more, len(summary)), rows // 3)))
-    if more or len(actions) > pane:
-        listed = actions[:min(len(actions), pane - 1)]
-        actions = listed + ["… and %d more" % ((len(actions) if finished else running) - len(listed))]
+    # As tall as the most Results rows there can be, for the whole build;
+    # the list scrolls in it (`actions_scroll`, the wheel over it), and
+    # unscrolled counts the rest, Bazel's unlisted ones too, on its last row.
+    pane = max(1, min(limit, rows // 3, results_capacity(wide)))
+    listed, edge = scrolled_rows(actions, pane, state.get("actions_scroll", 0), 0 if finished else running)
+    state["actions_scroll"] = min(state.get("actions_scroll", 0), max(0, len(actions) - pane))
+    actions = listed
     results = "Results"
 
     # Started but not yet running (queued for a remote executor or a full
@@ -2621,8 +2620,10 @@ def _top(state: dict, cols: int, rows: int) -> list:
         head = "Slowest"
     out.append(_box_top(head, left_w) + _box_top(results, right_w))
 
-    # Where the failures' count is drawn, for a click to show their tab.
+    # Where the failures' count is drawn, for a click to show their tab;
+    # where the list is, for the wheel over it.
     state["failed_at"] = None
+    state["actions_at"] = (len(out), len(out) + pane - 1, left_w)
     for i in range(pane):
         if i == failed_i:
             state["failed_at"] = (len(out), left_w)
@@ -2634,10 +2635,33 @@ def _top(state: dict, cols: int, rows: int) -> list:
         s_cell = _c("border") + "│ " + _RESET + s + " " * max(0, right_w - 4 - visible) + _c("border") + " │" + _RESET
         if visible > right_w - 4:
             s_cell = _box_row(_plain(s), right_w)
-        out.append(_box_row(action_row(a, left_w - 4), left_w, _aged(a)) + s_cell)
+        out.append(_box_row(action_row(a, left_w - 4), left_w, _aged(a), edge = edge[i] if edge else None) + s_cell)
     out.append(_box_bottom(left_w) + _box_bottom(right_w))
 
     return out
+
+# The Results rows a build may come to have past its targets and tests: its
+# cache hits, critical path, test runs and failures.
+_OPTIONAL_RESULTS = 4
+
+def results_capacity(wide: bool) -> int:
+    """The most rows the Results pane can have: targets (two rows wide) and
+    tests, then every optional one (`_OPTIONAL_RESULTS`). The panes are
+    that tall for the whole build, so nothing below them moves."""
+    return (3 if wide else 2) + _OPTIONAL_RESULTS
+
+def scrolled_rows(rows: list, height: int, scroll: int, total = 0):
+    """`(shown, edge)`: `rows` scrolled `scroll` from the top in a pane
+    `height` tall, and its scrollbar (None when they fit). Unscrolled with
+    more than fit, the last shown row counts the rest, of `total` when that
+    is more (rows Bazel did not list)."""
+    total = max(total, len(rows))
+    scroll = max(0, min(scroll, max(0, len(rows) - height)))
+    edge = scrollbar(len(rows), height, max(0, len(rows) - scroll - height))
+    if scroll == 0 and total > height:
+        shown = rows[:height - 1]
+        return (shown + ["… and %d more" % (total - len(shown))], edge)
+    return (rows[scroll:scroll + height], edge)
 
 def console_height(state: dict, cols: int, rows: int) -> int:
     """How many lines the console shows at `cols` by `rows`: a page, for the
@@ -3538,6 +3562,12 @@ def on_key(state: dict, key: str, page: int) -> bool:
         return False
     if key == "p":
         state["panes"] = not panes_shown(state)
+        return False
+    at = state.get("actions_at")
+    hover = state.get("hover")
+    if key in ("wheel-up", "wheel-down") and at != None and hover != None and at[0] <= hover[1] and hover[1] <= at[1] and hover[0] < at[2]:
+        # The wheel over the running actions scrolls them, not the console.
+        state["actions_scroll"] = max(0, state.get("actions_scroll", 0) + (_WHEEL if key == "wheel-down" else -_WHEEL))
         return False
     if key in ("<", ">") and state.get("tab") in _PICKED_TABS and state["view"] == None:
         newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
