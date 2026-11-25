@@ -546,7 +546,9 @@ impl Linker {
     }
 
     /// `record` with each URL and each path to something that exists
-    /// linked; escape sequences, and text already linked, kept as they are.
+    /// linked; escape sequences, and text already linked, kept as they are,
+    /// but for [`UNLINKED_START`] and [`UNLINKED_END`], which go, the text
+    /// between them left unlinked.
     pub fn link(&mut self, record: &[u8]) -> Vec<u8> {
         self.link_with(record, &[])
     }

@@ -1264,7 +1264,8 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
     });
 
 /// `line` with its URLs and paths linked as AXL `print()`'s are, for a line
-/// the runtime writes itself (the banner); as it is off a person's terminal.
+/// the runtime writes itself (the banner); off a person's terminal, as it is
+/// but for `ansi.unlinked`'s markers ([`bazel::console::links::strip_unlinked`]).
 pub(crate) fn linked(line: &str) -> String {
     match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
         Some(mut linker) => {
