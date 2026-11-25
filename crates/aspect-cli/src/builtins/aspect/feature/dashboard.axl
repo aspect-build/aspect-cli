@@ -2122,20 +2122,34 @@ def _view_file(state: dict):
     return (console, 1)
 
 def open_link(state: dict, url: str, trusted = False) -> str:
-    """Open `url` as this machine does (`open`, `xdg-open`), not waiting on
-    it, when a click opens it (`opens`); copy it instead in a remote
-    session, which would open it there, and for any other link. What
-    happened, for the keys row."""
+    """Open `url` as this machine does (`open`, `xdg-open`) when a click
+    opens it (`opens`); copy it instead in a remote session, which would
+    open it there, and for any other link. The opener is waited on for
+    `_OPEN_WAIT_MS` at most: one that fails by then (no app for a
+    `cursor://` link) has the link copied instead; one still running (a
+    browser taking it) has opened it. What happened, for the keys row."""
     process = state.get("process")
     if process == None or _remote(state.get("env")) or not (trusted or opens(url)):
         copy_text(state, url)
         return "link copied: " + url
     for opener in ("open", "xdg-open"):
         if process.which(opener) != None:
-            _detached(state, process.command(opener).args([url]).stdin("null").stdout("null").stderr("null"))
+            child = _detached(state, process.command(opener).args([url]).stdin("null").stdout("null").stderr("null"))
+            status = None
+            for _ in range(_OPEN_WAIT_MS // _OPEN_POLL_MS):
+                status = child.try_wait(timeout_ms = _OPEN_POLL_MS)
+                if status != None:
+                    break
+            if status != None and not status.success:
+                copy_text(state, url)
+                return "couldn't open %s, copied it" % url
             return "opened " + url
     copy_text(state, url)
     return "link copied: " + url
+
+# How long a click waits to see whether the opener failed, in slices.
+_OPEN_WAIT_MS = 300
+_OPEN_POLL_MS = 50
 
 # How soon a second press on the same cell makes a double click.
 _DOUBLE_CLICK_MS = 400
@@ -3965,7 +3979,11 @@ def _dashboard_impl(ctx: FeatureContext):
 
     def _tick(screen):
         """One frame while no build draws them: the CLI's new lines, the keys
-        waiting, the screen redrawn if it changed."""
+        waiting, the screen redrawn if it changed. Never inside itself: a key
+        that waits (a click's opener) runs the idle hook."""
+        if state.get("ticking"):
+            return
+        state["ticking"] = True
         state["now_ms"] = int(monotonic() * 1000)
         state["frames"] += 1
         _add_output(screen)
@@ -3977,6 +3995,7 @@ def _dashboard_impl(ctx: FeatureContext):
                 break
             on_key(state, key, page)
         _draw(screen, render(state, cols, rows))
+        state["ticking"] = False
 
     def _idle(task_ctx):
         # Between builds, and before the first: a build's frames draw while

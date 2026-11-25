@@ -5,7 +5,7 @@ Run with:
   aspect dev test-dashboard
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "on_key", "open_in_editor", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "running_actions", "scrollbar", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "running_actions", "scrollbar", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -74,9 +74,10 @@ def _screen(ctx, log, **kw):
     state.update(kw)
     return state
 
-def _fake_process(have, ran):
+def _fake_process(have, ran, exit = 0):
     """A `ctx.std.process` with only `have` on PATH, recording each command
-    it runs in `ran` as `[argv, what its stdin was given, in writes]`."""
+    it runs in `ran` as `[argv, what its stdin was given, in writes]`, each
+    child exiting with `exit` at once (None: still running)."""
 
     def command(name):
         run = [[name], []]
@@ -84,9 +85,11 @@ def _fake_process(have, ran):
         def spawn(cancellation = None):
             ran.append(run)
             pipe = struct(write = lambda t: run[1].append(t), close = lambda: None)
+            status = None if exit == None else struct(success = exit == 0, code = exit)
             return struct(
                 stdin = lambda: pipe,
                 wait = lambda: None,
+                try_wait = lambda timeout_ms = 0: status,
             )
 
         builder = struct(
@@ -1598,6 +1601,14 @@ def _impl(ctx: TaskContext) -> int:
     nothing = _screen(ctx, [], building = False, task = "format", ended = True)
     _eq("a task that never built shows no panes", (panes_shown(nothing), built(nothing)), (False, False))
     _eq("a task's own ▸ Running line is no phase", note_phase(dict(phase_title = "x"), "▸ Running format task"), None)
+
+    # A click's opener: one that fails at once has the link copied instead,
+    # one that exits 0 or is still running (a browser) has opened it.
+    for exit, want in [(1, "couldn't open cursor://file/x, copied it"), (0, "opened cursor://file/x"), (None, "opened cursor://file/x")]:
+        opened_by = []
+        clicked = _screen(ctx, [], process = _fake_process(["open", "pbcopy"], opened_by, exit = exit), env = _fake_env({}))
+        _eq("opener exiting %r" % exit, open_link(clicked, "cursor://file/x", trusted = True), want)
+        _eq("copied only when it failed: %r" % exit, len(opened_by), 2 if exit == 1 else 1)
 
     print("dashboard_test.axl: OK")
     return 0
