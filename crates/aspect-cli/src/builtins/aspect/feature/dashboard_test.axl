@@ -5,7 +5,7 @@ Run with:
   aspect dev test-dashboard
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_counts", "new_search", "note_event", "note_progress", "on_key", "open_in_editor", "open_peek", "opens", "output_of", "paste_text", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "running_actions", "scrollbar", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "on_key", "open_in_editor", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "running_actions", "scrollbar", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -59,6 +59,7 @@ def _screen(ctx, log, **kw):
         "cancelling": False,
         "ended": False,
         "counts": new_counts(),
+        "building": True,
         "pages": [],
         "test_counts": {},
         "spread": {},
@@ -176,6 +177,7 @@ def _impl(ctx: TaskContext) -> int:
         "cancelling": False,
         "ended": False,
         "counts": new_counts(),
+        "building": True,
         "pages": [],
     }
     screen = render(state, 100, 30)
@@ -792,7 +794,7 @@ def _impl(ctx: TaskContext) -> int:
     on_key(helped, "wheel-up", 10)
     _eq("the wheel keeps the keys shown", (helped["help"], helped["scroll"]), (True, 12))
     small = _visible(render(dict(helped, progress = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]), 80, 16))
-    if "Running" in small or "… 15 more: ↓" not in small:
+    if "Running" in small or "… 16 more: ↓" not in small:
         fail("render: the keys take the screen, counting what does not fit:\n%s" % small)
     for _ in range(30):
         on_key(helped, "down", 10)
@@ -1536,6 +1538,66 @@ def _impl(ctx: TaskContext) -> int:
     add_lines(seeded, ["banner", "▸ Running build task"], None, None, cli = True)
     add_lines(seeded, ["INFO: from bazel"])
     _eq("the replay starts after the seed", replay_lines(seeded, False), ["INFO: from bazel"])
+
+    # Before any build: the header names the task's phase, no progress row
+    # and no build panes, the build tabs muted and saying so.
+    early = _screen(ctx, [], building = False, task = "lint")
+    add_lines(early, ["▸ Running lint task", "", "▸ Setup", "› Running setup"], None, None, cli = True)
+    _eq("the phase from the CLI's lines", phase_status(early), "Setup · Running setup")
+    _eq("nothing built yet", built(early), False)
+    rows = _visible(render(early, 100, 24)).split("\n")
+    _eq("the header names the phase", "Setup · Running setup" in rows[0], True)
+    _eq("then the tabs, no progress row nor panes", rows[1].startswith("┌─ Console"), True)
+    _eq("no Results pane", "Results" in _visible(render(early, 100, 24)), False)
+    early["tab"] = "metrics"
+    _eq("a build tab says so", "No build yet" in _visible(render(early, 100, 24)), True)
+    early["tab"] = "console"
+    _eq("the build tabs muted", _role("muted") + " Failures " in render(early, 100, 24), True)
+
+    # A build running: its panes in one frame; ended, folded to a row; the
+    # next build's panes under it.
+    many_builds = _screen(ctx, ["one"], building = True, task = "lint")
+    new_build(many_builds, 1000)
+    many_builds["building"] = True
+    many_builds["progress"] = ["[3 / 9] 1 action running", "    a.cc; 1s"]
+    _eq("panes while a build runs", panes_shown(many_builds), True)
+    many_builds["counts"]["failures"] = ["//a:b"]
+    many_builds["counts"]["failed_labels"] = {"//a:b": True}
+    many_builds["now_ms"] = 13000
+    fold_build(many_builds, 13000)
+    many_builds["building"] = False
+    many_builds["progress"] = []
+    _eq("folded: its counts, failures and time", _visible(build_row(many_builds["builds"][0], 100)), " ✗ bazel · 3/9 · ✗1 · 12s")
+    _eq("between builds, folded", panes_shown(many_builds), False)
+    _eq("the console is the task's, kept", many_builds["log"], ["one"])
+    folded_rows = _visible(render(many_builds, 100, 24)).split("\n")
+    _eq("the folded row above the tabs", folded_rows[1].startswith(" ✗ bazel"), True)
+    on_key(many_builds, "p", 10)
+    _eq("p opens the panes", panes_shown(many_builds), True)
+    on_key(many_builds, "p", 10)
+    _eq("p folds them again", panes_shown(many_builds), False)
+    new_build(many_builds, 14000)
+    many_builds["building"] = True
+    _eq("the next build starts with its own counts", many_builds["counts"]["failures"], [])
+    _eq("picked: the running one", picked_build(many_builds), 1)
+    many_builds["tab"] = "metrics"
+    _eq("its crumb", crumbs(many_builds), ["2 of 2"])
+    on_key(many_builds, "<", 10)
+    _eq("< the build before", (picked_build(many_builds), crumbs(many_builds)), (0, ["1 of 2"]))
+    on_key(many_builds, "<", 10)
+    _eq("never before the first", picked_build(many_builds), 0)
+    on_key(many_builds, ">", 10)
+    _eq("> the next", picked_build(many_builds), 1)
+
+    # Finished: one build's panes stay open for build and test, every other
+    # task's builds stay folded.
+    for kind, want in [("build", True), ("test", True), ("lint", False), ("gazelle", False), ("format", False)]:
+        done = _screen(ctx, [], building = False, task = kind, ended = True)
+        fold_build(done, 0)
+        _eq("%s finished, its panes open" % kind, panes_shown(done), want)
+    nothing = _screen(ctx, [], building = False, task = "format", ended = True)
+    _eq("a task that never built shows no panes", (panes_shown(nothing), built(nothing)), (False, False))
+    _eq("a task's own ▸ Running line is no phase", note_phase(dict(phase_title = "x"), "▸ Running format task"), None)
 
     print("dashboard_test.axl: OK")
     return 0

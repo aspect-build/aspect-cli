@@ -1,21 +1,26 @@
-"""`Dashboard`: a live dashboard of a build in place of Bazel's terminal
-UI, on the terminal's alternate screen. Off by default:
+"""`Dashboard`: a live dashboard of a task and its builds in place of the
+console and Bazel's terminal UI, on the terminal's alternate screen, for
+`build`, `test`, `lint`, `gazelle` and `format` (`_KINDS`). Off by default:
 
-    aspect build //... --dashboard:enabled=true
+    aspect build //... --dashboard
 
-While a build runs it shows:
+It takes the screen when the task starts and shows:
 
-- a status bar with the task, how long Bazel has run, and a bar of its
-  `[done / total]` actions;
-- the actions running now, from Bazel's own progress area, oldest first,
-  yellow past a minute and red past five; once the build has finished,
-  Bazel's critical path and the slowest actions seen running;
-- links to the invocation's results pages: the Aspect Build Results page the
-  CLI streams to, and the BES results page Bazel streams to itself with
-  `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
-- a Results pane: targets and tests, cache hits from their sources of truth
-  (actions' from the compact execution log, tests' from their results), and
-  the failures counted (a click shows them);
+- a status bar with the task, how long it has run, and Bazel's status
+  while a build runs, else the task's phase and its latest update; under it
+  a bar of the build's `[done / total]` actions, while one runs;
+- each build that ended folded to a row (its verdict, command, actions,
+  failures and time, the newest last, `+N earlier` past three), and while a
+  build runs, or `p` asks, its panes:
+  - the actions running now, from Bazel's own progress area, oldest first,
+    yellow past a minute and red past five; once the build has finished,
+    Bazel's critical path and the slowest actions seen running;
+  - links to the invocation's results pages: the Aspect Build Results page
+    the CLI streams to, and the BES results page Bazel streams to itself
+    with `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
+  - a Results pane: targets and tests, cache hits from their sources of
+    truth (actions' from the compact execution log, tests' from their
+    results), and the failures counted (a click shows them);
 - the main pane's tabs, always in one order, the shown one named by what is
   open in it (`Failures ✗1 › //pkg:t › attempt 1/2 › a.py:12`):
   - Console: the task's whole output, from its start (what the CLI wrote
@@ -33,6 +38,9 @@ While a build runs it shows:
     targets, time and memory, the slowest actions;
   - Invocation: the command, ids, Bazel's version, the flags given,
     workspace status and build metadata, what may be a secret redacted;
+  - before any build, Failures, Metrics and Invocation muted, saying `No
+    build yet`; with several builds, Metrics and Invocation show the newest,
+    `<`/`>` another (`Metrics › 1 of 2`), and Failures the newest's;
 - a row of the keys for what has focus, and `?` for all of them (`_HELP`).
 
 The keys, as in `less`, lazygit and Claude Code's transcript: `↑`/`↓` or
@@ -61,50 +69,54 @@ and `n`/`N` then step to the next and previous match, round to the other
 end past the last; Esc clears it and
 goes back to where the bar opened.
 
-When a `build` or `test` task ends the screen stays up, its failures still
-browsable, until `q`, Enter or Esc with nothing open, or Ctrl+C; with
-nothing failed it counts down three seconds and leaves unless a key stops
-it (`--dashboard:stay=always`, `never`). Then the scrollback gets the
-console as the screen showed it (`replay_lines`) and a summary: each
-failure with its log's path (the history's copy, which outlives Bazel's),
-the targets a failure blocked, the flaky tests, the counts, and
-`aspect history show <id>` for the rest (`report_lines`).
+When the task ends the screen stays up, its failures still browsable, until
+`q`, Enter or Esc with nothing open, or Ctrl+C; with nothing failed it
+counts down three seconds and leaves unless a key stops it
+(`--dashboard:stay=always`, `never`). `build` and `test` keep their
+build's panes open on it, the others their builds folded; a task that
+failed before any build leaves at once, its error last in the scrollback.
+Then the scrollback gets the console as the screen showed it
+(`replay_lines`) and a summary: each failure with its log's path (the
+history's copy, which outlives Bazel's), the targets a failure blocked,
+the flaky tests, the counts, and `aspect history show <id>` for the rest
+(`report_lines`).
 
 How it is built:
 
 1. `BazelTrait.output_display = "none"`: Bazel's console is still captured
    and run through every stage, but nothing of it is shown.
-2. A `BazelTrait.output_frame` hook, which the runtime calls about every
-   100ms while the console is open, takes the terminal on its first call
-   (`ctx.std.term.take()`, the mouse taken with `screen.mouse(True)`
-   unless asked not to, the wheel sent as arrows with
-   `screen.wheel_keys(True)` while it is the terminal's),
-   then on each call reads what the console would have shown
-   (`build.output_feed()`, through `add_lines`), reads the keys
+2. A `pre_task` hook takes the terminal (`ctx.std.term.take()`, the mouse
+   taken with `screen.mouse(True)` unless asked not to, the wheel sent as
+   arrows with `screen.wheel_keys(True)` while it is the terminal's), what
+   the task wrote before it first in the console (`screen.earlier()`).
+   Until a build draws, an idle hook (`ctx.hooks.idle`), which the runtime
+   calls about every 100ms while the task waits on a child or sleeps,
+   reads the CLI's lines and the keys and redraws.
+3. A `BazelTrait.output_frame` hook, which the runtime calls about every
+   100ms while a build's console is open, reads what the console would
+   have shown (`build.output_feed()`, through `add_lines`), reads the keys
    (`screen.key()`, through `on_key`), and redraws the whole screen in one
-   write (`render`) when it changed (Ctrl+L redraws it anyway); the
+   write (`render`) when it changed (Ctrl+L redraws it anyway); its first
+   frame starts the build's own counts (`new_build`), a retry's too. The
    finished screen, idle, reads a key a second.
-3. `build_event` hooks count targets and tests from the build event stream,
+4. `build_event` hooks count targets and tests from the build event stream,
    gather the failures and the actions that wrote output with their logs
    (`failure_of`, `output_of`), and what finding a test's log in the output
    tree takes (the exec root, each configuration's output folder, each
    test's run and shard counts and last attempts).
-4. An `output_end` hook draws the build's last frame. A retry keeps the
-   screen, starting afresh on its first frame.
-   Any other task (`lint`, `warming`) gives the terminal back there, as it
-   goes on after its build.
-5. A `post_task` hook keeps the screen up (or counts down, the task's exit
+5. An `output_end` hook folds the build to a row (`fold_build`), keeping
+   what its tabs show for `<`/`>`, and draws.
+6. A `post_task` hook keeps the screen up (or counts down, the task's exit
    code 0 and nothing failed), with Ctrl+C read as a key
    (`screen.interrupts(False)`) since the task has already ended, then gives
    the terminal back (`screen.release(replay_stderr = False)`), then
    writes the console as it showed it (`replay_lines`) and the summary.
 
-On a terminal only, and never on CI. A task's builds show it while they
-run; `build` and `test` keep it up once they end, and any other task gets
-the terminal back (and the replay) when its build ends. Under a coding agent,
-with `TERM` dumb or unset, or on a terminal under 40x12, it stays off even
-when enabled, saying why in a line on stderr (`refusal`): an agent's pty
-has nobody to press the keys the finished screen waits for.
+On a terminal only, and never on CI; any other task keeps its console,
+saying so in a line on stderr. Under a coding agent, with `TERM` dumb or
+unset, or on a terminal under 40x12, it stays off even when enabled, saying
+why in a line on stderr (`refusal`): an agent's pty has nobody to press the
+keys the finished screen waits for.
 """
 
 load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook")
@@ -152,7 +164,16 @@ CONTROLS = "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]"
 
 # The tasks whose screen stays up after their build: the others go on to
 # run something that needs the terminal.
-_STAY_KINDS = ["build", "test"]
+# The tasks the screen is for, taken from their start; any other keeps the
+# console.
+_KINDS = ["build", "test", "lint", "gazelle", "format"]
+
+# The tasks whose finished screen keeps their last build's panes open; the
+# others keep their builds folded to a row each.
+_ONE_BUILD_KINDS = ["build", "test"]
+
+# Folded builds shown above the tabs, the older counted on a row.
+_MAX_FOLDED = 3
 
 # Errors repeated in the scrollback once the screen goes.
 _MAX_ERRORS = 20
@@ -207,6 +228,7 @@ _HELP = [
     ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"),
     ("a", "the list: failures, or actions that wrote output"),
     ("z", "the console fills the screen, and back"),
+    ("p  <  >", "the build panes open or folded, and back; in Metrics and Invocation, the previous or next build"),
     ("w", "wrap long lines (the default), or cut them at the edge"),
     ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold them again"),
     ("Esc", "back a crumb: a file to the log it was opened from, a log to its tab; a tab to the console"),
@@ -986,6 +1008,27 @@ def reset_attempt(state: dict, now_ms: int):
     state["search"]["origin"] = 0
     state["search"]["anchored"] = False
     state.update(attempt_state(now_ms))
+
+# What a build has of its own, which the next build (or a retried attempt)
+# starts afresh; the console and what is open in it are the task's.
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "critical", "bazel_uuid"]
+
+def new_build(state: dict, now_ms: int):
+    """Start the next build (or a retried attempt) in the task's screen: its
+    own counts, failures and invocation, timed from `now_ms`; the console,
+    the search and what is open in it kept. The Failures list, if focused,
+    goes back to the console, as its rows are the old build's."""
+    fresh = attempt_state(now_ms)
+    for key in _PER_BUILD:
+        state[key] = fresh[key]
+    state["blocked"] = {}
+    state["progress"] = []
+    state["fresh"] = False
+    state["build_failed"] = False
+    state["build_start_ms"] = now_ms
+    state["picked_build"] = None
+    if state.get("focus") == "failures":
+        state["focus"] = "console"
 
 def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     """Gather from one build event what the Failures list needs: a failure's
@@ -2367,6 +2410,90 @@ def _plain(s: str) -> str:
         out += part[end + 1:] if end >= 0 else part
     return out
 
+def note_phase(state: dict, line: str):
+    """The task's phase and its latest update from one of the CLI's own
+    lines, for the header while no build runs: `▸ Title` starts a phase (not
+    the task's own `▸ Running …` line), `› text` updates it."""
+    text = _plain(line).strip(" ")
+    if text.startswith("▸ ") and not text.startswith("▸ Running "):
+        state["phase_title"] = text[len("▸ "):]
+        state["phase_text"] = ""
+    elif text.startswith("› "):
+        state["phase_text"] = text[len("› "):]
+
+def phase_status(state: dict) -> str:
+    """What the header's right end says: Bazel's status while a build runs,
+    else the task's phase and its latest update."""
+    if state.get("building") and state["progress"]:
+        return bazel_line(state["progress"][0])
+    title = state.get("phase_title", "")
+    text = state.get("phase_text", "")
+    if title and text:
+        return title + " · " + text
+    return title or text or (state["phase"] if state.get("building") else "")
+
+def fold_build(state: dict, now_ms: int):
+    """Keep the build that just ended as a folded row (`build_row`) and what
+    its tabs show, for `<`/`>` to pick it again."""
+    counts = progress_counts(state["progress"][0]) if state["progress"] else state.get("last_counts")
+    failed, blocked = _failure_counts(state)
+    started = state.get("inv", {}).get("build_started")
+    state.setdefault("builds", []).append(dict(
+        command = str(_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
+        counts = counts,
+        failed = failed,
+        blocked = blocked,
+        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed"),
+        ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
+        snapshot = {k: state.get(k) for k in _BUILD_KEYS},
+    ))
+
+# What a folded build keeps for its tabs.
+_BUILD_KEYS = ["counts", "inv", "slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index"]
+
+def build_row(build: dict, cols: int) -> str:
+    """A folded build's row: its verdict, command, actions done, failures and
+    time, muted but for the counts' colours."""
+    mark = (_c("verdict.success") + "✓") if build["ok"] else (_c("verdict.failure") + "✗")
+    parts = [build["command"]]
+    if build["counts"]:
+        parts.append("%s/%s" % (_thousands(build["counts"][0]), _thousands(build["counts"][1])))
+    if build["failed"]:
+        parts.append(_c("error") + "✗%d" % build["failed"] + _RESET + _c("muted"))
+    if build["blocked"]:
+        parts.append("○%d" % build["blocked"])
+    parts.append(elapsed(build["ms"]))
+    row = " " + mark + _RESET + " " + _c("muted") + " · ".join(parts)
+    return _cut_escaped(row, cols) + _RESET
+
+def _thousands(n: int) -> str:
+    """`n` with commas between its thousands, as Bazel writes its counts."""
+    digits = str(n)
+    out = ""
+    for i, d in enumerate(digits.elems()):
+        if i and (len(digits) - i) % 3 == 0:
+            out += ","
+        out += d
+    return out
+
+def panes_shown(state: dict) -> bool:
+    """Whether the build panes are open: while a build runs, and on the
+    finished screen of a task that ran one build of its own (`build`,
+    `test`); else folded to a row a build, unless `p` asked for them."""
+    if not built(state):
+        return False
+    if state.get("panes") != None:
+        return state["panes"]
+    if state.get("building") or not state.get("builds"):
+        return True
+    return state["ended"] and state.get("task") in _ONE_BUILD_KINDS and len(state["builds"]) == 1
+
+def built(state: dict) -> bool:
+    """Whether a build has started (or left anything to show): before one,
+    the build tabs are muted and say so."""
+    c = state.get("counts") or {}
+    return bool(state.get("building") or state.get("builds") or state.get("fails") or state.get("outputs") or c.get("configured") or c.get("failures"))
+
 def _top(state: dict, cols: int, rows: int) -> list:
     """The rows above the console: the header and the progress bar, then,
     unless zoomed (`z`) or showing the keys (`?`), the links, and the running actions, oldest first
@@ -2375,10 +2502,10 @@ def _top(state: dict, cols: int, rows: int) -> list:
     out = []
 
     # Header.
-    spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else "✔"
-    title = " %s aspect %s · %s " % (spin, state["task"], elapsed(state["now_ms"] - state["start_ms"]))
-    status = bazel_line(state["progress"][0]) if state["progress"] else state["phase"]
-    counts = progress_counts(status)
+    spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else ("✔" if state.get("verdict", True) else "✗")
+    title = " %s aspect %s · %s " % (spin, state["task"], elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"])))
+    status = phase_status(state)
+    counts = progress_counts(status) if state.get("building") else None
 
     # The title first; Bazel's status in what is left, without the counts
     # the bar under it shows.
@@ -2395,14 +2522,30 @@ def _top(state: dict, cols: int, rows: int) -> list:
         done, total = counts
         label = fit(" %d / %d actions " % (done, total), cols)
         out.append(_c("progress") + bar(done, total, max(0, cols - len(label))) + _RESET + label)
-    else:
-        out.append("")
+    if state.get("zoom") or state.get("help"):
+        return out
+
+    # The builds that ended, a row each, the newest last, the older
+    # counted; not the one whose panes are open.
+    open_panes = panes_shown(state)
+    folded = list(state.get("builds", []))
+    if open_panes and not state.get("building") and folded:
+        folded = folded[:-1]
+    if len(folded) > _MAX_FOLDED:
+        out.append(fit(" " + _c("muted") + "+%d earlier" % (len(folded) - _MAX_FOLDED + 1) + _RESET, cols))
+        folded = folded[len(folded) - _MAX_FOLDED + 1:]
+    state["folded_at"] = len(out)
+    for b in folded:
+        out.append(build_row(b, cols))
+    state["folded_rows"] = len(folded)
+    if not open_panes:
+        return out
 
     # The panes get what the console pane and the keys row leave (the
     # links row going first under `_SHORT_ROWS`), and go when that is not
     # two rows.
     limit = rows - len(out) - 2 - 4
-    if state.get("zoom") or state.get("help") or limit < 2:
+    if limit < 2:
         return out
     if state["pages"] and (rows >= _SHORT_ROWS or limit >= 6):
         limit -= 1
@@ -2675,6 +2818,9 @@ def render(state: dict, cols: int, rows: int) -> str:
 # The main pane's tabs, by the number key that shows each.
 _TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"), ("invocation", "Invocation")]
 
+# The tabs about a build, muted before one starts.
+_BUILD_TABS = ["failures", "metrics", "invocation"]
+
 # The build events the Invocation and Metrics tabs read.
 _INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "build_metadata", "build_finished", "build_metrics"]
 
@@ -2718,6 +2864,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
         if tab == "failures" and (failed or blocked):
             name += " ✗%d" % failed + (" ○%d" % blocked if blocked else "")
         names[tab] = name
+    muted = [] if built(state) else _BUILD_TABS
     parts = [names[shown]] + crumbs(state)
     whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " › ".join(parts) + " ")
     tabs = [t for t, _ in _TABS] if whole <= cols else [shown]
@@ -2728,7 +2875,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
         if tab != shown:
             label = " " + names[tab] + " "
             spans.append((at, at + text_width(label), tab))
-            text += label
+            text += (_c("muted") + label + _RESET) if tab in muted else label
             at += text_width(label)
             continue
         room = cols - at - 2 - (0 if len(tabs) == 1 else text_width("".join([" " + names[t] + " " for t in tabs if t != shown])))
@@ -2903,7 +3050,31 @@ def crumbs(state: dict) -> list:
     out = [_crumb(state, v) for v, _ in state.get("views", [])]
     if state["view"] != None:
         out.append(_crumb(state, state["view"]))
+    builds = len(state.get("builds", [])) + (1 if state.get("building") else 0)
+    if state.get("tab") in _PICKED_TABS and builds > 1 and state["view"] == None:
+        out.append("%d of %d" % (picked_build(state) + 1, builds))
     return out
+
+# The tabs that show one build, picked with `<`/`>`.
+_PICKED_TABS = ["metrics", "invocation"]
+
+def picked_build(state: dict) -> int:
+    """Which build the Metrics and Invocation tabs show, oldest 0: the one
+    `<`/`>` picked, else the newest (the running one, while one runs)."""
+    newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
+    picked = state.get("picked_build")
+    return newest if picked == None else max(0, min(picked, newest))
+
+def build_view(state: dict) -> dict:
+    """`state` as the picked build's tabs read it: an older build's own
+    counts, invocation and timings over the newest's."""
+    i = picked_build(state)
+    builds = state.get("builds", [])
+    if i >= len(builds) or (i == len(builds) - 1 and not state.get("building")):
+        return state
+    view = dict(state)
+    view.update(builds[i]["snapshot"])
+    return view
 
 def back_to(state: dict, level: int):
     """The shown tab back to its `level`th view (0 its own: the list or
@@ -2924,11 +3095,15 @@ def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
     tab = state.get("tab", "console")
     log_h = max(1, rows - len(out) - 3)
     width = cols - 4
-    if tab == "failures":
+    if not built(state):
+        lines = [_c("muted") + "No build yet" + _RESET]
+        title = ""
+    elif tab == "failures":
         lines = (action_rows if state.get("list") == "actions" else failure_rows)(state, log_h, width)
         title = ("Actions with output · " if state.get("list") == "actions" else "") + "↑↓ choose · Enter show its log"
     else:
-        lines = metrics_lines(state) if tab == "metrics" else invocation_lines(state)
+        view = build_view(state)
+        lines = metrics_lines(view) if tab == "metrics" else invocation_lines(view)
         top = min(state.get("tab_scroll", 0), max(0, len(lines) - log_h))
         state["tab_scroll"] = top
         lines = lines[top:]
@@ -3092,6 +3267,8 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
     if cli:
         kinds = [severity(line) for line in lines]
         state["block"] = ""
+        for line in lines:
+            note_phase(state, line)
     else:
         kinds, state["block"] = classify(lines, state.get("block", ""))
     colour_of = state.setdefault("colour_of", {})
@@ -3344,6 +3521,14 @@ def on_key(state: dict, key: str, page: int) -> bool:
         names = [tab for tab, _ in _TABS]
         i = names.index(state.get("tab", "console")) if state.get("tab", "console") in names else 0
         show_tab(state, names[(i + (1 if key == "tab" else -1)) % len(names)])
+        return False
+    if key == "p":
+        state["panes"] = not panes_shown(state)
+        return False
+    if key in ("<", ">") and state.get("tab") in _PICKED_TABS and state["view"] == None:
+        newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
+        state["picked_build"] = max(0, min(newest, picked_build(state) + (1 if key == ">" else -1)))
+        state["tab_scroll"] = 0
         return False
     if state.get("tab") in ("metrics", "invocation") and state["view"] == None:
         if key in ("K", "home", "J", "end"):
@@ -3735,6 +3920,72 @@ def _dashboard_impl(ctx: FeatureContext):
         got = screen.output(with_links = True, with_colour = True)
         _add_lines([line for line, _, _ in got], [links for _, links, _ in got], [coloured for _, _, coloured in got], cli = True)
 
+    def _take(task_ctx):
+        """Take the terminal for the task, from its start: what it writes
+        is captured into the console from here on."""
+        state["screen"] = task_ctx.std.term.take()
+        state["drawn"] = None
+
+        # What the task wrote before the screen (the banner, its header),
+        # first in the console; on the main screen already, so not
+        # replayed on leaving.
+        early = state["screen"].earlier()
+        state["seeded"] = state.get("seeded", 0) + len(early)
+        _add_lines([line for line, _, _ in early], [links for _, links, _ in early], [coloured for _, _, coloured in early], cli = True)
+
+        # The mouse taken unless asked not to (`m` outlives a screen the
+        # runtime took back), and its wheel as arrows while it is the
+        # terminal's.
+        state["screen"].wheel_keys(True)
+        if state["mouse"]:
+            state["screen"].mouse(True)
+        state["re"] = task_ctx.std.re
+        state["cli_version"] = task_ctx.std.env.aspect_cli_version() or ""
+        state["read"] = task_ctx.std.fs.try_read_tail
+        state["ansi"] = task_ctx.std.re.compile(ANSI)
+        state["controls"] = task_ctx.std.re.compile(CONTROLS)
+        state["env"] = task_ctx.std.env
+        state["process"] = task_ctx.std.process
+        state["io"] = task_ctx.std.io
+        state["fs"] = task_ctx.std.fs
+        state["syntax"] = task_ctx.std.syntax
+        state["cancellation"] = task_ctx.cancellation
+        state["task"] = task_ctx.task.kind
+        state["start_ms"] = int(monotonic() * 1000)
+        state["task_start_ms"] = state["start_ms"]
+
+    def _pre(task_ctx):
+        if task_ctx.task.kind not in _KINDS:
+            task_ctx.std.io.stderr.write("Dashboard: for %s; %s shows its console\n" % (", ".join(_KINDS), task_ctx.task.kind))
+            return
+        if task_ctx.std.term.taken:
+            return
+        _take(task_ctx)
+        _tick(state["screen"])
+
+    def _tick(screen):
+        """One frame while no build draws them: the CLI's new lines, the keys
+        waiting, the screen redrawn if it changed."""
+        state["now_ms"] = int(monotonic() * 1000)
+        state["frames"] += 1
+        _add_output(screen)
+        cols, rows = screen.size()
+        page = console_height(state, cols, rows)
+        for _ in range(_MAX_KEYS):
+            key = screen.key()
+            if key == None:
+                break
+            on_key(state, key, page)
+        _draw(screen, render(state, cols, rows))
+
+    def _idle(task_ctx):
+        # Between builds, and before the first: a build's frames draw while
+        # it runs, and the finished screen draws itself.
+        screen = state["screen"]
+        if screen == None or not screen.held or state.get("building") or state["ended"]:
+            return
+        _tick(screen)
+
     def _frame(task_ctx, build):
         # A build whose console is shown (its own `output =`) is left alone.
         feed = build.output_feed()
@@ -3745,45 +3996,19 @@ def _dashboard_impl(ctx: FeatureContext):
         if state["screen"] != None and not state["screen"].held:
             state["screen"] = None
         if state["screen"] == None:
-            if task_ctx.std.term.taken:
-                return
-            state["screen"] = task_ctx.std.term.take()
-            state["drawn"] = None
+            return
 
-            # The task's output from its start, before any of Bazel's lines;
-            # already on the main screen, so not replayed on leaving.
-            early = state["screen"].earlier()
-            state["seeded"] = state.get("seeded", 0) + len(early)
-            _add_lines([line for line, _, _ in early], [links for _, links, _ in early], [coloured for _, _, coloured in early], cli = True)
-
-            # The mouse taken unless asked not to (`m` outlives a screen the
-            # runtime took back), and its wheel as arrows while it is the
-            # terminal's.
-            state["screen"].wheel_keys(True)
-            if state["mouse"]:
-                state["screen"].mouse(True)
-            state["re"] = task_ctx.std.re
-            state["cli_version"] = task_ctx.std.env.aspect_cli_version() or ""
-            state["read"] = task_ctx.std.fs.try_read_tail
-            state["ansi"] = task_ctx.std.re.compile(ANSI)
-            state["controls"] = task_ctx.std.re.compile(CONTROLS)
-            state["env"] = task_ctx.std.env
-            state["process"] = task_ctx.std.process
-            state["io"] = task_ctx.std.io
-            state["fs"] = task_ctx.std.fs
-            state["syntax"] = task_ctx.std.syntax
-            state["cancellation"] = task_ctx.cancellation
-            state["task"] = task_ctx.task.kind
-            state["start_ms"] = int(monotonic() * 1000)
-
-        # For the logs the history keeps of its failures.
+        # The next build, or a retried attempt of this one: its own counts
+        # and failures, in the task's console.
+        now = int(monotonic() * 1000)
+        if not state.get("building") or state["fresh"]:
+            new_build(state, now)
+            state["building"] = True
         state["build"] = build
-        if state["fresh"]:
-            reset_attempt(state, int(monotonic() * 1000))
         state["ended"] = False
         state["pages"] = results_pages(state["bes_base"], state["bazel_uuid"], state["update"])
         screen = state["screen"]
-        state["now_ms"] = int(monotonic() * 1000)
+        state["now_ms"] = now
         state["frames"] += 1
         _add_lines(feed["lines"], feed.get("links"), feed.get("colours"))
         state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
@@ -3833,26 +4058,17 @@ def _dashboard_impl(ctx: FeatureContext):
         if screen == None or not screen.held:
             return
         state["cancelling"] = state["cancelling"] or task_ctx.cancellation.root.cancelled
-        state["progress"] = []
-        stays = task_ctx.task.kind in _STAY_KINDS
+        if state["progress"]:
+            state["last_counts"] = progress_counts(state["progress"][0])
+        state["build_failed"] = bool(build.output_fatal)
 
-        # Kept running until `_post`, where the finished screen's keys are
-        # read: what follows the console (BES uploads, attempt-end hooks)
-        # is the task's, and Ctrl+C meanwhile still cancels it.
-        state["ended"] = not stays
-        state["phase"] = _FINISHING if stays else "Done"
+        # Folded to a row: the task goes on (`lint`'s reports, the next
+        # build), and its finished screen shows its builds.
+        fold_build(state, int(monotonic() * 1000))
+        state["building"] = False
+        state["progress"] = []
         cols, rows = screen.size()
         _draw(screen, render(state, cols, rows))
-
-        # A task that goes on after its build (`lint`'s reports, `warming`'s
-        # uploads) gets the terminal back now; only `build` and `test` end
-        # with their build, and keep the screen up after.
-        if not stays:
-            state["screen"] = None
-            _add_output(screen)
-            rest = screen.release(replay_stderr = False)
-            _add_lines([_plain(line) for line in rest], None, rest, cli = True)
-            _report(task_ctx)
 
     def _stay(task_ctx, screen, countdown_ms):
         """Keep the finished screen up, scrollable, until a leave key, or
@@ -3920,7 +4136,12 @@ def _dashboard_impl(ctx: FeatureContext):
             # out, and would force the exit before a key came.
             if task_ctx.cancellation.root.cancelled:
                 state["cancelling"] = True
-            if ctx.args.stay != "never" and task_ctx.std.io.stdin.is_tty and not state["cancelling"]:
+            state["verdict"] = outcome.exit_code == 0
+
+            # A task that failed before any build has nothing to browse:
+            # gone at once, its error last in the scrollback.
+            early = not built(state) and outcome.exit_code != 0
+            if ctx.args.stay != "never" and task_ctx.std.io.stdin.is_tty and not state["cancelling"] and not early:
                 state["ended"] = True
                 state["progress"] = []
                 state["phase"] = "Done"
@@ -3966,11 +4187,13 @@ def _dashboard_impl(ctx: FeatureContext):
     t.exec_log_event.append(ExecLogHook(on_entry = _spawn, kinds = ["spawn"]))
     t.bazel_attempt_end.append(_attempt_end)
     ctx.traits[Phases].task_update.append(_update)
+    ctx.hooks.pre_task(_pre)
+    ctx.hooks.idle(_idle)
     ctx.hooks.post_task(_post)
 
 Dashboard = feature(
     display_name = "Dashboard",
-    summary = "Replace Bazel's terminal UI with a full-screen dashboard of running actions, results and a scrollable console.",
+    summary = "Run build, test, lint, gazelle and format in a full-screen dashboard: the task's console, its builds' running actions and results, failures, metrics.",
     implementation = _dashboard_impl,
     enabled = False,
     args = {
