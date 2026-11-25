@@ -1106,8 +1106,9 @@ TIPS_HINT_ID = "tips-hint"
 
 def terminal_hint_lines(color_on = False, console = None):
     """The end-of-task `tips-hint` tip, on one line: how to silence a tip, by
-    flag (its own id the example) or in `.aspect/config.axl`, and the docs."""
-    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `.aspect/config.axl`; see %s" % (TIPS_HINT_ID, CLI_TIPS_SILENCE_URL)
+    flag (its own id the example) or in `.aspect/config.axl`, a file named
+    to edit and so `unlinked`, and the docs."""
+    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `%s`; see %s" % (TIPS_HINT_ID, ansi.unlinked(".aspect/config.axl"), CLI_TIPS_SILENCE_URL)
     return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, "", color_on, console)
 
 def _console(ctx):

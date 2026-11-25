@@ -1272,7 +1272,8 @@ pub(crate) fn linked(line: &str) -> String {
             String::from_utf8(linker.link_written(line.as_bytes()))
                 .unwrap_or_else(|_| line.to_string())
         }
-        None => line.to_string(),
+        None => String::from_utf8_lossy(&bazel::console::links::strip_unlinked(line.as_bytes()))
+            .into_owned(),
     }
 }
 
@@ -1287,7 +1288,10 @@ impl starlark::PrintHandler for TolerantPrintHandler {
                 let _ = std::io::stderr().write_all(&line);
                 copy_output(&line);
             }
-            None => errln!("{text}"),
+            None => {
+                let text = bazel::console::links::strip_unlinked(text.as_bytes());
+                errln!("{}", String::from_utf8_lossy(&text));
+            }
         }
         Ok(())
     }

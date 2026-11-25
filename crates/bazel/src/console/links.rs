@@ -12,9 +12,11 @@
 //! then the directory the task runs from. A path `relativize_paths` made
 //! relative it links itself, as only it knows the file (`BUILD.bazel` from
 //! a package directory is that package's), even one that does not exist:
-//! the linker leaves text already linked alone. A path in a code span
-//! (`` `.aspect/config.axl` ``) is text to type, not a place to open, and is
-//! left alone; a URL in one is still linked. A response file's path
+//! the linker leaves text already linked alone. Text between
+//! [`UNLINKED_START`] and [`UNLINKED_END`] (AXL's `ansi.unlinked`, for a
+//! path that is a word to type, not a place to open) is never linked, its
+//! URLs included, and the markers go ([`strip_unlinked`] where no linker
+//! runs). A response file's path
 //! (`@pkg/x.params`) is linked after its `@`. Only the path is linked, not
 //! a `:line:col` after it. A path to nothing (a sandbox gone with its
 //! action, a label, prose) or cut short (`src/a.c…`) is left alone. A URL
@@ -93,6 +95,27 @@ const REMEMBERED: usize = 4096;
 
 /// The longest record linked: a longer one (a command line) is left as it is.
 const MAX_RECORD: usize = 8192;
+
+/// Where text that is never linked starts: an APC string, which a terminal
+/// that is handed one ignores, though the linker takes it out.
+pub const UNLINKED_START: &[u8] = b"\x1b_aspect:unlinked\x1b\\";
+
+/// Where text that is never linked ends ([`UNLINKED_START`]).
+pub const UNLINKED_END: &[u8] = b"\x1b_aspect:/unlinked\x1b\\";
+
+/// `record` without [`UNLINKED_START`] and [`UNLINKED_END`], for text no
+/// linker sees.
+pub fn strip_unlinked(record: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !contains(record, b"\x1b_aspect:") {
+        return std::borrow::Cow::Borrowed(record);
+    }
+    std::borrow::Cow::Owned(
+        ansi::segments(record)
+            .filter(|&(escape, seg)| !(escape && (seg == UNLINKED_START || seg == UNLINKED_END)))
+            .flat_map(|(_, seg)| seg.iter().copied())
+            .collect(),
+    )
+}
 
 /// What a link to a file opens: ripgrep's `--hyperlink-format`, an alias or
 /// a template over `{path}`, `{line}`, `{column}` and `{host}`, or nothing.
@@ -535,15 +558,20 @@ impl Linker {
         if record.len() > MAX_RECORD
             || known.is_empty() && !contains(record, b"/") && !contains(record, b".")
         {
-            return record.to_vec();
+            return strip_unlinked(record).into_owned();
         }
         // The record's text, escapes removed, where a path's line is read
         // though colour sets it apart (`src/a.ts` `:` `12`).
         let plain = ansi::strip(record);
         let mut out = Vec::with_capacity(record.len());
         let mut inside = false;
+        let mut unlinked = false;
         let mut at = 0;
         for (escape, seg) in ansi::segments(record) {
+            if escape && (seg == UNLINKED_START || seg == UNLINKED_END) {
+                unlinked = seg == UNLINKED_START;
+                continue;
+            }
             if escape {
                 if let Some(url) = osc8_url(seg) {
                     inside = !url.is_empty();
@@ -551,7 +579,7 @@ impl Linker {
                 out.extend_from_slice(seg);
                 continue;
             }
-            if inside {
+            if inside || unlinked {
                 out.extend_from_slice(seg);
             } else {
                 out.extend(self.text(seg, at, known, &plain));
@@ -619,10 +647,6 @@ impl Linker {
             // After a `:` it is a label's target (`//pkg:BUILD`) or a URL's
             // rest, not a path of its own.
             if start > 0 && text[start - 1] == b':' {
-                continue;
-            }
-            // In a code span it is text to type, not a place to open.
-            if in_code_span(plain, base + start) {
                 continue;
             }
             // Cut short, it names some other file, if any.
@@ -843,13 +867,6 @@ fn active_style(text: &[u8]) -> Vec<u8> {
     style
 }
 
-/// Whether byte `at` of a record's text (`plain`) is inside a code span:
-/// after an odd number of backticks, with one more to close it.
-fn in_code_span(plain: &[u8], at: usize) -> bool {
-    let at = at.min(plain.len());
-    plain[..at].iter().filter(|&&b| b == b'`').count() % 2 == 1 && plain[at..].contains(&b'`')
-}
-
 /// The URL an OSC 8 sequence links to, empty for the one that ends a link,
 /// or None for another escape.
 fn osc8_url(seq: &[u8]) -> Option<&[u8]> {
@@ -1050,6 +1067,35 @@ mod tests {
             link(&mut l, &format!("see {abs}.")),
             format!("see {}.", file(dir.path(), "src/a.cc", &abs))
         );
+    }
+
+    #[test]
+    fn unlinked_text_is_never_linked_and_its_markers_go() {
+        let (_dir, mut l) = linker();
+        let mark = |s: &str| {
+            let mut v = super::UNLINKED_START.to_vec();
+            v.extend_from_slice(s.as_bytes());
+            v.extend_from_slice(super::UNLINKED_END);
+            String::from_utf8(v).unwrap()
+        };
+        let record = format!(
+            "edit {} or src/a.cc, see https://x.test/a",
+            mark("src/a.cc https://x.test/b")
+        );
+        let out = String::from_utf8(l.link(record.as_bytes())).unwrap();
+        assert!(
+            out.starts_with("edit src/a.cc https://x.test/b or "),
+            "{out:?}"
+        );
+        assert_eq!(out.matches("\x1b]8;;file://").count(), 1, "{out:?}");
+        assert!(out.contains("\x1b]8;;https://x.test/a"), "{out:?}");
+        assert!(!out.contains("\x1b]8;;https://x.test/b"), "{out:?}");
+        assert!(!out.contains("aspect:"), "the markers go: {out:?}");
+        assert_eq!(
+            String::from_utf8(l.link(mark("none").as_bytes())).unwrap(),
+            "none"
+        );
+        assert_eq!(&*super::strip_unlinked(mark("a.b").as_bytes()), b"a.b");
     }
 
     #[test]
@@ -1951,31 +1997,6 @@ mod tests {
         );
         // A web link's URL is never written out, so nothing to count.
         assert_eq!(written_urls(web.as_bytes(), false), web.as_bytes());
-    }
-
-    #[test]
-    fn a_path_in_a_code_span_is_text_to_type() {
-        let (_dir, mut l) = linker();
-        let out = String::from_utf8(l.link(b"edit `src/a.cc` or src/a.cc, see `https://x.test/a`"))
-            .unwrap();
-        assert!(
-            out.contains("edit `src/a.cc` or "),
-            "the code span's path stays plain: {out:?}"
-        );
-        assert_eq!(
-            out.matches("\x1b]8;;file://").count(),
-            1,
-            "the bare path is linked: {out:?}"
-        );
-        assert!(
-            out.contains("\x1b]8;;https://x.test/a"),
-            "a URL in a code span is linked: {out:?}"
-        );
-        let out = String::from_utf8(l.link(b"a ` before src/a.cc")).unwrap();
-        assert!(
-            out.contains("\x1b]8;;file://"),
-            "an unclosed backtick opens no span: {out:?}"
-        );
     }
 
     #[test]
