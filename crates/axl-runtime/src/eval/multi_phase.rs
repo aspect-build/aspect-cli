@@ -778,7 +778,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     /// Print the banner and the task's opening `header` slot through
     /// `console`, for the task at `task_index` in `self.tasks()`, then the
-    /// console's own config warnings ([`Console::warnings`]).
+    /// console's own config warnings ([`Console::warnings`]). What is written
+    /// from here on is this task's output, no earlier task's
+    /// ([`crate::out::begin_early`]).
     ///
     /// Called from the CLI before `execute_features_with_args` so that any
     /// diagnostic output emitted during feature initialization (auth WARNINGs,
@@ -795,6 +797,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
+        crate::out::begin_early();
         let color = console.color();
         let (verb_seq, reset) = running_verb_color(color);
         let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);

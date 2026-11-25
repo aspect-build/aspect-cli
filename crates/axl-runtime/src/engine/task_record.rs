@@ -198,6 +198,12 @@ impl TaskRecord {
 /// shorter ones would match too much text that is not them.
 const MIN_SCRUBBED: usize = 4;
 
+/// Whether `value`, a secret, is scrubbed wherever it appears: by [`scrub`]
+/// in the record and in the task's output files (`crate::out`).
+pub fn scrubs(value: &str) -> bool {
+    value.chars().count() >= MIN_SCRUBBED
+}
+
 /// `argv` with secrets redacted: the value of each of `secret_flags`, as
 /// `--flag=value`, `--flag value`, `-f value`, `-fvalue`, or in a cluster of
 /// short flags (`-vf value`, `-vfvalue`); only `--flag=value` and `-f=value`
@@ -230,10 +236,7 @@ pub fn secret_values(
 /// [`MIN_SCRUBBED`] characters) in it replaced by the redaction marker.
 pub fn scrub(args: &[String], values: &[String]) -> Vec<String> {
     let redacted = bazel::bes::redact::REDACTED;
-    let mut values: Vec<&String> = values
-        .iter()
-        .filter(|v| v.chars().count() >= MIN_SCRUBBED)
-        .collect();
+    let mut values: Vec<&String> = values.iter().filter(|v| scrubs(v)).collect();
     // Longest first, so a value inside another is not replaced first.
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     args.iter()
@@ -466,6 +469,11 @@ impl RecordFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The task's secret flag values, which its record and output redact.
+    pub fn secrets(&self) -> &[String] {
+        &self.secrets
     }
 
     /// Change the record and write it.

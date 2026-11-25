@@ -929,7 +929,8 @@ impl Console {
         if let Some(hold) = hold {
             reader = reader.holding(hold);
         }
-        let pipeline = config.pipeline();
+        let mut pipeline = config.pipeline();
+        pipeline.shape.copy = Some(crate::out::copy_console_output);
         let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
         let feed = pipeline.feed.clone();
         let forwarder = Forwarder::spawn_reported(
@@ -955,6 +956,7 @@ impl Console {
                         .unwrap_or_else(|| crate::color::stdout_supports_color()),
                     // A stdout of its own is the program's output, not the
                     // console UI: shown as written even when nothing else is.
+                    copy: Some(crate::out::copy_output),
                     ..Default::default()
                 };
                 (
@@ -4200,11 +4202,17 @@ Test = task(implementation = _impl)
             {
                 continue;
             }
-            let names: Vec<String> = std::fs::read_dir(&entry)
+            let mut names: Vec<String> = std::fs::read_dir(&entry)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(names, ["task.json"], "{why}: {}", entry.display());
+            names.sort();
+            assert_eq!(
+                names,
+                ["output.ansi", "output.log", "task.json"],
+                "{why}: {}",
+                entry.display()
+            );
         }
     }
 

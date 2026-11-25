@@ -166,7 +166,8 @@ impl Forwarder {
                 let mut splitter = Splitter::new(
                     processors,
                     Destination::new(forward, shape.strip_colour)
-                        .feeding(shape.feed.clone(), shape.hidden),
+                        .feeding(shape.feed.clone(), shape.hidden)
+                        .copying(shape.copy),
                     screen,
                 );
                 let mut buf = [0u8; READ_BUF_SIZE];
@@ -512,7 +513,11 @@ impl Splitter {
             }
         }
         current.extend_from_slice(boundary);
+        // What curses redraws (the progress area, a spinner's `\r`) is no
+        // line of the copy.
+        self.out.settled = !line.drawn && !line.returns;
         self.out.write(&current);
+        self.out.settled = true;
         true
     }
 }
@@ -531,6 +536,9 @@ pub struct Shape {
     pub feed: Option<Arc<Feed>>,
     /// Write nothing to the destination: what is shown goes to `feed` only.
     pub hidden: bool,
+    /// Also given every settled line written, shown or hidden: the task
+    /// history's copy of its output.
+    pub copy: Option<fn(&[u8])>,
 }
 
 /// The destination. A write that would block (stderr left nonblocking by
@@ -538,6 +546,9 @@ pub struct Shape {
 /// it.
 struct Destination {
     inner: Box<dyn Write + Send>,
+    copy: Option<fn(&[u8])>,
+    /// Whether what is being written is a settled line, for `copy`.
+    settled: bool,
     strip_colour: bool,
     feed: Option<Arc<Feed>>,
     hidden: bool,
@@ -550,12 +561,20 @@ impl Destination {
     fn new(inner: Box<dyn Write + Send>, strip_colour: bool) -> Self {
         Self {
             inner,
+            copy: None,
+            settled: true,
             strip_colour,
             feed: None,
             hidden: false,
             at_line_start: true,
             failed: false,
         }
+    }
+
+    /// Also give every settled line written to `copy`, shown or hidden.
+    fn copying(mut self, copy: Option<fn(&[u8])>) -> Self {
+        self.copy = copy;
+        self
     }
 
     /// Also write to `feed`, and with `hidden` only there.
@@ -571,6 +590,9 @@ impl Destination {
         }
         if let Some(feed) = &self.feed {
             feed.write(bytes);
+        }
+        if let (Some(copy), true) = (self.copy, self.settled) {
+            copy(bytes);
         }
         if self.hidden {
             return;

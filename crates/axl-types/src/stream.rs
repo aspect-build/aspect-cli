@@ -118,6 +118,22 @@ impl Read for &StdinSource {
     }
 }
 
+/// Where what AXL writes to stdout and stderr is also copied (the task
+/// history's output files); see [`copy_output_to`].
+static COPY_OUTPUT: std::sync::OnceLock<fn(&[u8])> = std::sync::OnceLock::new();
+
+/// Copy what `ctx.std.io.stdout` and `stderr` write to `copy` from now on.
+/// The first call wins.
+pub fn copy_output_to(copy: fn(&[u8])) {
+    let _ = COPY_OUTPUT.set(copy);
+}
+
+fn copy_output(data: &[u8]) {
+    if let Some(copy) = COPY_OUTPUT.get() {
+        copy(data);
+    }
+}
+
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Readable {
     Stdin(#[allocative(skip)] Arc<StdinSource>),
@@ -449,9 +465,14 @@ fn writable_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Writes a buffer into this writer, returning how many bytes were written.
+    ///
+    /// What is written to stdout or stderr is also copied to the task
+    /// history's `output.log` and `output.ansi`; `copy = False` leaves it
+    /// out of them.
     fn write<'v>(
         this: values::Value,
         #[starlark(require = pos)] buf: values::Value,
+        #[starlark(require = named, default = true)] copy: bool,
     ) -> anyhow::Result<u32> {
         let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
         let data: &[u8] = if let Some(s) = buf.unpack_str() {
@@ -480,9 +501,17 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
                 match inner.lock().write(data) {
-                    Ok(n) => Ok(n as u32),
+                    Ok(n) => {
+                        if copy {
+                            copy_output(&data[..n]);
+                        }
+                        Ok(n as u32)
+                    }
                     // Reported as written; see `ignore_broken_pipe`.
                     Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        if copy {
+                            copy_output(data);
+                        }
                         Ok(data.len() as u32)
                     }
                     Err(err) => Err(anyhow!(err)),
@@ -495,9 +524,17 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
                 match inner.lock().write(data) {
-                    Ok(n) => Ok(n as u32),
+                    Ok(n) => {
+                        if copy {
+                            copy_output(&data[..n]);
+                        }
+                        Ok(n as u32)
+                    }
                     // Reported as written; see `ignore_broken_pipe`.
                     Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        if copy {
+                            copy_output(data);
+                        }
                         Ok(data.len() as u32)
                     }
                     Err(err) => Err(anyhow!(err)),

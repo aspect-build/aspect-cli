@@ -700,6 +700,7 @@ fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
 
 fn main() -> ExitCode {
     axl_runtime::startup::mark_process_start();
+    axl_runtime::out::copy_axl_output();
     // Install before any other machinery, so fatal-signal reporting covers
     // everything after it (see the `crash_handler` module docs).
     crash_handler::install();
