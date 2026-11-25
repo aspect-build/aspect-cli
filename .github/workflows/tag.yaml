@@ -50,4 +50,3 @@ jobs:
     uses: ./.github/workflows/publish_release.yaml
     with:
       tag_name: ${{ needs.tag.outputs.new-tag }}
-      prerelease: ${{ inputs.prerelease }}

@@ -6,19 +6,14 @@ on:
         description: 'The tag name for the release (e.g., v2024.1.0)'
         required: true
         type: string
-      prerelease:
-        description: 'Mark the release as a pre-release (tag ends in -pre)'
-        required: false
-        type: boolean
-        default: false
   push:
     tags:
       - 'v202[0-9].[0-9]+.[0-9]+'
       - 'v202[0-9].[0-9]+.[0-9]+-pre'
 env:
   TAG: ${{ inputs.tag_name || github.ref_name }}
-  # A pushed `-pre` tag has no inputs, so the suffix decides there too.
-  PRERELEASE: ${{ inputs.prerelease || endsWith(github.ref_name, '-pre') }}
+  # The tag alone decides, so the release flag and the notes can't disagree.
+  PRERELEASE: ${{ endsWith(inputs.tag_name || github.ref_name, '-pre') }}
 permissions:
   id-token: write
   attestations: write
