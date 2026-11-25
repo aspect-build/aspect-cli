@@ -717,6 +717,7 @@ impl Linker {
     /// link in this linker's editor, or Some(None), no link, where there is
     /// none to make; None for any other URL, kept.
     fn instead_of_file_url(&self, url: &[u8]) -> Option<Option<String>> {
+        let url = url.trim_ascii_start();
         if !url
             .get(..5)
             .is_some_and(|s| s.eq_ignore_ascii_case(b"file:"))
@@ -1366,6 +1367,11 @@ mod tests {
         assert_eq!(
             l.link(b"x \x1b]8;;file:///bin/ls#\xff\x1b\\ls\x1b]8;;\x1b\\ y"),
             b"x ls y"
+        );
+        assert_eq!(
+            link(&mut l, "x \x1b]8;; file:///bin/ls\x1b\\ls\x1b]8;;\x1b\\ y"),
+            "x ls y",
+            "a file: URL after spaces is a file link too"
         );
     }
 
