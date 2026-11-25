@@ -627,7 +627,8 @@ def init_data():
             },
 
             # `aborted` comes from BuildFinished's exit code (see the
-            # `build_finished` arm of `process_event`). The reason/description
+            # `build_finished` arm of `process_event`), or from `conclude`
+            # for a cancelled run Bazel failed without saying so. The reason/description
             # are detail text for the rendered notice, taken from the last
             # `Aborted` payload seen; they never decide the verdict, so they
             # may be populated on a build that is not aborted (a skipped
@@ -5101,7 +5102,7 @@ def _pick_status(command, data, had_failure, terminal):
     a flaky-only test outcome flips to `warning`.
 
     Aborted outranking `failed` is deliberate. The flag is only set when Bazel
-    exited INTERRUPTED, where whatever failure was already recorded is a
+    exited INTERRUPTED, or the run was cancelled and Bazel failed, where whatever failure was already recorded is a
     consequence of the interrupt and "the build never finished" is the
     actionable fact. It also keeps the status consistent with
     `compute_invocation_state`, which returns the Aborted title label
@@ -5344,6 +5345,11 @@ def _results_new(ctx, command, report_uploader = None):
         # verdict off the reliable `success` bool and take the code a shell
         # would report.
         code = 0 if w.success else exit_code_of(w)
+
+        # A cancel can end the client before Bazel reports INTERRUPTED (one
+        # just after the client spawns): the run is aborted all the same.
+        if not w.success and ctx.cancellation.root.cancelled:
+            data["bazel"]["aborted"] = True
 
         # If retries occurred, append the final attempt so `bazel_attempts` holds
         # the full ordered history (failed priors + final).

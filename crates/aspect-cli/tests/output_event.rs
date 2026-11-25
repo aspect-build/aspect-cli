@@ -743,6 +743,64 @@ fn a_config_error_document_carries_the_errors_own_line() {
     assert_eq!(doc["message"], "no good", "{doc}");
 }
 
+/// A `BAZEL_REAL` that, given `verb`, touches `marker` and sleeps until
+/// stopped, and otherwise runs basil.
+fn stalling_bazel(dir: &Path, verb: &str, marker: &Path) -> std::path::PathBuf {
+    let wrapper = dir.join(format!("bazel-stalls-on-{verb}.sh"));
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = {verb} ]; then touch \"{}\"; exec sleep 60; fi\ndone\nexec \"{}\" \"$@\"\n",
+            marker.display(),
+            basil_bin()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wrapper
+}
+
+/// Spawn `cmd`, SIGINT it once `marker` exists, and return its exit code,
+/// stdout and stderr.
+fn interrupt_once(mut cmd: Command, marker: &Path) -> (Option<i32>, Vec<u8>, String) {
+    let _ = std::fs::remove_file(marker);
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawning aspect");
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr_pipe.read_to_string(&mut text);
+        text
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            marker.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: signalling a child this test spawned and has not reaped.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    let status = child.wait().unwrap();
+    (status.code(), stdout, stderr.join().unwrap())
+}
+
 /// A cancel while `bazel info` runs, before the build starts, ends with an
 /// `aborted` document and the cancel's exit code.
 #[test]
@@ -751,51 +809,88 @@ fn a_cancel_before_the_build_gets_an_aborted_document() {
         "def config(ctx: ConfigContext):\n    pass\n".to_string()
     });
     let started = dir.path().join("info-started");
-    let wrapper = dir.path().join("bazel-wrapper.sh");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = info ]; then touch \"{}\"; exec sleep 60; fi\ndone\nexec \"{}\" \"$@\"\n",
-            started.display(),
-            basil_bin()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let wrapper = stalling_bazel(dir.path(), "info", &started);
     for output in ["json", "ndjson"] {
-        let _ = std::fs::remove_file(&started);
-        let mut child = aspect(dir.path(), "build")
-            .arg(format!("--output={output}"))
-            .env("BAZEL_REAL", &wrapper)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawning aspect");
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while !started.exists() {
-            assert!(Instant::now() < deadline, "bazel info never started");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        // SAFETY: signalling a child this test spawned and has not reaped.
-        assert_eq!(
-            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
-            0
-        );
-        let mut stdout = Vec::new();
-        child
-            .stdout
-            .take()
-            .unwrap()
-            .read_to_end(&mut stdout)
-            .unwrap();
-        let status = child.wait().unwrap();
-        assert_eq!(status.code(), Some(130), "{output}");
+        let mut cmd = aspect(dir.path(), "build");
+        cmd.arg(format!("--output={output}"))
+            .env("BAZEL_REAL", &wrapper);
+        let (code, stdout, _) = interrupt_once(cmd, &started);
+        assert_eq!(code, Some(130), "{output}");
         let lines = json_lines(&stdout);
         let last = lines.last().expect("an error document");
         assert_eq!(last["error"], "aborted", "{output}: {lines:?}");
         assert_eq!(last["message"], "interrupted", "{output}: {lines:?}");
         assert_eq!(last.get("type").is_some(), output == "ndjson", "{last}");
+    }
+}
+
+/// A cancel that ends the Bazel client before it reports INTERRUPTED (one
+/// just after it spawns) still reads as aborted: in the document, and in the
+/// text bookend.
+#[test]
+fn a_cancel_as_the_client_starts_reports_aborted() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    let started = dir.path().join("build-started");
+    let wrapper = stalling_bazel(dir.path(), "build", &started);
+    let mut cmd = aspect(dir.path(), "build");
+    cmd.arg("--output=json").env("BAZEL_REAL", &wrapper);
+    let (_, stdout, stderr) = interrupt_once(cmd, &started);
+    let doc: serde_json::Value = serde_json::from_slice(&stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&stdout)));
+    assert_eq!(doc["status"], "aborted", "{doc}\n{stderr}");
+    assert!(stderr.contains("Invocation disconnected"), "{stderr}");
+    assert!(!stderr.contains("Failed to build"), "{stderr}");
+}
+
+/// A task that handles the cancel and returns 0 keeps its exit code, and
+/// stdout still gets its end: an `aborted` document, or the stream's last
+/// line.
+#[test]
+fn a_cancelled_task_that_returns_zero_still_ends_its_output() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let marker = dir.path().join("task-started");
+    let root = dir.path();
+    std::fs::write(root.join("MODULE.bazel"), "").unwrap();
+    std::fs::write(root.join("MODULE.aspect"), "").unwrap();
+    std::fs::create_dir(root.join(".aspect")).unwrap();
+    std::fs::write(
+        root.join(".aspect").join("fixture.axl"),
+        format!(
+            r#"load("@std//time.axl", "sleep")
+
+def _impl(ctx):
+    ctx.std.fs.write("{}", "")
+    for _ in range(6000):
+        if ctx.cancellation.root.cancelled:
+            return 0
+        sleep(10)
+    return 1
+
+patient = task(
+    implementation = _impl,
+    summary = "Wait for a cancel, then succeed.",
+    args = {{"output": args.string(default = "text", values = ["text", "json", "ndjson"])}},
+)
+"#,
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for output in ["json", "ndjson"] {
+        let mut cmd = aspect(root, "patient");
+        cmd.arg(format!("--output={output}"));
+        let (code, stdout, stderr) = interrupt_once(cmd, &marker);
+        assert_eq!(code, Some(0), "{output}: {stderr}");
+        let lines = json_lines(&stdout);
+        assert_eq!(lines.len(), 1, "{output}: {lines:?}");
+        assert_eq!(lines[0]["error"], "aborted", "{output}: {lines:?}");
+        assert_eq!(
+            lines[0].get("type").is_some(),
+            output == "ndjson",
+            "{lines:?}"
+        );
     }
 }
 

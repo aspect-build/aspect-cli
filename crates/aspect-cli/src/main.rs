@@ -380,7 +380,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         if file.destination == FileDestination::Stdout {
                             errln!(
                                 "warning: a stdout telemetry exporter is configured, but \
-                                 {owner} — redirecting it to stderr."
+                                 {owner}, so it writes to stderr instead."
                             );
                             file.destination = FileDestination::Stderr;
                         }
@@ -416,9 +416,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 task_start.elapsed(),
             );
             let exit = exit.map_err(anyhow::Error::from)?;
-            if exit.is_some_and(|code| code != 0)
-                && let Some(why) = cancelled()
-            {
+            if let Some(why) = cancelled() {
                 json_error("aborted", why, true);
             }
 
@@ -811,8 +809,9 @@ fn json_error(error: &str, message: &str, parsed: bool) {
 }
 
 /// Why the run was cancelled (`interrupted`, `terminated`, or `cancelled`
-/// when AXL cancelled it itself), or `None` when it was not: an exit then is
-/// `json_error`'s `aborted`.
+/// when AXL cancelled it itself), or `None` when it was not. A cancelled run
+/// that ends without its document gets `json_error`'s `aborted`, whatever
+/// its exit code, so a stream always has its last line.
 fn cancelled() -> Option<&'static str> {
     let signals = Signals::global();
     signals
@@ -876,13 +875,12 @@ fn main() -> ExitCode {
                 // `{err:#}` walks the chain to the Starlark error, whose
                 // rendering carries the traceback.
                 exit.report(&format_args!("{err:#}"));
-                if exit.code != 0 {
-                    match cancelled() {
-                        Some(why) => json_error("aborted", why, true),
-                        None => {
-                            json_error("task_exit", exit.message.as_deref().unwrap_or(""), true)
-                        }
+                match cancelled() {
+                    Some(why) => json_error("aborted", why, true),
+                    None if exit.code != 0 => {
+                        json_error("task_exit", exit.message.as_deref().unwrap_or(""), true)
                     }
+                    None => {}
                 }
                 return ExitCode::from(exit.code);
             }
