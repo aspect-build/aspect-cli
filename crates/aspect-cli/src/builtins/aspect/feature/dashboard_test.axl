@@ -5,7 +5,7 @@ Run with:
   aspect dev test-dashboard
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "slowest_rows", "slowest_title", "step_match", "text_width", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -587,7 +587,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("] shows the log in the Failures tab", (browse["tab"], len(crumbs(browse))), ("failures", 1))
     browse["scroll"] = 2
     on_key(browse, "tab", 10)
-    _eq("Tab to Metrics: its own pane", (browse["tab"], browse["view"]), ("metrics", None))
+    _eq("Tab to Tips: its own pane", (browse["tab"], browse["view"]), ("tips", None))
     on_key(browse, "shift-tab", 10)
     _eq("and back: the log still open, as it was scrolled", (browse["tab"], browse["view"] != None, browse["scroll"]), ("failures", True, 2))
     _eq("Esc: back to the list", (on_key(browse, "esc", 10), browse["tab"], browse["view"], browse["focus"]), (False, "failures", None, "failures"))
@@ -1386,16 +1386,16 @@ def _impl(ctx: TaskContext) -> int:
     on_key(back, "esc", 10)
     _eq("then the console", back["view"], None)
 
-    # The tabs: 1 to 4 show each, Esc goes back to the console; the
+    # The tabs: 1 to 5 show each, Esc goes back to the console; the
     # Invocation tab redacts what may be a secret.
     tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "//..."], explicit_startup_options = [])})
-    on_key(tabs, "4", 10)
+    on_key(tabs, "5", 10)
     shown = _visible(render(tabs, 100, 40))
     _eq("the invocation tab, its secrets hidden", ("Flags given" in shown, "abc" in shown, "zzz" in shown, "u:p@" in shown, "--action_env=TOKEN=<REDACTED>" in shown), (True, False, False, False, True))
-    on_key(tabs, "3", 10)
+    on_key(tabs, "4", 10)
     _eq("metrics", "Actions" in _visible(render(tabs, 100, 40)), True)
     for tab in ("metrics", "invocation", "failures"):
-        on_key(tabs, str(1 + ["console", "failures", "metrics", "invocation"].index(tab)), 10)
+        on_key(tabs, str(1 + ["console", "failures", "tips", "metrics", "invocation"].index(tab)), 10)
         render(tabs, 100, 40)
         widths = [text_width(_visible(r)) for r in tabs["frame"]]
         _eq("every row of %s as wide as the screen" % tab, [_visible(r) for r in tabs["frame"][1:] if r and text_width(_visible(r)) != 100], [])
@@ -1403,17 +1403,17 @@ def _impl(ctx: TaskContext) -> int:
     _eq("Esc to the console", tabs["tab"], "console")
     on_key(tabs, "tab", 10)
     on_key(tabs, "tab", 10)
-    _eq("Tab cycles every tab", tabs["tab"], "metrics")
+    _eq("Tab cycles every tab", tabs["tab"], "tips")
     on_key(tabs, "shift-tab", 10)
     _eq("Shift+Tab goes back", tabs["tab"], "failures")
     render(tabs, 100, 40)
     spans = tabs["tab_spans"]
-    _eq("the tabs stay in order", [t for _, _, t in spans], ["console", "failures", "metrics", "invocation"])
-    on_key(tabs, "mouse-move:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
+    _eq("the tabs stay in order", [t for _, _, t in spans], ["console", "failures", "tips", "metrics", "invocation"])
+    on_key(tabs, "mouse-move:%d:%d" % (spans[4][0] + 1, tabs["tab_row"]), 10)
     if _role("hover") not in render(tabs, 100, 40):
         fail("render: the tab under the pointer is lit")
-    on_key(tabs, "mouse-press:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
-    on_key(tabs, "mouse-release:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
+    on_key(tabs, "mouse-press:%d:%d" % (spans[4][0] + 1, tabs["tab_row"]), 10)
+    on_key(tabs, "mouse-release:%d:%d" % (spans[4][0] + 1, tabs["tab_row"]), 10)
     _eq("a click takes a tab", tabs["tab"], "invocation")
 
     # Review fixes: a peek open as a test's summary arrives; a status
@@ -1483,6 +1483,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("J: the list's last", (gg["tab"], gg["selected"], gg["zoom"]), ("failures", 4, True))
     on_key(gg, "K", 10)
     _eq("K: its first", gg["selected"], 0)
+    on_key(gg, "tab", 10)
     on_key(gg, "tab", 10)
     on_key(gg, "J", 10)
     render(gg, 100, 10)
@@ -1656,6 +1657,29 @@ def _impl(ctx: TaskContext) -> int:
     _eq("ran spawns, longest first", slowest_rows(spawned), ["CppCompile //a:long; 12.4s", "CppCompile //a:short; 1.2s"])
     _eq("titled from the log", slowest_title(spawned), "Slowest")
     _eq("without it, what Bazel showed", slowest_title(_screen(ctx, [])), "Slowest seen")
+
+    # The Tips tab: its count in the tab, the most urgent first, `s`
+    # silencing on this machine and back, a failed save said on its row.
+    calls = []
+    tipped = _screen(ctx, ["x"], tips = [
+        {"id": "remote-miss", "severity": "suggestion", "title": "41% missed", "body": "Use a cache."},
+        {"id": "disk-full", "severity": "warning", "title": "98% full", "body": ""},
+    ], silencer = lambda id, on: (calls.append((id, on)), None)[1])
+    _eq("counted", tips_count(tipped), 2)
+    _eq("in the most urgent's colour", tips_role(tipped), "tip.warning")
+    _eq("the most urgent first", [t["id"] for t, _ in shown_tips(tipped)], ["disk-full", "remote-miss"])
+    tipped["tab"] = "tips"
+    _eq("Tips N in the tab bar", " Tips " in _visible(render(tipped, 100, 30)), True)
+    on_key(tipped, "s", 10)
+    _eq("s silences the chosen one", (calls, tips_count(tipped)), ([("disk-full", True)], 1))
+    _eq("it stays, saying so", "silenced on this machine · s to undo" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), True)
+    tipped["tip_selected"] = [i for i, (t, _) in enumerate(shown_tips(tipped)) if t["id"] == "disk-full"][0]
+    on_key(tipped, "s", 10)
+    _eq("s again undoes it", (calls[-1], tips_count(tipped)), (("disk-full", False), 2))
+    tipped["silencer"] = lambda id, on: "read-only file"
+    on_key(tipped, "s", 10)
+    _eq("a failed save says why and changes nothing", ("couldn't save to ~/.aspect/config.json: read-only file" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), tips_count(tipped)), (True, 2))
+    _eq("no tips", _visible(tips_lines(_screen(ctx, []), 96)[0]), "No tips")
 
     print("dashboard_test.axl: OK")
     return 0

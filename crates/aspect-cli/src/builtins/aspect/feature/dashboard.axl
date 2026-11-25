@@ -36,6 +36,12 @@ It takes the screen when the task starts and shows:
     succeeded and wrote output instead (with `--dashboard:actions=all`);
   - Metrics: spawns and cache hits by runner, Bazel's action cache, tests,
     targets, time and memory, the slowest actions;
+  - Tips: the task's tips the screen shows (`SURFACE_DASHBOARD`), the
+    most urgent first, counted in the tab in the most urgent one's colour;
+    the chosen one's body under it, and `s` silences it on this machine
+    (`~/.aspect/config.json`, `silence_tip`) or undoes that, the row left
+    muted saying so; the scrollback names what was silenced and how to undo
+    it;
   - Invocation: the command, ids, Bazel's version, the flags given,
     workspace status and build metadata, what may be a secret redacted;
   - before any build, Failures, Metrics and Invocation muted, saying `No
@@ -135,6 +141,7 @@ load("@std//time.axl", "monotonic")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/aspect_flags.axl", "publish_all_actions")
 load("../private/lib/results_pages.axl", "bes_results_url", "results_pages")
+load("../private/lib/tips.axl", "SURFACE_DASHBOARD", "collect_tips_sorted", "severity_rank", "silence_tip", "unsilence_tip")
 
 # The screen's colours, by the run's theme (`@std//theme.axl`), looked up
 # as they are drawn: the theme the run has then (the background the screen
@@ -233,7 +240,7 @@ _HELP = [
     ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation (or click one)"),
     ("Enter", "in the list: show the chosen log"),
     ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"),
-    ("a", "the list: failures, or actions that wrote output"),
+    ("a  s", "the list: failures, or actions that wrote output; in Tips, silence the chosen tip on this machine, or undo it"),
     ("z", "the console fills the screen, and back"),
     ("p  <  >", "the build panes open or folded, and back; in Metrics and Invocation, the previous or next build"),
     ("w", "wrap long lines (the default), or cut them at the edge"),
@@ -2705,6 +2712,72 @@ def scrolled_rows(rows: list, height: int, scroll: int, total = 0):
         return (shown + ["… and %d more" % (total - len(shown))], edge)
     return (rows[scroll:scroll + height], edge)
 
+def shown_tips(state: dict) -> list:
+    """The Tips tab's rows, most urgent first: the task's tips the screen
+    shows (`SURFACE_DASHBOARD`), and in its place each silenced this run,
+    as `(tip, silenced)`."""
+    silenced = state.get("silenced_tips", {})
+    rows = [(t, False) for t in state.get("tips", []) if t["id"] not in silenced]
+    rows += [(t, True) for t in silenced.values()]
+    return sorted(rows, key = lambda r: severity_rank(r[0].get("severity")))
+
+def tips_count(state: dict) -> int:
+    """How many tips the tab shows, the silenced not counted."""
+    return len([1 for _, silenced in shown_tips(state) if not silenced])
+
+def tips_role(state: dict) -> str:
+    """The role the tab's count is drawn in: its most urgent tip's."""
+    rows = [t for t, silenced in shown_tips(state) if not silenced]
+    return "tip." + rows[0].get("severity", "note") if rows else "muted"
+
+def tips_lines(state: dict, width: int) -> list:
+    """The Tips tab: each tip as `TIP[id] severity: title`, the chosen one
+    lit with its body under it, a silenced one muted saying so (or why it
+    could not be), then how to silence a tip."""
+    rows = shown_tips(state)
+    if not rows:
+        return [_c("muted") + "No tips" + _RESET]
+    at = max(0, min(state.get("tip_selected", 0), len(rows) - 1))
+    out = []
+    for i, (tip, silenced) in enumerate(rows):
+        mark = "▸ " if i == at else "  "
+        error = state.get("silence_errors", {}).get(tip["id"])
+        if silenced:
+            line = _c("muted") + "%sTIP[%s] silenced on this machine · s to undo: %s" % (mark, tip["id"], tip.get("title", "")) + _RESET
+        else:
+            severity = tip.get("severity", "note")
+            line = "%s%s[%s]%s %s%s%s: %s" % (mark + _c("tip.label") + "TIP" + _RESET, _c("tip.id"), tip["id"], _RESET, _c("tip." + severity), severity, _RESET, tip.get("title", ""))
+        out.append(line)
+        if error:
+            out.append("    " + _c("error") + "couldn't save to ~/.aspect/config.json: " + error + _RESET)
+        if i == at and not silenced:
+            for body in (tip.get("body") or "").split("\n"):
+                if body:
+                    out.append("    " + _c("muted") + body + _RESET)
+    out += ["", _c("muted") + "s silences a tip on this machine · for everyone: --tips:silence=<id> or .aspect/config.axl · aspect.build/go/tips" + _RESET]
+    return out
+
+def toggle_silence(state: dict, row):
+    """Silence the tip of `row` on this machine, or undo it, through
+    `state["silencer"]` (`silence_tip`/`unsilence_tip`, `~/.aspect/config.json`);
+    a write that fails says why on its row and changes nothing."""
+    tip, silenced = row
+    silencer = state.get("silencer")
+    if silencer == None:
+        return
+    error = silencer(tip["id"], not silenced)
+    errors = state.setdefault("silence_errors", {})
+    if error:
+        errors[tip["id"]] = error
+        return
+    errors.pop(tip["id"], None)
+    gone = state.setdefault("silenced_tips", {})
+    if silenced:
+        gone.pop(tip["id"], None)
+        state["tips"] = [t for t in state.get("tips", []) if t["id"] != tip["id"]] + [tip]
+    else:
+        gone[tip["id"]] = tip
+
 def console_height(state: dict, cols: int, rows: int) -> int:
     """How many lines the console shows at `cols` by `rows`: a page, for the
     keys that scroll by one."""
@@ -2897,7 +2970,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     return _frame_of(state, out, rows, cols)
 
 # The main pane's tabs, by the number key that shows each.
-_TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"), ("invocation", "Invocation")]
+_TABS = [("console", "Console"), ("failures", "Failures"), ("tips", "Tips"), ("metrics", "Metrics"), ("invocation", "Invocation")]
 
 # The tabs about a build, muted before one starts.
 _BUILD_TABS = ["failures", "metrics", "invocation"]
@@ -2944,6 +3017,8 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     for tab, name in _TABS:
         if tab == "failures" and (failed or blocked):
             name += " ✗%d" % failed + (" ○%d" % blocked if blocked else "")
+        if tab == "tips" and tips_count(state):
+            name += " %d" % tips_count(state)
         names[tab] = name
     muted = [] if built(state) else _BUILD_TABS
     parts = [names[shown]] + crumbs(state)
@@ -2956,8 +3031,11 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
         if tab != shown:
             label = " " + names[tab] + " "
             spans.append((at, at + text_width(label), tab))
-            text += (_c("muted") + label + _RESET) if tab in muted else label
             at += text_width(label)
+            if tab == "tips":
+                count = tips_count(state)
+                label = (" Tips " + _c(tips_role(state)) + "%d" % count + _RESET + " ") if count else (_c("muted") + " Tips " + _RESET)
+            text += (_c("muted") + label + _RESET) if tab in muted else label
             continue
         room = cols - at - 2 - (0 if len(tabs) == 1 else text_width("".join([" " + names[t] + " " for t in tabs if t != shown])))
         drawn = _shown_parts(parts, room)
@@ -3176,7 +3254,10 @@ def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
     tab = state.get("tab", "console")
     log_h = max(1, rows - len(out) - 3)
     width = cols - 4
-    if not built(state):
+    if tab == "tips":
+        lines = tips_lines(state, width)
+        title = "↑↓ choose · s silence on this machine" if shown_tips(state) else ""
+    elif not built(state):
         lines = [_c("muted") + "No build yet" + _RESET]
         title = ""
     elif tab == "failures":
@@ -3593,7 +3674,7 @@ def on_key(state: dict, key: str, page: int) -> bool:
         return False
     if state["search"]["open"] and _search_key(state, key, page):
         return False
-    if key in ("1", "2", "3", "4") and not state["search"]["open"]:
+    if key in ("1", "2", "3", "4", "5") and not state["search"]["open"]:
         # The main pane's tabs; the failures' list takes the keys.
         show_tab(state, _TABS[int(key) - 1][0])
         return False
@@ -3605,6 +3686,17 @@ def on_key(state: dict, key: str, page: int) -> bool:
         return False
     if key == "p":
         state["panes"] = not panes_shown(state)
+        return False
+    if state.get("tab") == "tips" and state["view"] == None and key in ("up", "k", "down", "j", "s"):
+        rows = shown_tips(state)
+        if not rows:
+            return False
+        at = max(0, min(state.get("tip_selected", 0), len(rows) - 1))
+        if key == "s":
+            toggle_silence(state, rows[at])
+        else:
+            at = max(0, min(len(rows) - 1, at + (-1 if key in ("up", "k") else 1)))
+        state["tip_selected"] = at
         return False
     at = state.get("actions_at")
     hover = state.get("hover")
@@ -4040,6 +4132,8 @@ def _dashboard_impl(ctx: FeatureContext):
         state["task"] = task_ctx.task.kind
         state["start_ms"] = int(monotonic() * 1000)
         state["task_start_ms"] = state["start_ms"]
+        state["silencer"] = lambda id, on: silence_tip(task_ctx, id) if on else unsilence_tip(task_ctx, id)
+        state["tips_from"] = lambda: collect_tips_sorted(task_ctx, surface = SURFACE_DASHBOARD)
 
     def _pre(task_ctx):
         if task_ctx.task.kind not in _KINDS:
@@ -4050,6 +4144,11 @@ def _dashboard_impl(ctx: FeatureContext):
         _take(task_ctx)
         _tick(state["screen"])
 
+    def _tips():
+        # The task's tips as they stand, for the Tips tab.
+        if state.get("tips_from") != None:
+            state["tips"] = state["tips_from"]()
+
     def _tick(screen):
         """One frame while no build draws them: the CLI's new lines, the keys
         waiting, the screen redrawn if it changed. Never inside itself: a key
@@ -4057,6 +4156,7 @@ def _dashboard_impl(ctx: FeatureContext):
         if state.get("ticking"):
             return
         state["ticking"] = True
+        _tips()
         state["now_ms"] = int(monotonic() * 1000)
         state["frames"] += 1
         _add_output(screen)
@@ -4112,6 +4212,8 @@ def _dashboard_impl(ctx: FeatureContext):
             state["phase"] = feed["progress"][0]
             note_progress(state, feed["progress"])
         _add_output(screen)
+        if state["frames"] % 10 == 0:
+            _tips()
         cols, rows = screen.size()
         page = console_height(state, cols, rows)
 
@@ -4162,6 +4264,11 @@ def _dashboard_impl(ctx: FeatureContext):
         cols, rows = screen.size()
         _draw(screen, render(state, cols, rows))
 
+    def _stay_tips():
+        # The end's tips, collected before the screen is given back, as the
+        # Tips feature prints them only after.
+        _tips()
+
     def _stay(task_ctx, screen, countdown_ms):
         """Keep the finished screen up, scrollable, until a leave key, or
         until the run is told to stop (a SIGTERM), which no key would end.
@@ -4169,6 +4276,7 @@ def _dashboard_impl(ctx: FeatureContext):
         unless a key comes first, which only stops it. The screen is the state's meanwhile, for
         the keys that use it (`m`)."""
         state["screen"] = screen
+        _stay_tips()
         _hold(task_ctx, screen, countdown_ms)
         state["screen"] = None
 
@@ -4264,6 +4372,9 @@ def _dashboard_impl(ctx: FeatureContext):
                 err.write(line + "\n", copy = False)
         for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True):
             err.write(line + "\n")
+        gone = sorted(state.get("silenced_tips", {}).keys())
+        if gone:
+            err.write(_c("muted") + "Silenced on this machine: %s · undo: aspect tips unsilence <id>" % ", ".join(gone) + _RESET + "\n")
 
     t = ctx.traits[BazelTrait]
     t.output_display = "none"

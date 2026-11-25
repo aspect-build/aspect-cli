@@ -938,8 +938,11 @@ def collect_tips_sorted(ctx, limit = None, surface = None):
 
     `surface` is the caller's id (e.g. `SURFACE_GITHUB_STATUS_CHECKS`);
     `None` (default) skips filtering. See `tip_shows_on`. Pass `limit` to
-    cap the result for space-constrained surfaces.
+    cap the result for space-constrained surfaces. None for a task without
+    the Tips trait.
     """
+    if _TipsTrait not in ctx.traits:
+        return []
     filtered = [t for t in ctx.traits[_TipsTrait].collect() if tip_shows_on(t, surface)]
     out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
     if limit != None and limit >= 0:
