@@ -1116,7 +1116,7 @@ pub struct TolerantPrintHandler;
 
 /// Whether this process's stderr is a person's terminal that shows links:
 /// a TTY with a `TERM` other than `dumb` (which writes an escape as text),
-/// not a CI job's (a `file://` link names the runner's disk, and a log
+/// not a CI job's (a file's link names the runner's disk, and a log
 /// viewer may show the escape), and no coding agent reading it (its
 /// environment set, as the Console feature's `auto` profile checks), which
 /// gets each path once, plain.
@@ -1205,10 +1205,9 @@ pub(crate) fn config_link_format() -> Option<Option<bazel::console::links::LinkF
 /// The `editor` of the `config.json` at `user`, else of the one at `repo`, a
 /// team's default: `None` when neither sets one, else a format or `None` for
 /// `auto`. The repository's takes an editor's name, `auto` or `none` only,
-/// never `file` (the system's handler, which runs an executable file) or a
-/// URL template, so a cloned repository's data cannot make a click open any
-/// scheme it likes. An invalid one goes to `warn` and reads as unset, so the next
-/// decides.
+/// never a URL template, so a cloned repository's data cannot make a click
+/// open any scheme it likes. An invalid one (for anyone, a `file://` format)
+/// goes to `warn` and reads as unset, so the next decides.
 pub(crate) fn layered_editor(
     user: Option<&std::path::Path>,
     repo: Option<&std::path::Path>,
@@ -1229,7 +1228,8 @@ pub(crate) fn layered_editor(
 /// key is missing, else a format or `None` for `auto`, or a warning naming the
 /// file when the file is unreadable or not a JSON object (worded as every
 /// reader of the file words it, see `crate::config_json::object`) or the
-/// value is not a format, or, with `named_only`, is `file` or a URL template.
+/// value is not a format (`file` and every `file://` one are not), or, with
+/// `named_only`, is a URL template.
 pub(crate) fn editor_link_format(
     path: &std::path::Path,
     named_only: bool,
@@ -1246,8 +1246,7 @@ pub(crate) fn editor_link_format(
     if named_only && !repository_may_choose(&value, &format) {
         return Err(ignored(format!(
             "{} \"editor\": a repository's config.json takes auto, none or an editor's name, \
-             not {value:?}; a file:// link or a URL template belongs in your own \
-             ~/.aspect/config.json",
+             not {value:?}; a URL template belongs in your own ~/.aspect/config.json",
             path.display()
         )));
     }
@@ -1255,16 +1254,13 @@ pub(crate) fn editor_link_format(
 }
 
 /// Whether a repository's `config.json` may choose `value` (parsed as
-/// `format`): `none`, or a named format whose link is not `file://`. A
-/// `file://` link opens the file with the system's handler, which runs an
-/// executable one (a `.command`, an `.app`), whatever alias names it; a URL
-/// template may name any scheme.
+/// `format`): `none` or an editor's name, never a URL template, which may
+/// name any scheme.
 fn repository_may_choose(value: &str, format: &bazel::console::links::LinkFormat) -> bool {
     use bazel::console::links::LinkFormat;
-    let named = LinkFormat::ALIASES.iter().any(|(name, _)| *name == value);
     match format {
         LinkFormat::None => true,
-        LinkFormat::Template(template) => named && !template.starts_with("file://"),
+        LinkFormat::Template(_) => LinkFormat::ALIASES.iter().any(|(name, _)| *name == value),
     }
 }
 
@@ -1308,7 +1304,7 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(
             bazel::console::links::Linker::new(vec![base]).with_files(
-                bazel::console::links::FileLinks::file()
+                bazel::console::links::FileLinks::none()
                     .written(links_as_text())
                     .styled(crate::color::console_supports_color()),
             ),
@@ -1485,27 +1481,15 @@ mod tests {
             std::fs::write(&path, format!(r#"{{"editor": "{named}"}}"#)).unwrap();
             assert!(super::editor_link_format(&path, true).is_ok(), "{named}");
         }
-        // Every alias whose link is file://, by what it resolves to.
-        let file_aliases: Vec<&str> = LinkFormat::ALIASES
-            .iter()
-            .filter(|(_, template)| template.starts_with("file://"))
-            .map(|(name, _)| *name)
-            .collect();
-        assert!(file_aliases.contains(&"file") && file_aliases.contains(&"kitty"));
-        for alias in file_aliases {
-            std::fs::write(&path, format!(r#"{{"editor": "{alias}"}}"#)).unwrap();
-            let warning = super::editor_link_format(&path, true).unwrap_err();
-            assert!(warning.contains(&format!("not \"{alias}\"")), "{warning}");
-            assert!(
-                super::editor_link_format(&path, false).is_ok(),
-                "the user's may be {alias}"
-            );
+        for refused in ["file", "kitty", "file://{path}"] {
+            std::fs::write(&path, format!(r#"{{"editor": "{refused}"}}"#)).unwrap();
+            for named_only in [true, false] {
+                assert!(
+                    super::editor_link_format(&path, named_only).is_err(),
+                    "{refused} is no one's"
+                );
+            }
         }
-        std::fs::write(&path, r#"{"editor": "file://{path}"}"#).unwrap();
-        assert!(
-            super::editor_link_format(&path, true).is_err(),
-            "a file:// template"
-        );
         std::fs::write(&path, r#"{"editor": "myeditor://{path}"}"#).unwrap();
         let warning = super::editor_link_format(&path, true).unwrap_err();
         assert!(warning.contains("not \"myeditor://{path}\""), "{warning}");

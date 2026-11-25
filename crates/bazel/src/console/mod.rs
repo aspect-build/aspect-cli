@@ -358,7 +358,7 @@ impl Config {
             strip_colour: false,
             user_colour: None,
             links: None,
-            link_format: links::LinkFormat::parse("file").expect("an alias"),
+            link_format: links::LinkFormat::None,
             link_text: false,
             colour: false,
         }
@@ -1187,6 +1187,7 @@ mod tests {
         std::fs::write(dir.path().join("a.cc"), "").unwrap();
         let mut config = Config::new(Mode::Pipe, vec![], Style::default());
         config.links = Some(vec![dir.path().to_path_buf()]);
+        config.link_format = links::LinkFormat::parse("vscode").unwrap();
         config.link_text = true;
         let (_, pipeline) = run(&config, b"ERROR: a.cc:3:1: bad\nsee https://x.test\n");
         assert_eq!(

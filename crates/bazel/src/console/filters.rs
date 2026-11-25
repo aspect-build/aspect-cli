@@ -284,8 +284,9 @@ impl RelativizePaths {
     }
 
     /// This stage writing each path it makes relative as an OSC 8 link to
-    /// the file it names as `link`'s format says (plain under `none`), for a
-    /// terminal, whether or not that exists: the
+    /// the file it names as `link`'s format says (plain under `none`, and
+    /// for a path [`super::links::FileLinks::url`] refuses), for a terminal,
+    /// whether or not that exists: the
     /// shown text alone no longer tells which file (`BUILD.bazel` from a
     /// package directory is that package's).
     pub fn linking(mut self, link: Option<LinkTo>) -> Self {
@@ -1243,7 +1244,9 @@ mod tests {
             want
         );
         let mut linking = RelativizePaths::new(Some("/ws".into()), None).linking(Some(LinkTo {
-            files: crate::console::links::FileLinks::file(),
+            files: crate::console::links::FileLinks::new(
+                crate::console::links::LinkFormat::parse("vscode").unwrap(),
+            ),
             workspace: "/ws".into(),
         }));
         assert_eq!(

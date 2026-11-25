@@ -789,7 +789,8 @@ fn an_invalid_user_editor_warns_and_falls_back_to_config_axl() {
 
 /// The repository's `editor` is a team default: it beats `config.axl`, and the
 /// user's `editor`, the command line and the environment each beat it. An
-/// invalid one warns, naming the file, and falls through to `config.axl`.
+/// invalid one, or a `file://` format in either, warns, naming the file, and
+/// falls through to `config.axl`.
 #[test]
 fn a_repositorys_editor_is_a_default_under_the_users() {
     const REPO_CONFIG_JSON: &str = ".aspect/config.json";
@@ -829,10 +830,9 @@ fn a_repositorys_editor_is_a_default_under_the_users() {
     assert!(warning.contains(REPO_CONFIG_JSON), "{warning}");
     assert!(config_format_refused(&output), "falls back to config.axl");
 
-    // A repository's data file names an editor, never a file:// link (whose
-    // handler runs an executable file), by any alias, or a URL template,
-    // which stay the user's.
-    for refused in ["myeditor://{path}", "file", "kitty"] {
+    // A repository's data file names an editor, never a URL template, which
+    // stays the user's.
+    for refused in ["myeditor://{path}"] {
         let json = format!(r#"{{"editor": "{refused}"}}"#);
         let repo = [(REPO_CONFIG_JSON, json.as_str())];
         let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &repo);
@@ -851,5 +851,26 @@ fn a_repositorys_editor_is_a_default_under_the_users() {
             !config_format_refused(&output),
             "the user's may be {refused}"
         );
+    }
+
+    // A file:// format is no one's: from either file it warns, naming the
+    // file, and falls through to config.axl.
+    for refused in ["file", "kitty"] {
+        let json = format!(r#"{{"editor": "{refused}"}}"#);
+        for (file, kind) in [(REPO_CONFIG_JSON, "repo"), (USER_CONFIG_JSON, "user")] {
+            let files = [(file, json.as_str())];
+            let output = run_with_files(BOGUS_CONFIG_FORMAT, &["check"], false, &[], &files);
+            let err = stderr(&output);
+            let warning = err
+                .lines()
+                .find(|l| l.contains("WARNING") && l.contains("\"editor\""))
+                .unwrap_or_else(|| panic!("{kind} {refused}: no editor warning in:\n{err}"));
+            assert!(warning.contains(file), "{warning}");
+            assert!(warning.contains("a file:// link"), "{warning}");
+            assert!(
+                config_format_refused(&output),
+                "{kind} {refused}: falls back to config.axl"
+            );
+        }
     }
 }
