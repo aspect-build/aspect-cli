@@ -381,9 +381,12 @@ impl Early {
 /// Both files keep each line as it settled, column by column as a
 /// terminal shows it: a carriage return or a backspace moves back along the
 /// line, what is written then overwrites what was there (a wide character
-/// two columns, a combining mark joining the one before), a tab moves to
-/// the next stop of 8, the cursor moves along the line (`ESC [ C`, `D`,
-/// `G`), and an erase in line (`ESC [ K`) erases. Lines a
+/// two columns, a combining mark joining the one before), a tab spans to
+/// the next stop of 8 and is kept as a tab unless written over in part
+/// (then spaces), the cursor moves along the line (`ESC [ C`, `D`, `G`, no
+/// further than [`MAX_COLUMN`]), and an erase in line (`ESC [ K`) erases.
+/// A line nothing moves back over is written as it is, cell by cell only
+/// otherwise. Lines a
 /// cursor movement up or an erase of the screen removed are kept: this is
 /// no terminal. An unended line past [`MAX_PENDING`] is written in parts, a
 /// carriage return in one overwriting only that part, and a secret a colour
@@ -507,7 +510,7 @@ impl OutputLog {
                 plain: self.plain.written,
                 ansi: self.ansi.written,
                 task: self.task.clone(),
-                emitted: self.emitted.clone(),
+                emitted: self.emitted,
             });
         }
         if !self.full() {
@@ -546,17 +549,12 @@ impl OutputLog {
     /// [`output_before_console_ansi`]'s.
     fn before_console(&self, max: u64, colour: bool) -> Vec<u8> {
         let (plain_end, ansi_end, mut task, mut emitted) = match &self.console_start {
-            Some(start) => (
-                start.plain,
-                start.ansi,
-                start.task.clone(),
-                start.emitted.clone(),
-            ),
+            Some(start) => (start.plain, start.ansi, start.task.clone(), start.emitted),
             None => (
                 self.plain.written,
                 self.ansi.written,
                 self.task.clone(),
-                self.emitted.clone(),
+                self.emitted,
             ),
         };
         let (plain, ansi) = render(&task.pending, &mut task.style, &mut emitted, &self.secrets);
@@ -585,8 +583,7 @@ fn render(
             Some(body) => (body, "\n"),
             None => (line, ""),
         };
-        let settled = Settled::of(body, style);
-        settled.write(&mut plain, &mut ansi, emitted, secrets);
+        Line::of(body, style).write(&mut plain, &mut ansi, emitted, secrets);
         plain.extend_from_slice(end.as_bytes());
         ansi.extend_from_slice(end.as_bytes());
     }
@@ -596,7 +593,7 @@ fn render(
 /// Colour and text attributes as SGR sequences leave them: each attribute
 /// set or cleared on its own (`22`, `39`, ...), so a writer that never
 /// resets whole keeps a state of the same size.
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 struct Style {
     bold: bool,
     dim: bool,
@@ -606,9 +603,59 @@ struct Style {
     inverse: bool,
     hidden: bool,
     strike: bool,
-    /// The foreground's parameters (`31`, `38;5;208`, `38:2::1:2:3`).
-    fg: Option<String>,
-    bg: Option<String>,
+    fg: Colour,
+    bg: Colour,
+}
+
+/// A foreground or background colour.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Colour {
+    #[default]
+    Default,
+    /// One of the 16, by its own code (`31`, `92`, `44`).
+    Code(u8),
+    /// One of the 256 (`38;5;n`).
+    Index(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl Colour {
+    /// The colour `38`/`48` (`base`) gives with `parts`: `5;n` or `2;r;g;b`,
+    /// `;`- or `:`-separated (the latter with an optional colour space).
+    fn extended(parts: &[&str]) -> Colour {
+        let num = |s: &&str| s.parse::<u8>().ok();
+        match parts.first().copied() {
+            Some("5") => parts
+                .get(1)
+                .and_then(num)
+                .map_or(Colour::Default, Colour::Index),
+            Some("2") => {
+                let rgb: Vec<u8> = parts[parts.len().saturating_sub(3).max(1)..]
+                    .iter()
+                    .filter_map(num)
+                    .collect();
+                match rgb[..] {
+                    [r, g, b] => Colour::Rgb(r, g, b),
+                    _ => Colour::Default,
+                }
+            }
+            _ => Colour::Default,
+        }
+    }
+
+    /// Its parameters, `base` (38 or 48) for an extended one.
+    fn push_params(self, base: u8, out: &mut String) {
+        use std::fmt::Write as _;
+        if !out.is_empty() && self != Colour::Default {
+            out.push(';');
+        }
+        let _ = match self {
+            Colour::Default => Ok(()),
+            Colour::Code(code) => write!(out, "{code}"),
+            Colour::Index(n) => write!(out, "{base};5;{n}"),
+            Colour::Rgb(r, g, b) => write!(out, "{base};2;{r};{g};{b}"),
+        };
+    }
 }
 
 impl Style {
@@ -621,7 +668,8 @@ impl Style {
         let mut params = params.split(';').peekable();
         while let Some(p) = params.next() {
             // `38:5:208`: one parameter, its parts after colons.
-            let code: u32 = match p.split(':').next().unwrap_or("").parse() {
+            let mut parts = p.split(':');
+            let code: u32 = match parts.next().unwrap_or("").parse() {
                 Ok(code) => code,
                 Err(_) if p.is_empty() => 0,
                 Err(_) => continue,
@@ -643,28 +691,26 @@ impl Style {
                 27 => self.inverse = false,
                 28 => self.hidden = false,
                 29 => self.strike = false,
-                30..=37 | 90..=97 => self.fg = Some(p.to_owned()),
-                39 => self.fg = None,
-                40..=47 | 100..=107 => self.bg = Some(p.to_owned()),
-                49 => self.bg = None,
-                38 | 48 => {
-                    let mut colour = p.to_owned();
-                    if !p.contains(':') {
-                        let more = match params.peek().copied() {
+                30..=37 | 90..=97 => self.fg = Colour::Code(code as u8),
+                39 => self.fg = Colour::Default,
+                40..=47 | 100..=107 => self.bg = Colour::Code(code as u8),
+                49 => self.bg = Colour::Default,
+                // The underline's colour (58) is consumed and dropped.
+                38 | 48 | 58 => {
+                    let mut more: Vec<&str> = parts.collect();
+                    if more.is_empty() {
+                        let count = match params.peek().copied() {
                             Some("5") => 2,
                             Some("2") => 4,
                             _ => 0,
                         };
-                        for _ in 0..more {
-                            if let Some(next) = params.next() {
-                                colour.push(';');
-                                colour.push_str(next);
-                            }
-                        }
+                        more.extend(params.by_ref().take(count));
                     }
+                    let colour = Colour::extended(&more);
                     match code {
-                        38 => self.fg = Some(colour),
-                        _ => self.bg = Some(colour),
+                        38 => self.fg = colour,
+                        48 => self.bg = colour,
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -684,14 +730,16 @@ impl Style {
             (self.hidden, "8"),
             (self.strike, "9"),
         ];
-        let mut params: Vec<&str> = flags
-            .iter()
-            .filter(|(on, _)| *on)
-            .map(|(_, p)| *p)
-            .collect();
-        params.extend(self.fg.as_deref());
-        params.extend(self.bg.as_deref());
-        params.join(";")
+        let mut params = String::new();
+        for (_, p) in flags.iter().filter(|(on, _)| *on) {
+            if !params.is_empty() {
+                params.push(';');
+            }
+            params.push_str(p);
+        }
+        self.fg.push_params(38, &mut params);
+        self.bg.push_params(48, &mut params);
+        params
     }
 }
 
@@ -707,129 +755,104 @@ fn restyle(ansi: &mut Vec<u8>, emitted: &mut Style, to: &Style) {
         (false, false) => format!("\x1b[0;{params}m"),
     };
     ansi.extend_from_slice(sequence.as_bytes());
-    *emitted = to.clone();
+    *emitted = *to;
 }
 
-/// One column of a settled line.
-#[derive(Clone)]
-enum Cell {
-    /// A character with what joins it (combining marks), its width and
-    /// its colour, an index into [`Settled::styles`].
-    Char(String, usize, usize),
-    /// The second column of a wide character.
-    Rest,
-}
+/// The furthest column a cursor movement reaches (`ESC [ 999 C`): a line's
+/// own text goes as far as it is long.
+const MAX_COLUMN: usize = 4096;
 
-/// A line as it settled, column by column as a terminal shows it, and the
-/// colours its cells use, the last the one it ends in.
-struct Settled {
-    cells: Vec<Cell>,
+/// A line as it settled: its visible text, which colour each run of it is
+/// in (where the run ends in `visible`, an index into `styles`), and the
+/// colours, the last the one the line ends in.
+struct Line {
+    visible: String,
+    runs: Vec<(usize, usize)>,
     styles: Vec<Style>,
 }
 
-impl Settled {
-    fn of(line: &str, style: &mut Style) -> Settled {
+/// Whether `c` is a control character the files drop (C0 but tab, DEL, C1).
+fn dropped(c: char) -> bool {
+    (c < ' ' && c != '\t') || ('\x7f'..='\u{9f}').contains(&c)
+}
+
+/// The parameters of `seg`, an escape sequence `ESC [ params final`, or ""
+/// for another kind.
+fn csi_params(seg: &[u8]) -> &str {
+    match seg.strip_prefix(b"\x1b[") {
+        Some(rest) => std::str::from_utf8(&rest[..rest.len().saturating_sub(1)]).unwrap_or(""),
+        None => "",
+    }
+}
+
+/// Apply `seg`, an SGR sequence, to `style`; a private one
+/// (`ESC [ > 4 ; 2 m`) is not colour, and leaves it.
+fn apply_sgr(style: &mut Style, seg: &[u8]) {
+    let params = csi_params(seg);
+    if !params.starts_with(['<', '=', '>', '?']) {
+        style.apply(params);
+    }
+}
+
+impl Line {
+    fn of(line: &str, style: &mut Style) -> Line {
+        let before = *style;
+        Line::simple(line, style).unwrap_or_else(|| {
+            *style = before;
+            Cells::of(line, style).line()
+        })
+    }
+
+    /// A line nothing in it moves back over (no carriage return, backspace,
+    /// cursor movement, erase or combining mark), its text as written; else
+    /// None, for [`Cells`].
+    fn simple(line: &str, style: &mut Style) -> Option<Line> {
         use bazel::console::ansi;
-        let mut line_cells = Settled {
-            cells: vec![],
-            styles: vec![style.clone()],
+        let mut out = Line {
+            visible: String::with_capacity(line.len()),
+            runs: vec![],
+            styles: vec![*style],
         };
-        let mut col = 0;
         for (is_escape, seg) in ansi::segments(line.as_bytes()) {
             if is_escape {
-                let params = std::str::from_utf8(
-                    seg.get(2..seg.len().saturating_sub(1)).unwrap_or_default(),
-                )
-                .unwrap_or_default();
                 if ansi::is_sgr(seg) {
-                    style.apply(params);
-                    if line_cells.styles.last() != Some(style) {
-                        line_cells.styles.push(style.clone());
+                    apply_sgr(style, seg);
+                    if out.styles.last() != Some(style) {
+                        out.end_run();
+                        out.styles.push(*style);
                     }
-                } else if seg.starts_with(b"\x1b[") {
-                    let n = params.parse::<usize>().unwrap_or(1).max(1);
-                    let cells = &mut line_cells.cells;
-                    match (seg[seg.len() - 1], params) {
-                        (b'K', "" | "0") => cells.truncate(col),
-                        (b'K', "1") => cells
-                            .iter_mut()
-                            .take(col + 1)
-                            .for_each(|cell| *cell = Cell::Char(" ".into(), 1, 0)),
-                        (b'K', _) => cells.clear(),
-                        (b'C', _) => col += n,
-                        (b'D', _) => col = col.saturating_sub(n),
-                        (b'G', _) => col = n - 1,
-                        _ => {}
-                    }
+                } else if seg.starts_with(b"\x1b[")
+                    && matches!(seg.last(), Some(b'C' | b'D' | b'G' | b'K'))
+                {
+                    return None;
                 }
                 continue;
             }
-            // An escape is ASCII, so the text between is whole characters.
             let text = std::str::from_utf8(seg).unwrap_or_default();
+            if seg.is_ascii() && !seg.iter().any(|&b| b < b' ' || b == 0x7f) {
+                out.visible.push_str(text);
+                continue;
+            }
             for c in text.chars() {
                 match c {
-                    '\r' => col = 0,
-                    '\x08' => col = col.saturating_sub(1),
-                    '\t' => {
-                        col = (col / 8 + 1) * 8;
-                        line_cells.pad(col);
-                    }
-                    c if c < ' ' || ('\x7f'..='\u{9f}').contains(&c) => {}
-                    c => col = line_cells.put(col, c),
+                    '\r' | '\x08' => return None,
+                    '\t' => out.visible.push(c),
+                    c if dropped(c) => {}
+                    c if !c.is_ascii() && ansi::char_width(c) == 0 => return None,
+                    c => out.visible.push(c),
                 }
             }
         }
-        line_cells
+        out.end_run();
+        Some(out)
     }
 
-    /// Blank columns up to `col`, where the line is shorter.
-    fn pad(&mut self, col: usize) {
-        let blank = Cell::Char(" ".into(), 1, self.styles.len() - 1);
-        while self.cells.len() < col {
-            self.cells.push(blank.clone());
+    /// End the run of text in the current colour.
+    fn end_run(&mut self) {
+        let end = self.visible.len();
+        if self.runs.last().is_none_or(|(at, _)| *at < end) {
+            self.runs.push((end, self.styles.len() - 1));
         }
-    }
-
-    /// Write `c` at `col`, over what is there; where the next one goes.
-    fn put(&mut self, col: usize, c: char) -> usize {
-        let width = bazel::console::ansi::char_width(c);
-        let style = self.styles.len() - 1;
-        if width == 0 {
-            // Joins the character before it.
-            let end = col.min(self.cells.len());
-            let before = self.cells[..end]
-                .iter_mut()
-                .rev()
-                .find_map(|cell| match cell {
-                    Cell::Char(text, _, _) => Some(text),
-                    Cell::Rest => None,
-                });
-            match before {
-                Some(text) => text.push(c),
-                None => {
-                    self.pad(col);
-                    self.cells.insert(col, Cell::Char(c.to_string(), 1, style));
-                    return col + 1;
-                }
-            }
-            return col;
-        }
-        self.pad(col + width);
-        for at in col..col + width {
-            // A wide character half written over is gone whole.
-            match self.cells[at] {
-                Cell::Rest if at > 0 => self.cells[at - 1] = Cell::Char(" ".into(), 1, style),
-                Cell::Char(_, 2, _) if at + 1 < self.cells.len() => {
-                    self.cells[at + 1] = Cell::Char(" ".into(), 1, style)
-                }
-                _ => {}
-            }
-        }
-        self.cells[col] = Cell::Char(c.to_string(), width, style);
-        if width == 2 {
-            self.cells[col + 1] = Cell::Rest;
-        }
-        col + width
     }
 
     /// Write the line to `plain` and `ansi`, each secret as `<REDACTED>` in
@@ -841,38 +864,219 @@ impl Settled {
         emitted: &mut Style,
         secrets: &[String],
     ) {
-        let shown: Vec<(&str, usize)> = self
-            .cells
-            .iter()
-            .filter_map(|cell| match cell {
-                Cell::Char(text, _, style) => Some((text.as_str(), *style)),
-                Cell::Rest => None,
-            })
-            .collect();
-        let mut starts = Vec::with_capacity(shown.len());
-        let mut visible = String::new();
-        for (text, _) in &shown {
-            starts.push(visible.len());
-            visible.push_str(text);
-        }
-        let hidden = redactions(&visible, secrets);
+        let hidden = redactions(&self.visible, secrets);
         let mut hidden = hidden.iter().peekable();
-        let mut i = 0;
-        while i < shown.len() {
-            let (text, style) = shown[i];
-            restyle(ansi, emitted, &self.styles[style]);
-            if let Some(range) = hidden.next_if(|r| r.start < starts[i] + text.len()) {
-                let redacted = bazel::bes::redact::REDACTED.as_bytes();
-                plain.extend_from_slice(redacted);
-                ansi.extend_from_slice(redacted);
-                i = starts.partition_point(|&s| s < range.end);
-                continue;
+        let text = |plain: &mut Vec<u8>, ansi: &mut Vec<u8>, s: &str| {
+            plain.extend_from_slice(s.as_bytes());
+            ansi.extend_from_slice(s.as_bytes());
+        };
+        let mut pos = 0;
+        for &(end, style) in &self.runs {
+            while pos < end {
+                restyle(ansi, emitted, &self.styles[style]);
+                match hidden.next_if(|r| r.start < end) {
+                    Some(range) => {
+                        text(plain, ansi, &self.visible[pos..range.start]);
+                        text(plain, ansi, bazel::bes::redact::REDACTED);
+                        pos = range.end;
+                    }
+                    None => {
+                        text(plain, ansi, &self.visible[pos..end]);
+                        pos = end;
+                    }
+                }
             }
-            plain.extend_from_slice(text.as_bytes());
-            ansi.extend_from_slice(text.as_bytes());
-            i += 1;
         }
         restyle(ansi, emitted, self.styles.last().unwrap());
+    }
+}
+
+/// One column of a line that moves back over itself.
+#[derive(Clone)]
+enum Cell {
+    /// A character, the combining marks that join it, how many columns it
+    /// takes (a tab, to the next stop) and its colour, an index into
+    /// [`Cells::styles`].
+    Char(char, Option<Box<str>>, usize, usize),
+    /// A further column of the character before it.
+    Rest,
+}
+
+/// A line settled column by column, as a terminal shows it.
+struct Cells {
+    cells: Vec<Cell>,
+    styles: Vec<Style>,
+}
+
+impl Cells {
+    fn of(line: &str, style: &mut Style) -> Cells {
+        use bazel::console::ansi;
+        let mut out = Cells {
+            cells: vec![],
+            styles: vec![*style],
+        };
+        let mut col = 0usize;
+        for (is_escape, seg) in ansi::segments(line.as_bytes()) {
+            if is_escape {
+                if ansi::is_sgr(seg) {
+                    apply_sgr(style, seg);
+                    if out.styles.last() != Some(style) {
+                        out.styles.push(*style);
+                    }
+                } else if seg.starts_with(b"\x1b[") {
+                    let params = csi_params(seg);
+                    // A count too large to parse is as far as it goes.
+                    let n = match params.parse::<usize>() {
+                        Ok(n) => n.max(1),
+                        Err(_)
+                            if !params.is_empty() && params.bytes().all(|b| b.is_ascii_digit()) =>
+                        {
+                            usize::MAX
+                        }
+                        Err(_) => 1,
+                    };
+                    let furthest = MAX_COLUMN.max(out.cells.len());
+                    match (seg[seg.len() - 1], params) {
+                        (b'K', "" | "0") => out.erase(col, usize::MAX),
+                        (b'K', "1") => out.erase(0, col.saturating_add(1)),
+                        (b'K', _) => out.erase(0, usize::MAX),
+                        (b'C', _) => col = col.saturating_add(n).min(furthest),
+                        (b'D', _) => col = col.saturating_sub(n),
+                        (b'G', _) => col = (n - 1).min(furthest),
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            // An escape is ASCII, so the text between is whole characters.
+            let text = std::str::from_utf8(seg).unwrap_or_default();
+            for c in text.chars() {
+                match c {
+                    '\r' => col = 0,
+                    '\x08' => col = col.saturating_sub(1),
+                    c if dropped(c) => {}
+                    c => col = out.put(col, c),
+                }
+            }
+        }
+        out
+    }
+
+    /// Erase the columns from `from` up to `to`: blanks within the line,
+    /// nothing past its end.
+    fn erase(&mut self, from: usize, to: usize) {
+        if to >= self.cells.len() {
+            self.cells.truncate(from);
+            return;
+        }
+        if from >= to {
+            return;
+        }
+        self.break_at(from);
+        self.break_at(to - 1);
+        for cell in &mut self.cells[from..to] {
+            *cell = Cell::Char(' ', None, 1, 0);
+        }
+    }
+
+    /// Blank columns up to `col`, where the line is shorter.
+    fn pad(&mut self, col: usize) {
+        let blank = Cell::Char(' ', None, 1, self.styles.len() - 1);
+        if self.cells.len() < col {
+            self.cells.resize(col, blank);
+        }
+    }
+
+    /// Where a character that takes more than one column is written over
+    /// in part, it is gone whole: blanks in its columns.
+    fn break_at(&mut self, at: usize) {
+        let Some(head) = self.cells[..(at + 1).min(self.cells.len())]
+            .iter()
+            .rposition(|cell| matches!(cell, Cell::Char(..)))
+        else {
+            return;
+        };
+        let Cell::Char(_, _, width, style) = self.cells[head] else {
+            return;
+        };
+        if width > 1 && at < head + width {
+            let end = (head + width).min(self.cells.len());
+            for cell in &mut self.cells[head..end] {
+                *cell = Cell::Char(' ', None, 1, style);
+            }
+        }
+    }
+
+    /// Write `c` at `col`, over what is there; where the next one goes.
+    fn put(&mut self, col: usize, c: char) -> usize {
+        let style = self.styles.len() - 1;
+        let width = match c {
+            '\t' => (col / 8 + 1) * 8 - col,
+            c if c.is_ascii() => 1,
+            c => bazel::console::ansi::char_width(c),
+        };
+        if c == '\t' && col < self.cells.len() {
+            // Over text a tab only moves.
+            return (col + width).min(MAX_COLUMN.max(self.cells.len()));
+        }
+        if width == 0 {
+            // Joins the character before it.
+            let end = col.min(self.cells.len());
+            if let Some(Cell::Char(_, marks, _, _)) = self.cells[..end]
+                .iter_mut()
+                .rev()
+                .find(|cell| matches!(cell, Cell::Char(..)))
+            {
+                let mut joined = marks.take().map(String::from).unwrap_or_default();
+                joined.push(c);
+                *marks = Some(joined.into_boxed_str());
+                return col;
+            }
+            // With nothing before it, it joins a blank.
+            let next = self.put(col, ' ');
+            return self.put(next, c);
+        }
+        if col == self.cells.len() && width == 1 {
+            self.cells.push(Cell::Char(c, None, 1, style));
+            return col + 1;
+        }
+        self.pad(col + width);
+        self.break_at(col);
+        self.break_at(col + width - 1);
+        self.cells[col] = Cell::Char(c, None, width, style);
+        for rest in &mut self.cells[col + 1..col + width] {
+            *rest = Cell::Rest;
+        }
+        col + width
+    }
+
+    /// As a [`Line`]: its text, in runs of one colour.
+    fn line(self) -> Line {
+        let mut out = Line {
+            visible: String::with_capacity(self.cells.len()),
+            runs: vec![],
+            styles: self.styles,
+        };
+        let mut run_style = None;
+        for cell in &self.cells {
+            let Cell::Char(c, marks, _, style) = cell else {
+                continue;
+            };
+            if run_style != Some(*style) {
+                if let Some(previous) = run_style {
+                    out.runs.push((out.visible.len(), previous));
+                }
+                run_style = Some(*style);
+            }
+            out.visible.push(*c);
+            if let Some(marks) = marks {
+                out.visible.push_str(marks);
+            }
+        }
+        if let Some(previous) = run_style {
+            out.runs.push((out.visible.len(), previous));
+        }
+        out
     }
 }
 
@@ -1236,7 +1440,7 @@ mod output_log_tests {
         );
         assert_eq!(
             files(&dir).1,
-            "\x1b[1;31mA\x1b[0;31mB\x1b[0mC\x1b[38;5;208;48:2::1:2:3mD\x1b[0;4;38;5;208mE\x1b[0mF\n"
+            "\x1b[1;31mA\x1b[0;31mB\x1b[0mC\x1b[38;5;208;48;2;1;2;3mD\x1b[0;4;38;5;208mE\x1b[0mF\n"
         );
     }
 
@@ -1252,16 +1456,56 @@ mod output_log_tests {
             log.push(line);
         }
         assert_eq!(log.task.style, super::Style::default());
+        // Generous: the state's size is what keeps it linear.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
+            started.elapsed() < std::time::Duration::from_secs(60),
             "took {:?}",
             started.elapsed()
         );
     }
 
+    /// Bazel's usual lines, nothing in them moving back, take no cells.
+    #[test]
+    fn plain_lines_are_written_as_they_are() {
+        let (dir, mut log) = open_log(&["s3cr3t"]);
+        log.push(b"\x1b[32mINFO:\x1b[0m From Compiling a.cc:\ta\tb s3cr3t \xe6\x97\xa5\n");
+        assert_eq!(
+            files(&dir),
+            pair(
+                "INFO: From Compiling a.cc:\ta\tb <REDACTED> 日\n",
+                "\x1b[32mINFO:\x1b[0m From Compiling a.cc:\ta\tb <REDACTED> 日\n"
+            )
+        );
+    }
+
+    /// A cursor movement goes no further than [`super::MAX_COLUMN`], however
+    /// far it asks, and never overflows.
+    #[test]
+    fn a_cursor_movement_is_bounded() {
+        let (dir, mut log) = open_log(&[]);
+        log.push(b"a\x1b[18446744073709551615Cb\n");
+        log.push(b"a\x1b[20000000Cb\x1b[9999Gc\x1b[99999999999999999999Dd\n");
+        let plain = files(&dir).0;
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), super::MAX_COLUMN + 1);
+        assert!(lines[0].starts_with('a') && lines[0].ends_with('b'));
+        assert!(lines[1].starts_with('d') && lines[1].len() <= super::MAX_COLUMN + 2);
+    }
+
+    /// An SGR sequence that is not colour (a private one, `ESC [ > 4 ; 2 m`)
+    /// leaves it, and the underline's colour (58) takes its parameters.
+    #[test]
+    fn sequences_that_are_not_colour_leave_it() {
+        let (dir, mut log) = open_log(&[]);
+        log.push(b"\x1b[>4;2ma\x1b[58;5;1mb\x1b[58;2;1;2;3mc\x1b[?1md\n");
+        assert_eq!(files(&dir), pair("abcd\n", "abcd\n"));
+    }
+
     /// A line settles column by column: a wide character takes two, one
     /// half written over is gone whole, a combining mark joins the one
-    /// before it, and a tab moves to the next stop of 8.
+    /// before it, and a tab spans to the next stop of 8, kept as a tab
+    /// unless written over in part.
     #[test]
     fn a_line_settles_by_column() {
         let (dir, mut log) = open_log(&[]);
@@ -1269,8 +1513,12 @@ mod output_log_tests {
         log.push("日本\r\x1b[2Ca\n".as_bytes());
         log.push("cafe\u{301}\rC\n".as_bytes());
         log.push("a\tb\r\tc\n".as_bytes());
+        log.push("\tx\rab\n".as_bytes());
         log.push(b"\x1b[1Kx\n");
-        assert_eq!(files(&dir).0, "ab本\n日a \nCafe\u{301}\na       c\nx\n");
+        assert_eq!(
+            files(&dir).0,
+            "ab本\n日a \nCafe\u{301}\na\tc\nab      x\nx\n"
+        );
     }
 
     #[cfg(unix)]

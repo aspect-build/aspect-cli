@@ -85,7 +85,10 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 /// What the history keeps.
 #[derive(Debug, Clone, Copy)]
 pub struct Retention {
-    /// The size the history is pruned down to.
+    /// The size the history is pruned down to. A prune runs only from a
+    /// task's first Bazel build that keeps a file, so entries holding only
+    /// their output are held to it only then, and otherwise only by
+    /// [`records`](Self::records) and [`record_age`](Self::record_age).
     pub budget: u64,
     /// Invocations that built always kept, the most recently started,
     /// whatever their size, besides the current one, which a prune never
