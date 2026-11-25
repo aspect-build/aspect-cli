@@ -4175,15 +4175,20 @@ def _dashboard_impl(ctx: FeatureContext):
         _report(task_ctx)
 
     def _report(task_ctx):
-        """What the scrollback keeps once the screen is gone: the console as
-        it showed it (`replay_lines`), what the task wrote meanwhile in it,
-        then the failures, the counts and where the rest is
-        (`report_lines`)."""
+        """What the scrollback keeps once the screen is gone: the task's
+        output since the screen was taken, as `output.ansi` keeps it
+        (`ctx.std.term.dump_output`), else the console as the screen showed
+        it (`replay_lines`), then the failures, the counts and where the
+        rest is (`report_lines`)."""
         err = task_ctx.std.io.stderr
 
-        # The console's lines are in output.log already: not copied again.
-        for line in replay_lines(state, err.is_tty):
-            err.write(line + "\n", copy = False)
+        # The task's output as a run without the screen leaves it, from
+        # output.ansi; the console as the screen showed it without one. Both
+        # are in output.log already: not copied again.
+        older = "… {n} older lines: aspect history show " + task_ctx.task.id
+        if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = older):
+            for line in replay_lines(state, err.is_tty):
+                err.write(line + "\n", copy = False)
         for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True):
             err.write(line + "\n")
 

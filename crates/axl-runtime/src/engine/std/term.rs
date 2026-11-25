@@ -137,6 +137,7 @@ impl Redirect {
                             Err(_) => std::thread::sleep(Duration::from_millis(10)),
                             Ok(n) => {
                                 keep(&mut written.lock().unwrap(), &buf[..n]);
+                                crate::out::copy_captured(&buf[..n]);
                                 capture.write(source, &buf[..n]);
                             }
                         }
@@ -527,7 +528,16 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     } else {
         vec![]
     };
-    let forget_tty = || mark_captured(None);
+    // A screen of its own shows what is written meanwhile, and is dumped
+    // from here on leaving; its capture copies it to the output files.
+    if alt_screen {
+        *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
+        crate::out::set_capture_copies(true);
+    }
+    let forget_tty = || {
+        mark_captured(None);
+        crate::out::set_capture_copies(false);
+    };
     let stdout = Redirect::new(1, capture.clone(), Source::Stdout)
         .inspect_err(|_| forget_tty())
         .map_err(undo_termios)?;
@@ -603,6 +613,25 @@ struct CrashState {
     alt_screen: bool,
     stdout: RawFd,
     stderr: RawFd,
+    /// `output: <output.ansi>\n`, written to stderr after the restore: the
+    /// screen's dump cannot be made from a signal handler.
+    note: [u8; CRASH_NOTE],
+    note_len: usize,
+}
+
+/// The longest crash note kept, a path's line.
+const CRASH_NOTE: usize = 1024;
+
+/// The crash note for the task's `output.ansi`, cut to fit.
+fn crash_note() -> ([u8; CRASH_NOTE], usize) {
+    let mut note = [0u8; CRASH_NOTE];
+    let Some(path) = crate::out::output_ansi_path() else {
+        return (note, 0);
+    };
+    let line = format!("output: {}\n", path.display());
+    let n = line.len().min(CRASH_NOTE);
+    note[..n].copy_from_slice(&line.as_bytes()[..n]);
+    (note, n)
 }
 
 static CRASH: std::sync::atomic::AtomicPtr<CrashState> =
@@ -631,6 +660,11 @@ fn remember_for_crash(
     };
     let mut slot = SLOT.lock().unwrap();
     CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
+    let (note, note_len) = if alt_screen {
+        crash_note()
+    } else {
+        ([0u8; CRASH_NOTE], 0)
+    };
     let state = if *slot == 0 {
         let state = Box::into_raw(Box::new(CrashState {
             tty: keep(tty),
@@ -638,6 +672,8 @@ fn remember_for_crash(
             alt_screen,
             stdout: keep(stdout),
             stderr: keep(stderr),
+            note,
+            note_len,
         }));
         *slot = state as usize;
         state
@@ -651,6 +687,8 @@ fn remember_for_crash(
             s.alt_screen = alt_screen;
             s.stdout = renew(s.stdout, stdout);
             s.stderr = renew(s.stderr, stderr);
+            s.note = note;
+            s.note_len = note_len;
         }
         state
     };
@@ -677,6 +715,9 @@ pub fn restore_terminal_after_crash() {
         libc::write(s.tty, wheel.as_ptr().cast(), wheel.len());
         libc::dup2(s.stdout, 1);
         libc::dup2(s.stderr, 2);
+        if s.note_len > 0 {
+            libc::write(2, s.note.as_ptr().cast(), s.note_len);
+        }
     }
 }
 
@@ -698,15 +739,10 @@ pub fn release_all() -> bool {
             Ok(mut held) => {
                 let mine = held.take();
                 drop(held);
-                let was = mine.is_some();
-                let _ = release(mine, true);
-                return was;
+                return release_dumping(mine);
             }
             Err(std::sync::TryLockError::Poisoned(p)) => {
-                let mine = p.into_inner().take();
-                let was = mine.is_some();
-                let _ = release(mine, true);
-                return was;
+                return release_dumping(p.into_inner().take());
             }
             Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -717,6 +753,87 @@ pub fn release_all() -> bool {
             }
         }
     }
+}
+
+/// [`release_all`] for `held`: the task's output since the screen was
+/// taken written from `output.ansi` ([`dump_output`]) when there is one to
+/// write, else what was captured replayed. Whether one was held.
+fn release_dumping(held: Option<Held>) -> bool {
+    let was = held.is_some();
+    let dumping = was && dump_ready();
+    let _ = release(held, !dumping);
+    if dumping {
+        dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
+    }
+    was
+}
+
+/// Where `output.ansi` stood when the screen was taken (or came back from a
+/// suspend): what a dump on leaving writes from, the main screen showing
+/// what came before. None once dumped, or with no screen of its own.
+static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
+
+/// The most lines a dump writes, the older counted on a line before them.
+pub(crate) const DUMP_LINES: usize = 20000;
+
+/// Whether a dump would write anything: a mark, and the task's files.
+fn dump_ready() -> bool {
+    DUMP_MARK.lock().unwrap().is_some() && crate::out::output_ansi_mark().is_some()
+}
+
+/// Write the task's output since the mark ([`DUMP_MARK`]) to stderr in one
+/// write, as `output.ansi` keeps it, its links made again as the CLI's own
+/// lines make them (the file keeps colour, not links; Bazel's lines are kept
+/// before their URLs are written), but for a line holding a URL already
+/// where the terminal shows them as text (the CLI's own lines write
+/// theirs). Its newest `max_lines`,
+/// after a line `older` gives, `{n}` the count of those it leaves out.
+/// Not copied to the output files, which hold it. Whether it wrote: never a
+/// second time, nor without a mark or the task's files.
+pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
+    let Some(mark) = DUMP_MARK.lock().unwrap().take() else {
+        return false;
+    };
+    let Some((text, _)) = crate::out::output_ansi_since(mark) else {
+        return false;
+    };
+    let relink = crate::out::terminal_links();
+    let as_text = crate::out::links_as_text();
+    let out = dump_text(&String::from_utf8_lossy(&text), max_lines, older, |line| {
+        if relink && !(as_text && line.contains("://")) {
+            crate::out::linked(line)
+        } else {
+            line.to_string()
+        }
+    });
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(out.as_bytes());
+    let _ = err.flush();
+    true
+}
+
+/// What [`dump_output`] writes of `text`: its newest `max_lines` lines,
+/// each through `link` without its end, after a line `older` gives (`{n}`
+/// the count left out) when any were.
+fn dump_text(text: &str, max_lines: usize, older: &str, link: impl Fn(&str) -> String) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let skip = lines.len().saturating_sub(max_lines);
+    let mut out = String::with_capacity(text.len() + 64);
+    if skip > 0 && !older.is_empty() {
+        out.push_str(&older.replace("{n}", &skip.to_string()));
+        out.push('\n');
+    }
+    for line in &lines[skip..] {
+        match line.strip_suffix('\n') {
+            Some(body) => {
+                out.push_str(&link(body));
+                out.push('\n');
+            }
+            None => out.push_str(&link(line)),
+        }
+    }
+    out
 }
 
 /// [`release_all`] for `held`, stderr's capture written to it only with
@@ -745,6 +862,7 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
     mark_captured(None);
     held.stdout.finish(replay_stderr || !stdout_tty);
     held.stderr.finish(replay_stderr);
+    crate::out::set_capture_copies(false);
     if replay_stderr {
         return vec![];
     }
@@ -1326,6 +1444,22 @@ fn term_methods(registry: &mut MethodsBuilder) {
         Ok(NoneOr::from_option(terminal_size()))
     }
 
+    /// Write to stderr, once a screen of its own is given back, the task's
+    /// output since it was taken, as the task's `output.ansi` keeps it
+    /// (redacted, its colour kept, its links made again): the scrollback a
+    /// run without the screen would have. Its newest `max_lines`, after a
+    /// line `older` gives (`{n}` the count left out). In one write, not
+    /// copied to the output files, which hold it. Whether it wrote: once
+    /// per screen, never without the task's files (the history off), when
+    /// the screen's own lines are the fallback.
+    fn dump_output<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = DUMP_LINES as i32)] max_lines: i32,
+        #[starlark(require = named, default = "")] older: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(dump_output(max_lines.max(1) as usize, older))
+    }
+
     /// Whether a screen is held now, by any feature.
     #[starlark(attribute)]
     fn taken<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<bool> {
@@ -1638,6 +1772,23 @@ fn screen_methods(registry: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A dump keeps the newest lines, counts the rest on a line before
+    /// them, and links each line without its end.
+    #[test]
+    fn a_dump_keeps_the_newest_lines_linked() {
+        let text = "one\ntwo\nthree\nfour";
+        assert_eq!(
+            super::dump_text(text, 2, "… {n} older", |l| format!("[{l}]")),
+            "… 2 older\n[three]\n[four]"
+        );
+        assert_eq!(
+            super::dump_text(text, 9, "… {n} older", |l| l.to_string()),
+            text
+        );
+        assert_eq!(super::dump_text("a\nb\n", 1, "", |l| l.to_string()), "b\n");
+    }
+
     use super::*;
 
     /// A pipe closed on exec as it is made (`pipe2` on Linux), so a child

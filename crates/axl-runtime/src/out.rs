@@ -419,11 +419,83 @@ pub fn begin_early() {
 /// Copy `bytes`, as written to stdout or stderr, to the task's output
 /// files, a line at a time (an unended one held back, up to
 /// [`MAX_PENDING`], until it ends or [`flush_output`]); before
-/// [`keep_output`], to what it writes first.
+/// [`keep_output`], to what it writes first. Not while a screen's capture
+/// copies what reaches stdout and stderr ([`set_capture_copies`]), which
+/// these bytes are written to.
 pub fn copy_output(bytes: &[u8]) {
+    if CAPTURE_COPIES.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    copy_only(bytes);
+}
+
+/// [`copy_output`] whatever copies stdout and stderr: for text the task
+/// keeps in its output files without writing it (a terminal-only tip while
+/// a screen holds the terminal).
+pub fn copy_only(bytes: &[u8]) {
     if let Ok(mut copies) = OUTPUT.lock() {
         copies.copy(bytes, false);
     }
+}
+
+/// While a screen holds the terminal its capture reads everything written
+/// to stdout and stderr, a child's own writes included: it copies them
+/// ([`copy_captured`]), and [`copy_output`] does not, so nothing is copied
+/// twice.
+static CAPTURE_COPIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a screen's capture copies stdout and stderr ([`CAPTURE_COPIES`]).
+pub fn set_capture_copies(on: bool) {
+    CAPTURE_COPIES.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// What a screen's capture read from stdout or stderr, copied while it
+/// copies them.
+pub fn copy_captured(bytes: &[u8]) {
+    if CAPTURE_COPIES.load(std::sync::atomic::Ordering::SeqCst) {
+        copy_only(bytes);
+    }
+}
+
+/// How many bytes `output.ansi` holds now: where a dump of what follows
+/// starts ([`output_ansi_since`]). None without the task's files.
+pub fn output_ansi_mark() -> Option<u64> {
+    let copies = OUTPUT.lock().ok()?;
+    copies.log.as_ref().map(|log| log.ansi.written)
+}
+
+/// `output.ansi` from `mark` on, its unended lines (the task's, then the
+/// console's) at its end, and the file's path; None without the task's
+/// files or when it cannot be read.
+pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf)> {
+    use std::io::{Read as _, Seek as _};
+    let copies = OUTPUT.lock().ok()?;
+    let log = copies.log.as_ref()?;
+    let mut file = std::fs::File::open(&log.ansi.path).ok()?;
+    let end = log.ansi.written;
+    file.seek(std::io::SeekFrom::Start(mark.min(end))).ok()?;
+    let mut text = vec![];
+    file.take(end.saturating_sub(mark))
+        .read_to_end(&mut text)
+        .ok()?;
+    let mut emitted = log.emitted;
+    for stream in [&log.task, &log.console] {
+        let mut stream = stream.clone();
+        let (_, ansi) = render(
+            &stream.pending,
+            &mut stream.style,
+            &mut emitted,
+            &log.secrets,
+        );
+        text.extend_from_slice(&ansi);
+    }
+    Some((text, log.ansi.path.clone()))
+}
+
+/// Where `output.ansi` is, for a line naming it when it cannot be dumped.
+pub fn output_ansi_path() -> Option<std::path::PathBuf> {
+    let copies = OUTPUT.lock().ok()?;
+    copies.log.as_ref().map(|log| log.ansi.path.clone())
 }
 
 /// [`copy_output`] for Bazel's console as the console forwards it, whole
