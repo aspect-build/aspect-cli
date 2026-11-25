@@ -39,10 +39,13 @@ use starlark::values::starlark_value;
 /// there.
 ///
 /// `configured_keys` is the same kind of side-set for the keys a `config.axl`
-/// assigned, recorded during the merge whether or not the CLI then beat them.
-/// Rust-only ([`Arguments::is_configured_key`]): the runtime reads it where a
-/// default depends on whether config chose a value, such as the `Console`
-/// feature's base preset.
+/// assigned, recorded during the merge whether or not the CLI then beat them,
+/// with the value config assigned ([`Arguments::record_configured`]). The
+/// runtime reads the keys where a default depends on whether config chose a
+/// value, such as the `Console` feature's base preset
+/// ([`Arguments::is_configured_key`]); the `configured(name)` Starlark method
+/// gives the value, for an arg whose CLI value joins config's rather than
+/// replacing it, such as the `Tips` feature's `silence`.
 ///
 /// `claimed_keys` is the parallel side-set for [`Arguments::claim`], recording
 /// the args a task took responsibility for. It exists so the runtime can fail an
@@ -67,7 +70,7 @@ pub struct Arguments<'v> {
     #[allocative(skip)]
     explicit_cli_keys: RefCell<SmallMap<String, ()>>,
     #[allocative(skip)]
-    configured_keys: RefCell<SmallMap<String, ()>>,
+    configured_keys: RefCell<SmallMap<String, Option<Value<'v>>>>,
     #[allocative(skip)]
     claimed_keys: RefCell<SmallMap<String, ()>>,
     #[allocative(skip)]
@@ -135,7 +138,19 @@ impl<'v> Arguments<'v> {
     /// Mark `key` as assigned by a `config.axl` for the current invocation.
     /// Idempotent. See `is_configured_key`.
     pub fn mark_configured(&self, key: String) {
-        self.configured_keys.borrow_mut().insert(key, ());
+        self.configured_keys.borrow_mut().entry(key).or_insert(None);
+    }
+
+    /// Mark `key` as assigned `value` by a `config.axl`. See
+    /// `configured_value`.
+    pub fn record_configured(&self, key: String, value: Value<'v>) {
+        self.configured_keys.borrow_mut().insert(key, Some(value));
+    }
+
+    /// The value a `config.axl` assigned `key`, recorded during the runtime
+    /// merge whether or not the CLI then beat it; `None` when config did not.
+    pub fn configured_value(&self, key: &str) -> Option<Value<'v>> {
+        self.configured_keys.borrow().get(key).cloned().flatten()
     }
 
     /// Return `true` iff `key` was marked configured during the runtime merge
@@ -168,6 +183,11 @@ unsafe impl<'v> Trace<'v> for Arguments<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         for (_, v) in self.args.get_mut().iter_mut() {
             v.trace(tracer);
+        }
+        for (_, v) in self.configured_keys.get_mut().iter_mut() {
+            if let Some(v) = v {
+                v.trace(tracer);
+            }
         }
     }
 }
@@ -320,6 +340,27 @@ fn arguments_methods(builder: &mut MethodsBuilder) {
         ))
     }
 
+    /// The value a `config.axl` assigned the arg `name` for this invocation,
+    /// even when the command line then replaced it, or `None` when no
+    /// `config.axl` assigned it. For an arg whose command-line value should
+    /// join the config's instead of replacing it. Always `None` on a frozen
+    /// store.
+    fn configured<'v>(
+        this: Value<'v>,
+        #[starlark(require = pos)] name: &str,
+    ) -> anyhow::Result<Value<'v>> {
+        if let Some(a) = this.downcast_ref::<Arguments>() {
+            return Ok(a.configured_value(name).unwrap_or_else(Value::new_none));
+        }
+        if this.downcast_ref::<FrozenArguments>().is_some() {
+            return Ok(Value::new_none());
+        }
+        Err(anyhow::anyhow!(
+            "configured: expected an Arguments value, got '{}'",
+            this.get_type(),
+        ))
+    }
+
     /// Take responsibility for the arg `name` and return its value, or `[]`
     /// when the task declares no such arg.
     ///
@@ -383,6 +424,30 @@ mod tests {
         assert!(!args.is_explicit_key("template_preset"));
         args.mark_explicit("templates".to_string());
         assert!(!args.is_configured_key("templates"));
+    }
+
+    #[test]
+    fn a_configured_value_is_kept_beside_the_merged_one() {
+        Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let args = Arguments::new();
+            args.insert("silence".into(), heap.alloc("from-flag"));
+            args.record_configured("silence".into(), heap.alloc("from-config"));
+            args.mark_configured("silence".into());
+            assert!(args.is_configured_key("silence"));
+            assert_eq!(
+                args.configured_value("silence")
+                    .and_then(|v| v.unpack_str()),
+                Some("from-config")
+            );
+            assert_eq!(
+                args.get("silence").and_then(|v| v.unpack_str()),
+                Some("from-flag")
+            );
+            args.mark_configured("other".into());
+            assert!(args.configured_value("other").is_none());
+            assert!(args.configured_value("unset").is_none());
+        });
     }
 
     #[test]

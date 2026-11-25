@@ -16,6 +16,7 @@ use starlark::{environment::GlobalsBuilder, values::starlark_value_as_type::Star
 pub mod auth;
 mod credential_store;
 pub mod mcp;
+pub mod tips;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<aspect.Aspect>")]
@@ -42,6 +43,13 @@ pub(crate) fn aspect_methods(registry: &mut MethodsBuilder) {
     fn mcp<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<mcp::Mcp> {
         Ok(mcp::Mcp {})
     }
+
+    /// Tips silenced in the `config.json` files, and the writer that
+    /// silences one for this user.
+    #[starlark(attribute)]
+    fn tips<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<tips::Tips> {
+        Ok(tips::Tips {})
+    }
 }
 
 #[starlark_module]
@@ -53,4 +61,5 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
     auth::register_globals(globals);
     mcp::register_globals(globals);
+    tips::register_globals(globals);
 }

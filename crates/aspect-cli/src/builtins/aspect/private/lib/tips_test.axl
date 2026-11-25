@@ -6,6 +6,9 @@ Covers the tip framework primitives directly:
                 title/body (RAW / FORMAT `vars` / JINJA2 `vars` +
                 `accumulate`), within-task `accumulate` union,
                 and `silenced_tips` short-circuit (by `id`, across keys).
+  - Silencing from `config.json` - `silence_sources` (the union of the
+                arg and the user's and repository's files) and the
+                `silence_tip` / `unsilence_tip` writer, on temp files.
   - `collect_tips_sorted` — severity ordering, insertion-order stability,
                             limit, surface allowlist.
   - `surfaces` / `combine_across_tasks` — storage + defaults on `add_tip`,
@@ -41,6 +44,10 @@ load("./ansi.axl", "ansi")
 load(
     "./tips.axl",
     "AspectApiTokenHost",
+    "SILENCED_BY_CONFIG",
+    "SILENCED_BY_FLAG",
+    "SILENCED_BY_REPO",
+    "SILENCED_BY_USER",
     "SURFACE_BUILDKITE_ANNOTATIONS",
     "SURFACE_CLI",
     "SURFACE_GITHUB_PR_SUMMARY",
@@ -62,6 +69,7 @@ load(
     "add_tip",
     "agg",
     "blockquote_body",
+    "checked_silence",
     "collect_tips_sorted",
     "decorate_tip",
     "emit_rule_tips",
@@ -72,6 +80,9 @@ load(
     "severity_label",
     "severity_rank",
     "silence_hint_line",
+    "silence_sources",
+    "silence_tip",
+    "silenced_tips",
     "strip_code_fences",
     "terminal_hint_lines",
     "terminal_more_line",
@@ -84,6 +95,7 @@ load(
     "tip_shows_on",
     "tip_to_payload",
     "tips",
+    "unsilence_tip",
 )
 
 def _eq(label, got, want):
@@ -165,6 +177,89 @@ def _test_silenced_tips_blocks_add(ctx):
         tips._inspect_for_test(ctx),
         [],
     )
+
+def _test_config_json_silences_merge_with_the_arg(ctx):
+    """The silenced ids are the union of the `silence` arg and the user's and
+    the repository's `config.json` files, each id with every source that
+    silences it; an invalid file is a warning and adds nothing. Temp files
+    stand in for both, so no real home or repository is read."""
+    dir = ctx.std.fs.mkdtemp(prefix = "aspect-tips-merge")
+    user, repo = dir + "/user.json", dir + "/repo.json"
+    ctx.std.fs.write(user, json.encode({"editor": "zed", "tips": {"silence": ["u", "both"]}}))
+    ctx.std.fs.write(repo, json.encode({"tips": {"silence": ["both", "r"]}}))
+    found = ctx.aspect.tips.config_silence(user = user, repo = repo)
+    _eq("merge", silence_sources(["f", "u", "fc"], ["c", "fc"], found), {
+        "f": [SILENCED_BY_FLAG],
+        "u": [SILENCED_BY_FLAG, SILENCED_BY_USER],
+        "fc": [SILENCED_BY_FLAG, SILENCED_BY_CONFIG],
+        "c": [SILENCED_BY_CONFIG],
+        "both": [SILENCED_BY_USER, SILENCED_BY_REPO],
+        "r": [SILENCED_BY_REPO],
+    })
+    _eq("no files", silence_sources([], [], ctx.aspect.tips.config_silence(user = "", repo = "")), {})
+
+    flag, config, warnings = checked_silence(["ok", "a,b", ""], ["c d", "fine"], ctx.aspect.tips.is_tip_id)
+    _eq("valid flag ids kept", flag, ["ok"])
+    _eq("valid config ids kept", config, ["fine"])
+    _eq("a warning each", len(warnings), 3)
+    _eq("a comma says to repeat the flag", "repeat the flag" in warnings[0] and '"a,b"' in warnings[0], True)
+    _eq("config's named", "config.axl" in warnings[2], True)
+    _, _, warnings = checked_silence(["a,b", "a,b"], ["a,b", "a,b"], ctx.aspect.tips.is_tip_id)
+    _eq("once per source and id", len(warnings), 2)
+    _eq("the flag's comma: repeat the flag", "repeat the flag" in warnings[0], True)
+    _eq("config.axl's comma: split the item", "split it into list items" in warnings[1] and "repeat" not in warnings[1], True)
+
+    ctx.std.fs.write(repo, json.encode({"tips": {"silence": "r"}}))
+    found = ctx.aspect.tips.config_silence(user = user, repo = repo)
+    _eq("an invalid repo file adds nothing", silence_sources([], [], found), {
+        "u": [SILENCED_BY_USER],
+        "both": [SILENCED_BY_USER],
+    })
+    _eq("it warns, naming the file", repo in found.warnings[0] and "ignoring it" in found.warnings[0], True)
+    again = ctx.aspect.tips.config_silence(user = user, repo = repo)
+    _eq("once", again.warnings, [])
+
+def _test_silence_tip_writes_the_users_file(ctx):
+    """`silence_tip` adds an id to the file (created with its directory),
+    keeps its other keys, is idempotent, and drops the id for the rest of
+    the task; `unsilence_tip` undoes both. A bad id or file is an error
+    string, the file left as it was."""
+    _reset(ctx)
+    dir = ctx.std.fs.mkdtemp(prefix = "aspect-tips-write")
+    path = dir + "/home/.aspect/config.json"
+    add_tip(ctx, id = "noisy", severity = TIP_INFO, title = "T", body = "B")
+    _eq("silence", silence_tip(ctx, "noisy", path = path), None)
+    _eq("written", json.decode(ctx.std.fs.read_to_string(path)), {"tips": {"silence": ["noisy"]}})
+    _eq("its stored tips dropped", tips._inspect_for_test(ctx), [])
+    add_tip(ctx, id = "noisy", severity = TIP_INFO, title = "T", body = "B")
+    _eq("and later ones", tips._inspect_for_test(ctx), [])
+    _eq("silenced from the user's file", silenced_tips(ctx), {"noisy": [SILENCED_BY_USER]})
+    _eq("idempotent", silence_tip(ctx, "noisy", path = path), None)
+
+    ctx.std.fs.write(path, json.encode({"editor": "zed", "deployments": [], "tips": {"silence": ["noisy"]}}))
+    _eq("another", silence_tip(ctx, "other", path = path), None)
+    _eq("other keys kept", json.decode(ctx.std.fs.read_to_string(path)), {
+        "editor": "zed",
+        "deployments": [],
+        "tips": {"silence": ["noisy", "other"]},
+    })
+    _eq("unsilence", unsilence_tip(ctx, "noisy", path = path), None)
+    _eq("removed", json.decode(ctx.std.fs.read_to_string(path))["tips"]["silence"], ["other"])
+    add_tip(ctx, id = "noisy", severity = TIP_INFO, title = "T", body = "B")
+    _eq("shows again", _ids(tips._inspect_for_test(ctx)), ["noisy"])
+    _eq("unsilence of nothing", unsilence_tip(ctx, "noisy", path = path), None)
+
+    _eq("a list", silence_tip(ctx, ["l1", "l2"], path = path), None)
+    _eq("in one write", json.decode(ctx.std.fs.read_to_string(path))["tips"]["silence"], ["other", "l1", "l2"])
+    _eq("both silenced in the task", [id for id in silenced_tips(ctx) if id.startswith("l")], ["l1", "l2"])
+    _eq("a bad id in a list", "is not a tip id" in silence_tip(ctx, ["l3", "a b"], path = path), True)
+    _eq("writes none of it", json.decode(ctx.std.fs.read_to_string(path))["tips"]["silence"], ["other", "l1", "l2"])
+    _eq("nor silences it in the task", "l3" in silenced_tips(ctx), False)
+    _eq("a bad id", "is not a tip id" in silence_tip(ctx, "a b", path = path), True)
+    ctx.std.fs.write(path, "[]")
+    _eq("a file it cannot keep", "not writing it" in silence_tip(ctx, "x", path = path), True)
+    _eq("left as it was", ctx.std.fs.read_to_string(path), "[]")
+    _reset(ctx)
 
 def _test_important_tips_can_be_silenced(ctx):
     """An important tip whose `id` is on the silence list never lands —
@@ -756,7 +851,7 @@ def _test_terminal_format(_):
     _eq("more", terminal_more_line("x", TIP_WARNING, "T", 3), "TIP[x] 🟡 warning: 3 more; the last: T")
     _eq("now", terminal_now_line("x", TIP_INFO, "T"), "TIP[x] 💬 note: now: T")
     _eq("hint", [ansi.strip(l) for l in terminal_hint_lines()], [
-        "TIP[tips-hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips-hint`) or in `.aspect/config.axl`; see https://aspect.build/go/cli-tips-silence",
+        "TIP[tips-hint] 💬 note: Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=tips-hint`) or in `.aspect/config.axl`, or just for you in `~/.aspect/config.json`; see https://aspect.build/go/cli-tips-silence",
     ])
     _eq("its path a word to type", ansi.unlinked(".aspect/config.axl") in terminal_hint_lines()[0], True)
 
@@ -1004,6 +1099,8 @@ def _test_impl(ctx):
     _test_key_distinct(ctx)
     _test_silenced_tips_short_circuits_add_tip(ctx)
     _test_silenced_tips_blocks_add(ctx)
+    _test_config_json_silences_merge_with_the_arg(ctx)
+    _test_silence_tip_writes_the_users_file(ctx)
     _test_important_tips_can_be_silenced(ctx)
     _test_add_tip_format(ctx)
     _test_add_tip_raw_skips_interpolation(ctx)
@@ -1040,7 +1137,7 @@ def _test_impl(ctx):
     _test_merge_aggregate(ctx)
     _test_aggregates_merge_once_per_batch(ctx)
     _test_rule_tips_from_a_report(ctx)
-    print("tips.axl: OK (43 sections)")
+    print("tips.axl: OK (45 sections)")
     return 0
 
 tips_tests = task(

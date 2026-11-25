@@ -66,12 +66,13 @@ pub struct Env {
     /// read once when the `Env` is built. The process's own unless a test
     /// harness sets a snapshot.
     pub verbose: Result<Option<crate::diag::Verbose>, String>,
-    /// The `editor` in the user's `~/.aspect/config.json`, read when a task
-    /// resolves its console ([`crate::out::user_link_format`]). A test
-    /// harness sets its own for that. Lines written before the console
-    /// resolves read `user_link_format` itself, which reads no file in this
-    /// crate's unit tests.
-    pub user_editor: fn() -> Option<Option<bazel::console::links::LinkFormat>>,
+    /// The `editor` of the `config.json` files, the user's over the
+    /// repository's, read when a task resolves its console
+    /// ([`crate::out::config_link_format`]). A test harness sets its own for
+    /// that. Lines written before the console resolves read
+    /// `config_link_format` itself, which reads no file in this crate's unit
+    /// tests.
+    pub config_editor: fn() -> Option<Option<bazel::console::links::LinkFormat>>,
 }
 
 impl Env {
@@ -97,7 +98,7 @@ impl Env {
             buildkite: crate::ci::buildkite_from(|name| std::env::var_os(name)),
             coding_agent: crate::agent::detected(|name| std::env::var_os(name)),
             verbose: crate::diag::Verbose::from_env(|name| std::env::var_os(name)),
-            user_editor: crate::out::user_link_format,
+            config_editor: crate::out::config_link_format,
         }
     }
 

@@ -17,7 +17,7 @@
 
 mod common;
 
-use common::aspect_cli;
+use common::{aspect_cli, base_env};
 use std::process::Command;
 
 /// Run `auth status` against an empty credential store.
@@ -109,4 +109,30 @@ fn auth_status_renders_json() {
         .expect("an Aspect Cloud row");
     assert_eq!(cloud["api_token_env"], "ASPECT_API_TOKEN");
     assert_eq!(cloud["login_command"], "aspect auth login");
+}
+
+/// An empty `~/.aspect/config.json` reads as `{}`: no deployments, no error.
+/// The environment is cleared to `base_env` (no ambient `ASPECT_*` or CI
+/// variables) and `$HOME` is a temp folder, so the file is the test's own.
+#[test]
+fn auth_status_reads_an_empty_user_config() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".aspect")).unwrap();
+    std::fs::write(home.join(".aspect/config.json"), "").unwrap();
+    let output = Command::new(aspect_cli())
+        .args(["auth", "status"])
+        .current_dir(dir.path())
+        .env_clear()
+        .envs(base_env())
+        .env("HOME", &home)
+        .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
+        .env(
+            "ASPECT_CREDENTIALS_FILE",
+            dir.path().join("credentials.json"),
+        )
+        .output()
+        .expect("running `aspect auth status`");
+    let (_, rendered) = assert_ok(&output, "auth status with an empty config.json");
+    assert!(rendered.contains("Aspect Cloud"), "{rendered}");
 }

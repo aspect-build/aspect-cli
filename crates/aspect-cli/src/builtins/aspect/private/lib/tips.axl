@@ -42,7 +42,23 @@ as rustc writes `warning` and `note`, reads without colour. The emoji is
 the status surfaces' but for a warning, 🟡 rather than ⚠️. When the task
 ends, a line per id counts what was not printed, and a last tip,
 `tips-hint` (itself silenceable), says how to silence a tip, on the
-command line or in `.aspect/config.axl`, and links the docs.
+command line, in `.aspect/config.axl` or for yourself in
+`~/.aspect/config.json`, and links the docs.
+
+# Silencing
+
+A tip is silenced by id, for a task, by the union of: `--tips:silence`, a
+`config.axl`'s `ctx.features[Tips].args.silence` (the flag joins it rather
+than replacing it, read with `ctx.args.configured`), and `tips.silence` in
+the user's `~/.aspect/config.json` and in the repository's
+`.aspect/config.json` (`{"tips": {"silence": ["<id>", ...]}}`; a `tips` or
+`silence` of the wrong shape is a warning and is ignored whole, an entry
+that is no tip id is a warning and dropped alone). The `config.axl` files
+assign `silence` in turn, so the last one to (a `~/.aspect/config.axl`)
+replaces the others' list; `configured` sees only it. An id that is
+empty or holds whitespace or a comma (`checked_silence`) is a warning and
+silences nothing. `silence_tip` / `unsilence_tip` write the user's file
+only; `silenced_tips` says where each id comes from.
 
 # Severities, most urgent first
 
@@ -312,6 +328,13 @@ _TipsTrait = trait(
 
     # Raw insertion-ordered stored tips; `collect_tips_sorted` filters + sorts.
     collect = attr(typing.Callable[[], list], default = lambda: []),
+
+    # The silenced ids, each with where it is silenced (`silence_sources`).
+    silenced = attr(typing.Callable[[], dict], default = lambda: {}),
+
+    # Mark `id` silenced (True) or not (False) from `source` for the rest of
+    # the task; silencing drops its stored tips.
+    set_silenced = attr(typing.Callable[[str, str, bool], None], default = lambda id, source, on: None),
 
     # Test seams — owner binds these; production code should not call them.
     _reset = attr(typing.Callable[[], None], default = lambda: None),
@@ -918,6 +941,44 @@ def collect_tips_sorted(ctx, limit = None, surface = None):
         out = out[:limit]
     return out
 
+def _id_list(id):
+    return [id] if type(id) == "string" else list(id)
+
+def silence_tip(ctx, id, path = None):
+    """Silence tip `id` (one id, or a list) for this user: add it to
+    `tips.silence` in `~/.aspect/config.json` (`path` names another file),
+    so later runs drop it, and for the rest of this task, dropping its
+    stored tips. One write for every id, locked and atomic, keeping every
+    other key, so concurrent CLIs lose nothing; it creates the file when
+    missing. Returns `None` when done, an id already silenced included,
+    else why not as a string (an id that is empty or holds whitespace, a
+    file that is read-only or not a JSON object or whose `tips` is not as
+    written here, an I/O error); nothing is then written and the task is
+    left as it was."""
+    err = ctx.aspect.tips.silence(_id_list(id), path = path)
+    if err == None:
+        for one in _id_list(id):
+            ctx.traits[_TipsTrait].set_silenced(one, SILENCED_BY_USER, True)
+    return err
+
+def unsilence_tip(ctx, id, path = None):
+    """Undo `silence_tip`: remove `id` (one id, or a list) from
+    `tips.silence` in `~/.aspect/config.json` (or `path`), as it writes,
+    and from this task's user silences. It stays silenced while another
+    source silences it (see `silenced_tips`). Returns `None` when done, an
+    id not there included, else why not as a string, nothing written."""
+    err = ctx.aspect.tips.unsilence(_id_list(id), path = path)
+    if err == None:
+        for one in _id_list(id):
+            ctx.traits[_TipsTrait].set_silenced(one, SILENCED_BY_USER, False)
+    return err
+
+def silenced_tips(ctx):
+    """The task's silenced tip ids, a dict of id to where each is silenced
+    (`SILENCED_BY_FLAG`, `SILENCED_BY_CONFIG`, `SILENCED_BY_USER`,
+    `SILENCED_BY_REPO`), in first-seen order. Empty when `Tips` is off."""
+    return ctx.traits[_TipsTrait].silenced()
+
 def severity_emoji(severity):
     """Emoji prefix for a tip's severity. Used by renderers."""
     return _SEVERITY_EMOJI.get(severity, _SEVERITY_EMOJI[TIP_NOTE])
@@ -936,7 +997,9 @@ def severity_rank(severity):
 def silence_hint_line(id):
     """Markdown `<sub>` silence-hint footer naming the tip's id and the
     silence knob. Returns `""` for blank ids. Shared by the check-run
-    `TIPS_BLOCK` and PR-comment section so both stay aligned."""
+    `TIPS_BLOCK` and PR-comment section so both stay aligned. It names the
+    repository's knobs only: a CI run reads no developer's
+    `~/.aspect/config.json`, so silencing there is the terminal's."""
     if not id:
         return ""
     return '<sub>_Silence by setting `ctx.features[Tips].args.silence = ["%s", ...]` in `.aspect/config.axl` (load `Tips` from `@aspect//feature/tips.axl`), or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
@@ -1106,9 +1169,15 @@ TIPS_HINT_ID = "tips-hint"
 
 def terminal_hint_lines(color_on = False, console = None):
     """The end-of-task `tips-hint` tip, on one line: how to silence a tip, by
-    flag (its own id the example) or in `.aspect/config.axl`, a file named
-    to edit and so `unlinked`, and the docs."""
-    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `%s`; see %s" % (TIPS_HINT_ID, ansi.unlinked(".aspect/config.axl"), CLI_TIPS_SILENCE_URL)
+    flag (its own id the example), in `.aspect/config.axl` or for this user
+    in `~/.aspect/config.json`, files named to edit and so `unlinked`, and
+    the docs."""
+    title = "Silence a tip with `--tips:silence=<id>` (e.g. `--tips:silence=%s`) or in `%s`, or just for you in `%s`; see %s" % (
+        TIPS_HINT_ID,
+        ansi.unlinked(".aspect/config.axl"),
+        ansi.unlinked("~/.aspect/config.json"),
+        CLI_TIPS_SILENCE_URL,
+    )
     return terminal_tip_lines(TIPS_HINT_ID, TIP_NOTE, title, "", color_on, console)
 
 def _console(ctx):
@@ -1211,17 +1280,81 @@ def _surface_overrides(ctx, entries):
         out[id] = wanted
     return out
 
+# Where a tip is silenced: `--tips:silence`, a `config.axl`'s `silence` arg,
+# the user's `~/.aspect/config.json` or the repository's `.aspect/config.json`.
+SILENCED_BY_FLAG = "flag"
+SILENCED_BY_CONFIG = "config"
+SILENCED_BY_USER = "user"
+SILENCED_BY_REPO = "repo"
+
+def checked_silence(flag_ids, config_ids, is_id):
+    """`(flag_ids, config_ids, warnings)`: the ids of each list that
+    `is_id` (`ctx.aspect.tips.is_tip_id`) takes, and a warning for each it
+    does not, which silences nothing, once per source and id. A comma's
+    warning says how to give two ids there: repeat the flag
+    (`--tips:silence=a,b` is one id), or split a `config.axl`'s entry into
+    list items."""
+    warnings = []
+
+    def keep(ids, what, split):
+        kept = []
+        warned = {}
+        for id in ids:
+            if is_id(id):
+                kept.append(id)
+                continue
+            if id in warned:
+                continue
+            warned[id] = True
+            hint = "; " + split if "," in id else ""
+            warnings.append("%s %r is not a tip id, so it silences nothing%s" % (what, id, hint))
+        return kept
+
+    flag = keep(flag_ids, "--tips:silence", "repeat the flag for each id (`--tips:silence=a --tips:silence=b`)")
+    config = keep(config_ids, "a config.axl's Tips silence", 'split it into list items (`["a", "b"]`)')
+    return flag, config, warnings
+
+def silence_sources(flag_ids, config_ids, found):
+    """The silenced ids, the union of every source: a dict of id to the
+    sources that silence it, in first-seen order. `flag_ids` is the `silence`
+    arg typed on the command line, `config_ids` the one a `config.axl`
+    assigned (`ctx.args.configured`), each joining the other rather than
+    replacing it; `found` is `ctx.aspect.tips.config_silence()`, the
+    `config.json` files'."""
+    sources = {}
+    for ids, source in [
+        (flag_ids, SILENCED_BY_FLAG),
+        (config_ids, SILENCED_BY_CONFIG),
+        (found.user, SILENCED_BY_USER),
+        (found.repo, SILENCED_BY_REPO),
+    ]:
+        for id in ids:
+            if source not in sources.setdefault(id, []):
+                sources[id].append(source)
+    return sources
+
 def _tips_impl(ctx):
-    """Owner feature impl. Holds the per-task tips, the silence list and
-    what the terminal has shown in closure state; reads `silence` /
-    `auto_print` from feature args at bind time so config / `--tips:*`
-    flags propagate. Registers the end of the task's terminal output (see
-    `_finish`) as a post-task hook, so it runs however the task ended."""
+    """Owner feature impl. Holds the per-task tips, the silenced ids and
+    what the terminal has shown in closure state. At bind time reads the
+    `silence` / `auto_print` feature args, so config / `--tips:*` flags
+    propagate, and the `config.json` files' `tips.silence`, warning about an
+    invalid one; the silenced ids are the union (`silence_sources`).
+    Registers the end of the task's terminal output (see `_finish`) as a
+    post-task hook, so it runs however the task ended."""
     state = []
+
+    found = ctx.aspect.tips.config_silence()
+    for w in found.warnings:
+        ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": " + w + "\n")
 
     # `args.custom(...)` returns None when unset despite `default = []`;
     # coalesce defensively.
-    silenced = list(ctx.args.silence or [])
+    flag_ids = (ctx.args.silence or []) if ctx.args.is_explicit("silence") else []
+    flag_ids, config_ids, bad = checked_silence(flag_ids, ctx.args.configured("silence") or [], ctx.aspect.tips.is_tip_id)
+    for w in bad:
+        ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": " + w + "\n")
+    sources = silence_sources(flag_ids, config_ids, found)
+    silenced = list(sources.keys())
     surfaces_for = _surface_overrides(ctx, ctx.args.surfaces or [])
     auto_print = [ctx.args.auto_print]  # boxed so test seam can mutate
 
@@ -1471,6 +1604,7 @@ def _tips_impl(ctx):
         # auto_print False.
         state.clear()
         silenced.clear()
+        sources.clear()
         order.clear()
         shows.clear()
         shown.clear()
@@ -1487,8 +1621,38 @@ def _tips_impl(ctx):
 
     def _set_silenced(ids):
         silenced.clear()
+        sources.clear()
         for id in ids:
             silenced.append(id)
+            sources[id] = [SILENCED_BY_FLAG]
+
+    def _silenced():
+        return {id: list(s) for id, s in sources.items()}
+
+    def _set_silenced_from(id, source, on):
+        """Add `source` to (`on`) or remove it from `id`'s sources. An id
+        newly silenced has its stored tips dropped, so neither a surface nor
+        the end of the task shows them; one with no source left shows again
+        from its next emit."""
+        held = sources.get(id, [])
+        if on and source not in held:
+            sources[id] = held + [source]
+        elif not on and source in held:
+            held = [s for s in held if s != source]
+            if held:
+                sources[id] = held
+            else:
+                sources.pop(id)
+        if id in sources and id not in silenced:
+            silenced.append(id)
+            kept = [t for t in state if t["id"] != id]
+            state.clear()
+            state.extend(kept)
+            if id in order:
+                order.remove(id)
+                shows.pop(id)
+        elif id not in sources and id in silenced:
+            silenced.remove(id)
 
     def _set_auto_print(v):
         auto_print[0] = v
@@ -1498,6 +1662,8 @@ def _tips_impl(ctx):
 
     ctx.traits[_TipsTrait].add = _add
     ctx.traits[_TipsTrait].collect = _collect
+    ctx.traits[_TipsTrait].silenced = _silenced
+    ctx.traits[_TipsTrait].set_silenced = _set_silenced_from
     ctx.traits[_TipsTrait]._reset = _reset
     ctx.traits[_TipsTrait]._set_silenced = _set_silenced
     ctx.traits[_TipsTrait]._set_auto_print = _set_auto_print
@@ -1513,7 +1679,7 @@ Tips = feature(
     args = {
         "silence": args.string_list(
             default = [],
-            description = "Tip ids to suppress for this task. Set from config: `ctx.features[Tips].args.silence = [\"<id>\", ...]` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
+            description = "Tip ids to suppress for this task. Set from config: `ctx.features[Tips].args.silence = [\"<id>\", ...]` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple; a comma is no separator, and an id holding one is a warning). The command line's ids join a config.axl's rather than replacing them, and both join `tips.silence` in ~/.aspect/config.json and in the repository's .aspect/config.json.",
         ),
         "surfaces": args.string_list(
             default = [],
