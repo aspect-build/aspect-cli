@@ -953,6 +953,7 @@ def attempt_state(now_ms: int) -> dict:
         views = [],
         parked = {},
         seeded = 0,
+        seed_trimmed = 0,
         inv = {},
         tab_scroll = 0,
         hover = None,
@@ -1686,14 +1687,15 @@ def _slice_escaped(text: str, skip: int, cells: int) -> str:
             continue
         if seen < skip:
             seen += 1
-            prev = 1 if c < 0x0300 else _cells(c)
+            n, _ = _drawn_cell(c, prev)
+            prev = n if n else prev
             continue
         n, shown = _drawn_cell(c, prev)
         if at + n > cells:
             break
         out.append(shown)
         at += n
-        prev = n
+        prev = n if n else prev
     return "".join(out) + _RESET
 
 def _cut_escaped(text: str, cells: int) -> str:
@@ -1713,7 +1715,7 @@ def _cut_escaped(text: str, cells: int) -> str:
             break
         out.append(shown)
         at += n
-        prev = n
+        prev = n if n else prev
     return "".join(out) + "\x1b[39m"
 
 def _peek_paint(highlighted: str):
@@ -3198,6 +3200,12 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
         kept = state.get("colour_of", {})
         state["colour_of"] = {line: kept[line] for line in state["log"] if line in kept}
         state["dropped"] = state.get("dropped", 0) + over
+
+        # Trimmed seed lines are still on the main screen: neither replayed
+        # nor counted as not kept on leaving.
+        cut = min(over, state.get("seeded", 0))
+        state["seeded"] = state.get("seeded", 0) - cut
+        state["seed_trimmed"] = state.get("seed_trimmed", 0) + cut
         state["folded"] = []
         state["fold_src"] = []
         state["fold_n"] = -1
@@ -3557,9 +3565,10 @@ def replay_lines(state: dict, tty: bool) -> list:
     counting the oldest it did not keep; not what the task wrote before the
     screen was taken (`seeded`), which the main screen shows already."""
     out = []
-    if state.get("dropped"):
-        out.append("… %d older lines not kept: aspect history show for all of it" % state["dropped"])
-    for line in state["log"][max(0, state.get("seeded", 0) - state.get("dropped", 0)):]:
+    not_kept = state.get("dropped", 0) - state.get("seed_trimmed", 0)
+    if not_kept > 0:
+        out.append("… %d older lines not kept: aspect history show for all of it" % not_kept)
+    for line in state["log"][state.get("seeded", 0):]:
         out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
 

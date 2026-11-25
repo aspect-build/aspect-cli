@@ -1524,6 +1524,13 @@ def _impl(ctx: TaskContext) -> int:
         _eq("a coloured row fits: %r" % plain[:12], [text_width(r) for r in rows if text_width(r) != 80], [])
         _eq("no raw tab drawn", any(["\t" in r for r in rows]), False)
 
+    # A zero-width mark between a character and its U+FE0F: still as wide
+    # as the plain row.
+    marked = _screen(ctx, [], wrap = False)
+    add_lines(marked, ["á️ b " * 20], None, ["\x1b[33m" + "á️ b " * 20 + "\x1b[0m"])
+    marked_rows = [r.rstrip("\r") for r in _visible(render(marked, 80, 24)).split("\n") if r.rstrip("\r")]
+    _eq("a mark before U+FE0F fits", [text_width(r) for r in marked_rows if text_width(r) != 80], [])
+
     # What the task wrote before the screen was taken is not replayed.
     seeded = _screen(ctx, [], seeded = 2)
     add_lines(seeded, ["banner", "▸ Running build task"], None, None, cli = True)
