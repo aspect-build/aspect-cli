@@ -205,7 +205,8 @@ starlark_simple_value!(Filesystem);
 
 /// A background read whose completion callers poll for. `state` is `None`
 /// while a reader is still working on it; `Some(result)` once it finished
-/// (`result` is `None` on any I/O/UTF-8 error, `Some(content)` on success).
+/// (`result` is `None` on any I/O error or short read, `Some(content)` on
+/// success, non-UTF-8 bytes replaced).
 struct ReadProbe {
     state: Mutex<Option<Option<String>>>,
     done: Condvar,
@@ -233,12 +234,7 @@ struct ReadJob {
 
 impl ReadJob {
     fn run(self) {
-        let result = fs::read_to_string(&self.path)
-            .ok()
-            .filter(|c| match self.expected_len {
-                Some(want) => c.len() as u64 == want,
-                None => true,
-            });
+        let result = read_complete_lossy(&self.path, self.expected_len);
         self.probe.complete(result);
     }
 }
@@ -325,6 +321,17 @@ impl ReaderPool {
     fn workers(&self) -> usize {
         self.state.lock().unwrap().workers
     }
+}
+
+/// The file's contents if it reads as exactly `expected_len` bytes (any length
+/// when `None`), non-UTF-8 bytes replaced: the length is what says the file is
+/// whole, and a byte that isn't UTF-8 must not make it look unfinished.
+fn read_complete_lossy(path: &str, expected_len: Option<u64>) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if expected_len.is_some_and(|want| bytes.len() as u64 != want) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Poll a coalesced background read of `path` (see `poll_read_to_string` for
@@ -875,7 +882,8 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// taken after can have caught up with a writer that finished mid-read, so
     /// either would accept a prefix. `None` means "not complete yet" — poll
     /// again. A negative `expected_len` disables the check and accepts
-    /// whatever the read returns.
+    /// whatever the read returns. Non-UTF-8 bytes are replaced, never a reason
+    /// for `None`.
     ///
     /// This is the non-blocking counterpart to `poll_read_to_string`, which
     /// applies the same length gate to reads that can block indefinitely.
@@ -885,13 +893,11 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = -1)] expected_len: i64,
         heap: Heap<'v>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        let Ok(s) = fs::read_to_string(path.as_str()) else {
-            return Ok(NoneOr::None);
-        };
-        if expected_len >= 0 && s.len() as u64 != expected_len as u64 {
-            return Ok(NoneOr::None);
-        }
-        Ok(NoneOr::Other(heap.alloc_str(s.as_str())))
+        let expected_len = (expected_len >= 0).then_some(expected_len as u64);
+        Ok(match read_complete_lossy(path.as_str(), expected_len) {
+            Some(s) => NoneOr::Other(heap.alloc_str(s.as_str())),
+            None => NoneOr::None,
+        })
     }
 
     /// Reads the entire contents of a file into a string without ever
@@ -905,8 +911,9 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// waits up to `timeout_ms` for it, and while that read is still in
     /// flight, subsequent calls for the same path return `None` immediately
     /// rather than starting another read. Whenever the read eventually
-    /// completes, the next call returns its result: the file contents, or
-    /// `None` on any I/O/UTF-8 error (including a missing file).
+    /// completes, the next call returns its result: the file contents
+    /// (non-UTF-8 bytes replaced), or `None` on any I/O error (including a
+    /// missing file).
     ///
     /// Callers are expected to poll until content or a caller-side deadline:
     /// `None` always means "not readable yet", never "empty file" (an empty
@@ -1274,14 +1281,11 @@ Test = task(implementation = _impl)
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
 
-        // Helper mirroring the builtin's body; the starlark wrapper only adds
-        // heap allocation on top of this.
         fn read_if_complete(path: &std::path::Path, expected_len: i64) -> Option<String> {
-            let s = fs::read_to_string(path).ok()?;
-            if expected_len >= 0 && s.len() as u64 != expected_len as u64 {
-                return None;
-            }
-            Some(s)
+            read_complete_lossy(
+                path.to_str().unwrap(),
+                (expected_len >= 0).then_some(expected_len as u64),
+            )
         }
 
         fs::write(&path, "half").unwrap();
@@ -1297,6 +1301,20 @@ Test = task(implementation = _impl)
         assert_eq!(read_if_complete(&empty, 0).as_deref(), Some(""));
         // A missing file is unreadable regardless of the expected length.
         assert_eq!(read_if_complete(&dir.path().join("nope"), -1), None);
+        // Non-UTF-8 is whole at its byte length, replaced rather than refused.
+        let latin1 = dir.path().join("latin1.patch");
+        fs::write(&latin1, b"caf\xe9\n").unwrap();
+        assert_eq!(
+            read_if_complete(&latin1, 5).as_deref(),
+            Some("caf\u{FFFD}\n")
+        );
+        assert_eq!(
+            read_if_complete(&latin1, 7),
+            None,
+            "lossy length isn't the gate"
+        );
+        let got = poll_read(latin1.to_str().unwrap(), Duration::from_secs(5), Some(5));
+        assert_eq!(got.as_deref(), Some("caf\u{FFFD}\n"));
     }
 
     /// A read shorter than the authoritative length is a partially-materialized

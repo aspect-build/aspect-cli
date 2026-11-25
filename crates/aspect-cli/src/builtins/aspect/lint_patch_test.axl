@@ -1,11 +1,13 @@
 """Tests for lint's auto-fix patching (`apply_fix_patch`): a file that is
-not UTF-8, a hunk that removes a file, the user's own `.orig` and `.rej`
-files left alone, a hunk that fails, and a patch applied twice.
+not UTF-8, a hunk that removes a file and one that only empties it, the
+user's own `.orig` and `.rej` files left alone, a hunk that fails, a patch
+applied twice (its hunks ignored, not rejected), the same patch again in one
+run, a header-like line inside a hunk, and a path outside the tree.
 
     aspect dev test-lint-patch
 """
 
-load("@aspect//lint.axl", "apply_fix_patch", "patched_files")
+load("@aspect//lint.axl", "apply_fix_patch", "patch_headers", "patched_files")
 
 def _eq(label, got, want):
     if got != want:
@@ -14,36 +16,65 @@ def _eq(label, got, want):
 def _sh(ctx, cwd, script):
     ctx.std.process.command("sh").args(["-c", script]).current_dir(cwd).spawn().wait()
 
+def _names(fs, dir):
+    return sorted([e.path.rpartition("/")[2] for e in fs.read_dir(dir)])
+
 def _impl(ctx: TaskContext) -> int:
     fs = ctx.std.fs
-    _eq("both sides named, /dev/null not", patched_files("--- a/x.txt\n+++ /dev/null\n--- /dev/null\n+++ b/y.txt\n"), ["x.txt", "y.txt"])
+    _eq("both sides named, /dev/null not", patched_files("--- a/x.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n--- /dev/null\n+++ b/y.txt\n@@ -0,0 +1 @@\n+y\n"), ["x.txt", "y.txt"])
+    _eq(
+        "a removed `-- x` line is no header",
+        patch_headers("--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n--- not/a.txt\n+++ not/b.txt\n z\n"),
+        [("x.txt", "x.txt")],
+    )
 
-    tree = fs.mkdtemp()
-    _sh(ctx, tree, """
-mkdir -p src
-printf 'caf\\351\\n' > src/latin1.txt
-printf 'old\\n' > src/a.txt
-printf 'bye\\n' > src/gone.txt
-printf 'keep\\n' > src/b.txt
-printf 'user orig\\n' > src/a.txt.orig
-printf 'user rej\\n' > src/b.txt.rej
+    root = fs.mkdtemp()
+    ctx.defer(fs.remove_dir_all, root)
+    tree = root + "/tree"
+    fs.create_dir_all(tree)
+    _sh(ctx, root, """
+mkdir -p tree/src/pkg
+printf 'caf\\351\\n' > tree/src/latin1.txt
+printf 'old\\n' > tree/src/a.txt
+printf 'bye\\n' > tree/src/gone.txt
+printf 'import os\\n' > tree/src/pkg/__init__.py
+printf 'keep\\n' > tree/src/b.txt
+printf 'user orig\\n' > tree/src/a.txt.orig
+printf 'user rej\\n' > tree/src/b.txt.rej
 {
   printf -- '--- a/src/latin1.txt\\n+++ b/src/latin1.txt\\n@@ -1 +1 @@\\n-caf\\351\\n+cafe\\n'
   printf -- '--- a/src/a.txt\\n+++ b/src/a.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n'
   printf -- '--- a/src/gone.txt\\n+++ /dev/null\\n@@ -1 +0,0 @@\\n-bye\\n'
   printf -- '--- a/src/b.txt\\n+++ b/src/b.txt\\n@@ -1 +1 @@\\n-nope\\n+never\\n'
-} > ../fix.patch
+} > fix.patch
+printf -- '--- a/src/pkg/__init__.py\\n+++ b/src/pkg/__init__.py\\n@@ -1 +0,0 @@\\n-import os\\n' > empty.patch
+printf -- '--- a/src/new/made.txt\\n+++ b/src/new/made.txt\\n@@ -0,0 +1 @@\\n+made\\n' > made.patch
+printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' > escape.patch
 """)
-    patch = tree.rpartition("/")[0] + "/fix.patch"
+    patch = root + "/fix.patch"
+    seen = []
     for run in ("first", "again"):
-        apply_fix_patch(ctx, patch, cwd = tree)
+        kept = apply_fix_patch(ctx, patch, cwd = tree)
         _eq("%s: a file not UTF-8 patched" % run, fs.read_to_string(tree + "/src/latin1.txt"), "cafe\n")
         _eq("%s: patched" % run, fs.read_to_string(tree + "/src/a.txt"), "new\n")
         _eq("%s: a removed file removed" % run, fs.exists(tree + "/src/gone.txt"), False)
         _eq("%s: a failed hunk leaves the file" % run, fs.read_to_string(tree + "/src/b.txt"), "keep\n")
         _eq("%s: the user's .orig untouched" % run, fs.read_to_string(tree + "/src/a.txt.orig"), "user orig\n")
         _eq("%s: the user's .rej untouched" % run, fs.read_to_string(tree + "/src/b.txt.rej"), "user rej\n")
-        _eq("%s: no new .orig or .rej" % run, sorted([e.path.rpartition("/")[2] for e in fs.read_dir(tree + "/src")]), sorted(["a.txt", "a.txt.orig", "b.txt", "b.txt.rej", "latin1.txt"]))
+        _eq("%s: no new .orig or .rej" % run, _names(fs, tree + "/src"), ["a.txt", "a.txt.orig", "b.txt", "b.txt.rej", "latin1.txt", "pkg"])
+        _eq("%s: only the failed hunk is a reject" % run, kept != None and _names(fs, kept + "/src"), ["b.txt.rej"])
+        fs.remove_dir_all(kept)
+
+    apply_fix_patch(ctx, root + "/empty.patch", cwd = tree)
+    _eq("an emptied file stays, empty", fs.read_to_string(tree + "/src/pkg/__init__.py"), "")
+
+    _eq("a first patch in a run applies", apply_fix_patch(ctx, root + "/made.patch", cwd = tree, seen = seen), None)
+    fs.write(tree + "/src/new/made.txt", "edited\n")
+    _eq("the same patch again in a run is skipped", apply_fix_patch(ctx, root + "/made.patch", cwd = tree, seen = seen), None)
+    _eq("so the file keeps its edit", fs.read_to_string(tree + "/src/new/made.txt"), "edited\n")
+
+    apply_fix_patch(ctx, root + "/escape.patch", cwd = tree)
+    _eq("a path outside the tree is not patched", fs.exists(root + "/escape.txt"), False)
     print("lint_patch_test.axl: OK")
     return 0
 

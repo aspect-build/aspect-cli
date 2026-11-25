@@ -41,69 +41,153 @@ load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_s
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "did_you_mean_then", "pluralize")
 
-def patched_files(text: str) -> list:
-    """The files a unified diff touches, as `patch -p1` names them: each
-    `--- a/<path>` and `+++ b/<path>` header's path (one side is `/dev/null`
-    for a file made or removed), its prefix and any timestamp gone."""
+def _header_path(line: str):
+    """The path a `--- `/`+++ ` header names as `patch -p1` takes it, or None
+    for `/dev/null`: its prefix and any timestamp gone."""
+    path = line[4:].split("\t")[0].strip()
+    if path == "/dev/null":
+        return None
+    return path.partition("/")[2] if "/" in path else path
+
+def _hunk_count(spec: str) -> int:
+    """The line count of a hunk range, `-a,b` or `+c,d` (1 when `,b` is left out)."""
+    return int(spec.partition(",")[2] or "1")
+
+def patch_headers(text: str) -> list:
+    """Each file a unified diff touches, as `(old, new)` paths (see
+    `_header_path`; None for `/dev/null`). A `--- ` line followed by a
+    `+++ ` one is a header only outside a hunk's body: a removed `-- x` line
+    reads as `--- x` there."""
     out = []
-    for line in text.split("\n"):
-        if not (line.startswith("+++ ") or line.startswith("--- ")):
+    lines = text.split("\n")
+    old_left = 0
+    new_left = 0
+    for i, line in enumerate(lines):
+        if old_left > 0 or new_left > 0:
+            if line.startswith("\\"):
+                continue
+            if line.startswith("-"):
+                old_left -= 1
+            elif line.startswith("+"):
+                new_left -= 1
+            else:
+                old_left -= 1
+                new_left -= 1
             continue
-        path = line[4:].split("\t")[0].strip()
-        if path == "/dev/null":
-            continue
-        path = path.partition("/")[2] if "/" in path else path
-        if path and path not in out:
-            out.append(path)
+        if line.startswith("@@ "):
+            ranges = line.split(" ")
+            if len(ranges) > 2 and ranges[1].startswith("-") and ranges[2].startswith("+"):
+                old_left = _hunk_count(ranges[1])
+                new_left = _hunk_count(ranges[2])
+        elif line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            out.append((_header_path(line), _header_path(lines[i + 1])))
+    return out
+
+def patched_files(text: str) -> list:
+    """The files a unified diff touches, each side of each header (see
+    `patch_headers`), once each and in order, `/dev/null` left out."""
+    return _files_of(patch_headers(text))
+
+def _files_of(headers: list) -> list:
+    """`patched_files` for headers `patch_headers` gave."""
+    out = []
+    for old, new in headers:
+        for path in (old, new):
+            if path and path not in out:
+                out.append(path)
     return out
 
 def _is_file(fs, path: str) -> bool:
     """Whether `path` is a file; false where nothing is."""
-    return fs.exists(path) and fs.is_file(path)
+    return fs.exists(path) and fs.metadata(path).is_file
 
 def _same_bytes(fs, a: str, b: str) -> bool:
     """Whether files `a` and `b` hold the same bytes, whatever their text."""
     return fs.open(a).read() == fs.open(b).read()
 
-def apply_fix_patch(ctx, patch: str, cwd = None):
+def _inside(path: str) -> bool:
+    """Whether a relative `path` stays inside the directory it is taken in."""
+    return path and not path.startswith("/") and ".." not in path.split("/")
+
+def _ignored_rejects(said: str) -> list:
+    """The reject files patch's output says hold only hunks it ignored as
+    previously applied (BSD `N out of M hunks ignored--saving rejects to
+    'x.rej'`, GNU `... to file x.rej`), not hunks that failed."""
+    out = []
+    for line in said.split("\n"):
+        if " ignored" in line and "saving rejects to " in line:
+            name = line.partition("saving rejects to ")[2].strip()
+            name = name.removeprefix("file ").strip("'\"`")
+            out.append(name)
+    return out
+
+def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     """Apply one auto-fix patch with `patch -p1`, asking nothing (no
     terminal answers it): a hunk that looks applied already is skipped, not
-    reversed (`--forward --batch`, BSD and GNU patch both), and a file a hunk
-    empties is removed (`-E`). It is applied to
-    copies of every file it names (each side of each header, so a hunk that
-    removes a file has it to remove) in a directory of its own, and then
-    each one it changed, made or removed is changed, made or removed in the
-    tree, by its bytes: patch's `.rej` and `.orig` files never land beside
-    the user's (BSD patch writes a second file's rejects there whatever `-r`
-    says, over any the user had). A patch that leaves rejects has them kept
-    in a directory of their own, which a line names (patch's own message
-    names them relative to the copy). The copy goes when the task ends,
-    whatever happens. What patch says goes to the task's output, as any
-    child's does. In `cwd`, the task's own directory unless given."""
+    reversed (`--forward --batch`, BSD and GNU patch both). It is applied to
+    copies of every file it names (each side of each header) in a directory
+    of its own, with every side's directory made there and patch's own
+    temporary files kept there too, and then each file it changed or made
+    is changed or made in the tree, by its bytes. A file is removed only
+    where its header's new side is `/dev/null` and patch left it empty; one
+    a fix merely empties stays, empty. Patch's `.rej` and `.orig` files never
+    land beside the user's (BSD patch writes a second file's rejects there
+    whatever `-r` says, over any the user had). A patch that leaves rejects
+    for hunks that failed, not ones it ignored as applied already, has them
+    kept in a directory of their own, which a line names (patch's own
+    message names them relative to the copy). The copies go when the task
+    ends, whatever happens. What patch says goes to the task's output.
+
+    A patch naming a path outside the tree is not applied. `seen`, when
+    given, is a list of the bytes of patches applied already in this run: a
+    patch identical to one of them is skipped (one source in two lint
+    targets gives two), and this one's bytes are added. In `cwd`, the
+    task's own directory unless given. Returns the directory the rejects
+    are kept in, or None."""
     cwd = cwd or ctx.std.env.current_dir()
     fs = ctx.std.fs
-    work = fs.mkdtemp()
-    ctx.defer(fs.remove_dir_all, work)
+    if seen != None:
+        content = fs.open(patch).read()
+        if content in seen:
+            return None
+        seen.append(content)
 
     # Lossy: a hunk may hold any bytes; only the header paths are read.
-    paths = patched_files(fs.try_read_to_string_capped(patch, 64 * 1024 * 1024))
+    headers = patch_headers(fs.try_read_to_string_capped(patch, 64 * 1024 * 1024))
+    paths = _files_of(headers)
+    outside = [p for p in paths if not _inside(p)]
+    if outside:
+        print("WARNING: %s was not applied: it names %s, outside the workspace" % (patch, ", ".join(outside)))
+        return None
+    removed = [old for old, new in headers if old and not new]
+
+    work = fs.mkdtemp()
+    ctx.defer(fs.remove_dir_all, work)
+    scratch = fs.mkdtemp()
+    ctx.defer(fs.remove_dir_all, scratch)
     had = {}
     for path in paths:
+        parent = path.rpartition("/")[0]
+        if parent:
+            fs.create_dir_all(work + "/" + parent)
         if _is_file(fs, cwd + "/" + path):
             had[path] = True
-            parent = path.rpartition("/")[0]
-            if parent:
-                fs.create_dir_all(work + "/" + parent)
             fs.copy(cwd + "/" + path, work + "/" + path)
-    ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("-E").arg("--input=" + patch) \
-        .current_dir(work).spawn().wait()
+    out = ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
+        .current_dir(work).env("TMPDIR", scratch).stdout("piped").stderr("piped").spawn().wait_with_output()
+    said = out.stdout + out.stderr
+    if said:
+        ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
+    ignored = _ignored_rejects(said)
     rejects = []
     for path in paths:
         patched = work + "/" + path
         mine = cwd + "/" + path
-        if _is_file(fs, patched + ".rej"):
+        if _is_file(fs, patched + ".rej") and path + ".rej" not in ignored:
             rejects.append(path + ".rej")
         if not _is_file(fs, patched):
+            continue
+        if path in removed and len(fs.open(patched).read()) == 0:
             if path in had:
                 fs.remove_file(mine)
             continue
@@ -121,6 +205,8 @@ def apply_fix_patch(ctx, patch: str, cwd = None):
                 fs.create_dir_all(kept + "/" + parent)
             fs.copy(work + "/" + rej, kept + "/" + rej)
         print("INFO: %s did not apply in full; its rejected hunks are in %s" % (patch, kept))
+        return kept
+    return None
 
 # Poll budget for pending lint files after build.wait(): remote downloads are
 # async and the BES event can arrive before the file lands. 30s is generous.
@@ -826,7 +912,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_file
     if file.name.endswith(".patch"):
         # Readability gate (content discarded): requeues until the blob is
         # whole, since lint_patch hooks buffer the path and re-read it later
-        # with a plain read_to_string that has no completeness check.
+        # with no completeness check.
         if _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len) == None:
             return None
         patches.append({"path": filepath, "name": file.name})
@@ -1235,8 +1321,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data = data,
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
+        applied = []
         for patch in scoped_patches:
-            apply_fix_patch(ctx, patch)
+            apply_fix_patch(ctx, patch, seen = applied)
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
     # Skip the `filter` phase emit when the build failed or no aspect ran:
