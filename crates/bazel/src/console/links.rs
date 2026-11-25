@@ -860,7 +860,8 @@ impl LineProcessor for Links {
 /// the path and the position said after it, as the text reads with its
 /// escapes removed (`src/a.ts` `:9:4` <url>): for a terminal that shows no
 /// OSC 8 link but opens a URL written out. A URL's own link
-/// (`https://…`) shows it already.
+/// (`https://…`) shows it already, and a tool's own `file:` link is not
+/// written out, as the terminal would have the system open it.
 ///
 /// When `styled`, each written URL is grey and underlined
 /// ([`written_url`]), the record's own style taken up again after it, and
@@ -908,7 +909,7 @@ fn urls_written(record: &[u8], styled: bool) -> (Vec<u8>, usize) {
     ends.extend(open.map(|url| (starts.len(), url)));
     let mut inserts: Vec<(usize, Vec<u8>)> = ends
         .into_iter()
-        .filter(|(_, url)| !is_web(url))
+        .filter(|(_, url)| !is_web(url) && !is_file(url))
         .map(|(end, url)| {
             let said = located(&plain[end..]).map_or(0, |(.., len)| len);
             let at = starts.get(end + said).copied().unwrap_or(record.len());
@@ -934,6 +935,11 @@ fn urls_written(record: &[u8], styled: bool) -> (Vec<u8>, usize) {
 
 fn is_web(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
+}
+
+fn is_file(url: &str) -> bool {
+    url.get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("file:"))
 }
 
 /// ` <url>`, a URL written beside its link; when `styled`, grey with the
@@ -2141,6 +2147,14 @@ mod tests {
         );
         // A web link's URL is never written out, so nothing to count.
         assert_eq!(written_urls(web.as_bytes(), false), web.as_bytes());
+        let theirs = "\x1b]8;;FILE:///bin/ls\x1b\\ls\x1b]8;;\x1b\\";
+        let before = files.written.get();
+        assert_eq!(
+            files.write_urls(theirs.as_bytes()),
+            theirs.as_bytes(),
+            "a tool's own file: link is not written out for the system to open"
+        );
+        assert_eq!(files.written.get(), before, "nor counted");
     }
 
     #[test]
