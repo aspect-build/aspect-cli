@@ -1565,7 +1565,8 @@ fn shorthand_taken_on(
 
 /// A feature's shorthand as `aspect describe` and `aspect feature <name>`
 /// report it, with the commands it is not registered on (see
-/// [`shorthand_taken_on`]). `None` when it is reserved, or taken on every task.
+/// [`shorthand_taken_on`]), `aspect build` and `aspect test` first and the rest
+/// sorted. `None` when it is reserved, or taken on every task.
 fn shorthand_coverage(
     block: &FeatureBlock,
     tasks: &[&dyn TaskLike<'_>],
@@ -1574,7 +1575,7 @@ fn shorthand_coverage(
         return (None, vec![]);
     };
     let wanted: HashSet<&str> = [shorthand.as_str()].into();
-    let unavailable: Vec<String> = tasks
+    let mut unavailable: Vec<String> = tasks
         .iter()
         .filter(|task| {
             let overrides = stringify_overrides(task.overrides());
@@ -1582,6 +1583,14 @@ fn shorthand_coverage(
         })
         .map(|task| command_line(*task))
         .collect();
+    // Task order varies between runs; the help note names only the first few.
+    unavailable.sort_by_key(|c| {
+        let rank = ["aspect build", "aspect test"]
+            .iter()
+            .position(|first| c == first)
+            .unwrap_or(2);
+        (rank, c.clone())
+    });
     if !tasks.is_empty() && unavailable.len() == tasks.len() {
         return (None, vec![]);
     }
@@ -4683,6 +4692,30 @@ mod tests {
             help.contains("--profile is left to `aspect build`"),
             "{help}"
         );
+    }
+
+    /// The commands a shorthand is left to come out in one order whatever the
+    /// task order: `aspect build` and `aspect test` first, then sorted.
+    #[test]
+    fn feature_shorthand_unavailable_on_is_ordered() {
+        let tasks: Vec<StubTask> = ["zeta", "test", "alpha", "build"]
+            .map(|name| wrapping_task(name, &["--profile"], &[], &[]))
+            .into();
+        let greet = stub_task("greet", &[], SmallMap::new());
+        let profile = stub_feature("Profile");
+        let block = feature_block(&profile, &HashSet::new()).unwrap();
+        let want = ["aspect build", "aspect test", "aspect alpha", "aspect zeta"]
+            .map(str::to_owned)
+            .to_vec();
+        for order in [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1]] {
+            let mut listed: Vec<&dyn TaskLike> = order.iter().map(|&i| &tasks[i] as _).collect();
+            listed.push(&greet);
+            assert_eq!(
+                shorthand_coverage(&block, &listed),
+                (Some("profile".to_owned()), want.clone()),
+                "{order:?}"
+            );
+        }
     }
 
     /// The forwarded lists are read as config.axl leaves them.

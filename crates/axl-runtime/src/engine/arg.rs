@@ -611,7 +611,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// tool's flags that take no separate value (`--stamp`, `--nostamp`). It
     /// does not change routing. Together with `value_flags_from` it says which
     /// spellings belong to the wrapped tool, so a feature's bare `--<name>`
-    /// flag is never registered where it would take one of them.
+    /// flag is never registered where it would take one of them. Without
+    /// `known_flags_from`, a feature's bare `--<name>` takes a value-less flag
+    /// of the wrapped tool that has the same name.
     ///
     /// Nothing is rewritten on the way through: what the wrapped tool receives
     /// is what was typed.

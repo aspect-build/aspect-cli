@@ -328,5 +328,22 @@ fn a_feature_named_like_a_bazel_flag_leaves_it_to_bazel() {
     let unavailable = profile["shorthand_unavailable_on"]
         .as_array()
         .expect("shorthand_unavailable_on");
-    assert!(unavailable.iter().any(|c| c == "aspect build"), "{profile}");
+    assert_eq!(
+        unavailable.first().and_then(|c| c.as_str()),
+        Some("aspect build"),
+        "{profile}"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            json(aspect(root, &["describe", "feature profile"])),
+            profile,
+            "describe is the same on every run"
+        );
+    }
+    let help = aspect(root, &["feature", "profile"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help.contains("--profile is left to `aspect build`, `aspect test`, "),
+        "{help}"
+    );
 }
