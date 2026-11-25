@@ -53,6 +53,8 @@ printf -- '--- a/src/pkg/__init__.py\\n+++ b/src/pkg/__init__.py\\n@@ -1 +0,0 @@
 printf -- '--- a/src/new/made.txt\\n+++ b/src/new/made.txt\\n@@ -0,0 +1 @@\\n+made\\n' > made.patch
 printf -- '--- a/src/missing.txt\\n+++ b/src/missing.txt\\n@@ -1 +1 @@\\n-was\\n+is\\n' > missing.patch
 printf -- '--- a/src/a.txt\\n+++ b/src/a.txt\\n@@ -x +1 @@\\n-new\\n+bad\\n' > badrange.patch
+printf 'keep\\n' > tree/src/d2.txt
+printf -- '--- a/src/zz.txt\\n+++ b/src/d2.txt\\n@@ -1 +1 @@\\n-keep\\n+changed\\n' > rename.patch
 printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' > escape.patch
 """)
     patch = root + "/fix.patch"
@@ -65,7 +67,7 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
         _eq("%s: a failed hunk leaves the file" % run, fs.read_to_string(tree + "/src/b.txt"), "keep\n")
         _eq("%s: the user's .orig untouched" % run, fs.read_to_string(tree + "/src/a.txt.orig"), "user orig\n")
         _eq("%s: the user's .rej untouched" % run, fs.read_to_string(tree + "/src/b.txt.rej"), "user rej\n")
-        _eq("%s: no new .orig or .rej" % run, _names(fs, tree + "/src"), ["a.txt", "a.txt.orig", "b.txt", "b.txt.rej", "latin1.txt", "pkg"])
+        _eq("%s: no new .orig or .rej" % run, _names(fs, tree + "/src"), ["a.txt", "a.txt.orig", "b.txt", "b.txt.rej", "d2.txt", "latin1.txt", "pkg"])
         _eq("%s: only the failed hunk is a reject" % run, kept != None and _names(fs, kept + "/src"), ["b.txt.rej"])
         fs.remove_dir_all(kept)
 
@@ -84,6 +86,9 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
     if kept != None:
         _eq("its hunks are kept", _names(fs, kept + "/src"), ["missing.txt.rej"])
         fs.remove_dir_all(kept)
+
+    _eq("a patch whose headers name two files", apply_fix_patch(ctx, root + "/rename.patch", cwd = tree), None)
+    _eq("patches the side that is there", fs.read_to_string(tree + "/src/d2.txt"), "changed\n")
 
     _eq("a hunk range that isn't numbers", apply_fix_patch(ctx, root + "/badrange.patch", cwd = tree), None)
     _eq("leaves the file", fs.read_to_string(tree + "/src/a.txt"), "new\n")

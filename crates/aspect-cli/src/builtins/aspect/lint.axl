@@ -149,8 +149,9 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     where its header's new side is `/dev/null` and patch removed or emptied
     its copy (GNU patch removes it, BSD empties it); one a fix merely
     empties stays, empty, and one that is gone already counts as removed. A
-    fix to a file that isn't there is named in a line, its hunks kept with
-    the rejects. Patch's `.rej` and `.orig` files never
+    fix to a file that isn't there (nor written under its header's new name)
+    is named in a line; BSD patch writes its hunks out as rejects, kept with
+    the others, and GNU patch writes none. Patch's `.rej` and `.orig` files never
     land beside the user's (BSD patch writes a second file's rejects there
     whatever `-r` says, over any the user had). A patch that leaves rejects
     for hunks that failed, not ones it ignored as applied already, has them
@@ -225,7 +226,8 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
             fs.create_dir_all(cwd + "/" + parent)
         fs.copy(patched, mine)
     for old, new in headers:
-        if old and new and old not in had and not _is_file(fs, work + "/" + old):
+        made = new and new != old and _is_file(fs, work + "/" + new)
+        if old and new and old not in had and not made and not _is_file(fs, work + "/" + old):
             print("INFO: %s changes %s, which isn't there: its hunks for it were not applied" % (patch, old))
     if rejects:
         kept = fs.mkdtemp()
