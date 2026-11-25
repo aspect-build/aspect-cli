@@ -649,6 +649,35 @@ fn gazelle_watch_refuses_json_output_with_a_document() {
     }
 }
 
+/// A feature's `--<name>` disagreeing with its `--<name>:enabled` is a usage
+/// error, and says so on stdout too.
+#[test]
+fn a_feature_flag_conflict_under_json_output_gets_a_usage_document() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    for output in ["json", "ndjson"] {
+        let out = aspect(dir.path(), "build")
+            .args([
+                "--tips=false",
+                "--tips:enabled=true",
+                &format!("--output={output}"),
+            ])
+            .output()
+            .expect("running aspect build");
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+        assert_eq!(doc["error"], "usage", "{doc}");
+        assert_eq!(
+            doc["message"],
+            "--tips=false conflicts with --tips:enabled=true; pass only one of them",
+            "{doc}"
+        );
+        assert_eq!(doc.get("type").is_some(), output == "ndjson", "{doc}");
+    }
+}
+
 /// A graceful cancel waits for the client, and the console with it: the
 /// cleanup line basil prints after the interrupt is forwarded, under CI's stop
 /// sequence, which sends two SIGINTs and leaves the client to finish on its

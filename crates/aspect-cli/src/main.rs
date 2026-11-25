@@ -330,6 +330,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             if let Err(err) = cmd.feature_flag_conflict(&mut cmd_for_help, &matches) {
                 err.print().ok();
+                json_error("usage", &error_line(&err.to_string()), true);
                 return Ok(ExitCode::from(err.exit_code() as u8));
             }
             let dispatch = step("dispatch", || cmd.dispatch(matches))?;
