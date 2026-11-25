@@ -1143,7 +1143,8 @@ def _impl(ctx: TaskContext) -> int:
     note_progress(timed, ["[1 / 3] 2 actions running", "    Compiling a.cc; 3s local", "    Linking b; 1s local"])
     note_progress(timed, ["[2 / 3] 1 action running", "    Compiling a.cc; 9s local"])
     add_lines(timed, ["INFO: Elapsed time: 12.0s, Critical Path: 9.2s"])
-    _eq("the critical path, then the slowest", slowest_rows(timed), ["Critical path 9.2s", "Compiling a.cc; 9s", "Linking b; 1s"])
+    _eq("the slowest, not the critical path", slowest_rows(timed), ["Compiling a.cc; 9s", "Linking b; 1s"])
+    _eq("the critical path in the Results pane", "Critical path 9.2s" in _visible(render(dict(timed, ended = True, task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = []), 120, 30)), True)
     timed.update(ended = True, progress = [])
     _eq("shown once the build is done", "Slowest" in _visible(render(timed, 100, 30)), True)
     for i in range(8):
@@ -1492,6 +1493,17 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the version at the right end", (bottom.endswith(" aspect 2026.47.3 "), text_width(bottom)), (True, 100))
     narrow_bottom = _visible(render(versioned, 50, 20)).split("\n")[-1]
     _eq("too narrow: the keys alone", "2026.47.3" in narrow_bottom, False)
+
+    # Lines drawn in the colour they were written in; a search's matches
+    # laid over it; the CLI's own lines as written, no mark of their own.
+    painted = _screen(ctx, [])
+    add_lines(painted, ["INFO: done here"], None, ["\x1b[1;90mINFO:\x1b[0m done here"])
+    add_lines(painted, ["→ Build"], None, ["\x1b[1mBuild\x1b[0m"], cli = True)
+    drawn = render(painted, 100, 20)
+    _eq("the line's own colour drawn", "\x1b[1;90mINFO:\x1b[0m done here" in drawn, True)
+    _eq("the CLI's line unmarked", "» " in _visible(drawn), False)
+    painted["search"]["pattern"] = ctx.std.re.compile("done")
+    _eq("a match over the colour", _role("search.match") + "done" in render(painted, 100, 20), True)
 
     print("dashboard_test.axl: OK")
     return 0

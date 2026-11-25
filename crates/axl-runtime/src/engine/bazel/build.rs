@@ -2133,6 +2133,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc(serde_json::json!({
             "lines": got.lines,
             "links": got.links,
+            "colours": got.colours,
             "dropped": got.dropped,
             "progress": got.progress,
         })))

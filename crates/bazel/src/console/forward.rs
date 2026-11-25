@@ -682,9 +682,6 @@ impl Destination {
         if let (Some(copy), true) = (self.copy, self.settled) {
             copy(bytes);
         }
-        if let (Some(copy), true) = (self.copy, self.settled) {
-            copy(bytes);
-        }
         if self.hidden {
             return;
         }

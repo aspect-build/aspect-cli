@@ -435,10 +435,16 @@ impl Config {
         self.palette.as_deref().filter(|_| !self.strip_colour)
     }
 
-    /// The `bazel.*` colours, when Bazel is asked for colour, it is shown,
-    /// and the theme shares its vocabulary with Bazel.
+    /// The `bazel.*` colours, when Bazel is asked for colour, it is shown
+    /// (or hidden for a screen that draws the feed in colour itself), and
+    /// the theme shares its vocabulary with Bazel.
     fn recolours(&self) -> Option<recolour::BazelColours> {
-        recolour::BazelColours::of(self.shown_palette()?).filter(|_| self.colour)
+        let palette = if self.output == Output::Hidden {
+            self.palette.as_deref()?
+        } else {
+            self.shown_palette()?
+        };
+        recolour::BazelColours::of(palette).filter(|_| self.colour)
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a

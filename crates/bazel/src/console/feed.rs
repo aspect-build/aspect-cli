@@ -47,7 +47,7 @@ pub enum Source {
 
 #[derive(Debug, Default)]
 struct State {
-    lines: VecDeque<(String, Vec<Link>)>,
+    lines: VecDeque<(String, Vec<Link>, String)>,
     /// The bytes of the line each source is writing, not yet ended.
     partial: [Vec<u8>; 2],
     /// A carriage return each source wrote last, not yet known to end its
@@ -64,6 +64,9 @@ pub struct Drained {
     pub lines: Vec<String>,
     /// Each of `lines`' links, at the same index.
     pub links: Vec<Vec<Link>>,
+    /// Each of `lines` with its colour kept ([`coloured_line`]), at the same
+    /// index: the same text, for a screen that shows the colour.
+    pub colours: Vec<String>,
     /// Lines that were dropped for [`MAX_LINES`] since the last drain.
     pub dropped: u64,
     /// The rows of Bazel's progress area as it was before its latest redraw,
@@ -89,7 +92,7 @@ impl Feed {
             match b {
                 b'\n' => {
                     let line = std::mem::take(&mut s.partial[at]);
-                    s.push(linked_line(&line));
+                    s.push(line_of(&line));
                 }
                 b'\r' => s.cr[at] = true,
                 _ if s.partial[at].len() < MAX_LINE_BYTES => s.partial[at].push(b),
@@ -110,7 +113,7 @@ impl Feed {
         let line = std::mem::take(&mut s.partial[source as usize]);
         s.cr[source as usize] = false;
         if !line.is_empty() {
-            s.push(linked_line(&line));
+            s.push(line_of(&line));
         }
         if source == Source::Stderr {
             s.progress.clear();
@@ -120,10 +123,18 @@ impl Feed {
     /// The lines since the last drain, and the progress area now.
     pub fn drain(&self) -> Drained {
         let mut s = self.state.lock().unwrap();
-        let (lines, links) = s.lines.drain(..).unzip();
+        let mut lines = Vec::new();
+        let mut links = Vec::new();
+        let mut colours = Vec::new();
+        for (line, linked, coloured) in s.lines.drain(..) {
+            lines.push(line);
+            links.push(linked);
+            colours.push(coloured);
+        }
         Drained {
             lines,
             links,
+            colours,
             dropped: std::mem::take(&mut s.dropped),
             progress: s.progress.clone(),
         }
@@ -144,6 +155,38 @@ pub fn plain_line(raw: &[u8]) -> String {
     String::from_utf8_lossy(&ansi::strip(shown))
         .chars()
         .filter(|&c| c == '\t' || !(c < ' ' || ('\u{7f}'..='\u{9f}').contains(&c)))
+        .collect()
+}
+
+/// A line as [`linked_line`] makes it, and as [`coloured_line`] does.
+fn line_of(raw: &[u8]) -> (String, Vec<Link>, String) {
+    let (text, links) = linked_line(raw);
+    (text, links, coloured_line(raw))
+}
+
+/// [`plain_line`] with its colour (SGR) kept: the same visible text, every
+/// other escape and control character but a tab dropped, the colour set
+/// before a redraw (`\r`) carried over it.
+pub fn coloured_line(raw: &[u8]) -> String {
+    let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+    let (before, shown) = match raw.iter().rposition(|&b| b == b'\r') {
+        Some(i) => (&raw[..i], &raw[i + 1..]),
+        None => (&raw[..0], raw),
+    };
+    let mut out = Vec::new();
+    for (escape, seg) in ansi::segments(before) {
+        if escape && ansi::is_sgr(seg) {
+            out.extend_from_slice(seg);
+        }
+    }
+    for (escape, seg) in ansi::segments(shown) {
+        if !escape || ansi::is_sgr(seg) {
+            out.extend_from_slice(seg);
+        }
+    }
+    String::from_utf8_lossy(&out)
+        .chars()
+        .filter(|&c| c == '\t' || c == '\x1b' || !(c < ' ' || ('\u{7f}'..='\u{9f}').contains(&c)))
         .collect()
 }
 
@@ -188,7 +231,7 @@ pub fn linked_line(raw: &[u8]) -> (String, Vec<Link>) {
 }
 
 impl State {
-    fn push(&mut self, line: (String, Vec<Link>)) {
+    fn push(&mut self, line: (String, Vec<Link>, String)) {
         if self.lines.len() == MAX_LINES {
             self.lines.pop_front();
             self.dropped += 1;
@@ -200,6 +243,22 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_coloured_line_keeps_its_colour_and_only_it() {
+        let raw = b"\x1b[32mINFO:\x1b[0m done \x1b]8;;https://x\x1b\\x\x1b]8;;\x1b\\\x1b[2K";
+        let coloured = coloured_line(raw);
+        assert_eq!(coloured, "\x1b[32mINFO:\x1b[0m done x");
+        assert_eq!(
+            String::from_utf8_lossy(&ansi::strip(coloured.as_bytes())),
+            plain_line(raw)
+        );
+        assert_eq!(
+            coloured_line(b"\x1b[33m10%\r99%"),
+            "\x1b[33m99%",
+            "colour carried over a redraw"
+        );
+    }
 
     /// A line's OSC 8 links come out as spans of its drawable text, by
     /// character, across colour and a dropped control character.

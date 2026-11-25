@@ -521,7 +521,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     // A screen of its own shows the task's output from its start: what it
     // wrote before Bazel's console began, which arrives on its own.
     if alt_screen {
-        let earlier = crate::out::output_before_console(MAX_CAPTURED_BYTES as u64);
+        let earlier = crate::out::output_before_console_ansi(MAX_CAPTURED_BYTES as u64);
         if !earlier.is_empty() {
             capture.write(Source::Stderr, &earlier);
         }
@@ -746,7 +746,7 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
     if replay_stderr {
         return vec![];
     }
-    held.capture.drain().lines
+    held.capture.drain().colours
 }
 
 /// `frame` as one synchronized update (DEC mode 2026): the terminal holds
@@ -1446,16 +1446,28 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// The lines the process wrote to its stdout and stderr since the last
     /// call, escape sequences stripped: the CLI's own lines, `print()` and
     /// diagnostics, which `release()` also writes to the scrollback.
-    /// With `with_links`, each as `[line, links]`, `links` the line's OSC 8
+    /// With `with_colour`, each as `[line, links, coloured]`, `coloured` the
+    /// line with its colour kept, the same text. With `with_links`, each as
+    /// `[line, links]`, `links` the line's OSC 8
     /// links (`print()` links URLs and paths) as `[start, end, url]` by
     /// character, as `output_feed()` gives a build's.
     fn output<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = false)] with_links: bool,
+        #[starlark(require = named, default = false)] with_colour: bool,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let got = with_held(this, |h| Ok(h.capture.drain()))?;
-        Ok(if with_links {
+        Ok(if with_colour {
+            heap.alloc(serde_json::json!(
+                got.lines
+                    .into_iter()
+                    .zip(got.links)
+                    .zip(got.colours)
+                    .map(|((line, links), coloured)| serde_json::json!([line, links, coloured]))
+                    .collect::<Vec<_>>()
+            ))
+        } else if with_links {
             heap.alloc(serde_json::json!(
                 got.lines.into_iter().zip(got.links).collect::<Vec<_>>()
             ))
@@ -1469,8 +1481,8 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// stderr's only with `replay_stderr`, for a screen that writes what it
     /// showed itself (its output having been part of it); then stdout's
     /// too only where stdout is not the terminal, and the lines the
-    /// captures still held as they stopped are returned, for the screen to
-    /// add. A no-op once released, returning none.
+    /// captures still held as they stopped are returned, with their colour,
+    /// for the screen to add. A no-op once released, returning none.
     fn release<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = true)] replay_stderr: bool,

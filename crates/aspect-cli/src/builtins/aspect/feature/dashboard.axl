@@ -20,7 +20,8 @@ While a build runs it shows:
   open in it (`Failures ✗1 › //pkg:t › attempt 1/2 › a.py:12`):
   - Console: the task's whole output, from its start (what the CLI wrote
     before Bazel's console began, then Bazel's, then the CLI's own lines,
-    marked `» `), scrollable, Bazel's labels coloured by the theme, the
+    as written), scrollable, in the colours it was written in (the theme's,
+    Bazel's recoloured by it), the
     lines under each `INFO: From` folded to a count;
   - Failures: each failed action, each failed test run, shard and attempt,
     then the failed targets Bazel gave no log for and those a failed
@@ -123,35 +124,6 @@ def _c(role: str) -> str:
     return theme.sgr(role, stream = True)
 
 _RESET = theme.reset
-
-# Bazel's labels as the console shows them: the theme's, or Bazel's own
-# when the theme leaves Bazel's colours alone (`bazel = "tool"`).
-_LABELS = [
-    ("ERROR:", "bazel.error", "\x1b[31m\x1b[1m"),
-    ("FAILED:", "bazel.status.failed", "\x1b[31m\x1b[1m"),
-    ("FAIL:", "bazel.fail", "\x1b[31m\x1b[1m"),
-    ("WARNING:", "bazel.warning", "\x1b[35m"),
-    ("INFO: Build completed successfully", "bazel.status.success", "\x1b[32m"),
-    ("INFO:", "bazel.info", "\x1b[32m"),
-    ("DEBUG:", "bazel.debug", "\x1b[33m"),
-]
-
-def _bazel_raw() -> bool:
-    """Whether Bazel's labels keep Bazel's own colours: the theme leaves
-    them alone (`bazel = "tool"`) and draws colour (not `mono`)."""
-    info = theme.info()
-    return info["bazel"] == "tool" and info["name"] != "mono"
-
-def _label(line: str, raw = None) -> str:
-    """`line` with its leading Bazel label (`ERROR:`, `WARNING:`, ...)
-    coloured, the rest of it left as it is."""
-    rest = bazel_line(line)
-    at = len(line) - len(rest)
-    for word, role, code in _LABELS:
-        if rest.startswith(word):
-            tool = _bazel_raw() if raw == None else raw
-            return line[:at] + (code if tool else _c(role)) + word + _RESET + line[at + len(word):]
-    return line
 
 # Console lines kept for scrolling back; older ones are counted in the
 # pane's title, and Bazel's console log has them all.
@@ -1316,19 +1288,42 @@ def console_lines(state: dict, log: list, kinds = None) -> list:
     search = state["search"]
     return search["pattern"].filter(log) if search["pattern"] != None and search["mode"] == "filter" else log
 
-def _console_row(pattern, current = False):
-    """How a console row is coloured: its Bazel label (`_label`), then its
-    search matches (found in the plain text, so a match never lands
-    inside a colour's escape sequence)."""
+def _console_row(state: dict, pattern, current = False):
+    """How a console row is painted, for the piece of a line `at` characters
+    into it: the line as written, its colour kept (`colour_of`), cut to the
+    cells `fit` kept of it; then its search matches, found in the plain
+    text and laid over those cells (`mark_cells`)."""
+    colour_of = state.get("colour_of", {})
+    on = _c("search.current" if current else "search.match")
 
-    raw = _bazel_raw()
+    def paint_for(line, at = 0):
+        coloured = colour_of.get(line)
 
-    def colour(body, kind = None):
-        if pattern == None:
-            return _label(body, raw)
-        return _label(pattern.highlight(body, _c("search.current" if current else "search.match"), _RESET), raw)
+        def paint(shown):
+            base = shown
+            if coloured != None:
+                cut = shown.endswith("…")
+                base = _slice_escaped(coloured, at, text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
+            if pattern == None:
+                return base
+            marked = pattern.highlight(shown, "\x01", "\x02")
+            if marked == shown:
+                return base
+            marks = []
+            cell = 0
+            start = 0
+            for c in marked.elems():
+                if c == "\x01":
+                    start = cell
+                elif c == "\x02":
+                    marks.append((start, cell, on, _RESET, on))
+                else:
+                    cell += text_width(c)
+            return mark_cells(base, marks)
 
-    return colour
+        return paint
+
+    return paint_for
 
 def wrap_line(text: str, width: int) -> list:
     """`text` as the rows it wraps to at `width` cells, each `(piece,
@@ -1361,9 +1356,6 @@ def _piece_links(links, start: int, length: int):
         if a < b:
             out.append([a, b, url])
     return out
-
-def _kind_colour(colour, kind: str):
-    return lambda body: colour(body, kind)
 
 def _tail(text: str, cells: int) -> str:
     """The longest end of `text` a terminal draws in `cells` cells."""
@@ -1431,7 +1423,7 @@ def bazel_line(line: str) -> str:
 # What starts a line of Bazel's own: a line that starts none, a tool's
 # (a compiler's diagnostic under an `ERROR:`), takes the kind of the one
 # it follows (`classify`).
-_HEADERS = ["INFO:", "WARNING:", "ERROR:", "DEBUG:", "FAIL:", "TIMEOUT:", "Target ", "Loading:", "Analyzing:", "Executed ", "Build ", "//", "@", "» ", "["]
+_HEADERS = ["INFO:", "WARNING:", "ERROR:", "DEBUG:", "FAIL:", "TIMEOUT:", "Target ", "Loading:", "Analyzing:", "Executed ", "Build ", "//", "@", "["]
 
 def severity(line: str) -> str:
     """`error`, `warning` or `` for a console line by itself: Bazel's
@@ -1667,6 +1659,28 @@ def mark_cells(row: str, marks: list) -> str:
     if inside != None:
         out.append(inside[3])
     return "".join(out)
+
+def _slice_escaped(text: str, skip: int, cells: int) -> str:
+    """`text`, escapes and all, from its `skip`th visible character on, cut
+    after `cells` cells: the colour set before the cut kept, and ended."""
+    out = []
+    seen = 0
+    at = 0
+    esc = 0
+    for c in text.codepoints():
+        if esc != 0 or c == 0x1b:
+            out.append(chr(c))
+            esc = _escape_state(esc, c)
+            continue
+        if seen < skip:
+            seen += 1
+            continue
+        n = 1 if c < 0x0300 else _cells(c)
+        if at + n > cells:
+            break
+        out.append(chr(c))
+        at += n
+    return "".join(out) + _RESET
 
 def _cut_escaped(text: str, cells: int) -> str:
     """`text`, escapes and all, cut after `cells` visible cells, its colour
@@ -2280,11 +2294,10 @@ def note_progress(state: dict, progress: list):
 
 def slowest_rows(state: dict) -> list:
     """What the finished screen's left pane shows in place of the running
-    actions: Bazel's critical path, then the slowest actions seen running,
-    the longest first, each with how long it ran."""
+    actions: the slowest actions seen running, the longest first, each with
+    how long it ran. Bazel's critical path, which they need not be on, is
+    the Results pane's."""
     rows = []
-    if state.get("critical"):
-        rows.append("Critical path " + state["critical"])
     for what, secs in sorted(state.get("slowest", {}).items(), key = lambda kv: -kv[1])[:_SLOWEST]:
         if secs > 0:
             rows.append("%s; %ds" % (what, secs))
@@ -2406,6 +2419,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # execution log, tests' from their results.
     if c.get("spawns"):
         summary.append(("Cached   %d%% of %d actions" if wide else "Cached  %d%%/%d") % (c["spawn_hits"] * 100 // c["spawns"], c["spawns"]))
+    if state.get("critical"):
+        summary.append(("Critical path %s" if wide else "Crit %s") % state["critical"])
     if c.get("test_runs"):
         summary.append(("         %d of %d test runs" if wide else "        %d/%dt") % (c["test_cached"], c["test_runs"]))
     failed_n, blocked_n = _failure_counts(state)
@@ -2587,8 +2602,8 @@ def render(state: dict, cols: int, rows: int) -> str:
     state["pane"] = (len(out), len(out) + log_h - 1)
     line_links = {} if state.get("help") else state.get("line_links", {})
     shown = log[start:end]
-    colour = _console_row(pattern)
-    colour_current = _console_row(pattern, True)
+    colour = _console_row(state, pattern)
+    colour_current = _console_row(state, pattern, True)
     bar_edge = scrollbar(len(log), log_h, up) if not state.get("help") else None
     drawn = []
     first_row = -1
@@ -2599,14 +2614,14 @@ def render(state: dict, cols: int, rows: int) -> str:
             drawn.append((line, _peek_paint(view["hl"][start + i]), False, None, False))
             continue
         if not wrapping:
-            drawn.append((line, colour_current if start + i == current else colour, start + i == current, links, False))
+            drawn.append((line, (colour_current if start + i == current else colour)(line), start + i == current, links, False))
             continue
         kind = severity(line)
         if start + i == jumped:
             first_row = len(drawn)
         for j, (piece, at) in enumerate(wrap_line(line, body_w)):
             paint = colour_current if start + i == current else colour
-            drawn.append((piece, paint if j == 0 else _kind_colour(paint, kind), j == 0 and start + i == current, _piece_links(links, at, len(piece)), j > 0))
+            drawn.append((piece, paint(line, at), j == 0 and start + i == current, _piece_links(links, at, len(piece)), j > 0))
 
     # Wrapped, more rows than fit: the newest, but for the top of the
     # console, where the oldest line shows from its first row.
@@ -2623,7 +2638,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     state["continued"] = {}
     state["page_h"] = log_h
     for i in range(log_h):
-        text, paint, mark, links, more = drawn[i] if i < len(drawn) else ("", colour, False, None, False)
+        text, paint, mark, links, more = drawn[i] if i < len(drawn) else ("", None, False, None, False)
         if more:
             state["continued"][len(out)] = True
         out.append(_box_row(text, cols, paint, mark, bar_edge[i] if bar_edge else None, links))
@@ -2772,7 +2787,7 @@ def metrics_lines(state: dict) -> list:
     out += ["", _c("heading") + "Time" + _RESET]
     out.append(_row_of("elapsed", elapsed(state["now_ms"] - state["start_ms"])))
     if state.get("critical"):
-        out.append(_row_of("critical path", state["critical"].removeprefix("Critical path ")))
+        out.append(_row_of("critical path", state["critical"]))
     for field, name in (("analysis_phase_time_in_ms", "analysis"), ("execution_phase_time_in_ms", "execution"), ("cpu_time_in_ms", "CPU")):
         ms = _get(timing, field, 0) or 0
         if ms:
@@ -3032,7 +3047,7 @@ def folding(state: dict) -> bool:
     search = state["search"]
     return state.get("view") == None and state["filter"] == "all" and search["pattern"] == None and not state.get("unfolded")
 
-def add_lines(state: dict, lines: list, links = None):
+def add_lines(state: dict, lines: list, links = None, colours = None, cli = False):
     """Take the console's new `lines`, and with them their `links` (each
     line's `[start, end, url]`s, as `output_feed()` gives them): kept (the
     newest `_MAX_LOG`, with each one's kind, `classify`'s, its errors and
@@ -3044,12 +3059,20 @@ def add_lines(state: dict, lines: list, links = None):
     `unseen_errors`); a log being viewed does not move. Counted from the
     end, the current match and where the bar opened move with them, the
     latter in lines the `e` filter shows, as a search that jumps lists
-    them."""
+    them. `colours` are the lines as written, colour kept (the same text),
+    drawn in their place (`colour_of`); `cli` lines are the CLI's own, each
+    its own kind (never under an error of Bazel's), not Bazel's closing
+    block."""
     shown = 0
     shown_errors = 0
     unsearched = 0
     folded_before = len(state.get("folded", []))
-    kinds, state["block"] = classify(lines, state.get("block", ""))
+    if cli:
+        kinds = [severity(line) for line in lines]
+        state["block"] = ""
+    else:
+        kinds, state["block"] = classify(lines, state.get("block", ""))
+    colour_of = state.setdefault("colour_of", {})
     state.setdefault("kinds", [])
     closing = state.setdefault("closing", [])
     for i, line in enumerate(lines):
@@ -3060,6 +3083,9 @@ def add_lines(state: dict, lines: list, links = None):
         state["log_size"] = state.get("log_size", 0) + len(line)
         state["log"].append(line)
         state["kinds"].append(kind)
+        coloured = colours[i] if colours != None and i < len(colours) else None
+        if coloured and coloured != line and len(line) <= _MAX_LINE:
+            colour_of[line] = coloured
         _fold_line(state, line)
         if links != None and i < len(links):
             keep_links(state, line, links[i])
@@ -3071,8 +3097,8 @@ def add_lines(state: dict, lines: list, links = None):
                 state["errors"].append([line])
         elif kind == "error" and severity(line) != "error" and state["errors"] and len(state["errors"][-1]) < _MAX_BLOCK and state["error_count"] <= _MAX_ERRORS:
             state["errors"][-1].append(line)
-        if (closing or _closing(line)) and not line.startswith("» "):
-            # Bazel's, not the CLI's own lines (`» `), which the scrollback
+        if (closing or _closing(line)) and not cli:
+            # Bazel's, not the CLI's own lines, which the scrollback
             # gets as they were printed: the head, and a tail kept short.
             if len(closing) < _CLOSING_HEAD:
                 closing.append(line)
@@ -3149,6 +3175,8 @@ def add_lines(state: dict, lines: list, links = None):
             state["log_size"] = state.get("log_size", 0) - len(line)
         state["log"] = state["log"][over:]
         state["kinds"] = state["kinds"][over:]
+        kept = state.get("colour_of", {})
+        state["colour_of"] = {line: kept[line] for line in state["log"] if line in kept}
         state["dropped"] = state.get("dropped", 0) + over
         state["folded"] = []
         state["fold_src"] = []
@@ -3510,10 +3538,8 @@ def replay_lines(state: dict, tty: bool) -> list:
     out = []
     if state.get("dropped"):
         out.append("… %d older lines not kept: aspect history show for all of it" % state["dropped"])
-    raw = _bazel_raw() if tty else False
     for line in state["log"]:
-        line = line.removeprefix("» ")
-        out.append(_label(line, raw) if tty else line)
+        out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
 
 def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list:
@@ -3662,8 +3688,8 @@ def _dashboard_impl(ctx: FeatureContext):
         if key not in state:
             state[key] = value
 
-    def _add_lines(lines, links = None):
-        add_lines(state, lines, links)
+    def _add_lines(lines, links = None, colours = None, cli = False):
+        add_lines(state, lines, links, colours, cli)
 
     def _draw(screen, frame):
         """Write `frame` unless it is the one on the screen; whether it was
@@ -3676,8 +3702,8 @@ def _dashboard_impl(ctx: FeatureContext):
 
     def _add_output(screen):
         # The CLI's own lines, marked as such, their links moved with them.
-        got = screen.output(with_links = True)
-        _add_lines(["» " + line for line, _ in got], [[(start + 2, end + 2, url) for start, end, url in links] for _, links in got])
+        got = screen.output(with_links = True, with_colour = True)
+        _add_lines([line for line, _, _ in got], [links for _, links, _ in got], [coloured for _, _, coloured in got], cli = True)
 
     def _frame(task_ctx, build):
         # A build whose console is shown (its own `output =`) is left alone.
@@ -3723,7 +3749,7 @@ def _dashboard_impl(ctx: FeatureContext):
         screen = state["screen"]
         state["now_ms"] = int(monotonic() * 1000)
         state["frames"] += 1
-        _add_lines(feed["lines"], feed.get("links"))
+        _add_lines(feed["lines"], feed.get("links"), feed.get("colours"))
         state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
 
         # A frame that caught Bazel between drawing its progress area and
@@ -3788,7 +3814,8 @@ def _dashboard_impl(ctx: FeatureContext):
         if not stays:
             state["screen"] = None
             _add_output(screen)
-            _add_lines(["» " + line for line in screen.release(replay_stderr = False)])
+            rest = screen.release(replay_stderr = False)
+            _add_lines([_plain(line) for line in rest], None, rest, cli = True)
             _report(task_ctx)
 
     def _stay(task_ctx, screen, countdown_ms):
@@ -3867,7 +3894,8 @@ def _dashboard_impl(ctx: FeatureContext):
                 passed = outcome.exit_code == 0 and not [r for r in state["fails"] if not _flaky(state, r)] and not c["failures"] and not c["tests_failed"]
                 _stay(task_ctx, screen, _COUNTDOWN_MS if passed and ctx.args.stay == "failure" else 0)
             _add_output(screen)
-            _add_lines(["» " + line for line in screen.release(replay_stderr = False)])
+            rest = screen.release(replay_stderr = False)
+            _add_lines([_plain(line) for line in rest], None, rest, cli = True)
         _report(task_ctx)
 
     def _report(task_ctx):
