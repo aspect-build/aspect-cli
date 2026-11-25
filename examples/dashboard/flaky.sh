@@ -9,7 +9,7 @@ n=$(cat "$count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "attempt $n (shard ${TEST_SHARD_INDEX:-0}), failing the first $fails"
 if [ "$n" -le "$fails" ]; then
-    echo "$n" > "$count"
+    echo "$n" >"$count"
     echo "FAIL: attempt $n of a flaky test" >&2
     exit 1
 fi
