@@ -514,6 +514,28 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             None
         };
 
+        // A duration reads as its whole milliseconds, `<field>_ms`: AXL has no
+        // duration type, and every use so far is a time to show or compare.
+        if sattrs.duration && !attrs.repeated && !sattrs.skip {
+            let fident = field.ident.clone().unwrap();
+            let name = Ident::new(&format!("{fident}_ms"), Span::call_site());
+            let doc = format!(" `{fident}` in whole milliseconds; None when unset.");
+            return quote! {
+                #[doc = #doc]
+                #[starlark(attribute)]
+                #deprecated_allow
+                fn #name<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<::starlark::values::none::NoneOr<i64>> {
+                    use ::starlark::values::ValueLike;
+                    use ::starlark::StarlarkResultExt;
+                    #deprecated_allow
+                    let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
+                    Ok(::starlark::values::none::NoneOr::from_option(
+                        this.#fident.as_ref().map(|d| d.seconds * 1000 + i64::from(d.nanos) / 1_000_000),
+                    ))
+                }
+            };
+        }
+
         if sattrs.duration
             || sattrs.timestamp
             || sattrs.skip

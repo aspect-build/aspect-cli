@@ -5,7 +5,7 @@ Run with:
   aspect dev test-dashboard
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "slowest_rows", "slowest_title", "step_match", "text_width", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1634,6 +1634,18 @@ def _impl(ctx: TaskContext) -> int:
     wheeled["hover"] = (3, top + 1)
     on_key(wheeled, "wheel-down", 10)
     _eq("the wheel over the list scrolls it, not the console", (wheeled["actions_scroll"] > 0, wheeled["scroll"]), (True, 0))
+
+    # Slowest from the execution log: every spawn that ran, longest first,
+    # to a tenth of a second; a cache hit's fetch is no work and is left out.
+    spawned = _screen(ctx, [])
+    spawn = lambda ms, label, hit = False, runner = "darwin-sandbox": struct(mnemonic = "CppCompile", target_label = label, cache_hit = hit, runner = runner, metrics = struct(execution_wall_time_ms = ms, total_time_ms = ms))
+    note_spawn_time(spawned, spawn(1200, "//a:short"))
+    note_spawn_time(spawned, spawn(98000, "//a:cached", hit = True))
+    note_spawn_time(spawned, spawn(87000, "//a:disk", runner = "disk cache hit"))
+    note_spawn_time(spawned, spawn(12450, "//a:long"))
+    _eq("ran spawns, longest first", slowest_rows(spawned), ["CppCompile //a:long; 12.4s", "CppCompile //a:short; 1.2s"])
+    _eq("titled from the log", slowest_title(spawned), "Slowest")
+    _eq("without it, what Bazel showed", slowest_title(_screen(ctx, [])), "Slowest seen")
 
     print("dashboard_test.axl: OK")
     return 0

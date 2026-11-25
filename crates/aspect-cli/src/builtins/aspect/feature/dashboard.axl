@@ -990,6 +990,7 @@ def attempt_state(now_ms: int) -> dict:
         unseen_errors = 0,
         slowest = {},
         critical = "",
+        spawn_slowest = [],
         folded = [],
         fold_src = [],
         fold_n = -1,
@@ -1011,7 +1012,7 @@ def reset_attempt(state: dict, now_ms: int):
 
 # What a build has of its own, which the next build (or a retried attempt)
 # starts afresh; the console and what is open in it are the task's.
-_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "critical", "bazel_uuid"]
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid"]
 
 def new_build(state: dict, now_ms: int):
     """Start the next build (or a retried attempt) in the task's screen: its
@@ -2353,7 +2354,8 @@ def action_row(row: str, width: int) -> str:
     return head + " " * (room - text_width(head)) + " " + tail
 
 # The slowest actions the finished screen lists, of the most it keeps.
-_SLOWEST = 5
+# The slowest actions kept for the finished pane, which scrolls through them.
+_SLOWEST_KEPT = 50
 _MAX_SLOW = 200
 
 def note_progress(state: dict, progress: list):
@@ -2369,14 +2371,47 @@ def note_progress(state: dict, progress: list):
 
 def slowest_rows(state: dict) -> list:
     """What the finished screen's left pane shows in place of the running
-    actions: the slowest actions seen running, the longest first, each with
-    how long it ran. Bazel's critical path, which they need not be on, is
-    the Results pane's."""
+    actions, the longest first: from the execution log, every spawn that ran
+    (`note_spawn_time`), its mnemonic, target and wall time; without one, the
+    slowest actions Bazel's progress area showed, in whole seconds
+    (`slowest_title` says which). Bazel's critical path, which they need not
+    be on, is the Results pane's."""
+    timed = state.get("spawn_slowest") or []
+    if timed:
+        return ["%s %s; %s" % (mnemonic, label, _tenths(ms)) for ms, mnemonic, label in sorted(timed, key = lambda t: -t[0])[:_SLOWEST_KEPT]]
     rows = []
-    for what, secs in sorted(state.get("slowest", {}).items(), key = lambda kv: -kv[1])[:_SLOWEST]:
+    for what, secs in sorted(state.get("slowest", {}).items(), key = lambda kv: -kv[1])[:_SLOWEST_KEPT]:
         if secs > 0:
             rows.append("%s; %ds" % (what, secs))
     return rows
+
+def slowest_title(state: dict) -> str:
+    """The finished pane's title: `Slowest` from the execution log, `Slowest
+    seen` from what Bazel's progress area happened to show."""
+    return "Slowest" if state.get("spawn_slowest") else "Slowest seen"
+
+def note_spawn_time(state: dict, spawn):
+    """Keep `spawn`, from the execution log, among the build's slowest by
+    wall time (its execution's, else its whole time), when it ran, locally
+    or remotely: a cache hit's time is its fetch, not the work, and one that
+    did not execute has none. The `_SLOWEST_KEPT` longest are kept."""
+    if _get(spawn, "cache_hit", False) or "cache hit" in str(_get(spawn, "runner", "") or ""):
+        return
+    metrics = _get(spawn, "metrics")
+    ms = _get(metrics, "execution_wall_time_ms") or _get(metrics, "total_time_ms") or 0
+    if ms <= 0:
+        return
+    timed = state.setdefault("spawn_slowest", [])
+    timed.append((ms, str(_get(spawn, "mnemonic", "") or "action"), str(_get(spawn, "target_label", "") or "")))
+    if len(timed) > 2 * _SLOWEST_KEPT:
+        state["spawn_slowest"] = sorted(timed, key = lambda t: -t[0])[:_SLOWEST_KEPT]
+
+def _tenths(ms: int) -> str:
+    """`ms` as seconds to a tenth (`12.4s`), or minutes and seconds past a
+    minute (`1m 30s`)."""
+    if ms >= 60000:
+        return elapsed(ms)
+    return "%d.%ds" % (ms // 1000, (ms % 1000) // 100)
 
 def _aged(row: str):
     """How a running action's row is coloured by its age: none, slow, stuck."""
@@ -2463,7 +2498,7 @@ def fold_build(state: dict, now_ms: int):
     ))
 
 # What a folded build keeps for its tabs.
-_BUILD_KEYS = ["counts", "inv", "slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index"]
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index"]
 
 def build_row(build: dict, cols: int) -> str:
     """A folded build's row: its verdict, command, actions done, failures and
@@ -2617,7 +2652,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # local pool) are counted beside the running ones, as Bazel's line has.
     head = "Running (%d of %d started)" % (running, started) if started > running else "Running (%d)" % running
     if finished:
-        head = "Slowest"
+        head = slowest_title(state)
     out.append(_box_top(head, left_w) + _box_top(results, right_w))
 
     # Where the failures' count is drawn, for a click to show their tab;
@@ -4237,6 +4272,7 @@ def _dashboard_impl(ctx: FeatureContext):
     def _spawn(task_ctx, entry):
         # The entry's kind is its `type`: a `spawn` here, as asked.
         count_spawn(state["counts"], _get(entry, "type"))
+        note_spawn_time(state, _get(entry, "type"))
 
     t.exec_log_event.append(ExecLogHook(on_entry = _spawn, kinds = ["spawn"]))
     t.bazel_attempt_end.append(_attempt_end)
