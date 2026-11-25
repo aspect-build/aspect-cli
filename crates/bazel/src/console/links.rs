@@ -715,8 +715,20 @@ impl Linker {
 
     /// What a tool's own `file:` link (`url`) becomes: Some of its file's
     /// link in this linker's editor, or Some(None), no link, where there is
-    /// none to make; None for any other URL, kept.
+    /// none to make; None for any other URL, kept. The URL is judged as a
+    /// terminal reads it: without the control bytes its parser skips inside
+    /// an OSC string, or a URL parser removes, and its leading spaces.
     fn instead_of_file_url(&self, url: &[u8]) -> Option<Option<String>> {
+        let url: std::borrow::Cow<[u8]> = if url.iter().any(u8::is_ascii_control) {
+            std::borrow::Cow::Owned(
+                url.iter()
+                    .copied()
+                    .filter(|b| !b.is_ascii_control())
+                    .collect(),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(url)
+        };
         let url = url.trim_ascii_start();
         if !url
             .get(..5)
@@ -1329,7 +1341,8 @@ mod tests {
     /// A link dropped, then another opened before its end, keeps that
     /// one's end; one switched to a dropped link ends there; and a record
     /// too long to link, or naming no path, still has its own `file:` links
-    /// judged, one whose URL is not UTF-8 dropped.
+    /// judged, one whose URL is not UTF-8, or is one only once control
+    /// bytes and leading spaces are skipped, dropped.
     #[test]
     fn a_tools_file_link_dropped_keeps_the_next_links_end() {
         let (dir, mut l) = linker();
@@ -1373,6 +1386,17 @@ mod tests {
             "x ls y",
             "a file: URL after spaces is a file link too"
         );
+        for url in [
+            "\x01file:///bin/ls",
+            "\tfi\x00le:///bin/ls",
+            "\x0bfile:///bin/ls",
+        ] {
+            assert_eq!(
+                link(&mut l, &format!("x \x1b]8;;{url}\x1b\\ls\x1b]8;;\x1b\\ y")),
+                "x ls y",
+                "{url:?}: a terminal skips the control bytes"
+            );
+        }
     }
 
     #[test]
