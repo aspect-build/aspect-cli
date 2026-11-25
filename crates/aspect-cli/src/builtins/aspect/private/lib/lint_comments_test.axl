@@ -4,7 +4,7 @@ Run with:
   aspect dev test-lint-comments
 """
 
-load("./lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "suggestion_block")
+load("./lint_comments.axl", "build_marker", "can_attempt_comment", "diagnostics_by_anchor", "diff_window", "extract_marker", "parse_marker", "patch_linter", "suggestion_block")
 
 def _eq(label, got, want):
     if got != want:
@@ -68,6 +68,19 @@ def _test_diff_window():
         {"pkg/sub/p.ts": {1: True}},
     )
 
+def _test_patch_correlation():
+    _eq("patch linter", patch_linter("pkg/a.AspectRulesLintClangTidy.patch"), "ClangTidy")
+    _eq("patch linter fallback", patch_linter("pkg/a.patch"), "Linter")
+
+    # Keyed on the linter name, so a ClangTidy patch finds the clang-tidy finding.
+    line = {"file": "a.cc", "line": 3, "tool": "clang-tidy", "linter": "ClangTidy"}
+    legacy = {"file": "b.cc", "line": 4, "tool": "ShellCheck"}
+    file_level = {"file": "a.cc", "line": 0, "tool": "clang-tidy", "linter": "ClangTidy"}
+    idx = diagnostics_by_anchor([line, legacy, file_level, {"file": "", "line": 2}])
+    _eq("anchored by linter", idx.get(("a.cc", 3, "clangtidy")), line)
+    _eq("tool fallback", idx.get(("b.cc", 4, "shellcheck")), legacy)
+    _eq("line-less and file-less skipped", len(idx), 2)
+
 def _test_can_attempt_comment():
     # 0-based hunk regions; a comment on 1-based line N needs N-1 present.
     window = diff_window([
@@ -102,6 +115,7 @@ def _test_can_attempt_comment():
     # File-level (line 0) and location-less findings never comment, even unscoped.
     _eq("unscoped rejects line 0", can_attempt_comment(unscoped, "pkg/anything.ts", 0), False)
     _eq("unscoped rejects empty path", can_attempt_comment(unscoped, "", 0), False)
+    _eq("unscoped rejects empty path on a line", can_attempt_comment(unscoped, "", 5), False)
     _eq("scoped rejects line 0 on a changed file", can_attempt_comment(window, "pkg/direct.ts", 0), False)
 
     # start_line == 0 is an invalid range, not "absent".
@@ -155,6 +169,7 @@ def _test_impl(ctx):
 
     _test_diff_window()
     _test_can_attempt_comment()
+    _test_patch_correlation()
 
     print("lint_comments.axl: OK")
     return 0

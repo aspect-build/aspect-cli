@@ -192,15 +192,19 @@ def _filter_suggestions_by_strategy(suggestions, strategy_for, changed_files):
     up by the rules_lint `linter` name, as for diagnostics and patches, since
     `tool` carries the SARIF driver name when the suggestion is correlated.
     """
-    kept = []
-    for s in suggestions or []:
+    by_linter = {}
+    for i, s in enumerate(suggestions or []):
         anchor = {
             "file": s.get("file", "") or "",
             "line": s.get("end_line", 0) or s.get("start_line", 0) or 0,
+            "_index": i,
         }
-        if strategy_for(s.get("linter") or s.get("tool", "")).filter([anchor], changed_files):
-            kept.append(s)
-    return kept
+        by_linter.setdefault(s.get("linter") or s.get("tool", ""), []).append(anchor)
+    kept_indexes = {}
+    for linter, anchors in by_linter.items():
+        for a in strategy_for(linter).filter(anchors, changed_files):
+            kept_indexes[a["_index"]] = True
+    return [s for i, s in enumerate(suggestions or []) if i in kept_indexes]
 
 def report_diagnostics(sarif, linter, strategy_for, changed_files):
     """Diagnostics of one SARIF report, tagged with the rules_lint `linter` that
@@ -372,7 +376,7 @@ def resolve_strategy_overrides(overrides, unscoped):
         seen[linter.lower()] = linter
         if name not in _STRATEGIES:
             fail(
-                "lint: invalid LintTrait.strategies[%r]=%r — expected one of %s" %
+                "lint: invalid LintTrait.strategies[%r]=%r - expected one of %s" %
                 (linter, name, ", ".join(_STRATEGIES.keys())),
             )
         if unscoped and name in ("hold-the-line", "hold-the-file"):
@@ -403,13 +407,13 @@ def _strategy_name(strategy):
         return "soft"
     return "custom"
 
-def linter_error_message(failed_linters, strategy_name):
-    """Message for the fail_on_linter_error path, naming the offending tool(s)
-    when known. A non-zero `.exit_code` whose BES name didn't parse leaves
-    `failed_linters` empty, so fall back to an unnamed message.
+def linter_error_message(failed_linters):
+    """Message for the fail_on_linter_error path, naming the offending linters
+    when known.
 
-    `failed_linters` is a set-like dict of tool names; "" stands for a failure
-    whose tool name didn't parse.
+    `failed_linters` is a set-like dict of linter names; "" stands for a
+    failure whose name didn't parse, and with no named linter the message
+    stays unnamed. Only `hard` fails on linter errors, so the message names it.
     """
     names = sorted([t for t in failed_linters.keys() if t])
     if names:
@@ -418,7 +422,7 @@ def linter_error_message(failed_linters, strategy_name):
         head = "A linter process exited non-zero."
     return (
         "%s See the linter output under the 🔬 Lint phase above for details. " % head +
-        "(strategy=%s fails on any linter error.)" % strategy_name
+        "(strategy=hard fails on any linter error.)"
     )
 
 def fails_on_severity(d, strategy_for):
@@ -446,11 +450,12 @@ def _print_linters_run(ctx, tools_run):
     print("")
     print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
 
-def _print_relevant_findings(ctx, relevant, strategy_name):
-    """Print the strategy-filtered findings to stderr in compact
-    `file:line · tool · rule_id · message` form — the subset that drives the
-    exit code / PR comments / annotations, distinct from the raw streamed output.
-    No-op when empty.
+def _print_relevant_findings(ctx, relevant, strategy_label):
+    """Print the strategy-filtered findings to stderr, one
+    `location · tool · rule_id · message` row each, with the location from
+    `format_location`. This is the subset that drives the exit code, PR
+    comments and annotations, distinct from the raw streamed output. No-op
+    when empty.
     """
     if not relevant:
         return
@@ -462,7 +467,7 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
         bold,
         reset,
         bold,
-        strategy_name,
+        strategy_label,
         reset,
         len(relevant),
     )
@@ -859,16 +864,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         merge_base = ctx.args.merge_base or None,
     )
     if detect_result.get("unscoped"):
-        # Change detection failed (e.g. shallow checkout). Override to
-        # StrategyHard (filter_all, ignores changed_files) so we surface all
-        # findings rather than silently hiding them; any --strategy is overridden,
-        # and so are scoped per-linter overrides.
+        # Show every finding rather than hide them behind a scope we can't compute.
         warn(ctx.std, "Could not determine the changed-file set (%s). Linting with `strategy=hard` (all findings shown, no hold-the-line scoping). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
         strategy = StrategyHard
         strategy_overrides = resolve_strategy_overrides(strategy_overrides, unscoped = True)
         changed_files = []
     else:
         changed_files = detect_result["files"]
+    data["lint"]["strategy"] = _strategy_name(strategy)
     data["lint"]["strategies"] = strategy_overrides
     strategy_for = strategy_lookup(strategy, strategy_overrides)
     lint_trait.changed_files = changed_files
@@ -1155,7 +1158,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if unmatched and lint_tools_run and not build_failed:
         # A note, not a warning: a run that lints only some targets leaves
         # correctly spelled keys unmatched too.
-        print("   LintTrait.strategies: no reports this run from %s (keys match the names above)" % ", ".join(unmatched))
+        print("   LintTrait.strategies: no output this run from %s (keys match the names above)" % ", ".join(unmatched))
 
     # Print the post-filter subset (drives exit code / PR / annotations), distinct
     # from the high-volume raw output streamed during the Lint phase.
@@ -1202,7 +1205,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         # Without this the path surfaces nothing: a linter that crashed without
         # emitting findings would fail with an unexplained exit 1. Only `hard`
         # fails on linter errors.
-        error(ctx.std, linter_error_message(gating_errors, "hard"))
+        error(ctx.std, linter_error_message(gating_errors))
         exit_code = 1
     else:
         exit_code = 0
@@ -1335,3 +1338,5 @@ lint = task(
     ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )
+
+testonly_filter_suggestions_by_strategy = _filter_suggestions_by_strategy

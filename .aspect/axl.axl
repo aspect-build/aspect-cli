@@ -27,6 +27,7 @@ load(
     "resolve_strategy_overrides",
     "strategy_lookup",
     "unmatched_overrides",
+    lint_filter_suggestions_by_strategy = "testonly_filter_suggestions_by_strategy",
 )
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title", "uri_to_path_under_root")
@@ -2921,8 +2922,7 @@ def test_lint_filters(tc: int) -> int:
         tc = test_case(tc, f(file_level, []) == [], "%s: line-0 dropped without change context" % name)
     tc = test_case(tc, filter_all(file_level, changed) == file_level, "filter_all: keeps line-0 diagnostics")
 
-    # Line-level hold-the-line behavior is unchanged: a related file never
-    # rescues a line outside the hunk window.
+    # A related file never rescues a line outside the hunk window.
     line_level = [
         {"file": "a.go", "line": 1, "related_files": []},
         {"file": "a.go", "line": 3, "related_files": ["c.go"]},
@@ -2984,12 +2984,24 @@ def test_lint_per_linter_strategy(tc: int) -> int:
     tc = test_case(tc, unmatched_overrides({"rufff": "hard", "eslint": "soft"}, ["ESLint", "Ruff"]) == ["rufff"], "unmatched_overrides: flags the typo only")
     tc = test_case(tc, unmatched_overrides({}, ["ESLint"]) == [], "unmatched_overrides: no overrides")
 
+    # Suggestions take their linter's strategy; `tool` is the SARIF driver name
+    # when correlated, so the lookup uses `linter`, falling back to `tool`.
+    suggestions = [
+        {"tool": "clang-tidy", "linter": "ClangTidy", "file": "src/b.cc", "start_line": 3, "end_line": 3},
+        {"tool": "ClangTidy", "file": "src/b.cc", "start_line": 4, "end_line": 4},
+        {"tool": "ruff", "linter": "Ruff", "file": "src/a.cc", "start_line": 10, "end_line": 10},
+        {"tool": "ruff", "linter": "Ruff", "file": "src/b.cc", "start_line": 5, "end_line": 5},
+    ]
+    kept = lint_filter_suggestions_by_strategy(suggestions, hard_for, changed)
+    tc = test_case(tc, kept == suggestions[:3], "filter_suggestions_by_strategy: override by linter, tool fallback, run strategy otherwise (got %r)" % kept)
+    tc = test_case(tc, lint_filter_suggestions_by_strategy([], hard_for, changed) == [], "filter_suggestions_by_strategy: empty")
+
     # Exit gating on linter errors: only linters whose strategy fails on them.
     tc = test_case(tc, gating_linter_errors({"ESLint": True}, strategy_for) == {}, "gating_linter_errors: hold-the-line linter error does not gate")
     tc = test_case(tc, gating_linter_errors({"Ruff": True, "ESLint": True}, strategy_for) == {"Ruff": True}, "gating_linter_errors: hard override gates its own linter only")
     tc = test_case(tc, gating_linter_errors({"": True}, strategy_for) == {}, "gating_linter_errors: unnamed failure judged by run strategy")
     tc = test_case(tc, gating_linter_errors({"": True}, strategy_lookup(StrategyHard, {})) == {"": True}, "gating_linter_errors: unnamed failure gates under hard run")
-    tc = test_case(tc, linter_error_message({"": True, "Ruff": True}, "hard").startswith("Linter process(es) exited non-zero: Ruff."), "linter_error_message: unnamed key omitted from names")
+    tc = test_case(tc, linter_error_message({"": True, "Ruff": True}).startswith("Linter process(es) exited non-zero: Ruff."), "linter_error_message: unnamed key omitted from names")
 
     # Labels show the overrides next to the run strategy.
     tc = test_case(tc, lint_strategy_label("hold-the-line", {"ruff": "hard"}) == "hold-the-line (ruff: hard)", "strategy_label: renders overrides")
@@ -3049,17 +3061,17 @@ def test_parse_patch_hunks(tc: int) -> int:
 
 def test_linter_error_message(tc: int) -> int:
     """Coverage for lint.linter_error_message — the fail_on_linter_error text."""
-    single = linter_error_message({"PMD": True}, "hard")
+    single = linter_error_message({"PMD": True})
     tc = test_case(tc, "exited non-zero: PMD." in single, "linter_error_message: names the single tool")
     tc = test_case(tc, "strategy=hard" in single, "linter_error_message: includes strategy")
     tc = test_case(tc, "🔬 Lint phase" in single, "linter_error_message: points at the raw output")
 
     # Multiple tools are sorted for a stable message.
-    multi = linter_error_message({"Ruff": True, "PMD": True}, "hard")
+    multi = linter_error_message({"Ruff": True, "PMD": True})
     tc = test_case(tc, "exited non-zero: PMD, Ruff." in multi, "linter_error_message: sorts multiple tools")
 
     # Empty set (unparsable BES name) → unnamed fallback, still actionable.
-    none = linter_error_message({}, "hard")
+    none = linter_error_message({})
     tc = test_case(tc, none.startswith("A linter process exited non-zero."), "linter_error_message: unnamed fallback")
     tc = test_case(tc, "strategy=hard" in none, "linter_error_message: fallback keeps strategy")
 

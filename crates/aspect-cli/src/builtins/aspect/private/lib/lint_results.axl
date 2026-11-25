@@ -411,6 +411,14 @@ def detect_lint_tool(filename):
         return ""
     return filename[start:end]
 
+def linter_key(record):
+    """Case-folded rules_lint linter name of a diagnostic or suggestion record,
+    falling back to its `tool` when it carries no `linter`. Same-linter matching
+    keys on this, since a SARIF driver name (`clang-tidy`) can differ from the
+    linter name (`ClangTidy`) beyond case.
+    """
+    return (record.get("linter") or record.get("tool") or "").lower()
+
 def linter_rows(data):
     """Per-linter aggregate rows `{tool: {errors, warnings, infos, fixes}}`.
 
@@ -601,16 +609,14 @@ def _suggestions_for_template(suggestions, data):
     warning → info) then file; uncorrelated suggestions sink to the bottom.
     """
 
-    # (file, line, tool) → severity from the strategy-filtered diagnostics, to
-    # recover severity on uncorrelated records. tool is case-folded so we only
-    # correlate within one linter.
+    # Severity of the same linter's diagnostic at (file, line), to recover
+    # severity on uncorrelated records.
     sev_by_anchor = {}
     for d in data["lint"].get("diagnostics", []) or []:
         f = d.get("file", "")
         ln = d.get("line", 0) or 0
-        t = (d.get("tool", "") or "").lower()
         if f and ln:
-            sev_by_anchor[(f, ln, t)] = d.get("severity", "") or ""
+            sev_by_anchor[(f, ln, linter_key(d))] = d.get("severity", "") or ""
 
     out = []
     for s in suggestions:
@@ -621,7 +627,7 @@ def _suggestions_for_template(suggestions, data):
         # end_line first (where the comment lands), then start_line.
         if not sev:
             f = s.get("file", "")
-            t = (s.get("tool", "") or "").lower()
+            t = linter_key(s)
             for ln in (s.get("end_line", 0) or 0, s.get("start_line", 0) or 0):
                 if not ln:
                     continue
@@ -741,12 +747,15 @@ def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_ch
     Annotations are emitted in `_SEVERITY_ORDER` (most severe first if capped),
     preserving accumulation order within a severity. A file-level finding
     (`line == 0`) annotates line 1 of its file; one with no file is skipped.
+    `include_fix_bearing=False` never drops a file-level finding, since it
+    cannot post as a review comment instead.
 
     Args:
         data: dict from init_data()
         max_annotations: hard cap; excess reflected in `total_eligible`.
         only_changed_regions: when True, drop diagnostics whose (file, line-1)
-            isn't in the `hunk_lines` region (mirrors
+            isn't in the `hunk_lines` region, and file-level ones none of whose
+            `scope_files` changed (mirrors
             GithubStatusChecks.args.only_annotate_changed_regions). Skipped when
             changed_files is empty.
 
@@ -772,9 +781,9 @@ def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_ch
     by_sev = {}
     total_eligible = 0
     for d in data["lint"].get("diagnostics", []):
-        if d.get("has_fix") and not include_fix_bearing:
-            continue
         line = d.get("line", 0) or 0
+        if line and d.get("has_fix") and not include_fix_bearing:
+            continue
         path = d.get("file", "") or ""
         if not path:
             # Annotations need a file; location-less findings show in the summary only.

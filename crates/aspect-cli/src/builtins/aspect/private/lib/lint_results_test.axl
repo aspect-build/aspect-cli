@@ -34,6 +34,7 @@ load(
     "detect_lint_tool",
     "init_data",
     "lint_annotation_plan",
+    "linter_key",
     "linter_rows",
     "linter_summaries",
     "render_check_output",
@@ -693,6 +694,13 @@ def _check_file_level_annotations():
     (on, _t) = compute_annotations(r, only_changed_regions = True)
     if [a for a in on if a["path"] == "proto/b/v1/b.proto"]:
         fail("changed-region filter kept a file-level finding with no changed file")
+
+    # A fix-bearing file-level finding can't post as a comment, so it still annotates.
+    for d in r["lint"]["diagnostics"]:
+        d["has_fix"] = True
+    (no_fix, _t) = compute_annotations(r, include_fix_bearing = False)
+    if [a["path"] for a in no_fix] != ["proto/b/v1/b.proto"]:
+        fail("include_fix_bearing=False must keep only the file-level finding: %r" % no_fix)
     print("OK")
     print("")
 
@@ -1092,6 +1100,13 @@ linter_rows_tests = task(
 
 # ─── detect_lint_tool (BES filename parsing) ──────────────────────────────────
 
+def _test_linter_key(ctx):
+    """linter_key prefers the rules_lint linter name, case-folded, over `tool`."""
+    _eq("linter wins", linter_key({"linter": "ClangTidy", "tool": "clang-tidy"}), "clangtidy")
+    _eq("tool fallback", linter_key({"tool": "ShellCheck"}), "shellcheck")
+    _eq("empty linter falls back", linter_key({"linter": "", "tool": "ruff"}), "ruff")
+    _eq("neither", linter_key({}), "")
+
 def _test_detect_lint_tool(ctx):
     """Pin the rules_lint filename shape so the zero-aspect safeguard
     can't be bypassed by an unrelated build output whose name contains
@@ -1135,6 +1150,8 @@ def _test_detect_lint_tool(ctx):
     #    Defensive; not a shape rules_lint emits, but if it ever did we
     #    don't want a zero-length entry polluting lint_tools_run.
     _eq("empty tool → no match", detect_lint_tool("hello.AspectRulesLint.patch"), "")
+
+    _test_linter_key(ctx)
 
     print("lint_results.axl::detect_lint_tool: all cases OK")
     return 0
