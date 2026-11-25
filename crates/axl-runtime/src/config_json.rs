@@ -5,9 +5,10 @@
 //! merges the two) and `editor`: what a link to a file opens ([`editor`]), the
 //! repository's a team's default that the user's overrides (see
 //! `crate::out::config_link_format`). Both hold `tips` too, unioned (see
-//! `crate::user_config`, which also writes the user's file). A file that is
-//! not a JSON object is one warning however many of its keys are read
-//! ([`first_time`]).
+//! `crate::user_config`, which also writes the user's file). Only the user's
+//! file holds the colour keys ([`theme`]): what a user's terminal looks like
+//! is theirs. A file that is not a JSON object is one warning however many of
+//! its keys are read ([`first_time`]).
 
 use std::path::{Path, PathBuf};
 
@@ -100,6 +101,51 @@ pub(crate) fn editor(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+/// The colour keys of the user's `config.json`, as written; see
+/// `crate::theme` for what each means.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ThemeKeys {
+    pub theme: Option<serde_json::Value>,
+    pub appearance: Option<serde_json::Value>,
+    pub themes: std::collections::BTreeMap<String, serde_json::Value>,
+    pub bazel: Option<serde_json::Value>,
+    pub color_depth: Option<serde_json::Value>,
+    /// What was wrong with a key that was dropped, the rest kept.
+    pub warnings: Vec<String>,
+}
+
+/// The top-level `theme`, `appearance`, `themes`, `bazel` and `color_depth`
+/// of the `config.json` at `path`: empty when the file or a key is missing,
+/// else the file's own error ([`object`]). A `themes` that is not an object
+/// is left out with a warning in [`ThemeKeys::warnings`], the other keys
+/// kept.
+pub(crate) fn theme(path: &Path) -> Result<ThemeKeys, String> {
+    let Some(mut json) = object(path)? else {
+        return Ok(ThemeKeys::default());
+    };
+    let mut take = |key: &str| json.remove(key);
+    let mut warnings = Vec::new();
+    let themes = match take("themes") {
+        None => Default::default(),
+        Some(serde_json::Value::Object(map)) => map.into_iter().collect(),
+        Some(other) => {
+            warnings.push(format!(
+                "{} \"themes\" must be an object of themes by name, got {other}; ignoring it",
+                path.display()
+            ));
+            Default::default()
+        }
+    };
+    Ok(ThemeKeys {
+        warnings,
+        theme: take("theme"),
+        appearance: take("appearance"),
+        themes,
+        bazel: take("bazel"),
+        color_depth: take("color_depth"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +210,40 @@ mod tests {
         assert!(first_time("config_json test warning a"));
         assert!(!first_time("config_json test warning a"));
         assert!(first_time("config_json test warning b"));
+    }
+
+    #[test]
+    fn theme_reads_the_colour_keys_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(theme(&path), Ok(ThemeKeys::default()), "missing file");
+        std::fs::write(
+            &path,
+            r#"{"deployments": [], "editor": "zed", "theme": "colorblind",
+                "appearance": "light", "themes": {"mine-dark": {"extends": "aspect-dark"}},
+                "color_depth": 16, "bazel": "tool"}"#,
+        )
+        .unwrap();
+        let keys = theme(&path).unwrap();
+        assert_eq!(keys.theme, Some(serde_json::json!("colorblind")));
+        assert_eq!(keys.appearance, Some(serde_json::json!("light")));
+        assert_eq!(keys.themes.keys().collect::<Vec<_>>(), ["mine-dark"]);
+        assert_eq!(keys.color_depth, Some(serde_json::json!(16)));
+        assert_eq!(keys.bazel, Some(serde_json::json!("tool")));
+        std::fs::write(&path, "[]").unwrap();
+        assert!(theme(&path).unwrap_err().contains("is not a JSON object"));
+        std::fs::write(&path, r#"{"themes": [], "theme": "ansi", "bazel": "tool"}"#).unwrap();
+        let keys = theme(&path).unwrap();
+        assert!(
+            keys.warnings[0].contains("\"themes\" must be an object"),
+            "{keys:?}"
+        );
+        assert!(keys.themes.is_empty());
+        assert_eq!(keys.theme, Some(serde_json::json!("ansi")), "the rest kept");
+        assert_eq!(keys.bazel, Some(serde_json::json!("tool")));
+        std::fs::write(&path, "{").unwrap();
+        assert_eq!(theme(&path).unwrap_err(), object(&path).unwrap_err());
+        std::fs::write(&path, " \n").unwrap();
+        assert_eq!(theme(&path), Ok(ThemeKeys::default()), "only whitespace");
     }
 }

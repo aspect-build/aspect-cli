@@ -27,6 +27,7 @@ rust_library(
         "//crates/basil:__pkg__",
     ],
     deps = [
+        "//crates/aspect-theme",
         "//crates/axl-proto",
         "@crates//:allocative",
         "@crates//:anyhow",

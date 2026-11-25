@@ -98,17 +98,17 @@ def bazel_misdetects_color(std) -> bool:
     return bool(env.var("GITHUB_ACTIONS") or env.var("CIRCLECI") or env.var("GITLAB_CI"))
 
 # Severity-prefixed output. Channels (increasing alarm):
-#   debug(std, msg) - grey `DEBUG:`; internals a bug report needs. Always an
+#   debug(std, msg) - muted `DEBUG:`; internals a bug report needs. Always an
 #                     OTel log record; printed only at the `debug` verbose
 #                     level (`--console:verbose=debug`, `ASPECT_VERBOSE=debug`,
 #                     `ASPECT_DEBUG=1`). Never on a clean run.
 #   print(msg)      - narrative beats every run produces (banners, tables, outcomes).
-#   info(std, msg)  - cyan `INFO:`; conditional state a reader needs (a result,
+#   info(std, msg)  - `INFO:`; conditional state a reader needs (a result,
 #                     a skip reason). Every preset prints it.
 #   detail(std, msg) - the same `INFO:` line for an aside a reader can do
 #                     without; the Console feature can hide these (`verbose`).
-#   warn(std, msg)  - yellow `WARNING:`; subsystem problem, task continues.
-#   error(std, msg) - red `ERROR:`; recoverable error, usually precedes non-zero exit.
+#   warn(std, msg)  - `WARNING:`; subsystem problem, task continues.
+#   error(std, msg) - `ERROR:`; recoverable error, usually precedes non-zero exit.
 #   fail(msg)       - unrecoverable; aborts immediately.
 #
 # `trace.log` / `trace.event` / spans are the raw telemetry API: they reach the
@@ -148,7 +148,7 @@ def bazel_misdetects_color(std) -> bool:
 
 def debug(std, msg):
     """Emit `msg` as an OTel log record, as `trace.log` does, and print it as a
-    bold grey `DEBUG:` line when the verbose level is `debug` (`std.io.debug`).
+    `DEBUG:` line, in `label.debug`, when the verbose level is `debug` (`std.io.debug`).
     With `std` None (a caller with no `std` handle, such as a unit test of a
     pure helper) only the record is emitted."""
     trace.log(msg)
@@ -156,7 +156,7 @@ def debug(std, msg):
         print(ansi.style("DEBUG", ansi.DEBUG_LABEL, std.io.stderr.color) + ": " + msg)
 
 def info(std, msg):
-    """Print a bold cyan `INFO:` line for notable runtime state. Every preset
+    """Print an `INFO:` line, in `label.info`, for notable runtime state. Every preset
     prints it; use `detail` for an aside a reader can do without."""
     print(ansi.style("INFO", ansi.INFO_LABEL, std.io.stderr.color) + ": " + msg)
 
@@ -169,11 +169,11 @@ def detail(std, msg):
         info(std, msg)
 
 def warn(std, msg):
-    """Print a bold yellow `WARNING:` line for non-fatal subsystem failures."""
+    """Print a `WARNING:` line, in `label.warning`, for non-fatal subsystem failures."""
     print(ansi.style("WARNING", ansi.WARNING_LABEL, std.io.stderr.color) + ": " + msg)
 
 def error(std, msg):
-    """Print a bold red `ERROR:` line for recoverable errors preceding non-zero exit."""
+    """Print an `ERROR:` line, in `label.error`, for recoverable errors preceding non-zero exit."""
     print(ansi.style("ERROR", ansi.ERROR_LABEL, std.io.stderr.color) + ": " + msg)
 
 def buildkite_section(ctx: TaskContext, icon: str, title: str) -> None:
@@ -531,11 +531,11 @@ def print_environment_info(ctx: TaskContext, env: WorkflowsEnvironment) -> None:
     # Bold+underline+blue title mirrors `_display_runner_health` in
     # health_check.axl so the two setup-phase sections match.
     title = "Workflows runner metadata"
-    print(ansi.style(title, ansi.seq("1;4;34"), color))
+    print(ansi.style(title, ansi.TITLE, color))
 
     rows = build_aspect_runner_rows(std)
     for row in rows:
-        print(ansi.style(row["key"], ansi.BLUE, color) + ": " + row["value"])
+        print(ansi.style(row["key"], ansi.ACCENT, color) + ": " + row["value"])
 
     # Cloud-specific debug command — jump from job log to runner bootstrap logs.
     if runner.cloud_provider == "aws":
@@ -546,4 +546,4 @@ def print_environment_info(ctx: TaskContext, env: WorkflowsEnvironment) -> None:
         cli = ""
     if cli:
         label = "Bootstrap logs"
-        print(ansi.style(label, ansi.BLUE, color) + ": " + cli)
+        print(ansi.style(label, ansi.ACCENT, color) + ": " + cli)

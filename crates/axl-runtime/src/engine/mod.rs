@@ -33,6 +33,7 @@ pub(crate) mod builtins;
 pub mod cancellation;
 pub mod children;
 pub mod config_context;
+pub mod config_theme;
 pub mod console;
 pub mod feature_context;
 pub mod feature_map;
@@ -53,6 +54,7 @@ pub mod util;
 fn register_types(globals: &mut GlobalsBuilder) {
     const ConfigContext: StarlarkValueAsType<config_context::ConfigContext> =
         StarlarkValueAsType::new();
+    const ConfigTheme: StarlarkValueAsType<config_theme::ConfigTheme> = StarlarkValueAsType::new();
     const FeatureContext: StarlarkValueAsType<feature_context::FeatureContext> =
         StarlarkValueAsType::new();
     const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();

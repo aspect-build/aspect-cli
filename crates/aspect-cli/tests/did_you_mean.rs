@@ -89,7 +89,7 @@ fn an_arg_near_miss_is_suggested() {
     );
     assert_fails_with(
         &run(
-            r#"ctx.features[Console].args.templte_preset = "plain""#,
+            r#"ctx.features[Console].args.templte_preset = "emoji""#,
             &["check"],
         ),
         r#"did you mean "template_preset"?"#,

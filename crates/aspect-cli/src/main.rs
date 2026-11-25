@@ -722,7 +722,11 @@ fn main() -> ExitCode {
         };
     }
 
-    match run() {
+    let result = run();
+    // A run that ended before its configs ran still says what was wrong
+    // with the theme.
+    axl_runtime::theme::flush_warnings();
+    match result {
         Ok(code) => code,
         Err(err) => {
             // An exit raised from a feature or config impl never reaches the

@@ -1,0 +1,30 @@
+{
+  "name": "aspect-dark",
+  "family": "aspect",
+  "description": "The default family's dark variant, for a black background. Grey means routine, coral and amber mean act, teal means an outcome, azure means Aspect is talking.",
+  "appearance": "dark",
+  "syntax_theme": "base16-ocean.dark",
+  "roles": {
+    "text": "default",
+    "muted": { "rgb": "#979ea8", "256": 247, "16": "default", "ansi": "bright-black" },
+    "subtle": { "rgb": "#656c76", "256": 242, "16": "bright-black" },
+    "accent": { "rgb": "#6aa6ff", "256": 75, "16": "cyan" },
+    "success": { "rgb": "#52d0ae", "256": 79, "16": "green" },
+    "warning": { "rgb": "#f5c542", "256": 221, "16": "yellow" },
+    "error": { "rgb": "#f75f69", "256": 203, "16": "bright-red", "ansi": "red" },
+    "link.hover": { "fg": { "rgb": "#b5d2ff", "256": 153, "16": "bright-cyan" }, "underline": true },
+    "selection": { "bg": { "rgb": "#2c4a6e", "256": 24 }, "16": { "reverse": true } },
+    "hover": { "bg": { "rgb": "#3a3f47", "256": 238 }, "16": { "underline": true } },
+    "search.match": { "fg": { "rgb": "#ffffd7", "256": 230 }, "bg": { "rgb": "#5f5f00", "256": 58 }, "16": { "bold": true, "underline": true } },
+    "tip.important": { "fg": { "rgb": "#b77cf7", "256": 141, "16": "magenta" }, "bold": true },
+    "syntax.text": "#c0c5ce",
+    "syntax.comment": { "rgb": "#6c7a85", "256": 243 },
+    "syntax.variable": "#bf616a",
+    "syntax.constant": "#d08770",
+    "syntax.type": "#ebcb8b",
+    "syntax.string": "#a3be8c",
+    "syntax.escape": "#96b5b4",
+    "syntax.function": "#8fa1b3",
+    "syntax.keyword": "#b48ead"
+  }
+}

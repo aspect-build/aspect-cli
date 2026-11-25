@@ -1801,8 +1801,8 @@ def print_changed_files_listing(ctx, detect_result):
         return
     print("Detecting changed files via %s" % detect_result["source"])
     color = ctx.std.io.stderr.color
-    green = ansi.GREEN if color else ""
-    red = ansi.RED if color else ""
+    green = ansi.code(ansi.SUCCESS, color)
+    red = ansi.code(ansi.ERROR, color)
     reset = ansi.RESET if color else ""
 
     def _entry_to_rows(entry):

@@ -1056,19 +1056,16 @@ def strip_code_fences(body):
             kept.append(line)
     return "\n".join(kept)
 
-# `TIP` is one colour on every tip, so it reads as the CLI's. The id is the
-# CLI's grey.
-_TERMINAL_TIP_LABEL_COLOR = "1;38;5;75"  # bold sky blue
-_TERMINAL_TIP_ID_COLOR = "90"
-
-# The colour of each severity's lowercase word, every one bold, as rustc
-# writes its `warning` and `note`: the two to act on coloured, the two to
-# let pass quieter, in the terminal's own colour and grey.
-_TERMINAL_TIP_COLOR = {
-    TIP_WARNING: "1;33",  # bold yellow
-    TIP_IMPORTANT: "1;38;5;80",  # bold aqua
-    TIP_SUGGESTION: "1",  # bold, the terminal's own colour
-    TIP_NOTE: "1;90",  # bold grey
+# The theme's roles for a tip's first line: `TIP` one colour on every tip,
+# so it reads as the CLI's, the id quiet, and each severity's lowercase word,
+# the two to act on coloured and the two to let pass quieter.
+_TERMINAL_TIP_LABEL_ROLE = "tip.label"
+_TERMINAL_TIP_ID_ROLE = "tip.id"
+_TERMINAL_TIP_ROLE = {
+    TIP_WARNING: "tip.warning",
+    TIP_IMPORTANT: "tip.important",
+    TIP_SUGGESTION: "tip.suggestion",
+    TIP_NOTE: "tip.note",
 }
 
 # The terminal's emoji, each wide by default (Emoji_Presentation): one made
@@ -1083,22 +1080,22 @@ _TERMINAL_EMOJI = {
 
 def _tip_head(id, severity, title, color_on, console = None):
     """`TIP[id] <emoji> severity: title` as `console`'s `tip` slot renders it
-    (`full` carries the emoji, `compact` does not), or, with no console, as
-    `full` does: `TIP` in the tips' own colour, the id grey, the severity's
-    emoji, then its word lowercase in its colour (`_TERMINAL_TIP_COLOR`), the
+    (`emoji` carries the emoji, `full` does not), or, with no console, as
+    `emoji` does: `TIP` in `tip.label`, the id in `tip.id`, the severity's
+    emoji, then its word lowercase in its role (`_TERMINAL_TIP_ROLE`), the
     title plain. Every style is empty unless `color_on`. An unknown severity
     reads as a note."""
-    if severity not in _TERMINAL_TIP_COLOR:
+    if severity not in _TERMINAL_TIP_ROLE:
         severity = TIP_NOTE
-    style = lambda code: ansi.seq(code) if color_on else ""
+    style = lambda role: ansi.code(role, color_on)
     context = {
         "id": id,
         "severity": severity_label(severity).lower(),
         "emoji": _TERMINAL_EMOJI[severity],
         "title": title,
-        "tip_style": style(_TERMINAL_TIP_LABEL_COLOR),
-        "id_style": style(_TERMINAL_TIP_ID_COLOR),
-        "highlight_style": style(_TERMINAL_TIP_COLOR[severity]),
+        "tip_style": style(_TERMINAL_TIP_LABEL_ROLE),
+        "id_style": style(_TERMINAL_TIP_ID_ROLE),
+        "highlight_style": style(_TERMINAL_TIP_ROLE[severity]),
         "highlight_reset": ansi.RESET if color_on else "",
     }
     if console != None:

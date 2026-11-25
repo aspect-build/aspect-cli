@@ -17,7 +17,7 @@ def progress_bar(current: int, total: int, width: int = 30, color: bool = True) 
     filled = int(width * current / total)
     bar = "▪" * filled + "▫" * (width - filled)
     percent = int(100 * current / total)
-    return ansi.style("[" + bar + "]", ansi.ORANGE, color) + " " + str(percent) + "%"
+    return ansi.style("[" + bar + "]", ansi.PROGRESS, color) + " " + str(percent) + "%"
 
 def show_phase(ctx: TaskContext, phases: list, current: int):
     """Display phases with checkmarks and progress bar, on a terminal stdout
@@ -44,11 +44,11 @@ def show_phase(ctx: TaskContext, phases: list, current: int):
     lines = []
     for i, phase in enumerate(phases):
         if i < current:
-            lines.append(ansi.style("✓", ansi.GREEN, color) + " " + phase)
+            lines.append(ansi.style("✓", ansi.SUCCESS, color) + " " + phase)
         elif i == current:
             lines.append("  " + phase + "...")
         else:
-            lines.append(ansi.style("  " + phase, ansi.DIM, color))
+            lines.append(ansi.style("  " + phase, ansi.MUTED, color))
 
     # Write phases and progress bar
     output = "\n".join(lines) + "\n"
@@ -319,14 +319,14 @@ def _impl(ctx: TaskContext) -> int:
     if version == "latest" and not ctx.args.yes:
         color = ctx.std.io.stderr.color
         print("")
-        print(ansi.style("📦 Release", ansi.BOLD + ansi.ORANGE, color))
-        print(ansi.style("   ─────────────────────────────────────", ansi.DIM, color))
-        print(ansi.style("   Version   ", ansi.DIM, color) + ansi.style(tag_name, ansi.BOLD, color))
-        print(ansi.style("   Author    ", ansi.DIM, color) + author_login + (ansi.style(" <" + author_url + ">", ansi.CYAN, color) if author_url else ""))
-        print(ansi.style("   Integrity ", ansi.DIM, color) + ansi.style(integrity, ansi.DIM, color))
+        print(ansi.style("📦 Release", ansi.HEADING, color))
+        print(ansi.style("   ─────────────────────────────────────", ansi.MUTED, color))
+        print(ansi.style("   Version   ", ansi.MUTED, color) + ansi.style(tag_name, ansi.STRONG, color))
+        print(ansi.style("   Author    ", ansi.MUTED, color) + author_login + (ansi.style(" <" + author_url + ">", ansi.ACCENT, color) if author_url else ""))
+        print(ansi.style("   Integrity ", ansi.MUTED, color) + ansi.style(integrity, ansi.MUTED, color))
         print("")
-        if not confirm(ctx, ansi.style("?", ansi.YELLOW, ctx.std.io.stdout.color) + " Add this dependency to MODULE.aspect"):
-            print(ansi.style("Cancelled.", ansi.DIM, color))
+        if not confirm(ctx, ansi.style("?", ansi.PROMPT, ctx.std.io.stdout.color) + " Add this dependency to MODULE.aspect"):
+            print(ansi.style("Cancelled.", ansi.MUTED, color))
             return 1
 
     # Phase 3: Add to MODULE.aspect

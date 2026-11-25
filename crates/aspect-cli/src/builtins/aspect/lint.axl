@@ -374,7 +374,7 @@ def _print_linters_run(ctx, tools_run):
     if not tools_run:
         return
     color = ctx.std.io.stderr.color
-    bold = ansi.BOLD if color else ""
+    bold = ansi.code(ansi.STRONG, color)
     reset = ansi.RESET if color else ""
     print("")
     print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
@@ -388,7 +388,7 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     if not relevant:
         return
     color = ctx.std.io.stderr.color
-    bold = ansi.BOLD if color else ""
+    bold = ansi.code(ansi.STRONG, color)
     reset = ansi.RESET if color else ""
     print("")
     label = "%sLint findings%s after %s%s%s (%d)" % (
@@ -826,7 +826,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ),
         kind = "lint_results",
         data = data,
-        phase = phases.Phase(name = "lint", description = "Run lint aspects", emoji = "🔬"),
+        phase = phases.Phase(name = "lint", description = "Run lint aspects", emoji = "🔬", expanded = True),
     )
 
     # After the phase line, so the streams are announced under the spawn they

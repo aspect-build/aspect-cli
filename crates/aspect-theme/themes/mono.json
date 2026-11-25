@@ -1,0 +1,31 @@
+{
+  "name": "mono",
+  "family": "mono",
+  "description": "No colour and no dim: bold, underline and reverse only. The full-screen console uses it under NO_COLOR (it needs reverse); elsewhere only ASPECT_THEME=mono selects it.",
+  "appearance": "any",
+  "bazel": "shared",
+  "roles": {
+    "text": "default",
+    "muted": "none",
+    "subtle": "none",
+    "accent": "none",
+    "success": "none",
+    "warning": "none",
+    "error": "none",
+    "link.hover": { "bold": true, "underline": true },
+    "selection": { "reverse": true },
+    "hover": { "underline": true },
+    "prompt": { "bold": true },
+    "scrollbar": { "reverse": true },
+    "tip.important": { "bold": true, "underline": true },
+    "syntax.text": "none",
+    "syntax.comment": "none",
+    "syntax.keyword": { "bold": true },
+    "syntax.string": "none",
+    "syntax.constant": "none",
+    "syntax.type": "none",
+    "syntax.function": "none",
+    "syntax.variable": "none",
+    "syntax.escape": "none"
+  }
+}

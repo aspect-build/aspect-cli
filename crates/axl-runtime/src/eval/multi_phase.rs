@@ -38,39 +38,23 @@ use crate::eval::outcome::{Ending, Outcome};
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
 
-// ANSI SGR parameters for the closing bookend.
-//
-// Terminal-state colors are fixed semaphores (green/yellow/red). The
-// opening "Running" line uses the configurable highlight color from
-// `ASPECT_CLI_HIGHLIGHT_COLOR` (default `_DEFAULT_HIGHLIGHT_COLOR`),
-// mirroring AXL's `highlight_style` for mid-task phase updates.
-const SGR_BOLD_GREEN: &str = "1;32";
-const SGR_BOLD_YELLOW: &str = "1;33";
-const SGR_BOLD_RED: &str = "1;31";
-const SGR_RESET: &str = "\x1b[0m";
-
-/// Default highlight color for the opening "→ 🎬 Running" line when
-/// `ASPECT_CLI_HIGHLIGHT_COLOR` is unset. `1;36` is bold cyan — reads
-/// cleanly on dark terminals. Common overrides: `94` (bright blue),
-/// `38;5;75` (256-color sky blue), or empty to disable.
-const DEFAULT_HIGHLIGHT_COLOR: &str = "1;36";
-const HIGHLIGHT_COLOR_ENV: &str = "ASPECT_CLI_HIGHLIGHT_COLOR";
-
-/// Return `(verb_color_prefix, reset)` for the "Running" verb on the
-/// task-starting line. `verb_color_prefix` is empty when color is
-/// disabled or `ASPECT_CLI_HIGHLIGHT_COLOR=""`, and `reset` with it, as
-/// for the phase lines. `color` is [`crate::console::Console::color`].
-fn running_verb_color(color: bool) -> (String, &'static str) {
-    let highlight = std::env::var(HIGHLIGHT_COLOR_ENV)
-        .ok()
-        .unwrap_or_else(|| DEFAULT_HIGHLIGHT_COLOR.to_string());
-    let verb_seq = if color && !highlight.is_empty() {
-        format!("\x1b[{}m", highlight)
+/// `(open, reset)` for `role` of `palette` on a console line, both empty when
+/// color is off or the role has no styling. The opening "Running" line takes
+/// `highlight`, as AXL's phase lines do, and the closing verdict
+/// `label.success`, `label.warning` or `label.error`. `color` is
+/// [`crate::console::Console::color`].
+fn role_style(palette: &aspect_theme::Palette, role: &str, color: bool) -> (String, &'static str) {
+    let open = if color {
+        palette.sgr(role)
     } else {
         String::new()
     };
-    let reset = if verb_seq.is_empty() { "" } else { SGR_RESET };
-    (verb_seq, reset)
+    let reset = if open.is_empty() {
+        ""
+    } else {
+        aspect_theme::RESET
+    };
+    (open, reset)
 }
 
 /// The task label for the runtime's opening "Running …" and closing
@@ -672,6 +656,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 }
             }
         }
+        // What the configs set through `ctx.theme`, even those that then
+        // failed: a theme is never worth failing over.
+        let env = &self.loader.env;
+        if let Ok(layers) = env.theme_config.lock() {
+            crate::theme::refresh(&env.theme_inputs, &layers, &env.theme);
+        }
         if !out.is_empty() {
             return out;
         }
@@ -772,6 +762,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };
+        let console = console.with_palette(&self.loader.env.theme.get());
         diag::set_verbose(console.verbosity());
         Ok(Arc::new(console))
     }
@@ -799,11 +790,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         })?;
         crate::out::begin_early();
         let color = console.color();
-        let (verb_seq, reset) = running_verb_color(color);
+        let (verb_seq, reset) = role_style(&self.loader.env.theme.get(), "highlight", color);
         let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
-            console.emit(Slot::Banner, banner::console_context(color));
+            let palette = self.loader.env.theme.get();
+            let palette = color.then_some(&*palette);
+            console.emit(Slot::Banner, banner::console_context(palette));
         }
         console.emit(
             Slot::Header,
@@ -970,17 +963,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // The header printed before the features ran; only the verdict is
         // rendered here, in colors matching the header's.
         let color = console.color();
-        let sgr = |params: &str| {
-            if color {
-                format!("\x1b[{}m", params)
-            } else {
-                String::new()
-            }
-        };
-        let bold_green = sgr(SGR_BOLD_GREEN);
-        let bold_yellow = sgr(SGR_BOLD_YELLOW);
-        let bold_red = sgr(SGR_BOLD_RED);
-        let reset = if color { SGR_RESET } else { "" };
+        let palette = self.loader.env.theme.get();
+        let (success_style, _) = role_style(&palette, "label.success", color);
+        let (warning_style, _) = role_style(&palette, "label.warning", color);
+        let (error_style, _) = role_style(&palette, "label.error", color);
+        let reset = if color { aspect_theme::RESET } else { "" };
 
         let task_trait_map = match self.trait_map_value {
             Some(tmap_val) => {
@@ -1101,13 +1088,21 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let failed = matches!(exit_code, Some(code) if code != 0);
         let exit_suffix = match exit_code {
-            Some(code) if code != 0 => format!(" (exit code {})", code),
+            Some(code) if code != 0 => format!(" (exit {})", code),
             _ => String::new(),
         };
         let label = task_label(&task_group, &task_kind, &task_name, task_name_meaningful);
-        let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
+        let verdict = Verdict::pick(
+            exit_code,
+            flagged,
+            &success_style,
+            &warning_style,
+            &error_style,
+        );
+        let plain_breakdown = render_phase_breakdown(&phases, timing, failed, false);
         let context = minijinja::context! {
             verdict => verdict.name,
+            cancelled => exit_code == Some(INTERRUPTED_EXIT_CODE),
             glyph => verdict.glyph,
             shortcode => verdict.bk_shortcode,
             verb => verdict.verb,
@@ -1121,7 +1116,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             timing => render_timing_segment(timing, elapsed),
             conclusion => conclusion,
             breakdown => render_phase_breakdown(&phases, timing, failed, true),
-            plain_breakdown => render_phase_breakdown(&phases, timing, failed, false),
+            timings => dotted(&plain_breakdown),
+            plain_breakdown => plain_breakdown,
             phases => phases.iter().map(phase_context).collect::<Vec<_>>(),
         };
         if console.buildkite() && (failed || flagged) {
@@ -1141,6 +1137,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             // failing phase and the summary stay expanded. On a clean run
             // `emit` keeps `---` and BK's auto-expand handles the summary.
             errln!("^^^ +++");
+            console.emit_section("+++", Slot::Verdict, context);
+        } else if console.buildkite() {
+            // Expanded on a clean run too: a phase that runs Bazel opens its
+            // section `+++`, which keeps BK from auto-expanding the last
+            // collapsed one, so a `---` summary would stay shut.
             console.emit_section("+++", Slot::Verdict, context);
         } else {
             console.emit(Slot::Verdict, context);
@@ -1200,6 +1201,10 @@ fn apply_unclaimed_flags<'v>(
     }
 }
 
+/// The exit code of a task cut short by an interrupt (128 + SIGINT), which
+/// the verdict shows as cancelled.
+const INTERRUPTED_EXIT_CODE: u8 = 130;
+
 /// Make the evaluator end at the next loop iteration once the root token is
 /// cancelled, as `ctx.std.process.exit(130, "interrupted")` would: the safe
 /// point for pure Starlark loops. Blocking builtins have their own.
@@ -1222,16 +1227,13 @@ fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
 /// Three-way verdict rendered on the closing bookend line. Selected
 /// from the task's exit code and `flagged` bit:
 ///
-///   exit 0, !flagged → ✅ Passed   (bold green)
-///   exit 0,  flagged → ⚠️ Flagged  (bold yellow)
-///   exit non-0       → ❌ Failed   (bold red)
+///   exit 0, !flagged → Passed   (✓ in `full`, ✅ in `emoji`)
+///   exit 0,  flagged → Flagged  (✓ in `full`, ⚠️ in `emoji`)
+///   exit non-0       → Failed   (✗ in `full`, ❌ in `emoji`)
 ///
-/// Off Buildkite the runtime emits `→ <glyph> <verb> …`; on BK it
-/// emits `<marker> <bk_shortcode> <verb> · …` so the closing line lands
-/// as its own collapsible section header — `+++` (expanded) on a
-/// failed/flagged verdict so the timing summary stays open alongside the
-/// expanded failing phase, else `---` (collapsed, auto-expanded by BK as
-/// the last group).
+/// On BK the closing line lands as its own section header, always `+++`
+/// (expanded), so the timing summary stays open alongside an expanded
+/// failing phase or one that ran Bazel.
 struct Verdict<'a> {
     /// `passed` | `flagged` | `failed`, the `verdict` key of the template context.
     name: &'a str,
@@ -1244,7 +1246,7 @@ struct Verdict<'a> {
     /// The space keeps the line aligned across verdicts.
     glyph: &'a str,
     verb: &'a str,
-    /// ANSI color prefix (e.g. `bold_green`). Empty when the console's
+    /// The escape opening the verdict's `label.*` role. Empty when the console's
     /// [`crate::console::Console::color`] is off. Paired with `reset` at the
     /// call site.
     color: &'a str,
@@ -1254,9 +1256,9 @@ impl<'a> Verdict<'a> {
     fn pick(
         exit_code: Option<u8>,
         flagged: bool,
-        bold_green: &'a str,
-        bold_yellow: &'a str,
-        bold_red: &'a str,
+        success_style: &'a str,
+        warning_style: &'a str,
+        error_style: &'a str,
     ) -> Self {
         match (exit_code, flagged) {
             (Some(0) | None, false) => Self {
@@ -1264,21 +1266,21 @@ impl<'a> Verdict<'a> {
                 bk_shortcode: ":white_check_mark:",
                 glyph: "✅",
                 verb: "Passed",
-                color: bold_green,
+                color: success_style,
             },
             (Some(0) | None, true) => Self {
                 name: "flagged",
                 bk_shortcode: ":warning:",
                 glyph: "⚠️ ",
                 verb: "Flagged",
-                color: bold_yellow,
+                color: warning_style,
             },
             (Some(_), _) => Self {
                 name: "failed",
                 bk_shortcode: ":x:",
                 glyph: "❌",
                 verb: "Failed",
-                color: bold_red,
+                color: error_style,
             },
         }
     }
@@ -1342,18 +1344,18 @@ fn format_duration(d: std::time::Duration) -> String {
 const INIT_PHASE_HIDE_THRESHOLD_MS: u128 = 50;
 
 /// Verbosity for the timing summary trailing the runtime's
-/// "→ ✅ Passed" / "→ ⚠️ Flagged" / "→ ❌ Failed" line. Driven by the
+/// "✓ Passed" / "✓ Flagged" / "✗ Failed" line. Driven by the
 /// top-level `--task:timing-summary` CLI flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingMode {
     /// No timing summary at all — not even the total.
-    /// `→ ✅ Passed `lint` task`
+    /// `✓ Passed lint task`
     None,
     /// Total only.
-    /// `→ ✅ Passed `lint` task in 46.8s`
+    /// `✓ Passed lint task in 46.8s`
     Total,
     /// Total + inline phase breakdown.
-    /// `→ ✅ Passed `lint` task in 46.8s — 🌱 Init 0.2s · 🔍 Detect 1.2s · ...`
+    /// `✓ Passed lint task in 46.8s · Init 0.2s · Detect 1.2s · ...`
     Short,
     /// Total + multi-line breakdown with descriptions. Default.
     Detailed,
@@ -1400,8 +1402,17 @@ fn render_timing_segment(mode: TimingMode, elapsed: std::time::Duration) -> Stri
     }
 }
 
-/// Render the phase breakdown that trails the runtime's "→ Completed"
-/// / "→ Failed" line.
+/// `breakdown`, a [`render_phase_breakdown`] in `Short` mode, led by ` · `
+/// rather than ` — `; any other form as it is.
+fn dotted(breakdown: &str) -> String {
+    match breakdown.strip_prefix(" — ") {
+        Some(rest) => format!(" · {rest}"),
+        None => breakdown.to_owned(),
+    }
+}
+
+/// Render the phase breakdown that trails the runtime's closing verdict
+/// line.
 ///
 /// Returns `""` for `None`/`Total` mode, or for any mode when `phases`
 /// is empty (task didn't opt into phases).

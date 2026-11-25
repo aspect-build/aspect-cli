@@ -29,11 +29,28 @@ pub fn aspect_cli() -> String {
 /// the same reason - a coding agent's variables switch the console to its
 /// `agent` layout, `CLICOLOR_FORCE` would color piped output, and `OTEL_*`
 /// would register exporters that print to stderr or ship to a collector.
+/// The colour theme gets a known dark background (`COLORFGBG`), 256 colours
+/// (`TERM`), and none of the developer's `COLORTERM`, `NO_COLOR`, or the
+/// variables that say which terminal or session it is (hyperlinks, SSH).
 /// `HOME` and `PATH` stay: the CLI resolves its builtins cache under `HOME`.
 /// The task history goes to a temp folder of the test process's own.
 #[allow(dead_code)]
 pub fn base_env() -> std::collections::HashMap<String, String> {
-    const DROP_NAMES: &[&str] = &["BUILDKITE", "CI", "CLICOLOR_FORCE"];
+    const DROP_NAMES: &[&str] = &[
+        "BUILDKITE",
+        "CI",
+        "CLICOLOR_FORCE",
+        "COLORFGBG",
+        "COLORTERM",
+        "NO_COLOR",
+        "TERM_PROGRAM",
+        "TMUX",
+        "KITTY_WINDOW_ID",
+        "WT_SESSION",
+        "VTE_VERSION",
+        "SSH_CONNECTION",
+        "SSH_TTY",
+    ];
     const DROP_PREFIXES: &[&str] = &[
         "ASPECT_",
         "BASIL_",
@@ -50,6 +67,11 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
                 && !DROP_PREFIXES.iter().any(|p| k.starts_with(p))
         })
         .collect();
+    // A known dark background: the theme's fixed colours, at 256 without
+    // `COLORTERM`, and no system appearance asked. A test of another
+    // background sets its own.
+    env.insert("COLORFGBG".into(), "15;0".into());
+    env.insert("TERM".into(), "xterm-256color".into());
     // Every task keeps a record in the task history: the test's own, not the
     // user's. A test that reads the history names its own after this.
     env.insert(

@@ -791,47 +791,33 @@ pub(super) fn parse_event_kind(value: values::Value) -> anyhow::Result<i32> {
 /// invocation. Gated by the `--announce-bazel-version` / `--announce-bazel-command`
 /// task flags, resolved in AXL and passed through as `announce`.
 ///
-/// Its `INFO` label is the CLI's own (bold cyan), its text grey, so the long
-/// `INFO: Spawning:` line reads as background context next to bazel's own
-/// (undimmed) `INFO:` output. Falls back to
-/// plain text when stderr isn't a TTY and we're not on a recognized CI host
-/// — matching the gate used elsewhere in the runtime (see
-/// `multi_phase::running_verb_color`).
+/// Its `INFO` label is the CLI's own (`label.info`), its text `muted`, so the
+/// long `INFO: Spawning:` line reads as background context next to bazel's
+/// own `INFO:` output. Falls back to plain text when stderr takes no color
+/// ([`crate::color::console_supports_color`], the gate every runtime line on
+/// stderr uses).
 pub(super) fn announce_spawn(
     announce: AnnounceSpawn,
     version: Option<&semver::Version>,
     cmd: &Command,
 ) {
-    let (grey, reset) = grey_style();
-    let info = if grey.is_empty() { "" } else { "\x1b[1;36m" };
+    let palette = crate::color::console_supports_color().then(crate::theme::of_process);
+    let line = |text: String| match &palette {
+        Some(p) => format!(
+            "{}: {}",
+            p.paint("label.info", "INFO"),
+            p.paint("muted", &text)
+        ),
+        None => format!("INFO: {text}"),
+    };
     if announce.version {
-        errln!(
-            "{info}INFO{reset}: {grey}{}{reset}",
-            bazel::command::version_line(version)
-        );
+        errln!("{}", line(bazel::command::version_line(version)));
     }
     if announce.command {
         errln!(
-            "{info}INFO{reset}: {grey}Spawning: {}{reset}",
-            bazel::command::render(cmd)
+            "{}",
+            line(format!("Spawning: {}", bazel::command::render(cmd)))
         );
-    }
-}
-
-/// Return `(grey_prefix, reset)` ANSI escape pair for the announce lines.
-///
-/// Colored as every runtime line on stderr is, by the process's single memoized
-/// [`crate::color::console_supports_color`] (the console's [`crate::console::Host`]
-/// color too), whose rules are clap's plus ANSI-rendering CI hosts; empty
-/// strings otherwise, so file-captured / piped output stays plain.
-///
-/// Uses grey (bright black, `90`), the CLI's one grey, rather than SGR 2
-/// (faint): GitHub Actions' log viewer silently drops SGR 2.
-fn grey_style() -> (&'static str, &'static str) {
-    if crate::color::console_supports_color() {
-        ("\x1b[90m", "\x1b[0m")
-    } else {
-        ("", "")
     }
 }
 

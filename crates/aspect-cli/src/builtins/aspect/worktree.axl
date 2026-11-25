@@ -52,7 +52,7 @@ how the pool is bounded.
 The text reports go to stderr, and are styled whenever `std.io.stderr.color`
 allows it (`_color`: a color terminal, a CI log that renders ANSI,
 `CLICOLOR_FORCE`): headings bold, labels, column headers, comments and hints
-dimmed. Text from outside is escaped before any style is added (`_styled`), and
+muted. Text from outside is escaped before any style is added (`_styled`), and
 the layout reads the same without color.
 """
 
@@ -188,25 +188,25 @@ def _print_styled(std, line: str, code: str) -> None:
 
 def _field(std, indent: str, label: str, value: str) -> str:
     """A `label: value` line of a report block, the label (with whatever
-    padding aligns it) dimmed so the values read as the column that matters.
+    padding aligns it) muted so the values read as the column that matters.
     The value is escaped line breaks and all: it is one line, and a project
     path or a registry field with a newline in it would otherwise fake more."""
-    return indent + _styled(std, label, ansi.DIM) + printable(value)
+    return indent + _styled(std, label, ansi.MUTED) + printable(value)
 
 def _table(std, rows: list[dict], columns: list, indent: str = "") -> list[str]:
     """`rows` rendered as `render` renders them, each line indented, the header
-    dimmed. Cells are escaped (`printable`, line breaks and tabs included)
+    muted. Cells are escaped (`printable`, line breaks and tabs included)
     before the columns are measured, so an escaped name does not throw its row
     out of line, nor fake one; the lines are printed with plain `print`."""
     rows = [{k: (printable(v) if type(v) == "string" else v) for k, v in r.items()} for r in rows]
     lines = render(rows, columns)
     color = _color(std)
-    return [indent + ansi.style(lines[0], ansi.DIM, color)] + [indent + line for line in lines[1:]]
+    return [indent + ansi.style(lines[0], ansi.MUTED, color)] + [indent + line for line in lines[1:]]
 
 def _command_line(std, indent: str, command: str, comment: str = "") -> str:
-    """A command to copy, plain, and the shell comment after it dimmed: the
+    """A command to copy, plain, and the shell comment after it muted: the
     command is what a reader acts on."""
-    return indent + _shown(command) + (_styled(std, "   # " + comment, ansi.DIM) if comment else "")
+    return indent + _shown(command) + (_styled(std, "   # " + comment, ansi.MUTED) if comment else "")
 
 _POOL_BUSY = "another `aspect worktree` call is holding this pool's lock; try again"
 
@@ -2666,7 +2666,7 @@ def _render_sessions(groups: list, std = None) -> list[str]:
     """The sessions section: per session, its harness, its project, the command
     that returns to it, and its leases. Ready to print as they are: escaped,
     and styled when `std` is given and color is on — each block headed in bold,
-    its labels and column headers dimmed, a blank line between blocks.
+    its labels and column headers muted, a blank line between blocks.
 
     `-` where a fact is unavailable: a harness whose resume syntax is not known,
     a session its own store was read and found not to have, a project the store
@@ -2676,7 +2676,7 @@ def _render_sessions(groups: list, std = None) -> list[str]:
     for g in groups:
         if out:
             out.append("")
-        out.append(_styled(std, "  session " + g.id, ansi.BOLD))
+        out.append(_styled(std, "  session " + g.id, ansi.STRONG))
         out.append(_field(std, "    ", "agent:   ", g.kind or "-"))
         out.append(_field(std, "    ", "project: ", g.project or "-"))
         out.append(_field(std, "    ", "resume:  ", g.resume or "-"))
@@ -2738,10 +2738,10 @@ def _slot_detail(std, r: dict, home: str) -> None:
     How to get back into a holder's session is not here: it belongs to the
     session, and the sessions section says it once for every lease it took.
 
-    The heading is bold and the labels and column headers dimmed when color is
+    The heading is bold and the labels and column headers muted when color is
     on; the caller separates one block from the next.
     """
-    _print_styled(std, "  " + r["slot"], ansi.BOLD)
+    _print_styled(std, "  " + r["slot"], ansi.STRONG)
     if r["state"] == FREE:
         print(_field(std, "    ", "last branch: ", r["last_branch"] or "-"))
     else:
@@ -2904,7 +2904,7 @@ def _report_slot(
 
     # Abbreviated as `list` abbreviates, so the two commands do not describe one
     # directory two ways. The machine-readable outputs above carry it in full.
-    info(ctx.std, _shown("worktree ready: ") + _styled(ctx.std, tilde(path, ctx.std.env.home_dir()), ansi.BOLD))
+    info(ctx.std, _shown("worktree ready: ") + _styled(ctx.std, tilde(path, ctx.std.env.home_dir()), ansi.STRONG))
     if detached:
         _print("  detached at %s (%s), on no branch: commits made here need one before release — git switch -c <branch>" % (detached, _short(head)))
     elif created:
@@ -2939,8 +2939,8 @@ def _report_slot(
         "  # or from the clone, or anywhere in it",
         "  aspect worktree release " + handle,
     ]:
-        # The comments dimmed, so the commands are what stands out.
-        _print_styled(ctx.std, line, ansi.DIM if line.startswith("  #") else "")
+        # The comments muted, so the commands are what stands out.
+        _print_styled(ctx.std, line, ansi.MUTED if line.startswith("  #") else "")
     return 0
 
 def _upstream_report(ctx: TaskContext, pool: dict, name: str, upstream: str, base: str, created: bool) -> None:
@@ -2976,7 +2976,7 @@ def _upstream_report(ctx: TaskContext, pool: dict, name: str, upstream: str, bas
     if further and further != track:
         print(_command_line(ctx.std, "    ", "git branch --set-upstream-to=" + shell_quote(further), "track " + track + "'s upstream"))
     elif track != "<branch>" and _is_branch(ctx, pool, track):
-        _print_styled(ctx.std, "    (" + track + " has no upstream of its own)", ansi.DIM)
+        _print_styled(ctx.std, "    (" + track + " has no upstream of its own)", ansi.MUTED)
 
 def _trackable(ctx: TaskContext, pool: dict, ref: str) -> bool:
     """Whether `git branch --set-upstream-to=<ref>` would take `ref`: a local
@@ -4197,7 +4197,7 @@ def _inspect_impl(ctx: TaskContext) -> int | TaskConclusion:
             for h in held:
                 print("    " + pad_right(_shown(h["branch"]), width) + "  " + _shown(tilde(h["path"], home)) +
                       _styled(ctx.std, ("  (subagent " + h["agent_id"] + ")" if h["agent_id"] else "") +
-                                       ("  (checkout gone: `aspect worktree release` says why)" if h["gone"] else ""), ansi.DIM))
+                                       ("  (checkout gone: `aspect worktree release` says why)" if h["gone"] else ""), ansi.MUTED))
         if ended:
             _print("")
             _print("  ended in the last day — released, taken over, or taken back while this session's " +
@@ -4208,14 +4208,14 @@ def _inspect_impl(ctx: TaskContext) -> int | TaskConclusion:
                       _shown("slot " + e["slot"] + ", " + phrase_ms(time.now_ms() - e["ended_ms"]) + " ago"))
         _print("")
 
-        # The commands in one column and what each is for in the next, dimmed.
+        # The commands in one column and what each is for in the next, muted.
         hints = [
             ("aspect worktree list --all", "every pool on this machine"),
             ("aspect worktree add <branch> --create=origin/main" + _id_flag(ctx), "new work in a pooled worktree"),
         ]
         width = max([display_width(_shown(command)) for command, _ in hints])
         for command, why in hints:
-            print("  " + pad_right(_shown(command), width) + "  " + _styled(ctx.std, why, ansi.DIM))
+            print("  " + pad_right(_shown(command), width) + "  " + _styled(ctx.std, why, ansi.MUTED))
         return 0
 
     rows = [r for r in _pool_rows(ctx, pool, root, True) if r["slot"] == here]
@@ -4262,7 +4262,7 @@ def _inspect_impl(ctx: TaskContext) -> int | TaskConclusion:
         }, indent = 2) + "\n")
         return 0
 
-    _print_styled(ctx.std, tilde(pool["dir"], home) + "/" + SLOT_PREFIX + "<slot>", ansi.BOLD)
+    _print_styled(ctx.std, tilde(pool["dir"], home) + "/" + SLOT_PREFIX + "<slot>", ansi.STRONG)
     _print("")
     for line in _render_slot_tables(_list_cells(ctx.std, rows, home).cells, ctx.std):
         print(line)
@@ -5042,7 +5042,7 @@ def _render_slot_tables(cells: list, std = None) -> list[str]:
 
     A heading sits left of its table, at the pool path's margin, so it reads as
     a heading and not as one more row even with no color; with color it is
-    highlighted and the column headers under it are dimmed. Styling goes on
+    highlighted and the column headers under it are muted. Styling goes on
     whole lines after padding, since `render` measures with `len`.
     """
     color = _color(std)
@@ -5056,7 +5056,7 @@ def _render_slot_tables(cells: list, std = None) -> list[str]:
             continue
         if out:
             out.append("")
-        out.append(ansi.BOLD + ansi.highlight_style(std, True) + header + ansi.RESET if color else header)
+        out.append(ansi.style(header, ansi.HIGHLIGHT, color))
         out += _table(std, rows, columns)
     return out
 
@@ -5066,7 +5066,7 @@ def _render_pool(ctx: TaskContext, pool: dict, rows: list, home: str) -> None:
 
     # Where the slots are, as a template a reader can fill in from the first
     # column — which is what makes the table something other than magic.
-    _print_styled(ctx.std, tilde(pool["dir"], home) + "/" + SLOT_PREFIX + "<slot>", ansi.BOLD)
+    _print_styled(ctx.std, tilde(pool["dir"], home) + "/" + SLOT_PREFIX + "<slot>", ansi.STRONG)
 
     # The answer to "can I get one" before the rows that make it up. A slot
     # being set up is taken, as its table says; a free slot of another clone,
@@ -5276,8 +5276,8 @@ def _list_impl(ctx: TaskContext) -> int | TaskConclusion:
         # Named first, because what a reader of this table usually wants next is
         # the rest of it: the paths, each session's leases, and the command that
         # returns to it.
-        _print_styled(ctx.std, "  For more details run: aspect worktree list " + ("--all " if ctx.args.all else "") + "--verbose", ansi.DIM)
-    _print_styled(ctx.std, "  For usage instructions run: aspect worktree list --help", ansi.DIM)
+        _print_styled(ctx.std, "  For more details run: aspect worktree list " + ("--all " if ctx.args.all else "") + "--verbose", ansi.MUTED)
+    _print_styled(ctx.std, "  For usage instructions run: aspect worktree list --help", ansi.MUTED)
     return 0
 
 # Who is asking, for every command but `add`, which records it. `ASPECT_AGENT_KIND`

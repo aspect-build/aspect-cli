@@ -1,0 +1,16 @@
+{
+  "name": "colorblind-light",
+  "family": "colorblind",
+  "description": "White background, Okabe-Ito hues deepened: error vermilion, warning reddish purple, success blue. The accent is bold text, since a fourth hue would collide.",
+  "appearance": "light",
+  "extends": "aspect-light",
+  "roles": {
+    "accent": "default",
+    "success": { "rgb": "#2160d0", "256": 26, "16": "blue" },
+    "warning": { "rgb": "#a2387e", "256": 126, "16": "magenta" },
+    "error": { "rgb": "#b84a00", "256": 130, "16": "red" },
+    "link.hover": { "fg": "@text", "bold": true, "underline": true },
+    "selection": { "bg": { "rgb": "#e4e4e4", "256": 254 }, "16": { "reverse": true } },
+    "tip.important": { "fg": "@text", "bold": true, "underline": true }
+  }
+}

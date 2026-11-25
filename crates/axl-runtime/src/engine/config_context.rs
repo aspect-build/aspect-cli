@@ -183,6 +183,15 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
         Err(anyhow::anyhow!("expected ConfigContext"))
     }
 
+    /// The colour theme's settings for this config's layer: `select`,
+    /// `roles` and `define`; see `ConfigTheme`.
+    #[starlark(attribute)]
+    fn theme<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> anyhow::Result<crate::engine::config_theme::ConfigTheme> {
+        Ok(crate::engine::config_theme::ConfigTheme)
+    }
+
     /// Expand template files.
     #[starlark(attribute)]
     fn template<'v>(

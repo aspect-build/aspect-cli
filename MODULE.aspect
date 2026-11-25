@@ -15,7 +15,7 @@ use_task(".aspect/user/user-task-manual.axl", "user_task_manual")
 # Example plugins ported from BuildBuddy's open-source CLI plugins
 # (.aspect/plugins/), showing how AXL customizes and extends Bazel. Configured
 # in .aspect/config.axl.
-use_feature(".aspect/plugins/theme.axl", "Theme")
+use_feature(".aspect/plugins/flair.axl", "Flair")
 use_feature(".aspect/plugins/go_highlight.axl", "GoHighlight")
 use_feature(".aspect/plugins/go_deps.axl", "GoDeps")
 use_feature(".aspect/plugins/notify.axl", "Notify")

@@ -111,6 +111,7 @@ pub struct EvalBuilder {
         bool,
         bool,
         Result<Option<crate::diag::Verbose>, String>,
+        Arc<crate::theme::Inputs>,
     )>,
 }
 
@@ -165,10 +166,11 @@ impl EvalBuilder {
     /// Resolve the run's host in [`EvalBuilder::run_task`] from this snapshot
     /// rather than the process's own: whether stdout and stderr are terminals,
     /// and the only environment variables set. It decides color (the
-    /// console's, and `std.io.stdout.color` / `std.io.stderr.color`),
-    /// whether the console runs as on Buildkite, whether it runs under a
-    /// coding agent, and the verbose level `ASPECT_VERBOSE` / `ASPECT_DEBUG`
-    /// set.
+    /// console's, and `std.io.stdout.color` / `std.io.stderr.color`), the
+    /// theme (`ctx.std.theme`, resolved with no `HOME` and no system
+    /// appearance), whether the console runs as on Buildkite, whether it runs
+    /// under a coding agent, and the verbose level `ASPECT_VERBOSE` /
+    /// `ASPECT_DEBUG` set.
     pub fn with_host_env(
         mut self,
         stdout_tty: bool,
@@ -176,11 +178,13 @@ impl EvalBuilder {
         vars: &[(&str, &str)],
     ) -> Self {
         let var = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.into());
+        let color = StreamColor::from_snapshot(stdout_tty, stderr_tty, var);
         self.host_env = Some((
-            StreamColor::from_snapshot(stdout_tty, stderr_tty, var),
+            color,
             crate::ci::buildkite_from(var),
             crate::agent::detected(var),
             crate::diag::Verbose::from_env(var),
+            Arc::new(crate::theme::Inputs::snapshot(color, var, None, || None)),
         ));
         self
     }
@@ -326,8 +330,12 @@ impl EvalBuilder {
             );
             loader.env.signals = signals.clone();
             loader.env.config_editor = || None;
-            if let Some((color, buildkite, coding_agent, verbose)) = self.host_env.clone() {
+            if let Some((color, buildkite, coding_agent, verbose, inputs)) = self.host_env.clone() {
                 loader.env.stream_color = color;
+                let (theme, _) =
+                    crate::theme::resolve_with(&inputs, &crate::theme::AxlLayers::default());
+                loader.env.theme = crate::theme::ThemeSlot::new(Arc::new(theme));
+                loader.env.theme_inputs = inputs;
                 loader.env.buildkite = buildkite;
                 loader.env.coding_agent = coding_agent;
                 loader.env.verbose = verbose;

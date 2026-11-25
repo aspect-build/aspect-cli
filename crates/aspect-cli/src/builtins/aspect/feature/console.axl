@@ -27,11 +27,43 @@ do the same for one task, keyed by task kind ("lint") or command path
 
     def config(ctx):
         ctx.features[Console].args.template_preset = "compact"
-        ctx.features[Console].args.templates = {"header": "▶ {{ label }}"}
+        ctx.features[Console].args.templates = {"header": "== {{ label }}"}
         ctx.features[Console].args.task_presets = {"worktree add": "silent"}
         ctx.features[Console].args.task_templates = {
             "lint": {"verdict": "{{ glyph }} lint {{ verb }}{{ timing }}"},
         }
+
+The default, `full`, reads the same on a terminal and in a plain CI log:
+
+    ▸ Running build task
+
+    ▸ Setup
+    ▹ Running setup
+
+    ▸ Build
+    ▹ Spawning bazel build
+    INFO: Bazel 9.3.3
+    ...
+    INFO: Build completed successfully, 40 total actions
+
+    ✓ Passed build task in 1m 12s · Setup 0.4s · Build 1m 11s
+
+On Buildkite each phase opens a log section, its heading and first update on
+the section's line. Under every preset a phase that runs Bazel opens expanded
+(`+++`), so its errors are never in a collapsed group, and so does the verdict,
+which opens the last:
+
+    --- :aspect: Running build task
+    --- Setup · Running setup
+    +++ Build · Spawning bazel build
+    INFO: Bazel 9.3.3
+    ▹ Uploading results
+    +++ ✓ Passed build task in 1m 12s · Setup 0.4s · Build 1m 11s
+
+Its parts take the theme's `task`, `task.label`, `phase`, `phase.title`,
+`phase.update`, `phase.text` and `verdict.*` roles (see `docs/themes.md`).
+`emoji` keeps the lines Aspect printed before, with an emoji on each and
+Buildkite emoji shortcodes.
 
 A task with its own preset starts from it alone, without `templates`;
 `task_templates` beat everything else, a command path's over its kind's. A
@@ -42,9 +74,9 @@ The runtime does the rendering: it reads these args after `config.axl` runs
 and before the header prints. Bazel's own output, warnings and errors, and
 stdout are never templated, and nor is the end of Bazel's console (the
 recap and what was hidden): it prints under every preset. A tip's first
-line is the `tip` slot, `TIP[id] 💡 suggestion: title`; `full` and `silent`
-carry the emoji, `plain`, `compact` and `agent` leave it out, and a
-template that renders blank hides the tip:
+line is the `tip` slot, `TIP[id] suggestion: title`; `emoji` and `silent`
+add the severity's emoji (`TIP[id] 💡 suggestion: title`), and a template
+that renders blank hides the tip:
 
     ctx.features[Console].args.templates = {
         "tip": "{{ highlight_style }}{{ severity }}{{ highlight_reset }} [{{ id }}] {{ title }}",
@@ -57,7 +89,7 @@ rather than `full`. Setting `template_preset` on the command line or in any
 
 The preset also decides whether detail lines print: the `INFO:` asides a
 reader can do without, which `detail` in `lib/environment.axl` prints (timings,
-filter counts, uploaded-artifact notes). `full` and `plain` show them,
+filter counts, uploaded-artifact notes). `full` and `emoji` show them,
 `compact`, `agent` and `silent` hide them, and `verbose` forces them on or off
 whatever the preset. `verbose = "debug"` also prints the `DEBUG:` lines of
 `debug` in `lib/environment.axl`, the internals a bug report needs. The level
@@ -108,7 +140,7 @@ repository cannot make a click open a scheme of its choosing), which beats
 By default, your editor at the line, the one whose terminal this is, else the
 one `$VISUAL` or `$EDITOR` starts, else one installed; none on a remote
 machine (SSH, a dev container, Codespaces). In Terminal.app,
-which cannot show such a link, its URL is written beside the path, grey
+which cannot show such a link, its URL is written beside the path, muted
 and underlined where colour is shown, and `https://` URLs are underlined.
 
     load("@aspect//feature/console.axl", "Console")
@@ -233,29 +265,33 @@ Console = feature(
     summary = "Choose the lines Aspect prints around a task, and make Bazel's console easier to read: relative paths, collapsed warnings and repeated lines, recapped errors, tips for failures it recognizes.",
     implementation = _console_impl,
     args = {
+        # No `values`: the runtime checks the name, so a removed preset's error
+        # says what replaced it, on the command line and in config.axl alike.
         "template_preset": args.string(
             default = "full",
-            values = ["full", "plain", "compact", "agent", "silent"],
-            description = "Built-in terminal layout: 'full' (the banner, the header, every phase and " +
-                          "progress line, and the verdict with its phase breakdown; default), " +
-                          "'plain' (the same lines without emojis), 'compact' (the verdict alone, " +
+            description = "Built-in terminal layout: 'full' (the banner, the header, each phase's " +
+                          "heading and its updates, and the verdict with its phase breakdown, " +
+                          "without emojis; default), 'emoji' (the lines Aspect printed " +
+                          "before, with emojis and Buildkite emoji shortcodes), 'compact' (the verdict alone, " +
                           "on one line with no phase breakdown), 'agent' (compact without " +
                           "emojis; the default under a coding agent unless this is set on the " +
                           "command line or in config.axl), or 'silent' (nothing; the exit " +
                           "code, the task's own output and Bazel's console carry the result). 'compact', " +
                           "'agent' and 'silent' also hide detail lines; see `verbose`. On Buildkite the " +
                           "header, phase and verdict lines, and sections a task opens itself, " +
-                          "start log sections, so they print under every preset. " + TASK_PRESET_PRECEDENCE,
+                          "start log sections, so they print under every preset; a phase that " +
+                          "runs Bazel and the verdict open expanded (+++). " + TASK_PRESET_PRECEDENCE,
         ),
         "templates": args.custom(
             dict,
             default = {},
             description = "Jinja2 overrides on top of `template_preset`, keyed by slot: \"banner\" " +
                           "(`line`, `version`, `debug_build`, `docs_url`), \"header\" (`label`), " +
-                          "\"phase\" and \"progress\" (`text`, `title`, `emoji`), \"verdict\" " +
-                          "(`verdict`, `glyph`, `shortcode`, `verb`, `label`, `exit_code`, `exit`, " +
+                          "\"phase\" (`text`, `title`, `emoji`, `continued`: an update to the phase " +
+                          "already shown) and \"progress\" (`text`, `title`, `emoji`), \"verdict\" " +
+                          "(`verdict`, `cancelled`, `glyph`, `shortcode`, `verb`, `label`, `exit_code`, `exit`, " +
                           "`elapsed`, `elapsed_ms`, `timing`, `conclusion`, `breakdown`, " +
-                          "`plain_breakdown`, `phases`; `timing` and both breakdowns follow " +
+                          "`plain_breakdown`, `timings`, `phases`; `timing` and the breakdowns follow " +
                           "--task:timing-summary), \"section\" (`icon`, `title`), the title of " +
                           "a Buildkite section a task opens itself, such as the Workflows runner " +
                           "metadata, and \"tip\" (`id`, `severity`, `emoji`, `title`, `tip_style`, " +
@@ -263,11 +299,14 @@ Console = feature(
                           "render hides the tip. Every slot also gets `buildkite` and `task` (`kind`, `group`, " +
                           "`name`, `path`); all but \"section\", and a \"progress\" update that " +
                           "names no phase, get `highlight_style` and `highlight_reset`, the ANSI " +
-                          "codes around the line's highlight (empty when color is off). They apply to every task that renders with " +
+                          "codes around the line's highlight (empty when color is off). Every slot gets " +
+                          "the escape of each of the theme's `task`, `task.label`, `phase`, `phase.title`, " +
+                          "`phase.update`, `phase.text` and `verdict.*` roles as `<role>_style`, a `.` read as " +
+                          "`_` (`phase_title_style`), and `reset`, which closes them. They apply to every task that renders with " +
                           "`template_preset` (not one with its own `task_presets` entry); one task's own go in " +
                           "`task_templates`. An empty template prints nothing, except on Buildkite, " +
                           "where a line that opens a log section takes the preset's text (or " +
-                          "`full`'s). A template that " +
+                          "`emoji`'s, or `full`'s for a preset without emojis). A template that " +
                           "fails to render falls back to the preset's template for that slot.",
         ),
         "verbose": args.string(
@@ -276,7 +315,7 @@ Console = feature(
             bare = "true",
             description = "Whether detail lines print: the INFO asides a reader can do without, " +
                           "such as timings and filter counts. 'auto' (default) leaves it to the " +
-                          "task's preset: shown under 'full' and 'plain', hidden under 'compact', " +
+                          "task's preset: shown under 'full' and 'emoji', hidden under 'compact', " +
                           "'agent' and 'silent'. 'true' (or a bare --console:verbose) and 'false' " +
                           "force them on or off, and 'debug' also prints DEBUG lines; config.axl " +
                           "may also assign True or False. ASPECT_VERBOSE takes the same values and " +
@@ -303,7 +342,7 @@ Console = feature(
                           "naming its file and is ignored, so the next decides. A directory, a binary file, and anything under /bin, /sbin, /usr/bin and " +
                           "the system's other directories never link. In Terminal.app, " +
                           "which shows no such link, the link's URL is written after the path and its line, " +
-                          "grey and underlined where colour is shown, to open by Cmd+double-click or " +
+                          "muted and underlined where colour is shown, to open by Cmd+double-click or " +
                           "Control+click, but in a progress row Bazel redraws. URLs are links " +
                           "whatever it says.",
         ),

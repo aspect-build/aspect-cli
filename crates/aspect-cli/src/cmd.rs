@@ -139,6 +139,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
 
         let group_section = group_section(&tree.group_rows());
         let root = Command::new("aspect")
+            .styles(clap_styles(&help_palette()))
             .bin_name("aspect")
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
             .subcommand_value_name("TASK|GROUP|COMMAND")
@@ -213,7 +214,14 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .hide(true),
             )
             .help_template(format!(
-                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mdescribe\x1b[0m  Print the resolved task, flag and feature surface as JSON\n  \x1b[1mfeature\x1b[0m   List features and their flags\n  \x1b[1mversion\x1b[0m   Print version\n  \x1b[1mhelp\x1b[0m      Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
+                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{tasks}\n{{subcommands}}{group_section}\n{commands}\n  {describe}  Print the resolved task, flag and feature surface as JSON\n  {feature}   List features and their flags\n  {version_cmd}   Print version\n  {help}      Print this message or the help of the given subcommand(s)\n\n{options}\n{{options}}",
+                tasks = help_style("title", "Tasks:"),
+                commands = help_style("title", "Commands:"),
+                describe = help_style("strong", "describe"),
+                feature = help_style("strong", "feature"),
+                version_cmd = help_style("strong", "version"),
+                help = help_style("strong", "help"),
+                options = help_style("title", "Options:"),
             ));
 
         tree.attach(root, version)
@@ -484,13 +492,13 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 }
                 None => {
                     let valid: Vec<String> = blocks.iter().map(|(f, _)| f.name()).collect();
-                    let (red, reset) = if color::console_supports_color() {
-                        ("\x1b[1;31m", "\x1b[0m")
+                    let label = if color::console_supports_color() {
+                        help_palette().paint("label.error", "error:")
                     } else {
-                        ("", "")
+                        "error:".to_string()
                     };
                     errln!(
-                        "{red}error:{reset} unknown feature {name:?}{}",
+                        "{label} unknown feature {name:?}{}",
                         suggest::did_you_mean_then(
                             name,
                             valid.iter().map(String::as_str),
@@ -2109,21 +2117,22 @@ fn render_feature_list(
         .map(|(f, _)| f.name().len())
         .max()
         .unwrap_or(0);
-    let (bold, bold_underline, reset) = if color {
-        ("\x1b[1m", "\x1b[1;4m", "\x1b[0m")
-    } else {
-        ("", "", "")
+    let palette = color.then(help_palette);
+    let paint = |role: &str, text: &str| match &palette {
+        Some(p) => p.paint(role, text),
+        None => text.to_string(),
     };
     let mut out = format!(
-        "{}\n\n{bold_underline}Features:{reset}\n",
-        banner::line_colored(version, color)
+        "{}\n\n{}\n",
+        banner::line_colored(version, palette.as_deref()),
+        paint("title", "Features:")
     );
     for (feat, _) in blocks {
         let slug = feat.name();
         let pad = " ".repeat(width - slug.len() + 2);
         out.push_str(&format!(
-            "  {bold}{}{reset}{}{}\n",
-            slug,
+            "  {}{}{}\n",
+            paint("strong", &slug),
             pad,
             feat.summary()
         ));
@@ -2252,11 +2261,14 @@ fn config_args_section<'a>(
     setter: &str,
     config_args: impl IntoIterator<Item = (&'a str, &'a Arg)>,
 ) -> Option<String> {
-    let mut out = format!("\x1b[1;4m{CONFIG_ARGS_HEADING}:\x1b[0m\n");
+    let mut out = format!(
+        "{}\n",
+        help_style("title", &format!("{CONFIG_ARGS_HEADING}:"))
+    );
     let mut any = false;
     for (name, arg) in config_args {
         any = true;
-        out.push_str(&format!("      \x1b[1m{name}\x1b[0m\n"));
+        out.push_str(&format!("      {}\n", help_style("strong", name)));
         for line in arg.description().unwrap_or_default().lines() {
             if !line.is_empty() {
                 out.push_str("          ");
@@ -2268,9 +2280,12 @@ fn config_args_section<'a>(
     if !any {
         return None;
     }
-    out.push_str(&format!(
-        "\n\x1b[2mSet these as {setter}.<NAME> in .aspect/config.axl; \
-         they have no command-line flag.\x1b[0m"
+    out.push('\n');
+    out.push_str(&help_style(
+        "muted",
+        &format!(
+            "Set these as {setter}.<NAME> in .aspect/config.axl; they have no command-line flag."
+        ),
     ));
     Some(out)
 }
@@ -2478,7 +2493,7 @@ fn claimed_by_task(task: &dyn TaskLike<'_>) -> HashSet<String> {
         .collect()
 }
 
-/// Dimmed prose closing a task's `--help`, each paragraph led by a blank line:
+/// Muted prose closing a task's `--help`, each paragraph led by a blank line:
 /// the passthrough notes, then a pointer to the hidden feature flags on a task
 /// that shows its task options. Empty when neither applies.
 fn help_footer(task: &dyn TaskLike<'_>) -> String {
@@ -2488,7 +2503,7 @@ fn help_footer(task: &dyn TaskLike<'_>) -> String {
     passthrough_notes(task)
         .into_iter()
         .chain(task.show_task_options().then(|| FEATURES.to_owned()))
-        .map(|paragraph| format!("\n\n\x1b[2m{paragraph}\x1b[0m"))
+        .map(|paragraph| format!("\n\n{}", help_style("muted", &paragraph)))
         .collect()
 }
 
@@ -2602,12 +2617,16 @@ impl Tree {
             let mut template =
                 format!("{header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}");
             if !sub.tasks.is_empty() {
-                template.push_str("\n\n\x1b[1;4mTasks:\x1b[0m\n{subcommands}");
+                template.push_str(&format!(
+                    "\n\n{}\n{{subcommands}}",
+                    help_style("title", "Tasks:")
+                ));
             }
             template.push_str(&group_section(&sub_rows));
             let template = format!(
-                "{}\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}",
-                template.trim_end()
+                "{}\n\n{}\n{{options}}",
+                template.trim_end(),
+                help_style("title", "Options:")
             );
             let mut subcmd = Command::new(name.clone())
                 .subcommand_value_name("TASK|GROUP")
@@ -2657,12 +2676,102 @@ fn group_section(rows: &[(String, String)]) -> String {
         return String::new();
     }
     let max_len = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    let mut s = String::from("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
+    let mut s = format!("\n\n{}\n", help_style("title", "Task Groups:"));
     for (name, members) in rows {
         let pad = " ".repeat(max_len - name.len() + 2);
-        s.push_str(&format!("  \x1b[1m{}\x1b[0m{}{}\n", name, pad, members));
+        s.push_str(&format!(
+            "  {}{}{}\n",
+            help_style("strong", name),
+            pad,
+            members
+        ));
     }
     s
+}
+
+/// `text` in `role` of [`help_palette`], for help clap writes: it strips
+/// the escapes by the rules of [`color::stdout_supports_color`].
+fn help_style(role: &str, text: &str) -> String {
+    help_palette().paint(role, text)
+}
+
+/// The theme help is drawn in: the process's, and in this crate's unit tests
+/// `aspect-dark` at 256 colours, so no test reads its environment.
+fn help_palette() -> std::sync::Arc<aspect_theme::Palette> {
+    if cfg!(test) {
+        std::sync::Arc::new(aspect_theme::Palette::aspect_dark(
+            aspect_theme::Depth::Ansi256,
+        ))
+    } else {
+        axl_runtime::theme::of_process()
+    }
+}
+
+/// Clap's own styles from `palette`'s roles: headings and usage in `title`,
+/// literals in `strong`, `error:` in `label.error`, valid and invalid values
+/// in `success` and `label.warning`. A role written as raw SGR has no clap
+/// form and is left unstyled.
+fn clap_styles(palette: &aspect_theme::Palette) -> clap::builder::Styles {
+    use clap::builder::styling::{Ansi256Color, AnsiColor, Color, Effects, RgbColor, Style};
+    let colour = |c: aspect_theme::Colour| -> Color {
+        match c {
+            aspect_theme::Colour::Ansi(n) => {
+                let ansi = [
+                    AnsiColor::Black,
+                    AnsiColor::Red,
+                    AnsiColor::Green,
+                    AnsiColor::Yellow,
+                    AnsiColor::Blue,
+                    AnsiColor::Magenta,
+                    AnsiColor::Cyan,
+                    AnsiColor::White,
+                    AnsiColor::BrightBlack,
+                    AnsiColor::BrightRed,
+                    AnsiColor::BrightGreen,
+                    AnsiColor::BrightYellow,
+                    AnsiColor::BrightBlue,
+                    AnsiColor::BrightMagenta,
+                    AnsiColor::BrightCyan,
+                    AnsiColor::BrightWhite,
+                ];
+                Color::Ansi(ansi[usize::from(n.min(15))])
+            }
+            aspect_theme::Colour::Index(i) => Color::Ansi256(Ansi256Color(i)),
+            aspect_theme::Colour::Rgb(r, g, b) => Color::Rgb(RgbColor(r, g, b)),
+        }
+    };
+    let style = |role: &str| -> Style {
+        let Some(s) = palette
+            .style(role)
+            .filter(|s| s.raw.is_none() && palette.depth().is_some())
+        else {
+            return Style::new();
+        };
+        let mut effects = Effects::new();
+        for (on, effect) in [
+            (s.bold, Effects::BOLD),
+            (s.dim, Effects::DIMMED),
+            (s.italic, Effects::ITALIC),
+            (s.underline, Effects::UNDERLINE),
+            (s.reverse, Effects::INVERT),
+        ] {
+            if on {
+                effects |= effect;
+            }
+        }
+        Style::new()
+            .fg_color(s.fg.map(colour))
+            .bg_color(s.bg.map(colour))
+            .effects(effects)
+    };
+    clap::builder::Styles::styled()
+        .header(style("title"))
+        .usage(style("title"))
+        .literal(style("strong"))
+        .placeholder(Style::new())
+        .error(style("label.error"))
+        .valid(style("success"))
+        .invalid(style("label.warning"))
 }
 
 // ── Misc helpers ───────────────────────────────────────────────────────────
@@ -3909,7 +4018,7 @@ mod tests {
 
         assert_eq!(
             footer(false),
-            "\n\n\x1b[2mOther flags go to the tool.\x1b[0m"
+            "\n\n\x1b[38;5;247mOther flags go to the tool.\x1b[0m"
         );
         let shown = footer(true);
         assert!(shown.starts_with(&footer(false)), "{shown:?}");

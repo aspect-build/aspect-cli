@@ -1,0 +1,24 @@
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "aspect-theme",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = glob(["themes/*.json"]),
+    visibility = [
+        "//crates/aspect-cli:__pkg__",
+        "//crates/axl-runtime:__pkg__",
+        "//crates/bazel:__pkg__",
+    ],
+    deps = [
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "aspect-theme_test",
+    compile_data = glob(["src/testdata/*"]),
+    crate = ":aspect-theme",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)

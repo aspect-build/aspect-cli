@@ -21,6 +21,7 @@ pub mod out;
 pub mod project_root;
 pub mod startup;
 pub mod suggest;
+pub mod theme;
 pub mod trace;
 mod user_config;
 

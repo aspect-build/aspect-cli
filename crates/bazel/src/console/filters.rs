@@ -285,8 +285,8 @@ impl RelativizePaths {
 
     /// This stage writing each path it makes relative as an OSC 8 link to
     /// the file it names as `link`'s format says (plain under `none`, and
-    /// for a path [`super::links::FileLinks::url`] refuses), for a terminal,
-    /// whether or not that exists: the
+    /// for a path [`super::links::FileLinks::url`] refuses), styled as
+    /// `link`'s files are, for a terminal, whether or not that exists: the
     /// shown text alone no longer tells which file (`BUILD.bazel` from a
     /// package directory is that package's).
     pub fn linking(mut self, link: Option<LinkTo>) -> Self {
@@ -519,7 +519,15 @@ impl RelativizePaths {
             // stage writes its URL beside it where a terminal needs that.
             let after = ansi::strip(&out[close + 1..]);
             match link.files.url(file, super::links::position(&after)) {
-                Some(url) => linked.extend(super::links::osc8(&url, shown)),
+                Some(url) => {
+                    let restore = super::links::active_style(&linked);
+                    linked.extend(super::links::styled_osc8(
+                        &link.files,
+                        &url,
+                        shown,
+                        &restore,
+                    ))
+                }
                 None => linked.extend_from_slice(shown),
             }
             i = close + 1;
@@ -1253,6 +1261,32 @@ mod tests {
             String::from_utf8(linking.process(line.as_bytes()).unwrap()).unwrap(),
             want,
             "made relative without links"
+        );
+    }
+
+    /// Bazel's own error location, linked as `relativize_paths` links it,
+    /// takes `link.file` like every link the CLI makes.
+    #[test]
+    fn a_relativized_link_is_styled_as_a_file_link() {
+        let palette = aspect_theme::Palette::new(
+            aspect_theme::Theme::aspect_dark(),
+            Some(aspect_theme::Depth::Ansi256),
+            true,
+        );
+        let files = crate::console::links::FileLinks::new(
+            crate::console::links::LinkFormat::parse("vscode").unwrap(),
+        )
+        .styled(Some(crate::console::links::LinkStyle::of(&palette)));
+        let mut p =
+            RelativizePaths::new(Some("/ws".into()), Some("/ws".into())).linking(Some(LinkTo {
+                files,
+                workspace: "/ws".into(),
+            }));
+        let line = b"\x1b[31m\x1b[1mERROR: \x1b[0m/ws/BUILD.bazel:7:8: in genrule rule //:bad: /bin/bash failed";
+        let out = String::from_utf8(p.process(line).unwrap()).unwrap();
+        assert!(
+            out.contains("\x1b]8;;vscode://file/ws/BUILD.bazel:7:8\x1b\\\x1b[4mBUILD.bazel\x1b[0m\x1b]8;;\x1b\\:7:8:"),
+            "{out:?}"
         );
     }
 

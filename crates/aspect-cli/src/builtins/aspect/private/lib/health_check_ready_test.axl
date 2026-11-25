@@ -110,9 +110,11 @@ def _test_run_health_checks_surfaces_first_error(ctx):
 
 def _test_render_local_job_history_zero(ctx):
     """Empty history → header + `Number of builds: 0` + trailing blank.
-    Mirrors Vigor's zero-count rendering shape (no `Most recently` block)."""
+    Mirrors Vigor's zero-count rendering shape (no `Most recently` block);
+    the header in `accent`, under a pinned theme."""
+    ctx.std.theme.testonly_pin("aspect-dark", depth = 256)
     got = render_local_job_history("")
-    want = "\x1b[34m• Job History\x1b[0m\n\tNumber of builds on this runner: 0\n"
+    want = "\x1b[38;5;75m• Job History\x1b[0m\n\tNumber of builds on this runner: 0\n"
     _eq("render empty history", got, want)
 
 def _test_render_local_job_history_under_ten(ctx):

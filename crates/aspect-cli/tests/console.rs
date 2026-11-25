@@ -165,11 +165,133 @@ fn assert_task_behaviour(output: &Output, preset: &str, code: i32) {
     assert!(err.contains(": task info"), "{preset}: {err}");
     assert_eq!(
         err.contains(": task detail"),
-        matches!(preset, "full" | "plain"),
+        matches!(preset, "full" | "emoji"),
         "{preset}: {err}"
     );
 }
 
+/// `text` without its SGR sequences.
+fn without_colour(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\x1b[") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        let end = after.find('m').map_or(after.len(), |m| m + 1);
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `full`, the default, gives each phase a heading and its updates `▹` lines
+/// under it, with no emoji. A plain log and GitHub Actions, which only adds
+/// colour (and a label from the CI run), read the same.
+#[test]
+fn full_lays_out_headings_and_updates_alike_in_a_plain_log_and_on_github_actions() {
+    for env in [&[][..], &[("GITHUB_ACTIONS", "true")][..]] {
+        let output = run_with_env("", &["check", "--code", "3"], false, env);
+        assert_task_behaviour(&output, "full", 3);
+        let err = without_colour(&stderr(&output));
+        assert!(
+            err.lines().any(|l| l.starts_with("▸ Running check")),
+            "{env:?}: {err}"
+        );
+        for block in [
+            "\n\n▸ Work\n▹ phase progress\n▹ heartbeat progress\n",
+            "\n\n▸ Finish\n▹ final progress\n",
+            "\n\n✗ Failed check",
+            " (exit 3) in ",
+        ] {
+            assert!(err.contains(block), "{env:?}: {block:?} in\n{err}");
+        }
+        assert!(err.contains(" · task conclusion"), "{env:?}: {err}");
+        for gone in ["→", "🎬", "❌", "✅", ":aspect:"] {
+            assert!(!err.contains(gone), "{env:?}: {gone} in\n{err}");
+        }
+    }
+}
+
+/// On Buildkite `full` opens a section per phase, titled by its heading and
+/// first update with no glyph; later updates are `▹` lines inside it, and the
+/// verdict opens the last section expanded.
+#[test]
+fn full_on_buildkite_opens_a_section_per_phase() {
+    let output = run("", &["check"], true);
+    assert_task_behaviour(&output, "full", 0);
+    let err = without_colour(&stderr(&output));
+    let sections: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("--- ") || l.starts_with("+++ ") || l.starts_with("^^^"))
+        .collect();
+    assert_eq!(sections.len(), 4, "{err}");
+    assert!(
+        sections[0].starts_with("--- :aspect: Running check"),
+        "{err}"
+    );
+    assert_eq!(sections[1], "--- Work · phase progress", "{err}");
+    assert_eq!(sections[2], "--- Finish · final progress", "{err}");
+    assert!(sections[3].starts_with("+++ ✓ Passed check"), "{err}");
+    assert!(err.lines().any(|l| l == "▹ heartbeat progress"), "{err}");
+    let task = &err[err.find(sections[0]).expect("the task's section")..];
+    assert!(!task.contains("\n\n"), "no blank lines: {task:?}");
+}
+
+/// `emoji` keeps the lines `full` printed before.
+#[test]
+fn emoji_keeps_the_previous_layout() {
+    let output = run(
+        "",
+        &["check", "--console:template-preset=emoji", "--code", "3"],
+        false,
+    );
+    assert_task_behaviour(&output, "emoji", 3);
+    let err = stderr(&output);
+    assert!(err.starts_with("→ 🎬 Running check task\n"), "{err}");
+    for line in [
+        "\n\n→ Work · phase progress\n→ heartbeat progress\n",
+        "\n\n→ Finish · final progress\n",
+        "\n\n→ ❌ Failed check task (exit 3) in ",
+    ] {
+        assert!(err.contains(line), "{line:?} in\n{err}");
+    }
+}
+
+/// `plain` is gone, on the command line and in `config.axl` alike, and the
+/// error says what took its place.
+#[test]
+fn plain_is_refused_naming_full_and_emoji() {
+    const REMOVED_PLAIN: &str = r#"template preset "plain" was removed: "full" is the layout without emojis, and "emoji" the one with them"#;
+    for (config, args) in [
+        ("", &["check", "--console:template-preset=plain"][..]),
+        (
+            r#"ctx.features[Console].args.template_preset = "plain""#,
+            &["check"][..],
+        ),
+        (
+            r#"ctx.features[Console].args.task_presets = {"check": "plain"}"#,
+            &["check"][..],
+        ),
+    ] {
+        let output = run(config, args, false);
+        let err = stderr(&output);
+        assert_ne!(output.status.code(), Some(0), "{config} {args:?}: {err}");
+        assert!(err.contains(REMOVED_PLAIN), "{config} {args:?}: {err}");
+        if !config.is_empty() {
+            assert!(
+                !err.contains("--console:template-preset"),
+                "a config.axl setting names no flag: {err}"
+            );
+        }
+        assert!(
+            output.stdout.is_empty(),
+            "the task must not have run: {err}"
+        );
+    }
+}
+
+/// The runtime checks the preset's name, so the flag lists no values of its
+/// own; its help names each preset, in the runtime's order, and no other.
 #[test]
 fn the_feature_offers_exactly_the_runtimes_presets() {
     let output = Command::new(aspect_cli())
@@ -179,15 +301,42 @@ fn the_feature_offers_exactly_the_runtimes_presets() {
         .output()
         .expect("running `aspect feature console`");
     let help = String::from_utf8_lossy(&output.stdout);
-    let values = help
+    let mut lines = help
         .lines()
-        .skip_while(|l| !l.contains("--console:template-preset"))
-        .find_map(|l| l.split_once("[possible values: "))
-        .and_then(|(_, rest)| rest.split_once(']'))
-        .map(|(values, _)| values.split(", ").collect::<Vec<_>>())
-        .unwrap_or_else(|| panic!("no template-preset values in:\n{help}"));
-    let presets: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
-    assert_eq!(values, presets);
+        .skip_while(|l| !l.contains("--console:template-preset"));
+    let flag: String = lines
+        .next()
+        .into_iter()
+        .chain(lines.take_while(|l| !l.contains("--console:")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = |name: &str| flag.find(&format!("'{name}'"));
+    let mut last = 0;
+    for preset in PRESETS.map(|p| p.name) {
+        let here = at(preset).unwrap_or_else(|| panic!("{preset} not in:\n{flag}"));
+        assert!(here >= last, "{preset} out of order in:\n{flag}");
+        last = here;
+    }
+    assert_eq!(at("plain"), None, "{flag}");
+    assert!(!flag.contains("[possible values"), "{flag}");
+}
+
+/// On Buildkite every preset opens the verdict expanded, so it stays open
+/// after a phase that ran Bazel opened its own group expanded.
+#[test]
+fn every_preset_opens_the_verdict_expanded_on_buildkite() {
+    for preset in ["full", "emoji", "compact", "agent", "silent"] {
+        let flag = format!("--console:template-preset={preset}");
+        let output = run("", &["check", &flag], true);
+        assert_task_behaviour(&output, preset, 0);
+        let err = stderr(&output);
+        let last = err
+            .lines()
+            .filter(|l| l.starts_with("--- ") || l.starts_with("+++ "))
+            .last()
+            .unwrap_or_else(|| panic!("{preset}: no sections in\n{err}"));
+        assert!(last.starts_with("+++ "), "{preset}: {last:?}");
+    }
 }
 
 #[test]
@@ -215,7 +364,7 @@ fn compact_prints_the_verdict_alone() {
     let verdict: Vec<&str> = err.lines().filter(|l| l.contains("Failed")).collect();
     assert_eq!(verdict.len(), 1, "{err}");
     assert!(
-        verdict[0].starts_with("→ ❌ Failed check task (exit code 3) in "),
+        verdict[0].starts_with("→ ❌ Failed check task (exit 3) in "),
         "{err}"
     );
     assert!(verdict[0].ends_with(" · task conclusion"), "{err}");
@@ -241,7 +390,7 @@ fn buildkite_sections_print_under_every_preset() {
     for (preset, verdict) in [
         ("compact", "+++ :x: "),
         ("silent", "+++ :x: "),
-        ("agent", "+++ \u{1b}[1;31mFailed"),
+        ("agent", "+++ \u{1b}[1;38;5;203mFailed"),
     ] {
         let flag = format!("--console:template-preset={preset}");
         let output = run("", &["check", &flag, "--code", "3"], true);
@@ -318,7 +467,7 @@ fn a_cli_preset_beats_task_presets() {
     );
     assert_task_behaviour(&output, "full", 0);
     assert!(
-        stderr(&output).contains("→ heartbeat progress"),
+        stderr(&output).contains("▹ heartbeat progress"),
         "{}",
         stderr(&output)
     );
@@ -370,7 +519,7 @@ ctx.features[Console].args.task_presets = {"deploy": "silent"}"#,
     );
     assert_task_behaviour(&output, "full", 0);
     let err = stderr(&output);
-    assert!(err.contains("→ ✅ Passed check task"), "{err}");
+    assert!(err.contains("✓ Passed check task"), "{err}");
     assert!(!err.contains("deployed"), "{err}");
     assert!(!err.contains("names no task here"), "{err}");
 }
@@ -451,8 +600,8 @@ fn a_template_that_fails_to_render_falls_back_to_its_preset_with_one_warning() {
         1,
         "{err}"
     );
-    assert!(err.contains("→ Work · phase progress"), "{err}");
-    assert!(err.contains("→ Finish · final progress"), "{err}");
+    assert!(err.contains("▸ Work\n▹ phase progress"), "{err}");
+    assert!(err.contains("▸ Finish\n▹ final progress"), "{err}");
 }
 
 #[test]
@@ -489,17 +638,18 @@ ctx.features[Console].args.template_preset = "silent""#,
         false,
     );
     let err = stderr(&output);
-    assert!(err.contains("→ 🎬 Running check task"), "{err}");
-    assert!(err.contains("→ heartbeat progress"), "{err}");
+    assert!(err.contains("▸ Running check task"), "{err}");
+    assert!(err.contains("▹ heartbeat progress"), "{err}");
 }
 
-/// The Workflows runner sections open through `buildkite_section`, so `plain`
-/// reaches them too, and off Buildkite they print nothing.
+/// The Workflows runner sections open through `buildkite_section`, so a
+/// preset without emojis reaches them too, and off Buildkite they print
+/// nothing.
 #[test]
 fn a_task_owned_buildkite_section_follows_the_preset() {
     for (preset, title) in [
-        ("full", "--- :rocket: Runner metadata"),
-        ("plain", "--- Runner metadata"),
+        ("emoji", "--- :rocket: Runner metadata"),
+        ("full", "--- Runner metadata"),
     ] {
         let flag = format!("--console:template-preset={preset}");
         let output = run("", &["section", &flag], true);
@@ -550,7 +700,7 @@ fn a_coding_agent_gets_the_agent_layout_unless_a_preset_is_chosen() {
     let verdict: Vec<&str> = err.lines().filter(|l| l.contains("Failed")).collect();
     assert_eq!(verdict.len(), 1, "{err}");
     assert!(
-        verdict[0].starts_with("→ Failed check task (exit code 3) in "),
+        verdict[0].starts_with("→ Failed check task (exit 3) in "),
         "{err}"
     );
 
@@ -564,11 +714,11 @@ fn a_coding_agent_gets_the_agent_layout_unless_a_preset_is_chosen() {
 
     let typed = run_with_env(
         "",
-        &["check", "--console:template-preset=plain"],
+        &["check", "--console:template-preset=emoji"],
         false,
         &agent,
     );
-    assert_task_behaviour(&typed, "plain", 0);
+    assert_task_behaviour(&typed, "emoji", 0);
 
     let per_task = run_with_env(
         r#"ctx.features[Console].args.task_presets = {"check": "compact"}"#,

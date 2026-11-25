@@ -296,8 +296,8 @@ def _attribute(ctx: TaskContext, causes: dict, test_label: str, cause: dict, str
         _emit(ctx, test_label)
     if verbose:
         reason = _reason_text(test_label, cause)
-        head = ansi.style(test_label, ansi.BOLD, color) if first else " " * len(test_label)
-        _err(ctx, "  " + head + "  " + ansi.style("← " + reason, ansi.DIM, color))
+        head = ansi.style(test_label, ansi.STRONG, color) if first else " " * len(test_label)
+        _err(ctx, "  " + head + "  " + ansi.style("← " + reason, ansi.MUTED, color))
 
 def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc, stream_stdout: bool, verbose: bool, color: bool, timing: dict) -> dict:
     """Turn probe entries into affected tests + structured causes, streaming each
@@ -404,7 +404,7 @@ def _impl(ctx: TaskContext) -> int:
         _err(ctx, "No test targets in scope for: " + scope)
         return 0
 
-    _err(ctx, ansi.style("Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode), ansi.BOLD, color))
+    _err(ctx, ansi.style("Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode), ansi.STRONG, color))
 
     if mode == "precise":
         if not _build_missing_non_test(ctx, bazel_trait, patterns, rc, endpoint_auth_flags, announce_version, announce_command, color, timing):
@@ -443,7 +443,7 @@ def _impl(ctx: TaskContext) -> int:
     affected = [t for t in test_targets if t in causes]
 
     _err(ctx, "")
-    _err(ctx, ansi.style("Affected {} of {} test target(s).".format(len(affected), len(test_targets)), ansi.BOLD, color))
+    _err(ctx, ansi.style("Affected {} of {} test target(s).".format(len(affected), len(test_targets)), ansi.STRONG, color))
 
     # Time split: bazel (probe + queries + precise build) vs our analysis (gRPC
     # log parse + attribution bookkeeping).
@@ -457,12 +457,12 @@ def _impl(ctx: TaskContext) -> int:
         _fmt_elapsed(timing.get("enumerate", 0)),
         _fmt_elapsed(timing.get("attribute", 0)),
         build_part,
-    ), ansi.DIM, color))
+    ), ansi.MUTED, color))
     _err(ctx, ansi.style("  analysis {}: parse {} · classify {}".format(
         _fmt_elapsed(analysis_secs),
         _fmt_elapsed(timing.get("parse", 0)),
         _fmt_elapsed(timing.get("classify", 0)),
-    ), ansi.DIM, color))
+    ), ansi.MUTED, color))
 
     # --exec: hand the affected labels to a command instead of writing stdout.
     if using_exec:

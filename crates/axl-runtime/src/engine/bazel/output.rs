@@ -474,6 +474,9 @@ pub(crate) struct ProcessorSettings {
     pub show_colour: Option<bool>,
     /// In rendered lines, Bazel's status line every few seconds.
     pub progress: bool,
+    /// The run's theme ([`crate::engine::store::Env::theme`]): the colours
+    /// of the console's own lines and links, and of Bazel's as it shows them.
+    pub palette: std::sync::Arc<aspect_theme::Palette>,
 }
 
 /// The console processor `processor(...)` makes; see its docs.
@@ -485,7 +488,7 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
         DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
     };
     let style = if crate::color::console_supports_color() {
-        Style::dim()
+        Style::themed(&s.palette)
     } else {
         Style::default()
     };
@@ -514,6 +517,7 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     config.strip_colour = !s
         .show_colour
         .unwrap_or_else(crate::color::console_supports_color);
+    config.palette = Some(s.palette);
     // Clickable paths and URLs for a person at a terminal
     // (`crate::out::terminal_links`). A relative path is the workspace's,
     // as Bazel writes its own, else from where the task runs, as
@@ -717,7 +721,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// if build.output_fatal:
     ///     print("bazel server died: " + build.output_fatal_line)
     /// ```
-    fn processor(
+    fn processor<'v>(
         #[starlark(require = named, default = "auto")] display: &str,
         #[starlark(require = named, default = UnpackList::default())] stages: UnpackList<
             OutputStage,
@@ -725,6 +729,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] color: NoneOr<bool>,
         #[starlark(require = named, default = NoneOr::None)] show_color: NoneOr<bool>,
         #[starlark(require = named, default = true)] progress: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<OutputProcessor> {
         let config = processor_config(ProcessorSettings {
             display: DisplayMode::parse(display)?,
@@ -732,6 +737,10 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
             colour: color.into_option(),
             show_colour: show_color.into_option(),
             progress,
+            palette: crate::theme::shown(
+                crate::engine::store::Env::from_eval(eval)?,
+                show_color.into_option(),
+            ),
         });
         Ok(OutputProcessor { config })
     }
@@ -880,6 +889,13 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// stays one row: newlines in the result become spaces, and one longer
     /// than Bazel wrote is cut to that width. In plain lines the stages never
     /// see that area.
+    ///
+    /// Colours are the theme's, not a stage's to change: with the theme's
+    /// `bazel` setting `shared` (the default), Bazel's labels and progress are
+    /// recoloured before any stage runs, so a `pattern` matching Bazel's own
+    /// codes (`\x1b[35mWARNING`) sees the theme's instead. Set colours by
+    /// overriding roles (`ctx.theme.roles` in a `config.axl`, `"theme":
+    /// {"roles": …}` in `~/.aspect/config.json`; see `docs/themes.md`).
     fn rewrite(
         #[starlark(require = pos)] pattern: &str,
         #[starlark(require = pos)] replacement: &str,

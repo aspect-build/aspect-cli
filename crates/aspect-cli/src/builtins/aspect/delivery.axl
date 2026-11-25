@@ -456,39 +456,39 @@ def fmt_elapsed(secs):
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
 
 def _print_header(color, dd, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
-    print(ansi.style("Delivery:", ansi.BOLD, color))
+    print(ansi.style("Delivery:", ansi.STRONG, color))
     mode_str = mode + (" (dry-run)" if dry_run else "")
-    print("  {}: {}".format(ansi.style("Mode", ansi.BOLD, color), mode_str))
+    print("  {}: {}".format(ansi.style("Mode", ansi.STRONG, color), mode_str))
     if track_state:
-        print("  {}: {} ({})".format(ansi.style("State", ansi.BOLD, color), dd.endpoint, dd.describe))
+        print("  {}: {} ({})".format(ansi.style("State", ansi.STRONG, color), dd.endpoint, dd.describe))
 
         # The backend's own storage stats, off its startup probe — a v1
         # daemon reports none, so the line is dropped rather than shown empty.
         storage = delivery_state.describe_storage(dd.status)
         if storage:
-            print("  {}: {}".format(ansi.style("Storage", ansi.BOLD, color), storage))
+            print("  {}: {}".format(ansi.style("Storage", ansi.STRONG, color), storage))
     else:
-        print("  {}: (untracked — --track-state=false)".format(ansi.style("State", ansi.BOLD, color)))
-    print("  {}: {}".format(ansi.style("Host", ansi.BOLD, color), ci_host))
-    print("  {}: {}".format(ansi.style("Commit", ansi.BOLD, color), commit_sha))
-    print("  {}: {} (set by {})".format(ansi.style("Prefix", ansi.BOLD, color), prefix, prefix_source))
-    print("  {}: {}".format(ansi.style("URL", ansi.BOLD, color), build_url))
-    print("  {}: {}".format(ansi.style("Flags", ansi.BOLD, color), expanded_flags))
+        print("  {}: (untracked — --track-state=false)".format(ansi.style("State", ansi.STRONG, color)))
+    print("  {}: {}".format(ansi.style("Host", ansi.STRONG, color), ci_host))
+    print("  {}: {}".format(ansi.style("Commit", ansi.STRONG, color), commit_sha))
+    print("  {}: {} (set by {})".format(ansi.style("Prefix", ansi.STRONG, color), prefix, prefix_source))
+    print("  {}: {}".format(ansi.style("URL", ansi.STRONG, color), build_url))
+    print("  {}: {}".format(ansi.style("Flags", ansi.STRONG, color), expanded_flags))
     print()
-    print(ansi.style("Found {} to deliver:".format(pluralize(len(targets), "target")), ansi.BOLD, color))
+    print(ansi.style("Found {} to deliver:".format(pluralize(len(targets), "target")), ansi.STRONG, color))
     for t in targets:
-        forced_marker = ansi.style(" (forced)", ansi.YELLOW, color) if t in forced_targets else ""
+        forced_marker = ansi.style(" (forced)", ansi.WARNING, color) if t in forced_targets else ""
         print("  - {}{}".format(t, forced_marker))
     print("")
 
 def _print_captured_output(label, exit_code, stdout, stderr, color):
     sep = "─" * 36
     header = "── {} (exit {}) ".format(label, exit_code)
-    print(ansi.style(header + sep[:max(0, len(sep) - len(header))], ansi.BOLD, color))
+    print(ansi.style(header + sep[:max(0, len(sep) - len(header))], ansi.STRONG, color))
     combined = (stdout or "") + (stderr or "")
     if combined.strip():
         print(combined)
-    print(ansi.style(sep, ansi.BOLD, color))
+    print(ansi.style(sep, ansi.STRONG, color))
 
 def _spawn_deliverable(ctx, color, capture, deliver_dir, seq, label, ep, is_forced, output_sha):
     """Spawn one deliverable from its `Runnable` `ep`, print its `Delivering`
@@ -502,7 +502,7 @@ def _spawn_deliverable(ctx, color, capture, deliver_dir, seq, label, ep, is_forc
     never share a file, and a target that writes no metadata never inherits
     one."""
     forced_marker = " (FORCED)" if is_forced else ""
-    print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), label, forced_marker))
+    print("  {} {}{}...".format(ansi.style("Delivering", ansi.STRONG, color), label, forced_marker))
     stem = "{}/{}-{}".format(deliver_dir, seq, sanitize_filename(label))
     metadata_path = stem + ".metadata.json"
     cmd = ep.command(env = {METADATA_JSON_FILE_ENV: metadata_path})
@@ -930,7 +930,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
                 ),
                 kind = "delivery_results",
                 data = data,
-                phase = phases.Phase(name = "build", description = "Build delivery targets", emoji = "🔨"),
+                phase = phases.Phase(name = "build", description = "Build delivery targets", emoji = "🔨", expanded = True),
             )
         else:
             ph.update(
@@ -945,6 +945,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
                     name = "build_retry_" + str(attempt + 1),
                     description = "Retry attempt — Build delivery targets",
                     emoji = "🔨",
+                    expanded = True,
                 ),
             )
 
@@ -2407,11 +2408,11 @@ def _delivery_impl(ctx):
             max_duration_width = len(duration)
 
     status_styles = {
-        "ok": ansi.BOLD + ansi.GREEN,
-        "skip": ansi.BOLD + ansi.YELLOW,
-        "pending": ansi.BOLD + ansi.YELLOW,
-        "warn": ansi.BOLD + ansi.RED,
-        "fail": ansi.BOLD + ansi.RED,
+        "ok": ansi.SUCCESS_LABEL,
+        "skip": ansi.WARNING_LABEL,
+        "pending": ansi.WARNING_LABEL,
+        "warn": ansi.ERROR_LABEL,
+        "fail": ansi.ERROR_LABEL,
     }
 
     # KEY = <prefix>:<hash[:12]> — the change-detection identity (namespace +
@@ -2426,7 +2427,7 @@ def _delivery_impl(ctx):
         pad("KEY", key_width),
         "BUILD URL",
     )
-    print(ansi.style(header, ansi.BOLD, color))
+    print(ansi.style(header, ansi.STRONG, color))
     for label, status_text, status_type, delivered_by, output_sha, duration in rows:
         styled_status = ansi.style(status_text, status_styles[status_type], color)
         padding = " " * (max_status_width - len(status_text))
@@ -2443,12 +2444,12 @@ def _delivery_impl(ctx):
     total_elapsed = fmt_elapsed(time.monotonic() - _t_total)
     print("")
     summary_parts = [
-        ansi.style("{} delivered".format(success_count), ansi.BOLD + ansi.GREEN, color),
-        ansi.style("{} skipped".format(skipped_count), ansi.BOLD + ansi.YELLOW, color),
-        ansi.style("{} pending".format(pending_count), ansi.BOLD + ansi.YELLOW, color),
-        ansi.style("{} failed".format(failed_count), ansi.BOLD + ansi.RED, color),
+        ansi.style("{} delivered".format(success_count), ansi.SUCCESS_LABEL, color),
+        ansi.style("{} skipped".format(skipped_count), ansi.WARNING_LABEL, color),
+        ansi.style("{} pending".format(pending_count), ansi.WARNING_LABEL, color),
+        ansi.style("{} failed".format(failed_count), ansi.ERROR_LABEL, color),
     ]
-    print("{} {}  ({} total)".format(ansi.style("Summary:", ansi.BOLD, color), ", ".join(summary_parts), total_elapsed))
+    print("{} {}  ({} total)".format(ansi.style("Summary:", ansi.STRONG, color), ", ".join(summary_parts), total_elapsed))
 
     err, _ = catch(delivery_trait.delivery_end)
     if err:

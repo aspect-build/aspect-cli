@@ -70,6 +70,7 @@ axl-proto = { path = "../axl-proto" }
 starbuf-derive = { path = "../starbuf-derive" }
 fswatch = { path = "../fswatch" }
 bazel = { path = "../bazel", features = ["starlark"] }
+aspect-theme = { path = "../aspect-theme" }
 
 arc-slice = {version="0.1.0", features = ["std", "abort-on-refcount-overflow"]}
 dirs = "6.0.0"

@@ -857,12 +857,20 @@ def _test_terminal_format(_):
 
 def _test_terminal_colour_and_console(ctx):
     """A tip's styles are empty without colour, so no escape reaches a log;
-    with colour, `TIP`, the id and the severity's word carry theirs. The
-    task's console renders the same line, its emoji as its preset says."""
+    with colour, `TIP`, the id and the severity's word carry their roles'
+    escapes, under a pinned theme whatever the run's own. The task's console
+    renders the same line, its emoji as its preset says."""
+    ctx.std.theme.testonly_pin("aspect-dark", depth = 256)
     plain = terminal_tip_lines("x", TIP_WARNING, "T", "B", False)
     _eq("no colour, no escape", [l for l in plain if "\x1b" in l], [])
     coloured = terminal_tip_lines("x", TIP_WARNING, "T", "B", True)[0]
-    _eq("colour opens TIP", coloured.startswith("\x1b["), True)
+    _eq(
+        "tip.label, tip.id and tip.warning",
+        coloured,
+        "\x1b[1;38;5;75mTIP\x1b[0m\x1b[38;5;247m[x]\x1b[0m 🟡 \x1b[1;38;5;221mwarning\x1b[0m: T",
+    )
+    important = terminal_tip_lines("x", TIP_IMPORTANT, "T", "", True)[0]
+    _eq("tip.important", "\x1b[1;38;5;141mimportant\x1b[0m" in important, True)
     _eq("colour, stripped, is the plain line", ansi.strip(coloured), plain[0])
     for color_on in [False, True]:
         via = terminal_tip_lines("x", TIP_WARNING, "T", "B", color_on, ctx.console)
@@ -870,7 +878,7 @@ def _test_terminal_colour_and_console(ctx):
         _eq("console, colour %s: the line" % color_on, _plain_tip(via[0]), "TIP[x] warning: T")
         _eq("console, colour %s: the body under it" % color_on, via[1:], ["  B"])
     emoji = "🟡" in terminal_tip_lines("x", TIP_WARNING, "T", "", False, ctx.console)[0]
-    _eq("emoji as the preset says", emoji, ctx.console.template_preset in ["full", "silent"])
+    _eq("emoji as the preset says", emoji, ctx.console.template_preset in ["emoji", "silent"])
 
 def _test_printer_keeps_a_bodys_blank_lines(ctx):
     """The printer prints a body's blank lines, so its paragraphs stay apart."""

@@ -31,6 +31,7 @@ pub mod io;
 mod net;
 pub(crate) mod process;
 pub mod stream;
+pub mod theme;
 pub(crate) mod watch;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -86,6 +87,13 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn net<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<net::Net> {
         Ok(net::Net::new())
+    }
+
+    /// The run's colour theme, a role at a time; see `std.Theme`. The same
+    /// value as `load("@std//theme.axl", "theme")`.
+    #[starlark(attribute)]
+    fn theme<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<theme::Theme> {
+        Ok(theme::Theme)
     }
 
     /// The task history's records of past runs; see `std.History`.
@@ -156,6 +164,7 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const FileSystem: StarlarkValueAsType<fs::Filesystem> = StarlarkValueAsType::new();
     const Net: StarlarkValueAsType<net::Net> = StarlarkValueAsType::new();
     const History: StarlarkValueAsType<history::History> = StarlarkValueAsType::new();
+    const Theme: StarlarkValueAsType<theme::Theme> = StarlarkValueAsType::new();
     const Std: StarlarkValueAsType<Std> = StarlarkValueAsType::new();
 }
 

@@ -1303,13 +1303,17 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
         }
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(
-            bazel::console::links::Linker::new(vec![base]).with_files(
-                bazel::console::links::FileLinks::none()
-                    .written(links_as_text())
-                    .styled(crate::color::console_supports_color()),
-            ),
+            bazel::console::links::Linker::new(vec![base])
+                .with_files(bazel::console::links::FileLinks::none().written(links_as_text())),
         ))
     });
+
+/// How the CLI's own lines style their links: the process's theme as it is
+/// now, which a run's configs and the terminal's background may have changed.
+fn print_link_style() -> Option<bazel::console::links::LinkStyle> {
+    crate::color::console_supports_color()
+        .then(|| bazel::console::links::LinkStyle::of(&crate::theme::of_process()))
+}
 
 /// `line` with its URLs and paths linked as AXL `print()`'s are, for a line
 /// the runtime writes itself (the banner); off a person's terminal, as it is
@@ -1318,6 +1322,7 @@ pub(crate) fn linked(line: &str) -> String {
     match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
         Some(mut linker) => {
             linker.set_format(link_format());
+            linker.set_style(print_link_style());
             String::from_utf8(linker.link_written(line.as_bytes()))
                 .unwrap_or_else(|_| line.to_string())
         }
@@ -1332,6 +1337,7 @@ impl starlark::PrintHandler for TolerantPrintHandler {
             Some(mut linker) => {
                 use std::io::Write as _;
                 linker.set_format(link_format());
+                linker.set_style(print_link_style());
                 let mut line = linker.link_written(text.as_bytes());
                 line.push(b'\n');
                 let _ = std::io::stderr().write_all(&line);

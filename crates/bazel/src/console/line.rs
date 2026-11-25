@@ -216,6 +216,20 @@ pub struct Line {
     /// next writes over it (a tool's spinner). Set by the splitter, which
     /// sees the boundary.
     pub returns: bool,
+    /// Whether it came while an action's or a test's output was open, or
+    /// after streamed test output was announced: a tool's, whatever its
+    /// shape.
+    pub in_output: bool,
+    /// Whether streamed test output was announced before it: from there on
+    /// test output has no header, and only what follows Bazel's closing
+    /// `Build completed…` message is surely Bazel's.
+    pub streamed: bool,
+    /// Whether it is the first record after an action's output ended,
+    /// starting the way bazel colours a message's severity: bazel's next
+    /// message or the output's held last line, which the bytes cannot tell
+    /// apart (see the module docs). It is [`Kind::Other`] unless it opens
+    /// more output.
+    pub tail: bool,
 }
 
 /// What a record is, for a stage: what the chain said it is
@@ -288,6 +302,8 @@ impl Classifier {
             }
         }
         let text = message_of(record);
+        let inside = self.in_action_output || self.streamed;
+        let mut was_tail = false;
         let label = BAZEL_LABEL.is_match(record);
         let count = BAZEL_COUNT.is_match(record);
         let phase = !self.in_action_output && BAZEL_PHASE.is_match(record);
@@ -312,6 +328,7 @@ impl Classifier {
         } else {
             self.in_progress = false;
             let tail = std::mem::take(&mut self.maybe_tail);
+            was_tail = tail;
             let opens = ACTION_OUTPUT.is_match(&text) && !GRAPH_ERROR.is_match(&text);
             // A possible tail is taken for a message only if it opens more
             // output, as bazel's next `INFO: From …` does.
@@ -340,6 +357,7 @@ impl Classifier {
                     || text.starts_with("Waiting for: ")))
             || (after_status && kind != Kind::Blank)
             || (self.in_drawn && kind != Kind::Blank && (indented || wrapped));
+        let announces = text.contains(STREAMED);
         self.in_drawn = drawn;
         // Bazel wraps a row of its progress area with a `\`, whatever kind.
         self.wrapped = drawn && text.trim_end().ends_with('\\');
@@ -359,6 +377,9 @@ impl Classifier {
             opens_output,
             drawn,
             returns: false,
+            in_output: inside,
+            streamed: self.streamed && !announces,
+            tail: was_tail && label && !self.streamed,
         }
     }
 }

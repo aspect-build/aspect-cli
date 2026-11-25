@@ -341,7 +341,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ),
         kind = "format_results",
         data = data,
-        phase = phases.Phase(name = "build", description = "Build formatter", emoji = "🔨"),
+        phase = phases.Phase(name = "build", description = "Build formatter", emoji = "🔨", expanded = True),
     )
 
     # After the phase line, so the streams are announced under the spawn they
