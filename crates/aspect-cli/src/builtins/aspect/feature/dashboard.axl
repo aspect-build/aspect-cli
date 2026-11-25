@@ -3006,7 +3006,7 @@ def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
 # scrollback wants after the screen is gone (`report_lines`), its first
 # `_CLOSING_HEAD` and last `_CLOSING_TAIL` (where `Executed N out of M
 # tests` is) of them.
-_CLOSING = ["INFO: Elapsed time:", "INFO: Build completed", "ERROR: Build did NOT complete", "INFO: Errors Bazel reported", "── Errors (", "Executed "]
+_CLOSING = ["INFO: Elapsed time:", "INFO: Build completed", "ERROR: Build did NOT complete", "INFO: Errors Bazel reported", "── Error recap (", "Executed "]
 _CLOSING_HEAD = 5
 _CLOSING_TAIL = 40
 
@@ -3591,7 +3591,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     tail = state.get("closing_tail", [])
     cut = state.get("closing_cut", 0) + max(0, len(tail) - _CLOSING_TAIL)
     closing = state.get("closing", []) + (["… %d more of Bazel's lines" % cut] if cut else []) + tail[-_CLOSING_TAIL:]
-    recap = [line for line in closing if "Errors Bazel reported" in line or "── Errors (" in line]
+    recap = [line for line in closing if "Errors Bazel reported" in line or "── Error recap (" in line]
     blocks = state["errors"]
     if blocks and not recap and not replayed:
         shown = blocks[:_REPORT_ERRORS]

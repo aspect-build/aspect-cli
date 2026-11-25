@@ -1076,7 +1076,7 @@ def _impl(ctx: TaskContext) -> int:
     # The console's own recap under its heading: once, not as Bazel's
     # errors again nor counted as new ones.
     recapped = _screen(ctx, [], log_path = "/out/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
-    add_lines(recapped, ["ERROR: //a:b failed", "INFO: Elapsed time: 3.1s", "── Errors (1) ──", "  ERROR: //a:b failed", "    full stderr: /h/x", "ERROR: Build did NOT complete successfully"])
+    add_lines(recapped, ["ERROR: //a:b failed", "INFO: Elapsed time: 3.1s", "── Error recap (1) ──", "  ERROR: //a:b failed", "    full stderr: /h/x", "ERROR: Build did NOT complete successfully"])
     _eq("the recap's errors are not counted again", len(recapped["errors"]), 1)
     shown = report_lines(recapped, "t-2", False)
     _eq("no second copy of the errors", ("Bazel's errors:" in shown, len([l for l in shown if "ERROR: //a:b failed" in l])), (False, 1))

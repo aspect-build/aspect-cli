@@ -495,7 +495,8 @@ impl RecapErrors {
     }
 
     /// This recap naming, under each error, where the history kept the
-    /// failed action's whole output (`full stderr: <path>`), when `kept`
+    /// failed action's whole output (`full stderr: <path>`, its label
+    /// muted), when `kept`
     /// has it. `bases` (the workspace, then the directory the task runs
     /// from) place an error's BUILD file in its package; without them only
     /// an error naming its action's label is matched.
@@ -638,13 +639,16 @@ impl LineProcessor for RecapErrors {
                     }
                 }
             }
+            // The CLI's pointer, not Bazel's: its label muted, the path linked.
             for (stream, path) in whole.into_iter().flatten() {
-                let text = format!("full {stream}: {path}");
+                let label = format!("{}full {stream}:{}", style.open, style.close);
                 out.extend(
                     b"    "
                         .iter()
                         .copied()
-                        .chain(line(&text, &[]))
+                        .chain(label.into_bytes())
+                        .chain(*b" ")
+                        .chain(line(&path.to_string(), &[]))
                         .chain(*b"\n"),
                 );
             }
@@ -1023,6 +1027,30 @@ mod tests {
             "── Error recap (first 2) ──\n  \
              ERROR: /ws/BUILD:1:1: Compiling a.cc failed\n  \
              ERROR: /ws/BUILD:2:1: Compiling b.cc failed\n"
+        );
+    }
+
+    /// Themed, the rule and each quoted `ERROR` label are red, and the
+    /// pointer to a kept log is the CLI's own: its label muted.
+    #[test]
+    fn a_themed_recap_reads_as_errors() {
+        let kept = super::super::forward::KeptLogs::default();
+        kept.push(
+            "//a:gen".into(),
+            vec![("stderr".into(), "/h/a/gen.stderr".into())],
+        );
+        let mut p =
+            RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::themed(&dark())).naming(kept, None);
+        let mut records = vec![
+            "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ];
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        assert_eq!(
+            feed(&mut p, &records),
+            "\x1b[1;38;5;203m── Error recap (1) ──\x1b[0m\n  \
+             \x1b[1;38;5;203mERROR\x1b[0m: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)\n    \
+             \x1b[38;5;247mfull stderr:\x1b[0m /h/a/gen.stderr\n"
         );
     }
 
