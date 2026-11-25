@@ -75,10 +75,11 @@ and `n`/`N` then step to the next and previous match, round to the other
 end past the last; Esc clears it and
 goes back to where the bar opened.
 
-When the task ends the screen stays up, its failures still browsable, until
-`q`, Enter or Esc with nothing open, or Ctrl+C; with nothing failed it
-counts down three seconds and leaves unless a key stops it
-(`--dashboard:stay=always`, `never`). `build` and `test` keep their
+When the task ends the screen stays up, its tabs still browsable, until
+`q`, Enter or Esc with nothing open, or Ctrl+C, whatever the outcome
+(`--dashboard:stay=always`, the default); with `failure` it stays when
+anything failed and otherwise counts down ten seconds and leaves unless a
+key stops it; with `never` it leaves at once. `build` and `test` keep their
 build's panes open on it, the others their builds folded; a task that
 failed before any build leaves at once, its error last in the scrollback.
 Then the scrollback gets the console as the screen showed it
@@ -112,8 +113,9 @@ How it is built:
    test's run and shard counts and last attempts).
 5. An `output_end` hook folds the build to a row (`fold_build`), keeping
    what its tabs show for `<`/`>`, and draws.
-6. A `post_task` hook keeps the screen up (or counts down, the task's exit
-   code 0 and nothing failed), with Ctrl+C read as a key
+6. A `post_task` hook keeps the screen up (or, with `stay=failure`, counts
+   down, the task's exit code 0 and nothing failed), with Ctrl+C read as a
+   key
    (`screen.interrupts(False)`) since the task has already ended, then gives
    the terminal back (`screen.release(replay_stderr = False)`), then
    writes the console as it showed it (`replay_lines`) and the summary.
@@ -214,7 +216,7 @@ _WHEEL = 3
 
 # How long a finished screen with nothing failed stays up (`stay =
 # "failure"`), counting down.
-_COUNTDOWN_MS = 3000
+_COUNTDOWN_MS = 10000
 
 # How old, in seconds, a running action is coloured slow, and stuck.
 _SLOW_S = 60
@@ -3627,7 +3629,7 @@ def keys_row(state: dict, cols: int) -> str:
     has_other = bool(state.get("outputs")) or state.get("list") == "actions"
     view = state["view"]
     search = state["search"]
-    parts = ["Done"] if done else []
+    parts = [("Done ✔" if state.get("verdict", True) else "Done ✗")] if done else []
     if state["focus"] == "failures":
         parts += ["↑↓ choose", "Enter show its log", "Tab next tab", "Esc back", "q leave" if done else "q cancel"]
         if has_other:
@@ -3639,7 +3641,7 @@ def keys_row(state: dict, cols: int) -> str:
         if name:
             parts.append("o open in " + name)
         if done:
-            parts.append("q leave" if view != None else "q Enter Esc leave")
+            parts.append("q leave" if view != None else "q, Enter or Esc to leave")
         else:
             parts.append("q cancel")
         if items:
@@ -4441,10 +4443,10 @@ Dashboard = feature(
     enabled = False,
     args = {
         "stay": args.string(
-            default = "failure",
-            values = ["failure", "always", "never"],
+            default = "always",
+            values = ["always", "failure", "never"],
             bare = "always",
-            description = "Whether the screen stays up once the task ends, until q, Enter, Esc or Ctrl+C: `failure` (the default) stays when anything failed, and with nothing failed counts down 3 seconds first, which q, Enter or Esc cut short and any other key stops; `always` stays; `never` leaves at once. Only when stdin is a terminal.",
+            description = "Whether the screen stays up once the task ends, until q, Enter, Esc or Ctrl+C: `always` (the default) stays whatever the outcome, to look at its tabs; `failure` stays when anything failed, and with nothing failed counts down 10 seconds and leaves, which q, Enter or Esc cut short and any other key stops; `never` leaves at once. Only when stdin is a terminal.",
         ),
         "mouse": args.boolean(
             default = True,

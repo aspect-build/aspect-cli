@@ -1715,6 +1715,11 @@ def _impl(ctx: TaskContext) -> int:
     fold_build(ran, 0)
     _eq("a folded build: the actions it ran", "1,204 actions run" in _visible(build_row(ran["builds"][0], 100)), True)
 
+    # The finished screen stays, saying how to leave, its verdict first.
+    finished = _screen(ctx, ["x"], ended = True, verdict = False)
+    row = _visible(keys_row(finished, 120))
+    _eq("how to leave the finished screen", (row.startswith(" Done ✗"), "q, Enter or Esc to leave" in row), (True, True))
+
     print("dashboard_test.axl: OK")
     return 0
 
