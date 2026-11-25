@@ -1,3 +1,15 @@
+//! `ctx.std.process`: the child processes a task spawns.
+//!
+//! A stream the task does not set is the runtime's. An unmarked child reads
+//! `/dev/null` and has its stdout and stderr piped through the CLI, flushed
+//! as they come and copied to the task's output a line at a time; while a
+//! full screen holds the terminal it has no controlling terminal either. One
+//! marked `interactive(True)` gets the terminal, when there is one, and a
+//! line before and after it in the task's output. A process that should
+//! outlive the CLI sets its own stdout and stderr and leads its own group
+//! (`process_group(0)`); one backgrounded by an unmarked child keeps its pipe,
+//! and dies when it writes once the CLI, after a bounded wait, has gone.
+
 use std::cell::{Cell, RefCell};
 use std::process;
 use std::process::Stdio;
@@ -744,7 +756,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// Unset, it is piped through the CLI (copied to the task's output, then
     /// passed on to the CLI's own), or for a child marked `interactive(True)`
-    /// on a terminal, `"inherit"`.
+    /// on a terminal, `"inherit"`. A process that should outlive the CLI sets
+    /// it (a file, `"null"` or `"inherit"`): a piped one dies when it writes
+    /// once the CLI has gone.
     ///
     /// Accepts the strings `"null"`, `"piped"`, `"inherit"`, or a writable file
     /// stream from `fs.create(...)` to redirect output straight to that file —
@@ -767,7 +781,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// Unset, it is piped through the CLI (copied to the task's output, then
     /// passed on to the CLI's own), or for a child marked `interactive(True)`
-    /// on a terminal, `"inherit"`.
+    /// on a terminal, `"inherit"`. A process that should outlive the CLI sets
+    /// it (a file, `"null"` or `"inherit"`): a piped one dies when it writes
+    /// once the CLI has gone.
     ///
     /// Accepts the same values as [`stdout`].
     fn stderr<'v>(
@@ -786,7 +802,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// Executes the command as a child process, returning a handle to it.
     ///
     /// Stdin, stdout and stderr the task did not set are the runtime's: see
-    /// [`interactive`] and [`stdin`]/[`stdout`]/[`stderr`].
+    /// [`interactive`] and [`stdin`]/[`stdout`]/[`stderr`]. A process that
+    /// should outlive the CLI sets its stdout and stderr and leads its own
+    /// group (`process_group(0)`), so a Ctrl+C on the CLI does not reach it.
     ///
     /// The child is bound to `cancellation`, `ctx.cancellation.root` unless
     /// given: when that token is cancelled (Ctrl+C for the root) the child is

@@ -2072,7 +2072,8 @@ def opens(url: str) -> bool:
 def _detached(state: dict, command):
     """`command` spawned in a process group of its own, on a token nothing
     cancels, so the screen's `q` (its group's SIGINT) and a cancel leave a
-    browser it started or a clipboard daemon running."""
+    browser it started or a clipboard daemon running. Its streams are set
+    (`"null"`), as a process that outlives the CLI sets them."""
     command = command.process_group(0)
     cancellation = state.get("cancellation")
     return command.spawn(cancellation = cancellation.new()) if cancellation != None else command.spawn()

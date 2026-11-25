@@ -438,3 +438,14 @@ is ended with the task, so a prompt nobody will answer does not hold a cancelled
 run. The BES sink library registers `ctx.defer(drain_bes_sinks, ctx, sinks)`, so
 even a task ended at the deadline gives an interrupted bazel's `BuildFinished`
 a bounded window to reach its backend.
+
+A child's streams the task does not set are the runtime's. Stdin is
+`/dev/null`; stdout and stderr are piped through the CLI, copied to the
+history's `output.log` and passed on. A child marked
+`command(...).interactive(True)` gets the terminal instead, when there is one:
+mark a spawn interactive if it may prompt. A process that should outlive the
+CLI chooses its own stdout and stderr (a file from `ctx.std.fs.create(...)`
+for output worth keeping, `"null"`, or `"inherit"`) and leads its own group
+with `process_group(0)`, so a Ctrl+C on the CLI does not reach it. One
+backgrounded by an unmarked child keeps that child's pipe: at exit the CLI
+waits a bounded time for it, and then it dies when it next writes.
