@@ -165,6 +165,21 @@ fn watch_for_hangs() {
     }
 }
 
+/// What process `pid` and its descendants are doing, for a test that gave
+/// up on one (see [`watch_for_hangs`]); Linux only, empty elsewhere.
+#[allow(dead_code)]
+pub fn describe(pid: u32) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        hang_diag::describe(pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        String::new()
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod hang_diag {
     use std::collections::{HashMap, HashSet};
@@ -213,7 +228,26 @@ mod hang_diag {
         read(&format!("/proc/{pid}/cmdline")).replace('\0', " ")
     }
 
+    /// [`super::describe`] for `pid`.
+    pub fn describe(pid: u32) -> String {
+        let parents: HashMap<u32, u32> = pids()
+            .into_iter()
+            .filter_map(|p| stat(p).map(|(pp, _)| (p, pp)))
+            .collect();
+        let mut out = String::new();
+        let mut todo = vec![pid];
+        while let Some(p) = todo.pop() {
+            out.push_str(&report(p, &parents));
+            todo.extend(parents.iter().filter(|(_, pp)| **pp == p).map(|(c, _)| *c));
+        }
+        out
+    }
+
     fn dump(pid: u32, parents: &HashMap<u32, u32>) {
+        say(&report(pid, parents));
+    }
+
+    fn report(pid: u32, parents: &HashMap<u32, u32>) -> String {
         let mut out = format!("HANG-DIAG pid {pid}: {}\n", cmdline(pid));
         let tasks = format!("/proc/{pid}/task");
         let mut tids: Vec<u32> = std::fs::read_dir(&tasks)
@@ -256,7 +290,7 @@ mod hang_diag {
         for kid in kids {
             out.push_str(&format!("HANG-DIAG   child {kid}: {}\n", cmdline(kid)));
         }
-        say(&out);
+        out
     }
 
     pub fn watch() {
