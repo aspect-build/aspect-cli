@@ -574,26 +574,29 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
                     // A screen takes whole lines (a line begun before it was
                     // taken, from its start); without one, it is shown as it
                     // comes. Never while a screen is being released.
-                    let written = crate::engine::std::term::forwarding(|| {
-                        let fed = crate::engine::std::term::feed_screen(
+                    // The route is decided, and a screen fed, under the order
+                    // lock, which a release holds while it replays; a write to
+                    // the terminal is made after, without it, so a stream
+                    // nobody reads holds up only this child's output.
+                    let fed = crate::engine::std::term::forwarding(|| {
+                        crate::engine::std::term::feed_screen(
                             stderr,
                             &line[..whole.unwrap_or(0)],
                             shown,
-                        );
-                        let written = if fed {
-                            Ok(())
-                        } else {
-                            let r = show(&line[shown..]);
-                            shown = line.len();
-                            r
-                        };
-                        if let Some(end) = whole {
-                            crate::out::copy_only(&line[..end]);
-                            line.drain(..end);
-                            shown = shown.saturating_sub(end);
-                        }
-                        written
+                        )
                     });
+                    let written = if fed {
+                        Ok(())
+                    } else {
+                        let r = show(&line[shown..]);
+                        shown = line.len();
+                        r
+                    };
+                    if let Some(end) = whole {
+                        crate::out::copy_only(&line[..end]);
+                        line.drain(..end);
+                        shown = shown.saturating_sub(end);
+                    }
                     mine.busy.store(false, SeqCst);
                     if written.is_err() {
                         break;
@@ -604,12 +607,13 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
         if !line.is_empty() {
             let mut ended = line.clone();
             ended.push(b'\n');
-            crate::engine::std::term::forwarding(|| {
-                if !crate::engine::std::term::feed_screen(stderr, &ended, shown) {
-                    let _ = show(&line[shown..]);
-                }
-                crate::out::copy_only(&ended);
+            let fed = crate::engine::std::term::forwarding(|| {
+                crate::engine::std::term::feed_screen(stderr, &ended, shown)
             });
+            if !fed {
+                let _ = show(&line[shown..]);
+            }
+            crate::out::copy_only(&ended);
         }
     });
     Forwarder { handle, activity }

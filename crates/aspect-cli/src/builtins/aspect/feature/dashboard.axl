@@ -3896,8 +3896,15 @@ def on_key(state: dict, key: str, page: int) -> bool:
         if state["ended"]:
             return True
         if key == "q" and not state["cancelling"]:
+            # The run's root token, cancelled once: Bazel gets its own
+            # interrupt sequence from it, as for Ctrl+C. A SIGINT to the
+            # process group would reach the Bazel client directly too, and
+            # count twice.
             state["cancelling"] = True
-            state["screen"].interrupt()
+            if state.get("cancellation") != None:
+                state["cancellation"].root.cancel()
+            else:
+                state["screen"].interrupt()
     return False
 
 # Under this many rows the links row goes first, so the panes, the console

@@ -303,6 +303,11 @@ def _impl(ctx: TaskContext) -> int:
     keys["ended"] = True
     on_key(keys, "q", 10)
     _eq("q after the end does nothing", len(interrupted), 1)
+    cancelled = []
+    rooted = dict(keys, ended = False, cancelling = False, cancellation = struct(root = struct(cancel = lambda: cancelled.append(1))))
+    on_key(rooted, "q", 10)
+    on_key(rooted, "q", 10)
+    _eq("q cancels the run's root once, no SIGINT", (len(cancelled), len(interrupted)), (1, 1))
 
     # The search bar: typed into live, a regex, toggles, Enter keeps, Esc clears.
     find = {"scroll": 4, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": [

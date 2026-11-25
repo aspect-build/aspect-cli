@@ -842,10 +842,11 @@ pub(crate) fn suspend() -> bool {
 }
 
 /// Held by a release from before the screen is taken out of `HELD` until
-/// its capture is replayed, and by a forwarder for each chunk it feeds a
-/// screen or shows ([`forwarding`]): so a child's output never lands inside
-/// the replay, nor goes through the capture's pipe as the screen goes, where
-/// it would be copied twice.
+/// its capture is replayed, and by a forwarder while it decides a chunk's
+/// route and feeds a screen ([`forwarding`]), never across a write to the
+/// terminal: so a child's output never lands inside the replay, nor goes
+/// through the capture's pipe as the screen goes, where it would be copied
+/// twice, and a stream nobody reads stalls no one else.
 static OUTPUT_ORDER: Mutex<()> = Mutex::new(());
 
 /// Run `f`, a forwarder's handling of one chunk, between releases.
