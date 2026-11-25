@@ -145,9 +145,9 @@ pub fn basil_bin() -> &'static str {
     })
 }
 
-/// On Linux, once per test process: every 10s, each process started since
-/// this one that is still alive after 45s (a CLI under test, a child of
-/// one, or one left behind and reparented) has its threads' `comm`,
+/// On Linux, once per test process: every 10s, each of this process's
+/// descendants still alive after 45s (a CLI under test, or a child of one)
+/// has its threads' `comm`,
 /// `wchan`, `syscall` and `stat`, its open descriptors and its children
 /// printed to stderr, once, under `HANG-DIAG` (`HANG_DIAG_AFTER_SECS`
 /// overrides the 45s). For a CI timeout, which
@@ -163,6 +163,36 @@ fn watch_for_hangs() {
                 .spawn(hang_diag::watch);
         });
     }
+}
+
+/// What process `pid` and its descendants are doing, for a test that gave
+/// up on one (see [`watch_for_hangs`]); Linux only, empty elsewhere.
+#[allow(dead_code)]
+pub fn descendants(pid: u32) -> Vec<u32> {
+    // `ps` names every process's parent on Linux and macOS alike.
+    let table = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let pairs: Vec<(u32, u32)> = table
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            Some((f.next()?.parse().ok()?, f.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut out = vec![];
+    let mut todo = vec![pid];
+    while let Some(p) = todo.pop() {
+        for &(c, pp) in &pairs {
+            if pp == p && !out.contains(&c) {
+                out.push(c);
+                todo.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// What process `pid` and its descendants are doing, for a test that gave
@@ -194,8 +224,31 @@ mod hang_diag {
         let _ = std::io::stderr().write_all(text.as_bytes());
     }
 
+    /// `path` read on a thread of its own, given up on after 500ms: a read of
+    /// a process stuck in the kernel (D state) can block.
     fn read(path: &str) -> String {
-        std::fs::read_to_string(path).unwrap_or_default()
+        let path = path.to_string();
+        let (send, got) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("hang-diag-read".into())
+            .spawn(move || {
+                let _ = send.send(std::fs::read_to_string(path).unwrap_or_default());
+            });
+        got.recv_timeout(Duration::from_millis(500))
+            .unwrap_or_default()
+    }
+
+    /// Whether `pid` descends from `root`, by the parents in `parents`.
+    fn descends(pid: u32, root: u32, parents: &HashMap<u32, u32>) -> bool {
+        let mut at = pid;
+        for _ in 0..64 {
+            match parents.get(&at) {
+                Some(&p) if p == root => return true,
+                Some(&p) if p > 1 => at = p,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// `(ppid, starttime in ticks)` from `/proc/<pid>/stat`.
@@ -321,7 +374,8 @@ mod hang_diag {
             let mut reported = false;
             for (pid, _, start) in &all {
                 let age = Duration::from_millis(now.saturating_sub(*start) * 1000 / CLOCK_TICKS);
-                if *pid != me && *start > born && age > after && told.insert(*pid) {
+                if *start > born && age > after && descends(*pid, me, &parents) && told.insert(*pid)
+                {
                     dump(*pid, &parents);
                     reported = true;
                 }
