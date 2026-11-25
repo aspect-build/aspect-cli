@@ -49,15 +49,21 @@ def _header_path(line: str):
         return None
     return path.partition("/")[2] if "/" in path else path
 
-def _hunk_count(spec: str) -> int:
-    """The line count of a hunk range, `-a,b` or `+c,d` (1 when `,b` is left out)."""
-    return int(spec.partition(",")[2] or "1")
+def _hunk_count(spec: str):
+    """The line count of a hunk range, `-a,b` or `+c,d` (1 when `,b` is left
+    out), or None when it isn't numbers."""
+    start, _, count = spec[1:].partition(",")
+    count = count or "1"
+    if not (start.isdigit() and count.isdigit()):
+        return None
+    return int(count)
 
-def patch_headers(text: str) -> list:
+def patch_headers(text: str):
     """Each file a unified diff touches, as `(old, new)` paths (see
-    `_header_path`; None for `/dev/null`). A `--- ` line followed by a
-    `+++ ` one is a header only outside a hunk's body: a removed `-- x` line
-    reads as `--- x` there."""
+    `_header_path`; None for `/dev/null`), or None for a diff with a hunk
+    range that isn't numbers. A `--- ` line followed by a `+++ ` one is a
+    header only outside a hunk's body: a removed `-- x` line reads as
+    `--- x` there."""
     out = []
     lines = text.split("\n")
     old_left = 0
@@ -79,14 +85,17 @@ def patch_headers(text: str) -> list:
             if len(ranges) > 2 and ranges[1].startswith("-") and ranges[2].startswith("+"):
                 old_left = _hunk_count(ranges[1])
                 new_left = _hunk_count(ranges[2])
+                if old_left == None or new_left == None:
+                    return None
         elif line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
             out.append((_header_path(line), _header_path(lines[i + 1])))
     return out
 
 def patched_files(text: str) -> list:
     """The files a unified diff touches, each side of each header (see
-    `patch_headers`), once each and in order, `/dev/null` left out."""
-    return _files_of(patch_headers(text))
+    `patch_headers`), once each and in order, `/dev/null` left out; none
+    for a diff `patch_headers` can't read."""
+    return _files_of(patch_headers(text) or [])
 
 def _files_of(headers: list) -> list:
     """`patched_files` for headers `patch_headers` gave."""
@@ -112,10 +121,18 @@ def _inside(path: str) -> bool:
 def _ignored_rejects(said: str) -> list:
     """The reject files patch's output says hold only hunks it ignored as
     previously applied (BSD `N out of M hunks ignored--saving rejects to
-    'x.rej'`, GNU `... to file x.rej`), not hunks that failed."""
+    'x.rej'`, GNU `... to file x.rej`, after its `Ignoring previously
+    applied` or `Reversed (or previously applied)` line for that file), not
+    hunks that failed nor ones for a file that isn't there (`No file to
+    patch`, also "ignored")."""
     out = []
+    applied = False
     for line in said.split("\n"):
-        if " ignored" in line and "saving rejects to " in line:
+        if line.startswith("patching file") or "No file to patch" in line:
+            applied = False
+        if "previously applied" in line:
+            applied = True
+        if applied and " ignored" in line and "saving rejects to " in line:
             name = line.partition("saving rejects to ")[2].strip()
             name = name.removeprefix("file ").strip("'\"`")
             out.append(name)
@@ -129,8 +146,11 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     of its own, with every side's directory made there and patch's own
     temporary files kept there too, and then each file it changed or made
     is changed or made in the tree, by its bytes. A file is removed only
-    where its header's new side is `/dev/null` and patch left it empty; one
-    a fix merely empties stays, empty. Patch's `.rej` and `.orig` files never
+    where its header's new side is `/dev/null` and patch removed or emptied
+    its copy (GNU patch removes it, BSD empties it); one a fix merely
+    empties stays, empty, and one that is gone already counts as removed. A
+    fix to a file that isn't there is named in a line, its hunks kept with
+    the rejects. Patch's `.rej` and `.orig` files never
     land beside the user's (BSD patch writes a second file's rejects there
     whatever `-r` says, over any the user had). A patch that leaves rejects
     for hunks that failed, not ones it ignored as applied already, has them
@@ -138,7 +158,8 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     message names them relative to the copy). The copies go when the task
     ends, whatever happens. What patch says goes to the task's output.
 
-    A patch naming a path outside the tree is not applied. `seen`, when
+    A patch naming a path outside the tree, or with a hunk range that
+    isn't numbers, is not applied. `seen`, when
     given, is a list of the bytes of patches applied already in this run: a
     patch identical to one of them is skipped (one source in two lint
     targets gives two), and this one's bytes are added. In `cwd`, the
@@ -154,6 +175,9 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
 
     # Lossy: a hunk may hold any bytes; only the header paths are read.
     headers = patch_headers(fs.try_read_to_string_capped(patch, 64 * 1024 * 1024))
+    if headers == None:
+        print("WARNING: %s was not applied: a hunk's line range isn't numbers" % patch)
+        return None
     paths = _files_of(headers)
     outside = [p for p in paths if not _inside(p)]
     if outside:
@@ -184,12 +208,15 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
         patched = work + "/" + path
         mine = cwd + "/" + path
         if _is_file(fs, patched + ".rej") and path + ".rej" not in ignored:
+            if path in removed and path not in had:
+                continue
             rejects.append(path + ".rej")
-        if not _is_file(fs, patched):
-            continue
-        if path in removed and len(fs.open(patched).read()) == 0:
-            if path in had:
+        if path in removed:
+            # GNU patch deletes the copy itself; BSD leaves it empty.
+            if path in had and (not _is_file(fs, patched) or len(fs.open(patched).read()) == 0):
                 fs.remove_file(mine)
+            continue
+        if not _is_file(fs, patched):
             continue
         if path in had and _same_bytes(fs, patched, mine):
             continue
@@ -197,6 +224,9 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
         if parent:
             fs.create_dir_all(cwd + "/" + parent)
         fs.copy(patched, mine)
+    for old, new in headers:
+        if old and new and old not in had and not _is_file(fs, work + "/" + old):
+            print("INFO: %s changes %s, which isn't there: its hunks for it were not applied" % (patch, old))
     if rejects:
         kept = fs.mkdtemp()
         for rej in rejects:

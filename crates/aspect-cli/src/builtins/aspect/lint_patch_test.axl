@@ -2,7 +2,9 @@
 not UTF-8, a hunk that removes a file and one that only empties it, the
 user's own `.orig` and `.rej` files left alone, a hunk that fails, a patch
 applied twice (its hunks ignored, not rejected), the same patch again in one
-run, a header-like line inside a hunk, and a path outside the tree.
+run, a header-like line inside a hunk, a fix to a missing file, a hunk range
+that isn't numbers, and a path outside the tree. Run it with BSD and GNU
+patch both: GNU removes a file's copy itself.
 
     aspect dev test-lint-patch
 """
@@ -49,6 +51,8 @@ printf 'user rej\\n' > tree/src/b.txt.rej
 } > fix.patch
 printf -- '--- a/src/pkg/__init__.py\\n+++ b/src/pkg/__init__.py\\n@@ -1 +0,0 @@\\n-import os\\n' > empty.patch
 printf -- '--- a/src/new/made.txt\\n+++ b/src/new/made.txt\\n@@ -0,0 +1 @@\\n+made\\n' > made.patch
+printf -- '--- a/src/missing.txt\\n+++ b/src/missing.txt\\n@@ -1 +1 @@\\n-was\\n+is\\n' > missing.patch
+printf -- '--- a/src/a.txt\\n+++ b/src/a.txt\\n@@ -x +1 @@\\n-new\\n+bad\\n' > badrange.patch
 printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' > escape.patch
 """)
     patch = root + "/fix.patch"
@@ -72,6 +76,18 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
     fs.write(tree + "/src/new/made.txt", "edited\n")
     _eq("the same patch again in a run is skipped", apply_fix_patch(ctx, root + "/made.patch", cwd = tree, seen = seen), None)
     _eq("so the file keeps its edit", fs.read_to_string(tree + "/src/new/made.txt"), "edited\n")
+
+    kept = apply_fix_patch(ctx, root + "/missing.patch", cwd = tree)
+    _eq("a fix to a missing file is not made", fs.exists(tree + "/src/missing.txt"), False)
+
+    # BSD patch writes its hunks out as rejects; GNU writes none.
+    if kept != None:
+        _eq("its hunks are kept", _names(fs, kept + "/src"), ["missing.txt.rej"])
+        fs.remove_dir_all(kept)
+
+    _eq("a hunk range that isn't numbers", apply_fix_patch(ctx, root + "/badrange.patch", cwd = tree), None)
+    _eq("leaves the file", fs.read_to_string(tree + "/src/a.txt"), "new\n")
+    _eq("no headers for it", patched_files("--- a/x\n+++ b/x\n@@ -1,y +1 @@\n"), [])
 
     apply_fix_patch(ctx, root + "/escape.patch", cwd = tree)
     _eq("a path outside the tree is not patched", fs.exists(root + "/escape.txt"), False)
