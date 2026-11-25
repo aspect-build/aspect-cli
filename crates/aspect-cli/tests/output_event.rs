@@ -844,6 +844,37 @@ fn a_cancel_as_the_client_starts_reports_aborted() {
     assert!(!stderr.contains("Failed to build"), "{stderr}");
 }
 
+/// A build that failed on its own and is cancelled during its tail (Ctrl+C
+/// after the error, a CI cancel once a sibling failed) stays failed: Bazel
+/// reached its verdict, so the cancel does not relabel it aborted.
+#[test]
+fn a_cancel_after_bazels_verdict_keeps_the_failure() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    let finished = dir.path().join("build-finished");
+    let wrapper = dir.path().join("bazel-lingers.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n\"{basil}\" \"$@\" --scenario=nonzero_exit\ncode=$?\nfor a in \"$@\"; do\n  if [ \"$a\" = build ]; then\n    touch \"{marker}\"\n    trap 'exit $code' INT TERM\n    sleep 3 & wait $!\n  fi\ndone\nexit $code\n",
+            basil = basil_bin(),
+            marker = finished.display(),
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cmd = aspect(dir.path(), "build");
+    cmd.arg("--output=json").env("BAZEL_REAL", &wrapper);
+    let (code, stdout, stderr) = interrupt_once(cmd, &finished);
+    let doc: serde_json::Value = serde_json::from_slice(&stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&stdout)));
+    assert_eq!(doc["status"], "failed", "{doc}\n{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(!stderr.contains("Invocation disconnected"), "{stderr}");
+}
+
 /// A task that handles the cancel and returns 0 keeps its exit code, and
 /// stdout still gets its end: an `aborted` document, or the stream's last
 /// line.
