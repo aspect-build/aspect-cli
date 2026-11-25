@@ -28,17 +28,18 @@
 //! invocation's first Bazel build that keeps a file, unless another task
 //! pruned within
 //! [`Retention::every`]: the oldest started first while the history is over
-//! [`Retention::budget`], never below [`Retention::keep`] invocations, and
+//! [`Retention::budget`], never below [`Retention::keep`] invocations that built, and
 //! never one written to within [`Retention::guard`], which may be a build or an
 //! upload still running in another workspace, nor one whose record says its
 //! run is still going ([`task_record::still_running`]: another live process,
 //! the record written within a week). Past that, a run elsewhere that has
 //! gone longer than the guard without writing, and is not among the newest
 //! kept, can lose its files; its record, written again later, stays evicted. Entries with
-//! only a record (one evicted, or a task whose output could not be kept) count toward neither
-//! the budget nor `keep`; they are capped apart, by [`Retention::records`] and
-//! [`Retention::record_age`] ([`prune_records`]), also at the end of a run
-//! that started no prune. Dotfiles at the root serve the prune: `.pruned`
+//! no build's files (a task that never built, one evicted) do not count toward
+//! `keep`; the output they hold counts toward the budget, measured by a stat
+//! of each file rather than a walk, and they are capped apart, their output
+//! with them, by [`Retention::records`] and [`Retention::record_age`]
+//! ([`prune_records`]), also at the end of a run that started no prune. Dotfiles at the root serve the prune: `.pruned`
 //! and `.pruned-records`, whose times are the last prune's and the last
 //! capping's, and `.sizes`, the sizes of invocations that have settled (and,
 //! briefly, its temp file).
@@ -86,8 +87,9 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 pub struct Retention {
     /// The size the history is pruned down to.
     pub budget: u64,
-    /// Invocations always kept, the most recently started, whatever their size,
-    /// besides the current one, which a prune never removes.
+    /// Invocations that built always kept, the most recently started,
+    /// whatever their size, besides the current one, which a prune never
+    /// removes.
     pub keep: usize,
     /// An invocation written to this recently is never pruned.
     pub guard: Duration,
@@ -97,8 +99,9 @@ pub struct Retention {
     /// measured again. Far longer than `guard`, so a build that went quiet and
     /// wrote again is still measured.
     pub settle: Duration,
-    /// The most records kept of runs with no files besides their record
-    /// (ones whose files a prune removed), the most recently started first.
+    /// The most records kept of runs with no build's files (ones that never
+    /// built, their output with them, and ones whose files a prune removed),
+    /// the most recently started first.
     pub records: usize,
     /// Such a record older than this goes, by its start.
     pub record_age: Duration,
@@ -539,7 +542,9 @@ struct Settled {
 
 /// Remove old invocations' files under `root` as `retention` says, leaving
 /// `current` alone; each one's record stays ([`evict`]), and the records are
-/// then capped ([`prune_records`]). Only entries holding files count here.
+/// then capped ([`prune_records`]). Only entries holding files count here,
+/// and only those with a build's toward [`Retention::keep`]; one holding only
+/// its output is sized by a stat of each output file and never indexed.
 /// Best effort: an entry that cannot be read or removed is skipped.
 ///
 /// It runs beside the build and is not waited for: the CLI may exit midway,
@@ -569,7 +574,7 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter(|e| is_invocation_name(&e.file_name()))
         .map(|e| e.path())
-        .filter(|p| p != current && holds_files(p))
+        .filter(|p| p != current && (holds_build(p) || output_size(p).0 > 0))
         .collect();
     // Names start with the start time, so this is the most recent first.
     entries.sort();
@@ -595,7 +600,19 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
     let mut settled = HashMap::new();
     let within_guard = |t: SystemTime| !idle_for(t, retention.guard);
     let mut total = 0u64;
-    for (i, entry) in entries.iter().enumerate() {
+    let mut builds = 0;
+    for entry in &entries {
+        if !holds_build(entry) {
+            let (size, newest) = output_size(entry);
+            total += size;
+            let idle = newest.is_some_and(|t| idle_for(t, retention.guard));
+            if total > retention.budget && idle && matches!(evict(entry), Ok(true)) {
+                total -= size;
+            }
+            continue;
+        }
+        let protected = builds < retention.keep;
+        builds += 1;
         let name = entry.file_name().unwrap().to_string_lossy().into_owned();
         let known = index.get(&name).copied().filter(|s| {
             fs::metadata(entry.join(BAZEL_DIR))
@@ -619,7 +636,7 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
             None => measure(),
         };
         total += size;
-        let candidate = i >= retention.keep && total > retention.budget;
+        let candidate = !protected && total > retention.budget;
         // Nothing is removed on the index's word: an entry is measured again,
         // so one written to since it settled is seen to be live.
         if candidate && known.is_some() {
@@ -653,14 +670,26 @@ fn prune(root: &Path, retention: Retention, current: &Path) {
     prune_records(root, retention, current);
 }
 
-/// Whether the entry at `dir` holds files besides its record: a build's, or
-/// the task's output (`output.log`, `output.ansi`). One without (evicted,
-/// or a task whose output could not be kept) has only its record.
-fn holds_files(dir: &Path) -> bool {
+/// Whether the entry at `dir` holds a build's files, or at most its record
+/// and output (a task that never built, or one evicted).
+fn holds_build(dir: &Path) -> bool {
     dir.join(BAZEL_DIR).is_dir()
-        || [crate::out::OUTPUT_LOG, crate::out::OUTPUT_ANSI]
-            .iter()
-            .any(|name| dir.join(name).is_file())
+}
+
+/// The size of the task's output files in the entry at `dir`, and when they
+/// were last written: a stat of each.
+fn output_size(dir: &Path) -> (u64, Option<SystemTime>) {
+    let mut size = 0;
+    let mut newest: Option<SystemTime> = None;
+    for name in [crate::out::OUTPUT_LOG, crate::out::OUTPUT_ANSI] {
+        if let Ok(meta) = fs::metadata(dir.join(name)) {
+            size += meta.len();
+            if let Ok(t) = meta.modified() {
+                newest = Some(newest.map_or(t, |n| n.max(t)));
+            }
+        }
+    }
+    (size, newest)
 }
 
 /// Remove an entry's files but its record, which is kept, its command line
@@ -711,12 +740,13 @@ fn evict_locked(entry: &Path, record_path: &Path) -> io::Result<bool> {
     task_record::write_private(record_path, &bytes).map(|()| true)
 }
 
-/// Remove the records of runs with no files past [`Retention::records`] of
+/// Remove the records of runs with no build's files, their output with them,
+/// past [`Retention::records`] of
 /// them, the most recently started first, or started over
 /// [`Retention::record_age`] ago; never `current`, nor one written to within
 /// [`Retention::guard`], nor one still running
-/// ([`task_record::still_running`]). They count toward neither the budget
-/// nor [`Retention::keep`], which are for files.
+/// ([`task_record::still_running`]). They do not count toward
+/// [`Retention::keep`], which is for builds.
 fn prune_records(root: &Path, retention: Retention, current: &Path) {
     let Ok(read) = fs::read_dir(root) else {
         return;
@@ -726,7 +756,7 @@ fn prune_records(root: &Path, retention: Retention, current: &Path) {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter(|e| is_invocation_name(&e.file_name()))
         .map(|e| e.path())
-        .filter(|p| p != current && !holds_files(p))
+        .filter(|p| p != current && !holds_build(p))
         .collect();
     records.sort();
     records.reverse();
@@ -1110,6 +1140,21 @@ mod tests {
         }
     }
 
+    /// An old entry with a record and `size` bytes in each output file, and
+    /// no build.
+    fn with_output(dir: &Path, size: usize) {
+        with_record(dir, OLD);
+        let when = SystemTime::now() - OLD;
+        for file in [crate::out::OUTPUT_LOG, crate::out::OUTPUT_ANSI] {
+            fs::write(dir.join(file), vec![b'x'; size]).unwrap();
+            fs::File::open(dir.join(file))
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        fs::File::open(dir).unwrap().set_modified(when).unwrap();
+    }
+
     /// A task's output files are files too: an entry with them and no build
     /// is under the budget, and evicted like one with a build's.
     #[test]
@@ -1129,13 +1174,48 @@ mod tests {
             .unwrap()
             .set_modified(SystemTime::now() - OLD)
             .unwrap();
-        assert!(holds_files(&old));
+        assert!(!holds_build(&old));
         let h = history(root.path(), 1, 0);
         h.begin(&id(99));
         next(&h);
         assert!(!old.join(crate::out::OUTPUT_LOG).exists());
         assert!(old.join(task_record::FILE_NAME).exists());
-        assert!(!holds_files(&old));
+    }
+
+    /// Entries with only their output never take `keep` from builds.
+    #[test]
+    fn output_alone_takes_no_place_in_keep() {
+        let root = tempfile::tempdir().unwrap();
+        let build = entry(root.path(), 1, 1000, OLD);
+        with_record(&build, OLD);
+        for n in 2..=4 {
+            let dir = root.path().join(name(n));
+            with_output(&dir, 10);
+        }
+        let mut h = history(root.path(), 1, 1);
+        h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
+        h.begin(&id(99));
+        next(&h);
+        assert!(build.join(BAZEL_DIR).exists(), "the newest build is kept");
+    }
+
+    /// The records cap and age apply to entries holding only their output,
+    /// which go whole.
+    #[test]
+    fn output_alone_is_capped_with_the_records() {
+        let root = tempfile::tempdir().unwrap();
+        for n in 1..=3 {
+            with_output(&root.path().join(name(n)), 10);
+        }
+        let mut h = history(root.path(), 1 << 30, 0);
+        h.retention.records = 1;
+        h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
+        h.begin(&id(99));
+        next(&h);
+        let kept: Vec<bool> = (1..=3)
+            .map(|n| root.path().join(name(n)).exists())
+            .collect();
+        assert_eq!(kept, [false, false, true]);
     }
 
     /// Records past the count, or started too long ago, go; one written

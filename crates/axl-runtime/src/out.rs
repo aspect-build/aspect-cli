@@ -237,8 +237,8 @@ struct Stream {
     /// carriage return, an escape or a secret split across writes is
     /// handled whole.
     pending: Vec<u8>,
-    /// Its colour as its last line left it: SGR sequences since a reset.
-    style: Vec<u8>,
+    /// Its colour as its last line left it.
+    style: Style,
 }
 
 impl Stream {
@@ -276,7 +276,7 @@ struct ConsoleStart {
     plain: u64,
     ansi: u64,
     task: Stream,
-    emitted: Vec<u8>,
+    emitted: Style,
 }
 
 /// Where this process copies what it writes to its stdout and stderr: the
@@ -294,7 +294,7 @@ struct OutputLog {
     /// Bazel's console's lines.
     console: Stream,
     /// The colour `output.ansi` leaves set.
-    emitted: Vec<u8>,
+    emitted: Style,
     console_start: Option<ConsoleStart>,
 }
 
@@ -378,11 +378,16 @@ impl Early {
 /// the next task's [`begin_early`], so what is printed after the task ends
 /// is in them too. Returns which this is, for [`flush_output`].
 ///
-/// Both files keep each line as it settled: a carriage return or a
-/// backspace moves back along the line, what is written then overwrites
-/// what was there, and an erase in line (`ESC [ K`) erases. Lines a cursor
-/// movement up or an erase of the screen removed are kept: this is no
-/// terminal. `secrets` (the task's secret flag values, those
+/// Both files keep each line as it settled, column by column as a
+/// terminal shows it: a carriage return or a backspace moves back along the
+/// line, what is written then overwrites what was there (a wide character
+/// two columns, a combining mark joining the one before), a tab moves to
+/// the next stop of 8, the cursor moves along the line (`ESC [ C`, `D`,
+/// `G`), and an erase in line (`ESC [ K`) erases. Lines a
+/// cursor movement up or an erase of the screen removed are kept: this is
+/// no terminal. An unended line past [`MAX_PENDING`] is written in parts, a
+/// carriage return in one overwriting only that part, and a secret a colour
+/// change splits right at the cut between parts can be written unredacted. `secrets` (the task's secret flag values, those
 /// [`task_record::scrubs`](crate::engine::task_record::scrubs)) are
 /// redacted, and each file stops at [`MAX_OUTPUT_LOG`]. [`OUTPUT_LOG`] is
 /// plain text, every escape and control character (C1 included) but tab
@@ -480,7 +485,7 @@ impl OutputLog {
                 .collect(),
             task: Stream::default(),
             console: Stream::default(),
-            emitted: vec![],
+            emitted: Style::default(),
             console_start: None,
         })
     }
@@ -568,8 +573,8 @@ impl OutputLog {
 /// `emitted` the colour `output.ansi` was left in.
 fn render(
     bytes: &[u8],
-    style: &mut Vec<u8>,
-    emitted: &mut Vec<u8>,
+    style: &mut Style,
+    emitted: &mut Style,
     secrets: &[String],
 ) -> (Vec<u8>, Vec<u8>) {
     let text = String::from_utf8_lossy(bytes);
@@ -588,36 +593,173 @@ fn render(
     (plain, ansi)
 }
 
-/// A line as it settled: each character with its colour, an index into
-/// `styles`, and the colour the line ends in.
+/// Colour and text attributes as SGR sequences leave them: each attribute
+/// set or cleared on its own (`22`, `39`, ...), so a writer that never
+/// resets whole keeps a state of the same size.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+struct Style {
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: bool,
+    blink: bool,
+    inverse: bool,
+    hidden: bool,
+    strike: bool,
+    /// The foreground's parameters (`31`, `38;5;208`, `38:2::1:2:3`).
+    fg: Option<String>,
+    bg: Option<String>,
+}
+
+impl Style {
+    /// Apply the parameters of one SGR sequence, `ESC [ params m`.
+    fn apply(&mut self, params: &str) {
+        if params.is_empty() {
+            *self = Style::default();
+            return;
+        }
+        let mut params = params.split(';').peekable();
+        while let Some(p) = params.next() {
+            // `38:5:208`: one parameter, its parts after colons.
+            let code: u32 = match p.split(':').next().unwrap_or("").parse() {
+                Ok(code) => code,
+                Err(_) if p.is_empty() => 0,
+                Err(_) => continue,
+            };
+            match code {
+                0 => *self = Style::default(),
+                1 => self.bold = true,
+                2 => self.dim = true,
+                3 => self.italic = true,
+                4 | 21 => self.underline = true,
+                5 | 6 => self.blink = true,
+                7 => self.inverse = true,
+                8 => self.hidden = true,
+                9 => self.strike = true,
+                22 => (self.bold, self.dim) = (false, false),
+                23 => self.italic = false,
+                24 => self.underline = false,
+                25 => self.blink = false,
+                27 => self.inverse = false,
+                28 => self.hidden = false,
+                29 => self.strike = false,
+                30..=37 | 90..=97 => self.fg = Some(p.to_owned()),
+                39 => self.fg = None,
+                40..=47 | 100..=107 => self.bg = Some(p.to_owned()),
+                49 => self.bg = None,
+                38 | 48 => {
+                    let mut colour = p.to_owned();
+                    if !p.contains(':') {
+                        let more = match params.peek().copied() {
+                            Some("5") => 2,
+                            Some("2") => 4,
+                            _ => 0,
+                        };
+                        for _ in 0..more {
+                            if let Some(next) = params.next() {
+                                colour.push(';');
+                                colour.push_str(next);
+                            }
+                        }
+                    }
+                    match code {
+                        38 => self.fg = Some(colour),
+                        _ => self.bg = Some(colour),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The parameters that set this style from none, `;`-separated.
+    fn params(&self) -> String {
+        let flags = [
+            (self.bold, "1"),
+            (self.dim, "2"),
+            (self.italic, "3"),
+            (self.underline, "4"),
+            (self.blink, "5"),
+            (self.inverse, "7"),
+            (self.hidden, "8"),
+            (self.strike, "9"),
+        ];
+        let mut params: Vec<&str> = flags
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, p)| *p)
+            .collect();
+        params.extend(self.fg.as_deref());
+        params.extend(self.bg.as_deref());
+        params.join(";")
+    }
+}
+
+/// Change `output.ansi`'s colour from `emitted` to `to`, as one sequence.
+fn restyle(ansi: &mut Vec<u8>, emitted: &mut Style, to: &Style) {
+    if emitted == to {
+        return;
+    }
+    let params = to.params();
+    let sequence = match (*emitted == Style::default(), params.is_empty()) {
+        (_, true) => "\x1b[0m".to_owned(),
+        (true, false) => format!("\x1b[{params}m"),
+        (false, false) => format!("\x1b[0;{params}m"),
+    };
+    ansi.extend_from_slice(sequence.as_bytes());
+    *emitted = to.clone();
+}
+
+/// One column of a settled line.
+#[derive(Clone)]
+enum Cell {
+    /// A character with what joins it (combining marks), its width and
+    /// its colour, an index into [`Settled::styles`].
+    Char(String, usize, usize),
+    /// The second column of a wide character.
+    Rest,
+}
+
+/// A line as it settled, column by column as a terminal shows it, and the
+/// colours its cells use, the last the one it ends in.
 struct Settled {
-    cells: Vec<(char, usize)>,
-    styles: Vec<Vec<u8>>,
+    cells: Vec<Cell>,
+    styles: Vec<Style>,
 }
 
 impl Settled {
-    fn of(line: &str, style: &mut Vec<u8>) -> Settled {
+    fn of(line: &str, style: &mut Style) -> Settled {
         use bazel::console::ansi;
-        let mut cells: Vec<(char, usize)> = vec![];
-        let mut styles = vec![style.clone()];
+        let mut line_cells = Settled {
+            cells: vec![],
+            styles: vec![style.clone()],
+        };
         let mut col = 0;
         for (is_escape, seg) in ansi::segments(line.as_bytes()) {
             if is_escape {
-                let params = seg.get(2..seg.len().saturating_sub(1)).unwrap_or_default();
+                let params = std::str::from_utf8(
+                    seg.get(2..seg.len().saturating_sub(1)).unwrap_or_default(),
+                )
+                .unwrap_or_default();
                 if ansi::is_sgr(seg) {
-                    if params.is_empty() || params == b"0" {
-                        style.clear();
-                    } else if params.starts_with(b"0;") {
-                        *style = seg.to_vec();
-                    } else {
-                        style.extend_from_slice(seg);
+                    style.apply(params);
+                    if line_cells.styles.last() != Some(style) {
+                        line_cells.styles.push(style.clone());
                     }
-                    styles.push(style.clone());
-                } else if seg.starts_with(b"\x1b[") && seg.ends_with(b"K") {
-                    match params {
-                        b"" | b"0" => cells.truncate(col),
-                        b"1" => cells.iter_mut().take(col + 1).for_each(|c| c.0 = ' '),
-                        _ => cells.clear(),
+                } else if seg.starts_with(b"\x1b[") {
+                    let n = params.parse::<usize>().unwrap_or(1).max(1);
+                    let cells = &mut line_cells.cells;
+                    match (seg[seg.len() - 1], params) {
+                        (b'K', "" | "0") => cells.truncate(col),
+                        (b'K', "1") => cells
+                            .iter_mut()
+                            .take(col + 1)
+                            .for_each(|cell| *cell = Cell::Char(" ".into(), 1, 0)),
+                        (b'K', _) => cells.clear(),
+                        (b'C', _) => col += n,
+                        (b'D', _) => col = col.saturating_sub(n),
+                        (b'G', _) => col = n - 1,
+                        _ => {}
                     }
                 }
                 continue;
@@ -628,71 +770,110 @@ impl Settled {
                 match c {
                     '\r' => col = 0,
                     '\x08' => col = col.saturating_sub(1),
-                    c if c != '\t' && (c < ' ' || ('\x7f'..='\u{9f}').contains(&c)) => {}
-                    c => {
-                        let cell = (c, styles.len() - 1);
-                        while cells.len() < col {
-                            cells.push((' ', cell.1));
-                        }
-                        match cells.get_mut(col) {
-                            Some(slot) => *slot = cell,
-                            None => cells.push(cell),
-                        }
-                        col += 1;
+                    '\t' => {
+                        col = (col / 8 + 1) * 8;
+                        line_cells.pad(col);
                     }
+                    c if c < ' ' || ('\x7f'..='\u{9f}').contains(&c) => {}
+                    c => col = line_cells.put(col, c),
                 }
             }
         }
-        Settled { cells, styles }
+        line_cells
     }
 
-    /// Write the line to `plain` and `ansi`, each secret as `<REDACTED>`.
+    /// Blank columns up to `col`, where the line is shorter.
+    fn pad(&mut self, col: usize) {
+        let blank = Cell::Char(" ".into(), 1, self.styles.len() - 1);
+        while self.cells.len() < col {
+            self.cells.push(blank.clone());
+        }
+    }
+
+    /// Write `c` at `col`, over what is there; where the next one goes.
+    fn put(&mut self, col: usize, c: char) -> usize {
+        let width = bazel::console::ansi::char_width(c);
+        let style = self.styles.len() - 1;
+        if width == 0 {
+            // Joins the character before it.
+            let end = col.min(self.cells.len());
+            let before = self.cells[..end]
+                .iter_mut()
+                .rev()
+                .find_map(|cell| match cell {
+                    Cell::Char(text, _, _) => Some(text),
+                    Cell::Rest => None,
+                });
+            match before {
+                Some(text) => text.push(c),
+                None => {
+                    self.pad(col);
+                    self.cells.insert(col, Cell::Char(c.to_string(), 1, style));
+                    return col + 1;
+                }
+            }
+            return col;
+        }
+        self.pad(col + width);
+        for at in col..col + width {
+            // A wide character half written over is gone whole.
+            match self.cells[at] {
+                Cell::Rest if at > 0 => self.cells[at - 1] = Cell::Char(" ".into(), 1, style),
+                Cell::Char(_, 2, _) if at + 1 < self.cells.len() => {
+                    self.cells[at + 1] = Cell::Char(" ".into(), 1, style)
+                }
+                _ => {}
+            }
+        }
+        self.cells[col] = Cell::Char(c.to_string(), width, style);
+        if width == 2 {
+            self.cells[col + 1] = Cell::Rest;
+        }
+        col + width
+    }
+
+    /// Write the line to `plain` and `ansi`, each secret as `<REDACTED>` in
+    /// the colour of its first character.
     fn write(
         &self,
         plain: &mut Vec<u8>,
         ansi: &mut Vec<u8>,
-        emitted: &mut Vec<u8>,
+        emitted: &mut Style,
         secrets: &[String],
     ) {
-        let visible: String = self.cells.iter().map(|(c, _)| *c).collect();
-        let starts: Vec<usize> = visible.char_indices().map(|(i, _)| i).collect();
+        let shown: Vec<(&str, usize)> = self
+            .cells
+            .iter()
+            .filter_map(|cell| match cell {
+                Cell::Char(text, _, style) => Some((text.as_str(), *style)),
+                Cell::Rest => None,
+            })
+            .collect();
+        let mut starts = Vec::with_capacity(shown.len());
+        let mut visible = String::new();
+        for (text, _) in &shown {
+            starts.push(visible.len());
+            visible.push_str(text);
+        }
         let hidden = redactions(&visible, secrets);
         let mut hidden = hidden.iter().peekable();
         let mut i = 0;
-        let mut buf = [0u8; 4];
-        while i < self.cells.len() {
-            let (c, style) = self.cells[i];
+        while i < shown.len() {
+            let (text, style) = shown[i];
             restyle(ansi, emitted, &self.styles[style]);
-            if hidden.peek().is_some_and(|r| r.start == starts[i]) {
-                let range = hidden.next().unwrap();
+            if let Some(range) = hidden.next_if(|r| r.start < starts[i] + text.len()) {
                 let redacted = bazel::bes::redact::REDACTED.as_bytes();
                 plain.extend_from_slice(redacted);
                 ansi.extend_from_slice(redacted);
                 i = starts.partition_point(|&s| s < range.end);
                 continue;
             }
-            let c = c.encode_utf8(&mut buf).as_bytes();
-            plain.extend_from_slice(c);
-            ansi.extend_from_slice(c);
+            plain.extend_from_slice(text.as_bytes());
+            ansi.extend_from_slice(text.as_bytes());
             i += 1;
         }
         restyle(ansi, emitted, self.styles.last().unwrap());
     }
-}
-
-/// Change `output.ansi`'s colour from `emitted` to `to`.
-fn restyle(ansi: &mut Vec<u8>, emitted: &mut Vec<u8>, to: &[u8]) {
-    if emitted.as_slice() == to {
-        return;
-    }
-    match to.strip_prefix(emitted.as_slice()) {
-        Some(more) => ansi.extend_from_slice(more),
-        None => {
-            ansi.extend_from_slice(b"\x1b[0m");
-            ansi.extend_from_slice(to);
-        }
-    }
-    *emitted = to.to_vec();
 }
 
 /// Where in `text` a secret is, as sorted byte ranges that do not overlap.
@@ -1035,14 +1216,61 @@ mod output_log_tests {
     #[test]
     fn colour_is_kept_in_one_file_and_stripped_from_the_other() {
         let (dir, mut log) = open_log(&[]);
-        log.push(b"\x1b[1;32mINFO:\x1b[0m built\n\tplain \x1b[1m\x1b[33mbold\x1b[0m\n");
+        log.push(b"\x1b[1;32mINFO:\x1b[0m built\nplain \x1b[1m\x1b[33mbold\x1b[0m\n");
         assert_eq!(
             files(&dir),
             pair(
-                "INFO: built\n\tplain bold\n",
-                "\x1b[1;32mINFO:\x1b[0m built\n\tplain \x1b[1m\x1b[33mbold\x1b[0m\n"
+                "INFO: built\nplain bold\n",
+                "\x1b[1;32mINFO:\x1b[0m built\nplain \x1b[1;33mbold\x1b[0m\n"
             )
         );
+    }
+
+    /// Each attribute is set and cleared on its own, and the colour is
+    /// written as one sequence of what is set.
+    #[test]
+    fn colour_is_kept_as_its_state() {
+        let (dir, mut log) = open_log(&[]);
+        log.push(
+            b"\x1b[1;31mA\x1b[22mB\x1b[39mC\x1b[38;5;208;48:2::1:2:3mD\x1b[49;4mE\x1b[24;39mF\n",
+        );
+        assert_eq!(
+            files(&dir).1,
+            "\x1b[1;31mA\x1b[0;31mB\x1b[0mC\x1b[38;5;208;48:2::1:2:3mD\x1b[0;4;38;5;208mE\x1b[0mF\n"
+        );
+    }
+
+    /// A writer that clears each attribute (`39`, `22`) rather than
+    /// resetting keeps a state of one size: its lines cost the same however
+    /// many came before.
+    #[test]
+    fn colour_that_is_never_reset_stays_cheap() {
+        let (_dir, mut log) = open_log(&[]);
+        let line = b"\x1b[31mred\x1b[39m \x1b[1mbold\x1b[22m \x1b[4;32mok\x1b[24;39m\n";
+        let started = std::time::Instant::now();
+        for _ in 0..50_000 {
+            log.push(line);
+        }
+        assert_eq!(log.task.style, super::Style::default());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A line settles column by column: a wide character takes two, one
+    /// half written over is gone whole, a combining mark joins the one
+    /// before it, and a tab moves to the next stop of 8.
+    #[test]
+    fn a_line_settles_by_column() {
+        let (dir, mut log) = open_log(&[]);
+        log.push("日本\rab\n".as_bytes());
+        log.push("日本\r\x1b[2Ca\n".as_bytes());
+        log.push("cafe\u{301}\rC\n".as_bytes());
+        log.push("a\tb\r\tc\n".as_bytes());
+        log.push(b"\x1b[1Kx\n");
+        assert_eq!(files(&dir).0, "ab本\n日a \nCafe\u{301}\na       c\nx\n");
     }
 
     #[cfg(unix)]
