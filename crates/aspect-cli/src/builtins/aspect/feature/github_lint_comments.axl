@@ -46,7 +46,7 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 "different runs" and reap each other.
 """
 
-load("@aspect//lint.axl", "LintTrait")
+load("@aspect//lint.axl", "LintTrait", lint_findings_destination = "findings_destination")
 load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
@@ -469,9 +469,6 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
 def _github_lint_impl(ctx: FeatureContext):
     lint_trait = ctx.traits[LintTrait]
 
-    # Capture at config time so later LintTrait reassignment can't desync hooks.
-    destination = lint_trait.findings_destination
-
     # A run outside a PR registers nothing: there is nowhere to post, and the
     # reason `detect_pr` gives describes a PR it did not find. Checked before
     # the host gate, so a non-PR run logs no setup notice either.
@@ -529,6 +526,8 @@ def _github_lint_impl(ctx: FeatureContext):
 
     max_pr_comments = ctx.args.max_pr_comments
     state = {
+        # The lint task's --findings-destination, read in _lint_start.
+        "destination": "auto",
         "all_comments": [],
         # Total diagnostics seen across the run (keeps counting after all_comments
         # is cleared on cap exhaustion).
@@ -559,6 +558,8 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     def _lint_start(ctx):
+        state["destination"] = lint_findings_destination(ctx)
+
         # Workspace prefix relative to the git root. _post_individually prepends it
         # (SARIF paths are workspace-relative, GitHub wants repo-relative); the
         # diff window strips it to canonicalize changed-file keys. Resolved here,
@@ -581,7 +582,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # in priority/stable order, not per-file arrival order.
         if gh["stale"]:
             return
-        comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
+        comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = state["destination"])
 
         # Count before filtering so the reported total keeps matching the
         # diagnostic count; out-of-diff findings still reach the other surfaces.
@@ -796,7 +797,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 # "annotations" = no PR comments: patches go through
                 # _build_suggestion_comments independently of the destination
                 # filter, so gate them here too (SARIF comments are already empty).
-                if destination == "annotations":
+                if state["destination"] == "annotations":
                     suggestion_comments = []
                 else:
                     suggestion_comments = _postable(gh, _build_suggestion_comments(ctx, relevant_diagnostics))
@@ -882,7 +883,7 @@ def _github_lint_impl(ctx: FeatureContext):
                     if path and line:
                         lint_trait.comment_urls[(path, line)] = _files_changed_url(url)
 
-                _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, destination = destination)
+                _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, destination = state["destination"])
 
                 if state["dropped_due_to_cap"] > 0:
                     # Per-severity breakdown (known levels in priority order, rest "other").
@@ -918,7 +919,7 @@ def _github_lint_impl(ctx: FeatureContext):
             for v in lines_by_path.values():
                 changed_line_count += len(v)
             debug(ctx.std, "changed lines:    %s across %s file(s)" % (changed_line_count, len(lines_by_path)))
-            debug(ctx.std, "destination:      %s" % destination)
+            debug(ctx.std, "destination:      %s" % state["destination"])
             debug(ctx.std, "posted comments:  %s" % state["posted"])
             if outcome:
                 debug(ctx.std, "outcome:          %s" % outcome)

@@ -61,7 +61,7 @@ slot ("title", "summary", "details") to template for every task;
         # Or ["*"] to show everything.
 """
 
-load("@aspect//lint.axl", "LintTrait")
+load("@aspect//lint.axl", lint_findings_destination = "findings_destination")
 load(
     "../private/lib/bazel_results.axl",
     "format_run_date",
@@ -218,9 +218,6 @@ def _github_status_checks(ctx: FeatureContext):
     # Check-run URL is published below via `checkrun.set_url`; siblings
     # (GithubStatusComments) read it via `checkrun.url(ctx)`. Stored in
     # `<tmpdir>/checkrun/<pid>.url`, keyed by the task-scoped pid.
-
-    # Only consulted for kind="lint_results"; harmless on others.
-    lint_trait = ctx.traits[LintTrait]
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -505,7 +502,7 @@ def _github_status_checks(ctx: FeatureContext):
         """
         pr, _ = github.detect_pr(ctx.std)
         return lint_annotation_plan(
-            lint_trait.findings_destination,
+            lint_findings_destination(ctx),
             has_pr = pr != None,
         )
 
@@ -643,7 +640,7 @@ def _github_status_checks(ctx: FeatureContext):
             # patch-derived auto-fix comment already lands ("both" wants the
             # duplication; the others have nothing to dedupe).
             suppress_anchors = {}
-            if lint_trait.findings_destination == "auto":
+            if lint_findings_destination(ctx) == "auto":
                 for s in (data.get("lint", {}) or {}).get("suggestions", []) or []:
                     if not s.get("correlated"):
                         continue

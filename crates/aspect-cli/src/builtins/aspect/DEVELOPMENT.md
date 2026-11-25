@@ -196,7 +196,6 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 | **`LintTrait`**              | [lint.axl](lint.axl)                                                      | `lint_start`, `lint_report`, `lint_patch`, `lint_end` (✅ clean — hook lists) | Mixed. Hook lists are clean; the data fields below are legacy. |
 | `LintTrait.changed_files`    |                                                                           |                                                                                                              | ⚠️ Legacy — task→features data on a trait field. Migrate to hook signature: `lint_start(ctx, changed_files)`. |
 | `LintTrait.suggestions`, `LintTrait.comment_urls` |                                                      |                                                                                                              | ⚠️ Legacy — feature→task data on a trait field. Migrate to reversed hook return value or a Pattern-2 wrapper. |
-| `LintTrait.findings_destination` |                                                                       |                                                                                                              | ⚠️ Legacy — user-facing config. Migrate to feature `args`. |
 
 > **Note:** All public traits are re-exported from [`traits.axl`](traits.axl) for user `config.axl` ergonomics (`load("@aspect//:traits.axl", ...)`). Internal modules load from the owning module directly — the facade is a user-facing convenience, not the source of truth.
 
@@ -419,7 +418,7 @@ rate_limit = struct(
 
 3. **No new shared-state primitives.** Don't add a Bag, an accumulator type, a `ctx.std.kv`, a `ctx.std.db`, a per-task slot for arbitrary feature data, or any other ambient surface that lets two features pass data to each other without going through the patterns above. Every such proposal in framework history has been rejected because it relocates the abuse pattern under a different name. The three patterns above are sufficient.
 
-4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features — `GitHubStatusChecksTrait.templates`, `LintTrait.findings_destination`, and `TipsTrait.silenced_tips` are legacy violations of this rule.
+4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features — `GitHubStatusChecksTrait.templates` and `TipsTrait.silenced_tips` are legacy violations of this rule.
 
 5. **Don't bypass the wrappers.** Even when a trait or library is reachable, callers should always go through `lib.method(ctx, ...)`. Writing `ctx.traits[X].method(...)` directly couples the caller to the trait shape, prevents the library from changing its implementation, and defeats the wrapper's encapsulation. **The trait is implementation; the struct is API.**
 

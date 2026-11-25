@@ -16,6 +16,8 @@ Usage:
     aspect lint --target-pattern-file=targets.txt
     # Gate ruff on every finding while other linters hold the line
     aspect lint --linter-strategy=ruff=hard
+    # Post every finding as a PR review comment instead of annotating
+    aspect lint --findings-destination=comments
     # Fix lint violations, where the underlying linter provides fixes
     aspect lint --fix
     # Fix with rules_lint under its new module name (default: @aspect_rules_lint//lint:fix)
@@ -276,26 +278,6 @@ _STRATEGIES = {
 }
 
 LintTrait = trait(
-    # Where to surface lint findings. Cross-cutting: read by GithubStatusChecks
-    # (annotations) and GithubLintComments (SARIF + patch-derived comments).
-    # Modes:
-    #   "auto"        — (default) annotate every SARIF finding except those whose
-    #                   anchor matches a posted patch auto-fix comment (de-dup);
-    #                   fix-bearing SARIF findings → comments; patches post on PR.
-    #   "both"        — annotate everything (no de-dup) + fix-bearing → comments.
-    #   "comments"    — every finding → comment, no annotations. Requires a PR.
-    #   "annotations" — every finding → annotation, suppress ALL PR comments.
-    # has_fix/DORMANT caveat: the `has_fix` discriminant (set from SARIF
-    # relatedLocations by lib/sarif.axl::_result_has_fix) is False for every
-    # rules_lint Go-errorformat linter today, so SARIF-derived comments are empty
-    # in auto/both and only patch comments post; auto still differs from both via
-    # patch-correlated annotation suppression. Tracked:
-    # https://github.com/aspect-build/rules_lint/issues/749. Full trace in
-    # shellcheck-sarif-investigation.md. Comments carry hidden markers
-    # (run_id, task_key, tool, file, line, rule_id) for dedup/cleanup — see the
-    # module docstring of feature/github_lint_comments.axl for the state machine.
-    findings_destination = attr(str, default = "auto"),
-
     # Lifecycle hooks. Each is a list of callables; features append to compose.
 
     # Once before the build, after changed_files is set. (ctx) -> None
@@ -343,17 +325,30 @@ LintTrait = trait(
     comment_urls = attr(dict, default = {}),
 )
 
-# Allowed LintTrait.findings_destination values — keep in sync with the trait docstring.
 FINDINGS_DESTINATIONS = ["auto", "both", "comments", "annotations"]
 
-def validate_findings_destination(value):
-    """Return value if it's a recognised findings_destination, else fail."""
-    if value not in FINDINGS_DESTINATIONS:
-        fail(
-            "lint: invalid LintTrait.findings_destination=%r%s" %
-            (value, did_you_mean_then(value, FINDINGS_DESTINATIONS, " - ", "expected one of " + ", ".join(FINDINGS_DESTINATIONS))),
-        )
-    return value
+def findings_destination(ctx):
+    """Where the lint task surfaces findings, its `--findings-destination`.
+
+    Read by GithubLintComments / GitlabLintComments (SARIF + patch-derived
+    comments) and GithubStatusChecks (annotations) from the `TaskContext` of a
+    lint hook, so all three agree on one value ("auto" for a task without the
+    arg):
+      "auto"        - (default) annotate every SARIF finding except those whose
+                      anchor matches a posted patch auto-fix comment (de-dup);
+                      fix-bearing SARIF findings become comments; patches post.
+      "both"        - annotate everything (no de-dup), fix-bearing also comment.
+      "comments"    - every finding becomes a comment, no annotations.
+      "annotations" - every finding becomes an annotation, no PR comments.
+
+    `has_fix` (lib/sarif.axl::_result_has_fix) is False for every rules_lint
+    Go-errorformat linter today, so SARIF-derived comments are empty in
+    auto/both and only patch comments post; auto still differs from both via
+    patch-correlated annotation suppression
+    (https://github.com/aspect-build/rules_lint/issues/749). Comment markers
+    and cleanup are described in feature/github_lint_comments.axl.
+    """
+    return getattr(ctx.args, "findings_destination", "auto")
 
 def parse_linter_strategies(entries):
     """Parse `--linter-strategy` entries (`<linter>=<strategy>`) into a
@@ -814,7 +809,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     strategy = _STRATEGIES[ctx.args.strategy]
 
     # Validate up front so a typo doesn't fail after the build has run.
-    validate_findings_destination(lint_trait.findings_destination)
     strategy_overrides = parse_linter_strategies(ctx.args.linter_strategies)
 
     data = lint_init_data()
@@ -1341,6 +1335,19 @@ lint = task(
                 "(ruff for AspectRulesLintRuff), matched case-insensitively; " +
                 "the override covers that linter's findings, patches, " +
                 "suggestions and process failures."
+            ),
+        ),
+        "findings_destination": args.string(
+            default = "auto",
+            values = FINDINGS_DESTINATIONS,
+            description = (
+                "Where code-review features surface findings. 'auto' " +
+                "(default): annotate findings and post fix-bearing ones and " +
+                "rules_lint patches as PR comments, without annotating where " +
+                "a fix comment lands. 'both': like auto but annotate " +
+                "everything. 'comments': every finding as a PR comment, no " +
+                "annotations. 'annotations': every finding as an " +
+                "annotation, no PR comments."
             ),
         ),
         "base_ref": args.string(
