@@ -34,7 +34,9 @@
 //! follow the path (`:12:3`, `(12,3)`, a Starlark traceback's
 //! `", line 12, column 3`), or none, which links URLs alone. Never
 //! `file://`, which has the system open the file with whatever it picks,
-//! and run one it runs ([`LinkFormat::parse`] refuses it). [`LinkFormat::auto`] finds
+//! and run one it runs ([`LinkFormat::parse`] refuses it). A tool's own
+//! `file:` link in the text, however long the record, links its file as
+//! the CLI's do, or is taken out, its text kept. [`LinkFormat::auto`] finds
 //! the editor. Where a terminal shows no OSC 8 link but opens a URL written
 //! out (Terminal.app), each link's URL is written beside it too
 //! ([`FileLinks::text`]).
@@ -645,18 +647,21 @@ impl Linker {
     /// `record` with each URL and each path to something that exists
     /// linked, but what [`FileLinks::url`] refuses; escape sequences, and
     /// text already linked, kept as they are, but for [`UNLINKED_START`] and
-    /// [`UNLINKED_END`], which go, the text between them left unlinked.
+    /// [`UNLINKED_END`], which go, the text between them left unlinked, and
+    /// a tool's own `file:` link, which becomes its file's link or none.
     pub fn link(&mut self, record: &[u8]) -> Vec<u8> {
         self.link_with(record, &[])
     }
 
     /// [`Linker::link`], with `known` links put back where they were: each
     /// at its byte offset among `record`'s text (its escapes not counted),
-    /// whatever its text would otherwise link to.
+    /// whatever its text would otherwise link to, but a `file:` one,
+    /// judged as a tool's own.
     pub fn link_with(&mut self, record: &[u8], known: &[Known]) -> Vec<u8> {
-        if record.len() > MAX_RECORD
-            || known.is_empty() && !contains(record, b"/") && !contains(record, b".")
-        {
+        // Too long, or naming no path, only a tool's own links are judged.
+        let linking = record.len() <= MAX_RECORD
+            && (!known.is_empty() || contains(record, b"/") || contains(record, b"."));
+        if !linking && !contains(record, b"\x1b]8;") {
             return strip_unlinked(record).into_owned();
         }
         // The record's text, escapes removed, where a path's line is read
@@ -677,8 +682,7 @@ impl Linker {
                     inside = !url.is_empty();
                     // A tool's own file link: its file in the editor, or
                     // no link, never one the system opens.
-                    if dropped && url.is_empty() {
-                        dropped = false;
+                    if std::mem::take(&mut dropped) && url.is_empty() {
                         continue;
                     }
                     if let Some(to) = self.instead_of_file_url(url) {
@@ -695,7 +699,7 @@ impl Linker {
                 out.extend_from_slice(seg);
                 continue;
             }
-            if inside || unlinked {
+            if inside || unlinked || !linking {
                 out.extend_from_slice(seg);
             } else {
                 out.extend(self.text(seg, at, known, &plain));
@@ -1310,6 +1314,38 @@ mod tests {
             "a link put back is judged too"
         );
         assert!(LinkFormat::parse(" file://{path}").is_err());
+    }
+
+    /// A link dropped, then another opened before its end, keeps that
+    /// one's end; and a record too long to link, or naming no path, still
+    /// has its own `file:` links judged.
+    #[test]
+    fn a_tools_file_link_dropped_keeps_the_next_links_end() {
+        let (dir, mut l) = linker();
+        let a = format!("file://{}/src/a.cc", dir.path().display());
+        for next in ["https://x.test/", a.as_str()] {
+            let out = link(
+                &mut l,
+                &format!("x \x1b]8;;file:///bin/ls\x1b\\ls\x1b]8;;{next}\x1b\\N\x1b]8;;\x1b\\ y"),
+            );
+            assert!(out.ends_with("N\x1b]8;;\x1b\\ y"), "{out:?}");
+        }
+        let long = format!(
+            "{} \x1b]8;;{a}\x1b\\A\x1b]8;;\x1b\\",
+            "z".repeat(MAX_RECORD)
+        );
+        assert_eq!(
+            link(&mut l, &long),
+            format!(
+                "{} \x1b]8;;edit://{}/src/a.cc\x1b\\A\x1b]8;;\x1b\\",
+                "z".repeat(MAX_RECORD),
+                dir.path().display()
+            )
+        );
+        assert_eq!(
+            link(&mut l, "x \x1b]8;;file:x\x1b\\x\x1b]8;;\x1b\\ y"),
+            "x x y"
+        );
     }
 
     #[test]
