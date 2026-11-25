@@ -2558,7 +2558,9 @@ def built(state: dict) -> bool:
     return bool(state.get("building") or state.get("builds") or state.get("fails") or state.get("outputs") or c.get("configured") or c.get("failures"))
 
 def _top(state: dict, cols: int, rows: int) -> list:
-    """The rows above the console: the header and the progress bar, then,
+    """The rows above the console: the header and, whenever the build panes
+    are open, the progress bar (empty until Bazel counts its actions, so
+    the panes never move down a row), then,
     unless zoomed (`z`) or showing the keys (`?`), the links, and the running actions, oldest first
     and coloured by age, beside the Results pane, the list (failures or
     actions) under its counts."""
@@ -2581,10 +2583,11 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
     # A status bar: the whole row in the theme's `status_bar`.
     out.append(_c("status_bar") + title + " " * max(0, room - text_width(right)) + right + _RESET)
-    if counts:
-        done, total = counts
-        label = fit(" %d / %d actions " % (done, total), cols)
-        out.append(_c("progress") + bar(done, total, max(0, cols - len(label))) + _RESET + label)
+    if counts or panes_shown(state):
+        done, total = counts or (None if state.get("building") else state.get("last_counts")) or (0, 0)
+        label = fit(" %d / %d actions " % (done, total) if total else " - / - actions ", cols)
+        width = max(0, cols - text_width(label))
+        out.append(_c("progress") + (bar(done, total, width) if total else "░" * width) + _RESET + label)
     if state.get("zoom") or state.get("help"):
         return out
 

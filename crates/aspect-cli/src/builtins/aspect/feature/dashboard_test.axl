@@ -791,7 +791,7 @@ def _impl(ctx: TaskContext) -> int:
     # the console's scroll is left alone.
     helped = _screen(ctx, lines, scroll = 12)
     on_key(helped, "?", 10)
-    drawn = render(helped, 100, 30)
+    drawn = render(helped, 100, 31)
     if "Keys · ↑↓ scroll · any other key closes" not in drawn or "these keys" not in drawn:
         fail("render: ? should show the keys")
     on_key(helped, "wheel-up", 10)
@@ -1680,6 +1680,17 @@ def _impl(ctx: TaskContext) -> int:
     on_key(tipped, "s", 10)
     _eq("a failed save says why and changes nothing", ("couldn't save to ~/.aspect/config.json: read-only file" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), tips_count(tipped)), (True, 2))
     _eq("no tips", _visible(tips_lines(_screen(ctx, []), 96)[0]), "No tips")
+
+    # The progress row is there before Bazel counts its actions, so the
+    # panes under it never move down a row when it does.
+    def _running_row(progress):
+        rows = [_visible(r) for r in render(_screen(ctx, ["x"], progress = progress), 100, 30).split("\r\n")]
+        return [i for i, r in enumerate(rows) if "Running (" in r]
+
+    analyzing = _running_row(["Analyzing: 3 targets (2 packages loaded)", "    Compiling a.cc; 1s local"])
+    counted = _running_row(["[1 / 14] 1 action running", "    Compiling a.cc; 1s local"])
+    _eq("the panes stay put when the counts come", (len(analyzing), analyzing), (1, counted))
+    _eq("an empty bar until then", " - / - actions " in _visible(render(_screen(ctx, ["x"], progress = ["Analyzing: 3 targets"]), 100, 30)), True)
 
     print("dashboard_test.axl: OK")
     return 0
