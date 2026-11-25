@@ -629,7 +629,7 @@ impl Config {
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
         let mut shape = self.shape();
         shape.feed = feed.clone();
-        let notes = forward::Notes::default();
+        let notes = forward::Notes::styled(self.style.info.clone());
         shape.notes = Some(notes.clone());
         Pipeline {
             chain,

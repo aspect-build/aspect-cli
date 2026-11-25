@@ -298,9 +298,9 @@ impl Style {
     fn line(&self, out: &mut Vec<u8>, text: &str) {
         match text.strip_prefix("INFO:") {
             Some(rest) if !self.info.is_empty() => {
-                out.extend_from_slice(self.info.as_bytes());
-                out.extend_from_slice(b"INFO\x1b[0m:");
-                out.extend_from_slice(rest.as_bytes());
+                out.extend_from_slice(
+                    aspect_theme::label_line(&self.info, "INFO", rest).as_bytes(),
+                );
             }
             _ => {
                 out.extend_from_slice(self.open.as_bytes());

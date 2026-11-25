@@ -86,8 +86,13 @@ pub fn open_with_stdout(mode: Mode, stdout: bool) -> io::Result<Capture> {
 
 /// Whether this process's stdout and stderr are one and the same file (a
 /// terminal, or one pipe after `2>&1`), so a capture may take both and keep
-/// them in the order bazel wrote them.
+/// them in the order bazel wrote them. So they are while a feature's full
+/// screen captures both into one feed ([`STDERR_CAPTURED`]): its console
+/// shows them in that order.
 pub fn stdout_is_stderrs_file() -> bool {
+    if STDERR_CAPTURED.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
     let (out, err) = (io::stdout(), io::stderr());
     match (
         nix::sys::stat::fstat(out.as_fd()),
@@ -137,7 +142,8 @@ fn set_cloexec(fd: &impl AsFd) -> io::Result<()> {
 }
 
 /// Set while a feature's full screen has stderr captured, so a PTY opened
-/// meanwhile takes the controlling terminal's size ([`terminal_size`]).
+/// meanwhile takes the controlling terminal's size ([`terminal_size`]) and
+/// bazel's stdout shares its console's capture ([`stdout_is_stderrs_file`]).
 static STDERR_CAPTURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether stderr is captured by a feature's full screen: see

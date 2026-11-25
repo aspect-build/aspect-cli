@@ -612,20 +612,47 @@ impl KeptLogs {
 /// progress area again, so a line never lands inside what curses redraws;
 /// the rest when the console ends.
 #[derive(Debug, Clone, Default)]
-pub struct Notes(Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>);
+pub struct Notes {
+    queue: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    /// The `INFO` label's style, the CLI's own (`report::Style::info`):
+    /// a note is the CLI's line, so it looks as `diag::info`'s do. Empty
+    /// leaves it plain.
+    info: String,
+}
 
 impl Notes {
+    /// Notes whose `INFO` label is drawn in `info` ([`aspect_theme::label_line`]).
+    pub fn styled(info: String) -> Notes {
+        Notes {
+            info,
+            ..Notes::default()
+        }
+    }
+
     /// Queue `line`, without its newline.
     pub fn push(&self, line: Vec<u8>) {
-        self.0.lock().unwrap().push_back(line);
+        self.queue.lock().unwrap().push_back(line);
     }
 
     fn is_empty(&self) -> bool {
-        self.0.lock().unwrap().is_empty()
+        self.queue.lock().unwrap().is_empty()
     }
 
-    pub(crate) fn take(&self) -> Vec<Vec<u8>> {
-        self.0.lock().unwrap().drain(..).collect()
+    /// The queued notes, each as the CLI writes its own lines.
+    pub fn take(&self) -> Vec<Vec<u8>> {
+        let notes: Vec<Vec<u8>> = self.queue.lock().unwrap().drain(..).collect();
+        notes.into_iter().map(|note| self.style(note)).collect()
+    }
+
+    /// `note` with its `INFO` label styled as the CLI's own are.
+    fn style(&self, note: Vec<u8>) -> Vec<u8> {
+        match note.strip_prefix(b"INFO:") {
+            Some(rest) if !self.info.is_empty() => {
+                aspect_theme::label_line(&self.info, "INFO", &String::from_utf8_lossy(rest))
+                    .into_bytes()
+            }
+            _ => note,
+        }
     }
 }
 
