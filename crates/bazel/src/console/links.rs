@@ -168,12 +168,7 @@ impl LinkFormat {
         if value == "none" {
             return Ok(LinkFormat::None);
         }
-        if value == "file"
-            || value == "kitty"
-            || value
-                .get(..5)
-                .is_some_and(|s| s.eq_ignore_ascii_case("file:"))
-        {
+        if value == "file" || value == "kitty" || is_file(value.trim_start()) {
             return Err(format!(
                 "{value:?} is not a hyperlink format: a file:// link has the system open the file, \
                  which may run it; name an editor ({}), or none",
@@ -669,6 +664,7 @@ impl Linker {
         let plain = ansi::strip(record);
         let mut out = Vec::with_capacity(record.len());
         let mut inside = false;
+        let mut dropped = false;
         let mut unlinked = false;
         let mut at = 0;
         for (escape, seg) in ansi::segments(record) {
@@ -679,6 +675,22 @@ impl Linker {
             if escape {
                 if let Some(url) = osc8_url(seg) {
                     inside = !url.is_empty();
+                    // A tool's own file link: its file in the editor, or
+                    // no link, never one the system opens.
+                    if dropped && url.is_empty() {
+                        dropped = false;
+                        continue;
+                    }
+                    if let Some(to) = self.instead_of_file_url(url) {
+                        match to {
+                            Some(to) => out.extend(format!("\x1b]8;;{to}\x1b\\").bytes()),
+                            None => {
+                                inside = false;
+                                dropped = true;
+                            }
+                        }
+                        continue;
+                    }
                 }
                 out.extend_from_slice(seg);
                 continue;
@@ -691,6 +703,27 @@ impl Linker {
             at += seg.len();
         }
         out
+    }
+
+    /// What a tool's own `file:` link (`url`) becomes: Some of its file's
+    /// link in this linker's editor, or Some(None), no link, where there is
+    /// none to make; None for any other URL, kept.
+    fn instead_of_file_url(&self, url: &[u8]) -> Option<Option<String>> {
+        let url = std::str::from_utf8(url).ok()?;
+        if !is_file(url) {
+            return None;
+        }
+        let rest = &url[5..];
+        let path = rest
+            .strip_prefix("//")
+            .map_or(rest, |r| r.find('/').map_or("", |i| &r[i..]));
+        let path = crate::bes::percent_decode(path.split(['#', '?']).next().unwrap_or_default());
+        let path = Path::new(&path);
+        Some(
+            path.is_absolute()
+                .then(|| self.files.url(path, (None, None)))
+                .flatten(),
+        )
     }
 
     /// `text`, at byte `base` among its record's text, linked.
@@ -739,7 +772,11 @@ impl Linker {
             });
             if let Some((start, k)) = put {
                 out.extend_from_slice(&text[at..start]);
-                out.extend(osc8(&k.url, &k.shown));
+                match self.instead_of_file_url(k.url.as_bytes()) {
+                    None => out.extend(osc8(&k.url, &k.shown)),
+                    Some(Some(to)) => out.extend(osc8(&to, &k.shown)),
+                    Some(None) => out.extend_from_slice(&k.shown),
+                }
                 at = start + k.shown.len();
                 continue;
             }
@@ -1245,6 +1282,36 @@ mod tests {
         assert_eq!(&*super::strip_unlinked(mark("a.b").as_bytes()), b"a.b");
     }
 
+    /// A tool's own `file:` link opens its file in the editor, or is no
+    /// link at all: never one the system opens.
+    #[test]
+    fn a_tools_file_link_opens_in_the_editor_or_not_at_all() {
+        let (dir, mut l) = linker();
+        let a = format!("file://{}/src/a.cc", dir.path().display());
+        let record = format!(
+            "see \x1b]8;;{a}\x1b\\a.cc\x1b]8;;\x1b\\ and \x1b]8;;FILE:///bin/ls\x1b\\ls\x1b]8;;\x1b\\ now"
+        );
+        let out = link(&mut l, &record);
+        assert_eq!(
+            out,
+            format!("see {} and ls now", file(dir.path(), "src/a.cc", "a.cc")),
+            "{out:?}"
+        );
+        l.set_format(LinkFormat::None);
+        assert_eq!(link(&mut l, &record), "see a.cc and ls now");
+        let known = [Known {
+            at: 4,
+            shown: b"src/a.cc".to_vec(),
+            url: "file:///bin/ls".into(),
+        }];
+        assert_eq!(
+            String::from_utf8(l.link_with(b"see src/a.cc", &known)).unwrap(),
+            "see src/a.cc",
+            "a link put back is judged too"
+        );
+        assert!(LinkFormat::parse(" file://{path}").is_err());
+    }
+
     #[test]
     fn what_names_nothing_is_left_alone() {
         let (_dir, mut l) = linker();
@@ -1293,7 +1360,7 @@ mod tests {
                 file(dir.path(), "src/a.cc", "src/a.cc")
             )
         );
-        let linked = "\x1b]8;;file:///x\x1b\\src/a.cc\x1b]8;;\x1b\\";
+        let linked = "\x1b]8;;vscode://file/x:1:1\x1b\\src/a.cc\x1b]8;;\x1b\\";
         assert_eq!(
             link(&mut l, &format!("{linked} https://x.test")),
             format!("{linked} \x1b]8;;https://x.test\x1b\\https://x.test\x1b]8;;\x1b\\"),
@@ -1604,11 +1671,11 @@ mod tests {
         let known = [Known {
             at: 7,
             shown: b"packages".to_vec(),
-            url: "file:///ws/packages".into(),
+            url: "edit:///ws/packages".into(),
         }];
         assert_eq!(
             String::from_utf8(l.link_with(b"ERROR: packages: bad", &known)).unwrap(),
-            "ERROR: \x1b]8;;file:///ws/packages\x1b\\packages\x1b]8;;\x1b\\: bad"
+            "ERROR: \x1b]8;;edit:///ws/packages\x1b\\packages\x1b]8;;\x1b\\: bad"
         );
     }
 
