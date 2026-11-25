@@ -174,6 +174,11 @@ TIP_MAX_SHOWN = 20
 #
 # (GitLab commit statuses are too short to render a tip — no GitLab surface.)
 SURFACE_CLI = "cli"
+
+# The Dashboard's screen (`--dashboard`): a tip listing `SURFACE_CLI` but
+# not this is the terminal's alone, kept out of the screen while it is up
+# and in the task's output, so the scrollback has it where it happened.
+SURFACE_DASHBOARD = "cli-dashboard"
 SURFACE_GITHUB_STATUS_CHECKS = "github-status-checks"
 SURFACE_BUILDKITE_ANNOTATIONS = "buildkite-annotations"
 SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
@@ -181,7 +186,7 @@ SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
 # Per-task screens (excludes the aggregate PR summary). Set
 # `surfaces = TASK_SCREENS` for a tip that should never enter the
 # cross-task rollup.
-TASK_SCREENS = [SURFACE_CLI, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS]
+TASK_SCREENS = [SURFACE_CLI, SURFACE_DASHBOARD, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS]
 
 # Aggregate screen(s) — just the PR summary today; a list so
 # `surfaces = AGGREGATE_SCREENS` reads symmetrically for a rollup-only tip.
@@ -592,7 +597,7 @@ def emit_rule_tips(ctx, rule: TipRule, report: dict, build, batch: str):
     common = dict(
         id = rule.id,
         type = TIP_TEMPLATE_JINJA2,
-        surfaces = rule.surfaces or [SURFACE_CLI],
+        surfaces = rule.surfaces or [SURFACE_CLI, SURFACE_DASHBOARD],
         combine_across_tasks = rule.combine_across_tasks,
         show = rule.show,
         max_shown = rule.max_shown,
@@ -1470,7 +1475,13 @@ def _tips_impl(ctx):
     def _print_stored(call_ctx, stored, color_on):
         id = stored["id"]
         lines = terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on, _console(call_ctx))
-        _print(lines)
+        if call_ctx.std.term.taken and not tip_shows_on(stored, SURFACE_DASHBOARD):
+            # The terminal's alone: kept for the scrollback the screen
+            # leaves, never drawn on it.
+            for line in lines:
+                call_ctx.std.term.keep_output(line + "\n")
+        else:
+            _print(lines)
         if lines:
             shown[id] += 1
 

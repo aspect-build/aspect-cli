@@ -1576,6 +1576,18 @@ fn term_methods(registry: &mut MethodsBuilder) {
         Ok(dump_output(max_lines.max(1) as usize, older))
     }
 
+    /// Keep `text` in the task's output files (`output.log`, `output.ansi`)
+    /// without writing it anywhere: for a line the terminal alone shows,
+    /// written while a screen holds it, which the scrollback the screen
+    /// leaves (`dump_output`) then has in its place.
+    fn keep_output<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] text: &str,
+    ) -> anyhow::Result<NoneType> {
+        crate::out::copy_only(text.as_bytes());
+        Ok(NoneType)
+    }
+
     /// Whether a screen is held now, by any feature.
     #[starlark(attribute)]
     fn taken<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<bool> {
