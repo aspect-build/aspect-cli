@@ -256,7 +256,8 @@ def emit(ctx, data: dict, task_path: str, status: str, exit_code: int) -> None:
         return
     doc = document(ctx.std.env, data, task_path, status, exit_code)
     if wants_ndjson(ctx.args):
-        # The stream's last line, one line like the rest.
+        # The stream's last line, one compact line led by `"type"`: the
+        # runtime's `ends_stream` recognizes the end by that prefix.
         ctx.std.io.stdout.write(json.encode({"type": "result"} | doc) + "\n")
         ctx.std.io.stdout.flush()
         return

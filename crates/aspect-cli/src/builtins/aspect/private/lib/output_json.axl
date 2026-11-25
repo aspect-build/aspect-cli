@@ -1,8 +1,9 @@
 """The `--output=json` / `--output=ndjson` contract below the results
 document: which was asked for, its schema version, and the document a task
 writes in its place when it ends before it has a result (a failed health
-check), as `main` writes one for a config error, a feature's exit or a
-`fail()`. Loads nothing, so `lifecycle.axl` can end a task with it, below
+check, or `gazelle --watch` refusing JSON), as `main` writes one for a
+config error, a feature's exit, a `fail()`, a feature flag conflict or a
+cancel. Loads nothing, so `lifecycle.axl` can end a task with it, below
 `results_json.axl`, which renders the result.
 """
 
@@ -36,5 +37,7 @@ def emit_error(ctx, error: str, message: str) -> None:
         return
     doc = {"schema_version": SCHEMA_VERSION, "error": error, "message": message}
     if wants_ndjson(ctx.args):
+        # Compact and led by `"type"`: the runtime's `ends_stream`
+        # recognizes the stream's end by that prefix.
         doc = {"type": "error"} | doc
     ctx.std.io.stdout.write(json.encode(doc) + "\n")

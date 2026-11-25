@@ -8,6 +8,9 @@
 //!   show up unchanged and late: both the rewritten output and the elapsed
 //!   time say the drain happened.
 //! * A cancelled build still forwards what Bazel prints while it winds down.
+//! * Under `--output=json` and `ndjson` stdout carries only the document or
+//!   the stream, error documents included: a stdout telemetry exporter moves
+//!   to stderr, and a config error, a flag conflict or a cancel says so.
 
 #![cfg(unix)]
 
@@ -641,7 +644,7 @@ fn gazelle_watch_refuses_json_output_with_a_document() {
             .args(["--watch", &format!("--output={output}")])
             .output()
             .expect("running aspect gazelle");
-        assert!(!out.status.success());
+        assert_eq!(out.status.code(), Some(2), "a usage error: {out:?}");
         let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
         assert_eq!(doc["error"], "usage", "{doc}");
@@ -675,6 +678,124 @@ fn a_feature_flag_conflict_under_json_output_gets_a_usage_document() {
             "{doc}"
         );
         assert_eq!(doc.get("type").is_some(), output == "ndjson", "{doc}");
+    }
+}
+
+/// Every line of `stdout` as JSON, panicking on one that is not.
+fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect()
+}
+
+/// A stdout telemetry exporter would interleave its records with the
+/// document, so under JSON output it writes to stderr instead.
+#[test]
+fn a_stdout_telemetry_exporter_moves_off_a_json_stdout() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    ctx.telemetry.exporters.add(file = \"stdout\", format = \"jsonl\", signals = [\"logs\"])\n"
+            .to_string()
+    });
+    for output in ["json", "ndjson"] {
+        let out = aspect(dir.path(), "build")
+            .arg(format!("--output={output}"))
+            .output()
+            .expect("running aspect build");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let lines = if output == "json" {
+            vec![
+                serde_json::from_slice(&out.stdout)
+                    .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout))),
+            ]
+        } else {
+            json_lines(&out.stdout)
+        };
+        let last = lines.last().expect("a document");
+        assert_eq!(last["status"], "passed", "{output}: {last}");
+        assert!(
+            lines.iter().all(|l| l.get("kind").is_none()),
+            "{output}: no telemetry record on stdout: {lines:?}"
+        );
+        assert!(
+            stderr.contains(&format!("`--output={output}` owns stdout")),
+            "{output}: {stderr}"
+        );
+    }
+}
+
+/// A failing `config.axl` gets a `config_error` document whose message is
+/// the error's own line, without its traceback.
+#[test]
+fn a_config_error_document_carries_the_errors_own_line() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    fail(\"no good\")\n".to_string()
+    });
+    let out = aspect(dir.path(), "build")
+        .arg("--output=json")
+        .output()
+        .expect("running aspect build");
+    assert!(!out.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(doc["error"], "config_error", "{doc}");
+    assert_eq!(doc["message"], "no good", "{doc}");
+}
+
+/// A cancel while `bazel info` runs, before the build starts, ends with an
+/// `aborted` document and the cancel's exit code.
+#[test]
+fn a_cancel_before_the_build_gets_an_aborted_document() {
+    let dir = workspace("config.axl", |_| {
+        "def config(ctx: ConfigContext):\n    pass\n".to_string()
+    });
+    let started = dir.path().join("info-started");
+    let wrapper = dir.path().join("bazel-wrapper.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = info ]; then touch \"{}\"; exec sleep 60; fi\ndone\nexec \"{}\" \"$@\"\n",
+            started.display(),
+            basil_bin()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for output in ["json", "ndjson"] {
+        let _ = std::fs::remove_file(&started);
+        let mut child = aspect(dir.path(), "build")
+            .arg(format!("--output={output}"))
+            .env("BAZEL_REAL", &wrapper)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawning aspect");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "bazel info never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: signalling a child this test spawned and has not reaped.
+        assert_eq!(
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+            0
+        );
+        let mut stdout = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut stdout)
+            .unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(130), "{output}");
+        let lines = json_lines(&stdout);
+        let last = lines.last().expect("an error document");
+        assert_eq!(last["error"], "aborted", "{output}: {lines:?}");
+        assert_eq!(last["message"], "interrupted", "{output}: {lines:?}");
+        assert_eq!(last.get("type").is_some(), output == "ndjson", "{last}");
     }
 }
 

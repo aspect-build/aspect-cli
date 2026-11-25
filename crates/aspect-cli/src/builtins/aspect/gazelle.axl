@@ -429,7 +429,7 @@ def _gazelle_impl(ctx: TaskContext) -> int | TaskConclusion:
     if ctx.args.watch and results_json.wants_json(ctx.args):
         refusal = "--output=%s and --watch cannot be combined: the JSON output ends with the task's final result, and --watch never finishes. Drop one of the two." % ctx.args.output
         results_json.emit_error(ctx, "usage", refusal)
-        return TaskConclusion(exit_code = 1, message = refusal)
+        return TaskConclusion(exit_code = 2, message = refusal)
 
     # Initialize data for status-check emission.
     data = gaz_init_data()

@@ -35,7 +35,9 @@ pub fn stdout_ended() -> bool {
     STDOUT_ENDED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Whether `data` is a stream's last line: `result` or `error` typed.
+/// Whether `data` is a stream's last line: `result` or `error` typed, written
+/// compact with `type` its first key, as `results_json.emit` and
+/// `emit_error` write it.
 fn ends_stream(data: &[u8]) -> bool {
     data.starts_with(br#"{"type":"result""#) || data.starts_with(br#"{"type":"error""#)
 }

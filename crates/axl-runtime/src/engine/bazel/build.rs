@@ -1389,9 +1389,17 @@ impl Build {
         // still writing after the client has gone, or, at a retry, the abandoned
         // attempt's file if the server is still writing it once the next has
         // started.
+        // A cancel that killed `bazel info` ends the task as a cancel does.
         let (pid, version) =
             bazel::server::Server::new(&super::runner::CancellableRunner(&signals), &startup_flags)
-                .info()?;
+                .info()
+                .map_err(|e| {
+                    if signals.root().is_cancelled() {
+                        io::Error::other(signals.exit_for())
+                    } else {
+                        e
+                    }
+                })?;
         let recording = recording && writes_execution_log(false, true, version.as_ref());
         // `auto` telemetry reads a log the build writes anyway; `always`
         // turning it on for its telemetry is an ask of its own.
