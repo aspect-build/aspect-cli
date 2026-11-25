@@ -210,7 +210,7 @@ and the role keeps its parent's value. A misspelt role gets a "did you mean".
 | `search.current`, `search.match` | the current search match; the other matches |
 | `header` | a heading drawn without a fill |
 | `link` | a link the CLI makes to a web page (`https://…`), on any line, Bazel's and tools' included: the accent, underlined, so it reads as a hyperlink |
-| `link.file` | a link the CLI makes to a file (`file://` or an editor's): underlined only where the terminal is known to open OSC 8 links, else the text's own style |
+| `link.file` | a link the CLI makes to a file, which opens it in an editor: underlined only where the terminal is known to open OSC 8 links, else the text's own style |
 | `link.quiet` | the `<url>` written beside a file's link on a terminal that opens no OSC 8 link (Terminal.app), and kept log paths |
 | `label.debug`, `label.info`, `label.success`, `label.warning`, `label.error` | `DEBUG:`, `INFO:`, "3 delivered", `WARNING:`, `ERROR:`; `label.error` also the error recap's `── Error recap (N) ──` rule |
 | `tip.label`, `tip.id`, `tip.warning`, `tip.important`, `tip.suggestion`, `tip.note` | a tip's `TIP`, `[id]` and severity word |
