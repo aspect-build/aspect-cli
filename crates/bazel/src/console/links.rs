@@ -672,6 +672,8 @@ impl Linker {
         let mut dropped = false;
         let mut unlinked = false;
         let mut at = 0;
+        // The last segment written was a lone ESC.
+        let mut lone = false;
         for (escape, seg) in ansi::segments(record) {
             if escape && (seg == UNLINKED_START || seg == UNLINKED_END) {
                 unlinked = seg == UNLINKED_START;
@@ -680,19 +682,33 @@ impl Linker {
             if escape {
                 if let Some(url) = osc8_url(seg) {
                     let open = std::mem::replace(&mut inside, !url.is_empty());
+                    // In a tmux passthrough its ESC is doubled; the one
+                    // before it goes with it, and what replaces it is
+                    // doubled.
+                    let doubled = std::mem::take(&mut lone);
+                    let judged = |out: &mut Vec<u8>, seq: &[u8]| {
+                        if doubled {
+                            out.pop();
+                        }
+                        for &b in seq {
+                            if b == 0x1b && doubled {
+                                out.push(b);
+                            }
+                            out.push(b);
+                        }
+                    };
                     // A tool's own file link: its file in the editor, or
                     // no link, never one the system opens.
                     if std::mem::take(&mut dropped) && url.is_empty() {
+                        judged(&mut out, b"");
                         continue;
                     }
                     if let Some(to) = self.instead_of_file_url(url) {
                         match to {
-                            Some(to) => out.extend(format!("\x1b]8;;{to}\x1b\\").bytes()),
+                            Some(to) => judged(&mut out, format!("\x1b]8;;{to}\x1b\\").as_bytes()),
                             None => {
                                 // A link switched to this one ends here.
-                                if open {
-                                    out.extend_from_slice(b"\x1b]8;;\x1b\\");
-                                }
+                                judged(&mut out, if open { b"\x1b]8;;\x1b\\" } else { b"" });
                                 inside = false;
                                 dropped = true;
                             }
@@ -700,9 +716,11 @@ impl Linker {
                         continue;
                     }
                 }
+                lone = seg == b"\x1b";
                 out.extend_from_slice(seg);
                 continue;
             }
+            lone = false;
             if inside || unlinked || !linking {
                 out.extend_from_slice(seg);
             } else {
@@ -1348,6 +1366,30 @@ mod tests {
             "a link put back is judged too"
         );
         assert!(LinkFormat::parse(" file://{path}").is_err());
+    }
+
+    /// A tool's own `file:` link in a tmux passthrough, its ESCs doubled,
+    /// is judged with the ESC doubling it, so the passthrough still ends at
+    /// its ST and a link put in its place has its ESCs doubled too.
+    #[test]
+    fn a_tools_file_link_in_a_tmux_passthrough_keeps_it_whole() {
+        let (dir, mut l) = linker();
+        let pass = |s: &str| format!("\x1bPtmux;\x1b\x1b{s}\x07\x1b\\");
+        let dropped = format!("x {}ls{} y", pass("]8;;file:///bin/ls"), pass("]8;;"));
+        assert_eq!(
+            link(&mut l, &dropped),
+            "x \x1bPtmux;\x1b\\ls\x1bPtmux;\x1b\\ y"
+        );
+        let a = format!("file://{}/src/a.cc", dir.path().display());
+        let kept = format!("x {}a.cc{} y", pass(&format!("]8;;{a}")), pass("]8;;"));
+        assert_eq!(
+            link(&mut l, &kept),
+            format!(
+                "x \x1bPtmux;\x1b\x1b]8;;edit://{}/src/a.cc\x1b\x1b\\\x1b\\a.cc{} y",
+                dir.path().display(),
+                pass("]8;;")
+            )
+        );
     }
 
     /// A link dropped, then another opened before its end, keeps that
