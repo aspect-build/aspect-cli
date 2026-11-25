@@ -22,6 +22,7 @@ pub mod project_root;
 pub mod startup;
 pub mod suggest;
 pub mod trace;
+mod user_config;
 
 pub use eval::TaskExit;
 

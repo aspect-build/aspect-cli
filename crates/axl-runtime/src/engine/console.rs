@@ -37,9 +37,10 @@ use super::template::json_to_minijinja;
 /// none. A disabled feature gives the `full` layout and the environment's
 /// level. It also sets what links to files open, for the process
 /// (`file_hyperlink_format`, see `crate::out::set_link_format`), whether or not
-/// the feature is enabled; `user_editor` is the `editor` in the user's
-/// `~/.aspect/config.json` (`crate::out::user_link_format`), which beats a
-/// `config.axl`'s arg and loses to the command line and the environment.
+/// the feature is enabled; `config_editor` is the `editor` of the user's
+/// `~/.aspect/config.json`, else of the repository's `.aspect/config.json`
+/// (`crate::out::config_link_format`), which beats a `config.axl`'s arg and
+/// loses to the command line and the environment.
 /// Fails on a malformed `templates`, `task_presets`, `task_templates`,
 /// `verbose` or `file_hyperlink_format` value and on everything
 /// [`Surface::resolve`] refuses. The surface carries a
@@ -50,12 +51,12 @@ pub fn from_feature_args(
     task: TaskIdentity,
     host: Host,
     task_paths: &[String],
-    user_editor: Option<Option<bazel::console::links::LinkFormat>>,
+    config_editor: Option<Option<bazel::console::links::LinkFormat>>,
 ) -> Result<Surface, String> {
     crate::out::set_link_format(file_hyperlink_format(
         args,
         crate::out::env_link_format(),
-        user_editor,
+        config_editor,
     )?);
     if !args
         .get("enabled")
@@ -124,14 +125,14 @@ pub fn from_feature_args(
 /// What a link to a file opens, `None` for `auto` (`LinkFormat::auto`):
 /// the `file_hyperlink_format` arg typed on the command line, else `env`
 /// (`ASPECT_FILE_HYPERLINK_FORMAT`, see `crate::out::env_link_format`), else
-/// `user` (the `editor` in `~/.aspect/config.json`, see
-/// `crate::out::user_link_format`), else the arg a `config.axl` set, else
-/// `auto`. Fails on an invalid arg or `env`; an invalid `editor` was warned
-/// about and reaches here as unset.
+/// `config` (the `editor` of the user's `~/.aspect/config.json`, else of the
+/// repository's `.aspect/config.json`, see `crate::out::config_link_format`),
+/// else the arg a `config.axl` set, else `auto`. Fails on an invalid arg or
+/// `env`; an invalid `editor` was warned about and reaches here as unset.
 fn file_hyperlink_format(
     args: &Arguments<'_>,
     env: Option<Result<Option<bazel::console::links::LinkFormat>, String>>,
-    user: Option<Option<bazel::console::links::LinkFormat>>,
+    config: Option<Option<bazel::console::links::LinkFormat>>,
 ) -> Result<Option<bazel::console::links::LinkFormat>, String> {
     let arg = || match args
         .get("file_hyperlink_format")
@@ -148,7 +149,7 @@ fn file_hyperlink_format(
     if let Some(chosen) = env {
         return chosen;
     }
-    match user {
+    match config {
         Some(chosen) => Ok(chosen),
         None => arg(),
     }

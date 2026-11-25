@@ -728,14 +728,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Runs after `execute_configs` and before the header, so a config's
     /// templates frame the whole run. Without the feature the run gets the
     /// `full` layout, and links to files open as
-    /// `ASPECT_FILE_HYPERLINK_FORMAT` or the user's `editor` says
+    /// `ASPECT_FILE_HYPERLINK_FORMAT` or the `config.json` files' `editor` says
     /// (`crate::out::set_unconfigured_link_format`); see
     /// [`console_value::from_feature_args`] for the rest, including the
     /// `agent` layout a coding agent gets. Color, Buildkite and coding-agent
     /// detection and the environment's verbose level come from the run's
     /// `Env` ([`Host::of`], which fails on an invalid `ASPECT_VERBOSE`), the
-    /// console's only view of its host; the `editor` in the user's
-    /// `~/.aspect/config.json` comes from the `Env` too (`user_editor`). Also
+    /// console's only view of its host; the `editor` of the `config.json`
+    /// files comes from the `Env` too (`config_editor`). Also
     /// sets the verbose level for the rest of the run ([`diag::set_verbose`])
     /// as the resolved console says.
     pub fn resolve_console(
@@ -760,7 +760,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .find(|f| f.name() == CONSOLE_FEATURE)
         {
             None => {
-                crate::out::set_unconfigured_link_format((self.loader.env.user_editor)());
+                crate::out::set_unconfigured_link_format((self.loader.env.config_editor)());
                 Console::builtin(identity, host)
             }
             Some(feature) => console_value::from_feature_args(
@@ -768,7 +768,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 identity,
                 host,
                 &self.task_paths(),
-                (self.loader.env.user_editor)(),
+                (self.loader.env.config_editor)(),
             )
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?,
         };

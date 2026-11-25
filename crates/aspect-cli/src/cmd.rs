@@ -1326,12 +1326,13 @@ fn merge_args<'v>(
     }
 
     // Layer config.axl overrides for keys the user did NOT pass on the CLI,
-    // recording every key config assigned for `is_configured_key`.
+    // recording every key config assigned, and its value, for
+    // `is_configured_key` and `configured(name)`.
     let Some(overrides) = overrides_value.downcast_ref::<Arguments>() else {
         return args;
     };
     for (k, v) in overrides.entries() {
-        args.mark_configured(k.clone());
+        args.record_configured(k.clone(), v);
         let user_explicit = (k == "enabled" && shorthand.is_some())
             || schema
                 .get(&k)

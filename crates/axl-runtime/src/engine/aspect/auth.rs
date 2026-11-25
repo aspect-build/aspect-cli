@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -467,11 +466,15 @@ fn config_path() -> anyhow::Result<PathBuf> {
     crate::config_json::user_path()
 }
 
+/// The `deployments` of the `config.json` at `path`: none for a missing or
+/// empty file. Read through [`crate::config_json::object`], so a file it
+/// refuses (a byte order mark, a comment, not an object) is refused here
+/// with the same reason.
 fn load_config_file(path: &PathBuf) -> anyhow::Result<Vec<Deployment>> {
-    let Some(content) = crate::config_json::read(path)? else {
+    let Some(object) = crate::config_json::object(path).map_err(|e| anyhow::anyhow!(e))? else {
         return Ok(Vec::new());
     };
-    let cfg: DeploymentsConfig = serde_json::from_str(&content)
+    let cfg: DeploymentsConfig = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?;
     Ok(cfg.deployments)
 }
@@ -659,14 +662,7 @@ fn reconcile_seed_default(deployments: &mut [Deployment]) {
 /// to stay fast. It walks for one itself, which is the same few `stat`s startup
 /// would have done.
 fn repo_config_path() -> Option<PathBuf> {
-    let root = match crate::engine::store::resolved_aspect_root() {
-        Some(root) => root.to_path_buf(),
-        None => crate::project_root::aspect_root_from_cwd()?,
-    };
-    Some(
-        root.join(crate::project_root::DOT_ASPECT_FOLDER)
-            .join("config.json"),
-    )
+    crate::config_json::repo_path()
 }
 
 /// Select a deployment by name, or the default when `name` is `None`.
@@ -1413,49 +1409,40 @@ fn keep_build_endpoints(refreshed: &mut Deployment, recorded: &Deployment) {
     }
 }
 
-/// Serialize `deployments` to the user's `~/.aspect/config.json` (creating the
-/// directory), replacing its `deployments` and keeping its other top-level keys
-/// (`editor`, see [`crate::config_json`]). The built-in seed is not persisted -
-/// only user-configured deployments live in the file (the seed is re-added by
-/// [`load_deployments`] on read).
-fn write_user_config(deployments: Vec<Deployment>) -> anyhow::Result<()> {
-    let path = config_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("failed to create ~/.aspect directory: {}", e))?;
-    }
-    let json = user_config_json(
-        &path,
-        crate::config_json::read(&path)?.as_deref(),
-        deployments,
-    )?;
-    fs::write(&path, &json)
-        .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path.display(), e))?;
-    Ok(())
+/// Change the `deployments` of the user's `~/.aspect/config.json` with
+/// `change`, through [`modify_deployments`]. The built-in seed is not
+/// persisted - only user-configured deployments live in the file (the seed is
+/// re-added by [`load_deployments`] on read).
+fn modify_user_deployments<T>(
+    change: impl FnOnce(&mut Vec<Deployment>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    modify_deployments(&config_path()?, change)
 }
 
-/// The text of a user `config.json` holding `deployments`, beside the other
-/// top-level keys of `existing` (the text of the file at `path`, `None` for no
-/// file). Fails when `existing` is not a JSON object, rather than overwrite a
-/// file whose other keys it cannot keep.
-fn user_config_json(
+/// Read, `change` and write back the `deployments` of the `config.json` at
+/// `path`, all inside one [`crate::user_config::update`] (locked, atomic, the
+/// directory created), so two writers cannot lose each other's deployment;
+/// its other top-level keys are kept. Fails, writing nothing, when the file
+/// is not a JSON object, its `deployments` do not parse, or `change` fails.
+fn modify_deployments<T>(
     path: &std::path::Path,
-    existing: Option<&str>,
-    deployments: Vec<Deployment>,
-) -> anyhow::Result<String> {
-    let mut object = match existing.map(serde_json::from_str::<serde_json::Value>) {
-        None => serde_json::Map::new(),
-        Some(Ok(serde_json::Value::Object(object))) => object,
-        Some(Ok(_)) => anyhow::bail!("{} is not a JSON object; not writing it", path.display()),
-        Some(Err(e)) => {
-            anyhow::bail!("failed to parse {}: {e}; not writing it", path.display())
-        }
-    };
-    let deployments = serde_json::to_value(&deployments)
-        .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))?;
-    object.insert("deployments".into(), deployments);
-    serde_json::to_string_pretty(&object)
-        .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))
+    change: impl FnOnce(&mut Vec<Deployment>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut out = None;
+    crate::user_config::update(path, |object| {
+        let mut deployments: Vec<Deployment> = match object.get("deployments") {
+            None => Vec::new(),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|e| {
+                anyhow::anyhow!("failed to parse {} \"deployments\": {e}", path.display())
+            })?,
+        };
+        out = Some(change(&mut deployments)?);
+        let deployments = serde_json::to_value(&deployments)
+            .map_err(|e| anyhow::anyhow!("failed to serialize deployments: {}", e))?;
+        object.insert("deployments".into(), deployments);
+        Ok(true)
+    })?;
+    out.ok_or_else(|| anyhow::anyhow!("{} was not changed", path.display()))
 }
 
 /// Write (or replace by name) a deployment in the user's `~/.aspect/config.json`
@@ -1464,10 +1451,9 @@ fn save_user_deployment(
     deployment: Deployment,
     explicit_aspect_cloud: bool,
 ) -> anyhow::Result<bool> {
-    let mut existing = load_config_file(&config_path()?)?;
-    let is_default = upsert_deployment(&mut existing, deployment, explicit_aspect_cloud)?;
-    write_user_config(existing)?;
-    Ok(is_default)
+    modify_user_deployments(|existing| {
+        upsert_deployment(existing, deployment, explicit_aspect_cloud)
+    })
 }
 
 /// Discover `host`'s deployment and record it in the user's `config.json`,
@@ -1597,9 +1583,7 @@ fn apply_remove(deployments: &mut Vec<Deployment>, name: &str) -> anyhow::Result
 /// configured deployment. The built-in seed is not written to the file, so
 /// setting it default is expressed as "no configured default".
 fn set_default_deployment(name: Option<&str>) -> anyhow::Result<()> {
-    let mut existing = load_config_file(&config_path()?)?;
-    apply_set_default(&mut existing, name)?;
-    write_user_config(existing)
+    modify_user_deployments(|existing| apply_set_default(existing, name))
 }
 
 /// Mutate a configured-deployment list (the file's contents, excluding the seed)
@@ -1641,9 +1625,7 @@ fn apply_set_default(deployments: &mut [Deployment], name: Option<&str>) -> anyh
 /// removed deployment was the default, the file simply has no default afterward
 /// (selection falls back to Aspect Cloud).
 fn remove_deployment(name: &str) -> anyhow::Result<()> {
-    let mut existing = load_config_file(&config_path()?)?;
-    apply_remove(&mut existing, name)?;
-    write_user_config(existing)?;
+    modify_user_deployments(|existing| apply_remove(existing, name))?;
     // Also clear its stored credential in every profile: the deployment is gone,
     // so no identity has anything left to say to it.
     let mut all = load_all_credentials()?;
@@ -5188,41 +5170,97 @@ mod tests {
 
     #[test]
     fn writing_deployments_keeps_the_user_configs_other_keys() {
-        let existing = r#"{"editor": "zed", "deployments": [{"name": "old"}]}"#;
-        let json = user_config_json(
-            std::path::Path::new("config.json"),
-            Some(existing),
-            vec![dep("new", true)],
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+        std::fs::write(
+            &path,
+            r#"{"editor": "zed", "tips": {"silence": ["a"]}, "deployments": [{"name": "old"}]}"#,
         )
         .unwrap();
-        let written: serde_json::Value = serde_json::from_str(&json).unwrap();
+        modify_deployments(&path, |d| {
+            *d = vec![dep("new", true)];
+            Ok(())
+        })
+        .unwrap();
+        let written = read();
         assert_eq!(written["editor"], "zed");
+        assert_eq!(written["tips"]["silence"][0], "a");
         assert_eq!(written["deployments"].as_array().unwrap().len(), 1);
         assert_eq!(written["deployments"][0]["name"], "new");
 
-        let json = user_config_json(
-            std::path::Path::new("config.json"),
-            None,
-            vec![dep("new", true)],
-        )
+        std::fs::remove_file(&path).unwrap();
+        modify_deployments(&path, |d| {
+            d.push(dep("new", true));
+            Ok(())
+        })
         .unwrap();
-        let written: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(written.as_object().unwrap().len(), 1);
+        assert_eq!(read().as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_empty_config_has_no_deployments_and_a_bom_is_refused_saying_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for empty in ["", " \n"] {
+            std::fs::write(&path, empty).unwrap();
+            assert!(load_config_file(&path).unwrap().is_empty(), "{empty:?}");
+        }
+        std::fs::write(&path, "\u{feff}{}").unwrap();
+        let err = load_config_file(&path).unwrap_err().to_string();
+        assert!(err.contains("byte order mark"), "{err}");
+        std::fs::write(&path, "{\n  // mine\n}").unwrap();
+        let err = load_config_file(&path).unwrap_err().to_string();
+        assert!(err.contains("holds a comment"), "{err}");
+    }
+
+    /// Writers in parallel threads each add their own deployment; none is
+    /// lost, since each reads the list under the lock it writes under.
+    #[test]
+    fn concurrent_deployment_writers_lose_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::thread::scope(|s| {
+            for i in 0..16 {
+                let path = &path;
+                s.spawn(move || {
+                    modify_deployments(path, |d| {
+                        d.push(dep(&format!("d{i}"), false));
+                        Ok(())
+                    })
+                    .unwrap()
+                });
+            }
+        });
+        let mut names: Vec<String> = load_config_file(&path)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        names.sort();
+        let mut wanted: Vec<String> = (0..16).map(|i| format!("d{i}")).collect();
+        wanted.sort();
+        assert_eq!(names, wanted);
     }
 
     #[test]
     fn writing_deployments_refuses_a_user_config_it_cannot_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
         for existing in ["{", "[]", r#""text""#] {
-            let err = user_config_json(
-                std::path::Path::new("config.json"),
-                Some(existing),
-                vec![dep("new", true)],
-            )
+            std::fs::write(&path, existing).unwrap();
+            let err = modify_deployments(&path, |d| {
+                d.push(dep("new", true));
+                Ok(())
+            })
             .unwrap_err();
             assert!(
                 err.to_string().contains("not writing it"),
                 "{existing}: {err}"
             );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
         }
     }
 
