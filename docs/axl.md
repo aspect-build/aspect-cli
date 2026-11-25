@@ -442,8 +442,9 @@ a bounded window to reach its backend.
 A child's streams the task does not set are the runtime's. Stdin is
 `/dev/null`; stdout and stderr are piped through the CLI, copied to the
 history's `output.log` and passed on. A child marked
-`command(...).interactive(True)` gets the terminal instead, when there is one:
-mark a spawn interactive if it may prompt. A process that should outlive the
+`command(...).interactive(True)` gets the terminal instead, when there is one,
+in the CLI's own process group (so it takes no `process_group(...)`): mark a
+spawn interactive if it may prompt. A process that should outlive the
 CLI chooses its own stdout and stderr (a file from `ctx.std.fs.create(...)`
 for output worth keeping, `"null"`, or `"inherit"`) and leads its own group
 with `process_group(0)`, so a Ctrl+C on the CLI does not reach it. One

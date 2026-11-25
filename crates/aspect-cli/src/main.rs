@@ -424,7 +424,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     // A full-screen feature that did not give the terminal back.
     axl_runtime::engine::release_terminal();
     // What children's pipes still carry (a grandchild holding one), passed on.
-    axl_runtime::engine::finish_forwarders(std::time::Duration::from_secs(2));
+    axl_runtime::engine::finish_forwarders();
     // Children bound to the root may still be stopping (a terminated process
     // in its grace, a bazel client finishing its cancel). Give them the exit
     // window before the process goes away; past it, say so and leave.
@@ -849,7 +849,7 @@ fn install_signal_watcher() {
             errln!("aspect-cli: killed {killed} child process(es) that were still running");
         }
         axl_runtime::engine::release_terminal();
-        axl_runtime::engine::finish_forwarders(std::time::Duration::from_secs(2));
+        axl_runtime::engine::finish_forwarders();
         errln!("aspect-cli: exiting with code {}", kind.exit_code());
         std::process::exit(i32::from(kind.exit_code()));
     });

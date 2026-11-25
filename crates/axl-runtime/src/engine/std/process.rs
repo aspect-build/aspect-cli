@@ -348,6 +348,17 @@ impl Command {
             Some(token) => token.inner().clone(),
             None => signals.default_binding(),
         };
+        // An interactive child is the terminal's while it runs, in the CLI's
+        // own group, which the shell has in the foreground: Ctrl+Z, `fg` and
+        // `bg` are the shell's as for the CLI. One leading its own group is
+        // not in the foreground; a process meant to outlive the CLI is not
+        // interactive.
+        if self.interactive.get() && self.process_group.get().is_some() {
+            return Err(anyhow!(
+                "command {}: `interactive(True)` runs the child in the CLI's own process group, so it cannot take `process_group(...)`; a process meant to outlive the CLI sets its own stdout and stderr instead",
+                self.describe()
+            ));
+        }
         // Interactive only where there is a terminal to give it: without one
         // (CI) it runs as any other child, piped and copied.
         let interactive = self.interactive.get() && has_terminal();
@@ -393,11 +404,6 @@ impl Command {
                 ));
             }
         };
-        let foreground = if interactive && self.process_group.get().is_some() {
-            give_foreground(child.id() as i32)
-        } else {
-            None
-        };
         let mut forwarders = vec![];
         match plan {
             Forward::Merged(read) => forwarders.push(forward(read, true)),
@@ -415,7 +421,6 @@ impl Command {
             bound,
             forwarders: RefCell::new(forwarders),
             interactive: RefCell::new(marked),
-            foreground: RefCell::new(foreground),
         })
     }
 
@@ -453,70 +458,9 @@ fn has_terminal() -> bool {
     std::io::stdin().is_terminal() && crate::engine::stdout_is_terminal()
 }
 
-/// Make the terminal's foreground process group `group`, an interactive
-/// child's own, so it may read and write it; the terminal, for taking the
-/// foreground back ([`take_foreground`]). None without one.
-fn give_foreground(group: i32) -> Option<std::fs::File> {
-    use std::os::fd::AsRawFd;
-    let tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .ok()?;
-    // SAFETY: plain tcsetpgrp/signal/kill calls on our own terminal and the
-    // child's group; SIGTTOU ignored while a background process sets it.
-    unsafe {
-        let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-        libc::tcsetpgrp(tty.as_raw_fd(), group);
-        libc::signal(libc::SIGTTOU, previous);
-        // One that read before it had the terminal was stopped for it.
-        libc::kill(-group, libc::SIGCONT);
-    }
-    Some(tty)
-}
-
-/// Give the terminal's foreground back to the CLI's own process group.
-fn take_foreground(tty: &std::fs::File) {
-    use std::os::fd::AsRawFd;
-    // SAFETY: as in [`give_foreground`].
-    unsafe {
-        let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-        libc::tcsetpgrp(tty.as_raw_fd(), libc::getpgrp());
-        libc::signal(libc::SIGTTOU, previous);
-    }
-}
-
-/// What a [`forward`] thread is doing, for a wait deciding whether it has
-/// finished passing the child's output on.
-#[derive(Default)]
-struct Activity {
-    /// Writing what it read: a slow reader is progress.
-    busy: std::sync::atomic::AtomicBool,
-    /// When it last read, in ms of [`Activity::now`].
-    read_ms: std::sync::atomic::AtomicU64,
-}
-
-impl Activity {
-    fn now() -> u64 {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_millis() as u64
-    }
-
-    /// Neither writing nor having read for `grace`.
-    fn idle_for(&self, grace: Duration) -> bool {
-        use std::sync::atomic::Ordering::SeqCst;
-        !self.busy.load(SeqCst)
-            && Self::now().saturating_sub(self.read_ms.load(SeqCst)) >= grace.as_millis() as u64
-    }
-}
-
 /// A thread passing a child's output on ([`forward`]).
 struct Forwarder {
     handle: std::thread::JoinHandle<()>,
-    activity: Arc<Activity>,
 }
 
 impl std::fmt::Debug for Forwarder {
@@ -529,10 +473,16 @@ impl std::fmt::Debug for Forwarder {
 /// at the CLI's exit ([`finish_forwarders`]).
 static LEFT: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
 
-/// Let the forwarders a wait left running finish, for `within` at most: at
-/// the CLI's exit, so what they read reaches the terminal and output.log.
-pub fn finish_forwarders(within: Duration) {
-    let deadline = std::time::Instant::now() + within;
+/// How long the output of a child that has exited is passed on before what
+/// is left is let go: after its wait (a backgrounded grandchild holding the
+/// pipe, writing or not), and again at the CLI's exit.
+pub const FORWARD_BOUND: Duration = Duration::from_secs(2);
+
+/// Let the forwarders a wait left running finish, for [`FORWARD_BOUND`] at
+/// most: at the CLI's exit, so what they read reaches the terminal and
+/// output.log.
+pub fn finish_forwarders() {
+    let deadline = std::time::Instant::now() + FORWARD_BOUND;
     let left = std::mem::take(&mut *LEFT.lock().unwrap());
     for f in left {
         while !f.is_finished() && std::time::Instant::now() < deadline {
@@ -548,42 +498,59 @@ const MAX_FORWARD_LINE: usize = 64 * 1024;
 /// flushed as it comes so a partial line (a progress line) shows at once,
 /// and copied to the task's output a whole line at a time (an unended one
 /// held back, up to [`MAX_FORWARD_LINE`], ended at the pipe's end), so it
-/// never lands inside the CLI's own line. A stream that takes no more (a
-/// closed pipe, `| head -1`) ends it and closes `pipe`, so the child's next
-/// write fails, as it would have written there itself.
+/// never lands inside the CLI's own line. While a full screen holds the
+/// terminal it goes into the screen's capture instead, whole lines too, so
+/// neither its console nor the output files splice it with the CLI's. A
+/// stream that takes no more (a closed pipe, `| head -1`) ends it and closes
+/// `pipe`, so the child's next write fails, as it would have written there
+/// itself.
 fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwarder {
-    use std::sync::atomic::Ordering::SeqCst;
-    let activity = Arc::new(Activity::default());
-    activity.read_ms.store(Activity::now(), SeqCst);
-    let mine = activity.clone();
     let handle = std::thread::spawn(move || {
         use std::io::Write as _;
         let mut buf = [0u8; 8192];
+        // Not yet copied; its first `shown` bytes written out already.
         let mut line = Vec::new();
+        let mut shown = 0;
+        let show = |bytes: &[u8]| -> std::io::Result<()> {
+            if stderr {
+                let mut err = std::io::stderr().lock();
+                err.write_all(bytes).and_then(|()| err.flush())
+            } else {
+                let mut out = std::io::stdout().lock();
+                out.write_all(bytes).and_then(|()| out.flush())
+            }
+        };
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
                 Ok(n) => {
-                    mine.busy.store(true, SeqCst);
-                    mine.read_ms.store(Activity::now(), SeqCst);
-                    let written = if stderr {
-                        let mut err = std::io::stderr().lock();
-                        err.write_all(&buf[..n]).and_then(|()| err.flush())
-                    } else {
-                        let mut out = std::io::stdout().lock();
-                        out.write_all(&buf[..n]).and_then(|()| out.flush())
-                    };
                     line.extend_from_slice(&buf[..n]);
-                    if let Some(end) = line.iter().rposition(|&b| b == b'\n') {
-                        crate::out::copy_output(&line[..=end]);
-                        line.drain(..=end);
-                    } else if line.len() > MAX_FORWARD_LINE {
-                        crate::out::copy_output(&line);
-                        line.clear();
+                    let whole = line
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map(|end| end + 1)
+                        .or((line.len() > MAX_FORWARD_LINE).then_some(line.len()));
+                    let written = if crate::engine::std::term::screen_holds_terminal() {
+                        match whole {
+                            Some(end) if end > shown => {
+                                crate::engine::std::term::feed_screen(stderr, &line[shown..end]);
+                                shown = end;
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    } else {
+                        let r = show(&line[shown..]);
+                        shown = line.len();
+                        r
+                    };
+                    if let Some(end) = whole {
+                        crate::out::copy_only(&line[..end]);
+                        line.drain(..end);
+                        shown = shown.saturating_sub(end);
                     }
-                    mine.busy.store(false, SeqCst);
                     if written.is_err() {
                         break;
                     }
@@ -592,16 +559,14 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
         }
         if !line.is_empty() {
             line.push(b'\n');
-            crate::out::copy_output(&line);
+            if crate::engine::std::term::screen_holds_terminal() {
+                crate::engine::std::term::feed_screen(stderr, &line[shown.min(line.len())..]);
+            }
+            crate::out::copy_only(&line);
         }
-        mine.busy.store(false, SeqCst);
     });
-    Forwarder { handle, activity }
+    Forwarder { handle }
 }
-
-/// How long a pipe stays quiet, after its child has exited, before a wait
-/// stops waiting on it: a grandchild holding it, writing nothing.
-const FORWARD_GRACE: Duration = Duration::from_millis(250);
 
 impl<'v> AllocValue<'v> for Command {
     fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
@@ -720,7 +685,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// piped through the CLI (copied to the task's output, then passed on),
     /// and while a full screen holds the terminal, no controlling terminal
     /// either, so a surprise prompt fails rather than hangs. Mark a spawn
-    /// interactive if it may prompt.
+    /// interactive if it may prompt. It runs in the CLI's own process group,
+    /// which the shell has in the foreground, so it cannot also take
+    /// `process_group(...)`: spawning both fails.
     fn interactive<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] on: bool,
@@ -857,10 +824,7 @@ pub struct Child {
     /// The threads passing on its piped stdout and stderr ([`forward`]).
     #[allocative(skip)]
     forwarders: RefCell<Vec<Forwarder>>,
-    /// The terminal an interactive child leading its own group was given,
-    /// to take back as it ends.
-    #[allocative(skip)]
-    foreground: RefCell<Option<std::fs::File>>,
+
     /// An interactive child's command, start, and whether it suspended a
     /// screen: for the line after it, and to take the screen again.
     #[allocative(skip)]
@@ -876,7 +840,6 @@ impl Child {
             bound,
             forwarders: RefCell::new(vec![]),
             interactive: RefCell::new(None),
-            foreground: RefCell::new(None),
         }
     }
 
@@ -895,18 +858,16 @@ impl Child {
     /// What follows the child's exit: its output passed on, and an
     /// interactive one's screen back and the line after it.
     fn ended(&self, status: &process::ExitStatus) {
-        if let Some(tty) = self.foreground.borrow_mut().take() {
-            take_foreground(&tty);
-        }
-        // Everything its output pipes carry, passed on: waited on while bytes
-        // flow, given up once a pipe is quiet for the grace (a grandchild
-        // holding it) or the wait is cancelled, and finished at exit.
+        // Its output passed on until its pipes end, for [`FORWARD_BOUND`] at
+        // most (a grandchild holding one) or until the wait is cancelled; what
+        // is left is finished at exit.
+        let deadline = std::time::Instant::now() + FORWARD_BOUND;
         for f in self.forwarders.borrow_mut().drain(..) {
-            while !f.handle.is_finished() {
-                if f.activity.idle_for(FORWARD_GRACE) || self.bound.token().is_cancelled() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
+            while !f.handle.is_finished()
+                && std::time::Instant::now() < deadline
+                && !self.bound.token().is_cancelled()
+            {
+                std::thread::sleep(Duration::from_millis(2));
             }
             if f.handle.is_finished() {
                 let _ = f.handle.join();
@@ -1372,6 +1333,41 @@ t = task(implementation = _impl)
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A grandchild that keeps writing holds the child's wait for
+    /// `FORWARD_BOUND` at most: the task moves on.
+    #[test]
+    fn a_chatty_grandchild_holds_the_wait_for_the_bound_at_most() {
+        let started = std::time::Instant::now();
+        let got = run_child(
+            r#"(i=0; while [ $i -lt 50 ]; do echo x; sleep 0.2; i=$((i+1)); done) & echo started > $1"#,
+            "",
+        );
+        assert_eq!(got, "started\n");
+        assert!(
+            started.elapsed() < FORWARD_BOUND + Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// An interactive child runs in the CLI's own group: one asked to lead
+    /// its own is refused at spawn, saying why.
+    #[test]
+    fn interactive_and_a_process_group_are_refused() {
+        let result = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.std.process.command("true").interactive(True).process_group(0).spawn().wait()
+    return 0
+
+t = task(implementation = _impl)
+"#,
+        )
+        .run_task(0);
+        let err = format!("{:#}", result.expect_err("refused"));
+        assert!(err.contains("cannot take `process_group(...)`"), "{err}");
     }
 
     /// A command spawned twice decides each spawn afresh, its exit polled

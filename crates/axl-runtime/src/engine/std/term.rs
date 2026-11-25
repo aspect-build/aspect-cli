@@ -825,6 +825,26 @@ pub(crate) fn suspend() -> bool {
     true
 }
 
+/// Hand `bytes` (whole lines) a child wrote to the screen holding the
+/// terminal, as its stderr (or stdout) capture would: a forwarder's lines
+/// go to the screen's console here and not through the process's own
+/// stderr, where the capture would copy them a second time and splice them
+/// with the CLI's.
+pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) {
+    if let Ok(held) = HELD.lock()
+        && let Some(h) = held.as_ref().filter(|h| h.alt_screen && !h.suspended)
+    {
+        h.capture.write(
+            if stderr {
+                Source::Stderr
+            } else {
+                Source::Stdout
+            },
+            bytes,
+        );
+    }
+}
+
 /// Whether a full screen of its own holds the terminal now, not given back:
 /// a child spawned meanwhile has no terminal of its own.
 pub(crate) fn screen_holds_terminal() -> bool {
