@@ -2479,6 +2479,7 @@ def render(state: dict, cols: int, rows: int) -> str:
         return _frame_of(state, _tab_pane(state, out, cols, rows), rows, cols)
 
     # The console, scrolled.
+    at_top = False
     view = state["view"]
     search = state["search"]
     log = shown_lines(state)
@@ -2512,6 +2513,7 @@ def render(state: dict, cols: int, rows: int) -> str:
                     break
         state["scroll"] = min(state["scroll"], max(0, len(log) - top_lines))
         scroll = state["scroll"]
+        at_top = scroll > 0 and scroll == max(0, len(log) - top_lines)
         if scroll == 0:
             state["unseen"] = 0
             state["unseen_errors"] = 0
@@ -2533,7 +2535,9 @@ def render(state: dict, cols: int, rows: int) -> str:
         filled = 0
         start = end
         for i in range(end - 1, -1, -1):
-            if filled >= log_h:
+            # At the top, every line from the oldest: one taller than the
+            # pane does not hide those above it.
+            if filled >= log_h and not at_top:
                 break
             filled += len(wrap_line(log[i], body_w))
             start = i

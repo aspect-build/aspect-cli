@@ -1505,6 +1505,16 @@ def _impl(ctx: TaskContext) -> int:
     painted["search"]["pattern"] = ctx.std.re.compile("done")
     _eq("a match over the colour", _role("search.match") + "done" in render(painted, 100, 20), True)
 
+    # At the top, the oldest line shows from its first row even when a
+    # later line is taller than the pane.
+    tall = _screen(ctx, [], ended = True)
+    add_lines(tall, ["the oldest", "", "second"], None, None, cli = True)
+    add_lines(tall, ["INFO: " + "--flag " * 600] + ["line %d" % i for i in range(90)])
+    on_key(tall, "K", 10)
+    tall_rows = _visible(render(tall, 120, 40)).split("\n")
+    tab_row = [i for i, r in enumerate(tall_rows) if "Console" in r and "Invocation" in r][0]
+    _eq("the oldest line first at the top", tall_rows[tab_row + 1][:14], "│ the oldest  ")
+
     print("dashboard_test.axl: OK")
     return 0
 
