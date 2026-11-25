@@ -119,9 +119,11 @@ def _spawn_target(ctx: TaskContext, ph, runnable, target: str, forward_args: lis
         kind = "bazel_results",
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
+
+    # The user's own program, run as Bazel would: the CLI's stdin, stdout
+    # and stderr as they are, not piped.
     cmd = runnable.command(args = forward_args, env = extra_environment, cwd = spawn_cwd)
-    if stdin != None:
-        cmd = cmd.stdin(stdin)
+    cmd = cmd.stdin(stdin if stdin != None else "inherit").stdout("inherit").stderr("inherit")
     return cmd.spawn()
 
 def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spawn_cwd: str | None, rc, announce_version: bool, announce_command: bool):
@@ -418,7 +420,9 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
-    code = exit_code_of(resolved.runnable.command(args = forward_args, cwd = spawn_cwd).spawn().wait())
+    # The user's own program, run as Bazel would: the CLI's stdin, stdout
+    # and stderr as they are, not piped.
+    code = exit_code_of(resolved.runnable.command(args = forward_args, cwd = spawn_cwd).stdin("inherit").stdout("inherit").stderr("inherit").spawn().wait())
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
 

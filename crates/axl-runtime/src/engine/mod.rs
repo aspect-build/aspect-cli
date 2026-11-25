@@ -12,6 +12,7 @@ mod std;
 mod template;
 mod wasm;
 
+pub use self::std::process::finish_forwarders;
 pub use self::std::term::{release_all as release_terminal, restore_terminal_after_crash};
 pub use axl_types::stream::{stderr_is_terminal, stdout_is_terminal};
 

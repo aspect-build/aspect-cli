@@ -72,7 +72,6 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
-            inherits: Cell::new(false),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pre_exec_set: Cell::new(false),
@@ -157,10 +156,6 @@ pub struct Command {
     /// Which of its streams the task chose itself.
     #[allocative(skip)]
     chosen: Cell<Chosen>,
-    /// `aspect run`'s program, the user's own: it keeps the CLI's stdin,
-    /// stdout and stderr as they are, with no marker lines.
-    #[allocative(skip)]
-    inherits: Cell<bool>,
     /// The colour variables a spawn added, for the next to take back.
     #[allocative(skip)]
     added_env: RefCell<Vec<String>>,
@@ -190,73 +185,88 @@ struct Chosen {
 }
 
 impl Command {
-    /// Wrap a command the runtime assembled: `aspect run`'s program, which
-    /// keeps the CLI's stdin, stdout and stderr (the user's own program, run
-    /// as Bazel would). With `own_group` the child is spawned as the leader
-    /// of a new process group, so stopping it stops everything it started.
+    /// Wrap a command the runtime assembled (a runnable's), spawned by the
+    /// same rules as any other. With `own_group` the child is spawned as the
+    /// leader of a new process group, so stopping it stops everything it
+    /// started.
     pub(crate) fn from_std(inner: process::Command, own_group: bool) -> Self {
         Self {
             inner: RefCell::new(inner),
             process_group: Cell::new(own_group.then_some(0)),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
-            inherits: Cell::new(true),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pre_exec_set: Cell::new(false),
         }
     }
 
-    /// Choose what the task left to the runtime for an unmarked child, for
-    /// this spawn: stdin from `/dev/null`; stdout and stderr piped, one pipe
-    /// for both when the CLI's own are one file (their order kept); colour
-    /// forced on (`FORCE_COLOR`, `CLICOLOR_FORCE`) when the child's stdout
-    /// reaches a colour terminal through the CLI, unless the task set them;
-    /// and while a full screen holds the terminal, no controlling terminal.
-    /// Each spawn decides afresh: a reused command keeps nothing of the last.
-    fn unmarked(&self) -> anyhow::Result<Forward> {
+    /// Set, for this spawn, what the task left to the runtime: every stream
+    /// it did not choose, the colour variables and whether the child drops
+    /// the controlling terminal, so a reused command keeps nothing of the
+    /// last spawn. An interactive child inherits the CLI's stdin, stdout and
+    /// stderr. An unmarked one reads `/dev/null`, has its stdout and stderr
+    /// piped (one pipe for both when the CLI's are one file, their order
+    /// kept), colour forced on (`FORCE_COLOR`, `CLICOLOR_FORCE`) when its
+    /// stdout reaches a colour terminal through the CLI unless the task set
+    /// them or the CLI inherited them, and while a full screen holds the
+    /// terminal, no controlling terminal.
+    fn streams(&self, interactive: bool) -> anyhow::Result<Forward> {
         let chosen = self.chosen.get();
         let mut cmd = self.inner.borrow_mut();
-        if !chosen.stdin {
-            cmd.stdin(Stdio::null());
-        }
-        let merged =
-            !chosen.stdout && !chosen.stderr && bazel::console::capture::stdout_is_stderrs_file();
-        let forward = if merged {
-            let (read, write) = std::io::pipe()?;
-            cmd.stdout(write.try_clone()?);
-            cmd.stderr(write);
-            Forward::Merged(read)
+        let forward = if interactive {
+            for (set, which) in [(chosen.stdin, 0), (chosen.stdout, 1), (chosen.stderr, 2)] {
+                if !set {
+                    match which {
+                        0 => cmd.stdin(Stdio::inherit()),
+                        1 => cmd.stdout(Stdio::inherit()),
+                        _ => cmd.stderr(Stdio::inherit()),
+                    };
+                }
+            }
+            Forward::Each(false, false)
         } else {
-            if !chosen.stdout {
-                cmd.stdout(Stdio::piped());
+            if !chosen.stdin {
+                cmd.stdin(Stdio::null());
             }
-            if !chosen.stderr {
-                cmd.stderr(Stdio::piped());
+            let merged = !chosen.stdout
+                && !chosen.stderr
+                && bazel::console::capture::stdout_is_stderrs_file();
+            if merged {
+                let (read, write) = std::io::pipe()?;
+                cmd.stdout(write.try_clone()?);
+                cmd.stderr(write);
+                Forward::Merged(read)
+            } else {
+                if !chosen.stdout {
+                    cmd.stdout(Stdio::piped());
+                }
+                if !chosen.stderr {
+                    cmd.stderr(Stdio::piped());
+                }
+                Forward::Each(!chosen.stdout, !chosen.stderr)
             }
-            Forward::Each(!chosen.stdout, !chosen.stderr)
         };
 
         // Colour as the stream the child's stdout reaches through the CLI
         // shows it; the task's own values, and what the CLI inherited, kept.
-        let colour = !chosen.stdout && crate::color::stdout_supports_color();
+        let colour = !interactive && !chosen.stdout && crate::color::stdout_supports_color();
         let mut added = self.added_env.borrow_mut();
         for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
-            let tasks = cmd.get_envs().any(|(k, _)| k.to_string_lossy() == var)
-                && !added.iter().any(|a| a == var);
-            if tasks {
+            let ours = added.iter().any(|a| a == var);
+            let theirs = !ours
+                && (cmd.get_envs().any(|(k, _)| k.to_string_lossy() == var)
+                    || std::env::var_os(var).is_some());
+            if theirs {
                 continue;
             }
             if colour {
                 cmd.env(var, "1");
-                if !added.iter().any(|a| a == var) {
+                if !ours {
                     added.push(var.to_string());
                 }
-            } else if added.iter().any(|a| a == var) {
-                match std::env::var_os(var) {
-                    Some(inherited) => cmd.env(var, inherited),
-                    None => cmd.env_remove(var),
-                };
+            } else if ours {
+                cmd.env_remove(var);
                 added.retain(|a| a != var);
             }
         }
@@ -266,7 +276,7 @@ impl Command {
         #[cfg(unix)]
         {
             self.no_tty.store(
-                crate::engine::std::term::screen_holds_terminal(),
+                !interactive && crate::engine::std::term::screen_holds_terminal(),
                 std::sync::atomic::Ordering::SeqCst,
             );
             if !self.pre_exec_set.replace(true) {
@@ -326,12 +336,10 @@ impl Command {
             Some(token) => token.inner().clone(),
             None => signals.default_binding(),
         };
-        let interactive = self.interactive.get() && !self.inherits.get();
-        let plan = if interactive || self.inherits.get() {
-            Forward::Each(false, false)
-        } else {
-            self.unmarked()?
-        };
+        // Interactive only where there is a terminal to give it: without one
+        // (CI) it runs as any other child, piped and copied.
+        let interactive = self.interactive.get() && has_terminal();
+        let plan = self.streams(interactive)?;
         let marked = interactive.then(|| {
             let summary = self.summary();
             crate::errln!(
@@ -373,6 +381,11 @@ impl Command {
                 ));
             }
         };
+        let foreground = if interactive && self.process_group.get().is_some() {
+            give_foreground(child.id() as i32)
+        } else {
+            None
+        };
         let mut forwarders = vec![];
         match plan {
             Forward::Merged(read) => forwarders.push(forward(read, true)),
@@ -390,6 +403,7 @@ impl Command {
             bound,
             forwarders: RefCell::new(forwarders),
             interactive: RefCell::new(marked),
+            foreground: RefCell::new(foreground),
         })
     }
 
@@ -420,42 +434,161 @@ fn marker_line(text: &str, failed: bool) -> String {
     }
 }
 
+/// Whether the CLI has a terminal to give an interactive child: stdin and
+/// stdout both one (through a full screen's capture, the screen's).
+fn has_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && crate::engine::stdout_is_terminal()
+}
+
+/// Make the terminal's foreground process group `group`, an interactive
+/// child's own, so it may read and write it; the terminal, for taking the
+/// foreground back ([`take_foreground`]). None without one.
+fn give_foreground(group: i32) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    // SAFETY: plain tcsetpgrp/signal/kill calls on our own terminal and the
+    // child's group; SIGTTOU ignored while a background process sets it.
+    unsafe {
+        let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(tty.as_raw_fd(), group);
+        libc::signal(libc::SIGTTOU, previous);
+        // One that read before it had the terminal was stopped for it.
+        libc::kill(-group, libc::SIGCONT);
+    }
+    Some(tty)
+}
+
+/// Give the terminal's foreground back to the CLI's own process group.
+fn take_foreground(tty: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: as in [`give_foreground`].
+    unsafe {
+        let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(tty.as_raw_fd(), libc::getpgrp());
+        libc::signal(libc::SIGTTOU, previous);
+    }
+}
+
+/// What a [`forward`] thread is doing, for a wait deciding whether it has
+/// finished passing the child's output on.
+#[derive(Default)]
+struct Activity {
+    /// Writing what it read: a slow reader is progress.
+    busy: std::sync::atomic::AtomicBool,
+    /// When it last read, in ms of [`Activity::now`].
+    read_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Activity {
+    fn now() -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
+
+    /// Neither writing nor having read for `grace`.
+    fn idle_for(&self, grace: Duration) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        !self.busy.load(SeqCst)
+            && Self::now().saturating_sub(self.read_ms.load(SeqCst)) >= grace.as_millis() as u64
+    }
+}
+
+/// A thread passing a child's output on ([`forward`]).
+struct Forwarder {
+    handle: std::thread::JoinHandle<()>,
+    activity: Arc<Activity>,
+}
+
+impl std::fmt::Debug for Forwarder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Forwarder")
+    }
+}
+
+/// Forwarders a wait left running, a grandchild holding the pipe: finished
+/// at the CLI's exit ([`finish_forwarders`]).
+static LEFT: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// Let the forwarders a wait left running finish, for `within` at most: at
+/// the CLI's exit, so what they read reaches the terminal and output.log.
+pub fn finish_forwarders(within: Duration) {
+    let deadline = std::time::Instant::now() + within;
+    let left = std::mem::take(&mut *LEFT.lock().unwrap());
+    for f in left {
+        while !f.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// The longest unended line a forwarder holds back from the output files.
+const MAX_FORWARD_LINE: usize = 64 * 1024;
+
 /// Pass what a child writes to `pipe` on to the CLI's stderr (or stdout),
-/// copied to the task's output as the CLI's own writes are; a thread, waited
-/// on briefly once the child's wait ends ([`Child::ended`]). A stream that
-/// takes no more (a closed pipe, `| head -1`) ends it and closes `pipe`, so
-/// the child's next write fails, as it would have written there itself.
-fn forward(
-    mut pipe: impl std::io::Read + Send + 'static,
-    stderr: bool,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+/// flushed as it comes so a partial line (a progress line) shows at once,
+/// and copied to the task's output a whole line at a time (an unended one
+/// held back, up to [`MAX_FORWARD_LINE`], ended at the pipe's end), so it
+/// never lands inside the CLI's own line. A stream that takes no more (a
+/// closed pipe, `| head -1`) ends it and closes `pipe`, so the child's next
+/// write fails, as it would have written there itself.
+fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwarder {
+    use std::sync::atomic::Ordering::SeqCst;
+    let activity = Arc::new(Activity::default());
+    activity.read_ms.store(Activity::now(), SeqCst);
+    let mine = activity.clone();
+    let handle = std::thread::spawn(move || {
         use std::io::Write as _;
         let mut buf = [0u8; 8192];
+        let mut line = Vec::new();
         loop {
             match pipe.read(&mut buf) {
-                Ok(0) => return,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return,
+                Ok(0) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
                 Ok(n) => {
+                    mine.busy.store(true, SeqCst);
+                    mine.read_ms.store(Activity::now(), SeqCst);
                     let written = if stderr {
-                        std::io::stderr().lock().write_all(&buf[..n])
+                        let mut err = std::io::stderr().lock();
+                        err.write_all(&buf[..n]).and_then(|()| err.flush())
                     } else {
-                        std::io::stdout().lock().write_all(&buf[..n])
+                        let mut out = std::io::stdout().lock();
+                        out.write_all(&buf[..n]).and_then(|()| out.flush())
                     };
-                    if written.is_err() {
-                        return;
+                    line.extend_from_slice(&buf[..n]);
+                    if let Some(end) = line.iter().rposition(|&b| b == b'\n') {
+                        crate::out::copy_output(&line[..=end]);
+                        line.drain(..=end);
+                    } else if line.len() > MAX_FORWARD_LINE {
+                        crate::out::copy_output(&line);
+                        line.clear();
                     }
-                    crate::out::copy_output(&buf[..n]);
+                    mine.busy.store(false, SeqCst);
+                    if written.is_err() {
+                        break;
+                    }
                 }
             }
         }
-    })
+        if !line.is_empty() {
+            line.push(b'\n');
+            crate::out::copy_output(&line);
+        }
+        mine.busy.store(false, SeqCst);
+    });
+    Forwarder { handle, activity }
 }
 
-/// How long a child's wait, once it has exited, waits for what it wrote
-/// to be passed on: a grandchild still holding its pipe would hold it
-/// forever, and is left to the forwarder.
+/// How long a pipe stays quiet, after its child has exited, before a wait
+/// stops waiting on it: a grandchild holding it, writing nothing.
 const FORWARD_GRACE: Duration = Duration::from_millis(250);
 
 impl<'v> AllocValue<'v> for Command {
@@ -702,7 +835,11 @@ pub struct Child {
     bound: Bound,
     /// The threads passing on its piped stdout and stderr ([`forward`]).
     #[allocative(skip)]
-    forwarders: RefCell<Vec<std::thread::JoinHandle<()>>>,
+    forwarders: RefCell<Vec<Forwarder>>,
+    /// The terminal an interactive child leading its own group was given,
+    /// to take back as it ends.
+    #[allocative(skip)]
+    foreground: RefCell<Option<std::fs::File>>,
     /// An interactive child's command, start, and whether it suspended a
     /// screen: for the line after it, and to take the screen again.
     #[allocative(skip)]
@@ -718,6 +855,7 @@ impl Child {
             bound,
             forwarders: RefCell::new(vec![]),
             interactive: RefCell::new(None),
+            foreground: RefCell::new(None),
         }
     }
 
@@ -736,13 +874,23 @@ impl Child {
     /// What follows the child's exit: its output passed on, and an
     /// interactive one's screen back and the line after it.
     fn ended(&self, status: &process::ExitStatus) {
-        let deadline = std::time::Instant::now() + FORWARD_GRACE;
+        if let Some(tty) = self.foreground.borrow_mut().take() {
+            take_foreground(&tty);
+        }
+        // Everything its output pipes carry, passed on: waited on while bytes
+        // flow, given up once a pipe is quiet for the grace (a grandchild
+        // holding it) or the wait is cancelled, and finished at exit.
         for f in self.forwarders.borrow_mut().drain(..) {
-            while !f.is_finished() && std::time::Instant::now() < deadline {
+            while !f.handle.is_finished() {
+                if f.activity.idle_for(FORWARD_GRACE) || self.bound.token().is_cancelled() {
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            if f.is_finished() {
-                let _ = f.join();
+            if f.handle.is_finished() {
+                let _ = f.handle.join();
+            } else {
+                LEFT.lock().unwrap().push(f.handle);
             }
         }
         if let Some((summary, started, suspended)) = self.interactive.borrow_mut().take() {
@@ -1262,7 +1410,6 @@ t = task(implementation = _impl)
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
-            inherits: Cell::new(false),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pre_exec_set: Cell::new(false),
@@ -1294,7 +1441,6 @@ t = task(implementation = _impl)
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
-            inherits: Cell::new(false),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pre_exec_set: Cell::new(false),
@@ -1318,7 +1464,6 @@ t = task(implementation = _impl)
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
-            inherits: Cell::new(false),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pre_exec_set: Cell::new(false),
