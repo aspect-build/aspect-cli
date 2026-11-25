@@ -1205,10 +1205,9 @@ pub(crate) fn config_link_format() -> Option<Option<bazel::console::links::LinkF
 /// The `editor` of the `config.json` at `user`, else of the one at `repo`, a
 /// team's default: `None` when neither sets one, else a format or `None` for
 /// `auto`. The repository's takes an editor's name, `auto` or `none` only,
-/// never `file` (the system's handler, which runs an executable file) or a
-/// URL template, so a cloned repository's data cannot make a click open any
-/// scheme it likes. An invalid one goes to `warn` and reads as unset, so the next
-/// decides.
+/// never a URL template, so a cloned repository's data cannot make a click
+/// open any scheme it likes. An invalid one (for anyone, a `file://` format)
+/// goes to `warn` and reads as unset, so the next decides.
 pub(crate) fn layered_editor(
     user: Option<&std::path::Path>,
     repo: Option<&std::path::Path>,
@@ -1229,7 +1228,8 @@ pub(crate) fn layered_editor(
 /// key is missing, else a format or `None` for `auto`, or a warning naming the
 /// file when the file is unreadable or not a JSON object (worded as every
 /// reader of the file words it, see `crate::config_json::object`) or the
-/// value is not a format, or, with `named_only`, is `file` or a URL template.
+/// value is not a format (`file` and every `file://` one are not), or, with
+/// `named_only`, is a URL template.
 pub(crate) fn editor_link_format(
     path: &std::path::Path,
     named_only: bool,
