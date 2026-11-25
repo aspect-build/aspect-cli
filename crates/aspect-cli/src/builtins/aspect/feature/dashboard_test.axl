@@ -1319,6 +1319,16 @@ def _impl(ctx: TaskContext) -> int:
     drawn = render(peek, 100, 24)
     _eq("in the middle, titled", ("▸  100" in ctx.std.re.compile(ANSI).replace(drawn, ""), "Console › main.rs:100" in _visible(drawn)), (True, True))
     _eq("highlighted", "\x1b[38;5;" in drawn, True)
+
+    # The keys over a peek: the key list, every row the screen's width, and
+    # the peek as it was once they close.
+    peek_scroll = peek["scroll"]
+    on_key(peek, "?", 10)
+    keyed = [r.rstrip("\r") for r in _visible(render(peek, 100, 24)).split("\n") if r.rstrip("\r")]
+    _eq("the keys, not the file", ("these keys" in "\n".join(keyed) or "… " in keyed[-3], "fn f100" in "\n".join(keyed)), (True, False))
+    _eq("every row the screen's width", [text_width(r) for r in keyed if text_width(r) != 100], [])
+    on_key(peek, "x", 10)
+    _eq("back to the peek where it was", (peek["view"]["title"], peek["scroll"]), ("main.rs:100", peek_scroll))
     _eq("a file not there is no peek", open_peek(peek, tmp + "/gone.rs", 1), False)
     raw = tmp + "/raw.log"
     ctx.std.fs.write(raw, "a\tb\n\x1b[31mred\x1b[0m\nspin 10%\rspin 99%\n")

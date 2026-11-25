@@ -2712,9 +2712,10 @@ def render(state: dict, cols: int, rows: int) -> str:
     if state.get("tab", "console") != "console" and state["view"] == None and not state.get("help"):
         return _frame_of(state, _tab_pane(state, out, cols, rows), rows, cols)
 
-    # The console, scrolled.
+    # The console, scrolled; the keys over whatever is open, which is left
+    # as it is for when they close.
     at_top = False
-    view = state["view"]
+    view = None if state.get("help") else state["view"]
     search = state["search"]
     log = shown_lines(state)
     log_h = max(1, rows - len(out) - 3)
