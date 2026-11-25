@@ -1531,7 +1531,9 @@ def _tips_impl(ctx):
         # Only on a task with the Tips trait: one without it (`history
         # list`) still ends here, and a tip hook reads the task's context.
         if _TipsTrait in task_ctx.traits:
-            terminal_app_links_tip(task_ctx, links_written[0])
+            # A screen's scrollback writes out the URLs its builds' consoles
+            # did not while it held the terminal.
+            terminal_app_links_tip(task_ctx, links_written[0] + task_ctx.std.term.links_written)
         finished[0] = True
         color_on = task_ctx.std.io.stderr.color
         for id in order:

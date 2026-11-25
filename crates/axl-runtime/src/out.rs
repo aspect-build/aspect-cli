@@ -1368,10 +1368,24 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
         }
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(
-            bazel::console::links::Linker::new(vec![base])
-                .with_files(bazel::console::links::FileLinks::none().written(links_as_text())),
+            bazel::console::links::Linker::new(vec![base]).with_files(
+                bazel::console::links::FileLinks::none()
+                    .written(links_as_text())
+                    .counted(PRINT_WRITTEN.clone()),
+            ),
         ))
     });
+
+/// The URLs [`PRINT_LINKER`] has written out beside its links (the macOS
+/// Terminal's), for a count of what one pass of it wrote ([`links_written`]).
+static PRINT_WRITTEN: std::sync::LazyLock<bazel::console::links::WrittenCount> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How many URLs the CLI's own linker has written out beside its links so
+/// far: before and after a pass, what that pass wrote.
+pub(crate) fn links_written() -> u64 {
+    PRINT_WRITTEN.get()
+}
 
 /// How the CLI's own lines style their links: the process's theme as it is
 /// now, which a run's configs and the terminal's background may have changed.
@@ -1389,7 +1403,7 @@ pub(crate) fn linked_for_screen(line: &str) -> String {
             let base = std::env::current_dir().ok()?;
             Some(std::sync::Mutex::new(
                 bazel::console::links::Linker::new(vec![base])
-                    .with_files(bazel::console::links::FileLinks::file().written(false)),
+                    .with_files(bazel::console::links::FileLinks::none().written(false)),
             ))
         });
     match LINKER.as_ref().and_then(|l| l.lock().ok()) {

@@ -1045,6 +1045,7 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
     };
     let relink = crate::out::terminal_links();
     let as_text = crate::out::links_as_text();
+    let before = crate::out::links_written();
     let out = dump_text(&String::from_utf8_lossy(&text), max_lines, older, |line| {
         if relink && !(as_text && line.contains("://")) {
             crate::out::linked(line)
@@ -1052,12 +1053,19 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
             line.to_string()
         }
     });
+    DUMP_WRITTEN.fetch_add(crate::out::links_written() - before, Ordering::SeqCst);
     use std::io::Write as _;
     let mut err = std::io::stderr().lock();
     let _ = err.write_all(out.as_bytes());
     let _ = err.flush();
     true
 }
+
+/// The URLs the dumps have written out beside their links ([`dump_output`]):
+/// a build's console writes none out while a screen holds the terminal, so
+/// these are the ones a terminal that shows them as text has in its
+/// scrollback.
+static DUMP_WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What [`dump_output`] writes of `text`: its newest `max_lines` lines,
 /// each through `link` without its end, after a line `older` gives (`{n}`
@@ -1733,6 +1741,15 @@ fn term_methods(registry: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
+    /// How many URLs the scrollback a screen left (`dump_output`) has
+    /// written out beside its links, as a terminal that shows no link (the
+    /// macOS Terminal) has them: a build's console wrote none out while the
+    /// screen held the terminal. 0 elsewhere.
+    #[starlark(attribute)]
+    fn links_written<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<u64> {
+        Ok(DUMP_WRITTEN.load(Ordering::SeqCst))
+    }
+
     /// Whether a screen is held now, by any feature.
     #[starlark(attribute)]
     fn taken<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<bool> {
@@ -2058,6 +2075,27 @@ fn screen_methods(registry: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
+
+    /// What a dump re-links is counted when it writes a file's URL out (the
+    /// macOS Terminal, where the links tip is due), and not when it only
+    /// links it (iTerm2, VS Code, Cursor), nor for text naming no file.
+    #[test]
+    fn a_dump_counts_the_urls_it_writes_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        for (written, want) in [(true, 1), (false, 0)] {
+            let count = bazel::console::links::WrittenCount::default();
+            let mut linker = bazel::console::links::Linker::new(vec![dir.path().to_path_buf()])
+                .with_files(
+                    bazel::console::links::FileLinks::file()
+                        .written(written)
+                        .counted(count.clone()),
+                );
+            linker.link_written(b"see a.txt:1");
+            linker.link_written(b"nothing to link here");
+            assert_eq!(count.get(), want, "written out: {written}");
+        }
+    }
 
     /// A seeded line's URL, linked as the screen's linker links it (no URL
     /// written out), reaches the feed as a link the screen can open.
