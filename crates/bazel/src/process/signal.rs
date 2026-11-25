@@ -326,6 +326,23 @@ pub fn describe_process(_pid: u32) -> Option<String> {
     None
 }
 
+/// Start `cmd` with SIGINT at its default disposition, whatever the test
+/// process inherited: under `cargo test &` that is "ignored", and a child
+/// that keeps it never acts on the SIGINT a test sends it.
+#[cfg(all(test, unix))]
+pub(crate) fn default_sigint(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook only calls `signal(2)`, which is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            use nix::sys::signal::{SigHandler, Signal, signal};
+            signal(Signal::SIGINT, SigHandler::SigDfl)
+                .map(drop)
+                .map_err(std::io::Error::from)
+        })
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -333,7 +350,7 @@ mod tests {
     use std::process::{Command, Stdio};
 
     fn sleeper() -> std::process::Child {
-        Command::new("sleep")
+        default_sigint(&mut Command::new("sleep"))
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -906,7 +906,7 @@ mod tests {
         /// only sleep `exec` so the sleep is the signalled process: a shell
         /// waiting on a foreground child defers a SIGINT sent to it alone.
         fn spawn(script: &str) -> Child {
-            Command::new("sh")
+            crate::process::signal::default_sigint(&mut Command::new("sh"))
                 .arg("-c")
                 .arg(script)
                 .stdin(Stdio::null())

@@ -55,8 +55,33 @@ fn raise_first(failures: PhaseFailures) -> anyhow::Result<()> {
     }
 }
 
+/// Put SIGINT back to its default disposition for this test process, once.
+///
+/// The binary installs a SIGINT handler, so every child it spawns starts with
+/// SIGINT at its default. A test process installs none and passes on what it
+/// inherited: under `cargo test &` that is "ignored", which a `sleep` keeps
+/// and a shell cannot undo (it silently skips `trap ... INT` for a signal
+/// ignored on entry), so every test that interrupts a child fails or hangs.
+///
+/// [`eval`] and the `engine::children` tests' runtime helper call it. A test
+/// that spawns a child some other way and then signals it must call it
+/// before the spawn.
+#[cfg(unix)]
+pub(crate) fn default_sigint() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        use nix::sys::signal::{SigHandler, Signal, signal};
+        // SAFETY: installs the default disposition, no handler code runs.
+        unsafe { signal(Signal::SIGINT, SigHandler::SigDfl) }.expect("reset SIGINT");
+    });
+}
+
+#[cfg(not(unix))]
+pub(crate) fn default_sigint() {}
+
 pub fn eval(code: &str) -> EvalBuilder {
     crate::trace::telemetry_tests::install_interest_floor();
+    default_sigint();
     EvalBuilder {
         code: code.to_string(),
         with_loader: false,
