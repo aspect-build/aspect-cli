@@ -41,6 +41,41 @@ load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_s
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "did_you_mean_then", "pluralize")
 
+def _patched_files(text: str) -> list:
+    """The files a unified diff patches, as `patch -p1` names them: each
+    `+++ b/<path>` header's path, its prefix and any timestamp gone."""
+    out = []
+    for line in text.split("\n"):
+        if not line.startswith("+++ "):
+            continue
+        path = line[len("+++ "):].split("\t")[0].strip()
+        if path == "/dev/null":
+            continue
+        path = path.partition("/")[2] if "/" in path else path
+        if path and path not in out:
+            out.append(path)
+    return out
+
+def _apply_patch(ctx, patch: str):
+    """Apply one auto-fix patch with `patch -p1`, asking nothing (no
+    terminal answers it): a hunk that looks applied already is skipped, not
+    reversed (`--forward --batch`, BSD and GNU patch both). The `.rej` and
+    `.orig` files it leaves beside the files it patches are removed, only
+    those it made; what patch says goes to the task's output, as any
+    child's does."""
+    cwd = ctx.std.env.current_dir()
+    fs = ctx.std.fs
+    leftovers = []
+    for path in _patched_files(fs.read_to_string(patch)):
+        for suffix in (".rej", ".orig"):
+            leftovers.append(cwd + "/" + path + suffix)
+    before = {p: True for p in leftovers if fs.exists(p)}
+    ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
+        .current_dir(cwd).spawn().wait()
+    for p in leftovers:
+        if p not in before and fs.exists(p):
+            fs.remove_file(p)
+
 # Poll budget for pending lint files after build.wait(): remote downloads are
 # async and the BES event can arrive before the file lands. 30s is generous.
 _POST_BUILD_DOWNLOAD_TIMEOUT_MS = 30000
@@ -1155,11 +1190,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
         for patch in scoped_patches:
-            # Never a question (no terminal answers it): a hunk that looks
-            # applied already is skipped, not reversed, and leaves no reject
-            # file in the tree. BSD and GNU patch both.
-            ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--reject-file=/dev/null").arg("--input=" + patch) \
-                .current_dir(ctx.std.env.current_dir()).spawn().wait()
+            _apply_patch(ctx, patch)
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
     # Skip the `filter` phase emit when the build failed or no aspect ran:

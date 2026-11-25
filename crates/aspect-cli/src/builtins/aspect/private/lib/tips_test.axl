@@ -133,6 +133,14 @@ def _test_an_undone_silence_gives_the_tip_back(ctx):
     tips._set_silenced_from_for_test(ctx, "a", "user", False)
     _eq("undone: back where it was", _ids(tips._inspect_for_test(ctx)), ["a", "b"])
 
+    # Two silences undone in the order they were made: each back in place.
+    add_tip(ctx, id = "c", severity = TIP_WARNING, title = "T", body = "B")
+    tips._set_silenced_from_for_test(ctx, "a", "user", True)
+    tips._set_silenced_from_for_test(ctx, "b", "user", True)
+    tips._set_silenced_from_for_test(ctx, "a", "user", False)
+    tips._set_silenced_from_for_test(ctx, "b", "user", False)
+    _eq("two undone, the original order", _ids(tips._inspect_for_test(ctx)), ["a", "b", "c"])
+
 def _test_add_tip_dedup(ctx):
     """A re-emit of the same `(id, key)` within a task replaces the stored
     tip (last-wins), so a task can revise a tip it made earlier."""

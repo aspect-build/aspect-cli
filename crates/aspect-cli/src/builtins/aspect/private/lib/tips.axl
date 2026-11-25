@@ -1338,6 +1338,22 @@ def silence_sources(flag_ids, config_ids, found):
                 sources[id].append(source)
     return sources
 
+def _born(births: dict, key):
+    """Note when `key` was first seen, if it is new."""
+    if key not in births:
+        births[key] = births["next"]
+        births["next"] += 1
+
+def _insert_born(items: list, item, births: dict, key_of):
+    """Put `item` back into `items` before the first one first seen after
+    it (`births`), at the end when none was."""
+    n = births.get(key_of(item), births["next"])
+    for i, other in enumerate(items):
+        if births.get(key_of(other), births["next"]) > n:
+            items.insert(i, item)
+            return
+    items.append(item)
+
 def _tips_impl(ctx):
     """Owner feature impl. Holds the per-task tips, the silenced ids and
     what the terminal has shown in closure state. At bind time reads the
@@ -1348,10 +1364,13 @@ def _tips_impl(ctx):
     post-task hook, so it runs however the task ended."""
     state = []
 
-    # What silencing an id set aside: its stored tips with where they were,
-    # its `shows` entry and its place in `order` (-1 if none), given back
-    # where they were when it is unsilenced.
+    # What silencing an id set aside: its stored tips, its `shows` entry and
+    # whether it was in `order`, given back where they were when it is
+    # unsilenced: by when each was first stored (`born`, `born_ids`), so
+    # undoing several silences in any order keeps the original order.
     aside = {}
+    born = {"next": 0}
+    born_ids = {"next": 0}
 
     found = ctx.aspect.tips.config_silence()
     for w in found.warnings:
@@ -1455,6 +1474,7 @@ def _tips_impl(ctx):
         id = stored["id"]
         if id not in shows:
             order.append(id)
+            _born(born_ids, id)
             shows[id] = (stored.get("show", TIP_SHOW_EACH), stored.get("max_shown", TIP_MAX_SHOWN))
             shown[id] = 0
             printed[id] = {}
@@ -1609,6 +1629,7 @@ def _tips_impl(ctx):
 
         stored = _store(call_ctx, tip)
         state.append(stored)
+        _born(born, (stored["id"], stored.get("key", "")))
         _on_emit(call_ctx, stored, True, occurrence)
 
     def _collect():
@@ -1661,7 +1682,7 @@ def _tips_impl(ctx):
                 sources.pop(id)
         if id in sources and id not in silenced:
             silenced.append(id)
-            aside[id] = ([(i, t) for i, t in enumerate(state) if t["id"] == id], shows.get(id), order.index(id) if id in order else -1)
+            aside[id] = ([t for t in state if t["id"] == id], shows.get(id), id in order)
             kept = [t for t in state if t["id"] != id]
             state.clear()
             state.extend(kept)
@@ -1670,12 +1691,12 @@ def _tips_impl(ctx):
                 shows.pop(id)
         elif id not in sources and id in silenced:
             silenced.remove(id)
-            tips, show, at = aside.pop(id, ([], None, -1))
-            for i, t in tips:
+            tips, show, ordered = aside.pop(id, ([], None, False))
+            for t in tips:
                 if t not in state:
-                    state.insert(min(i, len(state)), t)
-            if at >= 0 and id not in order:
-                order.insert(min(at, len(order)), id)
+                    _insert_born(state, t, born, lambda s: (s["id"], s.get("key", "")))
+            if ordered and id not in order:
+                _insert_born(order, id, born_ids, lambda i: i)
                 shows[id] = show
 
     def _set_auto_print(v):

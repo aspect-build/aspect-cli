@@ -461,7 +461,41 @@ fn has_terminal() -> bool {
 /// A thread passing a child's output on ([`forward`]).
 struct Forwarder {
     handle: std::thread::JoinHandle<()>,
+    activity: Arc<Activity>,
 }
+
+/// What a [`forward`] thread is doing, for a wait deciding whether the
+/// child's output has all been passed on.
+#[derive(Default)]
+struct Activity {
+    /// Writing what it read: a slow reader is progress.
+    busy: std::sync::atomic::AtomicBool,
+    /// When it last read, in ms of [`Activity::now`].
+    read_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Activity {
+    fn now() -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
+
+    /// Neither writing nor having read for `grace`, counted from `since`
+    /// (the reap) at the earliest: what the child wrote before it exited is
+    /// in the pipe by then, so a quiet pipe after it is a grandchild's.
+    fn quiet_since(&self, since: u64, grace: Duration) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let last = self.read_ms.load(SeqCst).max(since);
+        !self.busy.load(SeqCst) && Self::now().saturating_sub(last) >= grace.as_millis() as u64
+    }
+}
+
+/// How long a pipe stays quiet, after its child is reaped, before its wait
+/// stops waiting on it: a grandchild holding it, writing nothing.
+const FORWARD_GRACE: Duration = Duration::from_millis(250);
 
 impl std::fmt::Debug for Forwarder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -505,6 +539,9 @@ const MAX_FORWARD_LINE: usize = 64 * 1024;
 /// `pipe`, so the child's next write fails, as it would have written there
 /// itself.
 fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwarder {
+    use std::sync::atomic::Ordering::SeqCst;
+    let activity = Arc::new(Activity::default());
+    let mine = activity.clone();
     let handle = std::thread::spawn(move || {
         use std::io::Write as _;
         let mut buf = [0u8; 8192];
@@ -526,20 +563,20 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
                 Ok(n) => {
+                    mine.busy.store(true, SeqCst);
+                    mine.read_ms.store(Activity::now(), SeqCst);
                     line.extend_from_slice(&buf[..n]);
                     let whole = line
                         .iter()
                         .rposition(|&b| b == b'\n')
                         .map(|end| end + 1)
                         .or((line.len() > MAX_FORWARD_LINE).then_some(line.len()));
-                    let written = if crate::engine::std::term::screen_holds_terminal() {
-                        match whole {
-                            Some(end) if end > shown => {
-                                crate::engine::std::term::feed_screen(stderr, &line[shown..end]);
-                                shown = end;
-                            }
-                            _ => {}
-                        }
+                    // A screen takes whole lines (a line begun before it was
+                    // taken, from its start); without one, it is shown as it
+                    // comes.
+                    let fed =
+                        crate::engine::std::term::feed_screen(stderr, &line[..whole.unwrap_or(0)]);
+                    let written = if fed {
                         Ok(())
                     } else {
                         let r = show(&line[shown..]);
@@ -551,6 +588,7 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
                         line.drain(..end);
                         shown = shown.saturating_sub(end);
                     }
+                    mine.busy.store(false, SeqCst);
                     if written.is_err() {
                         break;
                     }
@@ -558,14 +596,15 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
             }
         }
         if !line.is_empty() {
-            line.push(b'\n');
-            if crate::engine::std::term::screen_holds_terminal() {
-                crate::engine::std::term::feed_screen(stderr, &line[shown.min(line.len())..]);
+            let mut ended = line.clone();
+            ended.push(b'\n');
+            if !crate::engine::std::term::feed_screen(stderr, &ended) {
+                let _ = show(&line[shown..]);
             }
-            crate::out::copy_only(&line);
+            crate::out::copy_only(&ended);
         }
     });
-    Forwarder { handle }
+    Forwarder { handle, activity }
 }
 
 impl<'v> AllocValue<'v> for Command {
@@ -858,13 +897,16 @@ impl Child {
     /// What follows the child's exit: its output passed on, and an
     /// interactive one's screen back and the line after it.
     fn ended(&self, status: &process::ExitStatus) {
-        // Its output passed on until its pipes end, for [`FORWARD_BOUND`] at
-        // most (a grandchild holding one) or until the wait is cancelled; what
-        // is left is finished at exit.
+        // Its output passed on until its pipes end, a pipe still open (a
+        // grandchild holding it) until it has been quiet for [`FORWARD_GRACE`]
+        // since the reap, for [`FORWARD_BOUND`] at most, or until the wait is
+        // cancelled; what is left is finished at exit.
+        let reaped = Activity::now();
         let deadline = std::time::Instant::now() + FORWARD_BOUND;
         for f in self.forwarders.borrow_mut().drain(..) {
             while !f.handle.is_finished()
                 && std::time::Instant::now() < deadline
+                && !f.activity.quiet_since(reaped, FORWARD_GRACE)
                 && !self.bound.token().is_cancelled()
             {
                 std::thread::sleep(Duration::from_millis(2));

@@ -610,6 +610,9 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     );
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
     axl_types::stream::set_terminal_input(suspend, resume);
+    if alt_screen {
+        stop_with_the_screen();
+    }
     *held = Some(Held {
         generation,
         alt_screen,
@@ -827,13 +830,19 @@ pub(crate) fn suspend() -> bool {
 
 /// Hand `bytes` (whole lines) a child wrote to the screen holding the
 /// terminal, as its stderr (or stdout) capture would: a forwarder's lines
-/// go to the screen's console here and not through the process's own
-/// stderr, where the capture would copy them a second time and splice them
-/// with the CLI's.
-pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) {
-    if let Ok(held) = HELD.lock()
-        && let Some(h) = held.as_ref().filter(|h| h.alt_screen && !h.suspended)
-    {
+/// go to the screen's console here, and are kept for its replay as the
+/// capture's are, not through the process's own stderr, where the capture
+/// would copy them a second time and splice them with the CLI's. Whether a
+/// screen took them (one of its own, not given back); `bytes` empty asks
+/// only that.
+pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) -> bool {
+    let Ok(held) = HELD.lock() else {
+        return false;
+    };
+    let Some(h) = held.as_ref().filter(|h| h.alt_screen && !h.suspended) else {
+        return false;
+    };
+    if !bytes.is_empty() {
         h.capture.write(
             if stderr {
                 Source::Stderr
@@ -842,7 +851,62 @@ pub(crate) fn feed_screen(stderr: bool, bytes: &[u8]) {
             },
             bytes,
         );
+        if let Some(r) = if stderr { &h.stderr } else { &h.stdout } {
+            keep(&mut r.written.lock().unwrap(), bytes);
+        }
     }
+    true
+}
+
+/// Ctrl+Z (SIGTSTP) while a screen holds the terminal: the screen is given
+/// back first ([`suspend`]: the main screen, the shell's modes), then the
+/// process stops (SIGSTOP); once continued (`fg`) the screen is taken again,
+/// redrawn ([`resume`]). With no screen held it just stops, as by default.
+/// Installed once, with the first screen of its own; the signal handler only
+/// writes a byte to a pipe a thread reads.
+fn stop_with_the_screen() {
+    static ONCE: Once = Once::new();
+    static WAKE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+    extern "C" fn on_tstp(_: libc::c_int) {
+        let fd = WAKE.load(Ordering::SeqCst);
+        if fd >= 0 {
+            // SAFETY: write(2) is async-signal-safe; a full pipe drops it.
+            unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
+        }
+    }
+    ONCE.call_once(|| {
+        let Ok((read, write)) = std::io::pipe() else {
+            return;
+        };
+        WAKE.store(
+            std::os::fd::IntoRawFd::into_raw_fd(OwnedFd::from(write)),
+            Ordering::SeqCst,
+        );
+        let spawned = std::thread::Builder::new()
+            .name("term-tstp".into())
+            .spawn(move || {
+                let mut read = read;
+                let mut byte = [0u8; 1];
+                while std::io::Read::read(&mut read, &mut byte).is_ok_and(|n| n == 1) {
+                    let suspended = suspend();
+                    // SAFETY: stopping this process, as Ctrl+Z asked.
+                    unsafe { libc::raise(libc::SIGSTOP) };
+                    if suspended {
+                        resume();
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            // SAFETY: a handler that only calls write(2).
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = on_tstp as usize;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(libc::SIGTSTP, &action, std::ptr::null_mut());
+            }
+        }
+    });
 }
 
 /// Whether a full screen of its own holds the terminal now, not given back:
