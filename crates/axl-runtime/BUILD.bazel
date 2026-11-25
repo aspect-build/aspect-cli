@@ -18,6 +18,7 @@ rust_library(
     ],
     deps = [
         "//crates/aspect-telemetry",
+        "//crates/aspect-theme",
         "//crates/axl-proto",
         "//crates/axl-types",
         "//crates/bazel",

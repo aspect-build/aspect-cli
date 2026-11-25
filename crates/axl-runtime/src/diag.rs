@@ -3,9 +3,10 @@
 //! The Rust counterpart of the `debug` / `info` / `warn` / `error` std helpers
 //! in `lib/environment.axl`: the same `DEBUG:` / `INFO:` / `WARNING:` /
 //! `ERROR:` prefix style (mirroring Bazel's uppercase severity labels), the
-//! same ANSI colors, and the same "degrade to plain text when color is off"
-//! behavior - so a line printed from Rust is indistinguishable from one printed
-//! by an AXL task.
+//! same theme roles (`label.debug`, `label.info`, `label.warning`,
+//! `label.error`; see [`crate::theme`]), and the same "degrade to plain text
+//! when color is off" behavior - so a line printed from Rust is
+//! indistinguishable from one printed by an AXL task.
 //!
 //! Use this for user-facing subsystem messages (a backend became unreachable,
 //! a fallback fired). It is **not** the structured channel - that is
@@ -129,16 +130,16 @@ pub fn debugging() -> bool {
     verbosity() == Verbose::Debug
 }
 
-/// Severity of a diagnostic line, carrying its label and color.
+/// Severity of a diagnostic line, carrying its label and role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Severity {
-    /// Bold grey `DEBUG:` - internals a bug report needs.
+    /// `DEBUG:` - internals a bug report needs.
     Debug,
-    /// Bold cyan `INFO:` - a notable but expected runtime branch fired.
+    /// `INFO:` - a notable but expected runtime branch fired.
     Info,
-    /// Bold yellow `WARNING:` - a subsystem problem; the task continues.
+    /// `WARNING:` - a subsystem problem; the task continues.
     Warning,
-    /// Bold red `ERROR:` - a recoverable error, usually preceding a non-zero exit.
+    /// `ERROR:` - a recoverable error, usually preceding a non-zero exit.
     Error,
 }
 
@@ -153,51 +154,51 @@ impl Severity {
         }
     }
 
-    /// The SGR color-open sequence for the label, matching the AXL helpers:
-    /// every label bold, `DEBUG` grey, `INFO` cyan, `WARNING` yellow, `ERROR`
-    /// red.
-    fn color(self) -> &'static str {
+    /// The theme role of the label, as the AXL helpers use.
+    fn role(self) -> &'static str {
         match self {
-            Severity::Debug => "\x1b[1;90m",
-            Severity::Info => "\x1b[1;36m",
-            Severity::Warning => "\x1b[1;33m",
-            Severity::Error => "\x1b[1;31m",
+            Severity::Debug => "label.debug",
+            Severity::Info => "label.info",
+            Severity::Warning => "label.warning",
+            Severity::Error => "label.error",
         }
     }
 }
 
-/// SGR reset.
-const RESET: &str = "\x1b[0m";
-
-/// Format a severity line: `<LABEL>: <msg>`. The colon and message sit outside
-/// the color span, so the label degrades to a plain `LABEL:` when `colorize`
-/// is false (a non-rendering log gets no stray escapes).
+/// Format a severity line: `<LABEL>: <msg>`, the label in its role of
+/// `palette`. The colon and message sit outside the label's style, so with no
+/// palette it is a plain `LABEL:` (a non-rendering log gets no stray escapes).
 ///
 /// Pure (no I/O) so both the wording and the color gating are unit-testable;
 /// [`emit`] wraps it for the stderr side effect.
-fn format_line(sev: Severity, colorize: bool, msg: &str) -> String {
-    if colorize {
-        format!("{}{}{}: {msg}", sev.color(), sev.label(), RESET)
-    } else {
-        format!("{}: {msg}", sev.label())
+fn format_line(sev: Severity, palette: Option<&aspect_theme::Palette>, msg: &str) -> String {
+    match palette {
+        Some(p) => format!("{}: {msg}", p.paint(sev.role(), sev.label())),
+        None => format!("{}: {msg}", sev.label()),
     }
 }
 
-/// Whether to emit ANSI color: [`crate::color::console_supports_color`], the
-/// single memoized answer every line the runtime prints to stderr uses, the
-/// console's included.
-fn colorize() -> bool {
-    crate::color::console_supports_color()
+/// The process's theme when stderr takes color
+/// ([`crate::color::console_supports_color`], the single memoized answer
+/// every line the runtime prints to stderr uses, the console's included).
+fn palette() -> Option<std::sync::Arc<aspect_theme::Palette>> {
+    crate::color::console_supports_color().then(crate::theme::of_process)
 }
 
-/// Print one severity-prefixed line to stderr, colorized per [`colorize`].
+/// Print one severity-prefixed line to stderr, styled per [`palette`].
 /// The named helpers below cover the fixed severities; call this when the
 /// severity is computed.
 pub(crate) fn emit(sev: Severity, msg: &str) {
-    errln!("{}", format_line(sev, colorize(), msg));
+    emit_with(sev, palette().as_deref(), msg);
 }
 
-/// Print a bold grey `DEBUG:` line when [`debugging`]. The `trace!` macro calls
+/// [`emit`] styled with `palette` rather than the process's: for the theme's
+/// own warnings, printed while the process palette is being resolved.
+pub(crate) fn emit_with(sev: Severity, palette: Option<&aspect_theme::Palette>, msg: &str) {
+    errln!("{}", format_line(sev, palette, msg));
+}
+
+/// Print a `DEBUG:` line when [`debugging`]. The `trace!` macro calls
 /// it beside the log record it emits.
 pub fn debug(msg: &str) {
     if debugging() {
@@ -205,17 +206,17 @@ pub fn debug(msg: &str) {
     }
 }
 
-/// Print a bold cyan `INFO:` line for a notable runtime branch.
+/// Print an `INFO:` line for a notable runtime branch.
 pub fn info(msg: &str) {
     emit(Severity::Info, msg);
 }
 
-/// Print a bold yellow `WARNING:` line for a non-fatal subsystem failure.
+/// Print a `WARNING:` line for a non-fatal subsystem failure.
 pub fn warn(msg: &str) {
     emit(Severity::Warning, msg);
 }
 
-/// Print a bold red `ERROR:` line for a recoverable error (usually preceding a
+/// Print an `ERROR:` line for a recoverable error (usually preceding a
 /// non-zero exit).
 pub fn error(msg: &str) {
     emit(Severity::Error, msg);
@@ -227,19 +228,26 @@ mod tests {
 
     #[test]
     fn colorized_matches_axl_severity_style() {
-        // Colon and message outside the color span; colors match lib/environment.axl.
+        // Colon and message outside the label's style; roles match lib/environment.axl.
+        let dark = aspect_theme::Palette::aspect_dark(aspect_theme::Depth::Ansi256);
+        let line = |sev| format_line(sev, Some(&dark), "hello");
+        assert_eq!(line(Severity::Debug), "\x1b[38;5;247mDEBUG\x1b[0m: hello");
+        assert_eq!(line(Severity::Info), "\x1b[1;38;5;247mINFO\x1b[0m: hello");
         assert_eq!(
-            format_line(Severity::Info, true, "hello"),
-            "\x1b[1;36mINFO\x1b[0m: hello"
+            line(Severity::Warning),
+            "\x1b[1;38;5;221mWARNING\x1b[0m: hello"
+        );
+        assert_eq!(line(Severity::Error), "\x1b[1;38;5;203mERROR\x1b[0m: hello");
+        let unknown = aspect_theme::Palette::new(
+            aspect_theme::Theme::aspect_dark().following_terminal(),
+            Some(aspect_theme::Depth::Ansi256),
+            false,
         );
         assert_eq!(
-            format_line(Severity::Warning, true, "hello"),
-            "\x1b[1;33mWARNING\x1b[0m: hello"
-        );
-        assert_eq!(
-            format_line(Severity::Error, true, "hello"),
+            format_line(Severity::Error, Some(&unknown), "hello"),
             "\x1b[1;31mERROR\x1b[0m: hello"
         );
+        assert_eq!(format_line(Severity::Error, None, "hello"), "ERROR: hello");
     }
 
     #[test]
@@ -291,7 +299,7 @@ mod tests {
             Severity::Warning,
             Severity::Error,
         ] {
-            let line = format_line(sev, false, "hello");
+            let line = format_line(sev, None, "hello");
             assert_eq!(line, format!("{}: hello", sev.label()));
             assert!(!line.contains('\x1b'), "{sev:?} leaked an escape: {line:?}");
         }

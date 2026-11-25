@@ -181,7 +181,7 @@ def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spaw
         rc,
         announce_version,
         announce_command,
-        phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        phases.Phase(name = "build", description = "Build run target", emoji = "🔨", expanded = True),
         "Building %s" % target,
     )
     build_status = build_result.status
@@ -228,6 +228,7 @@ def _watch_loop(ctx: TaskContext, ph, target: str, forward_args: list[str], spaw
                 name = "rebuild_%d" % cycle[0],
                 description = "Rebuild run target",
                 emoji = "🔨",
+                expanded = True,
             ),
             "Rebuilding %s" % target,
             execution_log_path = detector.execution_log_path,
@@ -357,7 +358,7 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
             stream = "Building %s" % target,
         ),
         kind = "bazel_results",
-        phase = phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        phase = phases.Phase(name = "build", description = "Build run target", emoji = "🔨", expanded = True),
     )
 
     # After the phase line, so the streams are announced under the spawn they

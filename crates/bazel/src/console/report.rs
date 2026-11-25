@@ -6,8 +6,10 @@
 //! flushed what it held, so the report follows bazel's last line. A report
 //! line is styled with [`Style`] on a terminal or a recognized CI log, so it
 //! reads as aspect's rather than bazel's: an `INFO:` line as the CLI's own
-//! are (its label bold cyan, the text plain), the summary's detail lines
-//! under it dim; the recap's quoted errors stay as Bazel wrote them, with
+//! are (its label in the theme's `label.info`, the text plain), the summary's
+//! detail lines under it `muted`, the recap under a `── Error recap (N) ──`
+//! rule in `label.error`; the recap's quoted errors stay as Bazel wrote them
+//! but for each header's `ERROR` label, coloured as the live line's is, with
 //! what they name linked on a terminal ([`super::links`]).
 
 use std::collections::{HashSet, VecDeque};
@@ -228,22 +230,68 @@ impl Stats {
 
 /// How report lines are set apart from bazel's: an `INFO:` line's label in
 /// `info`, as the CLI's own `INFO:` lines have it (`axl_runtime::diag`), a
-/// detail line wrapped in `open`/`close`.
+/// detail line wrapped in `open`/`close`, the recap's rule in `recap` and the
+/// `ERROR` label of each error it quotes in `error`. Empty strings leave a
+/// line plain.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Style {
     pub open: String,
     pub close: String,
     pub info: String,
+    pub recap: String,
+    pub error: String,
 }
 
 impl Style {
-    /// The CLI's bold cyan `INFO` label, and dim grey for the detail under
-    /// it, which every terminal and CI log viewer we ship to renders.
-    pub fn dim() -> Style {
+    /// The theme's `label.info` for the `INFO` label, `muted` for the
+    /// detail under it, `label.error` for the recap's rule, and for a quoted
+    /// `ERROR` label `bazel.error` when the theme recolours Bazel's lines,
+    /// else the theme's own `label.error` (not Bazel's codes, which a
+    /// `bazel: tool` theme leaves on the live lines).
+    pub fn themed(palette: &aspect_theme::Palette) -> Style {
+        let open = palette.sgr("muted");
         Style {
-            open: "\x1b[90m".into(),
-            close: "\x1b[0m".into(),
-            info: "\x1b[1;36m".into(),
+            close: if open.is_empty() {
+                String::new()
+            } else {
+                aspect_theme::RESET.into()
+            },
+            open,
+            info: palette.sgr("label.info"),
+            recap: palette.sgr("label.error"),
+            error: palette.sgr(if palette.bazel() == aspect_theme::Bazel::Tool {
+                "label.error"
+            } else {
+                "bazel.error"
+            }),
+        }
+    }
+
+    /// `── text ──`, the recap's rule.
+    fn rule(&self, out: &mut Vec<u8>, text: &str) {
+        let line = format!("── {text} ──");
+        if self.recap.is_empty() {
+            out.extend_from_slice(line.as_bytes());
+        } else {
+            out.extend_from_slice(
+                format!("{}{line}{}", self.recap, aspect_theme::RESET).as_bytes(),
+            );
+        }
+        out.push(b'\n');
+    }
+
+    /// `line`, a quoted error's header, its leading `ERROR` label in `error`.
+    fn error_label(&self, line: Vec<u8>) -> Vec<u8> {
+        match line.strip_prefix(b"ERROR:") {
+            Some(rest) if !self.error.is_empty() => {
+                let mut out = self.error.as_bytes().to_vec();
+                out.extend_from_slice(b"ERROR");
+                out.extend_from_slice(aspect_theme::RESET.as_bytes());
+                out.push(b':');
+                out.extend_from_slice(rest);
+                out
+            }
+            _ => line,
         }
     }
 
@@ -315,8 +363,9 @@ const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
 /// draws do not count, so curses and plain lines count alike), enough to
-/// have scrolled it away. Its header says whether there were more than it
-/// repeats, never how many: in a pipe some are not recognized. Each comes
+/// have scrolled it away. Its heading (`── Error recap (2) ──`, or `── Error
+/// recap (first 2) ──`) counts those it repeats and says whether there were more,
+/// never how many: in a pipe some are not recognized. Each comes
 /// with its body (what says what went wrong, for a failed action): the lines
 /// the status surfaces' failure snippets would pick ([`excerpt::Shape::RECAP`]:
 /// the first that reads as an error, with context, and the last), the rest
@@ -524,17 +573,17 @@ impl LineProcessor for RecapErrors {
             return None;
         }
         let mut out = Vec::new();
-        // No total: in a pipe an error right after a failed action's output
-        // is not recognized as one, so the count could only understate it.
-        let header = if self.distinct.len() > self.errors.len() {
-            match self.errors.len() {
-                1 => "INFO: The first error Bazel reported:".to_string(),
-                n => format!("INFO: The first {n} errors Bazel reported:"),
-            }
+        // The count is of the errors shown, never a total: in a pipe an error
+        // right after a failed action's output is not recognized as one, so
+        // a total could only understate it.
+        let n = self.errors.len();
+        let header = if self.distinct.len() > n {
+            format!("Error recap (first {n})")
         } else {
-            "INFO: Errors Bazel reported:".to_string()
+            format!("Error recap ({n})")
         };
-        self.style.line(&mut out, &header);
+        self.style.rule(&mut out, &header);
+        let style = self.style.clone();
         let mut line = |text: &str, links: &[Known]| match self.linker.as_mut() {
             Some(l) if l.files.text => {
                 let linked = l.link_with(text.as_bytes(), links);
@@ -548,7 +597,7 @@ impl LineProcessor for RecapErrors {
                 b"  "
                     .iter()
                     .copied()
-                    .chain(line(&e.header.0, &e.header.1))
+                    .chain(style.error_label(line(&e.header.0, &e.header.1)))
                     .chain(*b"\n"),
             );
             for part in e.excerpt() {
@@ -738,17 +787,38 @@ mod tests {
         assert!(stats.collapsed().iter().all(|k| !k.incomplete));
     }
 
+    fn dark() -> aspect_theme::Palette {
+        aspect_theme::Palette::aspect_dark(aspect_theme::Depth::Ansi256)
+    }
+
     /// A report's `INFO:` line has the CLI's own label, its text plain; a
-    /// detail line under it is dim.
+    /// detail line under it is muted.
     #[test]
     fn an_info_line_looks_as_the_clis_own_do() {
         let mut out = Vec::new();
-        Style::dim().line(&mut out, "INFO: Errors Bazel reported:");
-        Style::dim().line(&mut out, "  3 more like: x");
+        Style::themed(&dark()).line(&mut out, "INFO: The raw console is in x");
+        Style::themed(&dark()).line(&mut out, "  3 more like: x");
+        Style::themed(&dark()).rule(&mut out, "Error recap (3)");
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "\x1b[1;36mINFO\x1b[0m: Errors Bazel reported:\n\x1b[90m  3 more like: x\x1b[0m\n"
+            "\x1b[1;38;5;247mINFO\x1b[0m: The raw console is in x\n\x1b[38;5;247m  3 more like: x\x1b[0m\n\x1b[1;38;5;203m── Error recap (3) ──\x1b[0m\n"
         );
+        assert_eq!(
+            Style::themed(&dark()).error_label(b"ERROR: //a:b failed".to_vec()),
+            b"\x1b[1;38;5;203mERROR\x1b[0m: //a:b failed".to_vec(),
+        );
+        assert_eq!(
+            Style::default().error_label(b"ERROR: //a:b failed".to_vec()),
+            b"ERROR: //a:b failed".to_vec(),
+        );
+        let mono = aspect_theme::Palette::new(
+            aspect_theme::Theme::builtin("mono").unwrap(),
+            Some(aspect_theme::Depth::Ansi256),
+            false,
+        );
+        let mut out = Vec::new();
+        Style::themed(&mono).line(&mut out, "INFO: x");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[1mINFO\x1b[0m: x\n");
     }
 
     /// Run `records` through `p`, coloured as bazel colours its messages
@@ -784,7 +854,7 @@ mod tests {
         records.push("ERROR: Build did NOT complete successfully");
         assert_eq!(
             feed(&mut p, &records),
-            "INFO: The first 2 errors Bazel reported:\n  \
+            "── Error recap (first 2) ──\n  \
              ERROR: /ws/BUILD:1:1: Compiling a.cc failed\n  \
              ERROR: /ws/BUILD:2:1: Compiling b.cc failed\n"
         );
@@ -804,7 +874,7 @@ mod tests {
         records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
         assert_eq!(
             feed(&mut p, &records),
-            "INFO: Errors Bazel reported:\n  \
+            "── Error recap (1) ──\n  \
              ERROR: /ws/BUILD:1:1: Executing genrule //dep:bad failed: (Exit 3)\n    \
              boom\n    app/x.cc:3: error: what went wrong\n    more output\n    \
              more output\n    … 2 more lines\n    more output\n"
@@ -824,7 +894,7 @@ mod tests {
         records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
         assert_eq!(
             feed(&mut p, &records),
-            "INFO: Errors Bazel reported:\n  \
+            "── Error recap (1) ──\n  \
              ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)\n    \
              … 7 more lines\n    In file included from a.h:1:\n    \
              a.cc:3:4: error: no member named 'x'\n    note: here\n    \
@@ -888,7 +958,7 @@ mod tests {
         records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
         assert_eq!(
             feed(&mut p, &records),
-            "INFO: Errors Bazel reported:\n  \
+            "── Error recap (1) ──\n  \
              ERROR: Traceback (most recent call last):\n    \
              … 1 more line\n    \tFile \"/ws/b.bzl\", line 2\n    \
              \tFile \"/ws/c.bzl\", line 3\n    \tFile \"/ws/d.bzl\", line 4\n    \
@@ -960,7 +1030,7 @@ mod tests {
         ));
         let out = feed(&mut p, &["ERROR: BUILD.bazel:1:1: see https://x.test/why"]);
         assert!(
-            out.starts_with("INFO: Errors Bazel reported:\n  ERROR: \x1b]8;;file-test://"),
+            out.starts_with("── Error recap (1) ──\n  ERROR: \x1b]8;;file-test://"),
             "{out:?}"
         );
         assert!(
@@ -1105,7 +1175,7 @@ mod tests {
         records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
         assert_eq!(
             feed(&mut p, &records),
-            "INFO: The first error Bazel reported:\n  ERROR: A\n"
+            "── Error recap (first 1) ──\n  ERROR: A\n"
         );
     }
 
@@ -1136,11 +1206,11 @@ mod tests {
             crate::console::links::LinkFormat::parse("vscode").unwrap(),
         )
         .written(true)
-        .styled(true);
+        .styled(Some(crate::console::links::LinkStyle::of(&dark())));
         let mut p = Summary::new(
             Arc::new(Stats::default()),
             RawLogState::Kept(log, Default::default()),
-            Style::dim(),
+            Style::themed(&dark()),
             Some(links),
         );
         let out = feed(&mut p, &[]);

@@ -129,16 +129,16 @@ def _wait_for_warming(std, environment):
 
 def _section_heading(label, color):
     """Sub-section heading: blank line + `• <label>`, blue when `color`."""
-    return "\n" + ansi.style("• " + label, ansi.BLUE, color)
+    return "\n" + ansi.style("• " + label, ansi.ACCENT, color)
 
 def _status_marker(kind, color):
     """Status glyph: ✓ green, ✗ red, ? yellow (colored when `color`). Used
     as the leading char on a status line under a sub-section heading."""
     if kind == "ok":
-        return ansi.style("✓", ansi.GREEN, color)
+        return ansi.style("✓", ansi.SUCCESS, color)
     if kind == "fail":
-        return ansi.style("✗", ansi.RED, color)
-    return ansi.style("?", ansi.YELLOW, color)
+        return ansi.style("✗", ansi.ERROR, color)
+    return ansi.style("?", ansi.PROMPT, color)
 
 def _display_warming(environment, color):
     """
@@ -218,7 +218,7 @@ def render_local_job_history(history):
     Returns the rendered section with a trailing newline.
     """
     lines = [line for line in history.split("\n") if line]
-    out = [ansi.style("• Job History", ansi.BLUE)]
+    out = [ansi.style("• Job History", ansi.ACCENT)]
     out.append("\tNumber of builds on this runner: %d" % len(lines))
     if lines:
         out.append("\tMost recently:")
@@ -282,7 +282,7 @@ def _display_runner_health(environment, job_history, color):
     call). The caller is responsible for snapshotting it. Without `color`
     the saved report is printed with its ANSI stripped.
     """
-    print(ansi.style("Runner Health", ansi.seq("1;4;34"), color))
+    print(ansi.style("Runner Health", ansi.TITLE, color))
 
     if not environment.runner.last_health_check:
         print("Health check has not yet been run on this runner")

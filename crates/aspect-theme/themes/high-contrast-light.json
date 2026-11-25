@@ -1,0 +1,30 @@
+{
+  "name": "high-contrast-light",
+  "family": "high-contrast",
+  "description": "White background, every text role at 7:1 or better at 24-bit and chrome at 4.5:1.",
+  "appearance": "light",
+  "extends": "aspect-light",
+  "roles": {
+    "text": "#000000",
+    "muted": { "rgb": "#3b4048", "256": 238, "16": "default", "ansi": "default" },
+    "subtle": { "rgb": "#5f6670", "256": 241, "16": "bright-black" },
+    "accent": { "rgb": "#0b47ad", "256": 24, "16": "blue" },
+    "success": { "rgb": "#005a66", "256": 23, "16": "green" },
+    "warning": { "rgb": "#663c00", "256": 58, "16": "yellow" },
+    "error": { "rgb": "#9a0f45", "256": 125, "16": "red" },
+    "link.hover": { "fg": { "rgb": "#062a66", "256": 17, "16": "blue" }, "bold": true, "underline": true },
+    "selection": { "fg": "#000000", "bg": { "rgb": "#a9c7f5", "256": 153 }, "16": { "reverse": true } },
+    "border": "@muted",
+    "link": { "fg": "@accent", "bold": true, "underline": true },
+    "tip.important": { "fg": { "rgb": "#4925f9", "256": 57, "16": "magenta" }, "bold": true },
+    "syntax.text": "#000000",
+    "syntax.comment": "#4a515a",
+    "syntax.variable": "#8b0f1f",
+    "syntax.constant": "#003d99",
+    "syntax.type": "#4b1fa0",
+    "syntax.string": "#032f62",
+    "syntax.escape": "#0b5a1f",
+    "syntax.function": "#4b1fa0",
+    "syntax.keyword": "#9a0f45"
+  }
+}

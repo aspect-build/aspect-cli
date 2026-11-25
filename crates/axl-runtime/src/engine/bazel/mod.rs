@@ -99,6 +99,10 @@ fn console_for<'v>(
                     show_colour: output::user_choice(flags, "color"),
                     progress: t.progress
                         && output::user_choice(flags, "show_progress") != Some(false),
+                    palette: crate::theme::shown(
+                        Env::from_eval(eval)?,
+                        output::user_choice(flags, "color"),
+                    ),
                 });
                 flags.extend(config.bazel_flags().into_iter().map(str::to_string));
                 Some(config)
@@ -1449,12 +1453,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = 120)] max_width: i64,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
-        let root = Env::from_eval(eval)?.bazel_root_dir.clone();
+        let env = Env::from_eval(eval)?;
+        let root = env.bazel_root_dir.clone();
+        let palette = ansi.then(|| env.theme.get());
         let home = std::env::home_dir();
         let redact = bazel::bes::redact::redactor(rc.all_option_values());
         Ok(rc.announce(
             &command,
-            ansi,
+            palette.as_deref(),
             max_width.max(0) as usize,
             &root,
             home.as_deref(),

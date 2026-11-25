@@ -53,6 +53,17 @@ pub struct Env {
     /// `std.io.<stream>.color`. The process's own unless a test harness sets
     /// a snapshot.
     pub stream_color: StreamColor,
+    /// The colour theme at the terminal's depth, behind `ctx.std.theme`
+    /// ([`crate::theme`]), resolved again once the configs have set
+    /// `ctx.theme`. Ungated: a stream's colour is still `stream_color`'s to
+    /// allow. The process's own unless a test harness resolves one from a
+    /// snapshot.
+    pub theme: crate::theme::ThemeSlot,
+    /// What [`Env::theme`] is resolved from, and resolved again from: the
+    /// process's own unless a test harness sets a snapshot.
+    pub theme_inputs: Arc<crate::theme::Inputs>,
+    /// What the run's `config.axl` files set through `ctx.theme`.
+    pub theme_config: Arc<std::sync::Mutex<crate::theme::AxlLayers>>,
     /// Whether the run is on Buildkite ([`crate::ci::buildkite_from`]), read
     /// once when the `Env` is built. The process's own unless a test harness
     /// sets a snapshot.
@@ -85,7 +96,7 @@ impl Env {
         // First one wins: a process resolves the root once, and a later `Env`
         // (the test harness builds several) does not move it.
         let _ = ASPECT_ROOT_DIR.set(aspect_root_dir.clone());
-        Self {
+        let env = Self {
             cli_version,
             aspect_root_dir,
             bazel_root_dir,
@@ -95,11 +106,16 @@ impl Env {
             telemetry: Arc::default(),
             history: Arc::new(History::at(History::default_root(), Retention::default())),
             stream_color: StreamColor::of_process(),
+            theme: crate::theme::ThemeSlot::new(crate::theme::of_process()),
+            theme_inputs: Arc::new(crate::theme::Inputs::of_process()),
+            theme_config: Arc::default(),
             buildkite: crate::ci::buildkite_from(|name| std::env::var_os(name)),
             coding_agent: crate::agent::detected(|name| std::env::var_os(name)),
             verbose: crate::diag::Verbose::from_env(|name| std::env::var_os(name)),
             config_editor: crate::out::config_link_format,
-        }
+        };
+        crate::theme::register(&env.theme_inputs, &env.theme);
+        env
     }
 
     pub fn from_eval<'v, 'a>(eval: &'a Evaluator<'v, '_, '_>) -> anyhow::Result<&'a Env> {

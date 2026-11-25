@@ -1,0 +1,29 @@
+{
+  "name": "aspect-light",
+  "family": "aspect",
+  "description": "The default family's light variant: the same roles deepened to 4.5:1 or better on white.",
+  "appearance": "light",
+  "syntax_theme": "InspiredGitHub",
+  "roles": {
+    "muted": { "rgb": "#5f6670", "256": 241, "16": "default", "ansi": "bright-black" },
+    "subtle": { "rgb": "#8c939d", "256": 246, "16": "bright-black" },
+    "accent": { "rgb": "#2160d0", "256": 26, "16": "blue" },
+    "success": { "rgb": "#0a7360", "256": 29, "16": "green" },
+    "warning": { "rgb": "#7a4e00", "256": 94, "16": "yellow" },
+    "error": { "rgb": "#c41d48", "256": 161, "16": "red" },
+    "link.hover": { "fg": { "rgb": "#0b3d91", "256": 19, "16": "blue" }, "bold": true, "underline": true },
+    "selection": { "bg": { "rgb": "#cfe0fb", "256": 189 }, "16": { "reverse": true } },
+    "hover": { "bg": { "rgb": "#e1e5eb", "256": 254 }, "16": { "underline": true } },
+    "search.match": { "bg": { "rgb": "#fff0a8", "256": 229 }, "16": { "bold": true, "underline": true } },
+    "tip.important": { "fg": { "rgb": "#8250df", "256": 98, "16": "magenta" }, "bold": true },
+    "syntax.text": "#24292e",
+    "syntax.comment": "#6a737d",
+    "syntax.variable": "#b31d28",
+    "syntax.constant": "#005cc5",
+    "syntax.type": "#6f42c1",
+    "syntax.string": "#032f62",
+    "syntax.escape": "#22863a",
+    "syntax.function": "#6f42c1",
+    "syntax.keyword": { "rgb": "#d73a49", "256": 161 }
+  }
+}

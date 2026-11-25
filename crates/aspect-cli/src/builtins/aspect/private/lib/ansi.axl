@@ -1,41 +1,39 @@
-"""Shared ANSI/SGR sequences and helpers — the single source for terminal styling.
+"""Shared ANSI/SGR sequences and helpers, the single source for terminal styling.
 
-Callers decide whether to emit color (gate on the `color` of the stream they
-write to: `std.io.stderr.color` for `print` and the console lines,
-`std.io.stdout.color` for stdout); this only builds the sequences.
+Colours are the theme's roles. The named constants (`ansi.ERROR`,
+`ansi.MUTED`, …) are role names, and `style` and `code` resolve them in the
+run's theme (`@std//theme.axl`, the same as `ctx.std.theme`) when they are
+called, so the colour follows the theme and what is known of the background
+even from a module's top level. Callers decide whether to emit colour: they
+gate on the `color` of the stream they write to (`std.io.stderr.color` for
+`print` and the console lines, `std.io.stdout.color` for stdout).
 """
+
+load("@std//theme.axl", "theme")
 
 _CSI = "\x1b["
 _RESET = _CSI + "0m"
 
 def _seq(params: str) -> str:
-    """A full SGR escape from raw `params`, e.g. `seq("1;36")` → bold cyan.
-    For combos and runtime-configured codes; prefer the named constants."""
+    """A full SGR escape from raw `params`, e.g. `seq("1;36")`. For an escape
+    no role covers; prefer a role."""
     return _CSI + params + "m"
 
+def _code(code: str, enabled: bool = True) -> str:
+    """The escape `code` stands for: a role (a constant here, or a name such
+    as `"tip.label"`) in the run's theme, or an escape from `seq`; "" when not
+    `enabled` or the role has no styling."""
+    if not enabled or not code:
+        return ""
+    if code.startswith("\x1b"):
+        return code
+    return theme.sgr(code, stream = True)
+
 def _style(text: str, code: str, enabled: bool = True) -> str:
-    """`text` wrapped in `code` (a constant here or `seq(...)`) then reset when
+    """`text` in `code` (a role or an escape, as `code` takes) then reset when
     `enabled`, else bare `text`."""
-    return code + text + _RESET if enabled else text
-
-# Default phase-label highlight when ASPECT_CLI_HIGHLIGHT_COLOR is unset:
-# bold cyan. The env var holds SGR params (e.g. `94`, `38;5;75`); empty
-# disables the highlight color.
-_DEFAULT_HIGHLIGHT_COLOR = "1;36"
-
-def _highlight_style(std, enabled: bool = True) -> str:
-    """SGR prefix for a styled highlight label (phase headers, …), or "" when
-    color is off. Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR params); unset →
-    bold cyan, empty → no color. Like `style`, the caller gates `enabled`,
-    on `std.io.stderr.color` for a console line."""
-    if not enabled:
-        return ""
-    color_arg = std.env.var("ASPECT_CLI_HIGHLIGHT_COLOR")
-    if color_arg == None:
-        color_arg = _DEFAULT_HIGHLIGHT_COLOR
-    if not color_arg:
-        return ""
-    return _seq(color_arg)
+    sgr = _code(code, enabled)
+    return sgr + text + _RESET if sgr else text
 
 # Around text `print()` never links (`unlinked`): APC strings, which the
 # runtime's linker takes out, and a terminal ignores.
@@ -51,7 +49,7 @@ def _unlinked(text: str) -> str:
 
 def _strip(text: str) -> str:
     """`text` with ANSI CSI (`\\x1b[`…final-byte) and OSC (`\\x1b]`…BEL) escapes,
-    and `unlinked`'s markers, removed. Character walk — the runtime has no
+    and `unlinked`'s markers, removed. Character walk: the runtime has no
     regex module."""
     text = text.replace(_UNLINKED_START, "").replace(_UNLINKED_END, "")
     if not text or "\x1b" not in text:
@@ -93,27 +91,33 @@ def _strip(text: str) -> str:
 
 ansi = namespace(
     RESET = _RESET,
-    BOLD = _CSI + "1m",
-    DIM = _CSI + "2m",
     ITALIC = _CSI + "3m",
     ITALIC_OFF = _CSI + "23m",
-    RED = _CSI + "31m",
-    GREEN = _CSI + "32m",
-    YELLOW = _CSI + "33m",
-    BLUE = _CSI + "34m",
-    CYAN = _CSI + "36m",
-    GREY = _CSI + "90m",
-    # The CLI's severity labels, every one bold, as `crate::diag` writes them.
-    DEBUG_LABEL = _CSI + "1;90m",
-    INFO_LABEL = _CSI + "1;36m",
-    WARNING_LABEL = _CSI + "1;33m",
-    ERROR_LABEL = _CSI + "1;31m",
-    ORANGE = _CSI + "38;5;208m",
     CLEAR_LINE = _CSI + "2K",
     MOVE_UP = _CSI + "1A",
+    # Roles, by name; see the module docs.
+    STRONG = "strong",
+    MUTED = "muted",
+    SUBTLE = "subtle",
+    ACCENT = "accent",
+    SUCCESS = "success",
+    WARNING = "warning",
+    ERROR = "error",
+    HEADING = "heading",
+    TITLE = "title",
+    HIGHLIGHT = "highlight",
+    PROGRESS = "progress",
+    PROMPT = "prompt",
+    LINK = "link",
+    LINK_QUIET = "link.quiet",
+    DEBUG_LABEL = "label.debug",
+    INFO_LABEL = "label.info",
+    SUCCESS_LABEL = "label.success",
+    WARNING_LABEL = "label.warning",
+    ERROR_LABEL = "label.error",
+    code = _code,
     seq = _seq,
     style = _style,
     strip = _strip,
     unlinked = _unlinked,
-    highlight_style = _highlight_style,
 )

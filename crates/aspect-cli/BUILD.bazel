@@ -6,6 +6,7 @@ load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binar
 # `-debug-` diagnostic variant so the two cannot drift apart.
 DEPS = [
     "//crates/aspect-telemetry",
+    "//crates/aspect-theme",
     "//crates/axl-runtime",
     "@crates//:anyhow",
     "@crates//:backtrace",
@@ -174,6 +175,20 @@ rust_test(
     deps = [
         "//crates/axl-runtime",
         "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "theme_test",
+    srcs = ["tests/theme.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/theme.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
         "@crates//:tempfile",
     ],
 )

@@ -1,0 +1,19 @@
+{
+  "name": "ansi",
+  "family": "ansi",
+  "description": "Only the terminal's own 16 colours, so it follows the terminal's theme on any background. The normal eight, not the bright ones (Solarized and others map those to greys); muted is the terminal's own text, since bright-black vanishes in Solarized Dark.",
+  "appearance": "any",
+  "roles": {
+    "text": "default",
+    "muted": "default",
+    "subtle": "bright-black",
+    "accent": "cyan",
+    "success": "green",
+    "warning": "yellow",
+    "error": "red",
+    "link.hover": { "fg": "@accent", "bold": true, "underline": true },
+    "selection": { "reverse": true },
+    "hover": { "underline": true },
+    "tip.important": { "fg": "magenta", "bold": true }
+  }
+}

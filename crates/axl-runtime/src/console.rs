@@ -36,8 +36,9 @@
 //! - On Buildkite, `header`, `phase`, `verdict` and `section` open log
 //!   sections. The section marker is printed for them, leading whitespace is
 //!   dropped so it is never untitled, and a blank render is replaced by the
-//!   preset's text (or `full`'s, `plain`'s for a preset without emojis), so
-//!   collapsing and the failing-phase expansion survive every layout.
+//!   preset's text (or `emoji`'s for a preset with emojis, `full`'s for one
+//!   without), so collapsing and the failing-phase expansion survive every
+//!   layout.
 //!
 //! The base preset is the first of these that applies: `template_preset` typed
 //! on the command line, `template_preset` set in a `config.axl`, [`AGENT_PRESET`]
@@ -76,7 +77,11 @@ use crate::suggest;
 /// Every slot's context also carries `buildkite` (bool) and `task`
 /// (`kind`, `group`, `name`, `path`). Where a slot has `highlight_style`, it
 /// is the ANSI escape that opens the line's highlight and `highlight_reset`
-/// the one that closes it; both are empty when color is off.
+/// the one that closes it; both are empty when color is off. Every slot also
+/// gets a `<role>_style` key for each of [`LAYOUT_ROLES`], a `.` in the role
+/// read as `_` (`phase.title` is `phase_title_style`), the escape that opens
+/// the theme's role, and `reset`, which closes any of them; all are empty when
+/// color is off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
     /// Identity line above the header, shown only on a TTY or a recognized CI
@@ -87,19 +92,23 @@ pub enum Slot {
     Header,
     /// A phase entry (off Buildkite) or a phase's section (on Buildkite).
     /// Context: `title`, `emoji`, `highlight_style`, `highlight_reset`,
-    /// `text`.
+    /// `text`, `continued` (an update to the phase already shown, rather
+    /// than its start).
     Phase,
     /// A mid-phase update. Context: `text`; `title`, `emoji`,
     /// `highlight_style`, `highlight_reset` when the update names its phase.
     Progress,
     /// Closing line, styled in the verdict's color. Context: `verdict`
-    /// (`passed` | `flagged` | `failed`), `glyph`, `shortcode`, `verb`,
-    /// `highlight_style`, `highlight_reset`, `label`, `exit_code`,
-    /// `exit`, `elapsed`, `elapsed_ms`, `timing`, `conclusion`, `breakdown`,
-    /// `plain_breakdown` (the same without phase emojis),
-    /// and `phases` (every recorded phase, the synthetic `init` included:
-    /// `name`, `title`, `emoji`, `description`, `duration`, `duration_ms`,
-    /// `interrupted`).
+    /// (`passed` | `flagged` | `failed`), `cancelled` (the run was
+    /// interrupted: exit 130, which `full` shows as `✗ Cancelled … (exit
+    /// 130)` in `verdict.cancelled`, on Buildkite too; the other presets
+    /// show it as a failure), `glyph`, `shortcode`, `verb`, `highlight_style`,
+    /// `highlight_reset`, `label`, `exit_code`, `exit`, `elapsed`,
+    /// `elapsed_ms`, `timing`, `conclusion`, `breakdown` (` — 🔨 Build 1.0s`),
+    /// `plain_breakdown` (the same without phase emojis), `timings`
+    /// (` · Build 1.0s`) and `phases` (every recorded phase, the synthetic
+    /// `init` included: `name`, `title`, `emoji`, `description`, `duration`,
+    /// `duration_ms`, `interrupted`).
     Verdict,
     /// A Buildkite log section a task or feature opens itself, such as the
     /// Workflows runner metadata; only printed on Buildkite. Context: `icon`
@@ -167,7 +176,7 @@ impl Slot {
 pub struct Preset {
     pub name: &'static str,
     /// Its lines carry emojis and Buildkite emoji shortcodes, so a blank
-    /// Buildkite section falls back to `full`'s text rather than `plain`'s.
+    /// Buildkite section falls back to `emoji`'s text rather than `full`'s.
     emoji: bool,
     /// Detail lines print under it unless the `verbose` arg says otherwise.
     verbose: bool,
@@ -232,14 +241,150 @@ macro_rules! verdict_icon {
     };
 }
 
-/// The layout Aspect has always printed, and a blank Buildkite section's last
-/// fallback.
+/// The theme roles the `full` layout styles its parts with: the task's line
+/// (`task` for its glyph and verb, `task.label` for what runs), a phase's
+/// heading (`phase`, `phase.title`), its updates (`phase.update` for the
+/// glyph, `phase.text`), and the verdict (`verdict.success`,
+/// `verdict.failure`, `verdict.cancelled` for its glyph, `verdict.verb`).
+/// Every slot gets their escapes ([`Slot`]). With the glyph macros below,
+/// the one place the layout's look is chosen.
+pub const LAYOUT_ROLES: [&str; 10] = [
+    "task",
+    "task.label",
+    "phase",
+    "phase.title",
+    "phase.update",
+    "phase.text",
+    "verdict.success",
+    "verdict.failure",
+    "verdict.cancelled",
+    "verdict.verb",
+];
+
+/// A heading's glyph, the task's and each phase's.
+macro_rules! heading_glyph {
+    () => {
+        "▸"
+    };
+}
+
+/// An update's glyph.
+macro_rules! update_glyph {
+    () => {
+        "▹"
+    };
+}
+
+/// A passed or flagged verdict's glyph.
+macro_rules! success_glyph {
+    () => {
+        "✓"
+    };
+}
+
+/// A failed or interrupted verdict's glyph.
+macro_rules! failure_glyph {
+    () => {
+        "✗"
+    };
+}
+
+/// `$text` in the role whose escape is the context key `$style`, closed only
+/// when the role has one.
+macro_rules! styled {
+    ($style:literal, $text:expr) => {
+        concat!(
+            "{{ ",
+            $style,
+            " }}",
+            $text,
+            "{% if ",
+            $style,
+            " %}{{ reset }}{% endif %}"
+        )
+    };
+}
+
+/// A phase's text or a later update, `▹ text`.
+macro_rules! update_line {
+    () => {
+        concat!(
+            styled!("phase_update_style", update_glyph!()),
+            " ",
+            styled!("phase_text_style", "{{ text }}")
+        )
+    };
+}
+
+/// The default layout, without emojis, and a blank Buildkite section's last
+/// fallback for a preset without them. The same text on a terminal and in a
+/// plain CI log.
+///
+/// Off Buildkite a phase starts with its heading, `▸ Title`, set off by a
+/// blank line; its text and every later update are `▹ …` lines. They are not
+/// indented: indented lines after a progress row are taken for Bazel's
+/// progress area. On Buildkite the heading and its first update share the
+/// section title, `Title · text`, with no glyph; only the task's line
+/// carries `:aspect:`.
+const FULL: Preset = Preset {
+    name: "full",
+    emoji: false,
+    verbose: true,
+    banner: "{{ line }}\n\n",
+    header: concat!(
+        "{% if buildkite %}:aspect: {% else %}",
+        styled!("task_style", heading_glyph!()),
+        " {% endif %}",
+        styled!("task_style", "Running"),
+        " ",
+        styled!("task_label_style", "{{ label }}"),
+    ),
+    phase: concat!(
+        "{% if buildkite %}",
+        styled!("phase_title_style", "{{ title }}"),
+        "{% if text %} · {{ text }}{% endif %}",
+        "{% else %}",
+        "{% if not continued %}\n",
+        styled!("phase_style", heading_glyph!()),
+        " ",
+        styled!("phase_title_style", "{{ title }}"),
+        "{% if text %}\n{% endif %}{% endif %}",
+        "{% if text %}",
+        update_line!(),
+        "{% endif %}",
+        "{% endif %}",
+    ),
+    progress: update_line!(),
+    verdict: concat!(
+        "{% if not buildkite %}\n{% endif %}",
+        "{% if cancelled %}",
+        styled!("verdict_cancelled_style", failure_glyph!()),
+        "{% elif verdict == 'failed' %}",
+        styled!("verdict_failure_style", failure_glyph!()),
+        "{% else %}",
+        styled!("verdict_success_style", success_glyph!()),
+        "{% endif %} ",
+        styled!(
+            "verdict_verb_style",
+            "{% if cancelled %}Cancelled{% else %}{{ verb }}{% endif %}"
+        ),
+        " {{ label }}{% if exit_code %} (exit {{ exit_code }}){% endif %}{{ timing }}",
+        "{% if conclusion %} · {{ conclusion }}{% endif %}{{ timings }}",
+    ),
+    section: "{{ title }}",
+    tip: tip_line!(""),
+};
+
+/// The lines Aspect printed before `full` dropped its emojis, and a blank
+/// Buildkite section's last fallback for a preset with them. On Buildkite,
+/// as under every preset, a phase that runs Bazel and the verdict now open
+/// expanded (`+++`); the markers are the runtime's, not the templates'.
 ///
 /// Off Buildkite a phase line is set off by a blank line and its emoji sits
 /// inside the highlight; on Buildkite the line is a section title, so the
 /// emoji leads it and a phase without one shows `:aspect:`.
-const FULL: Preset = Preset {
-    name: "full",
+const EMOJI: Preset = Preset {
+    name: "emoji",
     emoji: true,
     verbose: true,
     // Jinja drops one trailing newline, so two keep the blank line under it.
@@ -262,27 +407,6 @@ const FULL: Preset = Preset {
     tip: tip_line!("{{ emoji }} "),
 };
 
-/// `full` without emojis or Buildkite emoji shortcodes.
-const PLAIN: Preset = Preset {
-    name: "plain",
-    emoji: false,
-    verbose: true,
-    banner: FULL.banner,
-    header: concat!("{% if not buildkite %}→ {% endif %}", header_text!()),
-    phase: concat!(
-        "{% if not buildkite %}\n→ {% endif %}",
-        "{{ highlight_style }}{{ title }}{{ highlight_reset }}{% if text %} · {{ text }}{% endif %}",
-    ),
-    progress: "→ {% if title %}{{ highlight_style }}{{ title }}{{ highlight_reset }} · {% endif %}{{ text }}",
-    verdict: concat!(
-        "{% if not buildkite %}\n→ {% endif %}",
-        verdict_text!(),
-        "{{ plain_breakdown }}"
-    ),
-    section: "{{ title }}",
-    tip: tip_line!(""),
-};
-
 const COMPACT: Preset = Preset {
     name: "compact",
     emoji: true,
@@ -297,23 +421,27 @@ const COMPACT: Preset = Preset {
         verdict_text!()
     ),
     section: "",
-    tip: PLAIN.tip,
+    tip: FULL.tip,
 };
 
 /// `compact` without emojis or Buildkite emoji shortcodes, for a coding agent
 /// reading the output. Its own preset so it can change without changing
-/// `compact`.
+/// `compact`. On Buildkite its sections carry their bare titles, with no
+/// glyph or `:aspect:`.
 const AGENT: Preset = Preset {
     name: "agent",
     emoji: false,
     verbose: false,
     banner: "",
-    header: "",
-    phase: "",
+    header: concat!("{% if buildkite %}", header_text!(), "{% endif %}"),
+    phase: concat!(
+        "{% if buildkite %}{{ highlight_style }}{{ title }}{{ highlight_reset }}",
+        "{% if text %} · {{ text }}{% endif %}{% endif %}",
+    ),
     progress: "",
     verdict: concat!("{% if not buildkite %}→ {% endif %}", verdict_text!()),
-    section: "",
-    tip: PLAIN.tip,
+    section: "{{ title }}",
+    tip: FULL.tip,
 };
 
 const SILENT: Preset = Preset {
@@ -326,11 +454,17 @@ const SILENT: Preset = Preset {
     progress: "",
     verdict: "",
     section: "",
-    tip: FULL.tip,
+    tip: EMOJI.tip,
 };
 
 /// Built-in presets, in the order `--help` lists them.
-pub const PRESETS: [&Preset; 5] = [&FULL, &PLAIN, &COMPACT, &AGENT, &SILENT];
+pub const PRESETS: [&Preset; 5] = [&FULL, &EMOJI, &COMPACT, &AGENT, &SILENT];
+
+/// A preset that is gone, and what to say in its place.
+const REMOVED_PRESETS: [(&str, &str); 1] = [(
+    "plain",
+    "was removed: \"full\" is the layout without emojis, and \"emoji\" the one with them",
+)];
 
 /// The preset a run uses when nothing selects another.
 pub const DEFAULT_PRESET: &str = FULL.name;
@@ -538,6 +672,9 @@ pub struct Console {
     warned: Mutex<HashSet<Slot>>,
     /// Config warnings, printed under the header; see [`Console::warnings`].
     warnings: Vec<String>,
+    /// The `<role>_style` keys and `reset` every slot's context gets; see
+    /// [`Console::with_palette`].
+    styles: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for Preset {
@@ -604,7 +741,15 @@ impl Console {
             task,
             warned: Mutex::new(HashSet::new()),
             warnings: Vec::new(),
+            styles: layout_styles(None),
         }
+    }
+
+    /// This console with [`LAYOUT_ROLES`] styled from `palette`, when the
+    /// console lines carry color ([`Host::color`]).
+    pub fn with_palette(mut self, palette: &aspect_theme::Palette) -> Console {
+        self.styles = layout_styles(self.host.color.then_some(palette));
+        self
     }
 
     /// This console with `warnings` about its config, such as
@@ -652,11 +797,14 @@ impl Console {
     /// keys. Returns `""` for a slot the layout leaves blank, except where
     /// Buildkite needs the line to open a section.
     pub fn render(&self, slot: Slot, context: JinjaValue) -> String {
-        let context = minijinja::context! {
-            buildkite => self.host.buildkite,
-            task => JinjaValue::from_serialize(&self.task),
-            ..context
-        };
+        let context = minijinja::value::merge_maps([
+            minijinja::context! {
+                buildkite => self.host.buildkite,
+                task => JinjaValue::from_serialize(&self.task),
+                ..context
+            },
+            JinjaValue::from_serialize(&self.styles),
+        ]);
         let rendered = match self.overrides.get(&slot) {
             None => render_builtin(self.preset, slot, &context),
             Some(template) => render_str(template, &context).unwrap_or_else(|e| {
@@ -674,13 +822,13 @@ impl Console {
     /// whitespace, such as the line break a terminal layout uses to set a line
     /// off, would leave the marker untitled, so it goes; a title still blank
     /// after that comes from the preset, or where the preset leaves the slot
-    /// blank from `full`, or `plain` for a preset without emojis.
+    /// blank from `emoji` for a preset with emojis, `full` for one without.
     fn section_title(&self, slot: Slot, rendered: &str, context: &JinjaValue) -> String {
         let title = rendered.trim_start();
         if !title.is_empty() {
             return title.to_owned();
         }
-        let fallback = if self.preset.emoji { &FULL } else { &PLAIN };
+        let fallback = if self.preset.emoji { &EMOJI } else { &FULL };
         [self.preset, fallback]
             .into_iter()
             .map(|preset| render_builtin(preset, slot, context))
@@ -724,6 +872,25 @@ impl Console {
     }
 }
 
+/// The `<role>_style` key of each of [`LAYOUT_ROLES`] and `reset`, from
+/// `palette`, or all empty without one.
+fn layout_styles(palette: Option<&aspect_theme::Palette>) -> BTreeMap<String, String> {
+    let mut styles: BTreeMap<String, String> = LAYOUT_ROLES
+        .iter()
+        .map(|role| {
+            let key = format!("{}_style", role.replace('.', "_"));
+            (key, palette.map(|p| p.sgr(role)).unwrap_or_default())
+        })
+        .collect();
+    let reset = if palette.is_some() {
+        aspect_theme::RESET
+    } else {
+        ""
+    };
+    styles.insert("reset".into(), reset.into());
+    styles
+}
+
 /// Refuse a `task_presets` / `task_templates` key that is a slot name: it would
 /// name no task, so the entry would silently do nothing.
 fn task_key(key: &str, label: &str) -> Result<(), String> {
@@ -749,6 +916,9 @@ fn closest_task_key(key: &str, task_paths: &[String]) -> Option<String> {
 
 /// The built-in preset `name`, or an error naming where it was asked for.
 fn preset_named(name: &str, at: &str) -> Result<&'static Preset, String> {
+    if let Some((_, why)) = REMOVED_PRESETS.iter().find(|(gone, _)| *gone == name) {
+        return Err(format!("Console {at}: template preset {name:?} {why}"));
+    }
     PRESETS.into_iter().find(|p| p.name == name).ok_or_else(|| {
         format!(
             "Console {at}: unknown template preset {name:?}{}",
@@ -802,13 +972,24 @@ mod tests {
             highlight_style => "", highlight_reset => "",
             label => "test task",
             exit_code => if failed { 3 } else { 0 },
-            exit => if failed { " (exit code 3)" } else { "" },
+            exit => if failed { " (exit 3)" } else { "" },
             elapsed => "1.2s", elapsed_ms => 1200,
             timing => " in 1.2s",
             conclusion => "4 tests",
             breakdown => " — 🔨 Build 1.0s",
             plain_breakdown => " — Build 1.0s",
+            timings => " · Build 1.0s",
+            cancelled => false,
             phases => Vec::<JinjaValue>::new(),
+        }
+    }
+
+    /// A `phase` render of the Build phase: its start, or with `continued` a
+    /// later update to it.
+    fn phase(text: &str, continued: bool) -> JinjaValue {
+        minijinja::context! {
+            title => "Build", emoji => "🔨", highlight_style => "<s>", highlight_reset => "<r>",
+            text => text, continued => continued,
         }
     }
 
@@ -820,9 +1001,12 @@ mod tests {
         minijinja::context! { text => t }
     }
 
+    /// `emoji` renders the lines `full` did before it dropped its emojis;
+    /// only the Buildkite section markers around them changed, which the
+    /// runtime prints.
     #[test]
-    fn full_renders_the_historical_lines() {
-        let c = console("full", &Overrides::default(), false);
+    fn emoji_renders_the_historical_lines() {
+        let c = console("emoji", &Overrides::default(), false);
         assert_eq!(
             c.render(
                 Slot::Banner,
@@ -851,13 +1035,13 @@ mod tests {
         );
         assert_eq!(
             c.render(Slot::Verdict, verdict(true)),
-            "\n→ ❌ Failed test task (exit code 3) in 1.2s · 4 tests — 🔨 Build 1.0s"
+            "\n→ ❌ Failed test task (exit 3) in 1.2s · 4 tests — 🔨 Build 1.0s"
         );
     }
 
     #[test]
-    fn full_renders_the_historical_buildkite_sections() {
-        let c = console("full", &Overrides::default(), true);
+    fn emoji_renders_the_historical_buildkite_sections() {
+        let c = console("emoji", &Overrides::default(), true);
         assert_eq!(
             c.render(Slot::Header, header()),
             ":aspect: <c>Running<r> test task"
@@ -883,20 +1067,21 @@ mod tests {
     }
 
     #[test]
-    fn a_task_section_drops_its_icon_only_under_plain() {
+    fn a_task_section_keeps_its_icon_only_with_emojis() {
         let section = || minijinja::context! { icon => ":rocket:", title => "Runner metadata" };
         let rendered = |preset: &str| {
             console(preset, &Overrides::default(), true).render(Slot::Section, section())
         };
-        assert_eq!(rendered("full"), ":rocket: Runner metadata");
-        assert_eq!(rendered("plain"), "Runner metadata");
+        assert_eq!(rendered("emoji"), ":rocket: Runner metadata");
+        assert_eq!(rendered("full"), "Runner metadata");
+        assert_eq!(rendered("agent"), "Runner metadata");
         assert_eq!(
             rendered("silent"),
             ":rocket: Runner metadata",
             "a section is never blank"
         );
         assert_eq!(
-            console("full", &Overrides::default(), true).render(
+            console("emoji", &Overrides::default(), true).render(
                 Slot::Section,
                 minijinja::context! { icon => "", title => "Runner metadata" }
             ),
@@ -913,50 +1098,209 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let line =
-            console("full", &o, false).render(Slot::Banner, crate::banner::console_context(true));
-        assert!(line.starts_with("\x1b[90maspect "), "{line:?}");
+        let dark = aspect_theme::Palette::aspect_dark(aspect_theme::Depth::Ansi256);
+        let line = console("full", &o, false)
+            .render(Slot::Banner, crate::banner::console_context(Some(&dark)));
+        assert!(line.starts_with("\x1b[38;5;247maspect "), "{line:?}");
         assert!(
             line.ends_with(" · https://aspect.build/go/cli\x1b[0m"),
             "{line:?}"
         );
         let full = console("full", &Overrides::default(), false)
-            .render(Slot::Banner, crate::banner::console_context(true));
+            .render(Slot::Banner, crate::banner::console_context(Some(&dark)));
         assert_eq!(
             full,
             format!(
                 "{}\n",
-                crate::banner::line(&aspect_telemetry::cargo_pkg_short_version())
+                crate::banner::line_colored(
+                    &aspect_telemetry::cargo_pkg_short_version(),
+                    Some(&dark)
+                )
             )
         );
     }
 
+    /// `full` on a terminal and in a plain CI log (GitHub Actions), which get
+    /// the same text: a heading per phase, its updates under it, no emoji.
     #[test]
-    fn plain_is_full_without_emojis() {
-        let phase = minijinja::context! {
-            title => "Build", emoji => "🔨", highlight_style => "<s>", highlight_reset => "<r>", text => "Building"
-        };
-        let c = console("plain", &Overrides::default(), false);
+    fn full_reads_the_same_on_a_terminal_and_in_a_ci_log() {
+        let c = console("full", &Overrides::default(), false);
+        assert_eq!(c.render(Slot::Header, header()), "▸ Running test task");
         assert_eq!(
-            c.render(Slot::Header, header()),
-            "→ <c>Running<r> test task"
+            c.render(Slot::Phase, phase("Running setup", false)),
+            "\n▸ Build\n▹ Running setup"
         );
+        assert_eq!(c.render(Slot::Phase, phase("", false)), "\n▸ Build");
         assert_eq!(
-            c.render(Slot::Phase, phase.clone()),
-            "\n→ <s>Build<r> · Building"
+            c.render(Slot::Phase, phase("12 of 40", true)),
+            "▹ 12 of 40",
+            "an update to the phase shown is its own line, unindented"
         );
-        assert_eq!(c.render(Slot::Progress, text("12 of 40")), "→ 12 of 40");
+        assert_eq!(c.render(Slot::Progress, text("12 of 40")), "▹ 12 of 40");
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(false)),
+            "\n✓ Passed test task in 1.2s · 4 tests · Build 1.0s"
+        );
         assert_eq!(
             c.render(Slot::Verdict, verdict(true)),
-            "\n→ Failed test task (exit code 3) in 1.2s · 4 tests — Build 1.0s"
+            "\n✗ Failed test task (exit 3) in 1.2s · 4 tests · Build 1.0s"
         );
-        let bk = console("plain", &Overrides::default(), true);
-        assert_eq!(bk.render(Slot::Header, header()), "<c>Running<r> test task");
-        assert_eq!(bk.render(Slot::Phase, phase), "<s>Build<r> · Building");
+        let tip = minijinja::context! {
+            id => "x", severity => "suggestion", emoji => "💡", title => "T",
+            tip_style => "", id_style => "", highlight_style => "", highlight_reset => "",
+        };
+        let lines = [
+            c.render(Slot::Header, header()),
+            c.render(Slot::Phase, phase("Running setup", false)),
+            c.render(Slot::Verdict, verdict(true)),
+            c.render(Slot::Tip, tip),
+        ];
+        for line in lines {
+            assert!(
+                !line.contains(['🎬', '🔨', '❌', '✅', '💡', '→']),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// `full` on Buildkite: the task's section alone carries `:aspect:`, a
+    /// phase's heading and first update share its section's line with no
+    /// glyph, and later updates are `▹` lines inside it.
+    #[test]
+    fn full_on_buildkite_titles_its_sections() {
+        let c = console("full", &Overrides::default(), true);
         assert_eq!(
-            bk.render(Slot::Verdict, verdict(false)),
-            "Passed · test task in 1.2s · 4 tests — Build 1.0s"
+            c.render(Slot::Header, header()),
+            ":aspect: Running test task"
         );
+        assert_eq!(
+            c.render(Slot::Phase, phase("Running setup", false)),
+            "Build · Running setup"
+        );
+        assert_eq!(c.render(Slot::Phase, phase("", false)), "Build");
+        assert_eq!(
+            c.render(Slot::Progress, text("Uploading results")),
+            "▹ Uploading results"
+        );
+        assert_eq!(
+            c.render(Slot::Verdict, verdict(false)),
+            "✓ Passed test task in 1.2s · 4 tests · Build 1.0s"
+        );
+    }
+
+    /// An interrupted run (exit 130) is `Cancelled` under `full`, on a
+    /// terminal and on Buildkite; the other presets still call it a failure.
+    #[test]
+    fn full_calls_an_interrupted_run_cancelled() {
+        let cancelled = || {
+            minijinja::context! {
+                exit_code => 130, exit => " (exit 130)", cancelled => true,
+                ..verdict(true)
+            }
+        };
+        assert_eq!(
+            console("full", &Overrides::default(), false).render(Slot::Verdict, cancelled()),
+            "\n✗ Cancelled test task (exit 130) in 1.2s · 4 tests · Build 1.0s"
+        );
+        assert_eq!(
+            console("full", &Overrides::default(), true).render(Slot::Verdict, cancelled()),
+            "✗ Cancelled test task (exit 130) in 1.2s · 4 tests · Build 1.0s"
+        );
+        assert_eq!(
+            console("emoji", &Overrides::default(), false).render(Slot::Verdict, cancelled()),
+            "\n→ ❌ Failed test task (exit 130) in 1.2s · 4 tests — 🔨 Build 1.0s"
+        );
+    }
+
+    /// Each part of `full` takes its own role, and a role the theme leaves
+    /// plain is not closed.
+    #[test]
+    fn full_styles_each_part_in_its_role() {
+        let dark = aspect_theme::Palette::aspect_dark(aspect_theme::Depth::Ansi256);
+        let host = Host {
+            color: true,
+            ..Host::default()
+        };
+        let c = Console::resolve("full", &Overrides::default(), task(), host)
+            .unwrap()
+            .with_palette(&dark);
+        let styled = |role: &str, text: &str| {
+            let sgr = dark.sgr(role);
+            if sgr.is_empty() {
+                text.to_owned()
+            } else {
+                format!("{sgr}{text}{}", aspect_theme::RESET)
+            }
+        };
+        assert_eq!(
+            c.render(Slot::Header, header()),
+            format!(
+                "{} {} {}",
+                styled("task", "▸"),
+                styled("task", "Running"),
+                styled("task.label", "test task")
+            )
+        );
+        assert_eq!(
+            c.render(Slot::Phase, phase("x", false)),
+            format!(
+                "\n{} {}\n{} {}",
+                styled("phase", "▸"),
+                styled("phase.title", "Build"),
+                styled("phase.update", "▹"),
+                styled("phase.text", "x")
+            )
+        );
+        let verdict_line = |failed: bool, cancelled: bool| {
+            let mut context = verdict(failed);
+            if cancelled {
+                context = minijinja::context! { cancelled => true, ..context };
+            }
+            c.render(Slot::Verdict, context)
+        };
+        assert!(
+            verdict_line(false, false).starts_with(&format!(
+                "\n{} {} ",
+                styled("verdict.success", "✓"),
+                styled("verdict.verb", "Passed")
+            )),
+            "{:?}",
+            verdict_line(false, false)
+        );
+        assert!(
+            verdict_line(true, false)
+                .starts_with(&format!("\n{} ", styled("verdict.failure", "✗"))),
+            "{:?}",
+            verdict_line(true, false)
+        );
+        assert!(
+            verdict_line(true, true)
+                .starts_with(&format!("\n{} ", styled("verdict.cancelled", "✗"))),
+            "{:?}",
+            verdict_line(true, true)
+        );
+        let plain = console("full", &Overrides::default(), false);
+        assert_eq!(
+            plain.render(Slot::Header, header()),
+            "▸ Running test task",
+            "no color, no escapes"
+        );
+    }
+
+    /// `plain` is gone; asking for it says what replaced it.
+    #[test]
+    fn plain_is_refused_naming_full_and_emoji() {
+        let removed = r#"template preset "plain" was removed: "full" is the layout without emojis, and "emoji" the one with them"#;
+        let err = Console::resolve("plain", &Overrides::default(), task(), Host::default())
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, format!("Console template_preset: {removed}"));
+        let mut o = Overrides::default();
+        o.set_preset_for_task("lint", "plain".into()).unwrap();
+        let err = Console::resolve("full", &o, task(), Host::default())
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, format!(r#"Console task_presets["lint"]: {removed}"#));
     }
 
     #[test]
@@ -967,7 +1311,7 @@ mod tests {
         }
         assert_eq!(
             c.render(Slot::Verdict, verdict(true)),
-            "→ ❌ Failed test task (exit code 3) in 1.2s · 4 tests"
+            "→ ❌ Failed test task (exit 3) in 1.2s · 4 tests"
         );
         let bk = console("compact", &Overrides::default(), true);
         assert_eq!(
@@ -984,7 +1328,7 @@ mod tests {
         }
         assert_eq!(
             c.render(Slot::Verdict, verdict(true)),
-            "→ Failed test task (exit code 3) in 1.2s · 4 tests"
+            "→ Failed test task (exit 3) in 1.2s · 4 tests"
         );
         let bk = console("agent", &Overrides::default(), true);
         assert_eq!(
@@ -994,7 +1338,11 @@ mod tests {
         assert_eq!(
             bk.render(Slot::Header, header()),
             "<c>Running<r> test task",
-            "a blank section falls back to plain, not full"
+            "no `:aspect:`"
+        );
+        assert_eq!(
+            bk.render(Slot::Phase, phase("Running setup", false)),
+            "<s>Build<r> · Running setup"
         );
         assert_eq!(
             bk.render(
@@ -1009,7 +1357,7 @@ mod tests {
     fn the_preset_decides_verbose_unless_overridden() {
         for (preset, shown) in [
             ("full", true),
-            ("plain", true),
+            ("emoji", true),
             ("compact", false),
             ("agent", false),
             ("silent", false),
@@ -1046,12 +1394,21 @@ mod tests {
     fn buildkite_sections_never_render_blank() {
         let mut blank_header = Overrides::default();
         blank_header.set("header", "{# blank #}".into()).unwrap();
-        for (preset, overrides) in [("silent", Overrides::default()), ("full", blank_header)] {
+        for (preset, overrides, want) in [
+            (
+                "silent",
+                Overrides::default(),
+                ":aspect: <c>Running<r> test task",
+            ),
+            (
+                "emoji",
+                blank_header.clone(),
+                ":aspect: <c>Running<r> test task",
+            ),
+            ("full", blank_header, ":aspect: Running test task"),
+        ] {
             let c = console(preset, &overrides, true);
-            assert_eq!(
-                c.render(Slot::Header, header()),
-                ":aspect: <c>Running<r> test task"
-            );
+            assert_eq!(c.render(Slot::Header, header()), want, "{preset}");
         }
         let silent = console("silent", &Overrides::default(), true);
         assert_eq!(
@@ -1067,8 +1424,11 @@ mod tests {
     fn a_blank_buildkite_section_keeps_the_presets_text() {
         let mut blank_header = Overrides::default();
         blank_header.set("header", "".into()).unwrap();
-        let c = console("plain", &blank_header, true);
-        assert_eq!(c.render(Slot::Header, header()), "<c>Running<r> test task");
+        let c = console("full", &blank_header, true);
+        assert_eq!(
+            c.render(Slot::Header, header()),
+            ":aspect: Running test task"
+        );
     }
 
     #[test]
@@ -1136,7 +1496,7 @@ mod tests {
         let progress = |task| resolved("full", &o, task).render(Slot::Progress, text("x"));
         assert_eq!(progress(grouped("add", "worktree add")), "path");
         assert_eq!(progress(grouped("add", "auth add")), "kind");
-        assert_eq!(progress(task()), "→ x");
+        assert_eq!(progress(task()), "▹ x");
     }
 
     #[test]
@@ -1222,7 +1582,7 @@ mod tests {
         o.set("progress", "{{ text.nope.deeper }}".into()).unwrap();
         assert_eq!(
             console("full", &o, false).render(Slot::Progress, text("x")),
-            "→ x"
+            "▹ x"
         );
         assert_eq!(
             console("silent", &o, false).render(Slot::Progress, text("x")),
@@ -1308,35 +1668,35 @@ mod tests {
                 .map(|_| ())
                 .unwrap_err()
         };
-        assert!(preset("plian").contains(r#""plian"; did you mean "plain"? Expected one of "#));
+        assert!(preset("emoij").contains(r#""emoij"; did you mean "emoji"? Expected one of "#));
         assert!(!preset("loud").contains("did you mean"));
         assert!(!preset("fl").contains("did you mean"));
     }
 
     #[test]
-    fn a_tip_carries_its_emoji_under_full_and_silent_only() {
+    fn a_tip_carries_its_emoji_under_emoji_and_silent_only() {
         let tip = || {
             minijinja::context! {
                 id => "x", severity => "suggestion", emoji => "💡", title => "T",
                 tip_style => "<t>", id_style => "<i>", highlight_style => "<s>", highlight_reset => "<r>",
             }
         };
-        let full = "<t>TIP<r><i>[x]<r> 💡 <s>suggestion<r>: T";
+        let emoji = "<t>TIP<r><i>[x]<r> 💡 <s>suggestion<r>: T";
         let plain = "<t>TIP<r><i>[x]<r> <s>suggestion<r>: T";
         for (preset, want) in [
-            ("full", full),
-            ("silent", full),
-            ("plain", plain),
+            ("emoji", emoji),
+            ("silent", emoji),
+            ("full", plain),
             ("compact", plain),
             ("agent", plain),
         ] {
             let c = console(preset, &Overrides::default(), false);
             assert_eq!(c.render(Slot::Tip, tip()), want, "{preset}");
         }
-        let c = console("full", &Overrides::default(), true);
+        let c = console("emoji", &Overrides::default(), true);
         assert_eq!(
             c.render(Slot::Tip, tip()),
-            full,
+            emoji,
             "a tip opens no Buildkite section"
         );
     }
@@ -1407,7 +1767,7 @@ mod tests {
         o.set_for_task("worktree ad", "header", "c".into()).unwrap();
         o.set_for_task("release-notes", "header", "d".into())
             .unwrap();
-        o.set_preset_for_task("test", "plain".into()).unwrap();
+        o.set_preset_for_task("test", "emoji".into()).unwrap();
         assert_eq!(
             o.near_miss_warnings(&task_paths()),
             [

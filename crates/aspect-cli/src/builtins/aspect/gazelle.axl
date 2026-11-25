@@ -496,7 +496,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
         ),
         kind = "gazelle_results",
         data = data,
-        phase = phases.Phase(name = "build", description = "Build gazelle", emoji = "🔨"),
+        phase = phases.Phase(name = "build", description = "Build gazelle", emoji = "🔨", expanded = True),
     )
 
     # After the phase line, so the streams are announced under the spawn they

@@ -154,7 +154,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ),
         kind = _KIND,
         data = data,
-        phase = phases.Phase(name = "populate", description = "Populate Bazel caches", emoji = "🔨"),
+        phase = phases.Phase(name = "populate", description = "Populate Bazel caches", emoji = "🔨", expanded = True),
     )
 
     # After the phase line, so the streams are announced under the spawn they

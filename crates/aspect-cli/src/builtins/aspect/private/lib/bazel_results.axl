@@ -5284,6 +5284,7 @@ def _results_new(ctx, command, report_uploader = None):
                 name = phase_id,
                 description = phase_desc,
                 emoji = "🧪" if command == "test" else "🔨",
+                expanded = True,
             ),
         )
 

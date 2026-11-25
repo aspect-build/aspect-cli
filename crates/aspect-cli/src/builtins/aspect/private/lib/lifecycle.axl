@@ -16,7 +16,7 @@ during a task) and `repro_fix_suggestion` (per surface emit, so a user's
 `ph.suggest_fixes` / `ph.dispatch`.
 
 `ph.update(status, progress, ...)` both prints the progress to stderr through
-the console's `phase` / `progress` slot (`→ <progress>` in the `full` layout;
+the console's `phase` / `progress` slot (`▹ <progress>` in the `full` layout;
 see `feature/console.axl`) and emits a `TaskUpdate` to every
 `Phases.task_update` handler — paired to keep CI logs and the BK annotation /
 GHSC "Last update" line in sync. A layout that prints nothing changes only
@@ -133,8 +133,8 @@ Phase = record(
     # progress text when empty.
     description = field(str, default = ""),
 
-    # Emoji prefixed onto the phase label everywhere. Empty → `:aspect:`
-    # on BK section headers, no icon elsewhere.
+    # Emoji prefixed onto the phase label by the `emoji` layout. Empty →
+    # `:aspect:` on its BK section headers, no icon elsewhere.
     emoji = field(str, default = ""),
 
     # Display-label override; wins over titlecase(name) when non-empty.
@@ -142,7 +142,8 @@ Phase = record(
 
     # When True, this phase's Buildkite section header is emitted expanded
     # (`+++`) instead of collapsed (`---`), so the section is open by default
-    # in the BK log. The `--buildkite-annotations:expand-phase` user flag can
+    # in the BK log. Set for a phase that runs Bazel, so its `ERROR:` lines are
+    # never inside a collapsed group. The `--buildkite-annotations:expand-phase` user flag can
     # force a phase expanded regardless of this field — see
     # `_emit_bk_phase_section`. No effect off Buildkite.
     expanded = field(bool, default = False),
@@ -722,7 +723,7 @@ def _bk_phase_section_marker(ctx, phase) -> str:
 def _emit_bk_phase_section(ctx, phase, progress_styles):
     """Emit a per-phase BK section header `<marker> <console phase slot>`
     (1:1 AXL-phase → BK collapsible section). The slot's `text` mirrors the live
-    `→` print (`progress_styles.stream`, falling back to `.body`).
+    update off Buildkite (`progress_styles.stream`, falling back to `.body`).
 
     `<marker>` is `+++` (expanded) when `_bk_phase_section_marker` resolves it for
     this phase — either `Phase.expanded` or a `--buildkite-annotations:expand-phase`
@@ -748,7 +749,7 @@ def _phase_line_context(ctx: TaskContext, phase: Phase) -> dict:
     there is no highlight to close. Color follows `ctx.std.io.stderr.color`,
     the same decision as the runtime's header and verdict, since all of them
     print to stderr."""
-    highlight = ansi.highlight_style(ctx.std, ctx.std.io.stderr.color)
+    highlight = ansi.code(ansi.HIGHLIGHT, ctx.std.io.stderr.color)
     return {
         "title": phase.display_name or _titlecase_phase(phase.name),
         "emoji": phase.emoji,
@@ -778,7 +779,7 @@ def _resolve_progress_styles(progress):
 
 def _update(ctx, surface, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
     """Emit a TaskUpdate to all `Phases.task_update` handlers and print the
-    progress through the console's `phase` / `progress` slot (`→ <progress>`
+    progress through the console's `phase` / `progress` slot (`▹ <progress>`
     in the `full` layout) to stderr. When `final = True`, returns a
     `TaskConclusion(exit_code, text=conclusion, flagged=(status=="warning"))`
     that `_impl` returns to drive the runtime's closing bookend (else None).
@@ -798,7 +799,7 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
                    `phase.description` falls back to the resolved (ANSI-stripped)
                    surface text. See `Phase`.
         final:     `True` on the terminal emit; returns the `TaskConclusion`
-                   the runtime renders as `→ ✅/⚠️/❌ ... · <conclusion>`.
+                   the runtime renders as `✓/✗ ... · <conclusion>`.
         conclusion: One-line terminal summary, appended as ` · <conclusion>`.
                    Read only when `final=True`. Use each `*_results.axl`'s
                    `conclusion(status, data)` for check-run-title consistency.
@@ -834,12 +835,15 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
             bk_section_emitted = _emit_bk_phase_section(ctx, phase, progress_styles)
             phase_change = True
 
-    # Off BK a phase-tagged update is a `phase` line; on BK the section header
-    # already carries it, so only same-phase updates stream, as `progress`.
+    # Off BK a phase-tagged update is a `phase` line, `continued` when its
+    # phase is already shown; on BK the section header already carries it, so
+    # only same-phase updates stream, as `progress`.
     cli_text = progress_styles.stream
     if cli_text and not bk_section_emitted:
         phase_context = _phase_line_context(ctx, phase) if phase != None else {}
         slot = "phase" if phase != None and not ctx.console.buildkite else "progress"
+        if slot == "phase":
+            phase_context["continued"] = not phase_change
         line = ctx.console.render(slot, text = cli_text, **phase_context)
         if line:
             print(line)

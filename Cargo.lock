@@ -179,6 +179,7 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "aspect-telemetry",
+ "aspect-theme",
  "async-trait",
  "axl-runtime",
  "backtrace",
@@ -240,6 +241,14 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha1",
+ "tempfile",
+]
+
+[[package]]
+name = "aspect-theme"
+version = "0.0.0-dev"
+dependencies = [
+ "serde_json",
  "tempfile",
 ]
 
@@ -350,6 +359,7 @@ dependencies = [
  "anyhow",
  "arc-slice",
  "aspect-telemetry",
+ "aspect-theme",
  "axl-proto",
  "axl-types",
  "base64 0.22.1",
@@ -531,6 +541,7 @@ version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
+ "aspect-theme",
  "axl-proto",
  "bazel",
  "chrono",

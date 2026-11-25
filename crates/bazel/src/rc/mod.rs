@@ -413,8 +413,8 @@ impl Bazelrc {
     /// for the `--announce-bazel-rc` disclosure.
     ///
     /// Output is grouped by source file, with flags wrapped at `max_width`
-    /// columns; when `ansi` is true, headers and section names are styled with
-    /// ANSI escapes. Version-gated flags (from `try-import-if-bazel-version`)
+    /// columns; given a `palette`, headers are `strong`, section names `muted`
+    /// and version conditions `warning`. Version-gated flags (from `try-import-if-bazel-version`)
     /// are annotated with `[if <cond>]`.
     ///
     /// `root` is the workspace root and `home` the user's home directory; they
@@ -425,20 +425,20 @@ impl Bazelrc {
     pub fn announce(
         &self,
         command: &str,
-        ansi: bool,
+        palette: Option<&aspect_theme::Palette>,
         max_width: usize,
         root: &Path,
         home: Option<&Path>,
         redact: impl Fn(&str) -> String,
     ) -> String {
-        // `d` is grey (bright black) rather than SGR 2 (faint) because GitHub
-        // Actions' log viewer silently drops SGR 2 — the section keys would
-        // render at full weight on GHA even though the gate fired. It is the
-        // CLI's one grey.
-        let (b, d, y, r) = if ansi {
-            ("\x1b[1m", "\x1b[90m", "\x1b[33m", "\x1b[0m")
-        } else {
-            ("", "", "", "")
+        let (b, d, y, r) = match palette {
+            Some(p) => (
+                p.sgr("strong"),
+                p.sgr("muted"),
+                p.sgr("warning"),
+                aspect_theme::RESET,
+            ),
+            None => (String::new(), String::new(), String::new(), ""),
         };
 
         let fmt_flag = |opt: &RcOption| -> String {
@@ -2616,7 +2616,7 @@ import {}
                 ("common", 2, "--curses=no"),
             ],
         );
-        let out = rc.announce("build", false, 200, root, Some(home), |s| s.to_string());
+        let out = rc.announce("build", None, 200, root, Some(home), |s| s.to_string());
         assert!(out.contains("./.bazelrc"), "{out}");
         assert!(out.contains("~/.bazelrc"), "{out}");
         assert!(out.contains("/etc/bazel.bazelrc"), "{out}");
@@ -2635,7 +2635,7 @@ import {}
             &[Path::new("/work/repo-foo/.bazelrc")],
             &[("common", 0, "--jobs=4")],
         );
-        let out = rc.announce("build", false, 200, root, None, |s| s.to_string());
+        let out = rc.announce("build", None, 200, root, None, |s| s.to_string());
         assert!(out.contains("/work/repo-foo/.bazelrc"), "{out}");
         assert!(!out.contains("./"), "string-prefix must not anchor: {out}");
     }
@@ -2647,7 +2647,7 @@ import {}
         let home = Path::new("/home/dev");
         let root = Path::new("/home/dev/repo");
         let rc = rc_with(&[&root.join(".bazelrc")], &[("common", 0, "--jobs=4")]);
-        let out = rc.announce("build", false, 200, root, Some(home), |s| s.to_string());
+        let out = rc.announce("build", None, 200, root, Some(home), |s| s.to_string());
         assert!(out.contains("./.bazelrc"), "{out}");
         assert!(
             !out.contains("~/repo"),
@@ -2669,7 +2669,7 @@ import {}
                 None => flag.to_string(),
             }
         };
-        let out = rc.announce("build", false, 200, root, None, redact);
+        let out = rc.announce("build", None, 200, root, None, redact);
         assert!(out.contains("--remote_header=<REDACTED>"), "{out}");
         assert!(!out.contains("s3cr3t"), "secret leaked: {out}");
     }
@@ -2689,7 +2689,7 @@ import {}
                 ("test:ci", 0, "--flaky_test_attempts=2"),
             ],
         );
-        let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        let out = rc.announce("test", None, 200, root, None, |s| s.to_string());
         assert!(
             out.contains("--disk_cache=/cache"),
             "inherited build flag missing: {out}"
@@ -2724,7 +2724,7 @@ import {}
                 ("test:ci", 0, "--remote_cache=C"),
             ],
         );
-        let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        let out = rc.announce("test", None, 200, root, None, |s| s.to_string());
         let always_at = out.find("always:ci").expect("always:ci shown");
         let common_at = out.find("common:ci").expect("common:ci shown");
         let build_at = out.find("build:ci").expect("build:ci shown");
@@ -2747,7 +2747,7 @@ import {}
                 ("test", 0, "--test_output=errors"),
             ],
         );
-        let out = rc.announce("build", false, 200, root, None, |s| s.to_string());
+        let out = rc.announce("build", None, 200, root, None, |s| s.to_string());
         assert!(
             out.contains("--disk_cache=/cache"),
             "build flag missing: {out}"

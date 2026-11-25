@@ -13,6 +13,11 @@
 //!   its own screen.
 //! * [`ansi`]: the escape sequences in a record.
 //! * [`links`]: paths and URLs made clickable, for a terminal.
+//! * [`recolour`]: Bazel's own labels and progress in the theme's colours,
+//!   the first stage of every chain.
+//!
+//! The console's own lines and links take their colours from the
+//! [`Config::palette`], the process's theme ([`aspect_theme`]).
 //!
 //! A caller configures a [`Config`] once and builds a fresh [`Pipeline`] from
 //! it per invocation, so one config serves every retry attempt.
@@ -23,7 +28,12 @@
 //! one, whatever order they were listed in: what an observer sees and what a
 //! collapser folds then does not depend on which feature added its stage
 //! first. A pipeline with a stage that hides lines ends with a
-//! [`report::Summary`] of them.
+//! [`report::Summary`] of them. Before every stage, a pipeline that shows
+//! colour, with a theme whose `bazel` setting is `shared`, recolours Bazel's
+//! own labels and progress ([`recolour`]), so each stage, a user's
+//! `rewrite` included, sees the theme's colours. Each record is classified
+//! from Bazel's bytes before the chain runs, so what a stage knows of a
+//! record ([`line::Line`]) is the same in either mode.
 //!
 //! # Curses, and what is shown
 //!
@@ -63,6 +73,7 @@ pub mod line;
 pub mod links;
 pub mod log;
 pub mod processors;
+pub mod recolour;
 pub mod render;
 pub mod report;
 
@@ -341,6 +352,10 @@ pub struct Config {
     /// Write each link's URL beside it too, for a terminal that shows no
     /// OSC 8 link (Terminal.app).
     pub link_text: bool,
+    /// The theme the console's links are styled in and Bazel's own colours
+    /// recoloured with ([`recolour`]), where colour is shown; None styles
+    /// and recolours nothing.
+    pub palette: Option<Arc<aspect_theme::Palette>>,
 }
 
 impl Config {
@@ -361,6 +376,7 @@ impl Config {
             link_format: links::LinkFormat::None,
             link_text: false,
             colour: false,
+            palette: None,
         }
     }
 
@@ -393,8 +409,19 @@ impl Config {
     fn files(&self, written: &links::WrittenCount) -> links::FileLinks {
         links::FileLinks::new(self.link_format.clone())
             .written(self.link_text)
-            .styled(!self.strip_colour)
+            .styled(self.shown_palette().map(|p| links::LinkStyle::of(p)))
             .counted(written.clone())
+    }
+
+    /// The palette, where colour is shown.
+    fn shown_palette(&self) -> Option<&aspect_theme::Palette> {
+        self.palette.as_deref().filter(|_| !self.strip_colour)
+    }
+
+    /// The `bazel.*` colours, when Bazel is asked for colour, it is shown,
+    /// and the theme shares its vocabulary with Bazel.
+    fn recolours(&self) -> Option<recolour::BazelColours> {
+        recolour::BazelColours::of(self.shown_palette()?).filter(|_| self.colour)
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
@@ -479,6 +506,13 @@ impl Config {
             _ => None,
         };
         let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
+        // First, so every stage after it, a user's `rewrite` included, sees
+        // the theme's colours. Each record is classified from Bazel's own
+        // bytes before the chain runs ([`forward`]), so the stages that tell
+        // Bazel's messages by its colours still do.
+        if let Some(colours) = self.recolours() {
+            chain.push(Box::new(recolour::Recolour::new(Arc::new(colours))));
+        }
         // What `relativize_paths` links its paths with: Bazel's execroot
         // paths are the workspace's the build runs in, the first link base.
         let link_to = || {
@@ -649,6 +683,295 @@ mod tests {
             crate::console::line::tests::unbazel(&sink.bytes()),
             pipeline,
         )
+    }
+
+    /// What `config`'s pipeline forwards of `input`, escapes and all.
+    fn forwarded(config: &Config, input: &[u8]) -> String {
+        let mut pipeline = config.pipeline();
+        let sink = SharedSink::default();
+        Forwarder::spawn_logged(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+            None,
+            pipeline.shape.clone(),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        String::from_utf8(sink.bytes()).unwrap()
+    }
+
+    /// Bazel's labels take the theme's colours only where colour is asked
+    /// for and shown, and pass through untouched when the theme's `bazel`
+    /// setting is `tool`.
+    #[test]
+    fn bazels_colours_are_recoloured_only_where_colour_is_shown() {
+        let input = b"\x1b[35mWARNING: \x1b[0mdeprecated\n\x1b[32m[1 / 2]\x1b[0m Compiling\n";
+        let mut config = Config::new(Mode::Pipe, vec![], Style::default());
+        config.colour = true;
+        assert_eq!(
+            forwarded(&config, input),
+            String::from_utf8_lossy(input),
+            "no palette"
+        );
+        config.palette = Some(Arc::new(aspect_theme::Palette::aspect_dark(
+            aspect_theme::Depth::Ansi256,
+        )));
+        assert_eq!(
+            forwarded(&config, input),
+            "\x1b[1;38;5;221mWARNING: \x1b[0mdeprecated\n\x1b[38;5;247m[1 / 2]\x1b[0m Compiling\n"
+        );
+        config.strip_colour = true;
+        assert_eq!(
+            forwarded(&config, input),
+            "WARNING: deprecated\n[1 / 2] Compiling\n"
+        );
+        config.strip_colour = false;
+        let mut theme = aspect_theme::Theme::aspect_dark();
+        theme.bazel = Some(aspect_theme::Bazel::Tool);
+        config.palette = Some(Arc::new(aspect_theme::Palette::new(
+            theme,
+            Some(aspect_theme::Depth::Ansi256),
+            false,
+        )));
+        assert_eq!(
+            forwarded(&config, input),
+            String::from_utf8_lossy(input),
+            "tool"
+        );
+    }
+
+    /// The whole chain under a theme that is not the default: recolouring
+    /// runs first, so a user's `rewrite` sees the theme's codes, and the
+    /// stages that tell Bazel's messages apart still collapse its warnings
+    /// and recap its error; in `tool` mode Bazel's codes reach them as today.
+    #[test]
+    fn the_chain_runs_on_the_themes_colours_and_still_knows_bazels_messages() {
+        let input = b"\x1b[35mWARNING: \x1b[0ma 1\n\x1b[35mWARNING: \x1b[0ma 2\n\x1b[35mWARNING: \x1b[0ma 3\n\x1b[31m\x1b[1mERROR: \x1b[0mboom\n";
+        let config = |bazel| {
+            let mut config = Config::new(
+                Mode::Pipe,
+                vec![
+                    Stage::collapse_similar(vec!["WARNING".into()], []).unwrap(),
+                    Stage::RecapErrors { max: 5, after: 0 },
+                    Stage::rewrite(
+                        r"(\x1b\[1;38;5;210mERROR: \x1b\[0m)",
+                        "${1}(themed) ".into(),
+                    )
+                    .unwrap(),
+                    Stage::rewrite(r"(\x1b\[35mWARNING: \x1b\[0m)", "${1}(raw) ".into()).unwrap(),
+                ],
+                Style::default(),
+            );
+            config.colour = true;
+            let mut theme = aspect_theme::Theme::builtin("high-contrast-dark").unwrap();
+            theme.bazel = Some(bazel);
+            config.palette = Some(Arc::new(aspect_theme::Palette::new(
+                theme,
+                Some(aspect_theme::Depth::Ansi256),
+                false,
+            )));
+            config
+        };
+        let shared = forwarded(&config(aspect_theme::Bazel::Shared), input);
+        assert!(
+            shared.contains("\x1b[1;38;5;221mWARNING: \x1b[0ma 1\n"),
+            "{shared:?}"
+        );
+        assert!(!shared.contains("a 2"), "collapsed: {shared:?}");
+        assert!(
+            shared.contains("\x1b[1;38;5;210mERROR: \x1b[0m(themed) boom"),
+            "{shared:?}"
+        );
+        assert!(
+            !shared.contains("(raw)"),
+            "Bazel's own codes are gone: {shared:?}"
+        );
+        assert!(
+            shared.contains("── Error recap (1) ──\n  ERROR: (themed) boom"),
+            "recapped: {shared:?}"
+        );
+        assert!(shared.contains("Aspect hid 2 console lines"), "{shared:?}");
+        let tool = forwarded(&config(aspect_theme::Bazel::Tool), input);
+        assert!(
+            tool.contains("\x1b[35mWARNING: \x1b[0m(raw) a 1\n"),
+            "{tool:?}"
+        );
+        assert!(!tool.contains("a 2"), "collapsed: {tool:?}");
+        assert!(!tool.contains("(themed)"), "{tool:?}");
+        assert!(
+            tool.contains("── Error recap (1) ──\n  ERROR: boom"),
+            "recapped: {tool:?}"
+        );
+    }
+
+    /// `input`, a recorded `--test_output=streamed` console, through the
+    /// whole chain in `aspect-dark`.
+    fn streamed(mode: Mode, input: &[u8]) -> String {
+        streamed_to(mode, Output::AsWritten, input)
+    }
+
+    /// [`streamed`], shown as `output` says.
+    fn streamed_to(mode: Mode, output: Output, input: &[u8]) -> String {
+        let mut config = Config::new(mode, vec![], Style::default());
+        config.output = output;
+        config.colour = true;
+        config.palette = Some(Arc::new(aspect_theme::Palette::aspect_dark(
+            aspect_theme::Depth::Ansi256,
+        )));
+        forwarded(&config, input)
+    }
+
+    /// What a nested Bazel in a test writes at the end of its build.
+    const NESTED: [&str; 4] = [
+        "\x1b[32mINFO: \x1b[0mElapsed time: 0.112s, Critical Path: 0.01s",
+        "\x1b[32mINFO: \x1b[0m1 process: 1 internal.",
+        "\x1b[32mINFO: \x1b[0mBuild completed successfully, 1 total action",
+        "//nested:t  \x1b[0m\x1b[32mPASSED\x1b[0m in 0.1s",
+    ];
+
+    /// Bazel's closing message after streamed test output takes the theme,
+    /// with the summary and footer after it, under curses (where the
+    /// splitter makes the `\r` before each redraw a blank record) and in a
+    /// pipe.
+    #[test]
+    fn the_streamed_closing_block_is_bazels_under_curses_and_in_a_pipe() {
+        for (mode, input) in [
+            (
+                Mode::Pty,
+                &include_bytes!("testdata/pty_test_streamed.txt")[..],
+            ),
+            (
+                Mode::Pipe,
+                &include_bytes!("testdata/pipe_test_streamed.txt")[..],
+            ),
+        ] {
+            let out = streamed(mode, input);
+            assert!(
+                out.contains("\x1b[1;38;5;203mERROR: \x1b[0mBuild did NOT complete"),
+                "{mode:?}: {out:?}"
+            );
+            assert!(
+                out.contains("\x1b[0m\x1b[38;5;203mFAILED\x1b[0m in 0.1s"),
+                "{mode:?}: {out:?}"
+            );
+            assert!(
+                out.contains("1 test passes and \x1b[0m\x1b[38;5;203m1 fails locally"),
+                "{mode:?}: {out:?}"
+            );
+        }
+    }
+
+    /// Curses rendered to plain lines (piped colour, as on CI): Bazel's
+    /// closing block after streamed output takes the theme.
+    #[test]
+    fn the_streamed_closing_block_is_bazels_on_rendered_lines() {
+        let out = streamed_to(
+            Mode::Pty,
+            Output::Lines { status_every: None },
+            include_bytes!("testdata/pty_test_streamed.txt"),
+        );
+        assert!(
+            out.contains("\x1b[1;38;5;203mERROR: \x1b[0mBuild did NOT complete"),
+            "{out:?}"
+        );
+        assert!(
+            out.contains("\x1b[38;5;203mFAILED\x1b[0m in 0.1s"),
+            "{out:?}"
+        );
+        assert!(out.contains("\x1b[38;5;203m1 fails locally"), "{out:?}");
+    }
+
+    /// Bazel's ordinary `INFO:` messages (`Invocation ID`, `Analyzed`,
+    /// `Found`, `Elapsed time`) take `bazel.info`, under curses and in a pipe;
+    /// only its closing message and the text-less curses status row after it
+    /// take `bazel.status.*`. The theme follows the terminal, as with no
+    /// `COLORFGBG`.
+    #[test]
+    fn only_the_closing_message_and_the_status_row_take_the_status_roles() {
+        let palette = aspect_theme::Palette::new(
+            aspect_theme::Theme::aspect_dark().following_terminal(),
+            Some(aspect_theme::Depth::Ansi256),
+            false,
+        );
+        let sgr = |role| format!("\x1b[{}m", palette.params(role));
+        let (info, success) = (sgr("bazel.info"), sgr("bazel.status.success"));
+        assert_ne!(info, success);
+        for (mode, input) in [
+            (Mode::Pty, &include_bytes!("testdata/pty_genrules.txt")[..]),
+            (
+                Mode::Pty,
+                &include_bytes!("testdata/pty_bes_narrow.txt")[..],
+            ),
+            (
+                Mode::Pipe,
+                &include_bytes!("testdata/pipe_genrules.txt")[..],
+            ),
+        ] {
+            let mut config = Config::new(mode, vec![], Style::default());
+            config.colour = true;
+            config.palette = Some(Arc::new(palette.clone()));
+            // The recorder's echo of its EOF, which no real run has.
+            let input = input.strip_prefix(b"^D\x08\x08").unwrap_or(input);
+            let out = forwarded(&config, input);
+            let mut ordinary = 0;
+            for row in out.split(['\n', '\r']) {
+                let Some(at) = row.find("INFO:") else {
+                    continue;
+                };
+                let text = &row[at..];
+                let status = text.starts_with("INFO:\x1b[0m ") || text.contains("Build completed");
+                let want = if status { &success } else { &info };
+                if !row[..at].ends_with(want.as_str()) && !row[..at].ends_with("\x1b[32m") {
+                    panic!("{mode:?}: {row:?} wants {want:?}");
+                }
+                if !status && row[..at].ends_with(info.as_str()) {
+                    ordinary += 1;
+                }
+            }
+            assert!(ordinary >= 3, "{mode:?}: {ordinary} in {out:?}");
+            assert!(
+                out.contains(&format!("{info}INFO: \x1b[0mInvocation ID")),
+                "{mode:?}"
+            );
+            assert!(
+                out.contains(&format!("{info}INFO: \x1b[0mAnalyzed")),
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A nested Bazel's closing block in a streamed test's output is taken
+    /// for Bazel's, as `docs/themes.md` says: under curses Bazel draws each
+    /// of the test's lines after a redraw of its progress row, as it draws
+    /// its own, and in a pipe nothing tells them apart. Bazel's own closing
+    /// block after it still takes the theme.
+    #[test]
+    fn a_nested_bazels_closing_block_is_taken_for_bazels() {
+        let row = "\x1b[32m[12 / 13]\x1b[0m Testing //:t_pass; 0s darwin-sandbox, disk-cache";
+        let pty = String::from_utf8_lossy(include_bytes!("testdata/pty_test_streamed.txt"))
+            .replacen(
+                "\x1b[Ktest out\r\n",
+                &format!(
+                    "\x1b[K{}\r\n",
+                    NESTED.join(&format!("\r\n{row}\r\n\r\x1b[1A\x1b[K"))
+                ),
+                1,
+            );
+        let pipe = String::from_utf8_lossy(include_bytes!("testdata/pipe_test_streamed.txt"))
+            .replacen("failing test out\n", &format!("{}\n", NESTED.join("\n")), 1);
+        for (mode, input) in [(Mode::Pty, pty), (Mode::Pipe, pipe)] {
+            let out = streamed(mode, input.as_bytes());
+            assert!(
+                out.contains("//nested:t  \x1b[0m\x1b[38;5;79mPASSED\x1b[0m in 0.1s"),
+                "{mode:?}: {out:?}"
+            );
+            assert!(
+                out.contains("\x1b[1;38;5;203mERROR: \x1b[0mBuild did NOT complete"),
+                "{mode:?}: {out:?}"
+            );
+        }
     }
 
     /// Listed out of order: the interceptor answers first, observers see
@@ -1847,7 +2170,7 @@ mod tests {
             );
             if name == "pty_keep_going" {
                 let recap = &after[after
-                    .find("Errors Bazel reported")
+                    .find("── Error recap (")
                     .or_else(|| after.find("errors Bazel reported"))
                     .unwrap_or_else(|| panic!("no recap:\n{after}"))..];
                 for e in ["//:e0", "//:e1", "//:e3", "//:e4"] {
@@ -1931,7 +2254,7 @@ mod tests {
                 forwarder.join().unwrap();
                 let after = ansi::text(&sink.bytes());
                 let at = after
-                    .find("INFO: Errors Bazel reported")
+                    .find("── Error recap (")
                     .or_else(|| after.find("INFO: The first"))
                     .unwrap_or_else(|| panic!("{name} (lines: {lines}): no recap in\n{after}"));
                 let recap = &after[at..];
@@ -1972,15 +2295,11 @@ mod tests {
                 let (before, after) = (ansi::text(input), ansi::text(&sink.bytes()));
                 // The console itself, without the reports after it, whose
                 // quotes would pass for lines that survived.
-                let report = [
-                    "INFO: Aspect hid",
-                    "INFO: The first",
-                    "INFO: Errors Bazel reported",
-                ]
-                .iter()
-                .filter_map(|r| after.find(r))
-                .min()
-                .unwrap_or(after.len());
+                let report = ["INFO: Aspect hid", "INFO: The first", "── Error recap ("]
+                    .iter()
+                    .filter_map(|r| after.find(r))
+                    .min()
+                    .unwrap_or(after.len());
                 let shown = &after[..report];
                 for line in OUTPUT {
                     assert_eq!(

@@ -584,6 +584,19 @@ fn builtins_methods(registry: &mut MethodsBuilder) {
         Ok(BuiltinsTime)
     }
 
+    /// Returns the run's colour theme, `std.Theme`.
+    ///
+    /// Only callable from within `@std` modules; other modules should
+    /// `load("@std//theme.axl", "theme")`, which a module's top level can use.
+    fn theme<'v>(
+        this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<crate::engine::std::theme::Theme> {
+        let _ = this;
+        check_std_context(eval)?;
+        Ok(crate::engine::std::theme::Theme)
+    }
+
     /// Returns the gRPC namespace, exposing `Server` and `Status`
     /// constructors. Only callable from within `@std`/`@bazel` modules;
     /// public modules should `load("@bazel//grpc.axl", "grpc")`.

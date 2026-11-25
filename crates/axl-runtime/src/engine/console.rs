@@ -276,7 +276,7 @@ starlark_simple_value!(Console);
 
 #[starlark_module]
 fn console_methods(registry: &mut MethodsBuilder) {
-    /// The preset this task renders with (`full`, `plain`, `compact`,
+    /// The preset this task renders with (`full`, `emoji`, `compact`,
     /// `agent` or `silent`): its `task_presets` entry, else the `Console`
     /// feature's `template_preset`, which wins outright when typed on the
     /// command line. With neither set, `agent` under a coding agent and `full`
@@ -381,7 +381,7 @@ task_templates = {"check": {"progress": "mine"}}"#;
 
     #[test]
     fn unset_templates_keep_the_preset() {
-        assert_eq!(render("", Slot::Progress).unwrap(), "→ x");
+        assert_eq!(render("", Slot::Progress).unwrap(), "▹ x");
     }
 
     #[test]
@@ -516,8 +516,8 @@ task_templates = {"check": {"progress": "mine"}}"#;
             "config beats detection"
         );
         assert_eq!(
-            preset("plain", "cli", true),
-            "plain",
+            preset("emoji", "cli", true),
+            "emoji",
             "the CLI beats detection"
         );
         assert_eq!(preset("compact", "config", false), "compact");
@@ -532,7 +532,7 @@ task_templates = {"check": {"progress": "mine"}}"#;
         assert!(shown(r#"verbose = "true""#, "compact"));
         assert!(shown("verbose = True", "silent"));
         assert!(!shown(r#"verbose = "false""#, "full"));
-        assert!(!shown("verbose = False", "plain"));
+        assert!(!shown("verbose = False", "emoji"));
         let err = resolve_with("full", "cli", "verbose = 1", false).unwrap_err();
         assert!(err.contains("verbose must be"), "{err}");
         let err = resolve_with("full", "cli", r#"verbose = "ture""#, false).unwrap_err();
@@ -687,7 +687,7 @@ def _impl(ctx):
     if ctx.console.template_preset != "full":
         fail("preset: " + ctx.console.template_preset)
     line = ctx.console.render("progress", text = "x", title = "Build", emoji = "", highlight_style = "", highlight_reset = "")
-    if line != "→ Build · x":
+    if line != "▹ x":
         fail("rendered: " + repr(line))
     return 0
 
@@ -730,13 +730,13 @@ check = task(implementation = _impl)
     }
 
     /// `ctx.console.buildkite` and the section titles follow the same host
-    /// snapshot.
+    /// snapshot: on Buildkite a phase is its section's title, with no glyph.
     #[test]
     fn a_buildkite_snapshot_opens_sections() {
         let code = r#"
 def _impl(ctx):
     line = ctx.console.render("phase", title = "Build", emoji = "", highlight_style = "", highlight_reset = "", text = "")
-    return (2 if ctx.console.buildkite else 0) + (1 if line.startswith(":aspect:") else 0)
+    return (2 if ctx.console.buildkite else 0) + (1 if "Build" in line and "\u25b8" not in line else 0)
 
 check = task(implementation = _impl)
 "#;

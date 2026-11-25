@@ -23,6 +23,7 @@ bazel = []
 
 [dependencies]
 aspect-telemetry = { path = "../aspect-telemetry" }
+aspect-theme = { path = "../aspect-theme" }
 axl-runtime = { path = "../axl-runtime" }
 clap = {version= "4.5.40", features = ["string"]}
 anyhow = "1"

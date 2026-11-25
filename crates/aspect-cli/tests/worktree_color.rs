@@ -14,11 +14,11 @@ use common::{aspect_cli, base_env};
 use std::path::Path;
 use std::process::{Command, Output};
 
-/// The dimmed column header of the `taken` table.
-const DIM_HEADER: &[u8] = b"\x1b[2m  slot";
+/// The `muted` column header of the `taken` table.
+const DIM_HEADER: &[u8] = b"\x1b[38;5;247m  slot";
 
-/// The bold cyan prefix of the `worktree ready:` line.
-const INFO_PREFIX: &[u8] = b"\x1b[1;36mINFO\x1b[0m: ";
+/// The `label.info` prefix of the `worktree ready:` line.
+const INFO_PREFIX: &[u8] = b"\x1b[1;38;5;247mINFO\x1b[0m: ";
 
 /// `cmd` run in `dir/repo` under the test's own git environment.
 fn isolated(mut cmd: Command, dir: &Path) -> Command {

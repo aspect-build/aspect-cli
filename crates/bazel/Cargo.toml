@@ -17,6 +17,7 @@ starlark = ["dep:allocative", "dep:starlark", "dep:starlark_derive"]
 allocative = { version = "0.3.4", optional = true }
 anyhow = "1.0.98"
 axl-proto = { path = "../axl-proto" }
+aspect-theme = { path = "../aspect-theme" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fibre = "0.5.0"
 futures = "0.3.31"

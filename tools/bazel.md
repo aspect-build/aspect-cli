@@ -94,7 +94,7 @@ When the wrapper routes a command **through aspect**, it prints a single grey tr
 
 ```
 [tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //...
-→ 🎬 Running `build` task
+▸ Running build task
 …
 ```
 

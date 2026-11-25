@@ -1,7 +1,8 @@
-//! The grey "Aspect CLI v… — docs URL" identity line.
+//! The `Aspect CLI v<version>` identity line with the docs URL, in the theme's
+//! `muted`.
 //!
 //! Shown in two places — at the top of every `--help` screen and above each
-//! `→ 🎬 Running …` task header at runtime — so users always know which CLI
+//! `▸ Running …` task header at runtime — so users always know which CLI
 //! they're holding and where to find docs, even when aspect is invoked through
 //! a `tools/bazel` wrapper or a custom org alias. Both call sites render the
 //! same string in the same color from here so the two can't drift. At runtime
@@ -14,54 +15,54 @@ use aspect_telemetry::{cargo_pkg_short_version, is_debug_build};
 
 use crate::ci::on_recognized_ci;
 
-/// SGR sequence for the banner's grey, the CLI's one grey (bright black).
-const GREY: &str = "\x1b[90m";
-/// SGR reset.
-const RESET: &str = "\x1b[0m";
-
 /// Docs landing page advertised by the banner.
 const DOCS_URL: &str = crate::links::CLI;
 
-/// The grey banner line for `version`, e.g.
-/// `Aspect CLI v1.2.3 — https://aspect.build/go/cli`, wrapped in ANSI grey.
+/// The banner line for `version`, e.g.
+/// `Aspect CLI v1.2.3 — https://aspect.build/go/cli`, in `muted`.
 ///
 /// A `-debug-` build is marked here too: it is slower and larger than the primary
 /// binary, so a run that unexpectedly used one should be obvious from its output.
 ///
-/// No trailing newline — callers place it within their own layout.
+/// No trailing newline: callers place it within their own layout. Styled
+/// in the process's theme ([`crate::theme::of_process`]).
 pub fn line(version: &str) -> String {
-    line_colored(version, true)
+    line_colored(version, Some(&crate::theme::of_process()))
 }
 
-/// [`line`], with the grey wrapper applied only when `color` is set.
+/// [`line`], in `palette`'s `muted`, or plain with none.
 ///
 /// Call sites that print the banner themselves (rather than handing it to clap,
-/// which strips escapes by the rules [`crate::color`] follows) pass whether
-/// their stream takes color — [`crate::color::stdout_supports_color`] for
-/// stdout, the console's color for the runtime banner — so a piped run stays
-/// plain text.
-pub fn line_colored(version: &str, color: bool) -> String {
+/// which strips escapes by the rules [`crate::color`] follows) pass a palette
+/// only when their stream takes color ([`crate::color::stdout_supports_color`]
+/// for stdout, the console's color for the runtime banner), so a piped run
+/// stays plain text.
+pub fn line_colored(version: &str, palette: Option<&aspect_theme::Palette>) -> String {
     let debug = if is_debug_build() {
         " (debug build)"
     } else {
         ""
     };
     let body = format!("Aspect CLI v{version}{debug} — {DOCS_URL}");
-    if color {
-        format!("{GREY}{body}{RESET}")
-    } else {
-        body
+    match palette {
+        Some(p) => p.paint("muted", &body),
+        None => body,
     }
 }
 
 /// The console's `banner` slot context: the built-in line whole, and its pieces
-/// for a template that lays the line out itself. `color` is the console's, as
-/// for the header and verdict, so the grey is left out wherever they print
-/// plain.
-pub fn console_context(color: bool) -> minijinja::Value {
-    let (highlight_style, highlight_reset) = if color { (GREY, RESET) } else { ("", "") };
+/// for a template that lays the line out itself, `highlight_style` being
+/// `muted`. `palette` is the run's theme when the console colors, as for the
+/// header and verdict, so the style is left out wherever they print plain.
+pub fn console_context(palette: Option<&aspect_theme::Palette>) -> minijinja::Value {
+    let highlight_style = palette.map(|p| p.sgr("muted")).unwrap_or_default();
+    let highlight_reset = if highlight_style.is_empty() {
+        ""
+    } else {
+        aspect_theme::RESET
+    };
     minijinja::context! {
-        line => line_colored(&cargo_pkg_short_version(), color),
+        line => line_colored(&cargo_pkg_short_version(), palette),
         version => cargo_pkg_short_version(),
         debug_build => is_debug_build(),
         docs_url => DOCS_URL,
@@ -96,20 +97,36 @@ fn show_runtime_banner_from(stderr_is_tty: bool, on_ci: bool, no_banner_set: boo
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_console_context_follows_color() {
-        let plain = console_context(false);
-        assert_eq!(plain.get_attr("highlight_style").unwrap().to_string(), "");
-        assert_eq!(plain.get_attr("highlight_reset").unwrap().to_string(), "");
-        assert!(!plain.get_attr("line").unwrap().to_string().contains('\x1b'));
-        let grey = console_context(true);
-        assert_eq!(grey.get_attr("highlight_style").unwrap().to_string(), GREY);
-        assert!(grey.get_attr("line").unwrap().to_string().starts_with(GREY));
+    const MUTED: &str = "\x1b[38;5;247m";
+    const RESET: &str = aspect_theme::RESET;
+
+    fn dark() -> aspect_theme::Palette {
+        aspect_theme::Palette::aspect_dark(aspect_theme::Depth::Ansi256)
     }
 
     #[test]
-    fn line_renders_grey_version_and_docs_url() {
-        let s = line("9.9.9");
+    fn the_console_context_follows_color() {
+        let plain = console_context(None);
+        assert_eq!(plain.get_attr("highlight_style").unwrap().to_string(), "");
+        assert_eq!(plain.get_attr("highlight_reset").unwrap().to_string(), "");
+        assert!(!plain.get_attr("line").unwrap().to_string().contains('\x1b'));
+        let muted = console_context(Some(&dark()));
+        assert_eq!(
+            muted.get_attr("highlight_style").unwrap().to_string(),
+            MUTED
+        );
+        assert!(
+            muted
+                .get_attr("line")
+                .unwrap()
+                .to_string()
+                .starts_with(MUTED)
+        );
+    }
+
+    #[test]
+    fn line_renders_muted_version_and_docs_url() {
+        let s = line_colored("9.9.9", Some(&dark()));
         // Tests build with debug assertions on, so the marker is expected here; the
         // release binary renders the same line without it.
         let debug = if is_debug_build() {
@@ -119,17 +136,17 @@ mod tests {
         };
         assert_eq!(
             s,
-            format!("{GREY}Aspect CLI v9.9.9{debug} — {DOCS_URL}{RESET}")
+            format!("{MUTED}Aspect CLI v9.9.9{debug} — {DOCS_URL}{RESET}")
         );
-        assert!(s.starts_with(GREY) && s.ends_with(RESET));
+        assert!(s.starts_with(MUTED) && s.ends_with(RESET));
     }
 
     #[test]
-    fn line_colored_drops_the_grey_wrapper_when_uncolored() {
-        let plain = line_colored("9.9.9", false);
+    fn line_colored_drops_the_style_when_uncolored() {
+        let plain = line_colored("9.9.9", None);
         assert!(!plain.contains('\x1b'), "no escapes when uncolored");
         assert!(plain.starts_with("Aspect CLI v9.9.9"));
-        assert_eq!(line_colored("9.9.9", true), line("9.9.9"));
+        assert_eq!(line("9.9.9"), plain, "a unit test's process theme is plain");
     }
 
     #[test]

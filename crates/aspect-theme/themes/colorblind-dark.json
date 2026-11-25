@@ -1,0 +1,16 @@
+{
+  "name": "colorblind-dark",
+  "family": "colorblind",
+  "description": "Black background, Okabe-Ito hues: error vermilion, warning yellow, success sky blue, accent bluish green. No red-green pair anywhere.",
+  "appearance": "dark",
+  "extends": "aspect-dark",
+  "roles": {
+    "accent": { "rgb": "#2fc5a0", "256": 43, "16": "cyan" },
+    "success": { "rgb": "#56b4e9", "256": 74, "16": "bright-blue", "ansi": "blue" },
+    "warning": { "rgb": "#f0e442", "256": 221, "16": "bright-yellow", "ansi": "yellow" },
+    "error": { "rgb": "#ff7a45", "256": 209, "16": "bright-red", "ansi": "red" },
+    "link.hover": { "fg": { "rgb": "#a8f0dc", "256": 158, "16": "bright-cyan" }, "underline": true },
+    "selection": { "bg": { "rgb": "#3a3a3a", "256": 237 }, "16": { "reverse": true } },
+    "tip.important": { "fg": "@text", "bold": true, "underline": true }
+  }
+}

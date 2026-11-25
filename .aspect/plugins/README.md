@@ -4,12 +4,14 @@ These are example plugins, ported from [BuildBuddy's open-source CLI plugins](ht
 
 | Feature | Ported from | Built from | On here |
 |---|---|---|---|
-| `Theme` ([theme.axl](theme.axl)) | [theme-modern](https://github.com/siggisim/theme-modern), [theme-mono](https://github.com/siggisim/theme-mono) (`--theme:style`) | `rewrite` stages, on a terminal | yes, `modern` |
+| `Theme` ([theme.axl](theme.axl)) | [theme-modern](https://github.com/siggisim/theme-modern), [theme-mono](https://github.com/siggisim/theme-mono) (`--theme:style`) | `rewrite` stages, on a terminal | `--theme` |
 | `GoHighlight` ([go_highlight.axl](go_highlight.axl)) | [go-highlight](https://github.com/bduffany/go-highlight) | `rewrite` stages | yes |
 | `GoDeps` ([go_deps.axl](go_deps.axl)) | [go-deps](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/go-deps) | an `observe` stage, and an `output_end` hook that runs `aspect gazelle` | yes, `ask` |
 | `PingRemote` ([ping_remote.axl](ping_remote.axl)) | [ping-remote](https://github.com/siggisim/ping-remote) | an `rc_flags` hook that connects to `--remote_executor` | yes |
 | `Notify` ([notify.axl](notify.axl)) | [notify](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/notify) | `build_event` hooks and a `post_task` hook | `--notify` |
 | `OpenInvocation` ([open_invocation.axl](open_invocation.axl)) | [open-invocation](https://github.com/buildbuddy-io/buildbuddy/tree/master/cli/plugins/open-invocation) | `build_event` and `Phases.task_update` hooks and a `post_task` hook | `--open-invocation` |
+
+The CLI's own themes colour Bazel's console now (see [docs/themes.md](../../docs/themes.md)), so `Theme` stays as an example of `rewrite` stages, off by default so that it does not override the real theme for everyone in this repo.
 
 ## Size
 
