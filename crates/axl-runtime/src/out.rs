@@ -438,23 +438,16 @@ pub fn copy_only(bytes: &[u8]) {
     }
 }
 
-/// While a screen holds the terminal its capture reads everything written
-/// to stdout and stderr, a child's own writes included: it copies them
-/// ([`copy_captured`]), and [`copy_output`] does not, so nothing is copied
-/// twice.
+/// While a screen of its own holds the terminal its capture reads
+/// everything written to stdout and stderr, a child's own writes included,
+/// and copies all of it ([`copy_only`]); [`copy_output`] does not, so
+/// nothing is copied twice. Off before the descriptors are put back and on
+/// only once both are captured, so no write goes uncopied.
 static CAPTURE_COPIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether a screen's capture copies stdout and stderr ([`CAPTURE_COPIES`]).
 pub fn set_capture_copies(on: bool) {
     CAPTURE_COPIES.store(on, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// What a screen's capture read from stdout or stderr, copied while it
-/// copies them.
-pub fn copy_captured(bytes: &[u8]) {
-    if CAPTURE_COPIES.load(std::sync::atomic::Ordering::SeqCst) {
-        copy_only(bytes);
-    }
 }
 
 /// How many bytes `output.ansi` holds now: where a dump of what follows

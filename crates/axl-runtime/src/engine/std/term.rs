@@ -72,6 +72,9 @@ struct Held {
     mouse_on: bool,
     /// Given back for a prompt or an interactive child ([`suspend`]).
     suspended: bool,
+    /// How many [`suspend`]s are outstanding: the last [`resume`] takes the
+    /// screen back, so two interactive children at once share one suspend.
+    suspends: usize,
     capture: Arc<Feed>,
     /// What the task wrote before Bazel's console began, for `earlier()`.
     earlier: Vec<u8>,
@@ -93,7 +96,14 @@ struct Redirect {
 impl Redirect {
     /// Send `fd` into a pipe whose reader keeps what is written, for the
     /// replay, and hands it to `capture` as lines.
-    fn new(fd: RawFd, capture: Arc<Feed>, source: Source) -> std::io::Result<Redirect> {
+    /// With `copies` (a screen of its own's), what it reads is copied to
+    /// the task's output files, all of it, as it is drained on release too.
+    fn new(
+        fd: RawFd,
+        capture: Arc<Feed>,
+        source: Source,
+        copies: bool,
+    ) -> std::io::Result<Redirect> {
         let saved = dup(fd)?;
         // Closed on exec as it is made (`pipe2` on Linux; macOS sets it just
         // after): only `fd` is for children (`dup2` leaves it inheritable).
@@ -145,7 +155,9 @@ impl Redirect {
                             Err(_) => std::thread::sleep(Duration::from_millis(10)),
                             Ok(n) => {
                                 keep(&mut written.lock().unwrap(), &buf[..n]);
-                                crate::out::copy_captured(&buf[..n]);
+                                if copies {
+                                    crate::out::copy_only(&buf[..n]);
+                                }
                                 capture.write(source, &buf[..n]);
                             }
                         }
@@ -540,16 +552,15 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     // from here on leaving; its capture copies it to the output files.
     if alt_screen {
         *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
-        crate::out::set_capture_copies(true);
     }
     let forget_tty = || {
         mark_captured(None);
         crate::out::set_capture_copies(false);
     };
-    let stdout = Redirect::new(1, capture.clone(), Source::Stdout)
+    let stdout = Redirect::new(1, capture.clone(), Source::Stdout, alt_screen)
         .inspect_err(|_| forget_tty())
         .map_err(undo_termios)?;
-    let stderr = match Redirect::new(2, capture.clone(), Source::Stderr) {
+    let stderr = match Redirect::new(2, capture.clone(), Source::Stderr, alt_screen) {
         Ok(r) => r,
         Err(e) => {
             stdout.restore();
@@ -557,6 +568,11 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
             return Err(undo_termios(e).into());
         }
     };
+    // Once both are captured, the capture copies them; until then the print
+    // paths did.
+    if alt_screen {
+        crate::out::set_capture_copies(true);
+    }
 
     let mut tty = tty;
     let enter: &[u8] = if alt_screen {
@@ -605,6 +621,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         last_frame: vec![],
         mouse_on: false,
         suspended: false,
+        suspends: 0,
         capture,
         earlier,
         keys: Keys {
@@ -772,14 +789,23 @@ pub fn release_all() -> bool {
 /// the real terminal (a prompt reading stdin, an interactive child): the
 /// task's output so far dumped to it ([`dump_output`]), the main screen, its
 /// modes and stdout and stderr back, the capture's copies stopped. Whether
-/// one was given back, for [`resume`]. A screen already suspended, one not
-/// of its own, or none: false.
+/// one was given back, for [`resume`], which each true needs once: a screen
+/// already suspended counts another, and comes back with the last resume.
+/// One not of its own, or none: false.
 pub(crate) fn suspend() -> bool {
     {
         let mut held = HELD.lock().unwrap();
-        let Some(h) = held.as_mut().filter(|h| h.alt_screen && !h.suspended) else {
+        let Some(h) = held.as_mut().filter(|h| h.alt_screen) else {
             return false;
         };
+        if h.suspended {
+            h.suspends += 1;
+            return true;
+        }
+        h.suspends = 1;
+        // Copies by the print paths again before the descriptors go back,
+        // so nothing written meanwhile goes uncopied.
+        crate::out::set_capture_copies(false);
         for r in [&h.stdout, &h.stderr].into_iter().flatten() {
             r.put_back();
         }
@@ -793,7 +819,6 @@ pub(crate) fn suspend() -> bool {
         for r in [h.stdout.take(), h.stderr.take()].into_iter().flatten() {
             r.finish(false);
         }
-        crate::out::set_capture_copies(false);
         h.suspended = true;
     }
     dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
@@ -817,15 +842,20 @@ pub(crate) fn resume() {
     let Some(h) = held.as_mut().filter(|h| h.suspended) else {
         return;
     };
+    h.suspends = h.suspends.saturating_sub(1);
+    if h.suspends > 0 {
+        return;
+    }
     *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
-    crate::out::set_capture_copies(true);
     match (
-        Redirect::new(1, h.capture.clone(), Source::Stdout),
-        Redirect::new(2, h.capture.clone(), Source::Stderr),
+        Redirect::new(1, h.capture.clone(), Source::Stdout, true),
+        Redirect::new(2, h.capture.clone(), Source::Stderr, true),
     ) {
         (Ok(out), Ok(err)) => {
             h.stdout = Some(out);
             h.stderr = Some(err);
+            // Once both are captured: until then the print paths copied.
+            crate::out::set_capture_copies(true);
         }
         (out, err) => {
             // Without its captures the screen would be drawn over: it stays
@@ -833,7 +863,6 @@ pub(crate) fn resume() {
             for r in [out.ok(), err.ok()].into_iter().flatten() {
                 r.restore();
             }
-            crate::out::set_capture_copies(false);
             return;
         }
     }
@@ -959,7 +988,8 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
         .as_ref()
         .is_none_or(|r| unsafe { libc::isatty(r.saved.as_raw_fd()) } == 1);
     // Both descriptors back first, so a crash during the replays below
-    // reports to the terminal.
+    // reports to the terminal; the print paths copy again before they do.
+    crate::out::set_capture_copies(false);
     for r in [&held.stdout, &held.stderr].into_iter().flatten() {
         r.put_back();
     }
@@ -978,7 +1008,6 @@ fn release(held: Option<Held>, replay_stderr: bool) -> Vec<String> {
     if let Some(r) = held.stderr.take() {
         r.finish(replay_stderr);
     }
-    crate::out::set_capture_copies(false);
     if replay_stderr {
         return vec![];
     }
@@ -2375,7 +2404,7 @@ mod tests {
     fn a_child_outliving_the_capture_still_writes() {
         let (read, write) = private_pipe();
         let capture = Arc::new(Feed::default());
-        let r = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stdout).unwrap();
+        let r = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stdout, false).unwrap();
         let mut child = std::process::Command::new("sh")
             .args(["-c", "sleep 0.3; echo late"])
             .stdout(std::process::Stdio::from(dup(write.as_raw_fd()).unwrap()))
@@ -2395,7 +2424,7 @@ mod tests {
     fn a_redirect_captures_and_replays() {
         let (read, write) = private_pipe();
         let capture = Arc::new(Feed::default());
-        let r = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stdout).unwrap();
+        let r = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stdout, false).unwrap();
         let mut target = File::from(dup(write.as_raw_fd()).unwrap());
         target.write_all(b"one\ntwo\n").unwrap();
         drop(target);
@@ -2424,7 +2453,7 @@ mod tests {
     fn a_restore_does_not_wait_on_a_busy_child() {
         let (read, write) = private_pipe();
         let capture = Arc::new(Feed::default());
-        let r = Redirect::new(write.as_raw_fd(), capture, Source::Stdout).unwrap();
+        let r = Redirect::new(write.as_raw_fd(), capture, Source::Stdout, false).unwrap();
         let mut child = std::process::Command::new("sh")
             // `exec`, so the kill below reaches `yes` itself.
             .args(["-c", "exec yes"])

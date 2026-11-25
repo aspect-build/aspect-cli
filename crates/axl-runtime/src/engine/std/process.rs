@@ -72,6 +72,10 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
+            inherits: Cell::new(false),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         })
     }
 
@@ -153,6 +157,27 @@ pub struct Command {
     /// Which of its streams the task chose itself.
     #[allocative(skip)]
     chosen: Cell<Chosen>,
+    /// `aspect run`'s program, the user's own: it keeps the CLI's stdin,
+    /// stdout and stderr as they are, with no marker lines.
+    #[allocative(skip)]
+    inherits: Cell<bool>,
+    /// The colour variables a spawn added, for the next to take back.
+    #[allocative(skip)]
+    added_env: RefCell<Vec<String>>,
+    /// Whether this spawn drops the controlling terminal, read by the one
+    /// `pre_exec` closure the command gets ([`Command::unmarked`]).
+    #[allocative(skip)]
+    no_tty: Arc<std::sync::atomic::AtomicBool>,
+    #[allocative(skip)]
+    pre_exec_set: Cell<bool>,
+}
+
+/// How an unmarked child's output reaches the CLI ([`forward`]).
+enum Forward {
+    /// Its stdout and stderr in one pipe, the CLI's two being one file.
+    Merged(std::io::PipeReader),
+    /// Whether its stdout, and its stderr, are piped apart.
+    Each(bool, bool),
 }
 
 /// Which of a command's streams the task set (`stdin()`, `stdout()`,
@@ -165,85 +190,119 @@ struct Chosen {
 }
 
 impl Command {
-    /// Wrap a command the runtime assembled. With `own_group` the child is
-    /// spawned as the leader of a new process group, so stopping it stops
-    /// everything it started.
+    /// Wrap a command the runtime assembled: `aspect run`'s program, which
+    /// keeps the CLI's stdin, stdout and stderr (the user's own program, run
+    /// as Bazel would). With `own_group` the child is spawned as the leader
+    /// of a new process group, so stopping it stops everything it started.
     pub(crate) fn from_std(inner: process::Command, own_group: bool) -> Self {
         Self {
             inner: RefCell::new(inner),
             process_group: Cell::new(own_group.then_some(0)),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
+            inherits: Cell::new(true),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         }
     }
 
-    /// Choose what the task left to the runtime for an unmarked child: stdin
-    /// from `/dev/null`, stdout and stderr piped (to [`forward`]), colour
-    /// forced on when the CLI's own stderr shows it (unless the task set
-    /// `FORCE_COLOR` or `CLICOLOR_FORCE` itself), and while a full screen
-    /// holds the terminal, no controlling terminal. Which of stdout and
-    /// stderr are piped.
-    fn unmarked(&self) -> (bool, bool) {
+    /// Choose what the task left to the runtime for an unmarked child, for
+    /// this spawn: stdin from `/dev/null`; stdout and stderr piped, one pipe
+    /// for both when the CLI's own are one file (their order kept); colour
+    /// forced on (`FORCE_COLOR`, `CLICOLOR_FORCE`) when the child's stdout
+    /// reaches a colour terminal through the CLI, unless the task set them;
+    /// and while a full screen holds the terminal, no controlling terminal.
+    /// Each spawn decides afresh: a reused command keeps nothing of the last.
+    fn unmarked(&self) -> anyhow::Result<Forward> {
         let chosen = self.chosen.get();
         let mut cmd = self.inner.borrow_mut();
         if !chosen.stdin {
             cmd.stdin(Stdio::null());
         }
-        if !chosen.stdout {
-            cmd.stdout(Stdio::piped());
+        let merged =
+            !chosen.stdout && !chosen.stderr && bazel::console::capture::stdout_is_stderrs_file();
+        let forward = if merged {
+            let (read, write) = std::io::pipe()?;
+            cmd.stdout(write.try_clone()?);
+            cmd.stderr(write);
+            Forward::Merged(read)
+        } else {
+            if !chosen.stdout {
+                cmd.stdout(Stdio::piped());
+            }
+            if !chosen.stderr {
+                cmd.stderr(Stdio::piped());
+            }
+            Forward::Each(!chosen.stdout, !chosen.stderr)
+        };
+
+        // Colour as the stream the child's stdout reaches through the CLI
+        // shows it; the task's own values, and what the CLI inherited, kept.
+        let colour = !chosen.stdout && crate::color::stdout_supports_color();
+        let mut added = self.added_env.borrow_mut();
+        for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
+            let tasks = cmd.get_envs().any(|(k, _)| k.to_string_lossy() == var)
+                && !added.iter().any(|a| a == var);
+            if tasks {
+                continue;
+            }
+            if colour {
+                cmd.env(var, "1");
+                if !added.iter().any(|a| a == var) {
+                    added.push(var.to_string());
+                }
+            } else if added.iter().any(|a| a == var) {
+                match std::env::var_os(var) {
+                    Some(inherited) => cmd.env(var, inherited),
+                    None => cmd.env_remove(var),
+                };
+                added.retain(|a| a != var);
+            }
         }
-        if !chosen.stderr {
-            cmd.stderr(Stdio::piped());
-        }
-        if crate::color::console_supports_color() {
-            let set: Vec<String> = cmd
-                .get_envs()
-                .map(|(k, _)| k.to_string_lossy().into_owned())
-                .collect();
-            for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
-                if !set.iter().any(|k| k == var) {
-                    cmd.env(var, "1");
+
+        // One closure for the command's life, which reads at each fork
+        // whether this spawn drops the terminal.
+        #[cfg(unix)]
+        {
+            self.no_tty.store(
+                crate::engine::std::term::screen_holds_terminal(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            if !self.pre_exec_set.replace(true) {
+                let no_tty = self.no_tty.clone();
+                // SAFETY: only async-signal-safe calls between fork and exec.
+                // Dropping the controlling terminal leaves the process groups
+                // as they are, so cancellation reaches the child as before.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        if no_tty.load(std::sync::atomic::Ordering::SeqCst) {
+                            let fd =
+                                libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+                            if fd >= 0 {
+                                libc::ioctl(fd, libc::TIOCNOTTY as _);
+                                libc::close(fd);
+                            }
+                        }
+                        Ok(())
+                    });
                 }
             }
         }
-        #[cfg(unix)]
-        if crate::engine::std::term::screen_holds_terminal() {
-            // SAFETY: only async-signal-safe calls between fork and exec.
-            // Dropping the controlling terminal leaves the process groups
-            // as they are, so cancellation reaches the child as before.
-            unsafe {
-                cmd.pre_exec(|| {
-                    let fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
-                    if fd >= 0 {
-                        libc::ioctl(fd, libc::TIOCNOTTY as _);
-                        libc::close(fd);
-                    }
-                    Ok(())
-                });
-            }
-        }
-        (!chosen.stdout, !chosen.stderr)
+        Ok(forward)
     }
 
-    /// The command for a marker line: its program and arguments, redacted
-    /// as a bazel command echoed to a log is, cut to [`SUMMARY_WIDTH`].
+    /// The command for a marker line: its executable's name only, as an
+    /// error names it ([`Command::describe`]); its arguments may hold a
+    /// credential any tool takes its own way.
     fn summary(&self) -> String {
         let cmd = self.inner.borrow();
-        let program = cmd.get_program().to_string_lossy().into_owned();
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let mut line = std::iter::once(program)
-            .chain(bazel::bes::redact::redact_command_args(
-                args.iter().map(String::as_str),
-            ))
-            .collect::<Vec<_>>()
-            .join(" ");
-        if line.chars().count() > SUMMARY_WIDTH {
-            line = line.chars().take(SUMMARY_WIDTH - 1).collect::<String>() + "…";
-        }
-        line
+        let program = std::path::Path::new(cmd.get_program());
+        program
+            .file_name()
+            .unwrap_or(program.as_os_str())
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Only the executable is safe to include in errors: arguments and
@@ -267,11 +326,11 @@ impl Command {
             Some(token) => token.inner().clone(),
             None => signals.default_binding(),
         };
-        let interactive = self.interactive.get();
-        let (forward_out, forward_err) = if interactive {
-            (false, false)
+        let interactive = self.interactive.get() && !self.inherits.get();
+        let plan = if interactive || self.inherits.get() {
+            Forward::Each(false, false)
         } else {
-            self.unmarked()
+            self.unmarked()?
         };
         let marked = interactive.then(|| {
             let summary = self.summary();
@@ -294,6 +353,13 @@ impl Command {
             self.process_group.get(),
             children::Kind::Process,
         );
+        if let Forward::Merged(_) = plan {
+            // The command's own copies of the pipe's write end, closed so its
+            // reader ends with the child's.
+            let mut cmd = self.inner.borrow_mut();
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+        }
         let (mut child, bound) = match spawned {
             Ok(spawned) => spawned,
             Err(e) => {
@@ -308,11 +374,16 @@ impl Command {
             }
         };
         let mut forwarders = vec![];
-        if forward_out && let Some(out) = child.stdout.take() {
-            forwarders.push(forward(out, false));
-        }
-        if forward_err && let Some(err) = child.stderr.take() {
-            forwarders.push(forward(err, true));
+        match plan {
+            Forward::Merged(read) => forwarders.push(forward(read, true)),
+            Forward::Each(out, err) => {
+                if out && let Some(pipe) = child.stdout.take() {
+                    forwarders.push(forward(pipe, false));
+                }
+                if err && let Some(pipe) = child.stderr.take() {
+                    forwarders.push(forward(pipe, true));
+                }
+            }
         }
         Ok(Child {
             inner: RefCell::new(Some(child)),
@@ -335,9 +406,6 @@ impl Command {
     }
 }
 
-/// The widest a marker line names its command.
-const SUMMARY_WIDTH: usize = 60;
-
 /// A muted `› text` line, as the console's updates are, in `error` for one
 /// saying something failed; plain without colour.
 fn marker_line(text: &str, failed: bool) -> String {
@@ -353,8 +421,10 @@ fn marker_line(text: &str, failed: bool) -> String {
 }
 
 /// Pass what a child writes to `pipe` on to the CLI's stderr (or stdout),
-/// copied to the task's output as the CLI's own writes are; a thread, joined
-/// once the child's wait ends.
+/// copied to the task's output as the CLI's own writes are; a thread, waited
+/// on briefly once the child's wait ends ([`Child::ended`]). A stream that
+/// takes no more (a closed pipe, `| head -1`) ends it and closes `pipe`, so
+/// the child's next write fails, as it would have written there itself.
 fn forward(
     mut pipe: impl std::io::Read + Send + 'static,
     stderr: bool,
@@ -364,19 +434,29 @@ fn forward(
         let mut buf = [0u8; 8192];
         loop {
             match pipe.read(&mut buf) {
-                Ok(0) | Err(_) => return,
+                Ok(0) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
                 Ok(n) => {
-                    let _ = if stderr {
+                    let written = if stderr {
                         std::io::stderr().lock().write_all(&buf[..n])
                     } else {
                         std::io::stdout().lock().write_all(&buf[..n])
                     };
+                    if written.is_err() {
+                        return;
+                    }
                     crate::out::copy_output(&buf[..n]);
                 }
             }
         }
     })
 }
+
+/// How long a child's wait, once it has exited, waits for what it wrote
+/// to be passed on: a grandchild still holding its pipe would hold it
+/// forever, and is left to the forwarder.
+const FORWARD_GRACE: Duration = Duration::from_millis(250);
 
 impl<'v> AllocValue<'v> for Command {
     fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
@@ -656,8 +736,14 @@ impl Child {
     /// What follows the child's exit: its output passed on, and an
     /// interactive one's screen back and the line after it.
     fn ended(&self, status: &process::ExitStatus) {
+        let deadline = std::time::Instant::now() + FORWARD_GRACE;
         for f in self.forwarders.borrow_mut().drain(..) {
-            let _ = f.join();
+            while !f.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if f.is_finished() {
+                let _ = f.join();
+            }
         }
         if let Some((summary, started, suspended)) = self.interactive.borrow_mut().take() {
             if suspended {
@@ -907,7 +993,11 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             let inner = inner
                 .as_mut()
                 .ok_or(anyhow::anyhow!("child is no longer active"))?;
-            children::try_wait(inner, &child.bound)?
+            let status = children::try_wait(inner, &child.bound)?;
+            if let Some(status) = &status {
+                child.ended(status);
+            }
+            status
         } else {
             child.wait_idle(Some(Duration::from_millis(timeout_ms as u64)), eval)?
         };
@@ -1102,6 +1192,50 @@ t = task(implementation = _impl)
         assert_eq!(got, "notty\neof\n");
     }
 
+    /// A grandchild still holding the pipe does not hold the child's wait:
+    /// once the child exits its output is waited on only briefly.
+    #[test]
+    fn a_grandchild_holding_the_pipe_does_not_hold_the_wait() {
+        let started = std::time::Instant::now();
+        let got = run_child(r#"sleep 5 & echo started > $1"#, "");
+        assert_eq!(got, "started\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A command spawned twice decides each spawn afresh, its exit polled
+    /// with `try_wait` as well as waited.
+    #[test]
+    fn a_reused_command_spawns_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        let path = path.display();
+        let result = crate::test::eval(&format!(
+            r#"
+load("@std//time.axl", "sleep")
+
+def _impl(ctx):
+    cmd = ctx.std.process.command("sh").args(["-c", "echo x >> $1", "sh", "{path}"])
+    cmd.spawn().wait()
+    child = cmd.spawn()
+    for _ in range(1000):
+        if child.try_wait() != None:
+            break
+        sleep(5)
+    return 0
+
+t = task(implementation = _impl)
+"#
+        ))
+        .run_task(0);
+        assert_eq!(result.expect("run_task"), Some(0));
+        let got = std::fs::read_to_string(dir.path().join("out")).unwrap();
+        assert_eq!(got, "x\nx\n");
+    }
+
     /// A task's own `FORCE_COLOR` is the child's, never overridden.
     #[test]
     fn a_tasks_own_force_color_is_kept() {
@@ -1109,24 +1243,15 @@ t = task(implementation = _impl)
         assert_eq!(got, "0\n");
     }
 
-    /// An interactive child's marker names its command redacted, cut to fit.
+    /// An interactive child's marker names only its executable: an argument
+    /// may hold a credential.
     #[test]
-    fn a_marker_names_the_command_redacted_and_cut() {
-        let cmd = Command::from_std(process::Command::new("bazel"), false);
+    fn a_marker_names_only_the_executable() {
+        let cmd = Command::from_std(process::Command::new("/usr/bin/curl"), false);
         cmd.inner
             .borrow_mut()
-            .args(["build", "--remote_header=x-api-key=s3cret", "//..."]);
-        let summary = cmd.summary();
-        assert!(!summary.contains("s3cret"), "{summary}");
-        assert!(
-            summary.starts_with("bazel build --remote_header="),
-            "{summary}"
-        );
-        cmd.inner
-            .borrow_mut()
-            .args(std::iter::repeat_n("//pkg:target", 20));
-        assert_eq!(cmd.summary().chars().count(), SUMMARY_WIDTH);
-        assert!(cmd.summary().ends_with('…'));
+            .args(["--user", "me:s3cret", "https://example.com"]);
+        assert_eq!(cmd.summary(), "curl");
     }
 
     #[test]
@@ -1137,6 +1262,10 @@ t = task(implementation = _impl)
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
+            inherits: Cell::new(false),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         };
         cmd.inner.borrow_mut().args([
             "--aws-sigv4",
@@ -1165,6 +1294,10 @@ t = task(implementation = _impl)
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
+            inherits: Cell::new(false),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         };
         cmd.inner
             .borrow_mut()
@@ -1185,6 +1318,10 @@ t = task(implementation = _impl)
             process_group: Cell::new(None),
             interactive: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
+            inherits: Cell::new(false),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         };
         cmd.inner
             .borrow_mut()
