@@ -35,14 +35,19 @@ macro_rules! outln {
     }};
 }
 
+/// Write `bytes` to stdout (1) or stderr (2) as one unit, its target held
+/// against every other writer there (see [`axl_types::terminal`]).
+pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
+    axl_types::terminal::write_std(fd, bytes)
+}
+
 /// `print!` that ignores a failed write (notably a closed pipe), and copies
 /// the text to the task's output ([`copy_output`]).
 #[macro_export]
 macro_rules! out {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
         let text = format!($($arg)*);
-        let _ = std::io::stdout().write_all(text.as_bytes());
+        let _ = $crate::out::write_std(1, text.as_bytes());
         $crate::out::copy_output(text.as_bytes());
     }};
 }
@@ -55,9 +60,8 @@ macro_rules! errln {
         $crate::errln!("");
     }};
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
         let text = format!("{}\n", format_args!($($arg)*));
-        let _ = std::io::stderr().write_all(text.as_bytes());
+        let _ = $crate::out::write_std(2, text.as_bytes());
         $crate::out::copy_output(text.as_bytes());
     }};
 }
@@ -1436,12 +1440,11 @@ impl starlark::PrintHandler for TolerantPrintHandler {
     fn println(&self, text: &str) -> starlark::Result<()> {
         match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
             Some(mut linker) => {
-                use std::io::Write as _;
                 linker.set_format(link_format());
                 linker.set_style(print_link_style());
                 let mut line = linker.link_written(text.as_bytes());
                 line.push(b'\n');
-                let _ = std::io::stderr().write_all(&line);
+                let _ = write_std(2, &line);
                 copy_output(&line);
             }
             None => {

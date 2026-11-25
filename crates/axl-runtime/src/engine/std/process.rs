@@ -548,17 +548,18 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
         // Not yet copied; its first `shown` bytes written out already.
         let mut line = Vec::new();
         let mut shown = 0;
-        // Under the stream's lock, so the CLI's own writes keep their place,
-        // but never blocked inside a write (see `write_when_writable`).
+        // One unit on the stream's target (`axl_types::terminal`), so no
+        // other writer splices it, but never blocked inside a write (see
+        // `write_when_writable`): what std's stdout buffers goes first.
         let show = |bytes: &[u8]| -> std::io::Result<()> {
-            use crate::engine::std::term::write_when_writable;
-            if stderr {
-                let _err = std::io::stderr().lock();
-                write_when_writable(2, bytes)
-            } else {
-                let mut out = std::io::stdout().lock();
-                out.flush().and_then(|()| write_when_writable(1, bytes))
+            let fd = if stderr { 2 } else { 1 };
+            let _turn = axl_types::terminal::turn(fd);
+            if !stderr {
+                std::io::stdout().lock().flush()?;
             }
+            crate::engine::std::term::write_when_writable(fd, bytes)?;
+            axl_types::terminal::wrote(fd, bytes);
+            Ok(())
         };
         loop {
             match pipe.read(&mut buf) {

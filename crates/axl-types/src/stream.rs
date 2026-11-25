@@ -569,8 +569,10 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
+                let _turn = crate::terminal::turn(1);
                 match inner.lock().write(data) {
                     Ok(n) => {
+                        crate::terminal::wrote(1, &data[..n]);
                         if copy {
                             copy_output(&data[..n]);
                         }
@@ -592,8 +594,10 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
+                let _turn = crate::terminal::turn(2);
                 match inner.lock().write(data) {
                     Ok(n) => {
+                        crate::terminal::wrote(2, &data[..n]);
                         if copy {
                             copy_output(&data[..n]);
                         }
@@ -636,6 +640,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let guard = stdout.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
+                    let _turn = crate::terminal::turn(1);
                     ignore_broken_pipe(inner.lock().flush())?;
                 }
             }
@@ -643,6 +648,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let guard = stderr.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
+                    let _turn = crate::terminal::turn(2);
                     ignore_broken_pipe(inner.lock().flush())?;
                 }
             }

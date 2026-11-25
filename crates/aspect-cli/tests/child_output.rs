@@ -40,7 +40,7 @@ def _dumpsplice(ctx):
     screen = ctx.std.term.take()
     for i in range(400):
         print("DUMPLINE-%d-abcdefghijklmnopqrstuvwxyz0123456789" % i)
-    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 20000 ]; do echo CHILDERR$i >&2; i=$((i+1)); done"]).spawn()
+    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 20000 ]; do echo CHILDERR$i-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz >&2; i=$((i+1)); done"]).spawn()
     sleep(50)
     screen.release()
     ctx.std.term.dump_output(max_lines = 500, older = "OLDER {n}")
@@ -49,6 +49,18 @@ def _dumpsplice(ctx):
 
 partial = task(implementation = _partial, summary = "A child's partial lines.")
 dumpsplice = task(implementation = _dumpsplice, summary = "A dump while a child writes stderr.")
+
+def _tstpdump(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(400):
+        print("DUMPLINE-%d-abcdefghijklmnopqrstuvwxyz0123456789" % i)
+    for i in range(60000):
+        print("CLILINE-%d-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" % i)
+    screen.release()
+    return 0
+
+tstpdump = task(implementation = _tstpdump, summary = "Ctrl+Z's dump while the task prints.")
 takestall = task(implementation = _takestall, summary = "A screen taken while stdout takes nothing.")
 interactive = task(implementation = _interactive, summary = "An interactive child.")
 "#;
@@ -200,6 +212,40 @@ fn on_a_pty(
     (child, chunks, dir)
 }
 
+/// Wait at most `secs` for `child`; on a timeout, fail with what it and its
+/// children are doing ([`common::describe`], Linux) and what it wrote to the
+/// terminal, `chunks` drained, after killing it.
+#[cfg(unix)]
+fn wait_bounded(
+    child: &mut std::process::Child,
+    secs: u64,
+    chunks: &std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let doing = common::describe(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            let wrote: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+            let wrote = String::from_utf8_lossy(&wrote);
+            let tail: String = wrote
+                .chars()
+                .rev()
+                .take(2000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            panic!("the CLI ran past {secs}s, killed:\n{doing}\nits last output:\n{tail}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Taking the screen, and giving it back, while a child's stdout fills a
 /// FIFO nobody reads: neither may wait on stdout, or stderr's lines, fed to
 /// the screen, stop with it (macOS's `dup2` over a FIFO waits out a write in
@@ -257,7 +303,7 @@ fn a_stdout_nobody_reads_stalls_no_take_nor_stderr() {
     // SAFETY: clearing O_NONBLOCK on our own descriptor.
     unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, 0) };
     let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
-    let status = child.wait().expect("wait");
+    let status = wait_bounded(&mut child, 60, &chunks);
     let _ = drain.join();
     std::thread::sleep(Duration::from_millis(200));
     for (at, bytes) in chunks.try_iter() {
@@ -299,32 +345,16 @@ fn a_dump_is_never_spliced_with_a_childs_stderr() {
     use std::time::Duration;
     for stdout in [Stdio::inherit(), Stdio::null()] {
         let (mut child, chunks, _dir) = on_a_pty("dumpsplice", stdout);
-        let status = child.wait().expect("wait");
+        let status = wait_bounded(&mut child, 60, &chunks);
         std::thread::sleep(Duration::from_millis(300));
         let mut text = String::new();
         for (_, bytes) in chunks.try_iter() {
             text.push_str(&String::from_utf8_lossy(&bytes));
         }
         assert!(status.success(), "{status:?}");
-        let mut torn = vec![];
-        for line in plain(&text).split('\n') {
-            let line = line.trim_end_matches('\r');
-            let line = line.rsplit('\r').next().unwrap_or(line);
-            let dump = line
-                .strip_prefix("DUMPLINE-")
-                .and_then(|r| r.split_once('-'))
-                .is_some_and(|(n, rest)| {
-                    n.parse::<u32>().is_ok() && rest == "abcdefghijklmnopqrstuvwxyz0123456789"
-                });
-            let child = line
-                .strip_prefix("CHILDERR")
-                .is_some_and(|n| n.parse::<u32>().is_ok());
-            if (line.contains("DUMPLINE") || line.contains("CHILDERR")) && !(dump || child) {
-                torn.push(line.to_string());
-            }
-        }
+        let torn = torn_lines(&text);
         assert!(
-            text.contains("CHILDERR19999") && torn.is_empty(),
+            text.contains(&format!("CHILDERR19999-{LONG}")) && torn.is_empty(),
             "{} torn lines, the first: {:?}",
             torn.len(),
             torn.iter().take(3).collect::<Vec<_>>()
@@ -362,4 +392,87 @@ fn plain(text: &str) -> String {
         }
     }
     out
+}
+
+/// The tail of every long line the tests write: long enough that a line
+/// takes more than one of a forwarder's reads now and then.
+#[cfg(unix)]
+const LONG: &str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+
+/// The lines of `text` (its escapes and the terminal's `^Z` echo left out)
+/// that hold a dump's, a child's or the CLI's test line, but not one whole.
+#[cfg(unix)]
+fn torn_lines(text: &str) -> Vec<String> {
+    let numbered = |line: &str, prefix: &str, tail: &str| {
+        line.strip_prefix(prefix)
+            .and_then(|r| r.split_once('-'))
+            .is_some_and(|(n, rest)| n.parse::<u32>().is_ok() && rest == tail)
+    };
+    let mut torn = vec![];
+    for line in plain(text).replace("^Z", "").split('\n') {
+        let line = line.trim_end_matches('\r');
+        let line = line.rsplit('\r').next().unwrap_or(line);
+        let line = line.strip_prefix("FRAME").unwrap_or(line);
+        let whole = numbered(line, "DUMPLINE-", "abcdefghijklmnopqrstuvwxyz0123456789")
+            || numbered(line, "CHILDERR", LONG)
+            || numbered(line, "CLILINE-", LONG);
+        let ours = ["DUMPLINE", "CHILDERR", "CLILINE"]
+            .iter()
+            .any(|p| line.contains(p));
+        if ours && !whole {
+            torn.push(line.to_string());
+        }
+    }
+    torn
+}
+
+/// Ctrl+Z under a screen gives the terminal back with the task's output
+/// dumped, while the task goes on printing: the dump and the CLI's own lines
+/// are never spliced, either way round.
+#[cfg(unix)]
+#[test]
+fn a_ctrl_z_dump_is_never_spliced_with_the_clis_lines() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("tstpdump", Stdio::inherit());
+    let mut text = String::new();
+    let start = std::time::Instant::now();
+    while !text.contains("FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(100)) {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    assert!(text.contains("FRAME"), "the screen was taken: {text:?}");
+    // A Ctrl+Z on the terminal, then the shell's `fg`, three times: each
+    // gives the terminal back with a dump while the task prints.
+    // `fg` only once it has stopped, as a shell does: it stops itself after
+    // its dump, and a SIGCONT before that would leave it stopped for good.
+    let stopped = |pid: u32| {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim_start().starts_with('T'))
+    };
+    for _ in 0..3 {
+        // SAFETY: signals to our own child.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
+        let asked = std::time::Instant::now();
+        while !stopped(child.id()) && asked.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        unsafe { libc::kill(child.id() as i32, libc::SIGCONT) };
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(300));
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    assert!(status.success(), "{status:?}");
+    let torn = torn_lines(&text);
+    assert!(
+        text.contains(&format!("CLILINE-59999-{LONG}")) && torn.is_empty(),
+        "{} torn lines, the first: {:?}",
+        torn.len(),
+        torn.iter().take(3).collect::<Vec<_>>()
+    );
 }

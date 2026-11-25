@@ -951,7 +951,7 @@ impl Console {
         let kept_logs = pipeline.kept_logs.clone();
         let forwarder = Forwarder::spawn_reported(
             Box::new(reader),
-            Box::new(std::io::stderr()),
+            Box::new(axl_types::terminal::Locked::new(std::io::stderr(), 2)),
             pipeline.chain,
             pipeline.log,
             pipeline.shape,
@@ -962,7 +962,10 @@ impl Console {
             None if stdout_inherited => {
                 let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
-                let after = forwarder.ordered_after(Box::new(std::io::stdout()), probe.into());
+                let after = forwarder.ordered_after(
+                    Box::new(axl_types::terminal::Locked::new(std::io::stdout(), 1)),
+                    probe.into(),
+                );
                 // Colour asked for the stages' sake is shown as the user
                 // asked, else as the CLI's own stdout would carry it, as it
                 // is for stderr.

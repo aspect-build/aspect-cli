@@ -91,6 +91,8 @@ struct Redirect {
     stop: Arc<AtomicBool>,
     /// What was written to it, for the replay.
     written: Arc<Mutex<Vec<u8>>>,
+    /// The pipe's read end a [`Redirect::drain`] got back, still open.
+    left: Option<File>,
 }
 
 impl Redirect {
@@ -171,6 +173,7 @@ impl Redirect {
                 reader: Some(reader),
                 stop,
                 written,
+                left: None,
             }),
             Err(e) => {
                 let _ = dup2(saved.as_raw_fd(), fd);
@@ -198,31 +201,56 @@ impl Redirect {
 
     /// Stop capturing, replay what was written, and copy through what a
     /// child still holding the pipe writes; after [`Redirect::put_back`].
-    fn finish(mut self, replay: bool) {
+    /// Stop the reader once it has read (and, copying, copied) what the pipe
+    /// holds; after [`Redirect::put_back`]. [`Redirect::finish`] does it too.
+    fn drain(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let open = self.reader.take().and_then(|r| r.join().ok().flatten());
+        if let Some(reader) = self.reader.take() {
+            self.left = reader.join().ok().flatten();
+        }
+    }
+
+    fn finish(mut self, replay: bool) {
+        self.drain();
+        let open = self.left.take();
         let written = std::mem::take(&mut *self.written.lock().unwrap());
         let fd = self.fd;
         let mut out = File::from(self.saved);
         if replay {
             let _turn = stream_write_bounded(fd);
-            write_patiently(&mut out, newest(&written));
+            let replayed = newest(&written);
+            write_patiently(&mut out, replayed);
+            axl_types::terminal::wrote(fd, replayed);
         }
         if let Some(mut pipe) = open {
             let _ = std::thread::Builder::new()
                 .name("term-capture-after".into())
                 .spawn(move || {
+                    // Whole lines, each run of them one unit on the target;
+                    // an unended tail waits for its line's end or the pipe's.
                     let mut buf = [0u8; 8192];
+                    let mut pending = Vec::new();
+                    let mut put = |bytes: &[u8]| {
+                        let _turn = stream_write_bounded(fd);
+                        write_patiently(&mut out, bytes);
+                        axl_types::terminal::wrote(fd, bytes);
+                    };
                     loop {
                         match pipe.read(&mut buf) {
-                            Ok(0) => return,
+                            Ok(0) => break,
                             Ok(n) => {
-                                let _turn = stream_write_bounded(fd);
-                                write_patiently(&mut out, &buf[..n])
+                                pending.extend_from_slice(&buf[..n]);
+                                if let Some(end) = pending.iter().rposition(|&b| b == b'\n') {
+                                    put(&pending[..=end]);
+                                    pending.drain(..=end);
+                                }
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(_) => return,
+                            Err(_) => break,
                         }
+                    }
+                    if !pending.is_empty() {
+                        put(&pending);
                     }
                 });
         }
@@ -231,6 +259,11 @@ impl Redirect {
 
 /// How long a stopped capture reads what is left before handing the pipe on.
 const DRAIN_BUDGET: Duration = Duration::from_millis(100);
+
+/// How long moving fds 1 and 2 in or out of a capture waits for a writer to
+/// finish its unit: one writing does in far less, and one stalled on a
+/// destination nobody reads is not waited on.
+const SWITCH_WAIT: Duration = Duration::from_millis(100);
 
 /// How long [`write_patiently`] waits on a destination that takes nothing.
 const STALL_LIMIT: Duration = Duration::from_secs(2);
@@ -340,23 +373,15 @@ fn tty_readable(fd: RawFd, timeout: Duration) -> bool {
     select_one(fd, timeout, false).unwrap_or(false)
 }
 
-/// Held while a chunk is written to stdout (`[0]`) or stderr (`[1]`): by a
-/// forwarder for each chunk ([`write_when_writable`]), only once the stream
-/// takes it, and by a dump or a capture's replay for the whole of it, for at
-/// most [`STALL_LIMIT`] waiting: so neither splices the other's lines, and a
-/// stalled stream holds up neither for good.
-static STREAM_WRITE: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
-
-/// [`STREAM_WRITE`] for `fd` (1 or 2) for a whole dump or replay, given up
-/// after [`STALL_LIMIT`]; None for any other descriptor, or given up.
-fn stream_write_bounded(fd: RawFd) -> Option<std::sync::MutexGuard<'static, ()>> {
-    let lock = STREAM_WRITE.get((fd as usize).wrapping_sub(1))?;
-    lock_until(lock, std::time::Instant::now() + STALL_LIMIT)
+/// `fd`'s target ([`axl_types::terminal`]) for a whole dump or replay,
+/// given up after [`STALL_LIMIT`]; None for any other descriptor, or given up.
+fn stream_write_bounded(fd: RawFd) -> Option<axl_types::terminal::Turn> {
+    axl_types::terminal::turn_within(fd, STALL_LIMIT)
 }
 
 /// Write all of `bytes` to `fd`, waiting as long as it takes, but never
 /// inside a `write` that blocks: each chunk of at most [`WRITE_CHUNK`] once
-/// `fd` is writable, under its [`STREAM_WRITE`] for stdout and stderr. A
+/// `fd` is writable. The caller holds `fd`'s target for the whole. A
 /// take's `dup2` over `fd` waits out a write in flight on it on macOS, so a
 /// forwarder to a pipe nobody reads, blocked in one, would hold up the take,
 /// and every stream fed to the screen with it. A `select` that fails rather
@@ -370,9 +395,6 @@ pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Resul
             continue;
         }
         let chunk = &bytes[..bytes.len().min(WRITE_CHUNK)];
-        let _turn = STREAM_WRITE
-            .get((fd as usize).wrapping_sub(1))
-            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
         // SAFETY: a write from a live slice to a descriptor the caller names.
         let n = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
         match n {
@@ -562,6 +584,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     // holds its lock, and the take would wait on it. A partial line still
     // buffered goes out when a later write ends it: into the capture during
     // the screen, else after the release, behind what was written meanwhile.
+    axl_types::terminal::settle();
     let mut held = HELD.lock().unwrap();
     if held.is_some() {
         anyhow::bail!("the terminal is already taken");
@@ -617,6 +640,8 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         mark_captured(None);
         crate::out::set_capture_copies(false);
     };
+    // No write half to the terminal and half to the capture.
+    let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
     let stdout = Redirect::new(1, capture.clone(), Source::Stdout, alt_screen)
         .inspect_err(|_| forget_tty())
         .map_err(undo_termios)?;
@@ -633,6 +658,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     if alt_screen {
         crate::out::set_capture_copies(true);
     }
+    drop(moving);
 
     let mut tty = tty;
     let enter: &[u8] = if alt_screen {
@@ -873,12 +899,7 @@ pub(crate) fn suspend() -> bool {
             return true;
         }
         h.suspends = 1;
-        // Copies by the print paths again before the descriptors go back,
-        // so nothing written meanwhile goes uncopied.
-        crate::out::set_capture_copies(false);
-        for r in [&h.stdout, &h.stderr].into_iter().flatten() {
-            r.put_back();
-        }
+        give_back_descriptors([h.stdout.as_mut(), h.stderr.as_mut()]);
         let _ = h.tty.write_all(leave_sequence(true));
         let _ = h.tty.write_all(wheel_restore());
         let _ = h.tty.flush();
@@ -1085,10 +1106,13 @@ pub(crate) fn resume() {
         return;
     }
     *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
-    match (
+    let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
+    let redirected = (
         Redirect::new(1, h.capture.clone(), Source::Stdout, true),
         Redirect::new(2, h.capture.clone(), Source::Stderr, true),
-    ) {
+    );
+    drop(moving);
+    match redirected {
         (Ok(out), Ok(err)) => {
             h.stdout = Some(out);
             h.stderr = Some(err);
@@ -1173,9 +1197,16 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
     let Some(mark) = DUMP_MARK.lock().unwrap().take() else {
         return false;
     };
-    let Some((text, _)) = crate::out::output_ansi_since(mark) else {
+    let Some((mut text, _)) = crate::out::output_ansi_since(mark) else {
         return false;
     };
+    // Whole lines: an unended last one is still being written, and its end
+    // follows on the terminal by itself.
+    text.truncate(
+        text.iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |end| end + 1),
+    );
     let relink = crate::out::terminal_links();
     let as_text = crate::out::links_as_text();
     let before = crate::out::links_written();
@@ -1187,13 +1218,19 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
         }
     });
     DUMP_WRITTEN.fetch_add(crate::out::links_written() - before, Ordering::SeqCst);
-    // Not through `std::io::stderr()`, whose lock a forwarder waiting on a
-    // stderr nobody reads holds; its `STREAM_WRITE` keeps the forwarders'
-    // chunks out of the dump instead. Bounded as the replay is.
+    // Not through `std::io::stderr()`, whose lock a writer stalled on a
+    // stderr nobody reads may hold; the target's lock keeps every other
+    // writer out of the dump instead, stdout's too where they share it.
+    // Bounded as the replay is.
     // SAFETY: fd 2 stays open; ManuallyDrop never closes it.
     let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
-    let _turn = stream_write_bounded(2);
+    let _turn = axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, Duration::from_millis(200));
+    // On a line of its own: a child's line left unended past the wait.
+    if axl_types::terminal::mid_line(2) {
+        write_patiently(&mut err, b"\n");
+    }
     write_patiently(&mut err, out.as_bytes());
+    axl_types::terminal::wrote(2, out.as_bytes());
     true
 }
 
@@ -1243,11 +1280,8 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
         .as_ref()
         .is_none_or(|r| unsafe { libc::isatty(r.saved.as_raw_fd()) } == 1);
     // Both descriptors back first, so a crash during the replays below
-    // reports to the terminal; the print paths copy again before they do.
-    crate::out::set_capture_copies(false);
-    for r in [&held.stdout, &held.stderr].into_iter().flatten() {
-        r.put_back();
-    }
+    // reports to the terminal.
+    give_back_descriptors([held.stdout.as_mut(), held.stderr.as_mut()]);
     let leave = leave_sequence(held.alt_screen);
     let _ = held.tty.write_all(leave);
     let _ = held.tty.write_all(wheel_restore());
@@ -1282,24 +1316,27 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
     held.capture.drain().colours
 }
 
-/// Whether descriptors `a` and `b` are one file (`2>&1`) or both terminals,
-/// taken as one (`/dev/tty` and the pty it is are two inodes).
-fn same_file(a: RawFd, b: RawFd) -> bool {
-    // SAFETY: isatty, and fstat into zeroed stat buffers, on descriptors the
-    // caller owns.
-    unsafe {
-        if libc::isatty(a) == 1 && libc::isatty(b) == 1 {
-            return true;
-        }
-        let (mut x, mut y) = (
-            std::mem::zeroed::<libc::stat>(),
-            std::mem::zeroed::<libc::stat>(),
-        );
-        libc::fstat(a, &mut x) == 0
-            && libc::fstat(b, &mut y) == 0
-            && x.st_dev == y.st_dev
-            && x.st_ino == y.st_ino
+/// Put fds 1 and 2 back from a screen's captures, and the output files'
+/// copies back to the print paths, with every target held the while (each
+/// waited on for [`SWITCH_WAIT`]): no write lands half in a capture and half on the terminal, and
+/// none is copied between the capture's last chunks (its readers drained
+/// first), or goes uncopied.
+fn give_back_descriptors(redirects: [Option<&mut Redirect>; 2]) {
+    let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
+    let mut redirects: Vec<&mut Redirect> = redirects.into_iter().flatten().collect();
+    for r in &redirects {
+        r.put_back();
     }
+    for r in &mut redirects {
+        r.drain();
+    }
+    crate::out::set_capture_copies(false);
+    drop(moving);
+}
+
+/// Whether descriptors `a` and `b` are one target ([`axl_types::terminal::one_target`]).
+fn same_file(a: RawFd, b: RawFd) -> bool {
+    axl_types::terminal::one_target(a, b)
 }
 
 /// `frame` as one synchronized update (DEC mode 2026): the terminal holds
@@ -1906,8 +1943,7 @@ fn term_methods(registry: &mut MethodsBuilder) {
         if screen_holds_terminal() {
             crate::out::copy_only(text.as_bytes());
         } else {
-            use std::io::Write as _;
-            let _ = std::io::stderr().write_all(text.as_bytes());
+            let _ = crate::out::write_std(2, text.as_bytes());
             crate::out::copy_output(text.as_bytes());
         }
         Ok(NoneType)
