@@ -5,7 +5,7 @@ Run with:
   aspect dev test-dashboard
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_counts", "new_search", "note_event", "note_progress", "on_key", "open_in_editor", "open_peek", "opens", "output_of", "paste_text", "progress_counts", "refusal", "render", "report_lines", "reset_attempt", "running_actions", "scrollbar", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_counts", "new_search", "note_event", "note_progress", "on_key", "open_in_editor", "open_peek", "opens", "output_of", "paste_text", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "running_actions", "scrollbar", "severity", "shown_by", "slowest_rows", "step_match", "text_width", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1514,6 +1514,21 @@ def _impl(ctx: TaskContext) -> int:
     tall_rows = _visible(render(tall, 120, 40)).split("\n")
     tab_row = [i for i, r in enumerate(tall_rows) if "Console" in r and "Invocation" in r][0]
     _eq("the oldest line first at the top", tall_rows[tab_row + 1][:14], "│ the oldest  ")
+
+    # Coloured rows as wide as the plain ones: a tab as two spaces, U+FE0F
+    # widening the character before it.
+    for plain, coloured in [("x\tERROR: tab here", "\x1b[31mx\tERROR: tab here\x1b[0m"), ("done ⚠️ " * 20, "\x1b[33m" + "done ⚠️ " * 20 + "\x1b[0m")]:
+        wide = _screen(ctx, [], wrap = False)
+        add_lines(wide, [plain], None, [coloured])
+        rows = [r.rstrip("\r") for r in _visible(render(wide, 80, 24)).split("\n") if r.rstrip("\r")]
+        _eq("a coloured row fits: %r" % plain[:12], [text_width(r) for r in rows if text_width(r) != 80], [])
+        _eq("no raw tab drawn", any(["\t" in r for r in rows]), False)
+
+    # What the task wrote before the screen was taken is not replayed.
+    seeded = _screen(ctx, [], seeded = 2)
+    add_lines(seeded, ["banner", "▸ Running build task"], None, None, cli = True)
+    add_lines(seeded, ["INFO: from bazel"])
+    _eq("the replay starts after the seed", replay_lines(seeded, False), ["INFO: from bazel"])
 
     print("dashboard_test.axl: OK")
     return 0

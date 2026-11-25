@@ -65,6 +65,8 @@ struct Held {
     stdout: Redirect,
     stderr: Redirect,
     capture: Arc<Feed>,
+    /// What the task wrote before Bazel's console began, for `earlier()`.
+    earlier: Vec<u8>,
     keys: Keys,
 }
 
@@ -519,13 +521,12 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     }
     let capture = Arc::new(Feed::default());
     // A screen of its own shows the task's output from its start: what it
-    // wrote before Bazel's console began, which arrives on its own.
-    if alt_screen {
-        let earlier = crate::out::output_before_console_ansi(MAX_CAPTURED_BYTES as u64);
-        if !earlier.is_empty() {
-            capture.write(Source::Stderr, &earlier);
-        }
-    }
+    // wrote before Bazel's console began, handed over apart (`earlier()`).
+    let earlier = if alt_screen {
+        crate::out::output_before_console_ansi(MAX_CAPTURED_BYTES as u64)
+    } else {
+        vec![]
+    };
     let forget_tty = || mark_captured(None);
     let stdout = Redirect::new(1, capture.clone(), Source::Stdout)
         .inspect_err(|_| forget_tty())
@@ -582,6 +583,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         stdout,
         stderr,
         capture,
+        earlier,
         keys: Keys {
             pending: typed,
             ..Keys::default()
@@ -1474,6 +1476,29 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         } else {
             heap.alloc(got.lines)
         })
+    }
+
+    /// What the task wrote before Bazel's console began, as `[line, links,
+    /// coloured]` like `output(with_colour = True)`: for a screen that shows
+    /// the task's output from its start, before any of Bazel's lines. Once:
+    /// a second call gives none.
+    fn earlier<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let bytes = with_held(this, |h| Ok(std::mem::take(&mut h.earlier)))?;
+        let feed = Feed::default();
+        feed.write(Source::Stderr, &bytes);
+        feed.finish(Source::Stderr);
+        let got = feed.drain();
+        Ok(heap.alloc(serde_json::json!(
+            got.lines
+                .into_iter()
+                .zip(got.links)
+                .zip(got.colours)
+                .map(|((line, links), coloured)| serde_json::json!([line, links, coloured]))
+                .collect::<Vec<_>>()
+        )))
     }
 
     /// Give the terminal back: its modes, the main screen, and the process's

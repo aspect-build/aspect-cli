@@ -952,6 +952,7 @@ def attempt_state(now_ms: int) -> dict:
         log_size = 0,
         views = [],
         parked = {},
+        seeded = 0,
         inv = {},
         tab_scroll = 0,
         hover = None,
@@ -1660,6 +1661,16 @@ def mark_cells(row: str, marks: list) -> str:
         out.append(inside[3])
     return "".join(out)
 
+def _drawn_cell(c: int, prev: int):
+    """How a code point of a coloured line is drawn, `(cells, text)`, as
+    `fit` and `_widths` draw the plain line: a tab as two spaces, U+FE0F
+    widening the narrow character before it."""
+    if c == 0x09:
+        return (2, "  ")
+    if c == 0xFE0F:
+        return (1 if prev == 1 else 0, chr(c))
+    return (1 if c < 0x0300 else _cells(c), chr(c))
+
 def _slice_escaped(text: str, skip: int, cells: int) -> str:
     """`text`, escapes and all, from its `skip`th visible character on, cut
     after `cells` cells: the colour set before the cut kept, and ended."""
@@ -1667,6 +1678,7 @@ def _slice_escaped(text: str, skip: int, cells: int) -> str:
     seen = 0
     at = 0
     esc = 0
+    prev = 0
     for c in text.codepoints():
         if esc != 0 or c == 0x1b:
             out.append(chr(c))
@@ -1674,12 +1686,14 @@ def _slice_escaped(text: str, skip: int, cells: int) -> str:
             continue
         if seen < skip:
             seen += 1
+            prev = 1 if c < 0x0300 else _cells(c)
             continue
-        n = 1 if c < 0x0300 else _cells(c)
+        n, shown = _drawn_cell(c, prev)
         if at + n > cells:
             break
-        out.append(chr(c))
+        out.append(shown)
         at += n
+        prev = n
     return "".join(out) + _RESET
 
 def _cut_escaped(text: str, cells: int) -> str:
@@ -1688,16 +1702,18 @@ def _cut_escaped(text: str, cells: int) -> str:
     out = []
     at = 0
     esc = 0
+    prev = 0
     for c in text.codepoints():
         if esc != 0 or c == 0x1b:
             out.append(chr(c))
             esc = _escape_state(esc, c)
             continue
-        n = 1 if c < 0x0300 else _cells(c)
+        n, shown = _drawn_cell(c, prev)
         if at + n > cells:
             break
-        out.append(chr(c))
+        out.append(shown)
         at += n
+        prev = n
     return "".join(out) + "\x1b[39m"
 
 def _peek_paint(highlighted: str):
@@ -3538,11 +3554,12 @@ def replay_lines(state: dict, tty: bool) -> list:
     """The console as the screen showed it, for the scrollback once the
     screen is gone: every line it kept, Bazel's labels coloured on a
     terminal, the CLI's own as it wrote them (unmarked), after a line
-    counting the oldest it did not keep."""
+    counting the oldest it did not keep; not what the task wrote before the
+    screen was taken (`seeded`), which the main screen shows already."""
     out = []
     if state.get("dropped"):
         out.append("… %d older lines not kept: aspect history show for all of it" % state["dropped"])
-    for line in state["log"]:
+    for line in state["log"][max(0, state.get("seeded", 0) - state.get("dropped", 0)):]:
         out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
 
@@ -3723,6 +3740,12 @@ def _dashboard_impl(ctx: FeatureContext):
                 return
             state["screen"] = task_ctx.std.term.take()
             state["drawn"] = None
+
+            # The task's output from its start, before any of Bazel's lines;
+            # already on the main screen, so not replayed on leaving.
+            early = state["screen"].earlier()
+            _add_lines([line for line, _, _ in early], [links for _, links, _ in early], [coloured for _, _, coloured in early], cli = True)
+            state["seeded"] = state.get("seeded", 0) + len(early)
 
             # The mouse taken unless asked not to (`m` outlives a screen the
             # runtime took back), and its wheel as arrows while it is the
