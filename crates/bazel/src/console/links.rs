@@ -661,7 +661,7 @@ impl Linker {
         // Too long, or naming no path, only a tool's own links are judged.
         let linking = record.len() <= MAX_RECORD
             && (!known.is_empty() || contains(record, b"/") || contains(record, b"."));
-        if !linking && !contains(record, b"\x1b]8;") {
+        if !linking && !contains(record, b"\x1b]") {
             return strip_unlinked(record).into_owned();
         }
         // The record's text, escapes removed, where a path's line is read
@@ -935,7 +935,7 @@ pub fn written_urls(record: &[u8], styled: bool) -> Vec<u8> {
 
 /// [`written_urls`], and how many URLs it wrote.
 fn urls_written(record: &[u8], styled: bool) -> (Vec<u8>, usize) {
-    if !contains(record, b"\x1b]8;") {
+    if !contains(record, b"\x1b]") {
         return (record.to_vec(), 0);
     }
     let plain = ansi::strip(record);
@@ -1041,9 +1041,21 @@ fn active_style(text: &[u8]) -> Vec<u8> {
 }
 
 /// The URL an OSC 8 sequence links to, empty for the one that ends a link,
-/// or None for another escape.
+/// or None for another escape. Its number is read as a terminal reads it:
+/// without leading zeros or the control bytes its parser skips (`ESC ]08;`).
 fn osc8_url(seq: &[u8]) -> Option<&[u8]> {
-    let rest = seq.strip_prefix(b"\x1b]8;")?;
+    let body = seq.strip_prefix(b"\x1b]")?;
+    let semi = body.iter().position(|&b| b == b';')?;
+    let mut code = body[..semi].iter().filter(|b| !b.is_ascii_control());
+    if !code
+        .by_ref()
+        .find(|&&b| b != b'0')
+        .is_some_and(|&b| b == b'8')
+        || code.next().is_some()
+    {
+        return None;
+    }
+    let rest = &body[semi + 1..];
     let uri = &rest[rest.iter().position(|&b| b == b';')? + 1..];
     let end = uri
         .iter()
@@ -1341,8 +1353,9 @@ mod tests {
     /// A link dropped, then another opened before its end, keeps that
     /// one's end; one switched to a dropped link ends there; and a record
     /// too long to link, or naming no path, still has its own `file:` links
-    /// judged, one whose URL is not UTF-8, or is one only once control
-    /// bytes and leading spaces are skipped, dropped.
+    /// judged, one whose URL is not UTF-8, is one only once control bytes
+    /// and leading spaces are skipped, follows an OSC that its ESC ends, or
+    /// opens with a number a terminal reads as 8, dropped.
     #[test]
     fn a_tools_file_link_dropped_keeps_the_next_links_end() {
         let (dir, mut l) = linker();
@@ -1397,6 +1410,31 @@ mod tests {
                 "{url:?}: a terminal skips the control bytes"
             );
         }
+        assert_eq!(
+            link(
+                &mut l,
+                "x \x1b]8;;\x1b]8;;file:///bin/ls\x1b\\ls\x1b]8;;\x1b\\ y"
+            ),
+            "x \x1b]8;;ls y",
+            "an OSC ended by the next one's ESC is its own"
+        );
+        let tmux = link(
+            &mut l,
+            "x \x1bPtmux;\x1b\x1b]8;;file:///bin/ls\x07\x1b\\ls y",
+        );
+        assert!(!tmux.contains("file:"), "tmux passes it on: {tmux:?}");
+        for open in ["\x1b]08;;", "\x1b]\x008;;", "\x1b]8\x01;;"] {
+            assert_eq!(
+                link(
+                    &mut l,
+                    &format!("x {open}file:///bin/ls\x1b\\ls\x1b]8;;\x1b\\ y")
+                ),
+                "x ls y",
+                "{open:?}: a terminal reads OSC 8"
+            );
+        }
+        let title = "x \x1b]0;8;file:///bin/ls\x07 y";
+        assert_eq!(link(&mut l, title), title, "a title is no link");
     }
 
     #[test]

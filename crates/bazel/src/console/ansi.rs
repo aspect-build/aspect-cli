@@ -10,8 +10,8 @@
 //!
 //! Sequences are recognised per ECMA-48: CSI (`ESC [` … final byte), OSC and
 //! the other string sequences (`ESC ]`, `ESC P`, `ESC X`, `ESC ^`, `ESC _`, up
-//! to BEL or `ESC \`), and two-byte escapes. One left unterminated at the end
-//! of a record runs to its end.
+//! to BEL or `ESC \`, or before any other ESC), and two-byte escapes. One
+//! left unterminated at the end of a record runs to its end.
 
 use std::borrow::Cow;
 
@@ -40,8 +40,14 @@ fn escape_len(b: &[u8]) -> usize {
                 if b[i] == BEL {
                     return i + 1;
                 }
-                if b[i] == ESC && b.get(i + 1) == Some(&b'\\') {
-                    return i + 2;
+                if b[i] == ESC {
+                    // Another sequence, as a terminal's parser takes it,
+                    // where the ESC is not ST's.
+                    return if b.get(i + 1) == Some(&b'\\') {
+                        i + 2
+                    } else {
+                        i
+                    };
                 }
                 i += 1;
             }
@@ -381,6 +387,22 @@ mod tests {
         assert_eq!(
             controls(osc),
             b"\x1b]8;;https://example.com\x07\x1b]8;;\x1b\\\x1b7"
+        );
+    }
+
+    /// A string sequence ends before an ESC that is not ST's, which starts
+    /// the next sequence, as a terminal reads it.
+    #[test]
+    fn a_string_sequence_ends_before_another_escape() {
+        let b = b"\x1b]8;;\x1b]8;;file:///x\x07ls";
+        let segs: Vec<_> = segments(b).collect();
+        assert_eq!(
+            segs,
+            [
+                (true, &b"\x1b]8;;"[..]),
+                (true, &b"\x1b]8;;file:///x\x07"[..]),
+                (false, &b"ls"[..]),
+            ]
         );
     }
 
