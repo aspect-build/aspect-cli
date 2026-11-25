@@ -717,10 +717,15 @@ impl Linker {
     /// link in this linker's editor, or Some(None), no link, where there is
     /// none to make; None for any other URL, kept.
     fn instead_of_file_url(&self, url: &[u8]) -> Option<Option<String>> {
-        let url = std::str::from_utf8(url).ok()?;
-        if !is_file(url) {
+        if !url
+            .get(..5)
+            .is_some_and(|s| s.eq_ignore_ascii_case(b"file:"))
+        {
             return None;
         }
+        let Ok(url) = std::str::from_utf8(url) else {
+            return Some(None);
+        };
         let rest = &url[5..];
         let path = rest
             .strip_prefix("//")
@@ -1323,7 +1328,7 @@ mod tests {
     /// A link dropped, then another opened before its end, keeps that
     /// one's end; one switched to a dropped link ends there; and a record
     /// too long to link, or naming no path, still has its own `file:` links
-    /// judged.
+    /// judged, one whose URL is not UTF-8 dropped.
     #[test]
     fn a_tools_file_link_dropped_keeps_the_next_links_end() {
         let (dir, mut l) = linker();
@@ -1357,6 +1362,10 @@ mod tests {
         assert_eq!(
             link(&mut l, "x \x1b]8;;file:x\x1b\\x\x1b]8;;\x1b\\ y"),
             "x x y"
+        );
+        assert_eq!(
+            l.link(b"x \x1b]8;;file:///bin/ls#\xff\x1b\\ls\x1b]8;;\x1b\\ y"),
+            b"x ls y"
         );
     }
 
