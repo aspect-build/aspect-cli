@@ -258,7 +258,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["warming"]["archive_error"] = msg
         return _emit_final(ph, 1)
 
-    # Inherits the script's stdout/stderr so the user sees its progress in real time.
+    # Its stdout and stderr are passed on through the CLI as they come, so
+    # the user sees its progress in real time, and copied to the task's output.
     archive = ctx.std.process.command(archiver).spawn().wait()
     if not archive.success:
         code = exit_code_of(archive)

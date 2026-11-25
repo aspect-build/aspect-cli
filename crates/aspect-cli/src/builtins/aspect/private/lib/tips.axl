@@ -1348,6 +1348,10 @@ def _tips_impl(ctx):
     post-task hook, so it runs however the task ended."""
     state = []
 
+    # What silencing an id set aside: its stored tips, its `shows` entry,
+    # and whether it was in `order`, given back when it is unsilenced.
+    aside = {}
+
     found = ctx.aspect.tips.config_silence()
     for w in found.warnings:
         ctx.std.io.stderr.write(ansi.style("WARNING", ansi.WARNING_LABEL, ctx.std.io.stderr.color) + ": " + w + "\n")
@@ -1642,9 +1646,9 @@ def _tips_impl(ctx):
 
     def _set_silenced_from(id, source, on):
         """Add `source` to (`on`) or remove it from `id`'s sources. An id
-        newly silenced has its stored tips dropped, so neither a surface nor
-        the end of the task shows them; one with no source left shows again
-        from its next emit."""
+        newly silenced has its stored tips set aside (`aside`), so neither a
+        surface nor the end of the task shows them; one with no source left
+        has them back, and shows again on every surface and at the end."""
         held = sources.get(id, [])
         if on and source not in held:
             sources[id] = held + [source]
@@ -1656,6 +1660,7 @@ def _tips_impl(ctx):
                 sources.pop(id)
         if id in sources and id not in silenced:
             silenced.append(id)
+            aside[id] = ([t for t in state if t["id"] == id], shows.get(id), id in order)
             kept = [t for t in state if t["id"] != id]
             state.clear()
             state.extend(kept)
@@ -1664,6 +1669,11 @@ def _tips_impl(ctx):
                 shows.pop(id)
         elif id not in sources and id in silenced:
             silenced.remove(id)
+            tips, show, ordered = aside.pop(id, ([], None, False))
+            state.extend([t for t in tips if t not in state])
+            if ordered and id not in order:
+                order.append(id)
+                shows[id] = show
 
     def _set_auto_print(v):
         auto_print[0] = v
@@ -1715,6 +1725,7 @@ tips = struct(
     _reset_for_test = lambda ctx: ctx.traits[_TipsTrait]._reset(),
     _inspect_for_test = lambda ctx: ctx.traits[_TipsTrait].collect(),
     _set_silenced_for_test = lambda ctx, ids: ctx.traits[_TipsTrait]._set_silenced(ids),
+    _set_silenced_from_for_test = lambda ctx, id, source, on: ctx.traits[_TipsTrait].set_silenced(id, source, on),
     _set_auto_print_for_test = lambda ctx, v: ctx.traits[_TipsTrait]._set_auto_print(v),
     _set_sink_for_test = lambda ctx, fn: ctx.traits[_TipsTrait]._set_sink(fn),
     _finish_for_test = lambda ctx: ctx.traits[_TipsTrait]._finish(ctx),

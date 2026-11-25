@@ -720,8 +720,8 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Configuration for the child process's standard input (stdin) handle.
     ///
-    /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
-    /// defaults to [`piped`] when used with [`output`].
+    /// Unset, it is `"null"`, or for a child marked `interactive(True)` on a
+    /// terminal, `"inherit"`.
     fn stdin<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] io: values::StringValue,
@@ -742,8 +742,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Configuration for the child process's standard output (stdout) handle.
     ///
-    /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
-    /// defaults to [`piped`] when used with [`output`].
+    /// Unset, it is piped through the CLI (copied to the task's output, then
+    /// passed on to the CLI's own), or for a child marked `interactive(True)`
+    /// on a terminal, `"inherit"`.
     ///
     /// Accepts the strings `"null"`, `"piped"`, `"inherit"`, or a writable file
     /// stream from `fs.create(...)` to redirect output straight to that file —
@@ -764,8 +765,9 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Configuration for the child process's standard error (stderr) handle.
     ///
-    /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
-    /// defaults to [`piped`] when used with [`output`].
+    /// Unset, it is piped through the CLI (copied to the task's output, then
+    /// passed on to the CLI's own), or for a child marked `interactive(True)`
+    /// on a terminal, `"inherit"`.
     ///
     /// Accepts the same values as [`stdout`].
     fn stderr<'v>(
@@ -783,7 +785,8 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Executes the command as a child process, returning a handle to it.
     ///
-    /// By default, stdin, stdout and stderr are inherited from the parent.
+    /// Stdin, stdout and stderr the task did not set are the runtime's: see
+    /// [`interactive`] and [`stdin`]/[`stdout`]/[`stderr`].
     ///
     /// The child is bound to `cancellation`, `ctx.cancellation.root` unless
     /// given: when that token is cancelled (Ctrl+C for the root) the child is
@@ -804,7 +807,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Executes a command as a child process, waiting for it to finish and collecting its status.
     ///
-    /// By default, stdin, stdout and stderr are inherited from the parent.
+    /// Its streams are chosen as for [`spawn`].
     /// The child is bound to `cancellation` as in [`spawn`], and the wait
     /// ends the task if the root is cancelled meanwhile.
     fn status<'v>(
@@ -1167,10 +1170,9 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// child does not block waiting for input from the parent, while
     /// the parent waits for the child to exit.
     ///
-    /// By default, stdin, stdout and stderr are inherited from the parent.
-    /// In order to capture the output into this `Result<Output>` it is
-    /// necessary to create new pipes between parent and child. Use
-    /// `stdout('piped')` or `stderr('piped')`, respectively.
+    /// A stream the task did not set is passed on through the CLI, not
+    /// collected: to collect it into this `Output`, set `stdout('piped')` or
+    /// `stderr('piped')`.
     fn wait_with_output<'v>(
         this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,

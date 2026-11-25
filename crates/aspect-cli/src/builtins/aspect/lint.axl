@@ -1155,7 +1155,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
         for patch in scoped_patches:
-            ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
+            # Never a question (no terminal answers it): a hunk that looks
+            # applied already is skipped, not reversed. BSD and GNU patch both.
+            ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
                 .current_dir(ctx.std.env.current_dir()).spawn().wait()
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.

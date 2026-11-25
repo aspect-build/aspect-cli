@@ -122,6 +122,16 @@ def _test_add_tip_basic(ctx):
     _eq("add_tip basic — count", len(tips._inspect_for_test(ctx)), 2)
     _eq("add_tip basic — ids in insertion order", _ids(tips._inspect_for_test(ctx)), ["a", "b"])
 
+def _test_an_undone_silence_gives_the_tip_back(ctx):
+    """Silencing an id sets its stored tip aside; undoing that gives it
+    back to every surface and the end, not only the next emit."""
+    _reset(ctx)
+    add_tip(ctx, id = "a", severity = TIP_WARNING, title = "T", body = "B")
+    tips._set_silenced_from_for_test(ctx, "a", "user", True)
+    _eq("silenced: not stored", _ids(tips._inspect_for_test(ctx)), [])
+    tips._set_silenced_from_for_test(ctx, "a", "user", False)
+    _eq("undone: back", _ids(tips._inspect_for_test(ctx)), ["a"])
+
 def _test_add_tip_dedup(ctx):
     """A re-emit of the same `(id, key)` within a task replaces the stored
     tip (last-wins), so a task can revise a tip it made earlier."""
@@ -1145,6 +1155,7 @@ def _test_impl(ctx):
     _test_merge_aggregate(ctx)
     _test_aggregates_merge_once_per_batch(ctx)
     _test_rule_tips_from_a_report(ctx)
+    _test_an_undone_silence_gives_the_tip_back(ctx)
     print("tips.axl: OK (45 sections)")
     return 0
 

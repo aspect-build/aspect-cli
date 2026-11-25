@@ -866,6 +866,9 @@ pub(crate) fn resume() {
             return;
         }
     }
+    // What the prompt or child left unread (a newline after its answer) is
+    // not the screen's first key.
+    let _ = termios::tcflush(&h.tty, termios::FlushArg::TCIFLUSH);
     let _ = termios::tcsetattr(&h.tty, SetArg::TCSANOW, &h.cbreak);
     let mut enter = b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H".to_vec();
     if h.mouse_on {
@@ -1606,14 +1609,21 @@ fn term_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Keep `text` in the task's output files (`output.log`, `output.ansi`)
-    /// without writing it anywhere: for a line the terminal alone shows,
+    /// without writing it on a screen: for a line the terminal alone shows,
     /// written while a screen holds it, which the scrollback the screen
-    /// leaves (`dump_output`) then has in its place.
+    /// leaves (`dump_output`) then has in its place. With the screen given
+    /// back (a prompt), or none, it is written to stderr as any line is.
     fn keep_output<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] text: &str,
     ) -> anyhow::Result<NoneType> {
-        crate::out::copy_only(text.as_bytes());
+        if screen_holds_terminal() {
+            crate::out::copy_only(text.as_bytes());
+        } else {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(text.as_bytes());
+            crate::out::copy_output(text.as_bytes());
+        }
         Ok(NoneType)
     }
 
