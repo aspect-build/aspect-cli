@@ -14,6 +14,8 @@ Usage:
     aspect lint -- //path/to:targets -//not:this_one
     # Lint the patterns listed in a file (one per line)
     aspect lint --target-pattern-file=targets.txt
+    # Gate ruff on every finding while other linters hold the line
+    aspect lint --linter-strategy=ruff=hard
     # Fix lint violations, where the underlying linter provides fixes
     aspect lint --fix
     # Fix with rules_lint under its new module name (default: @aspect_rules_lint//lint:fix)
@@ -371,8 +373,8 @@ def parse_linter_strategies(entries):
             fail("lint: invalid --linter-strategy=%r - expected <linter>=<strategy>, e.g. ruff=hard" % entry)
         if name not in _STRATEGIES:
             fail(
-                "lint: invalid --linter-strategy=%r - expected a strategy of %s" %
-                (entry, ", ".join(_STRATEGIES.keys())),
+                "lint: invalid --linter-strategy=%r%s" %
+                (entry, did_you_mean_then(name, list(_STRATEGIES.keys()), " - ", "expected a strategy of " + ", ".join(_STRATEGIES.keys()))),
             )
         if linter.lower() in seen:
             fail(
@@ -402,7 +404,7 @@ def strategy_lookup(run_strategy, overrides):
     return lambda linter: by_linter.get((linter or "").lower(), run_strategy)
 
 def unmatched_overrides(overrides, tools_run):
-    """Override keys that name none of the linters in `tools_run`, sorted."""
+    """Overridden linters that name none of the linters in `tools_run`, sorted."""
     ran = {tool.lower(): True for tool in tools_run}
     return sorted([linter for linter in overrides if linter.lower() not in ran])
 
@@ -1171,7 +1173,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     unmatched = unmatched_overrides(strategy_overrides, data["lint"]["tools_run"])
     if unmatched and lint_tools_run and not build_failed:
         # A note, not a warning: a run that lints only some targets leaves
-        # correctly spelled keys unmatched too.
+        # correctly spelled linter names unmatched too.
         print("   --linter-strategy: no output this run from %s (linter names match the ones above)" % ", ".join(unmatched))
 
     # Print the post-filter subset (drives exit code / PR / annotations), distinct
@@ -1336,7 +1338,7 @@ lint = task(
                 "Per-linter --strategy override as <linter>=<strategy>, " +
                 "e.g. ruff=hard. Repeat for more linters. <linter> is a " +
                 "rules_lint linter name as listed under 🧹 Linters " +
-                "(Ruff for AspectRulesLintRuff), matched case-insensitively; " +
+                "(ruff for AspectRulesLintRuff), matched case-insensitively; " +
                 "the override covers that linter's findings, patches, " +
                 "suggestions and process failures."
             ),

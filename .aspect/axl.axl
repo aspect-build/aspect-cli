@@ -2944,6 +2944,10 @@ def test_lint_per_linter_strategy(tc: int) -> int:
         tc = test_case(tc, err != None and "<linter>=<strategy>" in err.message, "parse_linter_strategies: rejects %s" % why)
     err, _ = catch(parse_linter_strategies, ["ruff=strict"])
     tc = test_case(tc, err != None and "strict" in err.message, "parse_linter_strategies: rejects unknown strategy name")
+    err, _ = catch(parse_linter_strategies, ["ruff=hold-the-lne"])
+    tc = test_case(tc, err != None and "did you mean 'hold-the-line'" in err.message.replace('"', "'"), "parse_linter_strategies: suggests a near-miss strategy (got %r)" % (err.message if err else None))
+    err, _ = catch(parse_linter_strategies, ["ruff=hard=x"])
+    tc = test_case(tc, err != None and "hard=x" in err.message, "parse_linter_strategies: rejects a second =")
     err, _ = catch(parse_linter_strategies, ["Ruff=hard", "ruff=soft"])
     tc = test_case(tc, err != None and "twice" in err.message, "parse_linter_strategies: rejects linters differing only in case")
 
