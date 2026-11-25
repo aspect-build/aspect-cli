@@ -550,14 +550,27 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
         let mut shown = 0;
         // One unit on the stream's target (`axl_types::terminal`), so no
         // other writer splices it, but never blocked inside a write (see
-        // `write_when_writable`): what std's stdout buffers goes first.
+        // `write_when_writable`): what std's stdout buffers goes first. It
+        // goes to the stream's file as it is when the unit starts, through a
+        // descriptor of its own: a screen taken meanwhile moves fds 1 and 2
+        // without waiting on this write or failing it, and never captures
+        // (and copies a second time) what this forwarder copies itself.
+        use std::os::fd::FromRawFd as _;
         let show = |bytes: &[u8]| -> std::io::Result<()> {
             let fd = if stderr { 2 } else { 1 };
             let _turn = axl_types::terminal::turn(fd);
             if !stderr {
                 std::io::stdout().lock().flush()?;
             }
-            crate::engine::std::term::write_when_writable(fd, bytes)?;
+            // SAFETY: F_DUPFD_CLOEXEC on fd 1 or 2 returns a new descriptor
+            // this closure owns, closed when `own` drops.
+            let own = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+            if own < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let own = unsafe { std::os::fd::OwnedFd::from_raw_fd(own) };
+            use std::os::fd::AsRawFd as _;
+            crate::engine::std::term::write_when_writable(own.as_raw_fd(), bytes)?;
             axl_types::terminal::wrote(fd, bytes);
             Ok(())
         };

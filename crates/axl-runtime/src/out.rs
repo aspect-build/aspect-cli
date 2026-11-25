@@ -454,6 +454,12 @@ pub fn set_capture_copies(on: bool) {
     CAPTURE_COPIES.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Whether a screen's capture copies stdout and stderr now: a writer to fd
+/// 1 or 2 that copies its own bytes leaves them to it then.
+pub fn capture_copies() -> bool {
+    CAPTURE_COPIES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// How many bytes `output.ansi` holds now: where a dump of what follows
 /// starts ([`output_ansi_since`]). None without the task's files.
 pub fn output_ansi_mark() -> Option<u64> {

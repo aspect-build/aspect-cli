@@ -199,8 +199,6 @@ impl Redirect {
         let _ = dup2(self.saved.as_raw_fd(), self.fd);
     }
 
-    /// Stop capturing, replay what was written, and copy through what a
-    /// child still holding the pipe writes; after [`Redirect::put_back`].
     /// Stop the reader once it has read (and, copying, copied) what the pipe
     /// holds; after [`Redirect::put_back`]. [`Redirect::finish`] does it too.
     fn drain(&mut self) {
@@ -210,6 +208,10 @@ impl Redirect {
         }
     }
 
+    /// Stop capturing, replay what was written, and pass on what a child
+    /// still holding the pipe writes, whole lines at a time, to `fd` as it is
+    /// then (a capture again once a screen is taken back); after
+    /// [`Redirect::put_back`].
     fn finish(mut self, replay: bool) {
         self.drain();
         let open = self.left.take();
@@ -228,12 +230,28 @@ impl Redirect {
                 .spawn(move || {
                     // Whole lines, each run of them one unit on the target;
                     // an unended tail waits for its line's end or the pipe's.
+                    // To fd 1 or 2 as it is now: the terminal while the
+                    // screen is given back, a capture again once it is taken
+                    // back, which then copies them; else copied here. Any
+                    // other descriptor (a test's) gets them where it was.
                     let mut buf = [0u8; 8192];
                     let mut pending = Vec::new();
+                    let std_stream = fd == 1 || fd == 2;
                     let mut put = |bytes: &[u8]| {
                         let _turn = stream_write_bounded(fd);
-                        write_patiently(&mut out, bytes);
+                        if !std_stream {
+                            write_patiently(&mut out, bytes);
+                            return;
+                        }
+                        // SAFETY: fd 1 or 2, open for the process's life;
+                        // ManuallyDrop never closes it.
+                        let mut now = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+                        let captured = crate::out::capture_copies();
+                        write_patiently(&mut now, bytes);
                         axl_types::terminal::wrote(fd, bytes);
+                        if !captured {
+                            crate::out::copy_only(bytes);
+                        }
                     };
                     loop {
                         match pipe.read(&mut buf) {
@@ -385,14 +403,21 @@ fn stream_write_bounded(fd: RawFd) -> Option<axl_types::terminal::Turn> {
 /// take's `dup2` over `fd` waits out a write in flight on it on macOS, so a
 /// forwarder to a pipe nobody reads, blocked in one, would hold up the take,
 /// and every stream fed to the screen with it. A `select` that fails rather
-/// than waits (not a descriptor it can watch) gets the write anyway, which
-/// says why.
+/// than waits (not a descriptor it can watch) gets the write anyway, after a
+/// backoff that grows to 100ms, which says why.
 pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
     let wait = Duration::from_millis(100);
+    let mut failed_fast = 0u32;
     while !bytes.is_empty() {
         let asked = std::time::Instant::now();
-        if !writable(fd, wait) && asked.elapsed() >= wait {
-            continue;
+        if !writable(fd, wait) {
+            if asked.elapsed() >= wait {
+                continue;
+            }
+            // `select` failed rather than waited: back off, then the write
+            // says why (or goes through).
+            failed_fast += 1;
+            std::thread::sleep(Duration::from_millis(u64::from(failed_fast.min(10)) * 10));
         }
         let chunk = &bytes[..bytes.len().min(WRITE_CHUNK)];
         // SAFETY: a write from a live slice to a descriptor the caller names.
@@ -888,8 +913,15 @@ pub fn release_all() -> bool {
 /// already suspended counts another, and comes back with the last resume.
 /// One not of its own, or none: false.
 pub(crate) fn suspend() -> bool {
+    let finishing;
     {
-        let _order = Order::lock();
+        // Bounded, as a release's: one replaying to a stalled stdout holds
+        // these, and Ctrl+Z must not wait it out.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        let _order = Order {
+            _out: lock_until(&OUTPUT_ORDER[0], deadline),
+            err: lock_until(&OUTPUT_ORDER[1], deadline),
+        };
         let mut held = HELD.lock().unwrap();
         let Some(h) = held.as_mut().filter(|h| h.alt_screen) else {
             return false;
@@ -907,12 +939,14 @@ pub(crate) fn suspend() -> bool {
         CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
         mark_captured(None);
         // What the capture read before now stays in its feed, for the screen.
-        for r in [h.stdout.take(), h.stderr.take()].into_iter().flatten() {
-            r.finish(false);
-        }
+        finishing = [h.stdout.take(), h.stderr.take()];
         h.suspended = true;
     }
     dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
+    // After the dump: what a child still writes into a capture comes after it.
+    for r in finishing.into_iter().flatten() {
+        r.finish(false);
+    }
     true
 }
 
