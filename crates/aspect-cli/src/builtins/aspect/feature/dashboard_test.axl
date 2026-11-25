@@ -1676,6 +1676,10 @@ def _impl(ctx: TaskContext) -> int:
     tipped["tip_selected"] = [i for i, (t, _) in enumerate(shown_tips(tipped)) if t["id"] == "disk-full"][0]
     on_key(tipped, "s", 10)
     _eq("s again undoes it", (calls[-1], tips_count(tipped)), (("disk-full", False), 2))
+
+    # The Tips feature dropped the silenced tip: undone, it stays shown.
+    tipped["tips"] = [t for t in tipped["tips"] if t["id"] != "disk-full"]
+    _eq("undone, it stays though no longer stored", [t["id"] for t, _ in shown_tips(tipped)], ["disk-full", "remote-miss"])
     tipped["silencer"] = lambda id, on: "read-only file"
     on_key(tipped, "s", 10)
     _eq("a failed save says why and changes nothing", ("couldn't save to ~/.aspect/config.json: read-only file" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), tips_count(tipped)), (True, 2))
