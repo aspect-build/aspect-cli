@@ -152,7 +152,8 @@ pub fn basil_bin() -> &'static str {
 /// for the first two `aspect-cli` processes a tool attaches to (`gdb`,
 /// else `eu-stack`, each tried under `sudo -n timeout` too, as Ubuntu lets
 /// no non-ancestor attach; 40s at most a process; none tried again once
-/// all have failed), its open descriptors and its
+/// all have failed to attach to a live process, not for time), its open
+/// descriptors and its
 /// children printed to stderr, once, under `HANG-DIAG`
 /// (`HANG_DIAG_AFTER_SECS` overrides the 45s). For a CI timeout, which
 /// otherwise says only which tests ran long. Nothing elsewhere.
@@ -311,10 +312,10 @@ mod hang_diag {
     }
 
     /// What `program args` prints to stdout, given up on (and killed) after
-    /// `secs`; None where it can't be run or says nothing useful. Stdout is
-    /// read as it comes, so a long report never blocks the child on a full
-    /// pipe; stderr is dropped.
-    fn bounded(program: &str, args: &[&str], secs: u64) -> Option<String> {
+    /// `secs`: `Err(true)` for that, `Err(false)` where it can't be run or
+    /// says nothing useful. Stdout is read as it comes, so a long report
+    /// never blocks the child on a full pipe; stderr is dropped.
+    fn bounded(program: &str, args: &[&str], secs: u64) -> Result<String, bool> {
         use std::io::Read;
         let mut child = std::process::Command::new(program)
             .args(args)
@@ -322,8 +323,8 @@ mod hang_diag {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok()?;
-        let mut stdout = child.stdout.take()?;
+            .map_err(|_| false)?;
+        let mut stdout = child.stdout.take().ok_or(false)?;
         let (send, got) = std::sync::mpsc::channel();
         let _ = std::thread::Builder::new()
             .name("hang-diag-drain".into())
@@ -334,12 +335,12 @@ mod hang_diag {
             });
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);
         let status = loop {
-            match child.try_wait().ok()? {
+            match child.try_wait().map_err(|_| false)? {
                 Some(status) => break status,
                 None if std::time::Instant::now() >= deadline => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return None;
+                    return Err(true);
                 }
                 None => std::thread::sleep(Duration::from_millis(100)),
             }
@@ -349,14 +350,14 @@ mod hang_diag {
         let text = String::from_utf8_lossy(&text).into_owned();
         // gdb exits 0 having attached to nothing; a frame says it did.
         let useful = text.contains("#0") || (status.success() && !text.trim().is_empty());
-        useful.then_some(text)
+        if useful { Ok(text) } else { Err(false) }
     }
 
     /// Whether `timeout` (coreutils) can be run: what bounds a stack tool
     /// under `sudo`, which a kill of `sudo` itself would leave attached.
     fn have_timeout() -> bool {
         static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *HAVE.get_or_init(|| bounded("timeout", &["--version"], 5).is_some())
+        *HAVE.get_or_init(|| bounded("timeout", &["--version"], 5).is_ok())
     }
 
     /// The `aspect-cli` processes, per test process, whose stacks are still
@@ -383,9 +384,11 @@ mod hang_diag {
     const STACKS_PER_PROCESS: Duration = Duration::from_secs(40);
 
     /// Every thread's stack in `pid`: `gdb`, else `eu-stack`, each plain and
-    /// under `sudo -n timeout` (only where `timeout` is there); None where
-    /// none of them could attach in [`STACKS_PER_PROCESS`].
-    fn stacks(pid: u32) -> Option<String> {
+    /// under `sudo -n timeout` (only where `timeout` is there). Else
+    /// `Err(true)` where none could attach to a process still there, none
+    /// running out of time; `Err(false)` where the process ended, or a tool
+    /// or [`STACKS_PER_PROCESS`] ran out of time, so another may yet work.
+    fn stacks(pid: u32) -> Result<String, bool> {
         let p = pid.to_string();
         let gdb = ["-batch", "-nx", "-p", &p, "-ex", "thread apply all bt"];
         let eu = ["-p", &p];
@@ -396,12 +399,14 @@ mod hang_diag {
                 .as_secs()
                 .min(15)
         };
+        let mut timed_out = false;
         for (program, args) in [("gdb", &gdb[..]), ("eu-stack", &eu[..])] {
             if left() == 0 {
-                return None;
+                return Err(false);
             }
-            if let Some(text) = bounded(program, args, left()) {
-                return Some(text);
+            match bounded(program, args, left()) {
+                Ok(text) => return Ok(text),
+                Err(late) => timed_out |= late,
             }
             let secs = left();
             if secs == 0 || !have_timeout() {
@@ -410,11 +415,13 @@ mod hang_diag {
             let bound = secs.to_string();
             let mut sudo = vec!["-n", "timeout", "-s", "KILL", &bound, program];
             sudo.extend_from_slice(args);
-            if let Some(text) = bounded("sudo", &sudo, secs + 2) {
-                return Some(text);
+            match bounded("sudo", &sudo, secs + 2) {
+                Ok(text) => return Ok(text),
+                Err(late) => timed_out |= late,
             }
         }
-        None
+        let gone = !std::path::Path::new(&format!("/proc/{pid}")).exists();
+        Err(!timed_out && !gone)
     }
 
     fn report(pid: u32, parents: &HashMap<u32, u32>) -> String {
@@ -452,19 +459,27 @@ mod hang_diag {
             // Not an aspect-cli process: no stacks, nor budget spent.
         } else if NO_TOOL_ATTACHES.load(SeqCst) {
             out.push_str("HANG-DIAG   no stacks: no tool could attach (see above)\n");
-        } else if STACKS_LEFT.load(SeqCst) == 0 {
+        } else if STACKS_LEFT
+            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+            .is_err()
+        {
             out.push_str("HANG-DIAG   no stacks: those of two processes were printed already\n");
         } else {
+            // Reserved above; given back unless the capture worked.
             match stacks(pid) {
-                Some(text) => {
-                    let _ = STACKS_LEFT.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1));
+                Ok(text) => {
                     for line in text.lines() {
                         out.push_str(&format!("HANG-DIAG   | {line}\n"));
                     }
                 }
-                None => {
-                    NO_TOOL_ATTACHES.store(true, SeqCst);
-                    out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach; not tried again\n");
+                Err(cannot_attach) => {
+                    STACKS_LEFT.fetch_add(1, SeqCst);
+                    if cannot_attach {
+                        NO_TOOL_ATTACHES.store(true, SeqCst);
+                        out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach; not tried again\n");
+                    } else {
+                        out.push_str("HANG-DIAG   no stacks: the process ended, or the tools ran out of time\n");
+                    }
                 }
             }
         }

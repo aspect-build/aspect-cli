@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1362,12 +1362,15 @@ def _impl(ctx: TaskContext) -> int:
     targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
     _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 0 failed · 1 blocked by a dependency", "failures listed 1 (failed actions and test attempts, in Failures)"])
 
-    # A test Bazel could not run, its summary Aborted: failed, as Bazel
-    # counts it; an interrupt is no verdict.
+    # A test whose summary is Aborted with no reason: failed where one of
+    # its attempts failed (it failed to build), skipped where none ran (a
+    # build without --keep_going stopped first); an interrupt is no verdict.
     aborted_tests = new_counts()
-    count_aborted_test(aborted_tests, "//t:flaky_sharded", "unknown")
-    count_aborted_test(aborted_tests, "//t:stopped", "user_interrupted")
-    _eq("an aborted test summary", (aborted_tests["tests_failed"], aborted_tests["failures"]), (1, ["//t:flaky_sharded"]))
+    count_event(aborted_tests, "test_result", struct(label = "//t:built_badly", configuration = struct(id = "c")), struct(status = "failed_to_build"))
+    count_aborted_test(aborted_tests, "//t:built_badly", "unknown", "c")
+    count_aborted_test(aborted_tests, "//t:never_ran", "unknown", "c")
+    count_aborted_test(aborted_tests, "//t:stopped", "user_interrupted", "c")
+    _eq("an aborted test summary", (aborted_tests["tests_failed"], aborted_tests["failures"], aborted_tests["tests_skipped"]), (1, ["//t:built_badly"], 1))
 
     # One attempt Bazel posts twice is one row, the one with a log; a failed
     # TestRunner action folds into its test's attempts, before or after.
@@ -1377,12 +1380,15 @@ def _impl(ctx: TaskContext) -> int:
     for order in ("action first", "action last"):
         twice = _screen(ctx, ["x"])
         if order == "action first":
-            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "t/s/shard_2_of_2/test.log"), runner, False)
+            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "bazel-out/k8/testlogs/t/s/shard_2_of_2/test.log"), runner, False)
+            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "bazel-out/k8/testlogs/t/s/shard_1_of_2/test.log"), runner, False)
         note_event(twice, "test_result", shard, struct(status = "failed", test_action_output = log), False)
         note_event(twice, "test_result", shard, struct(status = "failed_to_build"), False)
         if order == "action last":
-            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "t/s/shard_2_of_2/test.log"), runner, False)
-        _eq("%s: one row for the attempt, with its log" % order, [(r["kind"], len(r["files"])) for r in twice["fails"]], [("test", 1)])
+            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "bazel-out/k8/testlogs/t/s/shard_2_of_2/test.log"), runner, False)
+            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "bazel-out/k8/testlogs/t/s/shard_1_of_2/test.log"), runner, False)
+        rows = sorted([(r["kind"], r.get("output", "")) for r in twice["fails"]])
+        _eq("%s: one row for the attempt; another shard's action kept" % order, rows, [("action", "bazel-out/k8/testlogs/t/s/shard_1_of_2/test.log"), ("test", "")])
 
     # Metrics' spawns: after the build until its execution log is read, then
     # what it held, none included.
@@ -1392,8 +1398,40 @@ def _impl(ctx: TaskContext) -> int:
     reading["exec_log_read"] = True
     _eq("a log with none", spawns(reading), ["spawns 0 run: the execution log has none"])
 
-    # A cached build's slowest pane: that nothing ran, not an empty box.
-    _eq("nothing ran", [_visible(r) for r in slowest_rows(_screen(ctx, [], critical = "a.cc 1s"))], ["nothing ran: every action was cached"])
+    # A cached build's slowest pane: that nothing ran, not an empty box, only
+    # where the build succeeded and its metrics say so: not mid-build, nor
+    # after a failed one.
+    def _metrics(executed, misses):
+        return struct(action_summary = struct(actions_executed = executed, action_cache_statistics = struct(hits = 0, misses = misses)))
+
+    success = struct(exit_code = struct(name = "SUCCESS", code = 0))
+    failure = struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))
+    cases = [
+        ("a cached build", dict(building = False, inv = {"build_finished": success, "build_metrics": _metrics(0, 0)}), ["nothing ran: every action was cached"]),
+        ("mid-build", dict(building = True, inv = {}), []),
+        ("a failed build", dict(building = False, inv = {"build_finished": failure, "build_metrics": _metrics(1, 1)}), []),
+    ]
+    for what, kw, want in cases:
+        _eq("slowest: " + what, [_visible(r) for r in slowest_rows(_screen(ctx, [], critical = "a.cc 1s", **kw))], want)
+    mid = _screen(ctx, ["x"], building = True)
+    _eq("Metrics keeps no Slowest mid-build", any(["Slowest" in _visible(l) for l in metrics_lines(mid)]), False)
+
+    # Blocked only by a dependency that failed; a missing source file (an
+    # unconfigured root) is the target's own failure.
+    def _completed(label, roots):
+        return struct(kind = "target_completed", id = struct(label = label), payload = struct(success = False), children = [struct(id = struct(label = r)) for r in roots])
+
+    own = _screen(ctx, ["x"])
+    note_blocked(own, _completed("//p:gen", ["//p:missing.txt"]))
+    dep = _screen(ctx, ["x"])
+    dep["counts"]["failed_labels"] = {"//p:broken": True}
+    note_blocked(dep, _completed("//p:demo", ["//p:broken"]))
+    _eq("blocked by what failed, not a missing source", (own.get("blocked") or {}, dep.get("blocked") or {}), ({}, {"//p:demo": ["//p:broken"]}))
+
+    # A build folded at its end keeps that its execution log was read.
+    ended = _screen(ctx, ["x"], building = True)
+    end_build(ended, 1000)
+    _eq("a folded build's log read", ended["builds"][-1]["snapshot"]["exec_log_read"], True)
 
     # Page Up and Option/Alt+↑ scroll, not an Esc and the arrow.
     paged = _screen(ctx, ["l%d" % i for i in range(200)])
