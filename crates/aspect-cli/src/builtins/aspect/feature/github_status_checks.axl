@@ -61,7 +61,7 @@ slot ("title", "summary", "details") to template for every task;
         # Or ["*"] to show everything.
 """
 
-load("@aspect//lint.axl", "LintTrait")
+load("@aspect//lint.axl", lint_findings_destination = "findings_destination")
 load(
     "../private/lib/bazel_results.axl",
     "format_run_date",
@@ -218,9 +218,6 @@ def _github_status_checks(ctx: FeatureContext):
     # Check-run URL is published below via `checkrun.set_url`; siblings
     # (GithubStatusComments) read it via `checkrun.url(ctx)`. Stored in
     # `<tmpdir>/checkrun/<pid>.url`, keyed by the task-scoped pid.
-
-    # Only consulted for kind="lint_results"; harmless on others.
-    lint_trait = ctx.traits[LintTrait]
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -494,7 +491,7 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_task_kind"] = ctx.task.kind
         _create_check_run(ctx)
 
-    def _lint_annotation_plan(ctx):
+    def _lint_annotation_plan(ctx, destination):
         """Resolve live PR context, then delegate to `lint_annotation_plan`.
 
         DORMANT-SPLIT — `has_fix` is False for every rules_lint
@@ -505,7 +502,7 @@ def _github_status_checks(ctx: FeatureContext):
         """
         pr, _ = github.detect_pr(ctx.std)
         return lint_annotation_plan(
-            lint_trait.findings_destination,
+            destination,
             has_pr = pr != None,
         )
 
@@ -635,15 +632,17 @@ def _github_status_checks(ctx: FeatureContext):
         # PATCHes, so per-tick emission duplicates them.
         extra_batches = []
         if final and update.kind == "lint_results":
-            ann_enabled, include_fix_bearing = _lint_annotation_plan(ctx)
+            destination = lint_findings_destination(ctx)
+            ann_enabled, include_fix_bearing = _lint_annotation_plan(ctx, destination)
         else:
+            destination = ""
             ann_enabled, include_fix_bearing = (False, False)
         if ann_enabled:
             # In "auto" mode only, suppress annotations at anchors where a
             # patch-derived auto-fix comment already lands ("both" wants the
             # duplication; the others have nothing to dedupe).
             suppress_anchors = {}
-            if lint_trait.findings_destination == "auto":
+            if destination == "auto":
                 for s in (data.get("lint", {}) or {}).get("suggestions", []) or []:
                     if not s.get("correlated"):
                         continue

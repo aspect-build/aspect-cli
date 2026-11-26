@@ -16,7 +16,7 @@ API requires. Lint findings sit on the new (added/changed) side, so
 omitted.
 """
 
-load("@aspect//lint.axl", "LintTrait")
+load("@aspect//lint.axl", "LintTrait", lint_findings_destination = "findings_destination")
 load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
@@ -457,7 +457,6 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
 
 def _gitlab_lint_impl(ctx: FeatureContext):
     lint_trait = ctx.traits[LintTrait]
-    destination = lint_trait.findings_destination
 
     mr, reason = detect_gitlab_mr(ctx.std)
     if mr == None:
@@ -528,9 +527,11 @@ def _gitlab_lint_impl(ctx: FeatureContext):
     if git_out.status.success:
         gl["prefix"] = git_out.stdout.strip()
 
-    state = {"all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
+    # `destination` is the lint task's --findings-destination, read in _lint_start.
+    state = {"destination": "auto", "all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
 
     def _lint_start(ctx):
+        state["destination"] = lint_findings_destination(ctx)
         gl["window"] = diff_window(
             lint_trait.changed_files,
             prefix = gl["prefix"],
@@ -538,7 +539,7 @@ def _gitlab_lint_impl(ctx: FeatureContext):
         )
 
     def _lint_report(ctx, filepath):
-        comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
+        comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = state["destination"])
         state["all_comments"].extend(comments)
         if "existing_markers" not in gl:
             gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.name)
@@ -561,7 +562,7 @@ def _gitlab_lint_impl(ctx: FeatureContext):
     def _lint_end(ctx, relevant_diagnostics):
         if "existing_markers" not in gl:
             gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.name)
-        suggestion_comments = [] if destination == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.name, relevant_diagnostics, state["pending_patches"])
+        suggestion_comments = [] if state["destination"] == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.name, relevant_diagnostics, state["pending_patches"])
         non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
         non_errors = _dedup_by_marker(non_errors, ctx.task.name)
         new_only = []
@@ -577,7 +578,7 @@ def _gitlab_lint_impl(ctx: FeatureContext):
             state["posted"] += len(gl["existing_markers"]) - before
             state["errors"].extend(errs)
         suggestion_markers = [m for m in [extract_marker(c.get("body", ""), task_key = ctx.task.name) for c in suggestion_comments] if m]
-        _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, destination)
+        _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, state["destination"])
         if trace.enabled or ctx.std.io.debug:
             debug(ctx.std, "gitlab lint comment summary:")
             debug(ctx.std, "posted comments:  %s" % state["posted"])

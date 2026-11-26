@@ -118,9 +118,9 @@ def config(ctx: ConfigContext):
     ctx.tasks["lint"].args.linter_strategies = ["ruff=hard"]
 ```
 
-File-level findings — a SARIF result with a file but no `region` is file-level; a result with no location has no file. Both keep the files named by their `relatedLocations`, and scoped strategies keep them when their file or a related file changed. rules_lint's errorformat-based linters emit no `relatedLocations`, so for them only the finding's own file counts. They count toward totals and the exit code, list in the status body, and never post as review comments. When `findings_destination` annotates (any mode but `comments`), a file-level finding annotates line 1 of its file.
+File-level findings — a SARIF result with a file but no `region` is file-level; a result with no location has no file. Both keep the files named by their `relatedLocations`, and scoped strategies keep them when their file or a related file changed. rules_lint's errorformat-based linters emit no `relatedLocations`, so for them only the finding's own file counts. They count toward totals and the exit code, list in the status body, and never post as review comments. When `--findings-destination` annotates (any mode but `comments`), a file-level finding annotates line 1 of its file.
 
-Diagnostic destination — `LintTrait.findings_destination`:
+Diagnostic destination — `--findings-destination` (in `config.axl`, `ctx.tasks["lint"].args.findings_destination`):
 
 - `auto` *(default)* — split by surface affordance: on a PR, fix-bearing findings post as PR review comments (suggestion block renders inline) and non-fix findings post as check-run annotations; off a PR, every finding posts as an annotation (no comments surface available).
 - `comments` — every finding posts as a PR review comment. Requires a PR.
@@ -299,10 +299,10 @@ The session can then run `aspect worktree release` itself. Without the `SessionS
 | `Workflows`              | [feature/workflows.axl](feature/workflows.axl)                             | Opt-in via config; only fully active on Aspect Workflows runners | Wires BES forwarding, build metadata, runner health checks, `--color=yes` where Bazel misdetects color (not when `std.io.stderr.color` is off), CI-host quirks (GitHub runner-tracking suppression, Buildkite section markers). |
 | `GithubStatusChecks`     | [feature/github_status_checks.axl](feature/github_status_checks.axl)       | `enabled = True` (default); skips silently outside CI / non-github.com host | Creates / updates a GitHub check run via the Aspect GitHub App token. |
 | `GithubStatusComments`   | [feature/github_status_comments.axl](feature/github_status_comments.axl)   | `enabled = True` (default); GitHub Actions + PR only    | PR-level *aggregated* sticky comment that rolls every sibling task into one body. Polled and PATCHed in place. |
-| `GithubLintComments`     | [feature/github_lint_comments.axl](feature/github_lint_comments.axl)       | Opt-in via `LintTrait.findings_destination` ∋ `comments` | Posts SARIF findings as PR review comments (channel 2) and rules_lint patches as suggestion-block comments (channel 3). |
+| `GithubLintComments`     | [feature/github_lint_comments.axl](feature/github_lint_comments.axl)       | `enabled = True` (default); PR only; what posts follows `aspect lint --findings-destination` | Posts SARIF findings as PR review comments (channel 2) and rules_lint patches as suggestion-block comments (channel 3). |
 | `GitlabLintComments`     | [feature/gitlab_lint_comments.axl](feature/gitlab_lint_comments.axl)       | `enabled = True` (default); fires on `aspect lint` task updates when a GitLab MR context is detected (`CI_MERGE_REQUEST_IID` on GitLab CI, or the `ASPECT_GITLAB_*` overrides on Aspect Workflows runners on other hosts) | Posts `aspect lint` findings as inline GitLab MR diff discussions, with one-click suggestion blocks where a fix patch is available — the GitLab counterpart to `GithubLintComments`. Auth via the Aspect GitLab App token (`api` scope), same flow as `GitlabStatusComments`. |
 | `BuildkiteAnnotations`   | [feature/buildkite_annotations.axl](feature/buildkite_annotations.axl)     | `enabled = True` (default); requires `BUILDKITE` env    | Posts `buildkite-agent annotate --scope=job` annotations with a leading task pill. |
-| `ArtifactUpload`         | [feature/artifacts.axl](feature/artifacts.axl)                             | `args.upload_*` flags per-task                          | Uploads testlogs / build-failure logs / profile / BEP / execlog to the host CI; populates `ArtifactsTrait`. |
+| `ArtifactUpload`         | [feature/artifacts.axl](feature/artifacts.axl)                             | `args.upload_*` flags per-task                          | Uploads testlogs / build-failure logs / profile / BEP / execlog to the host CI; registers each URL via `artifacts.append`. |
 | `History`                | [feature/history.axl](feature/history.axl)                                 | `args.action_logs` / `args.test_logs`                    | Keeps builds' action logs (hard-linked) and test logs (copied) in the task history, with an index beside each (`actions.json`, `testlogs.json`). |
 | `BuildEvents`            | [feature/build_events.axl](feature/build_events.axl)                       | Always on; `args.max_retries` / `retry_min_delay` / `retry_max_buffer_bytes` / `timeout` / `max_event_bytes` | Retries, replay buffer and upload deadline for every BES backend the CLI streams to, and the size every build event is held to (a failed action's command line is cut to fit). |
 | `Telemetry`              | [feature/telemetry.axl](feature/telemetry.axl)                             | `ctx.telemetry.exporters.add(...)` in config            | OTLP traces / logs / metrics export. |
@@ -322,7 +322,7 @@ Config knobs:
 | Knob | Default | Notes |
 |------|---------|-------|
 | `max_pr_comments` | `25` | Maximum MR discussions posted per run. Errors are prioritized over warnings, then notes; excess findings are dropped from the MR but still drive the lint task's exit code. Set to `0` to disable posting while keeping exit-code behavior intact. |
-| `findings_destination` | `auto` | Shared `LintTrait` knob (`auto` / `comments` / `annotations` / `both`) controlling whether findings post to inline discussions, annotations, or both — see [`lint`](#lint) for the full per-value breakdown. |
+| `findings_destination` | `auto` | Not a feature knob: set `aspect lint --findings-destination` — see [`lint`](#lint). |
 | `only_annotate_changed_regions` | — | Shared knob; findings outside the displayed MR diff hunk are not posted. |
 
 Behavior notes:

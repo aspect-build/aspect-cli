@@ -81,10 +81,8 @@ def _test_lint_comment_identity(ctx):
 load("@aspect//feature/deployment.axl", "Deployment")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments.axl", "GithubStatusComments")
-load("@aspect//traits.axl", "LintTrait")
 
 def config(ctx):
-    ctx.traits[LintTrait].findings_destination = "comments"
     ctx.features[Deployment].enabled = False
     ctx.features[GithubStatusChecks].enabled = False
     ctx.features[GithubStatusComments].enabled = False
@@ -121,6 +119,7 @@ def _impl(ctx):
         return struct(catch = lambda: struct(block = lambda: (None, struct(status = 200, body = json.encode(payload), headers = []))))
 
     fields = {name: getattr(ctx, name) for name in dir(ctx)}
+    fields["args"] = struct(findings_destination = "comments")
     fields["http"] = lambda: struct(
         get = lambda **kwargs: _send("get", **kwargs),
         post = lambda **kwargs: _send("post", **kwargs),

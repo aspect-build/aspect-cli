@@ -183,20 +183,18 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 
 | Trait                        | Defined in                                                                | Slots                                                                                                       | Status / Purpose |
 |------------------------------|---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|------------------|
-| **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `exec_log_event`, `build_end`, `build_retry`, `bazel_attempt_end`, `build_event_sinks`, `keep_action_logs`, `keep_test_logs`, `task_flags`, `rc_flags`, `flags`, `startup_flags`, `base_flags`, `extra_flags`, `extra_build_flags`, `extra_test_flags`, `extra_query_flags`, `extra_info_flags`, `extra_startup_flags`, `bes_backends`, `bes_runner_backends`, `bes_max_retries`, `bes_retry_min_delay`, `bes_retry_max_buffer_bytes`, `bes_timeout`, `max_build_event_bytes`, `bes_results_sources`, `execution_log_sinks`, `output_stages`, `output_display`, `output_progress`, `output_intercept`, `output_start`, `output_frame`, `output_end` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, console stages, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. `exec_log_event` is a hook list a task does not iterate itself — see [Execution log hooks](#execution-log-hooks); the runtime calls `output_intercept`, `output_frame` and `output_end` itself, for every `ctx.bazel.build`/`test` of the task (`bazel/console.axl`'s "Held lines and frames"). |
+| **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `exec_log_event`, `build_end`, `build_retry`, `bazel_attempt_end`, `build_event_sinks`, `keep_action_logs`, `keep_test_logs`, `task_flags`, `rc_flags`, `flags`, `startup_flags`, `base_flags`, `injected_flag_filters`, `extra_flags`, `extra_build_flags`, `extra_test_flags`, `extra_query_flags`, `extra_info_flags`, `extra_startup_flags`, `bes_backends`, `bes_runner_backends`, `bes_max_retries`, `bes_retry_min_delay`, `bes_retry_max_buffer_bytes`, `bes_timeout`, `max_build_event_bytes`, `bes_results_sources`, `execution_log_sinks`, `output_stages`, `output_display`, `output_progress`, `output_intercept`, `output_start`, `output_frame`, `output_end` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, console stages, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. `bes_max_retries`, `bes_retry_min_delay`, `bes_retry_max_buffer_bytes`, `bes_timeout` and `max_build_event_bytes` are set by the `BuildEvents` feature from its options. `exec_log_event` is a hook list a task does not iterate itself — see [Execution log hooks](#execution-log-hooks); the runtime calls `output_intercept`, `output_frame` and `output_end` itself, for every `ctx.bazel.build`/`test` of the task (`bazel/console.axl`'s "Held lines and frames"). |
 | **`HealthCheckTrait`**       | [private/lib/health_check.axl](private/lib/health_check.axl)                              | `health_check`                                                                                              | ✅ Clean. Hook lists only. |
-| **`Phases`**     | [private/lib/lifecycle.axl](private/lib/lifecycle.axl)                                    | `task_update`, `repro_fix_suggestion`                                                                       | ✅ Clean. Hook lists only. `task_update` drives status surfaces (first update inits, `final=True` concludes — see lifecycle section above). `repro_fix_suggestion` lets a user `config.axl` accept / reject / modify repro & fix command suggestions — see [Customizing repro & fix suggestions](#customizing-repro--fix-suggestions). |
-| **`DeliveryTrait`**          | [delivery.axl](delivery.axl)                                              | `delivery_start`, `delivery_target`, `delivery_end`, `delivery_manifest`, `render_manifest_file`, `upload_manifest` | ✅ Clean. Hook callables only. |
+| **`Phases`**     | [private/lib/lifecycle.axl](private/lib/lifecycle.axl)                                    | `task_update`, `status_surface_update`, `repro_fix_suggestion`                                                                       | ✅ Clean. Hook lists only. `task_update` drives status surfaces (first update inits, `final=True` concludes — see lifecycle section above). `repro_fix_suggestion` lets a user `config.axl` accept / reject / modify repro & fix command suggestions — see [Customizing repro & fix suggestions](#customizing-repro--fix-suggestions). |
+| **`DeliveryTrait`**          | [delivery.axl](delivery.axl)                                              | `delivery_start`, `delivery_target`, `delivery_end`, `delivery_manifest`, `render_manifest_file`, `upload_manifest`, `create_scheduler`, `skip_policy` | ✅ Clean. Hook callables only. |
 | **`DeliveryState`**          | [private/lib/delivery_state.axl](private/lib/delivery_state.axl)          | `connect`                                                                                                   | ✅ Clean. One nullable factory `(ctx, Params) -> Backend`; `None` = the deliveryd HTTP client. `redis_state.connect` ([private/lib/redis_state.axl](private/lib/redis_state.axl)) swaps in direct Redis. Re-exported with its implementations from [delivery_state.axl](delivery_state.axl). |
-| **`ArtifactsTrait`**         | [private/lib/artifacts.axl](private/lib/artifacts.axl)                                    | `artifacts_browse_url`, `artifact_urls`, `testlogs_label_urls`                                              | ⚠️ **Legacy** — data fields used as cross-feature state. Migrating to Pattern 2 (feature-owned + Callable trait). See [Artifact uploads](#artifact-uploads). |
-| **`GitHubStatusChecksTrait`**| [feature/github_status_checks.axl](feature/github_status_checks.axl)      | `templates`, `metadata_keys`                                                                                | ⚠️ **Legacy** — user-facing config on a trait. Migrating to feature `args`. |
-| **`GitHubCheckRunTrait`**    | [private/lib/checkrun.axl](private/lib/checkrun.axl)                                      | `html_url`                                                                                                  | ⚠️ **Legacy** — single-value cross-feature handoff via data field. Migrating to Pattern 2. |
-| **`TipsTrait`**              | [private/lib/tips.axl](private/lib/tips.axl)                                              | `tips`, `silenced_tips`, `auto_print`                                                                       | ⚠️ **Legacy** — list/dict data fields as cross-feature state. Migrating to Pattern 2 (feature-owned tips with `tips.append`/`tips.collect` wrapper API). |
-| **`GitHubApiRateLimitTrait`**| [private/lib/rate_limit.axl](private/lib/rate_limit.axl)                                  | `observations`, `watermark`, `limits`, `last_effective_factor`, `sibling_observations`, …                   | ⚠️ **Legacy** — many-to-many accumulator with cross-task swarm. Migrating to Pattern 3 (library-owned + tmpdir/JSON), because no single feature owns it and swarm aggregation crosses task boundaries. |
+| **`_ArtifactsTrait`**        | [private/lib/artifacts.axl](private/lib/artifacts.axl)                                    | `append`, `list`                                                                                            | ✅ Clean. Pattern 2: a private trait of callables, reached only through the `artifacts` wrapper. See [Artifact uploads](#artifact-uploads). |
+| **`TipsTrait`**              | [private/lib/tips.axl](private/lib/tips.axl)                                              | `tip_suggestion`, `rules`                                                                                   | ✅ Clean. A hook list and a registration list of `tip_rule(...)` values that config and features append to, like `output_stages`: it registers values rather than setting a knob. Tip state lives on the private `_TipsTrait`, reached through the `tips` wrapper. |
+| **`Worktrees`**              | [private/lib/worktrees_trait.axl](private/lib/worktrees_trait.axl)                        | `score_slot`, `abandoned_grace_hours`, `max_slots`                                                          | Mixed. `score_slot` is a hook list (clean). |
+| `Worktrees.abandoned_grace_hours`, `Worktrees.max_slots` |                                                       |                                                                                                              | ⚠️ Legacy — user-facing config on a trait, read by several worktree tasks. Migrate to a feature's `args` that writes the trait, as `History` does for `BazelTrait.keep_*_logs`. |
 | **`LintTrait`**              | [lint.axl](lint.axl)                                                      | `lint_start`, `lint_report`, `lint_patch`, `lint_end` (✅ clean — hook lists) | Mixed. Hook lists are clean; the data fields below are legacy. |
-| `LintTrait.changed_files`    |                                                                           |                                                                                                              | ⚠️ Legacy — task→features data on a trait field. Migrate to hook signature: `lint_start(ctx, changed_files)`. |
+| `LintTrait.changed_files`, `LintTrait.changed_files_scoped` |                                                                           |                                                                                                              | ⚠️ Legacy — task→features data on a trait field. Migrate to hook signature: `lint_start(ctx, changed_files)`. |
 | `LintTrait.suggestions`, `LintTrait.comment_urls` |                                                      |                                                                                                              | ⚠️ Legacy — feature→task data on a trait field. Migrate to reversed hook return value or a Pattern-2 wrapper. |
-| `LintTrait.findings_destination` |                                                                       |                                                                                                              | ⚠️ Legacy — user-facing config. Migrate to feature `args`. |
 
 > **Note:** All public traits are re-exported from [`traits.axl`](traits.axl) for user `config.axl` ergonomics (`load("@aspect//:traits.axl", ...)`). Internal modules load from the owning module directly — the facade is a user-facing convenience, not the source of truth.
 
@@ -205,8 +203,10 @@ Tasks declare which traits they *use* in the `traits = [...]` arg of the `task(.
 ```python
 build = task(
     name = "build",
-    traits = [BazelTrait, HealthCheckTrait, Phases,
-              GitHubStatusChecksTrait, ArtifactsTrait],
+    traits = [
+        BazelTrait,
+        HealthCheckTrait,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
     ...
 )
@@ -216,8 +216,7 @@ Features declare which traits they *register on* implicitly by referencing them 
 
 ```python
 def _artifact_upload_impl(ctx: FeatureContext):
-    bazel_trait    = ctx.traits[BazelTrait]
-    artifacts_trait = ctx.traits[ArtifactsTrait]
+    bazel_trait = ctx.traits[BazelTrait]
     ...
     bazel_trait.build_event.append(_on_build_event)   # subscribe
     bazel_trait.build_end.append(_on_build_end)       # subscribe
@@ -284,7 +283,7 @@ _Tip = record(
 
 # Trait — implementation detail. Underscore-prefixed; never exported by name.
 # Defaults are null-objects: silent no-op for void returns, empty for value returns.
-_TipTrait = trait(
+_TipsTrait = trait(
     append  = field(typing.Callable[[_Tip], None],   default = lambda t: None),
     collect = field(typing.Callable[[], list[_Tip]], default = lambda: []),
 )
@@ -292,9 +291,9 @@ _TipTrait = trait(
 # Wrapper struct — consumer-facing API. Hides the trait machinery.
 tips = struct(
     Tip     = _Tip,
-    append  = lambda ctx, tip: ctx.traits[_TipTrait].append(tip),
-    collect = lambda ctx: ctx.traits[_TipTrait].collect(),
-    TRAITS  = [_TipTrait],
+    append  = lambda ctx, tip: ctx.traits[_TipsTrait].append(tip),
+    collect = lambda ctx: ctx.traits[_TipsTrait].collect(),
+    TRAITS  = [_TipsTrait],
 )
 
 # Owner feature — co-located so it can bind closures to the module-private trait.
@@ -310,8 +309,8 @@ def _impl(ctx):
     def _collect():
         return _sorted(state)
 
-    ctx.traits[_TipTrait].append  = _append
-    ctx.traits[_TipTrait].collect = _collect
+    ctx.traits[_TipsTrait].append  = _append
+    ctx.traits[_TipsTrait].collect = _collect
 
 tips_feature = feature(_impl)
 ```
@@ -345,10 +344,10 @@ def task():
 
 - **State is real-private.** The closure scope is language-enforced. Other features can't reach `state` directly — they go through `tips.append`/`tips.collect`, which dispatch through the trait callables. The wrapper hides everything.
 - **Null-object defaults give graceful degradation for free.** When the owner feature isn't loaded (user opted out, no CI host, feature disabled), the trait callables stay at their defaults. `tips.append(ctx, t)` becomes a silent no-op; `tips.collect(ctx)` returns `[]`. Consumers don't crash, don't need `if feature_loaded:` checks, don't have error paths to maintain. The disabled state propagates through pure data flow.
-- **`TRAITS = [...]` is the only thing tasks see.** The underscore-prefixed `_TipTrait` never appears in any task or feature module. If the library later changes its implementation and stops needing trait registration (e.g., switches to Pattern 3), it sets `TRAITS = []` and no task module needs to change.
+- **`TRAITS = [...]` is the only thing tasks see.** The underscore-prefixed `_TipsTrait` never appears in any task or feature module. If the library later changes its implementation and stops needing trait registration (e.g., switches to Pattern 3), it sets `TRAITS = []` and no task module needs to change.
 - **Tasks don't reference owner features.** Feature loading happens via a separate channel (user `.aspect/config.axl`, framework defaults, opt-in flags). The decoupling is what makes the null-object property useful end-to-end.
 
-**Co-location is non-negotiable.** Splitting the owner feature into a separate `feature/<name>.axl` file forces you to re-export `_TipTrait` so the separate file can bind callbacks — which leaks the trait name out into the global namespace and defeats the encapsulation. Keep the trait, the wrapper struct, AND the owner feature in `private/lib/<name>.axl`. Other code only sees the exported `<name>` struct and `<name>_feature` symbol.
+**Co-location is non-negotiable.** Splitting the owner feature into a separate `feature/<name>.axl` file forces you to re-export `_TipsTrait` so the separate file can bind callbacks — which leaks the trait name out into the global namespace and defeats the encapsulation. Keep the trait, the wrapper struct, AND the owner feature in `private/lib/<name>.axl`. Other code only sees the exported `<name>` struct and `<name>_feature` symbol.
 
 ### Pattern 3: Library-owned + tmpdir/JSON
 
@@ -419,7 +418,7 @@ rate_limit = struct(
 
 3. **No new shared-state primitives.** Don't add a Bag, an accumulator type, a `ctx.std.kv`, a `ctx.std.db`, a per-task slot for arbitrary feature data, or any other ambient surface that lets two features pass data to each other without going through the patterns above. Every such proposal in framework history has been rejected because it relocates the abuse pattern under a different name. The three patterns above are sufficient.
 
-4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features — `GitHubStatusChecksTrait.templates`, `LintTrait.findings_destination`, and `TipsTrait.silenced_tips` are legacy violations of this rule.
+4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, or, for a knob several features must agree on, the owning task's `args` (e.g. `aspect lint --findings-destination`), not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features — `Worktrees.max_slots` and `Worktrees.abandoned_grace_hours` are legacy violations of this rule.
 
 5. **Don't bypass the wrappers.** Even when a trait or library is reachable, callers should always go through `lib.method(ctx, ...)`. Writing `ctx.traits[X].method(...)` directly couples the caller to the trait shape, prevents the library from changing its implementation, and defeats the wrapper's encapsulation. **The trait is implementation; the struct is API.**
 
@@ -696,7 +695,7 @@ load("./private/lib/check_dispatch.axl",
     "kind_for_task",      # task_name → kind for the initial pre-update render
     "to_display_name",
     "make_render_ctx",    # build the render_ctx dict from feature state
-    "apply_artifact_links",  # copy ArtifactsTrait fields onto links
+    "apply_artifact_links",  # copy artifacts.by_kind/by_label onto links
     "should_emit_update",    # throttle non-final updates, always pass terminals
 )
 ```
@@ -841,7 +840,6 @@ artifacts.browse_url(ctx)                    # → env-derived CI artifacts page
 
 `artifacts.browse_url(ctx)` is **not** a stored value — it's a thin re-export of `detect_artifacts_browse_url(ctx)` from `private/lib/ci.axl`, which reconstructs the URL from CI host env vars (the GH Actions run page, the BK build's canvas tab, etc.) on every call. The render-time decision "should I surface this link?" belongs to the consumer: typically gated by `if artifacts.list(ctx):`.
 
-> **Current implementation note.** As of this writing, the codebase still uses the legacy `ArtifactsTrait` with `artifacts_browse_url` / `artifact_urls` / `testlogs_label_urls` data fields. The migration to the wrapper API above is in progress. New code should be written against the wrapper; legacy callsites in `feature/github_status_checks.axl`, `feature/buildkite_annotations.axl`, `private/lib/bazel_results.axl`, `format.axl`, and `gazelle.axl` are scheduled to be ported. Do not extend the legacy fields.
 
 The check-run / annotation features consume artifact URLs via the wrapper's derived views (`by_kind`, `by_label`) routed through `apply_artifact_links` in `private/lib/check_dispatch.axl`. The renderers suppress the Artifacts row when both views are empty, so a task that didn't upload anything stays clean.
 
@@ -960,7 +958,7 @@ The `lint.axl` impl is the closest to this template; `format.axl` and `gazelle.a
 ## How to add a new task
 
 1. Create `crates/aspect-cli/src/builtins/aspect/<task_name>.axl` and follow the [canonical flow](#anatomy-of-a-task-_impl).
-2. **Declare the trait surface.** If your task drives Bazel, declare `BazelTrait`. If it surfaces data in CI, declare `Phases`. If it should print runner-env / health-check sections on Buildkite, declare `HealthCheckTrait`. For artifact uploads, splat `+ artifacts.TRAITS` (NOT `ArtifactsTrait` — that's the legacy data-field shape being migrated out). Same for tips: `+ tips.TRAITS`.
+2. **Declare the trait surface.** If your task drives Bazel, declare `BazelTrait`. If it surfaces data in CI, declare `Phases`. If it should print runner-env / health-check sections on Buildkite, declare `HealthCheckTrait`. For artifact uploads, splat `+ artifacts.TRAITS`. Same for tips: `+ tips.TRAITS`.
 3. **Do NOT list features** in the task constructor. Tasks declare trait surfaces only; feature loading happens through a separate channel (framework default, user `.aspect/config.axl`). See [Rules: what tasks must not do](#rules-what-tasks-must-not-do).
 4. Decide the `task_update.kind`. If your task's data shape matches an existing renderer (build/test → `bazel_results`, lint → `lint_results`, etc.), reuse it. Otherwise add a new kind — see [How to add a new task kind](#how-to-add-a-new-task-kind-new-renderer).
 5. Wire the task in `MODULE.aspect`'s task registry.
