@@ -15,7 +15,8 @@ It takes the screen when the task starts and shows:
   - a bar of the build's actions (`action_split`, one unit throughout):
     ran `█`, cached `▓`, unchanged `▒` (while it runs, `other`: unchanged,
     internal, or not yet in the execution log, which Bazel writes in
-    batches), internal `░`, then not done `─`, each kind its own glyph so
+    batches), internal `░`, failed `╳`, then not done `─`, each kind its
+    own glyph so
     they stay apart without colour; at its right end how far it is
     (`45% · 3,830 of 8,563+`, `+` while Bazel analyses), at the end its
     actions and what was reused; a build `<`/`>` picked, its own;
@@ -2862,7 +2863,8 @@ def build_progress(state: dict):
     return (kept[0], kept[1], kept[2] and bool(state.get("building")))
 
 # Mnemonics of Bazel's actions that spawn nothing, for Metrics' list of
-# internal kinds: some only (and `action_data` keeps Bazel's top twenty).
+# internal kinds and for where a failed action was counted
+# (`action_split`): some only (and `action_data` keeps Bazel's top twenty).
 _INTERNAL_MNEMONICS = ["BazelWorkspaceStatusAction", "CppModuleMap", "ExecutableSymlink", "FileWrite", "Middleman", "RepoMappingManifest", "RunfilesTree", "SolibSymlink", "SourceSymlinkManifest", "Symlink", "SymlinkTree", "TemplateExpand"]
 
 # Runners in `BuildMetrics` that ran nothing of their own: the total, the
@@ -2891,14 +2893,19 @@ def action_split(state: dict) -> dict:
     than there are, as dynamic execution does) and the rest ran;
     `action_cache_statistics.hits` (else an `action cache hit` runner) are
     unchanged. `failed` are the actions the build event stream reports
-    failed (`failed_actions`: the Failures list's, a test's aside, which
-    Tests counts), which Bazel 9 counts among `runner_count`'s internal
-    ones, taken out of them; what else it put there (cancelled, skipped)
-    stays internal. What Bazel's done count has past the summary is
-    unchanged where the action cache had hits (from an earlier build),
-    else internal, and never in the share reused. The done count is at
-    least their sum; a failed build's total at least what it created, and
-    its bar never full of what did not fail (`action_bar`).
+    failed (`failed_actions`: the Failures list's actions, a test's aside,
+    which Tests counts; a missing input file posts no `action_completed`,
+    so is not one). Bazel 9 counts one whose spawn failed among
+    `runner_count`'s internal ones (what the internal kinds `action_data`
+    names leave of them, else all of them), and one whose spawn succeeded
+    (its outputs missing) under its runner: each is taken out of where it
+    was counted; what else is internal (cancelled, skipped) stays there.
+    What Bazel's done count has past the summary is unchanged where the
+    action cache had hits or the build analysed nothing new (created fewer
+    than it counts: an earlier build's), else internal, and never in the
+    share reused; the sum never exceeds a whole count Bazel drew. A failed
+    build's total is at least what it created, and its bar never full of
+    what did not fail (`action_bar`).
 
     While it runs, `ran` and `cached` are the execution log's spawns, as it
     has them, clamped to the done count, and `rest` what is left of it:
@@ -2936,23 +2943,45 @@ def action_split(state: dict) -> dict:
         stats = _get(summary, "action_cache_statistics")
         unchanged = (_get(stats, "hits", 0) or 0) if stats != None else hit_runner
         succeeded = build_succeeded(inv)
+        ran = spawned - cached
+
+        # A failed action is internal where its spawn failed (what the
+        # internal kinds `action_data` names leave of them), else under the
+        # runner its spawn ran in (it ran, then its outputs were missing).
         failed = len(failed_actions(state))
-        internal = max(0, internal - failed)
-        whole = spawned + unchanged + internal + failed
+        data = _get(summary, "action_data", None) or []
+        kinds = 0
+        for d in data:
+            if str(_get(d, "mnemonic", "") or "") in _INTERNAL_MNEMONICS:
+                kinds += _get(d, "actions_executed", 0) or 0
+        from_internal = min(failed, max(0, internal - kinds) if data else internal)
+        internal -= from_internal
+        rest = failed - from_internal
+        took = min(rest, ran)
+        ran -= took
+        cached = max(0, cached - (rest - took))
+        whole = ran + cached + unchanged + internal + failed
 
         # What Bazel's done count has past its summary: up to date where
-        # its action cache had hits, else counted with the internal ones.
+        # its action cache had hits or nothing new was analysed (it created
+        # fewer than it counts), else internal. Never more than a count it
+        # drew whole (`[n / n]`); one a frame caught earlier is behind.
+        created = _get(summary, "actions_created", 0) or 0
         gap = max(0, done - whole)
-        if unchanged:
+        if unchanged or created < done:
             unchanged += gap
         else:
             internal += gap
-        split.update(counted = True, known = True, final = True, ran = spawned - cached, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False, failed_build = not succeeded)
-        split["done"] = max(done, whole)
+        if done >= 0 and done == total and whole > done:
+            over = whole - done
+            cut = min(over, internal)
+            internal -= cut
+            ran = max(0, ran - (over - cut))
+        split.update(counted = True, known = True, final = True, ran = ran, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False, failed_build = not succeeded)
+        split["done"] = max(done, ran + cached + unchanged + internal + failed)
         if succeeded:
             split["total"] = split["done"]
         else:
-            created = _get(summary, "actions_created", 0) or 0
             split["total"] = max(split["total"], split["done"], created if done < 0 else 0)
         return split
     if done < 0 or own_execution_log(inv):
@@ -3075,8 +3104,8 @@ def action_parts(split: dict) -> list:
     """Results' actions, `(glyph, count, words, role)` each, the bar's
     glyphs their legend: ran and cached, then while the build runs what
     else is done (`other`, as `action_split` has it), and at its end
-    unchanged and internal (and the actions that failed); with nothing to tell them apart, the done
-    count; none before it counts."""
+    unchanged, internal and failed; with nothing to tell them apart, the
+    done count; none before it counts."""
     if not split["counted"]:
         return []
     if not split["known"]:
@@ -3089,9 +3118,7 @@ def action_parts(split: dict) -> list:
         parts.append(("╳", split["failed"], "failed", "error"))
     return parts
 
-# Results' words for a kind where Metrics has more room (none now), and the
-# shorter ones where those do not fit.
-_RESULT_WORDS = {}
+# Results' shorter words for a kind, where the whole ones do not fit.
 _SHORT_WORDS = {"unchanged": "unch.", "internal": "int."}
 
 def action_results(split: dict, room: int, rows = 3) -> list:
@@ -3111,7 +3138,7 @@ def action_results(split: dict, room: int, rows = 3) -> list:
         packed = [[]]
         for glyph, n, words, role in parts:
             count = _thousands(n) if level == 0 else short_count(n)
-            word = (_SHORT_WORDS if level == 2 else _RESULT_WORDS).get(words, words)
+            word = _SHORT_WORDS.get(words, words) if level == 2 else words
             text = glyph + " " + count + " " + word
             if packed[-1] and text_width(" · ".join([t for _, t, _ in packed[-1]] + [text])) > room:
                 packed.append([])
@@ -3973,7 +4000,7 @@ def action_lines(state: dict) -> list:
     # Bazel's own action cache, and why it missed.
     stats = _get(summary, "action_cache_statistics")
     if stats != None:
-        out.append(_row_of("action cache", _counts("%d hits · %d misses", (_get(stats, "hits", 0) or 0, _get(stats, "misses", 0) or 0))))
+        out.append("  action cache" + " " * (column + 2 - len("action cache")) + _counts("%d hits · %d misses", (_get(stats, "hits", 0) or 0, _get(stats, "misses", 0) or 0)))
         reasons = {}
         for miss in _get(stats, "miss_details", None) or []:
             n = _get(miss, "count", 0) or 0
@@ -3983,7 +4010,8 @@ def action_lines(state: dict) -> list:
         # A reason newer than the CLI's protos reads as its number.
         for reason, n in _by_count(reasons):
             reason = _NEWER_MISS_REASONS.get(reason, reason)
-            out.append(_row_of("    " + (("reason " + reason) if reason.isdigit() else reason.lower().replace("_", " ")), _thousands(n)))
+            said = ("reason " + reason) if reason.isdigit() else reason.lower().replace("_", " ")
+            out.append("    " + said + " " * max(1, column - len(said)) + _thousands(n))
     if c.get("spawns"):
         pct = c["spawn_hits"] * 100 // c["spawns"]
         out.append(_row_of("spawns", _counts("%d · %d from a cache (%d%%) · %d run", (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"]))))
@@ -5194,8 +5222,9 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     first `_REPORT_FAILURES`, and apart from them the flaky tests' failed
     attempts; Bazel's closing block as it wrote it (its test summary,
     `Elapsed time`, `Build completed`), its head and its tail, unless
-    `replayed`; the results pages;
-    the counts; and how to see the rest (`aspect history show`)."""
+    `replayed`; the results pages; the counts, after `interrupted · `
+    where the build was cut short (not a Ctrl+C or `q` that came after it
+    had finished); and how to see the rest (`aspect history show`)."""
     out = []
     bold = _c("strong") if tty else ""
     reset = _RESET if tty else ""
@@ -5252,7 +5281,8 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     built_n, targets_failed, targets_blocked = target_counts(state)
 
     # An interrupted build's counts are of what it got to.
-    interrupted = state.get("cancelling") or build_outcome(state.get("inv") or {}) == "interrupted"
+    inv = state.get("inv") or {}
+    interrupted = build_outcome(inv) == "interrupted" or (state.get("cancelling") and inv.get("build_finished") == None)
     out.append(_counts("%s%d built, %d failed%s · %d %s passed, %d failed%s%s%s", (
         "interrupted · " if interrupted else "",
         built_n,

@@ -223,55 +223,79 @@ _REUSED = struct(action_summary = struct(
 _SUCCESS = struct(exit_code = struct(name = "SUCCESS", code = 0))
 _FAILURE = struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))
 
+# action_data of the cc builds (`build --keep_going //cc:all`).
+_CC_DATA = [("CppModuleMap", 6), ("CppCompile", 3), ("RepoMappingManifest", 1), ("CppArchive", 1), ("SymlinkTree", 1), ("CppLink", 1), ("SourceSymlinkManifest", 1), ("BazelWorkspaceStatusAction", 1), ("RunfilesTree", 1)]
+
 # Real Bazel 9.3.3 runs on a pty, from their BEP (build_events.binpb in the
-# task history): exit, the last `[done / total]` Bazel drew (None: never),
-# BuildMetrics' action_summary (actions executed and created, runner_count,
-# action cache hits and misses), and how many action_completed events said
-# an action other than a test's failed.
+# task history, decoded with protoc): exit, the last `[done / total]` Bazel
+# drew (None: never), BuildMetrics' action_summary (actions executed and
+# created, runner_count, action cache hits and misses, action_data's
+# executed mnemonics), and the type of each action_completed event saying
+# an action failed, as the stream posted them.
 _REAL = {
     # test //t:all, one sh_test failing: "13 processes: 11 internal, 4 darwin-sandbox".
-    "failing test": ("TESTS_FAILED", (13, 13), 13, 17, [("internal", 11), ("darwin-sandbox", 4)], 0, 13, 0),
+    "failing test": ("TESTS_FAILED", (13, 13), 13, 17, [("internal", 11), ("darwin-sandbox", 4)], 0, 13, [("SymlinkTree", 2), ("RepoMappingManifest", 2), ("SourceSymlinkManifest", 2), ("TestRunner", 2), ("ExecutableSymlink", 2), ("RunfilesTree", 2), ("BazelWorkspaceStatusAction", 1)], []),
     # build --keep_going //:all, three genrules failing.
-    "keep_going": ("BUILD_FAILURE", (45, 45), 45, 45, [("internal", 4), ("darwin-sandbox", 41)], 0, 45, 3),
-    # build --nokeep_going //:all after it: the rest built before, no action cache hit.
-    "nokeep_going incremental": ("BUILD_FAILURE", (45, 45), 4, 0, [("internal", 4)], 0, 4, 2),
+    "keep_going": ("BUILD_FAILURE", (45, 45), 45, 45, [("internal", 4), ("darwin-sandbox", 41)], 0, 45, [("Genrule", 44), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule", "Genrule"]),
+    # build --nokeep_going //:all after it: the rest built before, nothing new analysed.
+    "nokeep_going incremental": ("BUILD_FAILURE", (45, 45), 4, 0, [("internal", 4)], 0, 4, [("Genrule", 3), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule"]),
     # build --nokeep_going //big:all: the rest of 2,001 cancelled.
-    "nokeep_going big": ("BUILD_FAILURE", (1831, 2001), 4, 2001, [("internal", 4)], 1827, 4, 3),
+    "nokeep_going big": ("BUILD_FAILURE", (1831, 2001), 4, 2001, [("internal", 4)], 1827, 4, [("Genrule", 3), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule", "Genrule"]),
     # build //anal:all //:ok1, an analysis failure.
-    "analysis failure": ("BUILD_FAILURE", (3, 3), 1, 1, [("internal", 1)], 0, 1, 0),
+    "analysis failure": ("BUILD_FAILURE", (3, 3), 1, 1, [("internal", 1)], 0, 1, [("BazelWorkspaceStatusAction", 1)], []),
     # build --keep_going //infos:all, a BUILD file that does not parse.
-    "loading failure, no count": ("BUILD_FAILURE", None, 1, 0, [("internal", 1)], 0, 1, 0),
+    "loading failure, no count": ("BUILD_FAILURE", None, 1, 0, [("internal", 1)], 0, 1, [("BazelWorkspaceStatusAction", 1)], []),
     # test --keep_going //t:all //:all, cached but for a test and a disk hit.
-    "tests and genrules, a disk hit": ("BUILD_FAILURE", (52, 52), 5, 50, [("disk cache hit", 1), ("internal", 4), ("darwin-sandbox", 1)], 47, 5, 3),
+    "tests and genrules, a disk hit": ("BUILD_FAILURE", (52, 52), 5, 50, [("disk cache hit", 1), ("internal", 4), ("darwin-sandbox", 1)], 47, 5, [("Genrule", 3), ("TestRunner", 1), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule", "Genrule"]),
     # build //infos:all with a new --action_env.
-    "success": ("SUCCESS", (14, 14), 14, 13, [("internal", 1), ("darwin-sandbox", 13)], 0, 14, 0),
+    "success": ("SUCCESS", (14, 14), 14, 13, [("internal", 1), ("darwin-sandbox", 13)], 0, 14, [("Genrule", 13), ("BazelWorkspaceStatusAction", 1)], []),
     # build --keep_going //cc:all, a cc_library failing to compile:
     # "16 processes: 12 internal, 4 darwin-sandbox" (CppModuleMap among them).
-    "cc failure": ("BUILD_FAILURE", (17, 17), 16, 23, [("internal", 12), ("darwin-sandbox", 4)], 0, 16, 1),
-    # The same after bazel clean, cold: one done past the summary, no cache.
-    "cold cc failure": ("BUILD_FAILURE", (17, 17), 16, 24, [("internal", 12), ("darwin-sandbox", 4)], 0, 16, 1),
-    # build --keep_going //mn:all //:ok4: 25 mnemonics, action_data's top 20 only, one failing.
-    "25 mnemonics": ("BUILD_FAILURE", (53, 53), 53, 52, [("internal", 2), ("darwin-sandbox", 51)], 0, 53, 1),
+    "cc failure": ("BUILD_FAILURE", (17, 17), 16, 23, [("internal", 12), ("darwin-sandbox", 4)], 0, 16, _CC_DATA, ["CppCompile"]),
+    # The same after bazel clean, cold: one done past the summary, all new.
+    "cold cc failure": ("BUILD_FAILURE", (17, 17), 16, 24, [("internal", 12), ("darwin-sandbox", 4)], 0, 16, _CC_DATA, ["CppCompile"]),
+    # build --keep_going //mn:all //:ok4: 25 mnemonics, action_data's top 20 only.
+    "25 mnemonics": ("BUILD_FAILURE", (53, 53), 53, 52, [("internal", 2), ("darwin-sandbox", 51)], 0, 53, [("Mn%d" % i, 2) for i in range(20)], ["MnBad"]),
     # build --nokeep_going //:bad //:slow and three more: one failed, the slow one cancelled.
-    "nokeep_going cancelled": ("BUILD_FAILURE", (6, 6), 6, 5, [("internal", 3), ("darwin-sandbox", 3)], 0, 6, 1),
+    "nokeep_going cancelled": ("BUILD_FAILURE", (6, 6), 6, 5, [("internal", 3), ("darwin-sandbox", 3)], 0, 6, [("Genrule", 5), ("BazelWorkspaceStatusAction", 1)], ["Genrule"]),
+    # build --keep_going //noout:all: a genrule's spawn succeeds, its output
+    # never made: "7 processes: 1 internal, 6 darwin-sandbox".
+    "missing output": ("BUILD_FAILURE", (7, 7), 7, 7, [("internal", 1), ("darwin-sandbox", 6)], 0, 7, [("Genrule", 6), ("BazelWorkspaceStatusAction", 1)], ["Genrule"]),
+    # Two of them: more failed than internal.
+    "two missing outputs": ("BUILD_FAILURE", (8, 8), 8, 8, [("internal", 1), ("darwin-sandbox", 7)], 0, 8, [("Genrule", 7), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule"]),
+    # build --keep_going //two:all //silent:all: three spawns failing.
+    "three failing spawns": ("BUILD_FAILURE", (4, 4), 4, 0, [("internal", 4)], 0, 4, [("Genrule", 3), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule", "Genrule"]),
+    # build --keep_going //tool:all: a failing tool and its user, one done past the summary.
+    "failing tool": ("BUILD_FAILURE", (9, 9), 8, 9, [("internal", 3), ("darwin-sandbox", 5)], 0, 8, [("Genrule", 7), ("BazelWorkspaceStatusAction", 1)], ["Genrule", "Genrule"]),
+    # build --keep_going //dc:all with a warm disk cache, one failing.
+    "disk cache, one failing": ("BUILD_FAILURE", (8, 8), 8, 8, [("disk cache hit", 6), ("internal", 2)], 0, 8, [("Genrule", 7), ("BazelWorkspaceStatusAction", 1)], ["Genrule"]),
 }
 
-def _failed_records(n):
-    """`n` failed actions as the Failures list has them."""
-    return [{"kind": "action", "label": "//x:f%d" % i, "detail": "Genrule", "files": [], "output": "", "success": False} for i in range(n)]
-
 def _real(ctx, name):
-    """A finished build's screen state from `_REAL[name]`."""
-    exit, done_total, executed, created, runners, hits, misses, failed = _REAL[name]
-    return _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(failed), done_total = (done_total[0], done_total[1], False) if done_total else None, inv = {
+    """A finished build's screen state from `_REAL[name]`, its failed
+    actions taken in from their events as the feature takes them."""
+    exit, done_total, executed, created, runners, hits, misses, data, failed = _REAL[name]
+    st = _screen(ctx, ["x"], building = False, ended = True, done_total = (done_total[0], done_total[1], False) if done_total else None, inv = {
         "build_finished": struct(exit_code = struct(name = exit, code = 0 if exit == "SUCCESS" else 1)),
         "build_metrics": struct(action_summary = struct(
             actions_executed = executed,
             actions_created = created,
             runner_count = [struct(name = "total", count = executed)] + [struct(name = n, count = k) for n, k in runners],
             action_cache_statistics = struct(hits = hits, misses = misses),
+            action_data = [struct(mnemonic = m, actions_executed = k) for m, k in data],
         )),
     })
+    for i, kind in enumerate(failed):
+        _fail_event(st, kind, i)
+    return st
+
+def _failed_records(n):
+    """`n` failed genrules as the Failures list has them."""
+    return [{"kind": "action", "label": "//x:f%d" % i, "detail": "Genrule", "files": [], "output": "", "success": False} for i in range(n)]
+
+def _fail_event(st, kind, i):
+    """An `action_completed` event saying action `i`, a `kind`, failed."""
+    note_event(st, "action_completed", struct(label = "//x:f%d" % i, primary_output = "bazel-out/f%d" % i, configuration = None), struct(success = False, type = kind, stderr = None, stdout = None), False)
 
 def _split_of(split):
     return {k: split[k] for k in ("done", "total", "ran", "cached", "unchanged", "internal", "rest", "failed")}
@@ -313,9 +337,9 @@ def _actions_tests(ctx):
     for name, want in [
         ("failing test", dict(done = 13, total = 13, ran = 2, cached = 0, unchanged = 0, internal = 11, rest = 0, failed = 0)),
         ("keep_going", dict(done = 45, total = 45, ran = 41, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 3)),
-        ("nokeep_going incremental", dict(done = 45, total = 45, ran = 0, cached = 0, unchanged = 0, internal = 43, rest = 0, failed = 2)),
+        ("nokeep_going incremental", dict(done = 45, total = 45, ran = 0, cached = 0, unchanged = 41, internal = 2, rest = 0, failed = 2)),
         ("nokeep_going big", dict(done = 1831, total = 2001, ran = 0, cached = 0, unchanged = 1827, internal = 1, rest = 0, failed = 3)),
-        ("analysis failure", dict(done = 3, total = 3, ran = 0, cached = 0, unchanged = 0, internal = 3, rest = 0, failed = 0)),
+        ("analysis failure", dict(done = 3, total = 3, ran = 0, cached = 0, unchanged = 2, internal = 1, rest = 0, failed = 0)),
         ("loading failure, no count", dict(done = 1, total = 1, ran = 0, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0)),
         ("tests and genrules, a disk hit", dict(done = 52, total = 52, ran = 1, cached = 0, unchanged = 47, internal = 1, rest = 0, failed = 3)),
         ("success", dict(done = 14, total = 14, ran = 13, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0)),
@@ -323,13 +347,26 @@ def _actions_tests(ctx):
         ("cold cc failure", dict(done = 17, total = 17, ran = 4, cached = 0, unchanged = 0, internal = 12, rest = 0, failed = 1)),
         ("25 mnemonics", dict(done = 53, total = 53, ran = 51, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 1)),
         ("nokeep_going cancelled", dict(done = 6, total = 6, ran = 3, cached = 0, unchanged = 0, internal = 2, rest = 0, failed = 1)),
+        ("missing output", dict(done = 7, total = 7, ran = 5, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 1)),
+        ("two missing outputs", dict(done = 8, total = 8, ran = 5, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 2)),
+        ("three failing spawns", dict(done = 4, total = 4, ran = 0, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 3)),
+        ("failing tool", dict(done = 9, total = 9, ran = 5, cached = 0, unchanged = 0, internal = 2, rest = 0, failed = 2)),
+        ("disk cache, one failing", dict(done = 8, total = 8, ran = 0, cached = 6, unchanged = 0, internal = 1, rest = 0, failed = 1)),
     ]:
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
 
-    # Results' ╳ is the Failures list's failed actions, every time.
+    # Results' ╳ is the stream's failed actions, as decoded, a test's aside;
+    # the sum never past the done count Bazel drew.
     for name in _REAL:
         st = _real(ctx, name)
-        _eq("╳ is Failures' actions: " + name, action_split(st)["failed"], len([r for r in st["fails"] if r["kind"] == "action"]))
+        split = action_split(st)
+        decoded = [k for k in _REAL[name][8] if k != "TestRunner"]
+        _eq("╳ is the stream's failed actions: " + name, split["failed"], len(decoded))
+        if _REAL[name][1]:
+            _eq("never past Bazel's count: " + name, split["ran"] + split["cached"] + split["unchanged"] + split["internal"] + split["failed"], max(_REAL[name][1][0], split["done"]))
+    tested = _real(ctx, "failing test")
+    _fail_event(tested, "TestRunner", 9)
+    _eq("a test's failed action is no ╳", action_split(tested)["failed"], 0)
     _eq("a cold build reuses nothing", reused(action_split(_real(ctx, "cold cc failure"))), 0)
 
     # A failed build with no action failed never draws a full bar.
@@ -1535,6 +1572,9 @@ def _impl(ctx: TaskContext) -> int:
     _eq("failures capped", [l for l in report_lines(done, "t-1", False) if l.startswith("  … ")], ["  … 5 more: aspect history show t-1"])
     stopped = dict(done, inv = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}, cancelling = False)
     _eq("an interrupted build's counts say so", [l for l in report_lines(stopped, "t-3", False) if " built, " in l][0].startswith("interrupted · "), True)
+    late = dict(done, cancelling = True, inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))})
+    _eq("a Ctrl+C after Bazel finished is no interruption", [l for l in report_lines(late, "t-5", False) if " built, " in l][0].startswith("interrupted"), False)
+    _eq("one before it finished is", [l for l in report_lines(dict(done, cancelling = True, inv = {}), "t-6", False) if " built, " in l][0].startswith("interrupted · "), True)
     _eq("a finished one's do not", [l for l in report_lines(dict(done, cancelling = False, inv = {"build_finished": struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))}), "t-4", False) if " built, " in l][0].startswith("interrupted"), False)
 
     # Small terminals: counts whole, the title kept, an action's age kept,
