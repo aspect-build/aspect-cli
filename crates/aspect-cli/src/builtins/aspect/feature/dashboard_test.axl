@@ -1457,12 +1457,12 @@ def _impl(ctx: TaskContext) -> int:
 
     # The tabs: 1 to 5 show each, Esc goes back to the console; the
     # Invocation tab redacts what may be a secret.
-    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "--define=API_TOKEN=d1", "--test_arg=--password=t1", "--copt=-DKEY=c1", "--define=mode=fast", "--test_arg=--password", "--test_arg=hunter2", "--test_arg=--token x9", "--google_default_credentials", "//keep:me", "--bes_header=Cookie=sess1", "//..."], explicit_startup_options = [])})
+    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "--define=API_TOKEN=d1", "--test_arg=--password=t1", "--copt=-DKEY=c1", "--define=mode=fast", "--test_arg=--password", "--test_arg=hunter2", "--test_arg=--token x9", "--google_default_credentials", "//keep:me", "--test_arg=--token", "--copt=-Ikept", "--test_arg=after", "--bes_header=Cookie=sess1", "//..."], explicit_startup_options = [])})
     on_key(tabs, "4", 10)
     shown = _visible(render(tabs, 100, 40))
     _eq("the invocation tab, its secrets hidden", ("Flags given" in shown, "abc" in shown, "zzz" in shown, "u:p@" in shown, "--action_env=TOKEN=<REDACTED>" in shown), (True, False, False, False, True))
     _eq("a secret's setting inside a flag's value hidden", [w in shown for w in ("d1", "t1", "c1", "--define=API_TOKEN=<REDACTED>", "--define=mode=fast")], [False, False, False, True, True])
-    _eq("a secret's value in the next argument hidden", [w in shown for w in ("hunter2", "x9", "sess1", "--test_arg=<REDACTED>", "//keep:me")], [False, False, False, True, True])
+    _eq("a secret's value in the next argument hidden", [w in shown for w in ("hunter2", "x9", "sess1", "--test_arg=<REDACTED>", "//keep:me", "--copt=-Ikept", "--test_arg=after")], [False, False, False, True, True, True, True])
     on_key(tabs, "3", 10)
     _eq("metrics", "Actions" in _visible(render(tabs, 100, 40)), True)
     for tab in ("metrics", "invocation", "failures"):

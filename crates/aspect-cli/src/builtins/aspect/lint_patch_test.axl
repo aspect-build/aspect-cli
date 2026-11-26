@@ -6,8 +6,11 @@ run, a header-like line inside a hunk, a fix to a missing file, a hunk range
 that isn't numbers, a path outside the tree, a relative patch path, a
 patch that isn't there or isn't a file, one patch can't read (nothing of it
 applied), and a patch making a file that is there already (the same bytes,
-other ones, other bytes not UTF-8, an empty file). Run it with BSD and GNU
-patch both: GNU removes a file's copy itself.
+other ones, other bytes not UTF-8, an empty file), and each patch refused
+whole, every file untouched (a path in two headers, one that isn't a
+regular file, a parent that isn't a directory, a symlink, a patch past the
+read cap). Run it with BSD and GNU patch both: GNU removes a file's copy
+itself.
 
     aspect dev test-lint-patch
 """
@@ -140,6 +143,37 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     _eq("applies nothing", fs.read_to_string(tree + "/src/ok.txt"), "a\n")
     fs.create_dir_all(tree + "/bazel-out/dir.patch")
     _eq("a patch path that is a directory", apply_fix_patch(ctx, "bazel-out/dir.patch", cwd = tree), None)
+
+    # Refused whole, before anything is copied or patched: every file as it
+    # was, the first hunk's file too, and nothing made outside the tree.
+    refuse = root + "/refuse"
+    fs.create_dir_all(refuse + "/src/d")
+    _sh(ctx, refuse, """
+printf 'a\\n' > src/ok.txt
+printf 'f\\n' > src/f
+ln -s ../../outside.txt src/dangling.txt
+ln -s ok.txt src/link.txt
+mkdir real && ln -s real src/linked
+dd if=/dev/null of=big.patch bs=1 seek=67108865 2>/dev/null
+""")
+    first = "--- a/src/ok.txt\n+++ b/src/ok.txt\n@@ -1 +1 @@\n-a\n+A\n"
+    make = lambda path: "--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+made\n" % path
+    for reason, body in [
+        ("a type change: named in two headers", first + "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/f")),
+        ("two creations of one path", first + make("src/n.txt") + make("src/n.txt")),
+        ("a rename onto a made file", first + "--- a/src/f\n+++ b/src/g\n@@ -1 +1 @@\n-f\n+g\n" + make("src/f")),
+        ("a path that is a directory", first + make("src/d")),
+        ("a parent that is a file", first + make("src/f/z.txt")),
+        ("a dangling symlink", first + make("src/dangling.txt")),
+        ("a symlink to a file", first + "--- a/src/link.txt\n+++ b/src/link.txt\n@@ -1 +1 @@\n-a\n+B\n"),
+        ("a symlinked parent", first + make("src/linked/z.txt")),
+    ]:
+        fs.write(refuse + "/p.patch", body)
+        _eq("refused: " + reason, apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
+        _eq("%s: the first file untouched" % reason, fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
+        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", ["d", "dangling.txt", "f", "link.txt", "linked", "ok.txt"], []))
+        _eq("%s: nothing outside" % reason, fs.exists(root + "/outside.txt"), False)
+    _eq("refused: larger than the read cap", apply_fix_patch(ctx, refuse + "/big.patch", cwd = refuse), None)
     print("lint_patch_test.axl: OK")
     return 0
 

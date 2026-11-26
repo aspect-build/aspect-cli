@@ -1426,7 +1426,10 @@ fn check_golden(task: &str, drive: Drive, golden: &str) {
         );
     }
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        // Read at run time (cargo sets it): env! would embed the build path,
+        // which Bazel's process wrapper refuses.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("UPDATE_GOLDEN runs under cargo");
+        let path = std::path::Path::new(&manifest)
             .join("tests/testdata/terminal")
             .join(format!("{task}.golden"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

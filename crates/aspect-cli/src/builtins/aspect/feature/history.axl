@@ -11,7 +11,7 @@ its stdout and stderr are piped through the CLI, unless it is marked
 it in the output. What writes to a stream it inherited is not kept: `bazel
 run`'s program, and a build without a console processor (a task's
 `ctx.bazel.build` without `output =`), which writes to the terminal directly.
-This feature adds, off by default:
+This feature adds, each with its own default:
 
 - **Action logs** (`--history:action-logs`, failed actions' by default): the stdout and stderr Bazel
   wrote for each action, kept in the build's folder as

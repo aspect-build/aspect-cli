@@ -3122,19 +3122,20 @@ def _redacted(flag: str) -> str:
 def _redacted_args(flags: list) -> list:
     """`flags` each `_redacted`, and the one after a secret-named flag
     passed in another's value that left its own value to the next argument
-    (`--test_arg=--password` then `--test_arg=hunter2`) hidden too. A bare
-    flag is never taken to own the next argument: a boolean one
-    (`--google_default_credentials`) takes none."""
+    (`--test_arg=--password` then `--test_arg=hunter2`) hidden too, where
+    it is that same flag again. A bare flag is never taken to own the next
+    argument: a boolean one (`--google_default_credentials`) takes none."""
     out = []
-    hide = False
+    owner = None
     for flag in flags:
-        if hide:
-            name, eq, _ = flag.partition("=")
-            out.append(name + "=<REDACTED>" if eq else "<REDACTED>")
-        else:
-            out.append(_redacted(flag))
-        last = flag.partition("=")[2] if not hide else ""
-        hide = "=" not in last and " " not in last and last.startswith("-") and _secret_name(last)
+        name, eq, value = flag.partition("=")
+        if owner != None and eq and name == owner:
+            out.append(name + "=<REDACTED>")
+            owner = None
+            continue
+        out.append(_redacted(flag))
+        secret = eq and "=" not in value and " " not in value and value.startswith("-") and _secret_name(value)
+        owner = name if secret else None
     return out
 
 def _row_of(name: str, value) -> str:

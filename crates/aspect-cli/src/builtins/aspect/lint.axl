@@ -110,6 +110,40 @@ def _is_file(fs, path: str) -> bool:
     """Whether `path` is a file; false where nothing is."""
     return fs.exists(path) and fs.metadata(path).is_file
 
+# The most of a patch read: one larger is refused, as headers past it would
+# be missed.
+_PATCH_CAP = 64 * 1024 * 1024
+
+def _refusal(fs, cwd: str, headers: list):
+    """Why a patch with `headers` is refused before anything is copied or
+    patched, or None: a path in more than one header (a type change, two
+    creations, a rename onto a made file), one there that isn't a regular
+    file, a parent that isn't a directory, or a symlink on the way. Each
+    path is looked at from its first component down, so a missing one
+    ends the walk and a file where a directory should be never raises."""
+    counts = {}
+    for old, new in headers:
+        for path in {p: True for p in (old, new) if p}:
+            counts[path] = counts.get(path, 0) + 1
+    for path, n in counts.items():
+        if n > 1:
+            return "%s is named in %d headers" % (path, n)
+    for path in counts:
+        parts = path.split("/")
+        at = cwd
+        for i, part in enumerate(parts):
+            at = at + "/" + part
+            meta = fs.try_metadata(at)
+            if meta == None:
+                break
+            if meta.is_symlink:
+                return "%s is a symlink" % "/".join(parts[:i + 1])
+            if i < len(parts) - 1 and not meta.is_dir:
+                return "%s isn't a directory" % "/".join(parts[:i + 1])
+            if i == len(parts) - 1 and not meta.is_file:
+                return "%s isn't a regular file" % path
+    return None
+
 def _same_bytes(fs, a: str, b: str) -> bool:
     """Whether files `a` and `b` hold the same bytes, whatever their text."""
     return fs.open(a).read() == fs.open(b).read()
@@ -192,7 +226,12 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     side `/dev/null`, and no other header changing it) that is there already,
     not empty, is made apart from it, whichever patch runs: the same bytes
     count as applied already, other bytes leave it as it is and keep the
-    hunks as a reject."""
+    hunks as a reject.
+
+    A patch is refused whole, in a warning naming the path and why, before
+    anything is copied or patched, where `_refusal` says so or where it is
+    larger than `_PATCH_CAP`; what follows takes a simple, well-formed
+    patch."""
     cwd = cwd or ctx.std.env.current_dir()
     fs = ctx.std.fs
     if not patch.startswith("/"):
@@ -206,8 +245,12 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
             return None
         seen.append(content)
 
+    if fs.metadata(patch).size > _PATCH_CAP:
+        print("WARNING: %s was not applied: it is larger than %d MiB" % (patch, _PATCH_CAP // (1024 * 1024)))
+        return None
+
     # Lossy: a hunk may hold any bytes; only the header paths are read.
-    text = fs.try_read_to_string_capped(patch, 64 * 1024 * 1024)
+    text = fs.try_read_to_string_capped(patch, _PATCH_CAP)
     headers = patch_headers(text)
     if headers == None:
         print("WARNING: %s was not applied: a hunk's line range isn't numbers" % patch)
@@ -216,6 +259,10 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     outside = [p for p in paths if not _inside(p)]
     if outside:
         print("WARNING: %s was not applied: it names %s, outside the workspace" % (patch, ", ".join(outside)))
+        return None
+    refused = _refusal(fs, cwd, headers)
+    if refused:
+        print("WARNING: %s was not applied: %s" % (patch, refused))
         return None
     removed = [old for old, new in headers if old and not new]
     changed = [old for old, new in headers if old]
@@ -247,7 +294,7 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     for path in paths:
         patched = work + "/" + path
         mine = cwd + "/" + path
-        if path in made and _is_file(fs, mine) and len(fs.open(mine).read()) > 0:
+        if path in made and _is_file(fs, mine) and fs.metadata(mine).size > 0:
             # Made apart from the file that is there: never written over it.
             if not (_is_file(fs, patched) and _same_bytes(fs, patched, mine)):
                 fs.write(patched + ".rej", _creation_diff(text, path))
@@ -259,7 +306,7 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
             rejects.append(path + ".rej")
         if path in removed:
             # GNU patch deletes the copy itself; BSD leaves it empty.
-            if path in had and (not _is_file(fs, patched) or len(fs.open(patched).read()) == 0):
+            if path in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
                 fs.remove_file(mine)
             continue
         if not _is_file(fs, patched):
