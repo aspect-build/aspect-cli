@@ -430,6 +430,13 @@ def _actions_tests(ctx):
     _eq("a test's failed action is no ╳", action_split(tested)["failed"], 0)
     _eq("a cold build reuses nothing", reused(action_split(_real(ctx, "cold cc failure"))), 0)
 
+    # Reused counts failed actions as work attempted: (unchanged + cached)
+    # of (ran + cached + unchanged + failed), internal ones aside.
+    _eq("a disk cache and one failure", reused(action_split(_real(ctx, "disk cache, one failing"))), 6 * 100 // 7)
+    _eq("85%", reused(action_split(_real(ctx, "disk cache, one failing"))), 85)
+    _eq("four cached, one failed (a cold cc build, its disk cache warm)", reused(dict(action_split(_real(ctx, "cold cc failure")), ran = 0, cached = 4, internal = 11)), 80)
+    _eq("the big failed build", reused(action_split(big)), 2311 * 100 // (2600 + 2311 + 2000))
+
     # A failed build with no action failed never draws a full bar.
     for name in ["failing test", "analysis failure", "loading failure, no count"]:
         st = _real(ctx, name)
@@ -502,7 +509,23 @@ def _actions_tests(ctx):
     own_inv = {"options_parsed": struct(cmd_line = ["--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])}
     blind = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"], inv = own_inv)
     blind["counts"].update(spawns = 0)
-    _eq("no log: the done count alone", action_parts(action_split(blind)), [("━", 3830, "done", "")])
+    _eq("no log: the done count alone, and what is in progress", action_parts(action_split(blind)), [("━", 3830, "done", ""), ("─", 4733, "in progress", "border")])
+
+    # While it runs, Results' parts sum to the bar's total: what is not
+    # done yet too, under the bar's glyph; at the end it is gone.
+    for st in (mid, blind, meld):
+        sp = action_split(dict(st, building = True))
+        total = 0
+        for _, n, _, _ in action_parts(sp):
+            total += n
+        _eq("Results sum to the bar's total", total, sp["total"])
+    _eq("drawn", "─ 4,733 in progress" in _visible(render(dict(mid, building = True), 140, 30)), True)
+    _eq("none at the end", [p for p in action_parts(action_split(cached)) if p[2] == "in progress"], [])
+    progress_split = dict(action_split(dict(mid, building = True)), ran = 5691, rest = 2869, cached = 0, done = 8560, total = 8590)
+    _eq("Greg's numbers", [_visible(r) for r in action_results(progress_split, 33)], ["█ 5,691 ran · ▒ 2,869 other", "─ 30 in progress"])
+    _eq("narrow: its own row before shorter words", [_visible(r) for r in action_results(progress_split, 19)], ["█ 5,691 ran", "▒ 2,869 other", "─ 30 in progress"])
+    _eq("shorter words only where unavoidable", [_visible(r) for r in action_results(progress_split, 12)][-1].endswith("in prog."), True)
+    _eq("the ? key names it", any(["─ in progress" in r for r in help_rows(mid, 100)]), True)
     shown = _visible(render(blind, 140, 30))
     _eq("no log: drawn as done", ("Actions  ━ 3,830 done" in shown, "unchanged" in shown, "━" * 10 in shown), (True, False, True))
     blind.update(building = False, ended = True, inv = dict(own_inv, build_finished = _SUCCESS, build_metrics = _REUSED), done_total = (8563, 8563, False))
@@ -514,7 +537,8 @@ def _actions_tests(ctx):
     # dropping any.
     greg = dict(final, ran = 5612, cached = 0, unchanged = 2834, internal = 33, failed = 4, done = 8483, total = 8483)
     _eq("wide", [_visible(r) for r in action_results(greg, 33)], ["█ 5,612 ran · ▒ 2,834 unchanged", "░ 33 internal · ╳ 4 failed"])
-    _eq("in thousands", [_visible(r) for r in action_results(greg, 29)], ["█ 5.6k ran · ▒ 2.8k unchanged", "░ 33 internal · ╳ 4 failed"])
+    _eq("whole counts in three rows before thousands in two", [_visible(r) for r in action_results(greg, 29)], ["█ 5,612 ran", "▒ 2,834 unchanged", "░ 33 internal · ╳ 4 failed"])
+    _eq("in thousands where whole ones fit no three rows", [_visible(r) for r in action_results(dict(greg, internal = 0, failed = 0), 16)], ["█ 5.6k ran", "▒ 2.8k unchanged"])
     _eq("a third row", [_visible(r) for r in action_results(greg, 26)], ["█ 5,612 ran", "▒ 2,834 unchanged", "░ 33 internal · ╳ 4 failed"])
     _eq("shorter words", [_visible(r) for r in action_results(greg, 22)], ["█ 5.6k ran", "▒ 2.8k unch.", "░ 33 int. · ╳ 4 failed"])
     _eq("never a word dropped", "╳ 4 failed" in _visible(action_results(greg, 12)[-1]), True)
@@ -544,13 +568,13 @@ def _actions_tests(ctx):
     # Metrics: the done count and what was reused, each kind with what
     # makes it up, the action cache's misses by reason.
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(big)]
-    for want in ["done 9,301 · 47% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 2,311", "░ internal 2,390", "SourceSymlinkManifest 683", "╳ failed 2,000", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
+    for want in ["done 9,301 · 33% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 2,311", "░ internal 2,390", "SourceSymlinkManifest 683", "╳ failed 2,000", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
         _eq("Metrics has %r" % want, any([l.startswith(want) for l in lines]), True)
     _eq("Genrule is no internal kind", any(["Genrule" in l for l in lines]), False)
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(cached)]
     _eq("a newer miss reason by its name", "digest mismatch 2,436" in [" ".join(_visible(l).split()) for l in metrics_lines(big)], True)
     _eq("no note under a kind there is none of", [l for l in metrics_lines(ok) if "own action cache" in _visible(l)], [])
-    _eq("reused in Metrics", "done 8,563 · 98% reused (cached or unchanged, of those not internal)" in lines, True)
+    _eq("reused in Metrics", "done 8,563 · 98% reused (cached or unchanged, of the work attempted: ran, cached, unchanged or failed)" in lines, True)
     _eq("remote and disk hits apart", ["remote cache hit 600 spawns" in lines, "disk cache hit 40 spawns" in lines], [True, True])
     mid["counts"]["runners"] = {"darwin-sandbox": 200, "remote cache hit": 1100}
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(mid)]
@@ -1290,7 +1314,8 @@ def _impl(ctx: TaskContext) -> int:
     many = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"])
     many["counts"].update(spawns = 1452, spawn_hits = 58, test_runs = 1500, test_cached = 1200, configured = 12345, built = 12000)
     shown = _visible(render(many, 140, 30))
-    _eq("counts with thousands separators", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "12,345 configured" in shown, "12,000 built" in shown], [True, True, True, True])
+    _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
+    _eq("whole counts in three rows, what is in progress too", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "─ 4,733 in progress" in shown], [True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cache hits", "Tests    9 passed, 6 failed · 9/15 cached" in _visible(render(many, 140, 30)), True)
     _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 76, 30)), True)
@@ -1438,10 +1463,14 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the slowest pane's minutes", aged_time("CppCompile //a:long; 1m05s"), ("1m05s", "warning"))
     _eq("and its seconds", aged_time("CppCompile //a:short; 12.4s"), ("12.4s", "muted"))
 
-    # The header's time stands apart from its bar: out of the bar's reverse
-    # video (a reset before it), in `heading`, then the bar again.
-    _eq("the header's time out of the bar", (theme.reset + ANSI_ROLES["heading"] + "1m05s" + theme.reset + ANSI_ROLES["status_bar"]) in rows[0], True)
-    _eq("in attributes not the bar's", ANSI_ROLES["heading"] != ANSI_ROLES["status_bar"] or not ANSI_ROLES["status_bar"], True)
+    # The header's time is in its bar, as the rest of it: one style from
+    # the row's start to its end, no reset nor other role inside.
+    head = rows[0].rstrip("\r")
+    _eq("the header's time inside the bar", "1m05s" in _visible(head), True)
+    if ANSI_ROLES["status_bar"]:
+        inner = head[head.find("\x1b[H") + 3:] if "\x1b[H" in head else head
+        inner = inner[inner.find(ANSI_ROLES["status_bar"]) + len(ANSI_ROLES["status_bar"]):]
+        _eq("one style the whole bar", ("\x1b[" in inner.rpartition(theme.reset)[0]), False)
 
     # The actions that wrote output: their own list, under `a`.
     wrote = output_of("action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")))

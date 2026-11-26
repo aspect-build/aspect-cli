@@ -2958,7 +2958,7 @@ def action_split(state: dict) -> dict:
     inv = state.get("inv") or {}
     summary = _get(inv.get("build_metrics"), "action_summary")
     executed = _get(summary, "actions_executed")
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0, failed_build = False)
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0, failed_build = False, running = bool(state.get("building")))
     if not state.get("building") and type(executed) == "int":
         internal, cache, ran_spawns, hit_runner = 0, 0, 0, 0
         for runner in _get(summary, "runner_count", None) or []:
@@ -3035,10 +3035,11 @@ def failed_actions(state: dict) -> list:
     return [r for r in state.get("fails") or [] if r.get("kind") == "action" and r.get("detail") not in ("TestRunner", "analysis failed")]
 
 def reused(split: dict):
-    """The share of a finished build's actions that needed no run, cached
-    or unchanged, of those that were not internal, a whole percent rounded
-    down; None while it runs, or with none to share."""
-    whole = split["ran"] + split["cached"] + split["unchanged"]
+    """The share of a finished build's attempted work that needed no run:
+    cached or unchanged, of those that ran, were cached, were unchanged or
+    failed (a failed action is work attempted; internal ones are none), a
+    whole percent rounded down; None while it runs, or with none to share."""
+    whole = split["ran"] + split["cached"] + split["unchanged"] + split["failed"]
     if not split["final"] or not whole:
         return None
     return (split["unchanged"] + split["cached"]) * 100 // whole
@@ -3142,29 +3143,31 @@ def action_parts(split: dict) -> list:
     glyphs their legend: ran and cached, then while the build runs what
     else is done (`other`, as `action_split` has it), and at its end
     unchanged, internal and failed; with nothing to tell them apart, the
-    done count; none before it counts."""
+    done count; while it runs, what is not done yet too (`in progress`, the
+    bar's `─`), so they sum to the bar's total; none before it counts."""
     if not split["counted"]:
         return []
+    to_go = [(_UNDONE[0], split["total"] - split["done"], "in progress", _UNDONE[1])] if split.get("running") and split["total"] > split["done"] else []
     if not split["known"]:
-        return [(_DONE[0], split["done"], "done", _DONE[1])]
+        return [(_DONE[0], split["done"], "done", _DONE[1])] + to_go
     parts = [("█", split["ran"], "ran", "accent"), ("▓", split["cached"], "cached", "success")]
     if not split["final"]:
         parts.append(("▒", split["rest"], "other", "muted"))
-        return parts + ([("╳", split["failed"], "failed", "error")] if split["failed"] else [])
+        return parts + ([("╳", split["failed"], "failed", "error")] if split["failed"] else []) + to_go
     parts += [("▒", split["unchanged"], "unchanged", "muted"), ("░", split["internal"], "internal", "subtle")]
     if split["failed"]:
         parts.append(("╳", split["failed"], "failed", "error"))
     return parts
 
 # Results' shorter words for a kind, where the whole ones do not fit.
-_SHORT_WORDS = {"unchanged": "unch.", "internal": "int."}
+_SHORT_WORDS = {"unchanged": "unch.", "internal": "int.", "in progress": "in prog."}
 
 def action_results(split: dict, room: int, rows = 3) -> list:
     """`action_parts` there is any of (none of a kind there is none of),
     each in words with the bar's glyph before its count as a coloured key
     (`█ 5.6k ran`), packed into rows of `room` cells, the first of these
-    that fits: two rows (or `rows`, fewer) with whole counts, then with
-    `short_count` ones, `rows` rows with either, then shorter words
+    that fits: whole counts in two rows (or `rows`, fewer), then in
+    `rows`, then `short_count` ones in two or `rows`, then shorter words
     (`_SHORT_WORDS`) in two or `rows`. The words are never dropped: what
     fits none has its last row cut where it is drawn."""
     parts = [p for p in action_parts(split) if p[1]]
@@ -3172,7 +3175,7 @@ def action_results(split: dict, room: int, rows = 3) -> list:
         return []
     packed = []
     two = min(2, rows)
-    for level, most in [(0, two), (1, two), (0, rows), (1, rows), (2, two), (2, rows)]:
+    for level, most in [(0, two), (0, rows), (1, two), (1, rows), (2, two), (2, rows)]:
         packed = [[]]
         for glyph, n, words, role in parts:
             count = _thousands(n) if level == 0 else short_count(n)
@@ -3306,13 +3309,9 @@ def _header(state: dict, cols: int, bar: bool) -> str:
             right = shown + " "
             break
 
-    # A status bar: the whole row in the theme's `status_bar`, but the time
-    # it has run, out of the bar's reverse video and in `heading` (as
-    # BuildBuddy's theme makes Bazel's elapsed time stand out): apart in
-    # every theme, coloured once the row's width is settled.
+    # A status bar: the whole row, the time it has run included, in the
+    # theme's `status_bar`.
     pad = " " * max(0, room - text_width(right))
-    if (" · " + took) in title:
-        title = title.replace(" · " + took, " · " + _RESET + _c("heading") + took + _RESET + _c("status_bar"), 1)
     return _c("status_bar") + title + pad + right + _RESET
 
 def _top(state: dict, cols: int, rows: int) -> list:
@@ -3991,7 +3990,7 @@ def action_lines(state: dict) -> list:
     if split["counted"]:
         pct = reused(split)
         if split["final"]:
-            out.append(_row_of("done", _thousands(split["done"]) + ((" · %d%% reused (cached or unchanged, of those not internal)" % pct) if pct != None else "")))
+            out.append(_row_of("done", _thousands(split["done"]) + ((" · %d%% reused (cached or unchanged, of the work attempted: ran, cached, unchanged or failed)" % pct) if pct != None else "")))
         else:
             out.append(_row_of("done", "%s of %s%s" % (_thousands(split["done"]), _thousands(split["total"]), "+ (Bazel is still analysing)" if split["more"] else "")))
 
@@ -5140,7 +5139,7 @@ def help_rows(state: dict, width = 0) -> list:
     return rows + _actions_key(width)
 
 # What the bar's and Results' glyphs are, for the `?` overlay.
-_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged (while it runs, other)", "░ internal", "╳ failed"]
+_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged (while it runs, other)", "░ internal", "╳ failed", "─ in progress"]
 
 def _actions_key(width: int) -> list:
     """The `?` overlay's rows saying what the actions' glyphs are: a heading,

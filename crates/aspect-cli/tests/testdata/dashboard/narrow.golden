@@ -3,7 +3,7 @@
 │ Compilin…a.cc 3s ││ Targets ✗0 ✓0/0  │
 │ Linking …:bin 1s ││ Tests   ✗0 ✓0    │
 │                  ││ Actions ▒ 3 oth… │
-│                  ││                  │
+│                  ││         ─ 6 in … │
 └──────────────────┘└──────────────────┘
 ┌─ Console ──────────────── following ─┐
 │ le                                   │

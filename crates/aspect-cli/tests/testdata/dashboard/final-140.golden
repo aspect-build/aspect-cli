@@ -5,9 +5,9 @@
 │                                                                                            ││          3 built, 0 failed                 │
 │                                                                                            ││ Tests    15 passed, 0 failed · 9/15 cached │
 │                                                                                            ││ Actions  █ 105 ran · ▓ 640 cached          │
-│                                                                                            ││          ▒ 7.3k unchanged · ░ 459 internal │
+│                                                                                            ││          ▒ 7,359 unchanged                 │
+│                                                                                            ││          ░ 459 internal                    │
 │                                                                                            ││ Critical path Linking //app:bin 4.1s       │
-│                                                                                            ││                                            │
 │                                                                                            ││                                            │
 │                                                                                            ││                                            │
 └────────────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
