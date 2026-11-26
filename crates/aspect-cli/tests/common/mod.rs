@@ -149,9 +149,10 @@ pub fn basil_bin() -> &'static str {
 /// descendants still alive after 45s (a CLI under test, or a child of one)
 /// has its threads' `comm`, `wchan`, `syscall`, `stat` and CPU used over
 /// one second (a busy thread is slow, not stuck), every thread's stack
-/// for the first two such processes (`gdb`, else `eu-stack`, each tried
-/// under `sudo -n timeout` too, as Ubuntu lets no non-ancestor attach; 40s
-/// at most a process), its open descriptors and its
+/// for the first two `aspect-cli` processes a tool attaches to (`gdb`,
+/// else `eu-stack`, each tried under `sudo -n timeout` too, as Ubuntu lets
+/// no non-ancestor attach; 40s at most a process; none tried again once
+/// all have failed), its open descriptors and its
 /// children printed to stderr, once, under `HANG-DIAG`
 /// (`HANG_DIAG_AFTER_SECS` overrides the 45s). For a CI timeout, which
 /// otherwise says only which tests ran long. Nothing elsewhere.
@@ -358,10 +359,25 @@ mod hang_diag {
         *HAVE.get_or_init(|| bounded("timeout", &["--version"], 5).is_some())
     }
 
-    /// The processes, per test process, whose stacks are still printed: each
-    /// takes up to [`STACKS_PER_PROCESS`], so a test's own timeout comes
-    /// after the diagnosis, not during it.
+    /// The `aspect-cli` processes, per test process, whose stacks are still
+    /// printed: a capture that worked takes one, each up to
+    /// [`STACKS_PER_PROCESS`], so a test's own timeout comes after the
+    /// diagnosis, not during it.
     static STACKS_LEFT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(2);
+
+    /// Set once every tool has failed to attach: none is tried again.
+    static NO_TOOL_ATTACHES: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Whether `pid` is a CLI under test (by its executable's name), whose
+    /// stacks are worth the budget; a fixture's `sleep` is not.
+    fn is_cli(pid: u32) -> bool {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .is_some_and(|n| n == "aspect-cli")
+            || read(&format!("/proc/{pid}/comm")).trim() == "aspect-cli"
+    }
 
     /// The most one process's stacks take, every tool tried.
     const STACKS_PER_PROCESS: Duration = Duration::from_secs(40);
@@ -431,24 +447,25 @@ mod hang_diag {
                 stat.trim(),
             ));
         }
-        let take = STACKS_LEFT
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |n| n.checked_sub(1),
-            )
-            .is_ok();
-        match take.then(|| stacks(pid)).flatten() {
-            Some(text) => {
-                for line in text.lines() {
-                    out.push_str(&format!("HANG-DIAG   | {line}\n"));
+        use std::sync::atomic::Ordering::SeqCst;
+        if !is_cli(pid) {
+            // Not an aspect-cli process: no stacks, nor budget spent.
+        } else if NO_TOOL_ATTACHES.load(SeqCst) {
+            out.push_str("HANG-DIAG   no stacks: no tool could attach (see above)\n");
+        } else if STACKS_LEFT.load(SeqCst) == 0 {
+            out.push_str("HANG-DIAG   no stacks: those of two processes were printed already\n");
+        } else {
+            match stacks(pid) {
+                Some(text) => {
+                    let _ = STACKS_LEFT.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1));
+                    for line in text.lines() {
+                        out.push_str(&format!("HANG-DIAG   | {line}\n"));
+                    }
                 }
-            }
-            None if take => {
-                out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach\n")
-            }
-            None => {
-                out.push_str("HANG-DIAG   no stacks: those of two processes were printed already\n")
+                None => {
+                    NO_TOOL_ATTACHES.store(true, SeqCst);
+                    out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach; not tried again\n");
+                }
             }
         }
         let fds = format!("/proc/{pid}/fd");

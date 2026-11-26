@@ -988,6 +988,7 @@ def attempt_state(now_ms: int) -> dict:
         scroll = 0,
         start_ms = now_ms,
         bazel_uuid = "",
+        exec_log_read = False,
     )
 
 def reset_attempt(state: dict, now_ms: int):
@@ -1002,7 +1003,7 @@ def reset_attempt(state: dict, now_ms: int):
 
 # What a build has of its own, which the next build (or a retried attempt)
 # starts afresh; the console and what is open in it are the task's.
-_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid"]
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read"]
 
 def new_build(state: dict, now_ms: int):
     """Start the next build (or a retried attempt) in the task's screen: its
@@ -1056,10 +1057,43 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
         state["spread"][key[:2]] = (max(runs, key[2]), max(shards, key[3]))
     record = failure_of(kind, event_id, payload)
     if record != None:
-        state["fails"].append(record)
+        _add_failure(state, record)
     record = output_of(kind, event_id, payload)
     if record != None:
         state["outputs"].append(record)
+
+def _test_key(record: dict):
+    """Which attempt of which test a record is: one Bazel posts twice is one."""
+    return (record["label"], record["config"], record["run"], record["shard"], record["attempt"])
+
+def _test_runner(record: dict) -> bool:
+    """Whether `record` is a test's own failed action: what its attempts'
+    records say already, with their logs."""
+    return record["kind"] == "action" and record["detail"] == "TestRunner"
+
+def _add_failure(state: dict, record: dict):
+    """List a failure once. A test attempt Bazel posts again (Bazel 9 posts
+    attempt 1 failed with its log, then failed to build without one) is one
+    row, the one with a log kept; a failed `TestRunner` action is folded
+    into its test's attempts, which carry its log: left out where they are
+    listed, and dropped once they are."""
+    fails = state["fails"]
+    if _test_runner(record):
+        if not any([r["kind"] == "test" and r["label"] == record["label"] for r in fails]):
+            fails.append(record)
+        return
+    if record["kind"] == "test":
+        key = _test_key(record)
+        for i, r in enumerate(fails):
+            if r["kind"] == "test" and _test_key(r) == key:
+                if record["files"] and not r["files"]:
+                    fails[i] = record
+                return
+        if any([_test_runner(r) and r["label"] == record["label"] for r in fails]):
+            fails = [r for r in fails if not (_test_runner(r) and r["label"] == record["label"])]
+            state["fails"] = fails
+            state["selected"] = min(state.get("selected", 0), max(0, len(fails)))
+    fails.append(record)
 
 def _items(state: dict) -> list:
     """The records of the list the Results pane shows: the failures, or,
@@ -1562,6 +1596,14 @@ def _list_failure(counts: dict, label: str):
         counts["failed_labels"][label] = True
         counts["failures"].append(label)
 
+def count_aborted_test(counts: dict, label: str, reason: str):
+    """Tally a test whose summary is Aborted for `reason`: one Bazel could not
+    run (it failed to build) is failed, as Bazel's own summary counts it; an
+    interrupt is no verdict."""
+    if label and reason.lower() != "user_interrupted":
+        counts["tests_failed"] += 1
+        _list_failure(counts, label)
+
 def count_aborted(counts: dict, label: str, reason: str):
     """Tally a target that did not build, its Aborted `reason` given: failed
     when its loading or analysis did (`_FAILED_ABORTS`), else skipped; once
@@ -1580,16 +1622,20 @@ def count_event(counts: dict, kind: str, event_id, payload):
     far (failed in loading or analysis, skipped, interrupted) as an Aborted
     payload under its own id (`count_aborted`). An aspect's own completion is
     not a target. A test's `overall_status` is lowercase (`passed`, `flaky`,
-    `failed`, …); only `_FAILED_TEST_STATUSES` count as failed. A label is
-    listed in `failures` once."""
+    `failed`, …); only `_FAILED_TEST_STATUSES` count as failed, and so does a
+    test whose summary is Aborted (it failed to build) but for an interrupt.
+    A label is listed in `failures` once."""
     label = str(_get(event_id, "label", "") or "")
 
     # A target's own Aborted payload, under its `target_configured` or
     # `target_completed` id; under `configured_label` or `unconfigured_label`
     # it names a root cause (a dependency), not a target asked for.
     if type(payload) == "aborted":
+        reason = str(_get(payload, "reason", "") or "")
         if kind in ("target_configured", "target_completed") and not _get(event_id, "aspect", ""):
-            count_aborted(counts, label, str(_get(payload, "reason", "") or ""))
+            count_aborted(counts, label, reason)
+        elif kind == "test_summary":
+            count_aborted_test(counts, label, reason)
         return
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):
@@ -2367,8 +2413,8 @@ def slowest_rows(state: dict) -> list:
     actions, the longest first: from the execution log, every spawn that ran
     (`note_spawn_time`), its mnemonic, target and wall time; without one, the
     slowest actions Bazel's progress area showed, in whole seconds
-    (`slowest_title` says which). Bazel's critical path, which they need not
-    be on, is the Results pane's."""
+    (`slowest_title` says which), or that nothing ran. Bazel's critical
+    path, which they need not be on, is the Results pane's."""
     timed = state.get("spawn_slowest") or []
     if timed:
         return ["%s %s; %s" % (mnemonic, label, _tenths(ms)) for ms, mnemonic, label in sorted(timed, key = lambda t: -t[0])[:_SLOWEST_KEPT]]
@@ -2376,6 +2422,9 @@ def slowest_rows(state: dict) -> list:
     for what, secs in sorted(state.get("slowest", {}).items(), key = lambda kv: -kv[1])[:_SLOWEST_KEPT]:
         if secs > 0:
             rows.append("%s; %ds" % (what, secs))
+    if not rows:
+        # A cached build: its critical path alone, nothing seen running.
+        return [_c("muted") + "nothing ran: every action was cached" + _RESET]
     return rows
 
 def slowest_title(state: dict) -> str:
@@ -2528,7 +2577,7 @@ def fold_build(state: dict, now_ms: int):
     ))
 
 # What a folded build keeps for its tabs.
-_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index"]
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index", "exec_log_read"]
 
 def build_row(build: dict, cols: int) -> str:
     """A folded build's row: its verdict, command, the actions it ran (its
@@ -2641,18 +2690,20 @@ def _top(state: dict, cols: int, rows: int) -> list:
     right_w = min(44, max(cols // 3, 32 if cols >= 70 else cols // 2))
     left_w = cols - right_w
     c = state["counts"]
-    failed = _c("error") if c["failed"] else ""
+    built_n, targets_failed, targets_blocked = target_counts(state)
+    failed = _c("error") if targets_failed else ""
     tests_failed = _c("error") if c["tests_failed"] else ""
+    blocked_text_ = (", %d blocked" % targets_blocked) if targets_blocked else ""
     summary = [
         "Targets  %d configured" % c["configured"],
-        "         %s%d built%s, %s%d failed%s" % (_c("success"), c["built"], _RESET, failed, c["failed"], _RESET),
+        "         %s%d built%s, %s%d failed%s%s" % (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_),
         "Tests    %s%d passed%s, %s%d failed%s%s" % (_c("success"), c["tests_passed"], _RESET, tests_failed, c["tests_failed"], _RESET, (", %s%d flaky%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else ""),
     ]
     wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
     if not wide:
         # Narrow: the failures first, as what matters is what failed.
         summary = [
-            "Targets %s✗%d%s %s✓%d%s/%d" % (failed, c["failed"], _RESET, _c("success"), c["built"], _RESET, c["configured"]),
+            "Targets %s✗%d%s %s✓%d%s%s/%d" % (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (" ○%d" % targets_blocked) if targets_blocked else "", c["configured"]),
             "Tests   %s✗%d%s %s✓%d%s%s" % (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (" %s~%d%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else ""),
         ]
 
@@ -2917,10 +2968,10 @@ def render(state: dict, cols: int, rows: int) -> str:
     search["centre"] = False
     up = len(log) - end
     held = search["back"] >= 0 and search["pattern"] != None and search["mode"] == "jump" and view == None
-    where = ("on the match, G to follow" if held else "following") if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
+    where = ("on the match, J to follow" if held else "following") if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
     if state.get("unseen") and view == None:
         errors = state.get("unseen_errors", 0)
-        where += " · %d new%s, G to follow" % (state["unseen"], (" (%d error%s)" % (errors, "" if errors == 1 else "s")) if errors else "")
+        where += " · %d new%s, J to follow" % (state["unseen"], (" (%d error%s)" % (errors, "" if errors == 1 else "s")) if errors else "")
     if state.get("dropped") and view == None:
         where += " · %d older not kept" % state["dropped"]
 
@@ -3002,6 +3053,15 @@ _BUILD_TABS = ["failures", "metrics", "invocation"]
 
 # The build events the Invocation and Metrics tabs read.
 _INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "build_metadata", "build_finished", "build_metrics"]
+
+def target_counts(state: dict):
+    """`(built, failed, blocked)` targets: one that failed for a failed
+    dependency (`note_blocked`) is blocked, not failed, here and wherever
+    targets are counted."""
+    c = state["counts"]
+    blocked = state.get("blocked") or {}
+    counted = len([label for label in blocked if label in c["failed_labels"]])
+    return (c["built"], max(0, c["failed"] - counted), len(blocked))
 
 def _failure_counts(state: dict):
     """`(failed, blocked)`: targets and tests that failed themselves, and
@@ -3154,8 +3214,10 @@ def metrics_lines(state: dict) -> list:
         out.append(_row_of("spawns", "%d · %d from a cache (%d%%) · %d run" % (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"])))
         for runner in sorted(c["runners"], key = lambda r: -c["runners"][r]):
             out.append(_row_of("  " + runner, c["runners"][runner]))
+    elif state.get("exec_log_read"):
+        out.append(_row_of("spawns", "0 run: the execution log has none"))
     else:
-        out.append(_row_of("spawns", "not known: no execution log for this build"))
+        out.append(_row_of("spawns", "after the build, from its execution log"))
     summary = _get(bm, "action_summary")
     stats = _get(summary, "action_cache_statistics")
     if stats != None:
@@ -3166,10 +3228,12 @@ def metrics_lines(state: dict) -> list:
     runs = c.get("test_runs", 0)
     out.append(_row_of("runs", "%d · %d from a cache%s" % (runs, c.get("test_cached", 0), (" (%d%%)" % (c["test_cached"] * 100 // runs)) if runs else "")))
     out.append(_row_of("results", "%d passed · %d failed · %d flaky" % (c["tests_passed"], c["tests_failed"], c.get("tests_flaky", 0))))
-    failed, blocked = _failure_counts(state)
+    built_n, failed, blocked = target_counts(state)
+    shown, _ = _failure_counts(state)
     out += ["", _c("heading") + "Targets" + _RESET]
     out.append(_row_of("configured", c["configured"]))
-    out.append(_row_of("built", "%d · %d failed · %d blocked by a dependency" % (c["built"], failed, blocked)))
+    out.append(_row_of("built", "%d · %d failed · %d blocked by a dependency" % (built_n, failed, blocked)))
+    out.append(_row_of("failures listed", "%d (failed actions and test attempts, in Failures)" % shown))
     timing = _get(bm, "timing_metrics")
     out += ["", _c("heading") + "Time" + _RESET]
 
@@ -3649,6 +3713,9 @@ def keys_row(state: dict, cols: int) -> str:
         return fit(" " + state["note"], cols)
     if state.get("tab") in ("metrics", "invocation"):
         return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
+    if state.get("tab") == "tips" and state["view"] == None:
+        choose = "↑↓ choose · s silence · " if shown_tips(state) else ""
+        return fit(" " + choose + "Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
     done = state["ended"]
     parts = [("Done ✔" if state.get("verdict", True) else "Done ✗")] if done else []
     parts += row_labels(state)
@@ -4241,9 +4308,11 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
         out.append("%s: %s" % (label, link(url, url) if tty else url))
     c = state["counts"]
-    out.append("%d built, %d failed · %d %s passed, %d failed%s%s" % (
-        c["built"],
-        c["failed"],
+    built_n, targets_failed, targets_blocked = target_counts(state)
+    out.append("%d built, %d failed%s · %d %s passed, %d failed%s%s" % (
+        built_n,
+        targets_failed,
+        (", %d blocked" % targets_blocked) if targets_blocked else "",
         c["tests_passed"],
         "test" if c["tests_passed"] == 1 else "tests",
         c["tests_failed"],
@@ -4484,7 +4553,9 @@ def _dashboard_impl(ctx: FeatureContext):
             state["update"] = update.data
 
     def _attempt_end(task_ctx, exit_code):
+        # The execution log is read to its end before an attempt ends.
         state["fresh"] = True
+        state["exec_log_read"] = True
 
     def _end(task_ctx, build):
         state["log_path"] = build.output_log or ""

@@ -153,8 +153,8 @@ rust_test(
 )
 
 # Some ninety runs of the unoptimized CLI, each a CPU-second of
-# evaluating the builtins: 274s on a loaded CI runner, too near the medium
-# size's 300s timeout, which it has run past.
+# evaluating the builtins: up to 455s on a loaded CI runner, past the medium
+# size's 300s timeout.
 rust_test(
     name = "console_test",
     size = "large",
@@ -184,8 +184,10 @@ rust_test(
     ],
 )
 
+# 194s on a loaded CI runner, too near the medium size's 300s timeout.
 rust_test(
     name = "feature_color_test",
+    size = "large",
     srcs = ["tests/feature_color.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/feature_color.rs",
     data = [":aspect-cli"],
@@ -198,8 +200,10 @@ rust_test(
     ],
 )
 
+# 235s on a loaded CI runner, too near the medium size's 300s timeout.
 rust_test(
     name = "feature_shorthand_test",
+    size = "large",
     srcs = ["tests/feature_shorthand.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     compile_data = [
         "src/builtins/aspect/bazel/no_value_flags.axl",
@@ -266,8 +270,10 @@ rust_test(
     ],
 )
 
+# 194s on a loaded CI runner, too near the medium size's 300s timeout.
 rust_test(
     name = "axl_load_failure_test",
+    size = "large",
     srcs = ["tests/axl_load_failure.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/axl_load_failure.rs",
     data = [":aspect-cli"],
@@ -344,10 +350,11 @@ rust_test(
 
 # Drives every built-in task that spawns Bazel against the basil fake, with an
 # `exec_log_event` hook registered, so a lost `open` / `pump` / `close` at any
-# call site fails here rather than silently.
+# call site fails here rather than silently. Large: 300s on a loaded CI
+# runner, past the medium size's timeout.
 rust_test(
     name = "exec_log_event_test",
-    size = "medium",
+    size = "large",
     srcs = ["tests/exec_log_event.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/exec_log_event.rs",
     data = [

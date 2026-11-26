@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -821,7 +821,7 @@ def _impl(ctx: TaskContext) -> int:
     # are counted while scrolled up.
     add_lines(jump, ["new 1", "new 2"])
     _eq("scrolled up, new lines are counted", (jump["unseen"], jump["scroll"]), (2, origin + 2))
-    if "2 new, G to follow" not in render(jump, 100, 30):
+    if "2 new, J to follow" not in render(jump, 100, 30):
         fail("render: scrolled up, the new lines should be counted")
     on_key(jump, "J", 10)
     render(jump, 100, 30)
@@ -896,7 +896,7 @@ def _impl(ctx: TaskContext) -> int:
     if "┃ a hit" not in held:
         fail("render: a match near the newest line should stay in view:\n%s" % held)
     near["scroll"] = 0
-    if "on the match, G to follow" not in render(near, 100, 30):
+    if "on the match, J to follow" not in render(near, 100, 30):
         fail("render: a view held on a match should not say following")
     on_key(near, "J", 10)
     add_lines(near, ["e"])
@@ -1346,6 +1346,10 @@ def _impl(ctx: TaskContext) -> int:
     rec = {"kind": "action", "label": "//a:broken", "detail": "Genrule", "files": [], "output": "", "success": False}
     blocked = _screen(ctx, [], fails = [rec], blocked = {"//a:demo": ["//a:broken"]}, focus = "failures")
     blocked["counts"]["failures"] = ["//a:broken", "//a:demo"]
+
+    # Bazel's target_completed for it (not success) counted it failed.
+    blocked["counts"]["failed"] = 1
+    blocked["counts"]["failed_labels"] = {"//a:demo": True}
     rows = [_visible(r) for r in failure_rows(blocked, 5, 60)]
     _eq("the blocked row", "○ //a:demo  blocked by :broken" in rows[1], True)
     on_key(blocked, "down", 10)
@@ -1353,7 +1357,43 @@ def _impl(ctx: TaskContext) -> int:
     on_key(blocked, "enter", 10)
     _eq("Enter shows what blocks it", (blocked["selected"], blocked["view"]["record"]["label"]), (0, "//a:broken"))
     report = [_visible(l) for l in report_lines(dict(blocked, read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = ""), "id1", False)]
-    _eq("the scrollback's own group", [l for l in report if "blocked" in l], ["Not built, blocked by a failed dependency (1):", "  ○ //a:demo  blocked by :broken"])
+    _eq("the scrollback's own group", [l for l in report if "blocked by" in l], ["Not built, blocked by a failed dependency (1):", "  ○ //a:demo  blocked by :broken"])
+    _eq("its summary counts it blocked, not failed", [l for l in report if l.startswith("0 built")], ["0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
+    targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
+    _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 0 failed · 1 blocked by a dependency", "failures listed 1 (failed actions and test attempts, in Failures)"])
+
+    # A test Bazel could not run, its summary Aborted: failed, as Bazel
+    # counts it; an interrupt is no verdict.
+    aborted_tests = new_counts()
+    count_aborted_test(aborted_tests, "//t:flaky_sharded", "unknown")
+    count_aborted_test(aborted_tests, "//t:stopped", "user_interrupted")
+    _eq("an aborted test summary", (aborted_tests["tests_failed"], aborted_tests["failures"]), (1, ["//t:flaky_sharded"]))
+
+    # One attempt Bazel posts twice is one row, the one with a log; a failed
+    # TestRunner action folds into its test's attempts, before or after.
+    shard = struct(label = "//t:s", run = 1, shard = 2, attempt = 1, configuration = struct(id = "c"))
+    log = [struct(name = "test.log", file = struct(uri = "file:///x/test.log"))]
+    runner = struct(success = False, type = "TestRunner", stderr = struct(file = struct(contents = "boom")))
+    for order in ("action first", "action last"):
+        twice = _screen(ctx, ["x"])
+        if order == "action first":
+            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "t/s/shard_2_of_2/test.log"), runner, False)
+        note_event(twice, "test_result", shard, struct(status = "failed", test_action_output = log), False)
+        note_event(twice, "test_result", shard, struct(status = "failed_to_build"), False)
+        if order == "action last":
+            note_event(twice, "action_completed", struct(label = "//t:s", primary_output = "t/s/shard_2_of_2/test.log"), runner, False)
+        _eq("%s: one row for the attempt, with its log" % order, [(r["kind"], len(r["files"])) for r in twice["fails"]], [("test", 1)])
+
+    # Metrics' spawns: after the build until its execution log is read, then
+    # what it held, none included.
+    reading = _screen(ctx, ["x"])
+    spawns = lambda st: [" ".join(_visible(l).split()) for l in metrics_lines(st) if "spawns" in _visible(l)]
+    _eq("spawns before the log is read", spawns(reading), ["spawns after the build, from its execution log"])
+    reading["exec_log_read"] = True
+    _eq("a log with none", spawns(reading), ["spawns 0 run: the execution log has none"])
+
+    # A cached build's slowest pane: that nothing ran, not an empty box.
+    _eq("nothing ran", [_visible(r) for r in slowest_rows(_screen(ctx, [], critical = "a.cc 1s"))], ["nothing ran: every action was cached"])
 
     # Page Up and Option/Alt+↑ scroll, not an Esc and the arrow.
     paged = _screen(ctx, ["l%d" % i for i in range(200)])

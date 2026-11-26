@@ -2,7 +2,9 @@
 # Fails its first $1 attempts, then passes: a flaky test for the dashboard's
 # attempts (`}` and `{` step between them). The attempts so far are counted
 # in a file outside the sandbox (the targets are `no-sandbox`), removed once
-# it passes so the next run starts again.
+# it passes so the next run starts again. A sharded run is told it shards,
+# or Bazel 9 fails each shard for not saying so.
+[ -n "$TEST_SHARD_STATUS_FILE" ] && touch "$TEST_SHARD_STATUS_FILE"
 fails="${1:-1}"
 count="/tmp/aspect-dashboard-flaky-$(echo "$TEST_TARGET" | tr '/:' '__')-${TEST_SHARD_INDEX:-0}"
 n=$(cat "$count" 2>/dev/null || echo 0)
