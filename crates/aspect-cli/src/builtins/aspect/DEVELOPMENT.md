@@ -405,7 +405,7 @@ rate_limit = struct(
 
 ### Rules: what features must NOT do
 
-1. **No data fields on traits.** Trait fields are exclusively contract surfaces: `Callable` (single function — event handler, method, transform, predicate), `list[Callable]` (hook lists), or declarative config the task reads at dispatch time. **A `str`, `dict`, `list`, or any non-callable data type on a trait is the abuse pattern** and is forbidden in new code. If you need to share data across features, use Pattern 2 or 3, never a data field on a trait.
+1. **No data fields on traits.** Trait fields are exclusively contract surfaces: `Callable` (single function - event handler, method, transform, predicate), `list[Callable]` (hook lists), or declarative config the task reads at dispatch time. **A `str`, `dict`, `list`, or any non-callable data type on a trait is the abuse pattern** and is forbidden in new code. If you need to share data across features, use Pattern 2 or 3, never a data field on a trait.
 
 2. **No reaching into other features' state.** Features are anonymous to each other. Feature A never imports feature B and calls into its closures, accesses its variables, or reads its private state. Cross-feature data flows ONLY through:
    - **Hook signatures** — events the task fires through trait hook lists (see [The per-task lifecycle](#the-per-task-lifecycle))

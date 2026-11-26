@@ -46,7 +46,7 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 "different runs" and reap each other.
 """
 
-load("@aspect//lint.axl", "LintEndResult", "LintTrait", lint_findings_destination = "findings_destination")
+load("@aspect//lint.axl", "LintEndResult", "LintStartInfo", "LintTrait", lint_findings_destination = "findings_destination")
 load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
@@ -557,7 +557,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_due_to_cap"] += 1
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
-    def _lint_start(ctx, start):
+    def _lint_start(ctx, start: LintStartInfo):
         state["destination"] = lint_findings_destination(ctx)
 
         # Workspace prefix relative to the git root. _post_individually prepends it
@@ -771,11 +771,12 @@ def _github_lint_impl(ctx: FeatureContext):
                         comments.append(comment)
         return comments
 
-    def _lint_end(ctx, relevant_diagnostics):
+    def _lint_end(ctx, relevant_diagnostics) -> LintEndResult:
         """Post the buffered comments and clean up stale ones.
 
         Returns a `LintEndResult` with the suggestion records and comment URLs
-        for the rendered detail body; empty when nothing was posted.
+        for the rendered detail body; empty when posting was skipped (no token,
+        or the PR head moved during the run).
         """
 
         # Reason string for the trace summary; every code path sets it so the

@@ -2949,8 +2949,10 @@ def test_merge_lint_end_results(tc: int) -> int:
     tc = test_case(tc, merge_lint_end_results([LintEndResult()]).comment_urls == {}, "merge_lint_end_results: defaults are empty")
     err, _ = catch(merge_lint_end_results, [{"suggestions": []}])
     tc = test_case(tc, err != None and "LintEndResult or None" in err.message, "merge_lint_end_results: rejects another return type")
-    err, _ = catch(merge_lint_end_results, [struct(suggestions = None, comment_urls = {})])
-    tc = test_case(tc, err != None and "LintEndResult or None" in err.message, "merge_lint_end_results: rejects fields of the wrong type")
+    err, _ = catch(merge_lint_end_results, [struct(suggestions = [], comment_urls = {})])
+    tc = test_case(tc, err != None and "LintEndResult or None" in err.message, "merge_lint_end_results: rejects a look-alike struct")
+    err, _ = catch(lambda: LintEndResult(suggestions = None))
+    tc = test_case(tc, err != None, "LintEndResult: rejects fields of the wrong type")
     return tc
 
 def test_lint_per_linter_strategy(tc: int) -> int:

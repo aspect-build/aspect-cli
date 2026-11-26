@@ -139,15 +139,22 @@ def _impl(ctx):
         for callback in lint.lint_report:
             callback(proxy, "findings.sarif")
     ctx.std.fs.write("posted.json", json.encode(posted))
+    for callback in lint.lint_patch:
+        callback(proxy, "fix.patch", "subject.AspectRulesLintESLint.patch")
     urls = {}
+    suggestions = []
     for callback in lint.lint_end:
-        for (path, line), url in callback(proxy, []).comment_urls.items():
+        result = callback(proxy, [])
+        for (path, line), url in result.comment_urls.items():
             urls["%s:%d" % (path, line)] = url
+        suggestions.extend(result.suggestions)
     ctx.std.fs.write("comment_urls.json", json.encode(urls))
+    ctx.std.fs.write("suggestions.json", json.encode(suggestions))
     return 0
 
 probe = task(kind = "probe", summary = "Capture native lint review comments.", implementation = _impl, traits = [LintTrait])
 """)
+    ctx.std.fs.write(root + "/fix.patch", "--- a/subject.ts\n+++ b/subject.ts\n@@ -2,1 +2,1 @@\n-let a = 1\n+const a = 1\n")
     ctx.std.fs.write(root + "/findings.sarif", json.encode({
         "runs": [{
             "tool": {"driver": {"name": "eslint"}},
@@ -162,7 +169,10 @@ probe = task(kind = "probe", summary = "Capture native lint review comments.", i
             } for rule, end in [("first-rule", 1), ("second-rule", 1), ("range-rule", 3)]],
         }],
     }))
-    output = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    cmd = ctx.std.process.command(ctx.std.env.current_exe()).arg("probe").env("HOME", root).current_dir(root)
+    for name in _STRIPPED_ENV:
+        cmd = cmd.env(name, None)
+    output = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
     if not output.status.success:
         fail(output.stdout + output.stderr)
     posted = json.decode(ctx.std.fs.read_to_string(root + "/posted.json"))
@@ -178,6 +188,17 @@ probe = task(kind = "probe", summary = "Capture native lint review comments.", i
         "subject.ts:1": "https://github.com/fixture/repo/pull/1/files#r2",
         "subject.ts:3": "https://github.com/fixture/repo/pull/1/files#r3",
     })
+    _eq("lint_end returns the posted patch as a suggestion record", json.decode(ctx.std.fs.read_to_string(root + "/suggestions.json")), [{
+        "tool": "ESLint",
+        "linter": "ESLint",
+        "file": "subject.ts",
+        "start_line": 2,
+        "end_line": 2,
+        "severity": "",
+        "rule_id": "",
+        "correlated": False,
+        "comment_url": "https://github.com/fixture/repo/pull/1/files#r4",
+    }])
 
 def _test_enterprise_notice_only_on_pr(ctx):
     """An Enterprise checkout without credentials logs the setup notice on a

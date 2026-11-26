@@ -330,16 +330,16 @@ def merge_lint_end_results(results: list) -> LintEndResult:
     """Merge what the `lint_end` hooks returned, in hook order.
 
     `None` contributes nothing. Suggestions concatenate; for a `(file, line)`
-    two hooks both link, the later hook's URL wins. A return without a
-    `suggestions` list and a `comment_urls` dict fails the task naming it,
-    rather than dropping that hook's suggestions without a trace.
+    two hooks both link, the later hook's URL wins. Any other return value
+    fails the task naming it, rather than dropping that hook's suggestions
+    without a trace.
     """
     suggestions = []
     comment_urls = {}
     for r in results:
         if r == None:
             continue
-        if not (hasattr(r, "suggestions") and type(r.suggestions) == "list" and hasattr(r, "comment_urls") and type(r.comment_urls) == "dict"):
+        if not isinstance(r, LintEndResult):
             fail("a LintTrait.lint_end hook returned %s (%r); return a LintEndResult or None" % (type(r), r))
         suggestions.extend(r.suggestions)
         comment_urls.update(r.comment_urls)
@@ -1230,7 +1230,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         exit_code = 0
 
     # Repro reruns the same scope. The fix variant (adds --fix) is gated on the
-    # strategy-filtered suggestion set, not the raw trait list, so we don't offer
+    # strategy-filtered suggestion set, not the hooks' raw records, so we don't offer
     # a fix command for patches the strategy excluded.
     repro_flags = explicit_flags(ctx, [
         ("strategy", "--strategy"),
