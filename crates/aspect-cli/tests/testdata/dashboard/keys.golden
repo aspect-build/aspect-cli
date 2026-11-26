@@ -20,11 +20,11 @@
 │   p                    the build panes open or folded, and back                                  │
 │   drag                 select, and copy on release                                               │
 │   click                a file's link shows the file here (o: in your editor); a web link opens;… │
+│   click a fold         an INFO: From or its +N count: show or fold its lines (^O all)            │
 │   ?                    these keys                                                                │
 │   o  O                 open the log (or the task's output) in your editor; pick the editor       │
 │   w                    wrap long lines (the default), or cut them at the edge                    │
 │   ^O                   show the lines under each INFO: From (a successful action's output, fold… │
-│   z                    the console fills the screen, and back                                    │
-│ … 5 more: ↓                                                                                      │
+│ … 6 more: ↓                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ scroll · any other key closes

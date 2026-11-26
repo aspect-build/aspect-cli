@@ -78,7 +78,9 @@ names, and `O` picks another; a click on a web link opens it. The screen
 takes the mouse: a drag selects and copies, a double click a word; `m`
 (or `--dashboard:mouse=false`) gives it back to the terminal. `e` cycles
 every line, errors and warnings, errors only; `w` cuts long lines rather
-than wrap them; Ctrl+O unfolds; `z` gives the main pane the whole screen;
+than wrap them; Ctrl+O unfolds every fold and folds them all again
+(forgetting what clicks opened), a click on one (its `INFO: From` or its
+count) just that one; `z` gives the main pane the whole screen;
 `q` cancels the build, as Ctrl+C does.
 
 Ctrl+F or `/` opens a search bar for a regular expression (`std.re`),
@@ -1039,6 +1041,9 @@ def attempt_state(now_ms: int) -> dict:
         spawn_slowest = [],
         folded = [],
         fold_src = [],
+        fold_head = [],
+        fold_open = {},
+        log_base = 0,
         fold_n = -1,
         fold_seen = 0,
         scroll = 0,
@@ -2509,6 +2514,8 @@ def mouse_key(state: dict, key: str) -> bool:
             say_note(state, "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back")
         else:
             say_note(state, open_link(state, url))
+        return True
+    toggle_fold(state, row)
     return True
 
 def links_row(pages: list, cols: int) -> str:
@@ -3566,15 +3573,18 @@ def render(state: dict, cols: int, rows: int) -> str:
     colour_current = _console_row(state, pattern, True)
     bar_edge = scrollbar(len(log), log_h, up) if not state.get("help") else None
     drawn = []
+    drawn_at = []
     first_row = -1
     for i, line in enumerate(shown):
         links = line_links.get(line)
         if view != None and view.get("peek"):
             # A peek's rows, highlighted, cut as `fit` cut their text.
             drawn.append((line, _peek_paint(view["hl"][start + i]), False, None, False))
+            drawn_at.append(start + i)
             continue
         if not wrapping:
             drawn.append((line, (colour_current if start + i == current else colour)(line), start + i == current, links, False))
+            drawn_at.append(start + i)
             continue
         kind = severity(line)
         if start + i == jumped:
@@ -3582,6 +3592,7 @@ def render(state: dict, cols: int, rows: int) -> str:
         for j, (piece, at) in enumerate(wrap_line(line, body_w)):
             paint = colour_current if start + i == current else colour
             drawn.append((piece, paint(line, at), j == 0 and start + i == current, _piece_links(links, at, len(piece)), j > 0))
+            drawn_at.append(start + i)
 
     # Wrapped, more rows than fit: the newest, but for the top of the
     # console, where the oldest line shows from its first row.
@@ -3593,11 +3604,19 @@ def render(state: dict, cols: int, rows: int) -> str:
             # its jump put it.
             window = first_row
         drawn = drawn[window:window + log_h]
+        drawn_at = drawn_at[window:window + log_h]
 
     # Which rows go on from the one above, for a copy to join them again.
     state["continued"] = {}
     state["page_h"] = log_h
+
+    # Which of the folded view's lines each row is, for a click on a fold.
+    state["row_lines"] = {}
+    folded_view = view == None and not state.get("help") and folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and bool(state.get("folded"))
+    first = len(out)
     for i in range(log_h):
+        if folded_view and i < len(drawn_at):
+            state["row_lines"][first + i] = drawn_at[i]
         text, paint, mark, links, more = drawn[i] if i < len(drawn) else ("", None, False, None, False)
         if more:
             state["continued"][len(out)] = True
@@ -4152,8 +4171,11 @@ def _closing(line: str) -> bool:
             return True
     return False
 
-def _folded_line(n: int) -> str:
-    return "  … +%d line%s (Ctrl+O shows them)" % (n, "" if n == 1 else "s")
+def _folded_line(state: dict, n: int) -> str:
+    """A fold's row: how many lines it holds and how to show them (a click
+    while the screen has the mouse, Ctrl+O for every fold)."""
+    how = "click or Ctrl+O shows them" if state.get("mouse") else "Ctrl+O shows them"
+    return "  … +%d line%s (%s)" % (n, "" if n == 1 else "s", how)
 
 def _tools_own(coloured) -> bool:
     """Whether a line as written (`coloured`) is coloured as a tool colours
@@ -4177,28 +4199,78 @@ def _fold_line(state: dict, line: str):
     """Take `line` into the console's folded view (`folded`): the lines
     under an `INFO: From` (a successful action's output) counted on one
     row after it rather than shown, a tool's line coloured like one of
-    Bazel's (`_tools_own`, from its colours) among them."""
+    Bazel's (`_tools_own`, from its colours) among them; a block a click
+    opened (`fold_open`, by its `INFO: From` line's number since the
+    console began) shown whole. Each row's block (`fold_head`) is its
+    `INFO: From` line's index in `log` on that line's row and the count's,
+    else -1: what a click on it toggles."""
     folded = state.setdefault("folded", [])
     src = state.setdefault("fold_src", [])
+    head = state.setdefault("fold_head", [])
     at = state.get("fold_seen", 0)
     state["fold_seen"] = at + 1
     if bazel_line(line).startswith("INFO: From "):
         folded.append(line)
         src.append(at)
+        head.append(at)
         state["fold_n"] = 0
+        state["fold_at"] = at
+        state["fold_shown"] = (state.get("log_base", 0) + at) in state.get("fold_open", {})
         return
     if state.get("fold_n", -1) >= 0 and (not _starts_block(line) or _tools_own(state.get("colour_of", {}).get(line))):
         state["fold_n"] += 1
-        if state["fold_n"] == 1:
-            folded.append(_folded_line(1))
+        if state.get("fold_shown"):
+            folded.append(line)
             src.append(at)
+            head.append(-1)
+        elif state["fold_n"] == 1:
+            folded.append(_folded_line(state, 1))
+            src.append(at)
+            head.append(state["fold_at"])
         else:
-            folded[-1] = _folded_line(state["fold_n"])
+            folded[-1] = _folded_line(state, state["fold_n"])
             src[-1] = at
         return
     state["fold_n"] = -1
     folded.append(line)
     src.append(at)
+    head.append(-1)
+
+def refold(state: dict):
+    """The console's folded view built again from the lines kept, as a
+    trim, a click on a fold or the mouse's toggle leaves it."""
+    state["folded"] = []
+    state["fold_src"] = []
+    state["fold_head"] = []
+    state["fold_n"] = -1
+    state["fold_seen"] = 0
+    for line in state.get("log", []):
+        _fold_line(state, line)
+
+def toggle_fold(state: dict, row: int) -> bool:
+    """A click on the console's `row`: on an `INFO: From` with lines under
+    it, or on its count, shows them, or folds them again; the rest kept as
+    they were, that line where it was on the screen. Whether it was one."""
+    at = state.get("row_lines", {}).get(row)
+    heads = state.get("fold_head", [])
+    if at == None or at >= len(heads) or heads[at] < 0 or not folding(state):
+        return False
+    key = state.get("log_base", 0) + heads[at]
+    opened = state.setdefault("fold_open", {})
+    shown = key in opened
+    if not shown and at + 1 < len(heads) and heads[at + 1] != heads[at] and not state["folded"][at].startswith("  … +"):
+        # An `INFO: From` with nothing under it.
+        return False
+    before = len(state.get("folded", []))
+    if shown:
+        opened.pop(key)
+    else:
+        opened[key] = True
+    refold(state)
+    state["scroll"] = max(0, state.get("scroll", 0) + len(state["folded"]) - before)
+    state["search"]["anchored_view"] = False
+    say_note(state, "expanded · click again to fold" if not shown else "folded · click to expand")
+    return True
 
 def folded_to_lines(state: dict, scroll: int) -> int:
     """A scroll of the folded view (rows from its newest) as one of the
@@ -4350,18 +4422,14 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
         kept = state.get("colour_of", {})
         state["colour_of"] = {line: kept[line] for line in state["log"] if line in kept}
         state["dropped"] = state.get("dropped", 0) + over
+        state["log_base"] = state.get("log_base", 0) + over
 
         # Trimmed seed lines are still on the main screen: neither replayed
         # nor counted as not kept on leaving.
         cut = min(over, state.get("seeded", 0))
         state["seeded"] = state.get("seeded", 0) - cut
         state["seed_trimmed"] = state.get("seed_trimmed", 0) + cut
-        state["folded"] = []
-        state["fold_src"] = []
-        state["fold_n"] = -1
-        state["fold_seen"] = 0
-        for line in state["log"]:
-            _fold_line(state, line)
+        refold(state)
     if len(state.get("line_links", {})) > _MAX_LOG:
         kept = {line: True for line in state["log"]}
         state["line_links"] = {line: spans for line, spans in state["line_links"].items() if line in kept}
@@ -4722,8 +4790,12 @@ def _k_wrap(state, key, page):
 
 def _k_unfold(state, key, page):
     # The lines folded under each `INFO: From`, shown or folded again, from
-    # the newest line, as the rows change under the view.
+    # the newest line, as the rows change under the view; what clicks
+    # opened forgotten, so folding again folds every one.
     state["unfolded"] = not state.get("unfolded", False)
+    if state.get("fold_open"):
+        state["fold_open"] = {}
+        refold(state)
     state["scroll"] = 0
     state["search"]["anchored_view"] = False
     return False
@@ -4736,6 +4808,9 @@ def _k_mouse(state, key, page):
     if state.get("screen") != None:
         state["mouse"] = not state.get("mouse", False)
         state["screen"].mouse(state["mouse"])
+
+        # The folds' rows say whether a click shows them.
+        refold(state)
     return False
 
 def _k_redraw(state, key, page):
@@ -4835,10 +4910,11 @@ KEYS = [
     _key(["e"], _always, _k_filter, help = ("e", "every line, errors and warnings, errors only"), group = "Search", row = lambda s: ["e filter"], said = _said_filter),
     _documented("drag", "select, and copy on release", "Screen"),
     _documented("click", "a file's link shows the file here (o: in your editor); a web link opens; any other is copied", "Screen"),
+    _documented("click a fold", "an INFO: From or its +N count: show or fold its lines (^O all)", "Screen"),
     _key(["?"], _always, _k_help, help = ("?", "these keys"), group = "Screen"),
     _key(["o", "O"], _always, _k_open, help = ("o  O", "open the log (or the task's output) in your editor; pick the editor"), group = "Screen", row = _row_open),
     _key(["w"], _always, _k_wrap, help = ("w", "wrap long lines (the default), or cut them at the edge"), group = "Screen", row = lambda s: ["w " + ("cut" if s.get("wrap", True) else "wrap")], said = lambda s: "long lines wrapped · w cuts them" if s.get("wrap", True) else "long lines cut · w wraps them"),
-    _key(["ctrl-o"], _always, _k_unfold, help = ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold them again"), group = "Screen", said = lambda s: "lines under each INFO: From shown · ^O folds them" if s.get("unfolded") else "lines under each INFO: From folded · ^O shows them"),
+    _key(["ctrl-o"], _always, _k_unfold, help = ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold every one again"), group = "Screen", said = lambda s: "lines under each INFO: From shown · ^O folds them" if s.get("unfolded") else "lines under each INFO: From folded · ^O shows them"),
     _key(["z"], _always, _k_zoom, help = ("z", "the console fills the screen, and back"), group = "Screen", row = lambda s: ["z " + ("unzoom" if s.get("zoom") else "zoom")], said = lambda s: "console zoomed · z unzooms it" if s.get("zoom") else "console unzoomed · z zooms it"),
     _key(["m"], _always, _k_mouse, help = ("m", "the mouse to the terminal and back"), group = "Screen", said = lambda s: "mouse on: the wheel scrolls, a click picks · m gives it to the terminal" if s.get("mouse") else "mouse off: the terminal selects text · m takes it back"),
     _key(["q", "enter"], _always, _k_leave, help = ("q", "cancel the build; once it is done, leave"), group = "Leave", row = _row_leave),
