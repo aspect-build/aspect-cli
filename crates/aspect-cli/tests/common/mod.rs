@@ -147,10 +147,12 @@ pub fn basil_bin() -> &'static str {
 
 /// On Linux, once per test process: every 10s, each of this process's
 /// descendants still alive after 45s (a CLI under test, or a child of one)
-/// has its threads' `comm`,
-/// `wchan`, `syscall` and `stat`, its open descriptors and its children
-/// printed to stderr, once, under `HANG-DIAG` (`HANG_DIAG_AFTER_SECS`
-/// overrides the 45s). For a CI timeout, which
+/// has its threads' `comm`, `wchan`, `syscall`, `stat` and CPU used over
+/// one second (a busy thread is slow, not stuck), every thread's stack
+/// (`gdb`, else `eu-stack`, each tried with `sudo -n` too, as Ubuntu lets
+/// no non-ancestor attach; each bounded), its open descriptors and its
+/// children printed to stderr, once, under `HANG-DIAG`
+/// (`HANG_DIAG_AFTER_SECS` overrides the 45s). For a CI timeout, which
 /// otherwise says only which tests ran long. Nothing elsewhere.
 #[allow(dead_code)]
 fn watch_for_hangs() {
@@ -300,6 +302,57 @@ mod hang_diag {
         say(&report(pid, parents));
     }
 
+    /// A thread's user and system time so far, in ticks, from its `stat`.
+    fn cpu_ticks(stat: &str) -> Option<u64> {
+        let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+        Some(fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?)
+    }
+
+    /// What `program args` prints, given up on (and killed) after `secs`;
+    /// None where it can't be run or says nothing useful.
+    fn bounded(program: &str, args: &[&str], secs: u64) -> Option<String> {
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while child.try_wait().ok()?.is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let out = child.wait_with_output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        // gdb exits 0 having attached to nothing; a frame says it did.
+        let useful = text.contains("#0") || (out.status.success() && !text.trim().is_empty());
+        useful.then_some(text)
+    }
+
+    /// Every thread's stack in `pid`: `gdb`, else `eu-stack`, each plain and
+    /// under `sudo -n`; None where none of them could attach.
+    fn stacks(pid: u32) -> Option<String> {
+        let p = pid.to_string();
+        let gdb = ["-batch", "-nx", "-p", &p, "-ex", "thread apply all bt"];
+        let eu = ["-p", &p];
+        for (program, args) in [("gdb", &gdb[..]), ("eu-stack", &eu[..])] {
+            if let Some(text) = bounded(program, args, 20) {
+                return Some(text);
+            }
+            let mut sudo = vec!["-n", program];
+            sudo.extend_from_slice(args);
+            if let Some(text) = bounded("sudo", &sudo, 20) {
+                return Some(text);
+            }
+        }
+        None
+    }
+
     fn report(pid: u32, parents: &HashMap<u32, u32>) -> String {
         let mut out = format!("HANG-DIAG pid {pid}: {}\n", cmdline(pid));
         let tasks = format!("/proc/{pid}/task");
@@ -310,15 +363,33 @@ mod hang_diag {
             .filter_map(|e| e.file_name().to_str()?.parse().ok())
             .collect();
         tids.sort();
+        let before: HashMap<u32, u64> = tids
+            .iter()
+            .filter_map(|tid| Some((*tid, cpu_ticks(&read(&format!("{tasks}/{tid}/stat")))?)))
+            .collect();
+        std::thread::sleep(Duration::from_secs(1));
         for tid in tids {
             let t = format!("{tasks}/{tid}");
+            let stat = read(&format!("{t}/stat"));
+            let busy = match (before.get(&tid), cpu_ticks(&stat)) {
+                (Some(a), Some(b)) => format!("{}ms", b.saturating_sub(*a) * 1000 / CLOCK_TICKS),
+                _ => "?".into(),
+            };
             out.push_str(&format!(
-                "HANG-DIAG   task {tid} comm={} wchan={} syscall={} stat={}\n",
+                "HANG-DIAG   task {tid} comm={} wchan={} syscall={} cpu_last_1s={busy} stat={}\n",
                 read(&format!("{t}/comm")).trim(),
                 read(&format!("{t}/wchan")).trim(),
                 read(&format!("{t}/syscall")).trim(),
-                read(&format!("{t}/stat")).trim(),
+                stat.trim(),
             ));
+        }
+        match stacks(pid) {
+            Some(text) => {
+                for line in text.lines() {
+                    out.push_str(&format!("HANG-DIAG   | {line}\n"));
+                }
+            }
+            None => out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach\n"),
         }
         let fds = format!("/proc/{pid}/fd");
         let mut fdl: Vec<(u32, String)> = std::fs::read_dir(&fds)
