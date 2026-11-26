@@ -1,4 +1,4 @@
-//! The raw console log: every byte the client wrote to the capture (its
+//! The raw log: every byte the client wrote to the capture (its
 //! stderr, and its stdout when the two are one file), before any stage changed
 //! it. A pipeline that can drop or rewrite a line keeps one, so nothing it
 //! hides is lost; the summary at the end of the console names the file, and
@@ -9,7 +9,7 @@
 //! with others, `console-<millis>-<pid>-<n>.log`, so names sort oldest first.
 //! The files of what a `collapse_similar` stage folded go beside it
 //! ([`RawLog::sibling`]). Nothing here removes them, and nothing caps their
-//! size: how long they are kept is the caller's to decide. The raw console
+//! size: how long they are kept is the caller's to decide. The raw log
 //! holds whatever a stage redacted, so each file is `0600`, and every
 //! directory created for them `0700`; an existing one keeps its mode.
 

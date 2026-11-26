@@ -1061,7 +1061,7 @@ mod tests {
             format!(
                 "WARNING: a/BUILD:1:1: target '//a:a' is deprecated\n\
                  INFO: Build completed successfully\n\
-                 INFO: Aspect hid 2 console lines; the raw console is in {}\n  \
+                 INFO: Aspect hid 2 console lines; Bazel's raw log is in {}\n  \
                  1 more like: WARNING: a/BUILD:1:1: target '//a:a' is deprecated\n    \
                  all 2 in {}\n",
                 log.display(),

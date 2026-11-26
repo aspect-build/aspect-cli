@@ -1044,7 +1044,7 @@ pub struct Build {
     #[allocative(skip)]
     console_links_written: Option<bazel::console::links::WrittenCount>,
 
-    /// The raw console log, when the `output` processor changes what is shown.
+    /// Bazel's raw log, when the `output` processor changes what is shown.
     #[allocative(skip)]
     console_log: Option<std::path::PathBuf>,
 
@@ -1969,7 +1969,7 @@ impl<'v> values::StarlarkValue<'v> for Build {
                     .unwrap_or(0);
                 Some(heap.alloc(idle.min(i32::MAX as u64) as i32))
             }
-            // The raw console log's path: Bazel's stderr (and stdout, when it
+            // Bazel's raw log path: its stderr (and stdout, when it
             // is the same file) as it wrote it, kept when the `output`
             // processor changes what is shown. None otherwise, or when it
             // could not be created.
