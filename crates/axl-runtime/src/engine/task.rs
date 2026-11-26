@@ -48,6 +48,9 @@ pub trait TaskLike<'v> {
     /// Whether `--help` lists the `--task:*` flags and the features footer
     /// (the `show_task_options=` kwarg). The flags parse either way.
     fn show_task_options(&self) -> bool;
+    /// Whether a run keeps an entry in the task history (the
+    /// `keep_history=` kwarg).
+    fn keep_history(&self) -> bool;
     fn group(&self) -> &Vec<String>;
     /// The task kind — the command being run (e.g. `build`, `test`, `lint`),
     /// derived from the snake_case export variable (or the `kind=` kwarg).
@@ -134,6 +137,7 @@ pub struct Task<'v> {
     pub(super) description: String,
     pub(super) friendly_kind: RefCell<String>,
     pub(super) show_task_options: bool,
+    pub(super) keep_history: bool,
     pub(super) group: Vec<String>,
     pub(super) kind: RefCell<String>,
     pub(super) path: PathBuf,
@@ -190,6 +194,7 @@ impl<'v> Task<'v> {
             description: frozen.description.clone(),
             friendly_kind: RefCell::new(frozen.friendly_kind.clone()),
             show_task_options: frozen.show_task_options,
+            keep_history: frozen.keep_history,
             group: frozen.group.clone(),
             kind: RefCell::new(frozen.kind.clone()),
             path: frozen.path.clone(),
@@ -213,6 +218,9 @@ impl<'v> TaskLike<'v> for Task<'v> {
     }
     fn show_task_options(&self) -> bool {
         self.show_task_options
+    }
+    fn keep_history(&self) -> bool {
+        self.keep_history
     }
     fn group(&self) -> &Vec<String> {
         &self.group
@@ -293,6 +301,7 @@ impl<'v> values::Freeze for Task<'v> {
             description: self.description,
             friendly_kind: self.friendly_kind.into_inner(),
             show_task_options: self.show_task_options,
+            keep_history: self.keep_history,
             group: self.group,
             kind: self.kind.into_inner(),
             path: self.path,
@@ -311,6 +320,7 @@ pub struct FrozenTask {
     pub(super) description: String,
     pub(super) friendly_kind: String,
     pub(super) show_task_options: bool,
+    pub(super) keep_history: bool,
     pub(super) group: Vec<String>,
     pub(super) kind: String,
     pub(super) path: PathBuf,
@@ -359,6 +369,9 @@ impl<'v> TaskLike<'v> for FrozenTask {
     }
     fn show_task_options(&self) -> bool {
         self.show_task_options
+    }
+    fn keep_history(&self) -> bool {
+        self.keep_history
     }
     fn group(&self) -> &Vec<String> {
         &self.group
@@ -489,6 +502,7 @@ fn build_alias<'v>(
         description,
         friendly_kind: RefCell::new(friendly_kind),
         show_task_options: base.show_task_options(),
+        keep_history: base.keep_history(),
         group,
         kind: RefCell::new(kind),
         path: Env::current_script_path(eval)?,
@@ -607,6 +621,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// - `show_task_options` — list the `--task:*` flags (a `Task Options` section) and the
     ///   features footer in `--help`. Set it on tasks that report to CI status surfaces, where
     ///   naming the invocation matters. The flags are accepted either way; default `False`.
+    /// - `keep_history` — whether a run keeps an entry in the task history (`aspect
+    ///   history`): its record, output and builds' files; default `True`. With `False` the
+    ///   run writes nothing there, its builds' logs going to the temp dir. A task that
+    ///   only reads the history sets it `False`.
     ///
     /// ## Traits
     ///
@@ -653,6 +671,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] kind: String,
         #[starlark(require = named)] traits: Option<Value<'v>>,
         #[starlark(require = named, default = false)] show_task_options: bool,
+        #[starlark(require = named, default = true)] keep_history: bool,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
         let friendly_kind = resolve_task_metadata("task", &kind, &group.items, friendly_kind)?;
@@ -707,6 +726,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             description,
             friendly_kind: RefCell::new(friendly_kind),
             show_task_options,
+            keep_history,
             group: group.items,
             kind: RefCell::new(kind),
             path: Env::current_script_path(eval)?,

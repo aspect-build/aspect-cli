@@ -2930,6 +2930,9 @@ mod tests {
         fn show_task_options(&self) -> bool {
             self.show_task_options
         }
+        fn keep_history(&self) -> bool {
+            true
+        }
         fn group(&self) -> &Vec<String> {
             &self.group
         }

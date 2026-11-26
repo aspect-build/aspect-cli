@@ -556,6 +556,30 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0))
     }
+
+    /// How far the machine's local time zone was ahead of UTC, in seconds,
+    /// at `ms` (milliseconds since 1970, as `now_ms` gives): for showing a
+    /// UTC stamp in local time, daylight saving included. 0 for a time it
+    /// cannot place.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//time.axl", "local_offset_s", "now_ms")
+    /// local_ms = now_ms() + local_offset_s(now_ms()) * 1000
+    /// ```
+    fn local_offset_s(this: Value<'_>, #[starlark(require = pos)] ms: i64) -> anyhow::Result<i64> {
+        let _ = this;
+        use chrono::{Offset, TimeZone};
+        Ok(chrono::DateTime::from_timestamp_millis(ms)
+            .map(|t| {
+                chrono::Local
+                    .offset_from_utc_datetime(&t.naive_utc())
+                    .fix()
+                    .local_minus_utc() as i64
+            })
+            .unwrap_or(0))
+    }
 }
 
 #[starlark_module]

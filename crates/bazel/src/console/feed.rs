@@ -159,7 +159,7 @@ pub fn plain_line(raw: &[u8]) -> String {
 }
 
 /// A line as [`linked_line`] makes it, and as [`coloured_line`] does.
-fn line_of(raw: &[u8]) -> (String, Vec<Link>, String) {
+pub fn line_of(raw: &[u8]) -> (String, Vec<Link>, String) {
     let (text, links) = linked_line(raw);
     (text, links, coloured_line(raw))
 }

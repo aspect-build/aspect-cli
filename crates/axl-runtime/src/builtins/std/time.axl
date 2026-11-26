@@ -4,10 +4,12 @@ sleep_iter = _t.sleep_iter
 monotonic = _t.monotonic
 monotonic_ns = _t.monotonic_ns
 now_ms = _t.now_ms
+local_offset_s = _t.local_offset_s
 time = struct(
     sleep = _t.sleep,
     sleep_iter = _t.sleep_iter,
     monotonic = _t.monotonic,
     monotonic_ns = _t.monotonic_ns,
     now_ms = _t.now_ms,
+    local_offset_s = _t.local_offset_s,
 )

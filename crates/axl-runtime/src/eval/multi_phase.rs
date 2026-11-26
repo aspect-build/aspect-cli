@@ -903,17 +903,23 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
         let task_id = task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let env = &self.loader.env;
-        env.history.begin_task(
-            &task_id,
-            HistoryTaskStart {
-                name: task_name.clone(),
-                kind: task.kind(),
-                group: task.group().clone(),
-                cli_version: env.cli_version.clone(),
-                workspace: Some(env.bazel_root_dir.clone()),
-                git_root: env.git_root_dir.clone(),
-            },
-        );
+        // A task that keeps no history (`keep_history = False`) writes
+        // nothing there, its builds' logs going to the temp dir.
+        if task.keep_history() {
+            env.history.begin_task(
+                &task_id,
+                HistoryTaskStart {
+                    name: task_name.clone(),
+                    kind: task.kind(),
+                    group: task.group().clone(),
+                    cli_version: env.cli_version.clone(),
+                    workspace: Some(env.bazel_root_dir.clone()),
+                    git_root: env.git_root_dir.clone(),
+                },
+            );
+        } else {
+            env.history.keep_none();
+        }
         let task_args = args_builder(task, heap);
 
         let span = tracing::Span::current();

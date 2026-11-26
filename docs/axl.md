@@ -394,10 +394,14 @@ seconds after the signal is ended at its next blocking call with exit 130 (143
 for SIGTERM): post-task hooks, `ctx.defer` callbacks and the bookend still run,
 and `catch` never swallows it. A second Ctrl+C ends everything at once.
 
-The whole vocabulary is seven names: `ctx.cancellation.root`,
+The whole vocabulary is eight names: `ctx.cancellation.root`,
 `ctx.cancellation.new()` (a token nothing cancels but you), `tok.child()`,
-`tok.cancel()`, `tok.cancelled`, `tok.wait(timeout_ms)`, and `cancellation =
-tok` on `command(...).spawn()` / `.status()` and `ctx.bazel.build/test`. Every
+`tok.cancel()`, `tok.cancelled`, `tok.wait(timeout_ms)`, `cancellation =
+tok` on `command(...).spawn()` / `.status()` and `ctx.bazel.build/test`, and
+`ctx.cancellation.exit_code`: the code a task that ends on its own terms
+after the root was cancelled returns to end as the default would, 143 after
+SIGTERM or a hangup and 130 otherwise (Ctrl+C, `root.cancel()`), None while
+the root is not cancelled. Every
 `std.process.Child` and `bazel.Build` carries its own token as
 `handle.cancellation`, a `child()` of the one it was spawned under, so
 `handle.cancellation.cancel()` stops that one process the appropriate way.
