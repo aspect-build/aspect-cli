@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -866,11 +866,11 @@ def _impl(ctx: TaskContext) -> int:
     on_key(helped, "wheel-up", 10)
     _eq("the wheel keeps the keys shown", (helped["help"], helped["scroll"]), (True, 12))
     small = _visible(render(dict(helped, progress = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]), 80, 16))
-    if "Running" in small or "… 15 more: ↓" not in small:
+    if "Running" in small or " more: ↓" not in small:
         fail("render: the keys take the screen, counting what does not fit:\n%s" % small)
     for _ in range(30):
         on_key(helped, "down", 10)
-    if "these keys" not in render(helped, 80, 16):
+    if "cancel the build" not in render(helped, 80, 16):
         fail("render: ↓ should reach the last key")
     on_key(helped, "q", 10)
     _eq("a key closes them and does nothing else", (helped["help"], helped["scroll"], helped["cancelling"]), (False, 12, False))
@@ -1801,6 +1801,18 @@ def _impl(ctx: TaskContext) -> int:
     narrow = _screen(ctx, ["x"], progress = ["[1,204 / 9,000] 1 action running"])
     head = _visible(render(narrow, 40, 24)).split("\n")[0]
     _eq("no cut status", ("actions done" in head) or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
+
+    # Keys as data: an entry either takes keys and does something, or only
+    # documents keys another layer reads; the overlay shows only what
+    # applies, grouped; no key is shown twice.
+    for k in KEYS:
+        _eq("bound or documented: %s" % (k.help,), (len(k.keys) > 0) == (k.do != None), True)
+    calm = _screen(ctx, ["x"])
+    failed = _screen(ctx, ["x"], fails = [act])
+    _eq("no Failures keys without failures", "Failures" in help_rows(calm), False)
+    _eq("Failures keys with them", "Failures" in help_rows(failed), True)
+    shown = [k.help[0] for k in KEYS if k.help != None and k.shown(failed)]
+    _eq("no key row twice", len(shown), len({r: 1 for r in shown}))
 
     _goldens(ctx, view_state, act, ctx.args.update)
     print("dashboard_test.axl: OK")

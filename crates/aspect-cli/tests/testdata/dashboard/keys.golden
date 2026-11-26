@@ -1,30 +1,30 @@
  ⠋ aspect build · 12s                                                           3 of 9 actions done
 ┌─ Keys · ↑↓ scroll · any other key closes ────────────────────────────────────────────────────────┐
-│ ↑ ↓  k j             scroll a line; in a list, choose                                            │
-│ ⇧↑↓ ⌥↑↓  u d  ^U ^D  scroll half a page (macOS Terminal sends ⇧↑↓ as ↑↓)                         │
-│ PgUp PgDn  Space b   scroll a page (PgUp/PgDn are Fn+↑↓ on a Mac)                                │
-│ K  J                 the top; the end, following the newest (Home, End too)                      │
-│ wheel                scroll                                                                      │
-│ drag                 select, and copy on release                                                 │
-│ click                a file's link shows the file here (o: in your editor); a web link opens; a… │
-│ m  o  O              the mouse to the terminal and back; open the log (or the task's output) in… │
-│ ^L                   redraw the screen                                                           │
-│ e                    every line, errors and warnings, errors only                                │
-│ /  ^F                find: jumps to the newest match; n the next one down, N the previous, roun… │
-│   Tab                in the bar: filter to the matches instead, and back                         │
-│   ^T  ^B             in the bar: match case (else a capital does), whole words                   │
-│   ^W                 in the bar: delete a word                                                   │
-│   ^U  Enter  Esc     in the bar: clear; keep and close; clear and go back                        │
-│ Tab  ⇧Tab            the next or previous tab: console, failures, metrics, invocation, tips (or… │
-│ Enter                in the list: show the chosen log                                            │
-│ ]  [  }  {           the next or previous failure, its log in Failures; } { its next attempt or… │
-│ a  s                 the list: failures, or actions that wrote output; in Tips, silence the cho… │
-│ z                    the console fills the screen, and back                                      │
-│ p  <  >              the build panes open or folded, and back; in Metrics and Invocation, the p… │
-│ w                    wrap long lines (the default), or cut them at the edge                      │
-│ ^O                   show the lines under each INFO: From (a successful action's output, folded… │
-│ Esc                  back a crumb: a file to the log it was opened from, a log to its tab; a ta… │
-│ q                    cancel the build; once it is done, leave                                    │
-│ ?                    these keys                                                                  │
+│ Scroll                                                                                           │
+│   ↑ ↓  k j             scroll a line; in a list, choose                                          │
+│   ⇧↑↓ ⌥↑↓  u d  ^U ^D  scroll half a page (macOS Terminal sends ⇧↑↓ as ↑↓)                       │
+│   PgUp PgDn  Space b   scroll a page (PgUp/PgDn are Fn+↑↓ on a Mac)                              │
+│   wheel                scroll                                                                    │
+│   K  J                 the top; the end, following the newest (Home, End too)                    │
+│ Search                                                                                           │
+│   /  ^F                find: jumps to the newest match; n the next one down, N the previous, ro… │
+│     Tab                in the bar: filter to the matches instead, and back                       │
+│     ^T  ^B             in the bar: match case (else a capital does), whole words                 │
+│     ^W                 in the bar: delete a word                                                 │
+│     ^U  Enter  Esc     in the bar: clear; keep and close; clear and go back                      │
+│   e                    every line, errors and warnings, errors only                              │
+│ Screen                                                                                           │
+│   ^L                   redraw the screen                                                         │
+│   1-5                  a tab: console, failures, metrics, invocation, tips                       │
+│   Tab  ⇧Tab            the next or previous tab: console, failures, metrics, invocation, tips (… │
+│   p                    the build panes open or folded, and back                                  │
+│   drag                 select, and copy on release                                               │
+│   click                a file's link shows the file here (o: in your editor); a web link opens;… │
+│   ?                    these keys                                                                │
+│   o  O                 open the log (or the task's output) in your editor; pick the editor       │
+│   w                    wrap long lines (the default), or cut them at the edge                    │
+│   ^O                   show the lines under each INFO: From (a successful action's output, fold… │
+│   z                    the console fills the screen, and back                                    │
+│ … 4 more: ↓                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ scroll · any other key closes
