@@ -487,6 +487,7 @@ impl Config {
             hidden: self.output == Output::Hidden,
             notes: None,
             copy: None,
+            hold: None,
         }
     }
 

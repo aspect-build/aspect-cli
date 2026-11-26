@@ -167,7 +167,8 @@ impl Forwarder {
                     processors,
                     Destination::new(forward, shape.strip_colour)
                         .feeding(shape.feed.clone(), shape.hidden)
-                        .copying(shape.copy),
+                        .copying(shape.copy)
+                        .holding(shape.hold),
                     screen,
                 )
                 .with_notes(shape.notes.clone());
@@ -586,6 +587,9 @@ pub struct Shape {
     /// Also given every settled line written, shown or hidden: the task
     /// history's copy of its output.
     pub copy: Option<fn(&[u8])>,
+    /// Held across each write's copy and the write itself (the CLI's
+    /// terminal write lock), so nothing comes between the two.
+    pub hold: Option<fn() -> Box<dyn std::any::Any>>,
 }
 
 /// The failed actions' logs the history kept, in the order it kept them:
@@ -664,6 +668,8 @@ struct Destination {
     copy: Option<fn(&[u8])>,
     /// Whether what is being written is a settled line, for `copy`.
     settled: bool,
+    /// Held across a write's copy and the write ([`Shape::hold`]).
+    hold: Option<fn() -> Box<dyn std::any::Any>>,
     strip_colour: bool,
     feed: Option<Arc<Feed>>,
     hidden: bool,
@@ -678,6 +684,7 @@ impl Destination {
             inner,
             copy: None,
             settled: true,
+            hold: None,
             strip_colour,
             feed: None,
             hidden: false,
@@ -692,6 +699,12 @@ impl Destination {
         self
     }
 
+    /// Hold `hold`'s guard across each write's copy and the write.
+    fn holding(mut self, hold: Option<fn() -> Box<dyn std::any::Any>>) -> Self {
+        self.hold = hold;
+        self
+    }
+
     /// Also write to `feed`, and with `hidden` only there.
     fn feeding(mut self, feed: Option<Arc<Feed>>, hidden: bool) -> Self {
         self.feed = feed;
@@ -700,6 +713,7 @@ impl Destination {
     }
 
     fn write(&mut self, bytes: &[u8]) {
+        let _held = self.hold.map(|hold| hold());
         if let Some(&last) = ansi::strip(bytes).last() {
             self.at_line_start = last == b'\n' || last == b'\r';
         }

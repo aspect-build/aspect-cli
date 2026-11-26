@@ -1026,7 +1026,9 @@ pub(crate) fn suspend() -> bool {
         finishing = (h.stdout.take(), h.stderr.take());
         h.suspended = true;
     }
-    dump_output_turned(DUMP_LINES, "… {n} older lines: aspect history show", true);
+    if dump_output_turned(DUMP_LINES, "… {n} older lines: aspect history show", true) {
+        DUMPED.store(true, Ordering::SeqCst);
+    }
     drop(moving);
     // After the dump: what a child still writes into a capture comes after
     // it. Stdout's lines go to a stdout that is not the terminal, as on a
@@ -1235,6 +1237,7 @@ pub(crate) fn resume() {
         return;
     }
     *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
+    DUMPED.store(false, Ordering::SeqCst);
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
     let redirected = (
         Redirect::new(1, h.capture.clone(), Source::Stdout, true),
@@ -1314,8 +1317,9 @@ fn release_dumping(held: Option<Held>, order: &mut Order) -> bool {
 static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Whether the screen given back last had its dump written by its release
-/// ([`release`] with a dump): a later [`dump_output`] says so rather than
-/// write it again. Cleared when a screen is taken.
+/// ([`release`] with a dump) or by a suspend still in force: a later
+/// [`dump_output`] says so rather than write it again. Cleared when a screen
+/// is taken or comes back from a suspend.
 static DUMPED: AtomicBool = AtomicBool::new(false);
 
 /// The most lines a dump writes, the older counted on a line before them.
@@ -1333,9 +1337,12 @@ fn dump_ready() -> bool {
 /// where the terminal shows them as text (the CLI's own lines write
 /// theirs). Its newest `max_lines`,
 /// after a line `older` gives, `{n}` the count of those it leaves out.
-/// Not copied to the output files, which hold it; what stderr takes nothing
-/// of for `STALL_LIMIT` is dropped. Whether it wrote: never a second time,
-/// nor without a mark or the task's files.
+/// An unended last line (the CLI's, still to be ended) is written as far as
+/// it goes, its end following on the terminal. Not copied to the output
+/// files, which hold it; what stderr takes nothing of for `STALL_LIMIT` is
+/// dropped. Whether the screen's dump is written: by this call, or already
+/// by the release or suspend that gave the screen back ([`DUMPED`]); never
+/// twice, nor without a mark or the task's files.
 pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
     if DUMPED.swap(false, Ordering::SeqCst) {
         return true;
@@ -1343,23 +1350,34 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
     dump_output_turned(max_lines, older, false)
 }
 
+/// A pause between a dump reading `output.ansi` and writing it, from
+/// `ASPECT_TEST_DUMP_DELAY_MS` (read once): for tests, to widen the window
+/// a writer not held off would land in.
+fn dump_test_delay() {
+    static DELAY: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    let delay = DELAY.get_or_init(|| {
+        std::env::var("ASPECT_TEST_DUMP_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map(Duration::from_millis)
+    });
+    if let Some(delay) = delay {
+        std::thread::sleep(*delay);
+    }
+}
+
 /// [`dump_output`], with every target already held by the caller (`held`):
-/// for a suspend, which holds them from giving the descriptors back to the
-/// end of the dump, so no line printed meanwhile shows both live and in it.
+/// for a release or a suspend, which holds them from giving the descriptors
+/// back to the end of the dump, so no line printed meanwhile shows both live
+/// and in it.
 fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
     let Some(mark) = DUMP_MARK.lock().unwrap().take() else {
         return false;
     };
-    let Some((mut text, _)) = crate::out::output_ansi_since(mark) else {
+    let Some((text, _)) = crate::out::output_ansi_since(mark) else {
         return false;
     };
-    // Whole lines: an unended last one is still being written, and its end
-    // follows on the terminal by itself.
-    text.truncate(
-        text.iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |end| end + 1),
-    );
+    dump_test_delay();
     let relink = crate::out::terminal_links();
     let as_text = crate::out::links_as_text();
     let before = crate::out::links_written();
@@ -2167,11 +2185,16 @@ fn term_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] text: &str,
     ) -> anyhow::Result<NoneType> {
-        if screen_holds_terminal() {
-            crate::out::copy_only(text.as_bytes());
-        } else {
-            let _ = crate::out::write_std(2, text.as_bytes());
+        // Decided, and copied, under stderr's turn: a screen is taken or
+        // given back only with it held, so the copy lands on the side of
+        // the dump that matches where the text went.
+        let _turn = axl_types::terminal::turn(2);
+        if SINK.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(text.as_bytes());
+            axl_types::terminal::wrote(2, text.as_bytes());
         }
+        crate::out::copy_only(text.as_bytes());
         Ok(NoneType)
     }
 

@@ -576,12 +576,23 @@ fn forward(
                     // lock, which a release holds while it replays; a write to
                     // the terminal is made after, without it, so a stream
                     // nobody reads holds up only this child's output.
+                    // A line fed to the screen is copied under the same lock,
+                    // so a release (which holds it to its dump) has it.
+                    let mut copied = false;
                     let fed = crate::engine::std::term::forwarding(stderr, || {
-                        crate::engine::std::term::feed_screen(
+                        let fed = crate::engine::std::term::feed_screen(
                             stderr,
                             &line[..whole.unwrap_or(0)],
                             shown,
-                        )
+                        );
+                        if fed
+                            && let Some(end) = whole
+                            && !captured
+                        {
+                            crate::out::copy_only(&line[..end]);
+                            copied = true;
+                        }
+                        fed
                     });
                     // An unended tail waits while more is already there to
                     // read: it is shown once the child goes quiet (a progress
@@ -602,7 +613,7 @@ fn forward(
                         r.map(|into_capture| captured |= into_capture)
                     };
                     if let Some(end) = whole {
-                        if !captured {
+                        if !captured && !copied {
                             crate::out::copy_only(&line[..end]);
                         }
                         captured = false;
@@ -620,12 +631,16 @@ fn forward(
             let mut ended = line.clone();
             ended.push(b'\n');
             let fed = crate::engine::std::term::forwarding(stderr, || {
-                crate::engine::std::term::feed_screen(stderr, &ended, shown)
+                let fed = crate::engine::std::term::feed_screen(stderr, &ended, shown);
+                if fed && !captured {
+                    crate::out::copy_only(&ended);
+                }
+                fed
             });
             if !fed && let Ok(into_capture) = show(&line[shown..]) {
                 captured |= into_capture;
             }
-            if !captured {
+            if !fed && !captured {
                 crate::out::copy_only(&ended);
             }
         }

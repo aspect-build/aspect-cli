@@ -945,13 +945,15 @@ impl Console {
         }
         let mut pipeline = config.pipeline();
         pipeline.shape.copy = Some(crate::out::copy_console_output);
+        // The copy and the write under one turn of stderr's target.
+        pipeline.shape.hold = Some(axl_types::terminal::hold_stderr);
         let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
         let feed = pipeline.feed.clone();
         let notes = pipeline.notes.clone();
         let kept_logs = pipeline.kept_logs.clone();
         let forwarder = Forwarder::spawn_reported(
             Box::new(reader),
-            Box::new(axl_types::terminal::Locked::new(std::io::stderr(), 2)),
+            Box::new(axl_types::terminal::Routed::new(std::io::stderr(), 2)),
             pipeline.chain,
             pipeline.log,
             pipeline.shape,
@@ -963,7 +965,7 @@ impl Console {
                 let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
                 let after = forwarder.ordered_after(
-                    Box::new(axl_types::terminal::Locked::new(std::io::stdout(), 1)),
+                    Box::new(axl_types::terminal::Routed::new(std::io::stdout(), 1)),
                     probe.into(),
                 );
                 // Colour asked for the stages' sake is shown as the user
@@ -976,6 +978,7 @@ impl Console {
                     // A stdout of its own is the program's output, not the
                     // console UI: shown as written even when nothing else is.
                     copy: Some(crate::out::copy_only),
+                    hold: Some(axl_types::terminal::hold_stdout),
                     ..Default::default()
                 };
                 (

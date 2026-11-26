@@ -190,9 +190,9 @@ def _dashgap(ctx):
     screen = ctx.std.term.take()
     screen.write("FRAME")
     print("DURING")
-    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 300 ]; do echo GAPLINE$i >&2; i=$((i+1)); sleep 0.005; done"]).spawn()
-    sleep(300)
-    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 200 ]; do awk -v b=$i 'BEGIN{for(j=0;j<100;j++) printf \"GAPLINE%d\\n\", b*100+j}' >&2; i=$((i+1)); sleep 0.01; done"]).spawn()
+    sleep(150)
+    screen.release(replay_stderr = False, dump_lines = 20000, older = "OLDER {n}")
     sleep(100)
     if not ctx.std.term.dump_output(older = "OLDER {n}"):
         fail("the release's dump not said")
@@ -201,6 +201,30 @@ def _dashgap(ctx):
 
 exitgrand = task(implementation = _exitgrand, summary = "A screen held at exit while a grandchild floods stderr.")
 dashgap = task(implementation = _dashgap, summary = "A release that dumps while a child writes stderr.")
+
+def _givenback(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("BEFORE-SUSPEND")
+    child = ctx.std.process.command("sh").args(["-c", "sleep 0.5"]).interactive(True).spawn()
+    sleep(200)
+    print("WHILE-GIVEN-BACK")
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    print("DUMPED-SAID=%s" % ctx.std.term.dump_output(older = "OLDER {n}"))
+    child.wait()
+    return 0
+
+def _splitcli(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("CLITAIL\n")
+    return 0
+
+givenback = task(implementation = _givenback, summary = "A screen released while given back to an interactive child.")
+splitcli = task(implementation = _splitcli, summary = "A CLI line unended when its screen is released with a dump.")
 
 gt_release = task(implementation = _gt_release, summary = "Golden: take and release.")
 gt_exit = task(implementation = _gt_exit, summary = "Golden: a screen held at exit.")
@@ -287,6 +311,20 @@ fn on_a_pty(
     std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
     tempfile::TempDir,
 ) {
+    on_a_pty_with(task, stdout, &[])
+}
+
+/// [`on_a_pty`], with `env` set for the CLI too.
+#[cfg(unix)]
+fn on_a_pty_with(
+    task: &str,
+    stdout: Option<Stdio>,
+    env: &[(&str, &str)],
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
@@ -332,6 +370,7 @@ fn on_a_pty(
         .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
         .env("ASPECT_HISTORY_DIR", dir.path().join("history"))
         .env("HOME", dir.path().join("home"))
+        .envs(env.iter().copied())
         .stdin(Stdio::from(slave.try_clone().expect("dup")))
         .stdout(stdout.unwrap_or_else(|| Stdio::from(slave.try_clone().expect("dup"))))
         .stderr(Stdio::from(slave.try_clone().expect("dup")));
@@ -1329,7 +1368,10 @@ fn the_exit_dump_shows_each_line_once_and_first() {
 #[test]
 fn a_release_that_dumps_shows_each_line_once_and_first() {
     use std::time::Duration;
-    let (mut child, chunks, _dir) = on_a_pty("dashgap", None);
+    // A dump made to wait between reading the task's output and writing it,
+    // so a writer it does not hold off lands in between.
+    let (mut child, chunks, _dir) =
+        on_a_pty_with("dashgap", None, &[("ASPECT_TEST_DUMP_DELAY_MS", "100")]);
     let status = wait_bounded(&mut child, 60, &chunks);
     std::thread::sleep(Duration::from_millis(200));
     let mut text = String::new();
@@ -1339,5 +1381,50 @@ fn a_release_that_dumps_shows_each_line_once_and_first() {
     assert!(status.success(), "{status:?}: {}", plain(&text));
     let lines = gaplines(&text);
     assert_once_in_order("the release's scrollback", &lines);
-    assert_eq!(lines.len(), 300, "every line");
+    assert_eq!(lines.len(), 20000, "every line");
+}
+
+/// A screen released while given back (an interactive child spawned and not
+/// waited on): the suspend dumped already, so the release's dump is said
+/// to be written, and nothing is dumped twice.
+#[cfg(unix)]
+#[test]
+fn a_screen_released_while_given_back_dumps_once() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("givenback", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let text = plain(&text);
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(
+        text.contains("DUMPED-SAID=True"),
+        "the suspend's dump said: {text}"
+    );
+    assert_eq!(
+        text.matches("BEFORE-SUSPEND").count(),
+        1,
+        "dumped once: {text}"
+    );
+}
+
+/// A CLI line still unended when its screen is released with a dump: the
+/// dump writes as far as it goes, and its end follows on the same line.
+#[cfg(unix)]
+#[test]
+fn a_cli_line_unended_at_release_keeps_its_start() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("splitcli", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let text = plain(&text);
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(text.contains("CLIHEAD-CLITAIL"), "the line whole: {text:?}");
 }

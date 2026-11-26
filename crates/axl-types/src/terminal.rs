@@ -17,7 +17,9 @@
 //!
 //! The CLI's own output (its lines, the AXL streams, the build console) is
 //! one ordered channel: each write, under its target, is first offered to
-//! the route a screen installs ([`route_to`]). While a screen holds the
+//! the route a screen installs ([`route_to`]), and copied to the task's
+//! output files under the same turn ([`write_std`]; the console holds the
+//! turn across its copy and its [`Routed`] write). While a screen holds the
 //! terminal the route takes it (into the screen's console and its replay),
 //! so it never goes through fds 1 and 2 while a capture has them; else it
 //! is written there. The capture of fds 1 and 2 is left for stray writers
@@ -153,22 +155,22 @@ pub fn mid_line(fd: i32) -> bool {
     target(fd).is_some_and(|t| MID_LINE[t].load(Ordering::SeqCst))
 }
 
-/// A writer to fd `fd` (1 or 2) that holds its target for each write, and
-/// offers it to the route first ([`routed`]).
-pub struct Locked<W> {
+/// A writer to fd `fd` (1 or 2) that offers each write to the route first
+/// ([`routed`]) and notes where it left the target ([`wrote`]), for a caller
+/// that holds the target's [`turn`] itself (across a copy and the write).
+pub struct Routed<W> {
     inner: W,
     fd: i32,
 }
 
-impl<W> Locked<W> {
+impl<W> Routed<W> {
     pub fn new(inner: W, fd: i32) -> Self {
-        Locked { inner, fd }
+        Routed { inner, fd }
     }
 }
 
-impl<W: std::io::Write> std::io::Write for Locked<W> {
+impl<W: std::io::Write> std::io::Write for Routed<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let _turn = turn(self.fd);
         if routed(self.fd, buf) {
             return Ok(buf.len());
         }
@@ -177,20 +179,20 @@ impl<W: std::io::Write> std::io::Write for Locked<W> {
         Ok(n)
     }
 
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        let _turn = turn(self.fd);
-        if routed(self.fd, buf) {
-            return Ok(());
-        }
-        self.inner.write_all(buf)?;
-        wrote(self.fd, buf);
-        Ok(())
-    }
-
     fn flush(&mut self) -> std::io::Result<()> {
-        let _turn = turn(self.fd);
         self.inner.flush()
     }
+}
+
+/// The target of stdout held, as a guard of any type: for a writer that
+/// holds it across more than its write ([`Routed`]).
+pub fn hold_stdout() -> Box<dyn std::any::Any> {
+    Box::new(turn(1))
+}
+
+/// [`hold_stdout`] for stderr.
+pub fn hold_stderr() -> Box<dyn std::any::Any> {
+    Box::new(turn(2))
 }
 
 /// Write all of `bytes` to std's stdout (1) or stderr (2) as one unit, or
