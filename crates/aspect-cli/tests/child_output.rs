@@ -96,6 +96,36 @@ def _tstpstall(ctx):
     return 0
 
 tstpstall = task(implementation = _tstpstall, summary = "Ctrl+Z while a release replays to a stdout nobody reads.")
+
+def _batches(ctx):
+    return ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 100 ]; do awk -v b=$i 'BEGIN{for(j=0;j<30;j++) printf \"N%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\", b*30+j}'; i=$((i+1)); sleep 0.05; done"]).stdout("inherit").spawn()
+
+def _retake(ctx):
+    a = ctx.std.term.take()
+    a.write("FRAME-A")
+    child = _batches(ctx)
+    sleep(300)
+    a.release()
+    sleep(1500)
+    b = ctx.std.term.take()
+    b.write("FRAME-B")
+    sleep(2500)
+    b.release()
+    ctx.std.io.stderr.write("WAITED-%s\n" % child.wait().code)
+    return 0
+
+retake = task(implementation = _retake, summary = "A child given the CLI's stdout across two screens.")
+
+def _fgslow(ctx):
+    a = ctx.std.term.take()
+    a.write("FRAME-A")
+    child = _batches(ctx)
+    sleep(7000)
+    a.release()
+    ctx.std.io.stderr.write("WAITED-%s\n" % child.wait().code)
+    return 0
+
+fgslow = task(implementation = _fgslow, summary = "A child given the CLI's stdout across Ctrl+Z.")
 takestall = task(implementation = _takestall, summary = "A screen taken while stdout takes nothing.")
 interactive = task(implementation = _interactive, summary = "An interactive child.")
 "#;
@@ -729,4 +759,127 @@ fn ctrl_z_during_a_stalled_release_stops_at_once() {
         took < Duration::from_millis(1500),
         "stopped {took:?} after Ctrl+Z"
     );
+}
+
+/// The numbered lines a batch child writes, in `text`: whole ones and torn.
+#[cfg(unix)]
+fn batch_lines(text: &str) -> (Vec<String>, Vec<String>) {
+    let (mut whole, mut torn) = (vec![], vec![]);
+    for l in plain(text).replace('\r', "").lines() {
+        let ok = l
+            .strip_prefix('N')
+            .and_then(|r| r.split_once('-'))
+            .is_some_and(|(n, x)| n.len() == 6 && x.len() >= 95 && x.bytes().all(|b| b == b'x'));
+        if ok {
+            whole.push(l.to_string());
+        } else if l.contains("N0") {
+            torn.push(l.to_string());
+        }
+    }
+    (whole, torn)
+}
+
+/// Each of a batch child's 3000 lines, once and whole, in `text`.
+#[cfg(unix)]
+fn assert_every_batch_line_once(what: &str, text: &str) {
+    let (whole, torn) = batch_lines(text);
+    let unique: std::collections::HashSet<_> = whole.iter().collect();
+    assert!(
+        whole.len() == 3000 && unique.len() == 3000 && torn.is_empty(),
+        "{what}: {} lines, {} distinct, {} torn: {:?}",
+        whole.len(),
+        unique.len(),
+        torn.len(),
+        torn.iter().take(3).collect::<Vec<_>>()
+    );
+}
+
+/// A child given the CLI's stdout across two screens while stdout is read
+/// slowly: what it still writes into the first screen's stopped capture
+/// goes on through the second's, and is never cut short when a screen is
+/// taken (a `select` the move cuts short), nor written alongside the second
+/// screen's replay. Stdout and output.log get each line once.
+#[cfg(unix)]
+#[test]
+fn a_child_on_the_clis_stdout_across_two_screens_loses_and_tears_nothing() {
+    use std::time::{Duration, Instant};
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, dir) = on_a_pty("retake", Some(Stdio::from(writer)));
+    // 20KB/s for 8s, then as fast as it comes.
+    let drain = std::thread::spawn(move || {
+        let start = Instant::now();
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let slow = start.elapsed() < Duration::from_secs(8);
+            let want = if slow { 1000 } else { buf.len() };
+            match std::io::Read::read(&mut reader, &mut buf[..want]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+            if slow {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        got
+    });
+    let status = wait_bounded(&mut child, 90, &chunks);
+    let stdout = String::from_utf8_lossy(&drain.join().unwrap()).into_owned();
+    assert!(status.success(), "{status:?}");
+    assert_every_batch_line_once("stdout", &stdout);
+    assert_every_batch_line_once("output.log", &output_log(dir.path()));
+}
+
+/// Ctrl+Z while a child writes to the CLI's stdout, a FIFO: what the screen
+/// captured of stdout before the stop goes to stdout then, as a release's
+/// does, not only into the dump on the terminal.
+#[cfg(unix)]
+#[test]
+fn ctrl_z_passes_stdouts_captured_lines_to_a_stdout_that_is_no_terminal() {
+    use std::time::Duration;
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let drain = std::thread::spawn(move || {
+        let mut got = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut got);
+        got
+    });
+    let (mut child, chunks, _dir) = on_a_pty("fgslow", Some(Stdio::from(writer)));
+    // Once the screen is up, and some of the child's lines with it.
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(7).any(|w| w == b"FRAME-A") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(50)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    let stopped = |pid: u32| {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim_start()
+                    .starts_with('T')
+            })
+    };
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped(child.id()) && asked.elapsed() < Duration::from_secs(20) {
+        while chunks.try_recv().is_ok() {}
+        if child.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(stopped(child.id()), "stopped on Ctrl+Z");
+    std::thread::sleep(Duration::from_millis(300));
+    unsafe { libc::kill(child.id() as i32, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    let stdout = String::from_utf8_lossy(&drain.join().unwrap()).into_owned();
+    assert!(status.success(), "{status:?}");
+    assert_every_batch_line_once("stdout", &stdout);
 }

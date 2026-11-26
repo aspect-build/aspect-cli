@@ -165,8 +165,8 @@ fn watch_for_hangs() {
     }
 }
 
-/// What process `pid` and its descendants are doing, for a test that gave
-/// up on one (see [`watch_for_hangs`]); Linux only, empty elsewhere.
+/// The pids of every process under `pid`, its children's children too,
+/// from `ps` (Linux and macOS alike); none when `ps` can't be run.
 #[allow(dead_code)]
 pub fn descendants(pid: u32) -> Vec<u32> {
     // `ps` names every process's parent on Linux and macOS alike.
