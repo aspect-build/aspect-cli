@@ -185,6 +185,23 @@ rust_test(
     ],
 )
 
+# The `aspect` shell: a bare `aspect` on a pty, its opt-out, its internal
+# command.
+rust_test(
+    name = "shell_test",
+    srcs = ["tests/shell.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/shell.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:libc",
+        "@crates//:tempfile",
+    ],
+)
+
 rust_test(
     name = "did_you_mean_test",
     srcs = ["tests/did_you_mean.rs"] + INTEGRATION_TEST_COMMON_SRCS,

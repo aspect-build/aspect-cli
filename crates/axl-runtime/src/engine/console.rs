@@ -171,6 +171,33 @@ fn file_hyperlink_format(
     }
 }
 
+/// Set what links to files open for the process from the `Console`
+/// feature's merged `args`, as [`from_feature_args`] does, and nothing
+/// else: for a task whose console is not the feature's (an internal task's
+/// silent one). An arg or env value that cannot be used falls back to what
+/// the environment and `config.json` say, quietly.
+pub fn link_format_only(
+    args: &Arguments<'_>,
+    config_editor: Option<Option<bazel::console::links::LinkFormat>>,
+) {
+    crate::out::set_link_format(link_format_or_unconfigured(
+        args,
+        crate::out::env_link_format(),
+        config_editor,
+    ));
+}
+
+/// [`file_hyperlink_format`], else, when that cannot be used, what the
+/// environment and `config.json` say (`crate::out::unconfigured_link_format`).
+fn link_format_or_unconfigured(
+    args: &Arguments<'_>,
+    env: Option<Result<Option<bazel::console::links::LinkFormat>, String>>,
+    config_editor: Option<Option<bazel::console::links::LinkFormat>>,
+) -> Option<bazel::console::links::LinkFormat> {
+    file_hyperlink_format(args, env, config_editor.clone())
+        .unwrap_or_else(|_| crate::out::unconfigured_link_format(config_editor))
+}
+
 /// The `verbose` arg: `None` for `auto` or unset, so the preset decides.
 /// The CLI gives a string; a `config.axl` may assign a bool too.
 fn verbose(args: &Arguments<'_>) -> Result<Option<Verbose>, String> {
@@ -662,6 +689,33 @@ task_templates = {"check": {"progress": "mine"}}"#;
             }
             file_hyperlink_format(&args, env, user)
         })
+    }
+
+    /// An internal task's console is silent, but what a link to a file
+    /// opens is still the `config.axl`'s (`link_format_only`), and one that
+    /// cannot be used falls back to the environment's.
+    #[test]
+    fn a_silent_console_still_takes_the_configs_link_format() {
+        let format = |name| Some(LinkFormat::parse(name).unwrap());
+        let chosen = |value: &str, env| {
+            crate::test::eval(&format!("value = {value:?}")).with_value("value", |bound| {
+                let args = Arguments::new();
+                args.insert("file_hyperlink_format".into(), bound);
+                args.mark_configured("file_hyperlink_format".into());
+                link_format_or_unconfigured(&args, env, None)
+            })
+        };
+        assert_eq!(chosen("zed", None), format("zed"), "the config's");
+        assert_eq!(
+            chosen("zed", Some(Ok(format("idea")))),
+            format("idea"),
+            "env first"
+        );
+        assert_eq!(
+            chosen("zed", Some(Err("bad".into()))),
+            crate::out::unconfigured_link_format(None),
+            "an env that cannot be used falls back"
+        );
     }
 
     #[test]

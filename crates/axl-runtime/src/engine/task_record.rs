@@ -92,8 +92,15 @@ pub struct TaskRecord {
     /// The error a task that failed outright ended with.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// It failed after its root was cancelled (a signal, or the task itself)
+    /// while its body ran; one cancelled only in its post-task hooks and
+    /// defers, or that caught the cancel and passed, is not.
     #[serde(default)]
     pub cancelled: bool,
+    /// A signal stopped it, known to be the user's own stop (its verdict's
+    /// `(by you)`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_by_user: bool,
     /// Results pages and the like (`ctx.std.history.link`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,

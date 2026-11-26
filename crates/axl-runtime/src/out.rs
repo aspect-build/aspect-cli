@@ -1254,7 +1254,7 @@ pub(crate) fn set_unconfigured_link_format(
 /// `ASPECT_FILE_HYPERLINK_FORMAT` when it is a format or `auto`, else
 /// `config` (the `config.json` files' `editor`, [`config_link_format`]);
 /// `None` for `auto`.
-fn unconfigured_link_format(
+pub(crate) fn unconfigured_link_format(
     config: Option<Option<bazel::console::links::LinkFormat>>,
 ) -> Option<bazel::console::links::LinkFormat> {
     match env_link_format() {

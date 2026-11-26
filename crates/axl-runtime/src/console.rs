@@ -99,11 +99,15 @@ pub enum Slot {
     /// `highlight_style`, `highlight_reset` when the update names its phase.
     Progress,
     /// Closing line, styled in the verdict's color. Context: `verdict`
-    /// (`passed` | `flagged` | `failed`), `cancelled` (the run was
-    /// interrupted: exit 130, which `full` shows as `✗ Cancelled … (exit
-    /// 130)` in `verdict.cancelled`, on Buildkite too; the other presets
-    /// show it as a failure), `glyph`, `shortcode`, `verb`, `highlight_style`,
-    /// `highlight_reset`, `label`, `exit_code`, `exit`, `elapsed`,
+    /// (`passed` | `flagged` | `failed`), `stopped` (a signal, an interrupt
+    /// or a stop asked, came while the task ran and it failed, which `full`
+    /// shows as `■ Stopped …` in `verdict.cancelled`, on Buildkite too, its
+    /// exit code said unless it is a signal's 130 or 143; the other presets
+    /// show it as a failure), `by_you` (that stop is known to be the user's
+    /// own, `■ Stopped … (by you)`), `cancelled` (it exited 130 with no
+    /// signal, as `ctx.std.process.exit(130)` does, which `full` shows as
+    /// `✗ Cancelled … (exit 130)`), `glyph`, `shortcode`, `verb`,
+    /// `highlight_style`, `highlight_reset`, `label`, `exit_code`, `exit`, `elapsed`,
     /// `elapsed_ms`, `timing`, `conclusion`, `breakdown` (` — 🔨 Build 1.0s`),
     /// `plain_breakdown` (the same without phase emojis), `timings`
     /// (` · Build 1.0s`) and `phases` (every recorded phase, the synthetic
@@ -357,6 +361,14 @@ const FULL: Preset = Preset {
     progress: update_line!(),
     verdict: concat!(
         "{% if not buildkite %}\n{% endif %}",
+        "{% if stopped %}",
+        styled!("verdict_cancelled_style", "■"),
+        " ",
+        styled!("verdict_verb_style", "Stopped"),
+        " {{ label }}{% if by_you %} (by you){% endif %}",
+        "{% if exit_code and exit_code not in [130, 143] %} (exit {{ exit_code }}){% endif %}{{ timing }}",
+        "{% if conclusion %} · {{ conclusion }}{% endif %}{{ timings }}",
+        "{% else %}",
         "{% if cancelled %}",
         styled!("verdict_cancelled_style", failure_glyph!()),
         "{% elif verdict == 'failed' %}",
@@ -370,6 +382,7 @@ const FULL: Preset = Preset {
         ),
         " {{ label }}{% if exit_code %} (exit {{ exit_code }}){% endif %}{{ timing }}",
         "{% if conclusion %} · {{ conclusion }}{% endif %}{{ timings }}",
+        "{% endif %}",
     ),
     section: "{{ title }}",
     tip: tip_line!(""),
@@ -688,6 +701,13 @@ impl Console {
     /// `Console` feature (or with it disabled) prints.
     pub fn builtin(task: TaskIdentity, host: Host) -> Console {
         Console::new(&FULL, BTreeMap::new(), host.verbose, task, host)
+    }
+
+    /// The `silent` layout, no header or verdict, whatever the config says:
+    /// for one of the CLI's internal tasks, whose own screen is all it
+    /// shows.
+    pub fn silent(task: TaskIdentity, host: Host) -> Console {
+        Console::new(&SILENT, BTreeMap::new(), host.verbose, task, host)
     }
 
     /// Resolve `preset_name` plus `overrides` for `task`, on `host`.
@@ -1188,13 +1208,44 @@ mod tests {
         );
     }
 
-    /// An interrupted run (exit 130) is `Cancelled` under `full`, on a
-    /// terminal and on Buildkite; the other presets still call it a failure.
+    /// A run an interrupt ended reads as stopped under `full`, whatever it
+    /// exited with; one the user is known to have stopped, by them.
     #[test]
-    fn full_calls_an_interrupted_run_cancelled() {
+    fn full_says_a_run_an_interrupt_ended_was_stopped() {
+        let stopped = |by_you: bool| {
+            minijinja::context! {
+                exit_code => 8, exit => " (exit 8)", cancelled => false, stopped => true,
+                by_you => by_you, conclusion => "Invocation disconnected",
+                ..verdict(false)
+            }
+        };
+        assert_eq!(
+            console("full", &Overrides::default(), false).render(Slot::Verdict, stopped(true)),
+            "\n■ Stopped test task (by you) (exit 8) in 1.2s · Invocation disconnected · Build 1.0s"
+        );
+        assert_eq!(
+            console("full", &Overrides::default(), false).render(Slot::Verdict, stopped(false)),
+            "\n■ Stopped test task (exit 8) in 1.2s · Invocation disconnected · Build 1.0s"
+        );
+        let by_signal = minijinja::context! {
+            exit_code => 130, exit => " (exit 130)", stopped => true, by_you => false,
+            ..verdict(true)
+        };
+        assert_eq!(
+            console("full", &Overrides::default(), false).render(Slot::Verdict, by_signal),
+            "\n■ Stopped test task in 1.2s · 4 tests · Build 1.0s",
+            "a signal's own exit code goes unsaid"
+        );
+    }
+
+    /// A run that exits 130 with no signal (`ctx.std.process.exit(130)`) is
+    /// `Cancelled` under `full`, on a terminal and on Buildkite; the other
+    /// presets still call it a failure.
+    #[test]
+    fn full_calls_an_exit_130_without_a_signal_cancelled() {
         let cancelled = || {
             minijinja::context! {
-                exit_code => 130, exit => " (exit 130)", cancelled => true,
+                exit_code => 130, exit => " (exit 130)", cancelled => true, stopped => false,
                 ..verdict(true)
             }
         };

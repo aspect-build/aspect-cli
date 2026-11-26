@@ -58,6 +58,17 @@ impl Run {
         Self::launch(source, task, Stdio::null(), false)
     }
 
+    /// [`Run::start`] under the `full` layout, whatever the environment
+    /// (a coding agent's picks its own).
+    fn start_full(source: &str, task: &str) -> Self {
+        Self::launch(
+            source,
+            &format!("{task} --console:template-preset=full"),
+            Stdio::null(),
+            false,
+        )
+    }
+
     /// As [`Run::start`], with SIGHUP inherited ignored, as `nohup` starts a
     /// program.
     fn start_ignoring_hangup(source: &str, task: &str) -> Self {
@@ -87,13 +98,14 @@ impl Run {
             }
         }
         let mut child = command
-            .arg(task)
+            .args(task.split(' '))
             .current_dir(dir.path())
             .env(
                 "ASPECT_CREDENTIALS_FILE",
                 dir.path().join("credentials.json"),
             )
             .env("DO_NOT_TRACK", "1")
+            .env("ASPECT_HISTORY_DIR", dir.path().join("history"))
             .env_remove("ASPECT_DEBUG")
             .env_remove("CI")
             .env_remove("BUILDKITE")
@@ -163,9 +175,31 @@ impl Run {
         assert_eq!(rc, 0, "signalling aspect-cli");
     }
 
+    /// [`Run::finish`]'s stderr, and the run's `task.json` as the task
+    /// history kept it.
+    fn finish_with_record(mut self) -> (String, String) {
+        let history = self._dir.path().join("history");
+        let (_, stderr) = self.finish_keeping();
+        let record = std::fs::read_dir(&history)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path().join("task.json"))
+                    .find(|p| p.exists())
+            })
+            .map(|p| std::fs::read_to_string(p).expect("task.json"))
+            .unwrap_or_default();
+        (stderr, record)
+    }
+
     /// Read the rest of stderr and reap the CLI, within [`END_WITHIN`]: past
     /// it, say what the CLI and its children were doing, kill them, and fail.
     fn finish(mut self) -> (ExitStatus, String) {
+        self.finish_keeping()
+    }
+
+    fn finish_keeping(&mut self) -> (ExitStatus, String) {
         let deadline = Instant::now() + END_WITHIN;
         let mut rest = String::new();
         loop {
@@ -740,4 +774,81 @@ fn a_tool_a_signal_ends_ends_the_task_with_its_shell_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
     assert!(!stderr.contains("Traceback"), "{stderr}");
+}
+
+const LATE_FAIL: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _cleanup():
+    sleep(3000)
+
+def _impl(ctx):
+    ctx.defer(_cleanup)
+    print("ready")
+    sleep(300)
+    return 1
+
+latefail = task(summary = "Test fixture.", implementation = _impl)
+"#;
+
+/// A signal that comes after the task has already failed, while its
+/// defers run, stopped nothing: the verdict is the failure, with its exit
+/// code.
+#[test]
+fn a_signal_after_the_task_failed_leaves_its_failure() {
+    let run = Run::start_full(LATE_FAIL, "latefail");
+    std::thread::sleep(Duration::from_millis(1200));
+    run.signal(libc::SIGINT);
+    let (stderr, record) = run.finish_with_record();
+    assert!(
+        stderr.contains("Failed latefail task (exit 1)"),
+        "the failure stands:\n{stderr}"
+    );
+    assert!(!stderr.contains("Stopped"), "{stderr}");
+    assert!(
+        record.contains("\"cancelled\": false"),
+        "the record says as the verdict does:\n{record}"
+    );
+}
+
+/// A signal while the task runs, and it fails: stopped, its own exit code
+/// said when it is no signal's.
+#[test]
+fn a_signal_while_the_task_runs_reads_as_stopped() {
+    let run = Run::start_full(WAITING, "waiting");
+    run.signal(libc::SIGTERM);
+    let (_status, stderr) = run.finish();
+    assert!(stderr.contains("■ Stopped waiting task"), "{stderr}");
+    assert!(
+        !stderr.contains("(exit 143)") && !stderr.contains("(by you)"),
+        "{stderr}"
+    );
+}
+
+const CATCHER: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _impl(ctx):
+    print("ready")
+    for _ in range(600):
+        if ctx.cancellation.root.cancelled:
+            return 0
+        sleep(50)
+    return 0
+
+catcher = task(summary = "Test fixture.", implementation = _impl)
+"#;
+
+/// A task that catches the signal and passes is recorded as passing, as
+/// its verdict says, not cancelled.
+#[test]
+fn a_task_that_catches_the_signal_and_passes_is_not_recorded_cancelled() {
+    let run = Run::start_full(CATCHER, "catcher");
+    run.signal(libc::SIGINT);
+    let (stderr, record) = run.finish_with_record();
+    assert!(!stderr.contains("Stopped"), "{stderr}");
+    assert!(
+        record.contains("\"cancelled\": false") && record.contains("\"exit_code\": 0"),
+        "{record}"
+    );
 }

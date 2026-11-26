@@ -2,4 +2,4 @@
 aspect-cli: interrupted, stopping…
 \e[1;38;5;203mERROR\e[0m: interrupted
 
-\e[38;5;221m✗\e[0m \e[1;38;5;75mCancelled\e[0m gt-signal task (exit 130) in <T>
+\e[38;5;221m■\e[0m \e[1;38;5;75mStopped\e[0m gt-signal task in <T>
