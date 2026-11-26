@@ -131,6 +131,9 @@ rust_test(
 
 rust_test(
     name = "child_output_test",
+    # Large, so a hang's HANG-DIAG (stacks take up to 40s a process) prints
+    # before the timeout.
+    size = "large",
     srcs = ["tests/child_output.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     compile_data = glob(["tests/testdata/terminal/*.golden"]),
     crate_root = "tests/child_output.rs",

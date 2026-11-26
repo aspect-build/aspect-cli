@@ -149,8 +149,9 @@ pub fn basil_bin() -> &'static str {
 /// descendants still alive after 45s (a CLI under test, or a child of one)
 /// has its threads' `comm`, `wchan`, `syscall`, `stat` and CPU used over
 /// one second (a busy thread is slow, not stuck), every thread's stack
-/// (`gdb`, else `eu-stack`, each tried with `sudo -n` too, as Ubuntu lets
-/// no non-ancestor attach; each bounded), its open descriptors and its
+/// for the first two such processes (`gdb`, else `eu-stack`, each tried
+/// under `sudo -n timeout` too, as Ubuntu lets no non-ancestor attach; 40s
+/// at most a process), its open descriptors and its
 /// children printed to stderr, once, under `HANG-DIAG`
 /// (`HANG_DIAG_AFTER_SECS` overrides the 45s). For a CI timeout, which
 /// otherwise says only which tests ran long. Nothing elsewhere.
@@ -308,45 +309,92 @@ mod hang_diag {
         Some(fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?)
     }
 
-    /// What `program args` prints, given up on (and killed) after `secs`;
-    /// None where it can't be run or says nothing useful.
+    /// What `program args` prints to stdout, given up on (and killed) after
+    /// `secs`; None where it can't be run or says nothing useful. Stdout is
+    /// read as it comes, so a long report never blocks the child on a full
+    /// pipe; stderr is dropped.
     fn bounded(program: &str, args: &[&str], secs: u64) -> Option<String> {
+        use std::io::Read;
         let mut child = std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .ok()?;
+        let mut stdout = child.stdout.take()?;
+        let (send, got) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("hang-diag-drain".into())
+            .spawn(move || {
+                let mut text = Vec::new();
+                let _ = stdout.read_to_end(&mut text);
+                let _ = send.send(text);
+            });
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);
-        while child.try_wait().ok()?.is_none() {
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+        let status = loop {
+            match child.try_wait().ok()? {
+                Some(status) => break status,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                None => std::thread::sleep(Duration::from_millis(100)),
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let out = child.wait_with_output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        };
+        // A grandchild still holding the pipe ends the read no later.
+        let text = got.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        let text = String::from_utf8_lossy(&text).into_owned();
         // gdb exits 0 having attached to nothing; a frame says it did.
-        let useful = text.contains("#0") || (out.status.success() && !text.trim().is_empty());
+        let useful = text.contains("#0") || (status.success() && !text.trim().is_empty());
         useful.then_some(text)
     }
 
+    /// Whether `timeout` (coreutils) can be run: what bounds a stack tool
+    /// under `sudo`, which a kill of `sudo` itself would leave attached.
+    fn have_timeout() -> bool {
+        static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HAVE.get_or_init(|| bounded("timeout", &["--version"], 5).is_some())
+    }
+
+    /// The processes, per test process, whose stacks are still printed: each
+    /// takes up to [`STACKS_PER_PROCESS`], so a test's own timeout comes
+    /// after the diagnosis, not during it.
+    static STACKS_LEFT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(2);
+
+    /// The most one process's stacks take, every tool tried.
+    const STACKS_PER_PROCESS: Duration = Duration::from_secs(40);
+
     /// Every thread's stack in `pid`: `gdb`, else `eu-stack`, each plain and
-    /// under `sudo -n`; None where none of them could attach.
+    /// under `sudo -n timeout` (only where `timeout` is there); None where
+    /// none of them could attach in [`STACKS_PER_PROCESS`].
     fn stacks(pid: u32) -> Option<String> {
         let p = pid.to_string();
         let gdb = ["-batch", "-nx", "-p", &p, "-ex", "thread apply all bt"];
         let eu = ["-p", &p];
+        let until = std::time::Instant::now() + STACKS_PER_PROCESS;
+        let left = || {
+            until
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .min(15)
+        };
         for (program, args) in [("gdb", &gdb[..]), ("eu-stack", &eu[..])] {
-            if let Some(text) = bounded(program, args, 20) {
+            if left() == 0 {
+                return None;
+            }
+            if let Some(text) = bounded(program, args, left()) {
                 return Some(text);
             }
-            let mut sudo = vec!["-n", program];
+            let secs = left();
+            if secs == 0 || !have_timeout() {
+                continue;
+            }
+            let bound = secs.to_string();
+            let mut sudo = vec!["-n", "timeout", "-s", "KILL", &bound, program];
             sudo.extend_from_slice(args);
-            if let Some(text) = bounded("sudo", &sudo, 20) {
+            if let Some(text) = bounded("sudo", &sudo, secs + 2) {
                 return Some(text);
             }
         }
@@ -383,13 +431,25 @@ mod hang_diag {
                 stat.trim(),
             ));
         }
-        match stacks(pid) {
+        let take = STACKS_LEFT
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            )
+            .is_ok();
+        match take.then(|| stacks(pid)).flatten() {
             Some(text) => {
                 for line in text.lines() {
                     out.push_str(&format!("HANG-DIAG   | {line}\n"));
                 }
             }
-            None => out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach\n"),
+            None if take => {
+                out.push_str("HANG-DIAG   no stacks: neither gdb nor eu-stack could attach\n")
+            }
+            None => {
+                out.push_str("HANG-DIAG   no stacks: those of two processes were printed already\n")
+            }
         }
         let fds = format!("/proc/{pid}/fd");
         let mut fdl: Vec<(u32, String)> = std::fs::read_dir(&fds)

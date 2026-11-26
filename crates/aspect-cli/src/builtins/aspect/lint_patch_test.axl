@@ -13,7 +13,8 @@ header; a name patch writes its `.rej`, `.orig` or `.~N~` to; a symlink
 patch made in the copies; a path in two headers, case folded, one with
 a `.` or empty component, one that isn't a regular file, a parent that
 isn't a directory, a symlink leading out of the tree or to nothing, a patch
-past the read cap), and a symlink within the tree followed. Two names one
+past the read cap), a refused path's warning escaped, and a symlink
+within the tree followed. Two names one
 file in the copies' directory but two in the tree (a case-sensitive
 checkout, a temp dir that folds case) are refused too; the test covers the
 two new names it folds, where it does. By hand, on macOS:
@@ -249,6 +250,17 @@ printf 'a\\n' > 'src/my file'
         fs.write(refuse + "/p.patch", "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F"))
         _eq("a case-only rename on a case-sensitive disk", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
         _eq("applies", (fs.exists(refuse + "/src/f"), fs.read_to_string(refuse + "/src/F")), (False, "made\n"))
+
+    # A refused path's warning shows it escaped: a control character and
+    # one past ASCII as codes, a backslash doubled.
+    said = []
+    fs.write(refuse + "/p.patch", make("src/\x1b[31m\u00e9\\x") + make("src/\x1b[31m\u00e9\\x"))
+    _eq("an escaped path's refusal", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = said.append), None)
+    _eq("its warning", [l.partition(": ")[2].partition(": ")[2] for l in said], ["src/\\u001b[31m\\u00e9\\\\x is named in more than one header"])
+    fs.write(refuse + "/p.patch", "diff --git a/src/f b/src/g\nrename from src/f \x1b]0;title\x07 x\nrename to src/g\n")
+    said.clear()
+    apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = said.append)
+    _eq("a git header's warning names its keyword alone", [("\x1b" in l, "`rename from`" in l) for l in said], [(False, True)])
 
     # What patch leaves in the copies is checked before anything is copied
     # back: a symlink it made (GNU patch, from git's `120000`) is refused,
