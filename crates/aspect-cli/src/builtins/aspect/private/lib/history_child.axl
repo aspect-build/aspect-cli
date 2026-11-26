@@ -123,14 +123,23 @@ def _hex(n: int, digits: int) -> str:
     text = "%x" % n
     return ("0" * digits + text)[-digits:]
 
+def _mix(n: int) -> int:
+    """`n` mixed to 32 bits that each depend on all of it (murmur3's
+    finalizer), as `hash()` of strings that differ a little differs a
+    little."""
+    n = n % (1 << 32)
+    n = ((n ^ (n >> 16)) * 0x85EBCA6B) % (1 << 32)
+    n = ((n ^ (n >> 13)) * 0xC2B2AE35) % (1 << 32)
+    return n ^ (n >> 16)
+
 def new_task_id(pid: int, ms: int, n: int) -> str:
     """A task ID (a version 4 UUID's form) for the `n`th run this process,
-    `pid`, starts at `ms`, for finding the run's record by it: a hash of
-    all three first, as the first 8 characters are the ID as shown, then
-    the time and the count, which keep it unique."""
+    `pid`, starts at `ms`, for finding the run's record by it: two
+    independent hashes of all three first, as the first 8 characters are
+    the ID as shown, then the time and the count, which keep it unique."""
     key = "%d:%d:%d" % (pid, ms, n)
-    head = hash("a" + key) % (1 << 32)
-    mid = hash("b" + key) % (1 << 32)
+    head = _mix(hash(key) * 0x9E3779B1)
+    mid = _mix(hash(key + ":") ^ 0x5BD1E995)
     return "%s-%s-4%s-8%s-%s" % (
         _hex(head, 8),
         _hex(mid, 4),

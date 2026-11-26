@@ -45,10 +45,10 @@ BRIDGE_ADDED = ["--bridge:enabled=true", "--dashboard:enabled=false"]
 
 def command(record) -> str:
     """A run's command line, redacted, without the program, the flags the
-    History screen adds to run it again (`BRIDGE_ADDED`), or a
-    `--task:id=<id>` naming the run's own ID: the one the screen gives a
-    run handed the terminal, or one typed, which says nothing the record's
-    ID does not."""
+    History screen adds to run it again (`BRIDGE_ADDED`), or a `--task:id`
+    naming the run's own ID (`--task:id=<id>` or `--task:id <id>`): the
+    one the screen gives a run handed the terminal, or one typed, which
+    says nothing the record's ID does not."""
     argv = record.get("argv", [])
     if not argv:
         return ""
@@ -58,7 +58,16 @@ def command(record) -> str:
     own = record.get("task", {}).get("id", "")
     if own:
         added.append("--task:id=" + own)
-    args = [a for a in args[:end] if a not in added] + args[end:]
+    kept = []
+    skip = False
+    for i, arg in enumerate(args[:end]):
+        if skip:
+            skip = False
+        elif own and arg == "--task:id" and i + 1 < end and args[i + 1] == own:
+            skip = True
+        elif arg not in added:
+            kept.append(arg)
+    args = kept + args[end:]
     return " ".join(["aspect"] + args)
 
 def task_name(record) -> str:

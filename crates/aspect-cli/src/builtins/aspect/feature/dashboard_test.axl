@@ -1248,6 +1248,11 @@ def _test_child(ctx):
     ids = [new_task_id(70123, 1795365737634 + n * 1000, n) for n in range(1, 5)]
     _eq("a run handed the terminal has an ID of its own, a UUID's form", ([len(p) for p in ids[0].split("-")], ids[0][14], ids[0][19]), ([8, 4, 4, 4, 12], "4", "8"))
     _eq("one after another differ in their short form", len({i[:8]: True for i in ids}), 4)
+    _eq("and not by a step", len({i[0]: True for i in [new_task_id(70123, 1795365737634, n) for n in range(16)]}) > 6, True)
+    _eq("the run's own ID not shown, either form", (
+        command(_record("01a218e4-d7f1-4e78-8001-000001e78001", argv = ["/bin/aspect", "hi", "--task:id", "01a218e4-d7f1-4e78-8001-000001e78001", "//a"])),
+        command(_record("x", argv = ["/bin/aspect", "hi", "--task:id", "other", "//a"])),
+    ), ("aspect hi //a", "aspect hi --task:id other //a"))
     _eq("an ID the run was given is not shown, as it gets a new one", (
         shown_command(_record("x", argv = ["/bin/aspect", "hi", "--task:id=01a218e4-d7f1-4e78-8001-000001e78001"]), bridged = False),
         shown_command(_record("x", argv = ["/bin/aspect", "hi", "--task:id", "01a218e4-d7f1-4e78-8001-000001e78001", "//a"])),
