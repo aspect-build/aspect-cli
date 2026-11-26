@@ -8,12 +8,15 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "aged_time", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
 # The style the console's state is drawn in, apart from every tab's.
 ANSI_ACCENT = theme.sgr("accent")
+
+# The roles a running action's time and the header's time are drawn in.
+ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong")}
 
 def _visible(row):
     """`row` without its escape sequences (`ESC [ … letter`)."""
@@ -840,14 +843,20 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the cache tally is read", kept["cache"], (1003, 1004))
 
     # The Results pane's cache figures come from their sources of truth:
-    # actions' from the execution log, tests' from their results.
+    # spawns' from the execution log (not the progress line's actions, which
+    # count what Bazel's own action cache satisfied and its internal ones),
+    # tests' from their results.
     count_spawn(kept["counts"], struct(cache_hit = True, runner = "remote cache hit"))
     count_spawn(kept["counts"], struct(cache_hit = False, runner = "darwin-sandbox"))
     count_event(kept["counts"], "test_result", struct(label = "//t:a"), struct(cached_locally = True, execution_info = None))
     count_event(kept["counts"], "test_result", struct(label = "//t:b"), struct(cached_locally = False, execution_info = struct(cached_remotely = False)))
     drawn = _visible(render(kept, 100, 30))
-    if "Cached   50% of 2 actions" not in drawn or "1 of 2 test runs" not in drawn:
+    if "Cached   50% of 2 spawns" not in drawn or "1 of 2 test runs" not in drawn:
         fail("render: the cache figures should be in the Results pane:\n" + drawn)
+    many = _screen(ctx, ["x"])
+    many["counts"].update(spawns = 1452, spawn_hits = 58, test_runs = 1500, test_cached = 1200, configured = 12345, built = 12000)
+    shown = _visible(render(many, 120, 30))
+    _eq("counts with thousands separators", ["3% of 1,452 spawns" in shown, "1,200 of 1,500 test runs" in shown, "12,345 configured" in shown, "12,000 built" in shown], [True, True, True, True])
     metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
     if "2 · 1 from a cache (50%) · 1 run" not in metrics or "remote cache hit" not in metrics:
         fail("metrics: actions by the execution log:\n" + metrics)
@@ -965,11 +974,24 @@ def _impl(ctx: TaskContext) -> int:
     for row, want in [("Compiling a.cc; 12s remote", 12), ("GoLink x; 1m 30s local", 90), ("T //a; 2.5s", 2), ("T //a; 500ms", 0), ("Analyzing", 0), ("x; 1h darwin-sandbox", 3600)]:
         _eq("action_seconds %r" % row, action_seconds(row), want)
     aged = _screen(ctx, [], progress = ["[1 / 9] 3 actions running", "    young; 2s", "    stuck; 400s", "    slow; 70s"])
-    drawn = render(aged, 100, 30)
+    drawn = _visible(render(aged, 100, 30))
     if not (drawn.find("stuck; 400s") < drawn.find("slow; 70s") and drawn.find("slow; 70s") < drawn.find("young; 2s")):
         fail("render: running actions should be oldest first")
-    if _role("error") + "stuck; 400s" not in drawn or _role("warning") + "slow; 70s" not in drawn:
-        fail("render: old actions should be coloured")
+
+    # Under a theme, each running action's time alone is coloured by its age
+    # (BuildBuddy's theme does so in Bazel's progress area), the header's
+    # time strong.
+    painted = _screen(ctx, [], progress = ["[1 / 9] 3 actions running", "    young; 2s", "    stuck; 400s", "    slow; 1m 10s"], now_ms = 65000)
+    rows = render(painted, 100, 30).split("\n")
+    for label, took, role in [("young", "2s", "muted"), ("stuck", "400s", "error"), ("slow", "1m 10s", "warning")]:
+        _eq("%s's time and its role" % label, aged_time("%s; %s darwin-sandbox" % (label, took)), (took, role))
+        row = [r for r in rows if label + ";" in _visible(r)][0]
+        if ANSI_ROLES[role]:
+            _eq("%s's time in %s" % (label, role), (ANSI_ROLES[role] + took) in row, True)
+            _eq("%s's label plain" % label, (ANSI_ROLES[role] + label) in row, False)
+    _eq("no time, no colour", aged_time("Analyzing"), None)
+    if ANSI_ROLES["strong"]:
+        _eq("the header's time strong", (ANSI_ROLES["strong"] + "1m05s") in rows[0], True)
 
     # The actions that wrote output: their own list, under `a`.
     wrote = output_of("action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")))
@@ -1135,7 +1157,7 @@ def _impl(ctx: TaskContext) -> int:
     flood["filter"] = "errors"
     _eq("e still finds it", _visible(render(flood, 80, 24)).count("ERROR: first"), 1)
     flood["filter"] = "all"
-    _eq("the title says what is gone", "2007 older not kept" in render(flood, 120, 24), True)
+    _eq("the title says what is gone", "2,007 older not kept" in render(flood, 120, 24), True)
 
     # What the scrollback keeps: the first errors with their diagnostic,
     # each failure with the history's copy of its log, Bazel's closing

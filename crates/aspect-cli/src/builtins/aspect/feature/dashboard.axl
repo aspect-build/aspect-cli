@@ -1343,7 +1343,7 @@ def blocked_text(label: str, roots: list) -> str:
     first = roots[0]
     shown = ":" + first.rpartition(":")[2] if first.rpartition(":")[0] == pkg else first
     more = len(roots) - 1
-    return "blocked by " + shown + ((" and %d more" % more) if more else "")
+    return "blocked by " + shown + ((_counts(" and %d more", more)) if more else "")
 
 def _unlogged_label(state: dict, i: int) -> str:
     """The failed target without a log at row `i` of the Failures list."""
@@ -1436,7 +1436,7 @@ def _window(total: int, room: int, selected: int):
 
 def _counted(rows: list, above: int, below: int) -> list:
     """A list's `rows` with how many are hidden above and below them."""
-    return ([_c("muted") + "… %d earlier" % above + _RESET] if above else []) + rows + ([_c("muted") + "… %d more" % below + _RESET] if below else [])
+    return ([_c("muted") + _counts("… %d earlier", above) + _RESET] if above else []) + rows + ([_c("muted") + _counts("… %d more", below) + _RESET] if below else [])
 
 def action_rows(state: dict, room: int, width: int) -> list:
     """The actions list's rows, `room` at most, each `width` wide: a • and
@@ -2625,14 +2625,40 @@ def _tenths(ms: int) -> str:
         return elapsed(ms)
     return "%d.%ds" % (ms // 1000, (ms % 1000) // 100)
 
-def _aged(row: str):
-    """How a running action's row is coloured by its age: none, slow, stuck."""
+def aged_time(row: str):
+    """`(time, role)` for a running action's row: its time as Bazel wrote it
+    (`12s`, `1m 30s`), and the role it is drawn in by its age, as
+    BuildBuddy's theme colours the seconds in Bazel's progress area:
+    `muted` while young, `warning` once slow, `error` once stuck. None for a
+    row with no time."""
+    words = row.rpartition("; ")[2].split(" ") if "; " in row else []
+    kept = []
+    for word in words:
+        # The words `action_seconds` reads: `1m`, `30s`, `2.5s`.
+        number = word[:-1]
+        if word[-1:] not in ("h", "m", "s") or not number or not number.replace(".", "", 1).isdigit():
+            break
+        kept.append(word)
+    if not kept:
+        return None
     seconds = action_seconds(row)
-    if seconds >= _STUCK_S:
-        return lambda text: _c("error") + text + _RESET
-    if seconds >= _SLOW_S:
-        return lambda text: _c("warning") + text + _RESET
-    return None
+    return (" ".join(kept), "error" if seconds >= _STUCK_S else ("warning" if seconds >= _SLOW_S else "muted"))
+
+def _aged(row: str):
+    """How a running action's row is coloured: its time alone, in the role
+    `aged_time` gives it; the rest as it is. None for a row with no time."""
+    aged = aged_time(row)
+    if aged == None:
+        return None
+    took, role = aged
+
+    def colour(text):
+        at = text.rfind(took)
+        if at < 0:
+            return text
+        return text[:at] + _c(role) + took + _RESET + text[at + len(took):]
+
+    return colour
 
 def cache_hits(line: str):
     """`(hits, processes)` from Bazel's closing tally (`INFO: 1,204
@@ -2766,14 +2792,20 @@ def build_row(build: dict, cols: int) -> str:
     if build.get("run") != None:
         parts.append("%s actions run" % _thousands(build["run"]))
     if build["failed"]:
-        parts.append(_c("error") + "✗%d" % build["failed"] + _RESET + _c("muted"))
+        parts.append(_c("error") + _counts("✗%d", build["failed"]) + _RESET + _c("muted"))
     if build["blocked"]:
-        parts.append("○%d" % build["blocked"])
+        parts.append(_counts("○%d", build["blocked"]))
     if build.get("outcome"):
         parts.append(build["outcome"])
     parts.append(elapsed(build["ms"]))
     row = " " + mark + _RESET + " " + _c("muted") + " · ".join(parts)
     return _cut_escaped(row, cols) + _RESET
+
+def _counts(template: str, args) -> str:
+    """`template % args` with every count in `args` (a tuple, or one value)
+    written as `_thousands` writes it: `%d` takes a count's text."""
+    values = args if type(args) == "tuple" else (args,)
+    return template.replace("%d", "%s") % tuple([_thousands(v) if type(v) == "int" else v for v in values])
 
 def _thousands(n: int) -> str:
     """`n` with commas between its thousands, as Bazel writes its counts."""
@@ -2814,7 +2846,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
     # Header.
     spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else ("✔" if state.get("verdict", True) else "✗")
-    title = " %s aspect %s · %s " % (spin, state["task"], elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"])))
+    took = elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"]))
+    title = " %s aspect %s · %s " % (spin, state["task"], took)
     shown = phase_status(state)
 
     # The task and how long it has run whole; the status in what is left,
@@ -2827,8 +2860,13 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # Whole or not at all: a status cut to a bare number says nothing.
     right = shown + " " if shown and text_width(shown) <= room - 2 else ""
 
-    # A status bar: the whole row in the theme's `status_bar`.
-    out.append(_c("status_bar") + title + " " * max(0, room - text_width(right)) + right + _RESET)
+    # A status bar: the whole row in the theme's `status_bar`, the time it
+    # has run `strong` (as BuildBuddy's theme has Bazel's elapsed time),
+    # coloured once the row's width is settled.
+    pad = " " * max(0, room - text_width(right))
+    if (" · " + took) in title:
+        title = title.replace(" · " + took, " · " + _c("strong") + took + _RESET + _c("status_bar"), 1)
+    out.append(_c("status_bar") + title + pad + right + _RESET)
     if state.get("zoom") or state.get("help"):
         return out
 
@@ -2839,7 +2877,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     if open_panes and not state.get("building") and folded:
         folded = folded[:-1]
     if len(folded) > _MAX_FOLDED:
-        out.append(_c("muted") + fit(" +%d earlier" % (len(folded) - _MAX_FOLDED + 1), cols) + _RESET)
+        out.append(_c("muted") + fit(_counts(" +%d earlier", (len(folded) - _MAX_FOLDED + 1)), cols) + _RESET)
         folded = folded[len(folded) - _MAX_FOLDED + 1:]
     state["folded_at"] = len(out)
     for b in folded:
@@ -2871,33 +2909,35 @@ def _top(state: dict, cols: int, rows: int) -> list:
     built_n, targets_failed, targets_blocked = target_counts(state)
     failed = _c("error") if targets_failed else ""
     tests_failed = _c("error") if c["tests_failed"] else ""
-    blocked_text_ = (", %d blocked" % targets_blocked) if targets_blocked else ""
+    blocked_text_ = (_counts(", %d blocked", targets_blocked)) if targets_blocked else ""
     summary = [
-        "Targets  %d configured" % c["configured"],
-        "         %s%d built%s, %s%d failed%s%s" % (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_),
-        "Tests    %s%d passed%s, %s%d failed%s%s%s" % (_c("success"), c["tests_passed"], _RESET, tests_failed, c["tests_failed"], _RESET, (", %s%d flaky%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "", (", %d skipped" % c["tests_skipped"]) if c.get("tests_skipped") else ""),
+        _counts("Targets  %d configured", c["configured"]),
+        _counts("         %s%d built%s, %s%d failed%s%s", (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_)),
+        _counts("Tests    %s%d passed%s, %s%d failed%s%s%s", (_c("success"), c["tests_passed"], _RESET, tests_failed, c["tests_failed"], _RESET, (_counts(", %s%d flaky%s", (_c("warning"), c["tests_flaky"], _RESET))) if c.get("tests_flaky") else "", (_counts(", %d skipped", c["tests_skipped"])) if c.get("tests_skipped") else "")),
     ]
     wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
     if not wide:
         # Narrow: the failures first, as what matters is what failed.
         summary = [
-            "Targets %s✗%d%s %s✓%d%s%s/%d" % (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (" ○%d" % targets_blocked) if targets_blocked else "", c["configured"]),
-            "Tests   %s✗%d%s %s✓%d%s%s%s" % (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (" %s~%d%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "", (" ⊘%d" % c["tests_skipped"]) if c.get("tests_skipped") else ""),
+            _counts("Targets %s✗%d%s %s✓%d%s%s/%d", (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (_counts(" ○%d", targets_blocked)) if targets_blocked else "", c["configured"])),
+            _counts("Tests   %s✗%d%s %s✓%d%s%s%s", (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (_counts(" %s~%d%s", (_c("warning"), c["tests_flaky"], _RESET))) if c.get("tests_flaky") else "", (_counts(" ⊘%d", c["tests_skipped"])) if c.get("tests_skipped") else "")),
         ]
 
     # Cache hits from their sources of truth: actions' from Bazel's
     # execution log, tests' from their results.
     if c.get("spawns"):
-        summary.append(("Cached   %d%% of %d actions" if wide else "Cached  %d%%/%d") % (c["spawn_hits"] * 100 // c["spawns"], c["spawns"]))
+        # Spawns (from the execution log), not the progress line's actions:
+        # Bazel's own action cache and its internal actions spawn nothing.
+        summary.append(_counts("Cached   %d%% of %d spawns" if wide else "Cached  %d%%/%ds", (c["spawn_hits"] * 100 // c["spawns"], c["spawns"])))
     if state.get("critical"):
         summary.append(("Critical path %s" if wide else "Crit %s") % state["critical"])
     if c.get("test_runs"):
-        summary.append(("         %d of %d test runs" if wide else "        %d/%dt") % (c["test_cached"], c["test_runs"]))
+        summary.append(_counts("         %d of %d test runs" if wide else "        %d/%dt", (c["test_cached"], c["test_runs"])))
     failed_n, blocked_n = _failure_counts(state)
     failed_i = -1
     if failed_n or blocked_n:
         failed_i = len(summary)
-        summary.append("Failed   %s✗ %d%s%s" % (_c("error"), failed_n, _RESET, ("  ○ %d blocked" % blocked_n) if blocked_n else "") if wide else "%s✗%d%s ○%d" % (_c("error"), failed_n, _RESET, blocked_n))
+        summary.append(_counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n)))
 
     # As tall as the most Results rows there can be, for the whole build;
     # the list scrolls in it (`actions_scroll`, the wheel over it), and
@@ -2956,7 +2996,7 @@ def scrolled_rows(rows: list, height: int, scroll: int, total = 0):
     edge = scrollbar(len(rows), height, max(0, len(rows) - scroll - height))
     if scroll == 0 and total > height:
         shown = rows[:height - 1]
-        return (shown + ["… and %d more" % (total - len(shown))], edge)
+        return (shown + [_counts("… and %d more", (total - len(shown)))], edge)
     return (rows[scroll:scroll + height], edge)
 
 def shown_tips(state: dict) -> list:
@@ -3067,7 +3107,7 @@ def render(state: dict, cols: int, rows: int) -> str:
         log = log[top:]
         if len(log) > log_h:
             rest = len(log) - log_h + 1
-            log = log[:log_h - 1] + ["… %d more: ↓" % rest]
+            log = log[:log_h - 1] + [_counts("… %d more: ↓", rest)]
         pattern = None
         scroll = max(0, len(log) - log_h)
     else:
@@ -3150,9 +3190,9 @@ def render(state: dict, cols: int, rows: int) -> str:
     where = ("on the match, J to follow" if held else "following") if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
     if state.get("unseen") and view == None:
         errors = state.get("unseen_errors", 0)
-        where += " · %d new%s, J to follow" % (state["unseen"], (" (%d error%s)" % (errors, "" if errors == 1 else "s")) if errors else "")
+        where += _counts(" · %d new%s, J to follow", (state["unseen"], (_counts(" (%d error%s)", (errors, "" if errors == 1 else "s"))) if errors else ""))
     if state.get("dropped") and view == None:
-        where += " · %d older not kept" % state["dropped"]
+        where += _counts(" · %d older not kept", state["dropped"])
 
     # The pattern finding or filtering, which a query that does not compile
     # is not; a match found, which of them it is, oldest first.
@@ -3283,7 +3323,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     names = {}
     for tab, name in _TABS:
         if tab == "failures" and (failed or blocked):
-            name += " ✗%d" % failed + (" ○%d" % blocked if blocked else "")
+            name += _counts(" ✗%d", failed) + (_counts(" ○%d", blocked) if blocked else "")
         if tab == "tips" and tips_count(state):
             name += " %d" % tips_count(state)
         names[tab] = name
@@ -3396,7 +3436,7 @@ def metrics_lines(state: dict) -> list:
     out = [_c("heading") + "Actions" + _RESET]
     if c.get("spawns"):
         pct = c["spawn_hits"] * 100 // c["spawns"]
-        out.append(_row_of("spawns", "%d · %d from a cache (%d%%) · %d run" % (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"])))
+        out.append(_row_of("spawns", _counts("%d · %d from a cache (%d%%) · %d run", (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"]))))
         for runner in sorted(c["runners"], key = lambda r: -c["runners"][r]):
             out.append(_row_of("  " + runner, c["runners"][runner]))
     elif state.get("exec_log_read"):
@@ -3406,19 +3446,19 @@ def metrics_lines(state: dict) -> list:
     summary = _get(bm, "action_summary")
     stats = _get(summary, "action_cache_statistics")
     if stats != None:
-        out.append(_row_of("Bazel's action cache", "%d hits · %d misses" % (_get(stats, "hits", 0) or 0, _get(stats, "misses", 0) or 0)))
+        out.append(_row_of("Bazel's action cache", _counts("%d hits · %d misses", (_get(stats, "hits", 0) or 0, _get(stats, "misses", 0) or 0))))
     if summary != None:
         out.append(_row_of("actions created", _get(summary, "actions_created", 0) or 0))
     out += ["", _c("heading") + "Tests" + _RESET]
     runs = c.get("test_runs", 0)
-    out.append(_row_of("runs", "%d · %d from a cache%s" % (runs, c.get("test_cached", 0), (" (%d%%)" % (c["test_cached"] * 100 // runs)) if runs else "")))
-    out.append(_row_of("results", "%d passed · %d failed · %d flaky · %d skipped" % (c["tests_passed"], c["tests_failed"], c.get("tests_flaky", 0), c.get("tests_skipped", 0))))
+    out.append(_row_of("runs", _counts("%d · %d from a cache%s", (runs, c.get("test_cached", 0), (_counts(" (%d%%)", (c["test_cached"] * 100 // runs))) if runs else ""))))
+    out.append(_row_of("results", _counts("%d passed · %d failed · %d flaky · %d skipped", (c["tests_passed"], c["tests_failed"], c.get("tests_flaky", 0), c.get("tests_skipped", 0)))))
     built_n, failed, blocked = target_counts(state)
     shown, _ = _failure_counts(state)
     out += ["", _c("heading") + "Targets" + _RESET]
     out.append(_row_of("configured", c["configured"]))
-    out.append(_row_of("built", "%d · %d failed · %d blocked by a dependency" % (built_n, failed, blocked)))
-    out.append(_row_of("failures listed", "%d (failed actions and test attempts, in Failures)" % shown))
+    out.append(_row_of("built", _counts("%d · %d failed · %d blocked by a dependency", (built_n, failed, blocked))))
+    out.append(_row_of("failures listed", _counts("%d (failed actions and test attempts, in Failures)", shown)))
     timing = _get(bm, "timing_metrics")
     out += ["", _c("heading") + "Time" + _RESET]
 
@@ -4446,7 +4486,7 @@ def replay_lines(state: dict, tty: bool) -> list:
     out = []
     not_kept = state.get("dropped", 0) - state.get("seed_trimmed", 0)
     if not_kept > 0:
-        out.append("… %d older lines not kept: aspect history show for all of it" % not_kept)
+        out.append(_counts("… %d older lines not kept: aspect history show for all of it", not_kept))
     for line in state["log"][state.get("seeded", 0):]:
         out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
@@ -4469,7 +4509,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     red = _c("error") if tty else ""
     tail = state.get("closing_tail", [])
     cut = state.get("closing_cut", 0) + max(0, len(tail) - _CLOSING_TAIL)
-    closing = state.get("closing", []) + (["… %d more of Bazel's lines" % cut] if cut else []) + tail[-_CLOSING_TAIL:]
+    closing = state.get("closing", []) + ([_counts("… %d more of Bazel's lines", cut)] if cut else []) + tail[-_CLOSING_TAIL:]
     recap = [line for line in closing if "Errors Bazel reported" in line or "── Error recap (" in line]
     blocks = state["errors"]
     if blocks and not recap and not replayed:
@@ -4480,7 +4520,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
             out.append("  " + red + block[0] + reset)
             out.extend(["    " + line for line in block[1:]])
         if total > len(shown) and state.get("log_path"):
-            out.append("  … %d more in Bazel's console log: %s" % (total - len(shown), state["log_path"]))
+            out.append(_counts("  … %d more in Bazel's console log: %s", (total - len(shown), state["log_path"])))
     index = logged_index(state)
     blocked = blocked_targets(state)
     unlogged = [label for label in index["unlogged"] if label not in index["logged"] and label not in blocked]
@@ -4498,13 +4538,13 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
             out.append("  %s✗%s %s" % (red, reset, label))
             listed += 1
         if failures > listed:
-            out.append("  … %d more: aspect history show %s" % (failures - listed, task_id))
+            out.append(_counts("  … %d more: aspect history show %s", (failures - listed, task_id)))
     if stopped:
-        out.append(bold + "Not built" + reset + ", blocked by a failed dependency (%d):" % len(stopped))
+        out.append(bold + "Not built" + reset + _counts(", blocked by a failed dependency (%d):", len(stopped)))
         for label in stopped[:_REPORT_FAILURES]:
             out.append("  ○ %s  %s" % (label, blocked_text(label, blocked[label])))
         if len(stopped) > _REPORT_FAILURES:
-            out.append("  … %d more: aspect history show %s" % (len(stopped) - _REPORT_FAILURES, task_id))
+            out.append(_counts("  … %d more: aspect history show %s", (len(stopped) - _REPORT_FAILURES, task_id)))
     if flaky:
         yellow = _c("warning") if tty else ""
         out.append(bold + "Flaky" + reset + " (passed on a later attempt):")
@@ -4517,17 +4557,17 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
         out.append("%s: %s" % (label, link(url, url) if tty else url))
     c = state["counts"]
     built_n, targets_failed, targets_blocked = target_counts(state)
-    out.append("%d built, %d failed%s · %d %s passed, %d failed%s%s%s" % (
+    out.append(_counts("%d built, %d failed%s · %d %s passed, %d failed%s%s%s", (
         built_n,
         targets_failed,
-        (", %d blocked" % targets_blocked) if targets_blocked else "",
+        _counts(", %d blocked", targets_blocked) if targets_blocked else "",
         c["tests_passed"],
         "test" if c["tests_passed"] == 1 else "tests",
         c["tests_failed"],
-        (", %d flaky" % c["tests_flaky"]) if c.get("tests_flaky") else "",
-        (", %d skipped" % c["tests_skipped"]) if c.get("tests_skipped") else "",
+        _counts(", %d flaky", c["tests_flaky"]) if c.get("tests_flaky") else "",
+        _counts(", %d skipped", c["tests_skipped"]) if c.get("tests_skipped") else "",
         (" · Bazel's console: " + state["log_path"]) if state["log_path"] else "",
-    ))
+    )))
     out.append("All of it: aspect history show %s" % task_id)
     return out
 
