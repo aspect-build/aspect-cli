@@ -5,7 +5,9 @@
 //! as they come and copied to the task's output a line at a time; while a
 //! full screen holds the terminal it has no controlling terminal either. One
 //! marked `interactive(True)` gets the terminal, when there is one, and a
-//! line before and after it in the task's output. A process that should
+//! line before and after it in the task's output; one run `foreground()`
+//! gets it in a process group of its own, as a shell's job, and gives it
+//! back when it is waited for. A process that should
 //! outlive the CLI sets its own stdout and stderr and leads its own group
 //! (`process_group(0)`); one backgrounded by an unmarked child keeps its pipe,
 //! and dies when it writes once the CLI, after a bounded wait, has gone.
@@ -83,9 +85,11 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
             inner: RefCell::new(process::Command::new(program.as_str())),
             process_group: Cell::new(None),
             interactive: Cell::new(false),
+            foreground: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tty_fd: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             pre_exec_set: Cell::new(false),
         })
     }
@@ -191,6 +195,9 @@ pub struct Command {
     /// Marked `interactive(True)`: given the real terminal (see [`Command::try_spawn`]).
     #[allocative(skip)]
     interactive: Cell<bool>,
+    /// Run in the terminal's foreground (`foreground()`).
+    #[allocative(skip)]
+    foreground: Cell<bool>,
     /// Which of its streams the task chose itself.
     #[allocative(skip)]
     chosen: Cell<Chosen>,
@@ -201,9 +208,42 @@ pub struct Command {
     /// `pre_exec` closure the command gets ([`Command::unmarked`]).
     #[allocative(skip)]
     no_tty: Arc<std::sync::atomic::AtomicBool>,
+    /// The terminal a foreground spawn's child takes, -1 for none, read by
+    /// the same closure.
+    #[allocative(skip)]
+    tty_fd: Arc<std::sync::atomic::AtomicI32>,
     #[allocative(skip)]
     pre_exec_set: Cell<bool>,
 }
+
+/// The controlling terminal, when this process's group is its foreground:
+/// what a child run in the foreground takes it from and gives it back to.
+#[cfg(unix)]
+fn foreground_tty() -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::AsRawFd;
+    let tty = std::fs::File::open("/dev/tty").ok()?;
+    // SAFETY: plain queries of this process and an open descriptor.
+    let ours = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) == libc::getpgrp() };
+    ours.then(|| tty.into())
+}
+
+/// Make `pgrp` the foreground of the terminal `fd`, as a background
+/// process may only with SIGTTOU ignored. Async-signal-safe, for a child
+/// between fork and exec.
+#[cfg(unix)]
+fn set_foreground(fd: std::os::fd::RawFd, pgrp: libc::pid_t) {
+    // SAFETY: signal and tcsetpgrp are async-signal-safe and take plain
+    // values; the old disposition is put back.
+    unsafe {
+        let old = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(fd, pgrp);
+        libc::signal(libc::SIGTTOU, old);
+    }
+}
+
+/// A foreground child's terminal and its modes from before it ran.
+#[cfg(unix)]
+type TakenTty = (std::os::fd::OwnedFd, Option<nix::sys::termios::Termios>);
 
 /// How an unmarked child's output reaches the CLI ([`forward`]).
 enum Forward {
@@ -232,9 +272,11 @@ impl Command {
             inner: RefCell::new(inner),
             process_group: Cell::new(own_group.then_some(0)),
             interactive: Cell::new(false),
+            foreground: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tty_fd: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             pre_exec_set: Cell::new(false),
         }
     }
@@ -301,6 +343,7 @@ impl Command {
             );
             if !self.pre_exec_set.replace(true) {
                 let no_tty = self.no_tty.clone();
+                let tty_fd = self.tty_fd.clone();
                 // SAFETY: only async-signal-safe calls between fork and exec.
                 // Dropping the controlling terminal leaves the process groups
                 // as they are, so cancellation reaches the child as before.
@@ -313,6 +356,17 @@ impl Command {
                                 libc::ioctl(fd, libc::TIOCNOTTY as _);
                                 libc::close(fd);
                             }
+                        }
+                        // In the foreground (`foreground()`): its own group,
+                        // spawned as one, takes the terminal before it runs.
+                        // Ctrl+Z would stop a group this task cannot resume
+                        // (it waits without job control): ignored, as by a
+                        // full-screen program.
+                        let fd = tty_fd.load(std::sync::atomic::Ordering::SeqCst);
+                        if fd >= 0 {
+                            libc::setpgid(0, 0);
+                            set_foreground(fd, libc::getpgrp());
+                            libc::signal(libc::SIGTSTP, libc::SIG_IGN);
                         }
                         Ok(())
                     });
@@ -367,11 +421,39 @@ impl Command {
                 self.describe()
             ));
         }
+        if self.foreground.get() && (self.interactive.get() || self.process_group.get().is_some()) {
+            return Err(anyhow!(
+                "command {}: `foreground()` runs the child in a process group of its own that takes the terminal, so it takes neither `interactive(True)` nor `process_group(...)`",
+                self.describe()
+            ));
+        }
         // Interactive only where there is a terminal to give it: without one
-        // (CI) it runs as any other child, piped and copied.
-        let interactive = self.interactive.get() && has_terminal();
+        // (CI) it runs as any other child, piped and copied. A foreground
+        // child has the terminal's streams as an interactive one does.
+        let interactive = (self.interactive.get() || self.foreground.get()) && has_terminal();
+        // In the foreground: the terminal, when this process has its
+        // foreground, and its modes read before the child can change them.
+        #[cfg(unix)]
+        let taken: Option<TakenTty> = if self.foreground.get() && interactive {
+            foreground_tty().map(|t| {
+                let modes = nix::sys::termios::tcgetattr(&t).ok();
+                (t, modes)
+            })
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            self.tty_fd.store(
+                taken.as_ref().map_or(-1, |t| t.0.as_raw_fd()),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
         let plan = self.streams(interactive)?;
-        let marked = interactive.then(|| {
+        let foreground_suspended =
+            self.foreground.get() && interactive && crate::engine::std::term::suspend();
+        let marked = (interactive && !self.foreground.get()).then(|| {
             let summary = self.summary();
             crate::errln!(
                 "{}",
@@ -389,7 +471,11 @@ impl Command {
             &mut self.inner.borrow_mut(),
             signals,
             &parent,
-            self.process_group.get(),
+            if self.foreground.get() {
+                Some(0)
+            } else {
+                self.process_group.get()
+            },
             children::Kind::Process,
         );
         if let Forward::Merged(_) = plan {
@@ -402,8 +488,18 @@ impl Command {
         let (mut child, bound) = match spawned {
             Ok(spawned) => spawned,
             Err(e) => {
-                if marked.as_ref().is_some_and(|(_, _, suspended)| *suspended) {
+                if marked.as_ref().is_some_and(|(_, _, suspended)| *suspended)
+                    || foreground_suspended
+                {
                     crate::engine::std::term::resume();
+                }
+                // A program that failed to start may have taken the
+                // terminal first.
+                #[cfg(unix)]
+                if let Some((tty, _)) = &taken {
+                    use std::os::fd::AsRawFd;
+                    // SAFETY: a plain query of this process.
+                    set_foreground(tty.as_raw_fd(), unsafe { libc::getpgrp() });
                 }
                 return Err(anyhow!(
                     "failed to spawn command {}: {}",
@@ -429,6 +525,9 @@ impl Command {
             bound,
             forwarders: RefCell::new(forwarders),
             interactive: RefCell::new(marked),
+            #[cfg(unix)]
+            tty: RefCell::new(taken),
+            foreground_suspended: Cell::new(foreground_suspended),
         })
     }
 
@@ -786,6 +885,23 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Run the child in the terminal's foreground, as a shell runs a job: the
+    /// terminal's streams, as `interactive(True)` gives them, in a process
+    /// group of its own that takes the terminal before it starts, so the
+    /// terminal's Ctrl+C reaches it and not this task. The terminal comes
+    /// back to this process, in the modes it had, once the child is waited
+    /// for (or the wait ends with the task's exit, or the child is let go).
+    /// Ctrl+Z is ignored in it, as this task waits without job control and
+    /// could not resume a stopped group. A screen still held is given back
+    /// meanwhile, as for an interactive child, with no marker lines. Not
+    /// with `interactive(True)` or `process_group(...)`: spawning so fails.
+    /// Without a terminal, a child of a group of its own, piped and copied.
+    fn foreground<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.foreground.set(true);
+        Ok(this)
+    }
+
     /// Configuration for the child process's standard input (stdin) handle.
     ///
     /// Unset, it is `"null"`, or for a child marked `interactive(True)` on a
@@ -918,6 +1034,16 @@ pub struct Child {
     /// screen: for the line after it, and to take the screen again.
     #[allocative(skip)]
     interactive: RefCell<Option<(String, std::time::Instant, bool)>>,
+    /// The terminal a foreground child took, and its modes from before: the
+    /// terminal's foreground given back to this process's group once it is
+    /// reaped (or the wait ends with the task's exit, or it is dropped), the
+    /// modes put back, as a shell does for a job.
+    #[cfg(unix)]
+    #[allocative(skip)]
+    tty: RefCell<Option<TakenTty>>,
+    /// Whether a foreground child suspended a screen, taken again then.
+    #[allocative(skip)]
+    foreground_suspended: Cell<bool>,
 }
 
 impl Child {
@@ -929,6 +1055,9 @@ impl Child {
             bound,
             forwarders: RefCell::new(vec![]),
             interactive: RefCell::new(None),
+            #[cfg(unix)]
+            tty: RefCell::new(None),
+            foreground_suspended: Cell::new(false),
         }
     }
 
@@ -937,16 +1066,43 @@ impl Child {
     /// first. Once it has exited, what it wrote is passed on in full, and an
     /// interactive one's screen taken again and its line written.
     fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Option<process::ExitStatus>> {
-        let status = children::wait(&self.inner, &self.bound, timeout)?;
-        if let Some(status) = &status {
-            self.ended(status);
+        let status = children::wait(&self.inner, &self.bound, timeout);
+        match &status {
+            Ok(Some(status)) => self.ended(status),
+            // The task's exit coming back needs the terminal as much.
+            Err(_) => self.give_back(),
+            Ok(None) => {}
         }
-        Ok(status)
+        status
+    }
+
+    /// A foreground child is gone, or this task is done waiting on it: the
+    /// terminal comes back to this process's group, in the modes it had
+    /// before the child ran (input typed meanwhile was the child's, so it is
+    /// dropped), and a screen it suspended is taken again. Once.
+    fn give_back(&self) {
+        #[cfg(unix)]
+        if let Some((tty, modes)) = self.tty.borrow_mut().take() {
+            use std::os::fd::AsRawFd;
+            // SAFETY: a plain query of this process.
+            set_foreground(tty.as_raw_fd(), unsafe { libc::getpgrp() });
+            if let Some(modes) = modes {
+                let _ = nix::sys::termios::tcsetattr(
+                    &tty,
+                    nix::sys::termios::SetArg::TCSAFLUSH,
+                    &modes,
+                );
+            }
+        }
+        if self.foreground_suspended.replace(false) {
+            crate::engine::std::term::resume();
+        }
     }
 
     /// What follows the child's exit: its output passed on, and an
     /// interactive one's screen back and the line after it.
     fn ended(&self, status: &process::ExitStatus) {
+        self.give_back();
         // Its output passed on until its pipes end, a pipe still open (a
         // grandchild holding it) until it has been quiet for [`FORWARD_GRACE`]
         // since the reap, for [`FORWARD_BOUND`] at most, or until the wait is
@@ -1018,6 +1174,13 @@ impl Child {
         timeout: Option<Duration>,
     ) -> std::io::Result<Option<process::ExitStatus>> {
         self.wait(timeout)
+    }
+}
+
+/// A child dropped without being waited for gives back the terminal it took.
+impl Drop for Child {
+    fn drop(&mut self) {
+        self.give_back();
     }
 }
 
@@ -1462,6 +1625,37 @@ t = task(implementation = _impl)
         assert!(err.contains("cannot take `process_group(...)`"), "{err}");
     }
 
+    /// A foreground child leads a group of its own that takes the
+    /// terminal: asked to be interactive or to join another group too, it
+    /// is refused at spawn, saying why. Without a terminal it runs as any
+    /// child, and spawns again.
+    #[test]
+    fn foreground_with_interactive_or_a_process_group_is_refused() {
+        for (with, ok) in [
+            (".interactive(True)", false),
+            (".process_group(0)", false),
+            ("", true),
+        ] {
+            let script = format!(
+                r#"
+def _impl(ctx):
+    cmd = ctx.std.process.command("true").foreground(){with}
+    cmd.spawn().wait()
+    return 0 if cmd.spawn().wait().success else 1
+
+t = task(implementation = _impl)
+"#
+            );
+            let result = crate::test::eval(&script).run_task(0);
+            if ok {
+                assert_eq!(result.expect("spawns"), Some(0));
+            } else {
+                let err = format!("{:#}", result.expect_err("refused"));
+                assert!(err.contains("`foreground()`"), "{with}: {err}");
+            }
+        }
+    }
+
     /// A command spawned twice decides each spawn afresh, its exit polled
     /// with `try_wait` as well as waited.
     #[test]
@@ -1545,9 +1739,11 @@ t = task(implementation = _impl)
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
             interactive: Cell::new(false),
+            foreground: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tty_fd: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             pre_exec_set: Cell::new(false),
         };
         cmd.inner.borrow_mut().args([
@@ -1576,9 +1772,11 @@ t = task(implementation = _impl)
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
             interactive: Cell::new(false),
+            foreground: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tty_fd: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             pre_exec_set: Cell::new(false),
         };
         cmd.inner
@@ -1599,9 +1797,11 @@ t = task(implementation = _impl)
             inner: RefCell::new(process::Command::new("program")),
             process_group: Cell::new(None),
             interactive: Cell::new(false),
+            foreground: Cell::new(false),
             chosen: Cell::new(Chosen::default()),
             added_env: RefCell::new(vec![]),
             no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tty_fd: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             pre_exec_set: Cell::new(false),
         };
         cmd.inner

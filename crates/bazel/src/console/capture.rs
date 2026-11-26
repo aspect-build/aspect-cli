@@ -141,9 +141,8 @@ fn set_cloexec(fd: &impl AsFd) -> io::Result<()> {
     Ok(())
 }
 
-/// Set while a feature's full screen has stderr captured, so a PTY opened
-/// meanwhile takes the controlling terminal's size ([`terminal_size`]) and
-/// bazel's stdout shares its console's capture ([`stdout_is_stderrs_file`]).
+/// Set while a feature's full screen has stderr captured, so bazel's stdout
+/// shares its console's capture ([`stdout_is_stderrs_file`]).
 static STDERR_CAPTURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether stderr is captured by a feature's full screen: see
@@ -161,20 +160,20 @@ pub fn window_size(fd: std::os::fd::RawFd) -> Option<libc::winsize> {
     (unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0).then_some(ws)
 }
 
-/// The terminal's window size: stderr's, or while a feature's full screen
-/// has stderr captured ([`set_stderr_captured`]), the controlling
-/// terminal's, even when stderr was redirected before the screen took it;
-/// `None` without one.
+/// The terminal's window size: stderr's, or, when stderr is not one (a
+/// feature's full screen has it captured, or it was redirected, as a child
+/// a full screen runs has it), the controlling terminal's, else, with none
+/// (a child in a session of its own), `COLUMNS` and `LINES`'s; `None`
+/// without either.
 fn terminal_size() -> Option<nix::pty::Winsize> {
     use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
     let stderr = io::stderr();
-    let captured = STDERR_CAPTURED.load(std::sync::atomic::Ordering::SeqCst);
-    let tty = (captured && !stderr.is_terminal())
+    let tty = (!stderr.is_terminal())
         .then(|| std::fs::File::open("/dev/tty").ok())
         .flatten();
     if tty.is_none() && !stderr.is_terminal() {
-        return None;
+        return size_from_env();
     }
     let fd = tty.as_ref().map_or(stderr.as_raw_fd(), |t| t.as_raw_fd());
     let ws = window_size(fd)?;
@@ -183,6 +182,53 @@ fn terminal_size() -> Option<nix::pty::Winsize> {
         ws_col: ws.ws_col,
         ws_xpixel: ws.ws_xpixel,
         ws_ypixel: ws.ws_ypixel,
+    })
+}
+
+/// Whether a PTY opened now would have a size ([`terminal_size`]): a
+/// terminal to take it from, [`set_screen_size`]'s, or `COLUMNS` and
+/// `LINES`.
+pub fn has_terminal_size() -> bool {
+    terminal_size().is_some_and(|ws| ws.ws_col > 0 && ws.ws_row > 0)
+}
+
+/// The screen size this process was given for its consoles alone
+/// ([`set_screen_size`]), columns and rows.
+static SCREEN_SIZE: std::sync::OnceLock<(u16, u16)> = std::sync::OnceLock::new();
+
+/// Size every console's PTY `cols` by `rows` where there is no terminal to
+/// take it from, in place of `COLUMNS` and `LINES`: for a process that took
+/// those out of its environment, so what it starts does not get them.
+pub fn set_screen_size(cols: u16, rows: u16) {
+    if cols > 0 && rows > 0 {
+        let _ = SCREEN_SIZE.set((cols, rows));
+    }
+}
+
+/// The size [`set_screen_size`] gave, else `COLUMNS` and `LINES`, as a
+/// program run with no terminal of its own (a full screen's child) is told
+/// its parent's.
+fn size_from_env() -> Option<nix::pty::Winsize> {
+    if let Some(&(cols, rows)) = SCREEN_SIZE.get() {
+        return Some(nix::pty::Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        });
+    }
+    let var = |name| {
+        std::env::var(name)
+            .ok()?
+            .parse::<u16>()
+            .ok()
+            .filter(|n| *n > 0)
+    };
+    Some(nix::pty::Winsize {
+        ws_row: var("LINES")?,
+        ws_col: var("COLUMNS")?,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
     })
 }
 

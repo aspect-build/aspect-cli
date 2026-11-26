@@ -134,11 +134,25 @@ fn copy_output(data: &[u8]) {
     }
 }
 
+/// A child process's output pipe, until a [`LinePoller`] takes it to read
+/// on its own thread; then empty, every read of it at its end.
+#[derive(Debug)]
+pub struct ChildPipe<T>(Option<T>);
+
+impl<T: Read> Read for ChildPipe<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match &mut self.0 {
+            Some(pipe) => pipe.read(buf),
+            None => Ok(0),
+        }
+    }
+}
+
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Readable {
     Stdin(#[allocative(skip)] Arc<StdinSource>),
-    ChildStderr(#[allocative(skip)] Arc<Mutex<RefCell<ChildStderr>>>),
-    ChildStdout(#[allocative(skip)] Arc<Mutex<RefCell<ChildStdout>>>),
+    ChildStderr(#[allocative(skip)] Arc<Mutex<RefCell<ChildPipe<ChildStderr>>>>),
+    ChildStdout(#[allocative(skip)] Arc<Mutex<RefCell<ChildPipe<ChildStdout>>>>),
     File(#[allocative(skip)] Arc<Mutex<std::fs::File>>),
 }
 
@@ -224,13 +238,13 @@ impl Readable {
 
 impl From<ChildStderr> for Readable {
     fn from(stderr: ChildStderr) -> Self {
-        Self::ChildStderr(Arc::new(Mutex::new(RefCell::new(stderr))))
+        Self::ChildStderr(Arc::new(Mutex::new(RefCell::new(ChildPipe(Some(stderr))))))
     }
 }
 
 impl From<ChildStdout> for Readable {
     fn from(stdout: ChildStdout) -> Self {
-        Self::ChildStdout(Arc::new(Mutex::new(RefCell::new(stdout))))
+        Self::ChildStdout(Arc::new(Mutex::new(RefCell::new(ChildPipe(Some(stdout))))))
     }
 }
 
@@ -309,7 +323,34 @@ impl<T: Read> Read for ArcMutexReader<T> {
 
 unsafe impl<T: Read> Send for ArcMutexReader<T> {}
 
+struct OwnedReader<T: Read>(T);
+
+impl<T: Read> Read for OwnedReader<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+unsafe impl<T: Read> Send for OwnedReader<T> {}
+
 impl Readable {
+    /// This stream as a reader of its own: a child's pipe taken out of the
+    /// stream (which then reads as ended), so it is closed once the reader
+    /// is dropped; any other stream shared, as [`Self::to_boxed_read`].
+    fn take_boxed_read(&self) -> Box<dyn Read + Send> {
+        match self {
+            Readable::ChildStdout(arc) => {
+                let pipe = arc.lock().unwrap().borrow_mut().0.take();
+                Box::new(OwnedReader(ChildPipe(pipe)))
+            }
+            Readable::ChildStderr(arc) => {
+                let pipe = arc.lock().unwrap().borrow_mut().0.take();
+                Box::new(OwnedReader(ChildPipe(pipe)))
+            }
+            _ => self.to_boxed_read(),
+        }
+    }
+
     /// Produce a boxed `Read + Send` from this `Readable`.
     pub fn to_boxed_read(&self) -> Box<dyn Read + Send> {
         match self {
@@ -339,6 +380,155 @@ impl<'v> values::StarlarkValue<'v> for Readable {
 
 starlark_simple_value!(Readable);
 
+/// The longest line a [`LinePoller`] keeps; the rest of it is cut. Room for
+/// a bridge message (`feature/bridge.axl`), which keeps under it.
+const MAX_POLLED_LINE: usize = 16 << 20;
+
+/// The most lines a [`LinePoller`] holds unpolled: past them its thread
+/// waits, and so does the writer, on a full pipe, so a stream written
+/// faster than it is polled holds no more than these in memory.
+const MAX_UNPOLLED_LINES: usize = 4096;
+
+/// A stream's lines, read on a thread of their own as they come, for a
+/// caller that cannot wait on them (a full screen polling a child process's
+/// output between frames): `poll()` takes those read so far, at most
+/// [`MAX_UNPOLLED_LINES`] ahead of it.
+#[derive(Debug, derive_more::Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[display("<std.io.LinePoller>")]
+pub struct LinePoller {
+    #[allocative(skip)]
+    lines: Mutex<std::sync::mpsc::Receiver<Option<String>>>,
+    #[allocative(skip)]
+    ended: std::sync::atomic::AtomicBool,
+}
+
+starlark_simple_value!(LinePoller);
+
+impl LinePoller {
+    /// Drop the receiver, so the reading thread throws the rest of the
+    /// stream away, and read as ended: `close()`.
+    fn close(&self) {
+        *self.lines.lock().unwrap() = std::sync::mpsc::channel().1;
+        self.ended.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Read `reader` on a new thread until it ends, line by line.
+    pub fn spawn(mut reader: Box<dyn Read + Send>) -> std::io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(MAX_UNPOLLED_LINES);
+        std::thread::Builder::new()
+            .name("line-poller".into())
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                let mut line = Vec::new();
+
+                // Once nobody takes the lines (closed or dropped), the stream
+                // is still read to its end and thrown away, so a writer is
+                // never blocked on a full pipe nor a line kept.
+                let mut discarding = false;
+                let send = |line: &mut Vec<u8>| {
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    let text = String::from_utf8_lossy(line).into_owned();
+                    line.clear();
+                    tx.send(Some(text)).is_ok()
+                };
+                loop {
+                    let n = match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    };
+                    if discarding {
+                        continue;
+                    }
+                    for &b in &buf[..n] {
+                        if b == b'\n' {
+                            if !send(&mut line) {
+                                discarding = true;
+                                break;
+                            }
+                        } else if line.len() < MAX_POLLED_LINE {
+                            line.push(b);
+                        }
+                    }
+                }
+                if !line.is_empty() && !discarding {
+                    send(&mut line);
+                }
+                let _ = tx.send(None);
+            })?;
+        Ok(Self {
+            lines: Mutex::new(rx),
+            ended: Default::default(),
+        })
+    }
+}
+
+#[starlark_value(type = "std.io.LinePoller")]
+impl<'v> values::StarlarkValue<'v> for LinePoller {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new("line_poller_methods", line_poller_methods);
+        Some(RES.methods())
+    }
+}
+
+#[starlark_module]
+fn line_poller_methods(registry: &mut MethodsBuilder) {
+    /// The lines read since the last call, oldest first, at most `limit`
+    /// (the rest come next time), each without its line ending. Waits up to
+    /// `timeout_ms` for the first when there is none yet; 0, the default,
+    /// never waits.
+    fn poll<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = 0)] timeout_ms: u32,
+        #[starlark(require = named, default = 10000)] limit: u32,
+    ) -> anyhow::Result<Vec<String>> {
+        let me = this.downcast_ref_err::<LinePoller>().into_anyhow_result()?;
+        let rx = me.lines.lock().unwrap();
+        let mut out = vec![];
+        let mut first = timeout_ms > 0;
+        while out.len() < limit as usize {
+            let got = if first {
+                first = false;
+                rx.recv_timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
+                    .map_err(|_| ())
+            } else {
+                rx.try_recv().map_err(|_| ())
+            };
+            match got {
+                Ok(Some(line)) => out.push(line),
+                Ok(None) => {
+                    me.ended.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                Err(()) => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the stream has ended and every line of it was polled.
+    #[starlark(attribute)]
+    fn ended<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        let me = this.downcast_ref_err::<LinePoller>().into_anyhow_result()?;
+        Ok(me.ended.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Stop keeping lines: those not yet polled are dropped, and the rest of
+    /// the stream is read to its end and thrown away, so one something
+    /// still writes to (a process left behind) neither grows in memory nor
+    /// blocks its writer on a full pipe. `poll()` then gives nothing, and
+    /// `ended` is True.
+    fn close<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
+        this.downcast_ref_err::<LinePoller>()
+            .into_anyhow_result()?
+            .close();
+        Ok(NoneType)
+    }
+}
+
 #[starlark_module]
 fn readable_methods(registry: &mut MethodsBuilder) {
     /// Returns true if the underlying stream is connected to a terminal/tty.
@@ -351,6 +541,20 @@ fn readable_methods(registry: &mut MethodsBuilder) {
             Readable::ChildStdout(_) => false,
             Readable::File(_) => false,
         })
+    }
+
+    /// Read this stream's lines on a thread of their own, as they come, for
+    /// a caller that cannot wait on them: the `std.io.LinePoller`'s
+    /// `poll()` takes those read so far. Not for stdin, which a screen's
+    /// keys read. A child's output is the poller's from then on: the stream
+    /// reads as ended, and the pipe is closed once the poller's thread
+    /// reads its end (after `close()` too, the rest thrown away).
+    fn poller<'v>(this: values::Value) -> anyhow::Result<LinePoller> {
+        let io = this.downcast_ref_err::<Readable>().into_anyhow_result()?;
+        if matches!(&*io, Readable::Stdin(_)) {
+            return Err(anyhow!("stdin cannot be polled; a screen reads its keys"));
+        }
+        Ok(LinePoller::spawn(io.take_boxed_read())?)
     }
 
     /// Reads bytes from this source.
@@ -576,13 +780,15 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     }
                     return Ok(data.len() as u32);
                 }
-                match inner.lock().write(data) {
-                    Ok(n) => {
-                        crate::terminal::wrote(1, &data[..n]);
+                // Whole, so a reader of the stream (a bridge's parent) never
+                // gets a message cut where the pipe was full.
+                match inner.lock().write_all(data) {
+                    Ok(()) => {
+                        crate::terminal::wrote(1, data);
                         if copy {
-                            copy_output(&data[..n]);
+                            copy_output(data);
                         }
-                        Ok(n as u32)
+                        Ok(data.len() as u32)
                     }
                     // Reported as written; see `ignore_broken_pipe`.
                     Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
@@ -607,13 +813,15 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     }
                     return Ok(data.len() as u32);
                 }
-                match inner.lock().write(data) {
-                    Ok(n) => {
-                        crate::terminal::wrote(2, &data[..n]);
+                // Whole, so a reader of the stream (a bridge's parent) never
+                // gets a message cut where the pipe was full.
+                match inner.lock().write_all(data) {
+                    Ok(()) => {
+                        crate::terminal::wrote(2, data);
                         if copy {
-                            copy_output(&data[..n]);
+                            copy_output(data);
                         }
-                        Ok(n as u32)
+                        Ok(data.len() as u32)
                     }
                     // Reported as written; see `ignore_broken_pipe`.
                     Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
@@ -760,5 +968,39 @@ mod remembered_tty_tests {
         remember_tty(None);
         assert_eq!(during, (!was.0, !was.1));
         assert_eq!((stdout_is_terminal(), stderr_is_terminal()), was);
+    }
+
+    /// Closed, a poller keeps nothing of a stream that never ends, and
+    /// still reads it, so its writer is never blocked.
+    #[test]
+    fn a_closed_poller_drains_an_endless_stream_keeping_nothing() {
+        struct Endless(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl std::io::Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                // Long enough to outlast the test, then over, so its thread ends.
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 1_000_000 {
+                    return Ok(0);
+                }
+                buf.fill(b'\n');
+                Ok(buf.len())
+            }
+        }
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let poller = LinePoller::spawn(Box::new(Endless(reads.clone()))).unwrap();
+        poller.close();
+        let at_close = reads.load(std::sync::atomic::Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while reads.load(std::sync::atomic::Ordering::SeqCst) < at_close + 100 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stream stopped being read"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            poller.lines.lock().unwrap().try_recv().is_err(),
+            "nothing kept"
+        );
+        assert!(poller.ended.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

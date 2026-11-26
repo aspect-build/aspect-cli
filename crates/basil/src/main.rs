@@ -226,6 +226,10 @@ fn run_build(args: &[String], verb: &str) {
         if std::mem::take(&mut drawn) {
             eprint!("\r\x1b[1A\x1b[K");
         }
+        if *line == STDERR_KIND {
+            eprintln!("{}", stderr_kind());
+            continue;
+        }
         match line.strip_prefix("stdout:") {
             Some(out) => {
                 println!("{out}");
@@ -472,6 +476,19 @@ struct Scenario {
     /// for a SIGINT, then write this line after a cleanup pause and exit 8 —
     /// what an interrupted bazel prints on its way out.
     interrupt_tail: Option<&'static str>,
+}
+
+/// A `stderr_lines` entry that writes what stderr is instead
+/// ([`stderr_kind`]).
+const STDERR_KIND: &str = "<stderr kind>";
+
+/// `stderr: a terminal of <cols>x<rows>`, or `stderr: not a terminal`: what
+/// the client was given to write its console to.
+fn stderr_kind() -> String {
+    match bazel::console::capture::window_size(2) {
+        Some(ws) => format!("stderr: a terminal of {}x{}", ws.ws_col, ws.ws_row),
+        None => "stderr: not a terminal".to_string(),
+    }
 }
 
 /// Whether `line` is one of bazel's progress lines: `[1 / 2] …` or a phase.
@@ -762,6 +779,12 @@ fn scenario(name: &str) -> Scenario {
 
         // `success` with console chatter on stderr, for the captured-output
         // pipeline: a warning, a repeated line and a credential to rewrite.
+        // What the client's stderr is, a terminal (and its size) or not.
+        "stderr_kind" => Scenario {
+            stderr_lines: &[STDERR_KIND],
+            ..Default::default()
+        },
+
         "stderr_chatter" => Scenario {
             stderr_lines: &[
                 "INFO: Analyzed 1 target",

@@ -709,6 +709,8 @@ fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
 }
 
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    bridged_child();
     axl_runtime::startup::mark_process_start();
     axl_runtime::out::copy_axl_output();
     axl_runtime::engine::route_cli_output();
@@ -823,6 +825,8 @@ fn install_signal_watcher() {
         let Some((first, origin, _)) = next_signal().await else {
             return;
         };
+        #[cfg(unix)]
+        STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
         let signals = Signals::global();
         signals.record(first, origin);
         errln!("aspect-cli: {}, stopping…", first.message());
@@ -984,18 +988,125 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
         origin_of(
             LAST_SENDER.load(Ordering::SeqCst),
             std::process::id() as i32,
+            group_signaller(),
         )
     };
     Some((kind, origin, hangup))
 }
 
-/// Who a signal came from, by its sender's pid (`si_pid`): the terminal (0),
-/// or this process signalling its own group (a full screen's `interrupt()`),
-/// which reached the children as the terminal's Ctrl+C does; else another
-/// process.
+/// The browser (`aspect history browse`, its `r`) this process is the
+/// bridged child of: the pid it named in `ASPECT_GROUP_SIGNALLER`, held only
+/// when that pid is this process's parent at start-up, or already gone
+/// ([`bridged_child`]). Internal: only the browser sets the variable, and it
+/// is no setting a user makes.
 #[cfg(unix)]
-fn origin_of(sender: i32, own_pid: i32) -> SignalOrigin {
-    if sender == 0 || sender == own_pid {
+static GROUP_SIGNALLER: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+
+/// Whether a stop was asked of this process (its first SIGINT or SIGTERM),
+/// so a bridged child's watcher never asks a second one.
+#[cfg(unix)]
+static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+fn group_signaller() -> Option<i32> {
+    GROUP_SIGNALLER.get().copied().flatten()
+}
+
+/// Reads `ASPECT_GROUP_SIGNALLER` once and takes it out of this process's
+/// environment, so nothing this process starts (a nested CLI, Bazel and the
+/// credential helper it runs) sees it. Then, as the browser's bridged child
+/// ([`GROUP_SIGNALLER`]): the `COLUMNS` and `LINES` the browser gave taken
+/// out the same way, kept as the size of Bazel's console here; its stderr
+/// written to its stdout, so the browser
+/// reads one stream, in the order it was written; each build's events kept
+/// in the history flushed as they come, for the browser following them
+/// ([`axl_runtime::engine::follow_build_events`]); and once the browser is
+/// gone (this process is no longer its child: killed, or its terminal
+/// closed) or no longer reads it (its end of the pipe closed), a stop asked
+/// as the browser asks one, SIGINT to this process's group, so a run nobody
+/// watches does not go on with Bazel's output base locked. It asks at most
+/// once, and not at all when a stop was already asked: a second would be
+/// the hard stop that ends the run before its record is written.
+///
+/// The variable is heeded when it names this process's parent, or a
+/// browser already gone by the time this process starts (its parent is
+/// init, or the pid names no process): then the watcher stops it at once,
+/// as it would have a moment later. Any other process that has it (one
+/// that some other process started with this environment) ignores it.
+///
+/// Runs first in `main`, before any thread exists.
+#[cfg(unix)]
+fn bridged_child() {
+    let named = std::env::var("ASPECT_GROUP_SIGNALLER")
+        .ok()
+        .and_then(|pid| pid.parse::<i32>().ok());
+    // SAFETY: no other thread exists yet to read the environment.
+    unsafe {
+        std::env::remove_var("ASPECT_GROUP_SIGNALLER");
+    }
+    // SAFETY: getppid and a null signal are plain queries.
+    let parent = unsafe { libc::getppid() };
+    let gone = |pid: i32| {
+        parent == 1
+            || (unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+    };
+    let signaller = named.filter(|&pid| parent == pid || gone(pid));
+    let _ = GROUP_SIGNALLER.set(signaller);
+    let Some(signaller) = signaller else {
+        return;
+    };
+    // The browser's screen size, for Bazel's console here alone: what this
+    // process starts gets the size it would have had.
+    let size = |name: &str| std::env::var(name).ok().and_then(|n| n.parse::<u16>().ok());
+    if let (Some(cols), Some(rows)) = (size("COLUMNS"), size("LINES")) {
+        axl_runtime::engine::set_screen_size(cols, rows);
+        // SAFETY: no other thread exists yet to read the environment.
+        unsafe {
+            std::env::remove_var("COLUMNS");
+            std::env::remove_var("LINES");
+        }
+    }
+    // SAFETY: dup2 of this process's own standard descriptors.
+    unsafe {
+        libc::dup2(1, 2);
+    }
+    axl_runtime::engine::follow_build_events();
+    let _ = std::thread::Builder::new()
+        .name("bridge-parent".into())
+        .spawn(move || {
+            loop {
+                let mut out = libc::pollfd {
+                    fd: 1,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: poll of one descriptor of this process's own, no
+                // wait; getppid is a plain query.
+                let reader_gone = unsafe { libc::poll(&mut out, 1, 0) } > 0
+                    && out.revents & (libc::POLLERR | libc::POLLHUP) != 0;
+                if reader_gone || unsafe { libc::getppid() } != signaller {
+                    if !STOP_ASKED.load(std::sync::atomic::Ordering::SeqCst) {
+                        // SAFETY: a signal to this process's own group.
+                        unsafe {
+                            libc::kill(-libc::getpgrp(), libc::SIGINT);
+                        }
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+}
+
+/// Who a signal came from, by its sender's pid (`si_pid`): the terminal (0),
+/// this process signalling its own group (a full screen's `interrupt()`), or
+/// the `signaller` that named itself in `ASPECT_GROUP_SIGNALLER` (the history
+/// browser, which signals its child run's group as a terminal would): each
+/// reached the children as the terminal's Ctrl+C does; else another process.
+#[cfg(unix)]
+fn origin_of(sender: i32, own_pid: i32, signaller: Option<i32>) -> SignalOrigin {
+    if sender == 0 || sender == own_pid || signaller == Some(sender) {
         SignalOrigin::Terminal
     } else {
         SignalOrigin::Process
@@ -1165,8 +1276,10 @@ mod signal_origin_tests {
 
     #[test]
     fn a_signal_to_our_own_group_counts_as_the_terminals() {
-        assert!(matches!(origin_of(0, 42), SignalOrigin::Terminal));
-        assert!(matches!(origin_of(42, 42), SignalOrigin::Terminal));
-        assert!(matches!(origin_of(7, 42), SignalOrigin::Process));
+        assert!(matches!(origin_of(0, 42, None), SignalOrigin::Terminal));
+        assert!(matches!(origin_of(42, 42, None), SignalOrigin::Terminal));
+        assert!(matches!(origin_of(7, 42, None), SignalOrigin::Process));
+        assert!(matches!(origin_of(7, 42, Some(7)), SignalOrigin::Terminal));
+        assert!(matches!(origin_of(8, 42, Some(7)), SignalOrigin::Process));
     }
 }

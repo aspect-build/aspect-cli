@@ -4,7 +4,8 @@
 //! until it is all passed on. With no terminal, a child marked interactive
 //! runs as any other: piped and copied, with no marker lines. A stdout
 //! nobody reads stalls neither stderr nor a screen taken meanwhile, and a
-//! screen's dump of the task's output is never spliced with a child's.
+//! screen's dump of the task's output is never spliced with a child's. A
+//! child's output a poller read to its end is closed.
 
 mod common;
 
@@ -402,6 +403,29 @@ def _releasestall(ctx):
     child.wait()
     return 0
 
+def _polled(ctx):
+    counts = []
+    for i in range(12):
+        proc = ctx.std.process.command("sh").args(["-c", "echo out; echo err >&2"]).stdout("piped").stderr("piped").spawn()
+        out = proc.stdout().poller()
+        err = proc.stderr().poller()
+        for _ in range(500):
+            out.poll()
+            err.poll()
+            if out.ended and err.ended:
+                break
+            sleep(10)
+        proc.wait()
+        if i in (1, 11):
+            # This process's open descriptors, once each poller's thread let go.
+            sleep(100)
+            count = 'if [ -d /proc/$PPID/fd ]; then ls /proc/$PPID/fd; else lsof -p $PPID; fi | wc -l > fds.txt'
+            ctx.std.process.command("sh").args(["-c", count]).spawn().wait()
+            counts.append(int(ctx.std.fs.read_to_string("fds.txt").strip()))
+    print("FDS %d %d" % (counts[0], counts[1]))
+    return 0
+
+polled = task(implementation = _polled, summary = "Children's output polled, again and again.")
 takestall = task(implementation = _takestall, summary = "A screen taken while stdout takes nothing.")
 releasestall = task(implementation = _releasestall, summary = "A dump while a forwarder is stalled on stdout.")
 interactive = task(implementation = _interactive, summary = "An interactive child.")
@@ -2046,4 +2070,23 @@ fn a_dump_never_erases_a_childs_unended_line() {
         written.contains("CLIHEAD-") && written.contains("-CLITAIL"),
         "{written:?}"
     );
+}
+
+/// A child's output a poller read to its end is closed, not kept open for as
+/// long as the task runs: a screen running child after child (the History
+/// screen's `r`) holds no more descriptors after a dozen of them than after
+/// two.
+#[cfg(unix)]
+#[test]
+fn a_polled_childs_pipes_are_closed_at_their_end() {
+    let (output, _) = run("polled");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let line = stderr
+        .lines()
+        .find_map(|l| l.split_once("FDS ").map(|(_, n)| n.to_owned()))
+        .unwrap_or_else(|| panic!("no count in:\n{stderr}"));
+    let (two, twelve) = line.split_once(' ').expect("two counts");
+    let (two, twelve): (i64, i64) = (two.parse().unwrap(), twelve.trim().parse().unwrap());
+    assert!(twelve <= two, "descriptors grew from {two} to {twelve}");
 }

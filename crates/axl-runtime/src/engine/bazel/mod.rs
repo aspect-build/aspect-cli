@@ -396,6 +396,7 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
 }
 
 pub(crate) use bazel::command::stderr_detail;
+pub use build::follow_build_events;
 pub(crate) use output::console_trait;
 
 /// The startup flags for an invocation: sourced from the active `Bazelrc`
@@ -1634,6 +1635,27 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             }
         };
         stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds)
+    }
+
+    /// Follow a build event stream another process's build is still writing,
+    /// such as the task history's copy a build names as
+    /// `build.build_events_file`: `poll()` gives the whole events written
+    /// since the last call, the same `BuildEvent` values a live build's
+    /// `iterator()` yields, never waiting (none before the file is there).
+    /// `complete` says whether the last event `poll()` returned was Bazel's
+    /// final one, `error` why following stopped (a message that does not
+    /// decode) once every event before it was returned, and `restarts` how
+    /// often the file started over (a retried attempt), as far as the events
+    /// `poll()` returned so far go: a call never returns events from both
+    /// sides of a restart.
+    #[starlark(as_type = stored_events::FollowedBuildEvents)]
+    fn follow<'v>(
+        #[starlark(require = pos)] path: &str,
+    ) -> anyhow::Result<stored_events::FollowedBuildEvents> {
+        Ok(stored_events::FollowedBuildEvents::new(
+            std::path::Path::new(path),
+            None,
+        ))
     }
 
     /// Create a handle iterating this build's BES stream. Pass it in

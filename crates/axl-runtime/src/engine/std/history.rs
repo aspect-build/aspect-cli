@@ -1,8 +1,9 @@
 //! `ctx.std.history`: the task history's records of past runs (each entry's
 //! `task.json`; see `engine::task_record`), newest first (`list`, `get`),
 //! how many it keeps (`census`, which reads them all once for `list` to
-//! answer from), a run's kept output read back (`read_output`), and the
-//! current run's links.
+//! answer from), a run's kept output read back (`read_output`), a run as a
+//! command to run it again (`command`, its arguments never handed back),
+//! and the current run's links.
 //!
 //! A record is handed out as a dict, its command line redacted, with keys of
 //! the reader's own: `dir`, the entry's folder; `outcome`, how it ended in a
@@ -18,6 +19,7 @@ use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
+use starlark::values::list::UnpackList;
 use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::{
     self, NoSerialize, ProvidesStaticType, StarlarkValue, Value, starlark_value,
@@ -127,6 +129,45 @@ fn output_tail(mut file: std::fs::File, max: u64) -> std::io::Result<(Vec<u8>, u
         .map_or(bytes.len(), |i| i + 1);
     bytes.drain(..start);
     Ok((bytes, from + start as u64))
+}
+
+/// A run's command line as typed (`argv`, the program first) as arguments to
+/// run it again: without the program; before a `--`, without the flags
+/// `drop` names (`--x` takes `--x`, `--x=…` and `--x:…`; an entry with `=`
+/// only that flag exactly) and the argument after each `drop_with_value`
+/// names written without `=`, with `add` in their place.
+fn again_args(
+    argv: &[String],
+    drop: &[String],
+    drop_with_value: &[String],
+    add: &[String],
+) -> Vec<String> {
+    let args = argv.get(1..).unwrap_or_default();
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let dropped = |arg: &str| {
+        drop.iter().any(|d| {
+            if d.contains('=') {
+                arg == d
+            } else {
+                arg == d || arg.starts_with(&format!("{d}=")) || arg.starts_with(&format!("{d}:"))
+            }
+        })
+    };
+    let mut out = vec![];
+    let mut skip = false;
+    for arg in &args[..end] {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        if dropped(arg) {
+            skip = drop_with_value.iter().any(|d| d == arg);
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out.extend(add.iter().cloned());
+    out.extend(args[end..].iter().cloned());
+    out
 }
 
 /// The outcomes `list` filters by.
@@ -294,6 +335,44 @@ fn history_methods(registry: &mut MethodsBuilder) {
         )))
     }
 
+    /// The run with task ID `id` (or whose entry's folder is named `id`)
+    /// as a command to run it again: this CLI's own binary with the run's
+    /// arguments as typed, not redacted, which the command never hands back
+    /// (`std.process.Command`, ready for `current_dir`, streams and
+    /// `spawn`). Before a `--` (the CLI's flags, not Bazel's arguments), the
+    /// flags `drop` names are left out (`--x` takes `--x`, `--x=…`, `--x:…`;
+    /// an entry with `=` only that flag exactly), and so is the argument after
+    /// each one `drop_with_value` names, written without `=`; `add` goes in
+    /// their place, before the `--`. None when the run is not kept, or its
+    /// record's command line was redacted on disk (once its files were
+    /// pruned), as running that would pass the redactions on.
+    fn command<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] id: &str,
+        #[starlark(require = named, default = UnpackList::default())] drop: UnpackList<String>,
+        #[starlark(require = named, default = UnpackList::default())] drop_with_value: UnpackList<
+            String,
+        >,
+        #[starlark(require = named, default = UnpackList::default())] add: UnpackList<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneOr<crate::engine::std::process::Command>> {
+        let history = RuntimeEnv::from_eval(eval)?.history.clone();
+        let Some((_, record)) = history.record(id).filter(|(_, r)| !r.argv_redacted) else {
+            return Ok(NoneOr::None);
+        };
+        let args = again_args(
+            &record.argv,
+            &drop.items,
+            &drop_with_value.items,
+            &add.items,
+        );
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.args(args);
+        Ok(NoneOr::Other(
+            crate::engine::std::process::Command::from_std(cmd, false),
+        ))
+    }
+
     /// Add a link to this run's record: a results page, say, which a history
     /// list then shows. A link already there is not added twice.
     fn link<'v>(
@@ -309,6 +388,63 @@ fn history_methods(registry: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
+    /// A run's arguments to run it again: the program and the dropped
+    /// flags left out before a `--`, the added ones in their place, Bazel's
+    /// arguments after it as they were.
+    #[test]
+    fn a_runs_arguments_again() {
+        let v = |s: &[&str]| s.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let drop = v(&["--dashboard", "--bridge"]);
+        let with_value = v(&["--dashboard:actions"]);
+        let add = v(&["--bridge:enabled=true", "--dashboard:enabled=false"]);
+        assert_eq!(
+            super::again_args(
+                &v(&[
+                    "/bin/aspect",
+                    "test",
+                    "--dashboard:actions",
+                    "all",
+                    "--dashboard",
+                    "//a",
+                    "--",
+                    "--dashboard"
+                ]),
+                &drop,
+                &with_value,
+                &add
+            ),
+            v(&[
+                "test",
+                "//a",
+                "--bridge:enabled=true",
+                "--dashboard:enabled=false",
+                "--",
+                "--dashboard"
+            ])
+        );
+        assert_eq!(
+            super::again_args(
+                &v(&[
+                    "/bin/aspect",
+                    "build",
+                    "--dashboard",
+                    "--bridge:enabled=true",
+                    "--dashboard:enabled=false",
+                    "//a"
+                ]),
+                &v(&["--bridge", "--dashboard:enabled=false"]),
+                &[],
+                &[]
+            ),
+            v(&["build", "--dashboard", "//a"]),
+            "an exact entry drops that flag alone"
+        );
+        assert_eq!(
+            super::again_args(&[], &drop, &[], &[]),
+            Vec::<String>::new()
+        );
+    }
+
     /// A long output is read from its first whole line in the limit, a line
     /// that starts right at the cut included, with how much came before.
     #[test]
