@@ -2,13 +2,10 @@
 A default 'build' task that wraps a 'bazel build' command.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation")
+load("@aspect//bazel.axl", "bazel_invocation")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
-load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
-load("./private/lib/tips.axl", "tips")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # High-level invocation handle: resolves targets, the flag → rc pipeline,
@@ -49,9 +46,5 @@ build = task(
     args = bazel_invocation.targets_arg("build") | bazel_invocation.args("the build") | repro_flavor_args(),
     show_task_options = True,
     summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

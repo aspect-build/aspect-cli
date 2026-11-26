@@ -147,7 +147,7 @@ def _impl(ctx):
     ctx.std.fs.write("suggestions.json", json.encode(result.suggestions))
     return 0
 
-probe = task(kind = "probe", summary = "Capture native lint review comments.", implementation = _impl, traits = [LintTrait])
+probe = task(kind = "probe", summary = "Capture native lint review comments.", implementation = _impl)
 """)
     ctx.std.fs.write(root + "/fix.patch", "--- a/subject.ts\n+++ b/subject.ts\n@@ -2,1 +2,1 @@\n-let a = 1\n+const a = 1\n")
     ctx.std.fs.write(root + "/findings.sarif", json.encode({
@@ -240,7 +240,7 @@ load("@aspect//traits.axl", "LintTrait")
 def _impl(ctx):
     return 0
 
-probe = task(kind = "probe", summary = "Check GitHub feature startup.", implementation = _impl, traits = [LintTrait])
+probe = task(kind = "probe", summary = "Check GitHub feature startup.", implementation = _impl)
 """)
     for case, label in [("", "local build"), ("branch", "CI branch build"), ("pr", "CI PR build")]:
         is_pr = case == "pr"
@@ -258,7 +258,6 @@ probe = task(kind = "probe", summary = "Check GitHub feature startup.", implemen
 
 _STATUS_COMMENT_PROBE = """
 load("@std//base64.axl", "base64")
-load("@aspect//tips.axl", "tips")
 load("@aspect//traits.axl", "Phases", "TaskUpdate")
 
 _API = "https://ghes.example.mil/api/v3/repos/fixture/repo/"
@@ -372,7 +371,7 @@ def _impl(ctx):
     ctx.std.fs.write("result.json", json.encode({"calls": calls, "contributions": contributions, "after_first": first[0], "comments": comments}))
     return 0
 
-probe = task(kind = "probe", summary = "Drive status-comment updates.", implementation = _impl, traits = [Phases] + tips.TRAITS)
+probe = task(kind = "probe", summary = "Drive status-comment updates.", implementation = _impl)
 """
 
 # The probe calls every `task_update` handler, so every other feature that
@@ -493,7 +492,6 @@ def _test_status_comment_coordination(ctx):
     _assert_uncoordinated_comment("opted out", result)
 
 _STATUS_CHECK_PROBE = """
-load("@aspect//tips.axl", "tips")
 load("@aspect//traits.axl", "Phases", "TaskUpdate")
 
 _API = "https://ghes.example.mil/api/v3/repos/fixture/repo/"
@@ -534,7 +532,7 @@ def _impl(ctx):
     ctx.std.fs.write("result.json", json.encode({"calls": calls}))
     return 0
 
-probe = task(kind = "probe", summary = "Drive status-check updates.", implementation = _impl, traits = [Phases] + tips.TRAITS)
+probe = task(kind = "probe", summary = "Drive status-check updates.", implementation = _impl)
 """
 
 _STATUS_CHECK_CONFIG = """

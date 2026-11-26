@@ -63,6 +63,10 @@ unsafe impl<'v> Trace<'v> for Defer<'v> {
 pub struct TaskContext<'v> {
     pub args: values::Value<'v>,
     pub traits: values::Value<'v>,
+    /// The trait type `ctx.traits` is read at for the console of the task's
+    /// builds ([`crate::engine::bazel::console_trait`]); None when the run
+    /// has none.
+    pub console_trait: Option<values::Value<'v>>,
     pub task: values::Value<'v>,
     bazel: values::Value<'v>,
     /// The run's `TaskHooks`, shared with every feature's context.
@@ -84,6 +88,7 @@ unsafe impl<'v> Trace<'v> for TaskContext<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.args.trace(tracer);
         self.traits.trace(tracer);
+        self.console_trait.trace(tracer);
         self.task.trace(tracer);
         self.bazel.trace(tracer);
         self.hooks.trace(tracer);
@@ -97,6 +102,7 @@ impl<'v> TaskContext<'v> {
     pub fn new(
         args: values::Value<'v>,
         traits: values::Value<'v>,
+        console_trait: Option<values::Value<'v>>,
         task: values::Value<'v>,
         bazel: values::Value<'v>,
         hooks: values::Value<'v>,
@@ -107,6 +113,7 @@ impl<'v> TaskContext<'v> {
         Self {
             args,
             traits,
+            console_trait,
             task,
             bazel,
             hooks,
@@ -208,10 +215,11 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(ValueTyped::new_err(ctx.args)?)
     }
 
-    /// Configured trait instances visible to this task. Index by a trait
-    /// type to read its fields, e.g. `ctx.traits[GitHub].token`. Only
-    /// trait types this task opted into via `task(traits = [...])`
-    /// are present.
+    /// The run's trait instances. Index by any trait type to read its
+    /// fields, e.g. `ctx.traits[GitHub].token`: the instance is the one
+    /// configs wrote and features registered hooks on, created with its
+    /// defaults on first access. `T in ctx.traits` is True for every trait
+    /// type.
     #[starlark(attribute)]
     fn traits<'v>(this: values::Value<'v>) -> starlark::Result<ValueTyped<'v, TraitMap<'v>>> {
         let ctx = this.downcast_ref_err::<TaskContext>()?;
@@ -359,10 +367,8 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
         Ok(FrozenValueTyped::new_err(ctx.args)?)
     }
 
-    /// Configured trait instances visible to this task. Index by a trait
-    /// type to read its fields, e.g. `ctx.traits[GitHub].token`. Only
-    /// trait types this task opted into via `task(traits = [...])`
-    /// are present.
+    /// The trait instances of a frozen context: a snapshot. A type with no
+    /// instance in it reads as a fresh default instance, which is not kept.
     #[starlark(attribute)]
     fn traits<'v>(
         this: values::Value<'v>,

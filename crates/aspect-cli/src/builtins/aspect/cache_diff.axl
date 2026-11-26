@@ -503,7 +503,6 @@ diff = task(
         "change). Costs the build of the missing actions."
     ),
     implementation = _impl,
-    traits = [BazelTrait],
     args = {
         "mode": args.string(
             default = "overreport",

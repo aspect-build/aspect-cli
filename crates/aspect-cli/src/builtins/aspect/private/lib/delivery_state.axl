@@ -11,8 +11,7 @@ config.axl picks one everywhere, or the deprecated direct-Redis
 `redis_state.axl`:
 
     load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api")
-    if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = delivery_api.connect
+    ctx.traits[DeliveryState].connect = delivery_api.connect
 
 A backend reports "not configured" and "unreachable" the same way, through
 `Backend.status.ok`, so the task has one startup error path.
@@ -114,6 +113,7 @@ Backend = record(
     deprecation = field(str, default = ""),
 )
 
+# Read by the `delivery` task.
 DeliveryState = trait(
     connect = attr(
         typing.Callable[[TaskContext, Params], Backend] | None,

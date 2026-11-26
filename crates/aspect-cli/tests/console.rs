@@ -21,7 +21,7 @@ use std::process::{Command, Output};
 
 const TASKS: &str = r#"
 load("@aspect//private/lib/environment.axl", "buildkite_section", "debug", "detail", "info", "warn")
-load("@aspect//private/lib/lifecycle.axl", "Phase", "Phases", "phases")
+load("@aspect//private/lib/lifecycle.axl", "Phase", "phases")
 
 def _impl(ctx):
     ctx.std.io.stdout.write("preset=%s\n" % ctx.console.template_preset)
@@ -44,7 +44,6 @@ def _impl(ctx):
 check = task(
     implementation = _impl,
     summary = "Exercise the console surface.",
-    traits = [Phases],
     args = {"code": args.int(default = 0), "flag": args.boolean(default = False)},
 )
 
@@ -54,7 +53,6 @@ grouped_check = task(
     summary = "Exercise the console surface in a group.",
     group = ["fx"],
     kind = "check",
-    traits = [Phases],
     args = {"code": args.int(default = 0), "flag": args.boolean(default = False)},
 )
 

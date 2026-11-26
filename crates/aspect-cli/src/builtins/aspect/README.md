@@ -195,8 +195,7 @@ State backend: the task gets its "already delivered" store from the `DeliverySta
 load("@aspect//delivery_state.axl", "DeliveryState", "redis_state")
 
 def config(ctx: ConfigContext):
-    if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = redis_state.connect
+    ctx.traits[DeliveryState].connect = redis_state.connect
 ```
 
 ### Custom delivery scheduling

@@ -4,8 +4,7 @@ the implementations that ship with the CLI.
     load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api")
 
     def config(ctx: ConfigContext):
-        if DeliveryState in ctx.traits:
-            ctx.traits[DeliveryState].connect = delivery_api.connect
+        ctx.traits[DeliveryState].connect = delivery_api.connect
 
 `DeliveryState.connect` is `(ctx, delivery_state.Params) -> delivery_state.Backend`.
 Unset, the delivery task uses `deliveryd.connect` on an Aspect Workflows runner

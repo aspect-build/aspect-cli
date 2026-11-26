@@ -1657,5 +1657,4 @@ github_detect_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = tips.TRAITS,
 )

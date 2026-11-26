@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use starlark::environment::{FrozenModule, Globals, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::{AstModule, Dialect};
-use starlark::values::Value;
+use starlark::values::{OwnedFrozenValue, Value, ValueLike};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -14,6 +14,7 @@ use super::error::EvalError;
 use super::load_path::{LoadPath, join_confined};
 use super::prefetch::{Prefetch, Taken};
 use crate::engine::store::Env;
+use crate::engine::r#trait::FrozenTraitType;
 use crate::module::Mod;
 
 /// State of a path in the loader's module cache.
@@ -97,6 +98,48 @@ impl<'m> AxlLoader<'m> {
             let out = body();
             *self.prefetch.borrow_mut() = previous;
             out
+        })
+    }
+
+    /// The value `@<module>//<subpath>` exports as `name`, if that file has
+    /// been loaded. Never loads it.
+    pub(crate) fn loaded_export(
+        &self,
+        module: &str,
+        subpath: &str,
+        name: &str,
+    ) -> Option<OwnedFrozenValue> {
+        let dep = self.modules.iter().find(|m| m.name == module)?;
+        let path = join_confined(&dep.root, Path::new(subpath)).ok()?;
+        match self.loaded_modules.borrow().get(&path)? {
+            LoadState::Loaded(m) => m.get(name).ok(),
+            LoadState::Loading => None,
+        }
+    }
+
+    /// The first trait type a loaded module exports for which `pred` holds,
+    /// visiting modules in path order so the pick is deterministic.
+    pub(crate) fn find_exported_trait(
+        &self,
+        pred: impl Fn(&FrozenTraitType) -> bool,
+    ) -> Option<OwnedFrozenValue> {
+        let loaded = self.loaded_modules.borrow();
+        let mut modules: Vec<(&PathBuf, &FrozenModule)> = loaded
+            .iter()
+            .filter_map(|(path, state)| match state {
+                LoadState::Loaded(m) => Some((path, m)),
+                LoadState::Loading => None,
+            })
+            .collect();
+        modules.sort_by(|a, b| a.0.cmp(b.0));
+        modules.into_iter().find_map(|(_, m)| {
+            m.names()
+                .filter_map(|name| m.get(name.as_str()).ok())
+                .find(|v| {
+                    v.value()
+                        .downcast_ref::<FrozenTraitType>()
+                        .is_some_and(&pred)
+                })
         })
     }
 

@@ -345,13 +345,14 @@ _TipsTrait = trait(
 )
 
 # Public trait carrying the user `tip_suggestion` hook list, separate from
-# `_TipsTrait` so users see only the hook surface. Tasks include it via
-# `tips.TRAITS`; users register from `.aspect/config.axl`:
+# `_TipsTrait` so users see only the hook surface. Users register from
+# `.aspect/config.axl`:
 #
 #     ctx.traits[TipsTrait].tip_suggestion.append(my_hook)
 #
 # Each hook is `(ctx: TaskContext, info: TipInfo) -> TipSuggestion`, run on
-# every `add_tip` by `apply_tip_suggestion_hooks`.
+# every `add_tip` by `apply_tip_suggestion_hooks`, in any task. `rules` apply
+# to every Bazel build's console, in any task.
 TipsTrait = trait(
     tip_suggestion = attr(list[typing.Callable[[TaskContext, TipInfo], TipSuggestion]], default = []),
     # Rules of a repository's own: `tip_rule(...)` values, appended from
@@ -574,16 +575,15 @@ def emit_rule_tips(ctx, rule: TipRule, report: dict, build, batch: str):
     """Emit `rule`'s tips from `report`, its `bazel.output.aggregate` stage's
     entry in `build.output_aggregates()`. `batch`, which must be unique
     among the task's builds, names the build, so its aggregates count once
-    however many tips it emits. Nothing in a task
-    without the tips traits, which has nowhere to show them, or when
-    `only_if(ctx, build)` says not to.
+    however many tips it emits. Nothing when the report counted nothing,
+    or when `only_if(ctx, build)` says not to.
 
     `emit(ctx, build, groups)`, when the rule has one, decides the tips
     instead: it gets each group as `{"key", "line", "count", "values",
     "truncated"}` and returns dicts of `title`, `body` (Jinja2 over `vars`,
     by default the first group's `line`), and optionally `severity`, `key`
     and `vars`."""
-    if _TipsTrait not in ctx.traits or not report or not report.get("count"):
+    if not report or not report.get("count"):
         return
     if rule.only_if != None and not rule.only_if(ctx, build):
         return
@@ -1704,5 +1704,4 @@ tips = struct(
     _set_auto_print_for_test = lambda ctx, v: ctx.traits[_TipsTrait]._set_auto_print(v),
     _set_sink_for_test = lambda ctx, fn: ctx.traits[_TipsTrait]._set_sink(fn),
     _finish_for_test = lambda ctx: ctx.traits[_TipsTrait]._finish(ctx),
-    TRAITS = [_TipsTrait, TipsTrait],
 )

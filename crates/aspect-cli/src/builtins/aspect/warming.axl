@@ -32,9 +32,7 @@ load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/environment.axl", "error", "warn")
-load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
-load("./private/lib/tips.axl", "tips")
 load("./private/lib/warming_results.axl", warming_conclusion = "conclusion", warming_init_data = "init_data")
 
 ASPECT_CLI_RELEASES_URL = "https://github.com/aspect-build/aspect-cli/releases"
@@ -277,10 +275,6 @@ warming = task(
     summary = "Pre-populate Bazel caches on a CI runner (and archive them on Aspect Workflows runners).",
     description = "Cleans prior Bazel state under the runner's storage mount, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives to the warming bucket, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
     implementation = _impl,
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     args = {
         "targets": args.positional(
             minimum = 1,

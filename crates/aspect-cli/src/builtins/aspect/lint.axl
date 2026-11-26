@@ -34,14 +34,12 @@ load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTE
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
-load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_sarif", "sarif_diagnostics", "scope_files")
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "did_you_mean_then", "pluralize")
-load("./private/lib/tips.axl", "tips")
 
 # Poll budget for pending lint files after build.wait(): remote downloads are
 # async and the BES event can arrive before the file lands. 30s is generous.
@@ -306,6 +304,7 @@ LintEndResult = record(
     comment_urls = field(dict, default = {}),
 )
 
+# Fired by the `lint` task.
 LintTrait = trait(
     # Lifecycle hooks. Each is a list of callables; features append to compose.
 
@@ -1375,11 +1374,6 @@ lint = task(
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
     } | bazel_flags.args("the lint build") | bazel_announce.args("the lint build") | bes_args() | bazel_invocation.target_pattern_file_arg() | repro_flavor_args(include_fix = True),
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-        LintTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )
 

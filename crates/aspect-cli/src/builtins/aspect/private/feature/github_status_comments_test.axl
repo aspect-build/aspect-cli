@@ -2835,5 +2835,4 @@ pr_comment_snapshot_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = tips.TRAITS,
 )

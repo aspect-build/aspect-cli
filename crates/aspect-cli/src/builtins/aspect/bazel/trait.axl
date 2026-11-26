@@ -134,6 +134,9 @@ ExecLogHook = record(
     kinds = field(list[str], default = []),
 )
 
+# Fired by every built-in task that drives Bazel: build, test, run, lint,
+# format, gazelle, ci warming, delivery and cache diff. The runtime calls the
+# `output_*` hooks itself for every `ctx.bazel.build`/`test` of any task.
 BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
     # One field per Bazel command AXL can run (`engine/bazel/mod.rs` exposes

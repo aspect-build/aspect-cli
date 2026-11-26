@@ -9,6 +9,8 @@
 //! - `.run_task(idx)` — discover tasks via `MultiPhaseEval`, execute task `idx`.
 //!
 //! `.with_loader()` opts into a real `AxlLoader` so `load("@std//...")` works.
+//! `.with_module(name, files)` gives `run_task` a dependency module to
+//! `load("@<name>//...")` from.
 //!
 //! Macros at the crate root cover the two most common one-liners:
 //! `axl_eval!(c)` (= `eval(c).with_loader().repr()`) and
@@ -93,6 +95,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         exporting: false,
         history: None,
         host_env: None,
+        modules: vec![],
     }
 }
 
@@ -106,6 +109,9 @@ pub struct EvalBuilder {
     signals: Option<Arc<Signals>>,
     exporting: bool,
     history: Option<PathBuf>,
+    /// Dependency modules for [`EvalBuilder::run_task`]: name and
+    /// `(subpath, contents)` files.
+    modules: Vec<(String, Vec<(String, String)>)>,
     host_env: Option<(
         StreamColor,
         bool,
@@ -194,6 +200,18 @@ impl EvalBuilder {
     /// blocks) without touching the other tests.
     pub fn with_signals(mut self, signals: Arc<Signals>) -> Self {
         self.signals = Some(signals);
+        self
+    }
+
+    /// Declare a dependency module `name` for [`EvalBuilder::run_task`],
+    /// made of `files` (`(subpath, contents)`), so the snippet can
+    /// `load("@<name>//<subpath>", ...)` from it.
+    pub fn with_module(mut self, name: &str, files: &[(&str, &str)]) -> Self {
+        let files = files
+            .iter()
+            .map(|(path, code)| (path.to_string(), code.to_string()))
+            .collect();
+        self.modules.push((name.to_string(), files));
         self
     }
 
@@ -310,7 +328,16 @@ impl EvalBuilder {
 
         let signals = self.signals.clone().unwrap_or_else(Signals::new);
         let result = ModuleEnv::with(|env| -> anyhow::Result<Option<u8>> {
-            let modules: Vec<Mod> = vec![];
+            let mut modules: Vec<Mod> = vec![];
+            for (name, files) in &self.modules {
+                let root = tmp.path().join("modules").join(name);
+                for (subpath, code) in files {
+                    let path = root.join(subpath);
+                    std::fs::create_dir_all(path.parent().expect("a file has a parent"))?;
+                    std::fs::write(path, code)?;
+                }
+                modules.push(Mod::new(root.clone(), name.clone(), root));
+            }
             let mut root_mod = Mod::new(
                 tmp.path().to_path_buf(),
                 "_root".to_string(),

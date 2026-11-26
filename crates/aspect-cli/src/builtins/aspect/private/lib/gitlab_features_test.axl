@@ -46,7 +46,6 @@ def _eq(label, got, want):
 
 _STATUS_NOTE_PROBE = """
 load("@std//base64.axl", "base64")
-load("@aspect//tips.axl", "tips")
 load("@aspect//traits.axl", "Phases", "TaskUpdate")
 
 _API = "https://gitlab.example.mil/api/v4/projects/acme%2Fwidgets/merge_requests/1/"
@@ -152,7 +151,7 @@ def _impl(ctx):
     ctx.std.fs.write("result.json", json.encode({"calls": calls, "contributions": contributions, "after_first": first[0], "notes": notes}))
     return 0
 
-probe = task(kind = "probe", summary = "Drive status-note updates.", implementation = _impl, traits = [Phases] + tips.TRAITS)
+probe = task(kind = "probe", summary = "Drive status-note updates.", implementation = _impl)
 """
 
 # The probe calls every `task_update` handler, so every other feature that
