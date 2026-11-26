@@ -176,12 +176,44 @@ def _identity(fs, resolved: list):
     """Which file `resolved` (from `_resolved`) is: `(dev, ino)` where it is
     there, whatever spelling names it (case, Unicode normalization, a hard
     link); else its deepest ancestor that is there, by `(dev, ino)`, and the
-    rest as named."""
+    rest as named. Where the filesystem gives no identity (off Unix), the
+    spelling followed to it."""
     for depth in range(len(resolved), -1, -1):
         meta, _ = _look(fs, "/" + "/".join(resolved[:depth]))
         if meta != None:
+            if meta.dev == None:
+                return tuple(resolved)
             return (meta.dev, meta.ino) + tuple(resolved[depth:])
     return tuple(resolved)
+
+def _escaped(path: str) -> str:
+    """`path` with each character past ASCII as `\\u` and its code, so two
+    spellings that look alike (NFC and NFD) read apart."""
+    out = []
+    for c in path.elems():
+        n = ord(c)
+        if n < 128:
+            out.append(c)
+        else:
+            code = "%x" % n
+            out.append("\\u" + "0" * max(0, 4 - len(code)) + code)
+    return "".join(out)
+
+def _copy_collision(fs, work: str, keys: dict):
+    """Why two named paths that are two files in the workspace are one in
+    the copies' directory `work` (a disk that folds case or Unicode where
+    the workspace doesn't, or two new names it folds into one), or None:
+    patch would put both their hunks on one copy, and copying it back would
+    write one result over both."""
+    seen = {}
+    for path, key in keys.items():
+        resolved, _ = _resolved(fs, work + "/" + path)
+        at = _identity(fs, resolved) if resolved != None else (work, path)
+        other = seen.get(at)
+        if other != None and keys[other] != key:
+            return "%s and %s are one file where the patch is applied" % (_escaped(other), _escaped(path))
+        seen[at] = path
+    return None
 
 def _refusal(fs, cwd: str, headers: list):
     """Why a patch with `headers` is refused before anything is copied or
@@ -192,34 +224,38 @@ def _refusal(fs, cwd: str, headers: list):
     two as one, a hard link); one whose symlinks lead out of the workspace,
     or can't be followed; one there that isn't a regular file; or a file
     removed through a symlink naming it. A symlink within the workspace is
-    followed. Two new names no file has yet are told apart as spelled."""
+    followed. Two new names no file has yet are told apart as spelled here;
+    `_copy_collision` catches them where the copies' directory folds them.
+    Returns `(why, keys)`: the reason (paths shown `_escaped`) and `{}`, or
+    None and each named path's identity in the workspace."""
     root, why = _resolved(fs, cwd)
     if root == None:
-        return "the workspace %s" % why
+        return "the workspace %s" % why, {}
     removed = [old for old, new in headers if old and not new]
     seen = {}
     for old, new in headers:
         for path in {p: True for p in (old, new) if p}:
             parts = path.split("/")
+            shown = _escaped(path)
             if "" in parts or "." in parts:
-                return "%s has a `.` or empty component" % path
+                return "%s has a `.` or empty component" % shown, {}
             resolved, why = _resolved(fs, cwd + "/" + path)
             if resolved == None:
-                return "%s %s" % (path, why)
+                return "%s %s" % (shown, why), {}
             if resolved[:len(root)] != root or len(resolved) == len(root):
-                return "%s leads out of the workspace" % path
+                return "%s leads out of the workspace" % shown, {}
             key = _identity(fs, resolved)
             if key in seen:
-                return "%s is named in more than one header" % path if seen[key] == path else "%s and %s are one file" % (seen[key], path)
+                return ("%s is named in more than one header" % shown if seen[key] == path else "%s and %s are one file" % (_escaped(seen[key]), shown)), {}
             seen[key] = path
             meta, _ = _look(fs, "/" + "/".join(resolved))
             if meta != None and not meta.is_file:
-                return "%s isn't a regular file" % path
+                return "%s isn't a regular file" % shown, {}
             if path in removed:
                 named, _ = _look(fs, cwd + "/" + path)
                 if named != None and named.is_symlink:
-                    return "%s is a symlink: removing it would keep what it names" % path
-    return None
+                    return "%s is a symlink: removing it would keep what it names" % shown, {}
+    return None, {path: key for key, path in seen.items()}
 
 def _same_bytes(fs, a: str, b: str) -> bool:
     """Whether files `a` and `b` hold the same bytes, whatever their text."""
@@ -308,7 +344,9 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     A patch is refused whole, in a warning naming the path and why, before
     anything is copied or patched, where `_refusal` says so or where it is
     larger than `_PATCH_CAP`; what follows takes a simple, well-formed
-    patch."""
+    patch. It is refused too, with nothing copied back, where two of its
+    files are one in the copies' directory, once made and again once
+    patched (`_copy_collision`)."""
     cwd = cwd or ctx.std.env.current_dir()
     fs = ctx.std.fs
     if not patch.startswith("/"):
@@ -337,7 +375,7 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     if outside:
         print("WARNING: %s was not applied: it names %s, outside the workspace" % (patch, ", ".join(outside)))
         return None
-    refused = _refusal(fs, cwd, headers)
+    refused, keys = _refusal(fs, cwd, headers)
     if refused:
         print("WARNING: %s was not applied: %s" % (patch, refused))
         return None
@@ -357,6 +395,10 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
         if _is_file(fs, cwd + "/" + path) and path not in made:
             had[path] = True
             fs.copy(cwd + "/" + path, work + "/" + path)
+    collision = _copy_collision(fs, work, keys)
+    if collision:
+        print("WARNING: %s was not applied: %s" % (patch, collision))
+        return None
     out = ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
         .current_dir(work).env("TMPDIR", scratch).stdout("piped").stderr("piped").spawn().wait_with_output()
     said = out.stdout + out.stderr
@@ -365,6 +407,10 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     code = out.status.code
     if code not in (0, 1):
         print("WARNING: %s was not applied: %s" % (patch, "patch exited with %d" % code if code != None else "patch was ended by a signal"))
+        return None
+    collision = _copy_collision(fs, work, keys)
+    if collision:
+        print("WARNING: %s was not applied: %s" % (patch, collision))
         return None
     ignored = _ignored_rejects(said)
     rejects = []
