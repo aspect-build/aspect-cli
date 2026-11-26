@@ -459,15 +459,15 @@ pub fn output_ansi_mark() -> Option<u64> {
     copies.log.as_ref().map(|log| log.ansi.written)
 }
 
-/// [`output_ansi_mark`], for a dump's mark, and whether the task or the
-/// console has an unended line now: the one the terminal is in the middle
-/// of, which the dump then has whole (written since, or still unended), so
-/// it redraws that row from its start rather than go on from it.
+/// [`output_ansi_mark`], for a dump's mark, and whether exactly one of the
+/// task and the console has an unended line now: then the dump has that
+/// line whole (written since, or still unended), and can redraw the row the
+/// terminal shows its start on, if that row is still the CLI's when it dumps.
 pub fn mark_dump() -> Option<(u64, bool)> {
     let copies = OUTPUT.lock().ok()?;
     let log = copies.log.as_ref()?;
-    let partial = !log.task.pending.is_empty() || !log.console.pending.is_empty();
-    Some((log.ansi.written, partial))
+    let one = log.task.pending.is_empty() != log.console.pending.is_empty();
+    Some((log.ansi.written, one))
 }
 
 /// `output.ansi` from `mark` on, its unended lines (the task's, then the
@@ -1540,10 +1540,11 @@ pub fn panicking_print_macros(sources: &include_dir::Dir<'_>) -> Vec<String> {
 mod tests {
     use bazel::console::links::LinkFormat;
 
-    /// `parts` written to a task's files one after the other, as with a
-    /// screen's dump mark set between them: what `output.log` and a dump
-    /// from the start have. Files are rendered from whole lines, whatever
-    /// the marks, so they read as the same bytes written at once.
+    /// `parts` written to a task's files one after the other: what
+    /// `output.log` and a dump from the start have. Guards whole-line
+    /// rendering: a line written in parts reads as the same bytes written
+    /// at once (a mark changes nothing in the files, which the pty tests
+    /// with a screen check end to end).
     fn written_in_parts(parts: &[(&[u8], bool)], secrets: &[&str]) -> (String, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let mut log =

@@ -679,8 +679,9 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     // Stdout is not flushed: a writer waiting on a stdout nobody reads may
     // hold its lock, and the take would wait on it. The CLI's own output
     // goes to the screen from here on ([`route`]), not through std's
-    // buffer; a partial line std still buffers goes out with the next write
-    // through it, after the release.
+    // buffer. A partial line std still buffers is flushed by the dump where
+    // stdout is the terminal; to a stdout that isn't, it goes out with the
+    // next write through std, after the release.
     axl_types::terminal::settle();
     let mut held = HELD.lock().unwrap();
     if held.is_some() {
@@ -1320,8 +1321,8 @@ static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
 /// of its own (the alternate screen) is taken or comes back from a suspend.
 static DUMPED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the task or the console had an unended line when the mark was
-/// set: the one the terminal is in the middle of, which the dump has whole.
+/// Whether exactly one of the task and the console had an unended line when
+/// the mark was set ([`crate::out::mark_dump`]): one the dump has whole.
 static DUMP_PARTIAL: AtomicBool = AtomicBool::new(false);
 
 /// The dump's mark from here on (at a take, or back from a suspend): what
@@ -1350,9 +1351,9 @@ fn dump_ready() -> bool {
 /// after a line `older` gives, `{n}` the count of those it leaves out.
 /// An unended last line (the task's, the console's, or a stray writer's the
 /// capture copied) is written as far as it goes, its end following on the
-/// terminal; a start the terminal already showed when the mark was set is
-/// left out ([`crate::out::mark_dump`]), and the dump then goes on from it
-/// rather than start a line of its own. Not copied to the output
+/// terminal. Where the terminal is left mid-line, the dump starts on a line
+/// of its own, or redraws that row from its start when the row is the CLI's
+/// one unended line, which the dump has whole. Not copied to the output
 /// files, which hold it; what stderr takes nothing of for `STALL_LIMIT` is
 /// dropped. Whether the screen's dump is written: by this call, or already
 /// by the release or suspend that gave the screen back ([`DUMPED`]); never
@@ -1420,21 +1421,29 @@ fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
     // Bounded as the replay is.
     // SAFETY: fd 2 stays open; ManuallyDrop never closes it.
     let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
-    let _turn = (!held)
+    let turn = (!held)
         .then(|| axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, Duration::from_millis(200)));
+    let turned = held || turn.as_ref().is_some_and(|t| t.is_some());
     // What std's stdout holds of an unended line goes out first where it
-    // shares the terminal: the dump then redraws it whole, rather than it
-    // surfacing after everything (`DUMP_PARTIAL`).
+    // shares the terminal, so it is not left to surface after everything.
+    // Only with the target held: else a writer stalled on it holds std's
+    // lock too.
     // SAFETY: isatty on fd 1.
-    if unsafe { libc::isatty(1) } == 1 && axl_types::terminal::one_target(1, 2) {
+    if turned && unsafe { libc::isatty(1) } == 1 && axl_types::terminal::one_target(1, 2) {
         use std::io::Write as _;
         let _ = std::io::stdout().lock().flush();
     }
-    // The terminal left mid-line: the CLI's own unended line, which the dump
-    // has whole, is redrawn from its row's start; any other's (a child's,
-    // past the wait) is left, the dump on a line of its own.
+    // The terminal left mid-line: the row is redrawn from its start only
+    // where the CLI's own output left it so, and the CLI had exactly one
+    // unended line at the mark, on that target (not stdout's of its own),
+    // which the dump has whole. Any other row (a child's line, two of the
+    // CLI's) is left, the dump on a line of its own: it may show a start
+    // again, never lose one.
     if axl_types::terminal::mid_line(2) {
-        let redraw = DUMP_PARTIAL.load(Ordering::SeqCst);
+        let stdout_apart =
+            !axl_types::terminal::one_target(1, 2) && axl_types::terminal::cli_row(1);
+        let redraw =
+            axl_types::terminal::cli_row(2) && DUMP_PARTIAL.load(Ordering::SeqCst) && !stdout_apart;
         write_patiently(&mut err, if redraw { b"\r\x1b[K" } else { b"\n" });
     }
     write_patiently(&mut err, out.as_bytes());
@@ -2230,7 +2239,7 @@ fn term_methods(registry: &mut MethodsBuilder) {
         if SINK.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
             use std::io::Write as _;
             let _ = std::io::stderr().write_all(text.as_bytes());
-            axl_types::terminal::wrote(2, text.as_bytes());
+            axl_types::terminal::wrote_cli(2, text.as_bytes());
         }
         crate::out::copy_only(text.as_bytes());
         Ok(NoneType)

@@ -283,6 +283,65 @@ def _secretcut(ctx):
     return 0
 
 pretakeolder = task(implementation = _pretakeolder, summary = "A line begun before the take, older lines left out of the dump.")
+
+def _childafter(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(500)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("INSCREEN")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _childfirst(ctx):
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(500)
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _stdoutpiped(ctx):
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(300)
+    ctx.std.io.stdout.write("RESULT=")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stdout.write("42\n")
+    return 0
+
+def _latedump(ctx):
+    ctx.std.io.stderr.write("PRE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    ctx.std.io.stderr.write("IN\n")
+    sleep(200)
+    screen.release(replay_stderr = False)
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(500)
+    ctx.std.term.dump_output(older = "OLDER {n}")
+    child.wait()
+    return 0
+
+childafter = task(implementation = _childafter, summary = "A child's partial after the CLI's, on one row, before a take.")
+childfirst = task(implementation = _childfirst, summary = "The CLI's partial after a child's, on one row, before a take.")
+stdoutpiped = task(implementation = _stdoutpiped, summary = "The CLI's stdout partial and a child's on stderr's row.")
+latedump = task(implementation = _latedump, summary = "A dump after the release, a child's partial written between.")
 pretakeout = task(implementation = _pretakeout, summary = "A stdout line begun before the take, ended under the screen.")
 secretcut = task(implementation = _secretcut, summary = "A secret written in two parts, a Ctrl+Z between.", args = {"token": args.string(secret = True)})
 prompt = task(implementation = _prompt, summary = "A question asked under a screen and answered.")
@@ -1516,8 +1575,8 @@ fn a_cli_line_unended_at_release_keeps_its_start() {
 
 /// What the terminal shows of `raw`, as rows: the alternate screen's text
 /// (between entering and leaving it) left out, a carriage return going back
-/// to its row's start and `ESC [ K` erasing the rest of it, other escapes
-/// left out.
+/// to its row's start, `ESC [ K` erasing the rest of it and `ESC [ 2 K`
+/// all of it, other escapes left out.
 #[cfg(unix)]
 fn main_screen(raw: &str) -> String {
     let mut main = String::new();
@@ -1535,14 +1594,18 @@ fn main_screen(raw: &str) -> String {
         match c {
             '\x1b' => match chars.next() {
                 Some('[') => {
+                    let mut params = String::new();
                     let mut last = ' ';
                     for c in chars.by_ref() {
                         last = c;
                         if ('\x40'..='\x7e').contains(&c) {
                             break;
                         }
+                        params.push(c);
                     }
-                    if last == 'K' {
+                    if last == 'K' && params == "2" {
+                        row.clear();
+                    } else if last == 'K' {
                         row.truncate(col);
                     }
                 }
@@ -1714,11 +1777,42 @@ fn a_secret_cut_by_a_suspend_is_redacted_in_the_history() {
         while chunks.try_recv().is_ok() {}
         std::thread::sleep(Duration::from_millis(20));
     }
+    let was_stopped = stopped();
     unsafe { libc::kill(pid, libc::SIGCONT) };
     let status = wait_bounded(&mut child, 60, &chunks);
     std::thread::sleep(Duration::from_millis(200));
+    assert!(was_stopped, "stopped on Ctrl+Z before fg");
     assert!(status.success(), "{status:?}");
     let log = output_log(dir.path());
     assert!(log.contains("token="), "{log:?}");
     assert!(!log.contains(secret), "unredacted: {log:?}");
+}
+
+/// A row the terminal shows a child's unended line on (alone or with the
+/// CLI's) when a screen's dump is written: the dump never erases it, as the
+/// child's start would never be written again.
+#[cfg(unix)]
+#[test]
+fn a_dump_never_erases_a_childs_unended_line() {
+    use std::time::Duration;
+    let cases: [(&str, Option<Stdio>); 5] = [
+        ("childafter", None),
+        ("childfirst", None),
+        ("stdoutpiped", None),
+        ("stdoutpiped", Some(Stdio::null())),
+        ("latedump", None),
+    ];
+    for (task, stdout) in cases {
+        let piped = stdout.is_some();
+        let (mut child, chunks, _dir) = on_a_pty(task, stdout);
+        let status = wait_bounded(&mut child, 60, &chunks);
+        std::thread::sleep(Duration::from_millis(200));
+        let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+        let text = main_screen(&String::from_utf8_lossy(&raw));
+        assert!(status.success(), "{task}: {status:?}: {text}");
+        assert!(
+            text.contains("CHILD50PCT"),
+            "{task} (stdout piped: {piped}): the child's start erased: {text:?}"
+        );
+    }
 }

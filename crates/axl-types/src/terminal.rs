@@ -31,6 +31,10 @@ use std::time::{Duration, Instant};
 
 static LOCKS: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
 static MID_LINE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// Whether each target's current row holds only the CLI's own output (not a
+/// child's forwarded, nor a capture's replay): the CLI started it, and
+/// nothing else has written to it since.
+static CLI_ROW: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 static SHARED: OnceLock<bool> = OnceLock::new();
 static ROUTE: OnceLock<fn(i32, &[u8]) -> bool> = OnceLock::new();
 
@@ -143,11 +147,35 @@ pub fn every_turn_within(bound: Duration) -> Vec<Turn> {
     held
 }
 
-/// Note `bytes` written to `fd`'s target: whether it is left mid-line.
+/// Note `bytes` written to `fd`'s target by a child's forwarder, a
+/// capture's replay or a dump: whether it is left mid-line, on a row that
+/// is not the CLI's own.
 pub fn wrote(fd: i32, bytes: &[u8]) {
+    noted(fd, bytes, false);
+}
+
+/// [`wrote`], for the CLI's own output (its lines, the AXL streams, the
+/// build console): a row it leaves mid-line is its own ([`cli_row`]).
+pub fn wrote_cli(fd: i32, bytes: &[u8]) {
+    noted(fd, bytes, true);
+}
+
+fn noted(fd: i32, bytes: &[u8], cli: bool) {
     if let (Some(t), Some(&last)) = (target(fd), bytes.last()) {
+        // A row this write starts is its writer's; one it goes on with stays
+        // the CLI's only if it was and this is the CLI too.
+        let starts = bytes.contains(&b'\n') || !MID_LINE[t].load(Ordering::SeqCst);
+        let clis = cli && (starts || CLI_ROW[t].load(Ordering::SeqCst));
+        CLI_ROW[t].store(clis, Ordering::SeqCst);
         MID_LINE[t].store(last != b'\n', Ordering::SeqCst);
     }
+}
+
+/// Whether `fd`'s target was left mid-line on a row only the CLI's own
+/// output has written.
+pub fn cli_row(fd: i32) -> bool {
+    target(fd)
+        .is_some_and(|t| MID_LINE[t].load(Ordering::SeqCst) && CLI_ROW[t].load(Ordering::SeqCst))
 }
 
 /// Whether `fd`'s target was left mid-line by its last write.
@@ -175,7 +203,7 @@ impl<W: std::io::Write> std::io::Write for Routed<W> {
             return Ok(buf.len());
         }
         let n = self.inner.write(buf)?;
-        wrote(self.fd, &buf[..n]);
+        wrote_cli(self.fd, &buf[..n]);
         Ok(n)
     }
 
@@ -211,7 +239,7 @@ pub fn write_std(fd: i32, bytes: &[u8], copy: fn(&[u8])) -> std::io::Result<()> 
     } else {
         std::io::stderr().write_all(bytes)
     };
-    wrote(fd, bytes);
+    wrote_cli(fd, bytes);
     copy(bytes);
     r
 }
