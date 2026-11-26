@@ -196,3 +196,37 @@ pub mod stardoc_output {
     include!(concat!(env!("OUT_DIR"), "/stardoc_output.rs"));
 }
 include!(concat!(env!("OUT_DIR"), "/remote_logging.rs"));
+
+#[cfg(test)]
+mod tests {
+    use starlark::values::Heap;
+
+    use crate::blaze::action_cache_statistics::{MissDetail, MissReason};
+
+    fn reason_of(reason: i32) -> String {
+        Heap::temp(|heap| {
+            let detail = heap.alloc(MissDetail { reason, count: 1 });
+            detail
+                .get_attr("reason", heap)
+                .expect("reading reason")
+                .expect("a reason field")
+                .unpack_str()
+                .expect("a string")
+                .to_owned()
+        })
+    }
+
+    #[test]
+    fn a_known_enum_value_reads_as_its_name() {
+        assert_eq!(
+            reason_of(MissReason::NotCached as i32).to_uppercase(),
+            "NOT_CACHED"
+        );
+    }
+
+    /// Bazel 9 added `DIGEST_MISMATCH` (7) after this proto was vendored.
+    #[test]
+    fn an_enum_value_the_proto_does_not_know_reads_as_its_number() {
+        assert_eq!(reason_of(99), "99");
+    }
+}

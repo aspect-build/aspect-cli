@@ -607,7 +607,9 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             // comparisons keep working. The typed enum value is used only on
             // the write side (members + constructor); a custom value can't be
             // `==` a builtin string reliably (starlark's operand-dispatch is
-            // unspecified), so reads stay string for back-compat.
+            // unspecified), so reads stay string for back-compat. A value the
+            // vendored proto does not know (a newer Bazel's) reads as its
+            // number, so reading it never fails.
             &parse_str::<Type>("::std::string::String").expect("failed to parse String type")
         } else if attrs.bytes.is_some() {
             &parse_str::<Type>("::starlark::values::bytes::StarlarkBytes")
@@ -631,7 +633,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.enumeration.is_some() {
             let ty = Type::from_string(&attrs.enumeration.as_ref().unwrap())
                 .expect("failed to parse enum type");
-            quote! { Ok(#ty::try_from(this.#fident)?.starlark_str().to_string()) }
+            quote! { Ok(#ty::try_from(this.#fident).map(|e| e.starlark_str().to_string()).unwrap_or_else(|_| this.#fident.to_string())) }
         } else if attrs.bytes.is_some() {
             quote! { Ok(::starlark::values::bytes::StarlarkBytes::new(this.#fident.as_ref())) }
         } else {

@@ -1,5 +1,5 @@
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 cargo_build_script(
     name = "build_script",
@@ -50,4 +50,10 @@ rust_library(
         "@crates//:tonic-prost",
         "@crates//:uuid",
     ],
+)
+
+rust_test(
+    name = "test",
+    size = "small",
+    crate = ":axl-proto",
 )
