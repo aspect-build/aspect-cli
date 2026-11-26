@@ -3894,7 +3894,7 @@ def keys_row(state: dict, cols: int) -> str:
         return fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
     if state.get("help"):
         return fit(" ↑↓ scroll · any other key closes", cols)
-    if state.get("note"):
+    if state.get("note") and (state.get("note_until") == None or state.get("now_ms", 0) < state["note_until"]):
         return fit(" " + state["note"], cols)
     if state.get("tab") in ("metrics", "invocation"):
         return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
@@ -3920,12 +3920,14 @@ def on_key(state: dict, key: str, page: int) -> bool:
     as Alt with it, the `?` overlay open (↑↓, `k`/`j` and the wheel scroll
     it, any other key closes it), the search bar open (`_search_key`, every
     key but the arrows and the wheel). Else the first entry of `KEYS` that
-    takes the key and applies now. Any key clears what the last one said
-    (`note`)."""
+    takes the key and applies now; a toggle's entry (`said`) has the keys
+    row say, for `_SAID_MS`, the state it left and how to undo it. Any key
+    clears what the last one said (`note`)."""
 
     if mouse_key(state, key):
         return False
     state["note"] = ""
+    state["note_until"] = None
     for k in KEYS:
         if k.early and key in k.keys and k.when(state):
             return k.do(state, key, page)
@@ -3948,8 +3950,16 @@ def on_key(state: dict, key: str, page: int) -> bool:
         return False
     for k in KEYS:
         if key in k.keys and k.when(state):
-            return k.do(state, key, page)
+            leaves = k.do(state, key, page)
+            if k.said != None:
+                # What the toggle did and how to undo it, for a moment.
+                state["note"] = k.said(state)
+                state["note_until"] = state.get("now_ms", 0) + _SAID_MS
+            return leaves
     return False
+
+# How long the keys row says what a toggle did.
+_SAID_MS = 2000
 
 # Key bindings, as data: one table (`KEYS`) drives `on_key`, the keys row
 # (`keys_row`) and the `?` overlay (`help_rows`), so none of them can name a
@@ -4269,8 +4279,19 @@ def _row_other_list(state):
         return []
     return ["a failures" if state.get("list") == "actions" else "a actions"]
 
-def _key(keys, when, do, help = None, group = None, row = None, shown = None, early = False):
-    return struct(keys = keys, when = when, do = do, help = help, group = group, row = row, shown = shown or when, early = early)
+def _key(keys, when, do, help = None, group = None, row = None, shown = None, early = False, said = None):
+    """A binding: its `keys`, `when` it applies, what it does (`do`), its
+    overlay row (`help`) and keys-row labels (`row`); `said`, for a toggle,
+    the state it left and how to undo it, which the keys row says a moment
+    after the key (`on_key`)."""
+    return struct(keys = keys, when = when, do = do, help = help, group = group, row = row, shown = shown or when, early = early, said = said)
+
+def _said_filter(state):
+    return {
+        "all": "every line · e errors and warnings only",
+        "warnings": "errors and warnings only · e errors only",
+        "errors": "errors only · e every line",
+    }[state["filter"]]
 
 def _documented(keys, text, group, shown = _always):
     """An overlay row for keys another layer reads (the mouse, the bar)."""
@@ -4280,13 +4301,13 @@ KEYS = [
     _key(["ctrl-l"], _always, _k_redraw, help = ("^L", "redraw the screen"), group = "Screen", early = True),
     _key(["1", "2", "3", "4", "5"], _bar_closed, _k_tab_number, help = ("1-5", "a tab: console, failures, metrics, invocation, tips"), group = "Screen"),
     _key(["tab", "shift-tab"], _bar_closed, _k_tab_cycle, help = ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation, tips (or click one)"), group = "Screen"),
-    _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen"),
+    _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen", said = lambda s: "build panes open · p folds them" if panes_shown(s) else "build panes folded · p opens them"),
     _key(["up", "k", "down", "j", "s"], _tips_listed, _k_tips, help = ("s", "in Tips, ↑↓ choose a tip and s silences it on this machine, or undoes it"), group = "Failures", shown = lambda s: s.get("tab") == "tips" or tips_count(s) > 0),
     _key(["wheel-up", "wheel-down"], _over_actions, _k_actions_wheel),
     _key(["<", ">"], lambda s: s.get("tab") in _PICKED_TABS and s["view"] == None, _k_pick_build, help = ("<  >", "in Metrics and Invocation, the previous or next build"), group = "Screen", shown = lambda s: len(s.get("builds", [])) > 0),
     _key(["K", "home", "J", "end", "up", "k", "wheel-up", "down", "j", "wheel-down", "pageup", "pagedown", "b", " ", "u", "d"], _in_list_tab, _k_tab_scroll),
     _key(["esc"], _always, _k_esc, help = ("Esc", "back a crumb: a file to the log it was opened from, a log to its tab; a tab to the console"), group = "Leave", row = lambda s: ["Esc back"] if s["view"] != None else []),
-    _key(["a"], _has_other_list, _k_other_list, help = ("a", "the list: failures, or actions that wrote output"), group = "Failures", row = _row_other_list),
+    _key(["a"], _has_other_list, _k_other_list, help = ("a", "the list: failures, or actions that wrote output"), group = "Failures", row = _row_other_list, said = lambda s: "actions that wrote output listed · a lists the failures" if s.get("list") == "actions" else "failures listed · a lists the actions that wrote output"),
     _key(["up", "k", "wheel-up", "down", "j", "wheel-down", "K", "home", "J", "end", "enter"], _failures_focused, _k_list, help = ("Enter", "in the list: show the chosen log"), group = "Failures", row = lambda s: ["↑↓ choose", "Enter show its log", "Tab next tab", "Esc back"], shown = lambda s: _failure_total(s) > 0 or bool(_items(s))),
     _key(["]", "["], _has_items, _k_step_record, help = ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"), group = "Failures", row = _row_step),
     _key(["}", "{"], _has_items, _k_step_attempt),
@@ -4301,15 +4322,15 @@ KEYS = [
     _key(["wheel-up", "wheel-down"], _always, _k_scroll, help = ("wheel", "scroll"), group = "Scroll"),
     _key(["n", "N"], _always, _k_match, row = lambda s: ["n N next/prev match"] if s["search"]["pattern"] != None and s["search"]["mode"] == "jump" else []),
     _key(["K", "home", "J", "end"], _always, _k_ends, help = ("K  J", "the top; the end, following the newest (Home, End too)"), group = "Scroll", row = lambda s: ["K J top/end"]),
-    _key(["e"], _always, _k_filter, help = ("e", "every line, errors and warnings, errors only"), group = "Search", row = lambda s: ["e filter"]),
+    _key(["e"], _always, _k_filter, help = ("e", "every line, errors and warnings, errors only"), group = "Search", row = lambda s: ["e filter"], said = _said_filter),
     _documented("drag", "select, and copy on release", "Screen"),
     _documented("click", "a file's link shows the file here (o: in your editor); a web link opens; any other is copied", "Screen"),
     _key(["?"], _always, _k_help, help = ("?", "these keys"), group = "Screen"),
     _key(["o", "O"], _always, _k_open, help = ("o  O", "open the log (or the task's output) in your editor; pick the editor"), group = "Screen", row = _row_open),
-    _key(["w"], _always, _k_wrap, help = ("w", "wrap long lines (the default), or cut them at the edge"), group = "Screen", row = lambda s: ["w " + ("cut" if s.get("wrap", True) else "wrap")]),
-    _key(["ctrl-o"], _always, _k_unfold, help = ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold them again"), group = "Screen"),
-    _key(["z"], _always, _k_zoom, help = ("z", "the console fills the screen, and back"), group = "Screen", row = lambda s: ["z " + ("unzoom" if s.get("zoom") else "zoom")]),
-    _key(["m"], _always, _k_mouse, help = ("m", "the mouse to the terminal and back"), group = "Screen"),
+    _key(["w"], _always, _k_wrap, help = ("w", "wrap long lines (the default), or cut them at the edge"), group = "Screen", row = lambda s: ["w " + ("cut" if s.get("wrap", True) else "wrap")], said = lambda s: "long lines wrapped · w cuts them" if s.get("wrap", True) else "long lines cut · w wraps them"),
+    _key(["ctrl-o"], _always, _k_unfold, help = ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold them again"), group = "Screen", said = lambda s: "lines under each INFO: From shown · ^O folds them" if s.get("unfolded") else "lines under each INFO: From folded · ^O shows them"),
+    _key(["z"], _always, _k_zoom, help = ("z", "the console fills the screen, and back"), group = "Screen", row = lambda s: ["z " + ("unzoom" if s.get("zoom") else "zoom")], said = lambda s: "console zoomed · z shows the panes" if s.get("zoom") else "panes shown · z zooms the console"),
+    _key(["m"], _always, _k_mouse, help = ("m", "the mouse to the terminal and back"), group = "Screen", said = lambda s: "mouse on: the wheel scrolls, a click picks · m gives it to the terminal" if s.get("mouse") else "mouse off: the terminal selects text · m takes it back"),
     _key(["q", "enter"], _always, _k_leave, help = ("q", "cancel the build; once it is done, leave"), group = "Leave", row = _row_leave),
 ]
 

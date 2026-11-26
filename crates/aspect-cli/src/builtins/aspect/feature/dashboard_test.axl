@@ -2119,6 +2119,32 @@ def _impl(ctx: TaskContext) -> int:
             long_top = _visible([r for r in render(long, cols, 30).split("\n") if "Console" in _visible(r) and "┌" in _visible(r)][0])
             _eq("the tabs whatever the state's length at %d" % cols, "Failures" in plain, "Failures" in long_top)
 
+    # A toggle says, for a moment, the state it left and how to undo it;
+    # then the keys row is its own again, and Ctrl+C's warning wins.
+    for key, first, second in [
+        ("w", "long lines cut · w wraps them", "long lines wrapped · w cuts them"),
+        ("z", "console zoomed · z shows the panes", "panes shown · z zooms the console"),
+        ("p", "build panes folded · p opens them", "build panes open · p folds them"),
+        ("ctrl-o", "lines under each INFO: From shown · ^O folds them", "lines under each INFO: From folded · ^O shows them"),
+        ("e", "errors and warnings only · e errors only", "errors only · e every line"),
+        ("m", "mouse on: the wheel scrolls, a click picks · m gives it to the terminal", "mouse off: the terminal selects text · m takes it back"),
+    ]:
+        toggled = _screen(ctx, ["x"], now_ms = 10000, screen = struct(mouse = lambda on: None), panes = True)
+        for want in (first, second):
+            on_key(toggled, key, 10)
+            row = _visible(keys_row(toggled, 120))
+            _eq("%s says %r" % (key, want), row.strip(), want)
+            _eq("%s's row the frame's width" % key, text_width(row), 120)
+        toggled["now_ms"] += 2000
+        _eq("%s's note gone after a moment" % key, second in _visible(keys_row(toggled, 120)), False)
+    urgent = _screen(ctx, ["x"], now_ms = 0)
+    on_key(urgent, "w", 10)
+    urgent["cancelling"] = True
+    _eq("Ctrl+C's warning wins over a toggle's note", "Ctrl+C again" in _visible(keys_row(urgent, 120)), True)
+    lists = _screen(ctx, ["x"], now_ms = 0, outputs = [{"kind": "action", "label": "//o:o", "detail": "Genrule", "files": [("stdout", "x")], "output": "", "success": True}], fails = [act])
+    on_key(lists, "a", 10)
+    _eq("a says which list", _visible(keys_row(lists, 120)).strip(), "actions that wrote output listed · a lists the failures")
+
     # Keys as data: an entry either takes keys and does something, or only
     # documents keys another layer reads; the overlay shows only what
     # applies, grouped; no key is shown twice.
