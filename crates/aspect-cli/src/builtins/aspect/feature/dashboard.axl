@@ -3054,10 +3054,11 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     """`action_split` while a build runs with every action it executes
     published (`--build_event_publish_all_actions`, the `actions` arg's
     default): the events say which ran no spawn (`internal`: no command
-    line) and which spawned, of which the execution log's cache hits are
-    `cached` and the rest `ran`; the actions that failed apart; what the
-    done count has past them is `unchanged`: Bazel's own action cache, which
-    posts no event, and the few the stream has not told yet."""
+    line) and which spawned, each of those `ran` until the execution log
+    says a cache served it (`cached`, as its entries arrive); the actions
+    that failed apart; what the done count has past them, with no event at
+    all, is `unchanged` (Bazel's own action cache posts none). Events ahead
+    of Bazel's count take from `ran`, never from the others."""
     c = state.get("counts") or {}
     failed = len(failed_actions(state))
     internal = c.get("actions_internal", 0)
@@ -3065,6 +3066,10 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     cached = min(c.get("spawn_hits", 0), spawned)
     ran = spawned - cached
     seen = ran + cached + internal + failed
+    if seen > done:
+        cut = min(seen - done, ran)
+        ran -= cut
+        seen -= cut
     split.update(known = True, published = True, ran = ran, cached = cached, internal = internal, failed = failed, unchanged = max(0, done - seen), done = max(done, seen))
     split["total"] = max(split["total"], split["done"])
     return split

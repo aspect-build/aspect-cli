@@ -445,6 +445,21 @@ def _actions_tests(ctx):
         count_spawn(live["counts"], struct(cache_hit = True, runner = "disk cache hit"))
     half = action_split(dict(live, progress = ["[20 / 30] 3 actions running"]))
     _eq("part told: the rest unchanged so far", [half[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")], [0, 10, 1, 0, 9, 20])
+
+    # The execution log late: an action that spawned is ran until its entry
+    # says a cache served it; unchanged only what has no event at all.
+    late_log = _screen(ctx, ["x"], progress = ["[11 / 14] 3 actions running"])
+    _action(late_log, 0, "BazelWorkspaceStatusAction", True, False)
+    for i in range(1, 11):
+        _action(late_log, i, "Genrule", True, True)
+    early = action_split(late_log)
+    _eq("before the log: ran", [early[k] for k in ("ran", "cached", "internal", "unchanged")], [10, 0, 1, 0])
+    for i in range(6):
+        count_spawn(late_log["counts"], struct(cache_hit = True, runner = "disk cache hit"))
+    _eq("as entries arrive: cached", [action_split(late_log)[k] for k in ("ran", "cached", "internal", "unchanged")], [4, 6, 1, 0])
+    ahead = action_split(dict(late_log, progress = ["[8 / 14] 3 actions running"]))
+    _eq("events ahead of the count take from ran", [ahead[k] for k in ("ran", "cached", "internal", "unchanged", "done")], [1, 6, 1, 0, 8])
+
     for i in range(11, 14):
         _action(live, i, "Genrule", False, True)
     mid_split = action_split(live)
