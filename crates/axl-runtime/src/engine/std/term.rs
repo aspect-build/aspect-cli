@@ -154,8 +154,7 @@ impl Redirect {
                             Ok(0) => return None,
                             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                             // Read again after a pause: stopping reading would
-                            // fill the pipe and block every writer, the CLI's
-                            // own printing among them.
+                            // fill the pipe and block every writer to it.
                             Err(_) => std::thread::sleep(Duration::from_millis(10)),
                             Ok(n) => {
                                 keep(&mut written.lock().unwrap(), &buf[..n]);
@@ -676,10 +675,11 @@ fn osc11_reply(bytes: &[u8]) -> Option<(std::ops::Range<usize>, Option<bool>)> {
 /// Take the terminal; see the module docs. Its generation. Refused while
 /// this process runs in the background (another job has the terminal).
 fn take(alt_screen: bool) -> anyhow::Result<u64> {
-    // Stdout is not flushed: a forwarder waiting on a stdout nobody reads
-    // holds its lock, and the take would wait on it. A partial line still
-    // buffered goes out when a later write ends it: into the capture during
-    // the screen, else after the release, behind what was written meanwhile.
+    // Stdout is not flushed: a writer waiting on a stdout nobody reads may
+    // hold its lock, and the take would wait on it. The CLI's own output
+    // goes to the screen from here on ([`route`]), not through std's
+    // buffer; a partial line std still buffers goes out with the next write
+    // through it, after the release.
     axl_types::terminal::settle();
     let mut held = HELD.lock().unwrap();
     if held.is_some() {
@@ -735,6 +735,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     let forget_tty = || {
         mark_captured(None);
         crate::out::set_capture_copies(false);
+        set_sink(None);
     };
     // No write half to the terminal and half to the capture.
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
@@ -749,10 +750,11 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
             return Err(undo_termios(e).into());
         }
     };
-    // Once both are captured, the capture copies them; until then the print
-    // paths did.
+    // Once both are captured, the capture copies them, and the CLI's own
+    // output goes to the screen instead ([`route`]).
     if alt_screen {
         crate::out::set_capture_copies(true);
+        set_sink(Some((&capture, &stdout, &stderr)));
     }
     drop(moving);
 
@@ -989,6 +991,7 @@ pub fn release_all() -> bool {
 /// One not of its own, or none: false.
 pub(crate) fn suspend() -> bool {
     let finishing;
+    let moving;
     {
         // Bounded, as a release's: one replaying to a stalled stdout holds
         // these, and Ctrl+Z must not wait it out.
@@ -1006,7 +1009,7 @@ pub(crate) fn suspend() -> bool {
             return true;
         }
         h.suspends = 1;
-        give_back_descriptors([h.stdout.as_mut(), h.stderr.as_mut()]);
+        moving = give_back_descriptors([h.stdout.as_mut(), h.stderr.as_mut()]);
         // The child gets a quiet terminal: no answer meant for the screen
         // in its input, no frame left on the screen it leaves.
         drop_answers_due(&mut h.tty);
@@ -1021,7 +1024,8 @@ pub(crate) fn suspend() -> bool {
         finishing = (h.stdout.take(), h.stderr.take());
         h.suspended = true;
     }
-    dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
+    dump_output_turned(DUMP_LINES, "… {n} older lines: aspect history show", true);
+    drop(moving);
     // After the dump: what a child still writes into a capture comes after
     // it. Stdout's lines go to a stdout that is not the terminal, as on a
     // release: the dump showed them on the terminal only.
@@ -1234,13 +1238,16 @@ pub(crate) fn resume() {
         Redirect::new(1, h.capture.clone(), Source::Stdout, true),
         Redirect::new(2, h.capture.clone(), Source::Stderr, true),
     );
+    if let (Ok(out), Ok(err)) = &redirected {
+        // Once both are captured, as at the take.
+        crate::out::set_capture_copies(true);
+        set_sink(Some((&h.capture, out, err)));
+    }
     drop(moving);
     match redirected {
         (Ok(out), Ok(err)) => {
             h.stdout = Some(out);
             h.stderr = Some(err);
-            // Once both are captured: until then the print paths copied.
-            crate::out::set_capture_copies(true);
         }
         (out, err) => {
             // Without its captures the screen would be drawn over: it stays
@@ -1321,6 +1328,13 @@ fn dump_ready() -> bool {
 /// of for `STALL_LIMIT` is dropped. Whether it wrote: never a second time,
 /// nor without a mark or the task's files.
 pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
+    dump_output_turned(max_lines, older, false)
+}
+
+/// [`dump_output`], with every target already held by the caller (`held`):
+/// for a suspend, which holds them from giving the descriptors back to the
+/// end of the dump, so no line printed meanwhile shows both live and in it.
+fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
     let Some(mark) = DUMP_MARK.lock().unwrap().take() else {
         return false;
     };
@@ -1351,7 +1365,8 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
     // Bounded as the replay is.
     // SAFETY: fd 2 stays open; ManuallyDrop never closes it.
     let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
-    let _turn = axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, Duration::from_millis(200));
+    let _turn = (!held)
+        .then(|| axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, Duration::from_millis(200)));
     // On a line of its own: a child's line left unended past the wait.
     if axl_types::terminal::mid_line(2) {
         write_patiently(&mut err, b"\n");
@@ -1408,7 +1423,10 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
         .is_none_or(|r| unsafe { libc::isatty(r.saved.as_raw_fd()) } == 1);
     // Both descriptors back first, so a crash during the replays below
     // reports to the terminal.
-    give_back_descriptors([held.stdout.as_mut(), held.stderr.as_mut()]);
+    drop(give_back_descriptors([
+        held.stdout.as_mut(),
+        held.stderr.as_mut(),
+    ]));
     let leave = leave_sequence(held.alt_screen);
     let _ = held.tty.write_all(leave);
     let _ = held.tty.write_all(wheel_restore());
@@ -1443,12 +1461,61 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
     held.capture.drain().colours
 }
 
+/// Where the CLI's own output goes while a screen of its own holds the
+/// terminal ([`route`]): its console's feed, and what its captures keep for
+/// the replay. Set and cleared with every target held, where the capture's
+/// copies go on and off, so a write is routed exactly when fds 1 and 2 are
+/// captured.
+struct Sink {
+    capture: Arc<Feed>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+}
+
+static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+
+/// Route the CLI's writes to `capture` and the replays `out` and `err`
+/// keep, or (None) to fds 1 and 2 again.
+fn set_sink(sink: Option<(&Arc<Feed>, &Redirect, &Redirect)>) {
+    *SINK.lock().unwrap_or_else(|p| p.into_inner()) = sink.map(|(capture, out, err)| Sink {
+        capture: capture.clone(),
+        stdout: out.written.clone(),
+        stderr: err.written.clone(),
+    });
+}
+
+/// The route the CLI's own writes are offered ([`axl_types::terminal`]):
+/// while a screen of its own holds the terminal, `bytes` for fd 1 or 2 go to
+/// its console and are kept for its replay, as its capture would have them,
+/// without passing through the captured descriptors; the writer copies them
+/// to the output files itself. Whether it took them.
+fn route(fd: i32, bytes: &[u8]) -> bool {
+    let sink = SINK.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(s) = sink.as_ref() else {
+        return false;
+    };
+    let (source, kept) = if fd == 2 {
+        (Source::Stderr, &s.stderr)
+    } else {
+        (Source::Stdout, &s.stdout)
+    };
+    s.capture.write(source, bytes);
+    keep(&mut kept.lock().unwrap_or_else(|p| p.into_inner()), bytes);
+    true
+}
+
+/// Install [`route`] for the CLI's own output. Once, at start-up.
+pub fn route_cli_output() {
+    axl_types::terminal::route_to(route);
+}
+
 /// Put fds 1 and 2 back from a screen's captures, and the output files'
 /// copies back to the print paths, with every target held the while (each
-/// waited on for [`SWITCH_WAIT`]): no write lands half in a capture and half on the terminal, and
+/// waited on for [`SWITCH_WAIT`]; returned, for a caller that dumps before
+/// it lets them go): no write lands half in a capture and half on the terminal, and
 /// none is copied between the capture's last chunks (its readers drained
 /// first), or goes uncopied.
-fn give_back_descriptors(redirects: [Option<&mut Redirect>; 2]) {
+fn give_back_descriptors(redirects: [Option<&mut Redirect>; 2]) -> Vec<axl_types::terminal::Turn> {
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
     let mut redirects: Vec<&mut Redirect> = redirects.into_iter().flatten().collect();
     for r in &redirects {
@@ -1458,7 +1525,8 @@ fn give_back_descriptors(redirects: [Option<&mut Redirect>; 2]) {
         r.drain();
     }
     crate::out::set_capture_copies(false);
-    drop(moving);
+    set_sink(None);
+    moving
 }
 
 /// Whether descriptors `a` and `b` are one target ([`axl_types::terminal::one_target`]).
@@ -2075,7 +2143,7 @@ fn term_methods(registry: &mut MethodsBuilder) {
             crate::out::copy_only(text.as_bytes());
         } else {
             let _ = crate::out::write_std(2, text.as_bytes());
-            crate::out::copy_output(text.as_bytes());
+            crate::out::copy_only(text.as_bytes());
         }
         Ok(NoneType)
     }
@@ -2940,6 +3008,27 @@ mod tests {
         let mut got = String::new();
         File::from(read).read_to_string(&mut got).unwrap();
         assert_eq!(got, "late\n");
+    }
+
+    /// The CLI's own writes, with a screen's sink set, go to the screen's
+    /// feed and its replay, never through the captured descriptors; with
+    /// none, nowhere but the descriptor.
+    #[test]
+    fn the_clis_own_output_is_routed_past_a_capture() {
+        route_cli_output();
+        let (_read, write) = private_pipe();
+        let capture = Arc::new(Feed::default());
+        let out = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stdout, false).unwrap();
+        let err = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stderr, false).unwrap();
+        set_sink(Some((&capture, &out, &err)));
+        assert!(axl_types::terminal::routed(2, b"routed line\n"));
+        set_sink(None);
+        assert!(!axl_types::terminal::routed(2, b"not routed\n"));
+        assert_eq!(capture.drain().lines, vec!["routed line"]);
+        assert_eq!(&*err.written.lock().unwrap(), b"routed line\n");
+        assert!(out.written.lock().unwrap().is_empty());
+        err.restore();
+        out.restore();
     }
 
     /// What is written to a redirected descriptor is captured as lines and

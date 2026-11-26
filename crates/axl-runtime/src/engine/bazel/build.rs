@@ -975,7 +975,7 @@ impl Console {
                         .unwrap_or_else(|| crate::color::stdout_supports_color()),
                     // A stdout of its own is the program's output, not the
                     // console UI: shown as written even when nothing else is.
-                    copy: Some(crate::out::copy_output),
+                    copy: Some(crate::out::copy_only),
                     ..Default::default()
                 };
                 (

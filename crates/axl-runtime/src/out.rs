@@ -24,7 +24,7 @@
 //! and `output.ansi` ([`keep_output`]).
 
 /// `println!` that ignores a failed write (notably a closed pipe), and copies
-/// the line to the task's output ([`copy_output`]).
+/// the line to the task's output ([`copy_only`]).
 #[macro_export]
 macro_rules! outln {
     () => {{
@@ -42,18 +42,18 @@ pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// `print!` that ignores a failed write (notably a closed pipe), and copies
-/// the text to the task's output ([`copy_output`]).
+/// the text to the task's output ([`copy_only`]).
 #[macro_export]
 macro_rules! out {
     ($($arg:tt)*) => {{
         let text = format!($($arg)*);
         let _ = $crate::out::write_std(1, text.as_bytes());
-        $crate::out::copy_output(text.as_bytes());
+        $crate::out::copy_only(text.as_bytes());
     }};
 }
 
 /// `eprintln!` that ignores a failed write (notably a closed pipe), and
-/// copies the line to the task's output ([`copy_output`]).
+/// copies the line to the task's output ([`copy_only`]).
 #[macro_export]
 macro_rules! errln {
     () => {{
@@ -62,7 +62,7 @@ macro_rules! errln {
     ($($arg:tt)*) => {{
         let text = format!("{}\n", format_args!($($arg)*));
         let _ = $crate::out::write_std(2, text.as_bytes());
-        $crate::out::copy_output(text.as_bytes());
+        $crate::out::copy_only(text.as_bytes());
     }};
 }
 
@@ -82,10 +82,10 @@ pub const OUTPUT_LOG: &str = "output.log";
 pub const OUTPUT_ANSI: &str = "output.ansi";
 
 /// Copy what AXL's `ctx.std.io.stdout` and `stderr` write as this process's
-/// own output is copied ([`copy_output`]): before a task's files open, to
+/// own output is copied ([`copy_only`]): before a task's files open, to
 /// what they get first. Called once at start-up.
 pub fn copy_axl_output() {
-    axl_types::stream::copy_output_to(copy_output);
+    axl_types::stream::copy_output_to(copy_only);
 }
 
 /// One of the task's output files.
@@ -420,33 +420,26 @@ pub fn begin_early() {
     }
 }
 
-/// Copy `bytes`, as written to stdout or stderr, to the task's output
-/// files, a line at a time (an unended one held back, up to
+/// Copy `bytes`, as written to stdout or stderr (or kept without writing,
+/// a terminal-only tip while a screen holds the terminal), to the task's
+/// output files, a line at a time (an unended one held back, up to
 /// [`MAX_PENDING`], until it ends or [`flush_output`]); before
-/// [`keep_output`], to what it writes first. Not while a screen's capture
-/// copies what reaches stdout and stderr ([`set_capture_copies`]), which
-/// these bytes are written to.
-pub fn copy_output(bytes: &[u8]) {
-    if CAPTURE_COPIES.load(std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
-    copy_only(bytes);
-}
-
-/// [`copy_output`] whatever copies stdout and stderr: for text the task
-/// keeps in its output files without writing it (a terminal-only tip while
-/// a screen holds the terminal).
+/// [`keep_output`], to what it writes first. Exactly once: the CLI's own
+/// writes by their writer, routed past a screen's capture
+/// ([`axl_types::terminal`]); what the capture reads (stray writers, a
+/// child given the CLI's stdout) by the capture.
 pub fn copy_only(bytes: &[u8]) {
     if let Ok(mut copies) = OUTPUT.lock() {
         copies.copy(bytes, false);
     }
 }
 
-/// While a screen of its own holds the terminal its capture reads
-/// everything written to stdout and stderr, a child's own writes included,
-/// and copies all of it ([`copy_only`]); [`copy_output`] does not, so
-/// nothing is copied twice. Off before the descriptors are put back and on
-/// only once both are captured, so no write goes uncopied.
+/// While a screen of its own holds the terminal its capture reads what
+/// reaches fds 1 and 2 (stray writers, a child given the CLI's stdout) and
+/// copies it ([`copy_only`]); the CLI's own writes are routed past it then,
+/// copied by their writers. A forwarder that wrote into the capture leaves
+/// its bytes to it. Off before the descriptors are put back and on only
+/// once both are captured.
 static CAPTURE_COPIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether a screen's capture copies stdout and stderr ([`CAPTURE_COPIES`]).
@@ -501,7 +494,7 @@ pub fn output_ansi_path() -> Option<std::path::PathBuf> {
     copies.log.as_ref().map(|log| log.ansi.path.clone())
 }
 
-/// [`copy_output`] for Bazel's console as the console forwards it, whole
+/// [`copy_only`] for Bazel's console as the console forwards it, whole
 /// lines: kept apart from the task's own unended line, and where the first
 /// of it begins is kept, for [`output_before_console`].
 pub fn copy_console_output(bytes: &[u8]) {
@@ -1449,9 +1442,12 @@ impl starlark::PrintHandler for TolerantPrintHandler {
                 linker.set_format(link_format());
                 linker.set_style(print_link_style());
                 let mut line = linker.link_written(text.as_bytes());
+                // Written with the linker let go: a dump holds the target
+                // and links its lines through it.
+                drop(linker);
                 line.push(b'\n');
                 let _ = write_std(2, &line);
-                copy_output(&line);
+                copy_only(&line);
             }
             None => {
                 let text = bazel::console::links::strip_unlinked(text.as_bytes());

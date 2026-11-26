@@ -570,6 +570,12 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
                 let _turn = crate::terminal::turn(1);
+                if crate::terminal::routed(1, data) {
+                    if copy {
+                        copy_output(data);
+                    }
+                    return Ok(data.len() as u32);
+                }
                 match inner.lock().write(data) {
                     Ok(n) => {
                         crate::terminal::wrote(1, &data[..n]);
@@ -595,6 +601,12 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
                 let _turn = crate::terminal::turn(2);
+                if crate::terminal::routed(2, data) {
+                    if copy {
+                        copy_output(data);
+                    }
+                    return Ok(data.len() as u32);
+                }
                 match inner.lock().write(data) {
                     Ok(n) => {
                         crate::terminal::wrote(2, &data[..n]);

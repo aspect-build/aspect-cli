@@ -14,6 +14,14 @@
 //!
 //! Each target also keeps whether its last write ended mid-line, so a dump
 //! can wait a moment for the line's end, and else start a line of its own.
+//!
+//! The CLI's own output (its lines, the AXL streams, the build console) is
+//! one ordered channel: each write, under its target, is first offered to
+//! the route a screen installs ([`route_to`]). While a screen holds the
+//! terminal the route takes it (into the screen's console and its replay),
+//! so it never goes through fds 1 and 2 while a capture has them; else it
+//! is written there. The capture of fds 1 and 2 is left for stray writers
+//! and children given the CLI's own stdout.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -22,6 +30,18 @@ use std::time::{Duration, Instant};
 static LOCKS: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
 static MID_LINE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 static SHARED: OnceLock<bool> = OnceLock::new();
+static ROUTE: OnceLock<fn(i32, &[u8]) -> bool> = OnceLock::new();
+
+/// Install the route the CLI's own writes are offered first: whether it took
+/// `bytes` for fd 1 or 2 (a screen holding the terminal). Once, at start.
+pub fn route_to(route: fn(i32, &[u8]) -> bool) {
+    let _ = ROUTE.set(route);
+}
+
+/// Whether the route took `bytes` for `fd`; call it under `fd`'s [`turn`].
+pub fn routed(fd: i32, bytes: &[u8]) -> bool {
+    !bytes.is_empty() && ROUTE.get().is_some_and(|route| route(fd, bytes))
+}
 
 /// A held target, for one unit of writing.
 pub type Turn = MutexGuard<'static, ()>;
@@ -133,7 +153,8 @@ pub fn mid_line(fd: i32) -> bool {
     target(fd).is_some_and(|t| MID_LINE[t].load(Ordering::SeqCst))
 }
 
-/// A writer to fd `fd` (1 or 2) that holds its target for each write.
+/// A writer to fd `fd` (1 or 2) that holds its target for each write, and
+/// offers it to the route first ([`routed`]).
 pub struct Locked<W> {
     inner: W,
     fd: i32,
@@ -148,6 +169,9 @@ impl<W> Locked<W> {
 impl<W: std::io::Write> std::io::Write for Locked<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let _turn = turn(self.fd);
+        if routed(self.fd, buf) {
+            return Ok(buf.len());
+        }
         let n = self.inner.write(buf)?;
         wrote(self.fd, &buf[..n]);
         Ok(n)
@@ -155,6 +179,9 @@ impl<W: std::io::Write> std::io::Write for Locked<W> {
 
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         let _turn = turn(self.fd);
+        if routed(self.fd, buf) {
+            return Ok(());
+        }
         self.inner.write_all(buf)?;
         wrote(self.fd, buf);
         Ok(())
@@ -166,10 +193,14 @@ impl<W: std::io::Write> std::io::Write for Locked<W> {
     }
 }
 
-/// Write all of `bytes` to std's stdout (1) or stderr (2) as one unit.
+/// Write all of `bytes` to std's stdout (1) or stderr (2) as one unit, or
+/// to the route that takes it ([`routed`]).
 pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let _turn = turn(fd);
+    if routed(fd, bytes) {
+        return Ok(());
+    }
     let r = if fd == 1 {
         std::io::stdout().write_all(bytes)
     } else {
