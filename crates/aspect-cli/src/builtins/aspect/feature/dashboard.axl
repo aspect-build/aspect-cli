@@ -1773,7 +1773,7 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
             # a target it blocks failed for (`blocked_targets`), and a
             # failure of its own.
             counts["failed_roots"][label] = True
-            _fail(counts, label)
+            count_aborted(counts, label, reason)
         return
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):

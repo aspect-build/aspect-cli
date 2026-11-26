@@ -1551,6 +1551,20 @@ def _impl(ctx: TaskContext) -> int:
     on_key(mix, "enter", 10)
     _eq("Enter shows Bazel's error", "no such package" in _visible(render(mix, 140, 40)), True)
 
+    # A target asked for that fails analysis is its own root cause, Bazel 9
+    # posting an Aborted configured_label for it before its Aborted
+    # target_configured: one failure, not two.
+    solo = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    own = "//p:req_broken"
+    rid = struct(label = own, configuration = struct(id = "6e1e0d0f"))
+    aborted = struct(reason = "ANALYSIS_FAILURE", description = "in broken rule " + own)
+    count_event(solo["counts"], "configured_label", rid, aborted, aborted = True)
+    note_event(solo, "configured_label", rid, aborted, True)
+    note_blocked(solo, struct(kind = "target_configured", id = struct(label = own), payload = struct(), children = [struct(id = rid)]))
+    count_event(solo["counts"], "target_configured", struct(label = own), struct(reason = "ANALYSIS_FAILURE"), aborted = True)
+    _eq("a target asked for, its own root, failed once", solo["counts"]["failed"], 1)
+    _eq("Results says it failed once", "0 built, 1 failed" in _visible(render(solo, 140, 40)), True)
+
     ok = _screen(ctx, ["x"])
     note_blocked(ok, struct(kind = "target_configured", id = struct(label = "//p:ok"), payload = struct(), children = [struct(id = struct(label = "//p:ok"))]))
     _eq("a configured target's own completion is no root cause", blocked_targets(ok), {})
