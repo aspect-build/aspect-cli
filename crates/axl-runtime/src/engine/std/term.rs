@@ -66,8 +66,10 @@ struct Held {
     /// The process's stdout and stderr, captured; None while suspended.
     stdout: Option<Redirect>,
     stderr: Option<Redirect>,
-    /// The last frame written, drawn again on a resume.
+    /// The last frame written, drawn again on a resume at the size it was
+    /// drawn at (`frame_size`).
     last_frame: Vec<u8>,
+    frame_size: Option<(i32, i32)>,
     /// Whether `mouse(True)` took the mouse, for a resume to take it again.
     mouse_on: bool,
     /// Given back for a prompt or an interactive child ([`suspend`]).
@@ -574,8 +576,10 @@ fn query_background(tty: &mut File, wait: Duration) -> (Option<bool>, Vec<u8>) {
     let deadline = std::time::Instant::now() + wait;
     let mut got = vec![];
     let mut buf = [0u8; 256];
+    ANSWER_DUE.store(true, Ordering::SeqCst);
     loop {
         if da1_reply(&got).is_some() {
+            ANSWER_DUE.store(false, Ordering::SeqCst);
             break;
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -596,6 +600,45 @@ fn query_background(tty: &mut File, wait: Duration) -> (Option<bool>, Vec<u8>) {
         rest.drain(range);
     }
     (dark, rest)
+}
+
+/// Whether the background query's DA1 answer is still to come: asked, and
+/// not answered within its wait (a slow link). The keys clear it when it
+/// arrives late; a hand-off to a child reads it out first
+/// ([`drop_answers_due`]).
+static ANSWER_DUE: AtomicBool = AtomicBool::new(false);
+
+/// Before the terminal goes to a child or a prompt: read and drop the
+/// answers to the screen's own queries still on their way (the background
+/// query's DA1, the wheel query's), for at most [`BACKGROUND_WAIT`], so the
+/// child never gets them as typed input; then drop what else is unread,
+/// keys typed for the screen.
+fn drop_answers_due(tty: &mut File) {
+    let deadline = std::time::Instant::now() + BACKGROUND_WAIT;
+    let mut got = vec![];
+    let mut buf = [0u8; 256];
+    let due = |got: &[u8]| {
+        (ANSWER_DUE.load(Ordering::SeqCst) && da1_reply(got).is_none())
+            || (WHEEL.load(Ordering::SeqCst) == WHEEL_ASKED && find(got, b"$y").is_none())
+    };
+    while due(&got) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || select_one(tty.as_raw_fd(), left, false) != Some(true) {
+            break;
+        }
+        match std::io::Read::read(tty, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    }
+    if da1_reply(&got).is_some() {
+        ANSWER_DUE.store(false, Ordering::SeqCst);
+    }
+    // A wheel answer read here still says what release puts back.
+    if let Some(at) = find(&got, b"\x1b[?1007;") {
+        let _ = late_wheel_answer(&got[at..]);
+    }
+    let _ = termios::tcflush(&*tty, termios::FlushArg::TCIFLUSH);
 }
 
 /// Where a DA1 answer (`ESC [ ? ... c`) is in `bytes`.
@@ -761,6 +804,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         stdout: Some(stdout),
         stderr: Some(stderr),
         last_frame: vec![],
+        frame_size: None,
         mouse_on: false,
         suspended: false,
         suspends: 0,
@@ -936,8 +980,10 @@ pub fn release_all() -> bool {
 /// Give a held screen of its own back for a while, for something that needs
 /// the real terminal (a prompt reading stdin, an interactive child): the
 /// task's output so far dumped to it ([`dump_output`]) and stdout's captured
-/// lines to a stdout that is not the terminal, the main screen, its modes and
-/// stdout and stderr back, the capture's copies stopped. Whether
+/// lines to a stdout that is not the terminal, the main screen (the screen's
+/// own cleared first), its modes and stdout and stderr back, the capture's
+/// copies stopped, and no answer to its own queries or key typed for it left
+/// for the child to read ([`drop_answers_due`]). Whether
 /// one was given back, for [`resume`], which each true needs once: a screen
 /// already suspended counts another, and comes back with the last resume.
 /// One not of its own, or none: false.
@@ -961,6 +1007,10 @@ pub(crate) fn suspend() -> bool {
         }
         h.suspends = 1;
         give_back_descriptors([h.stdout.as_mut(), h.stderr.as_mut()]);
+        // The child gets a quiet terminal: no answer meant for the screen
+        // in its input, no frame left on the screen it leaves.
+        drop_answers_due(&mut h.tty);
+        let _ = h.tty.write_all(b"\x1b[2J\x1b[H");
         let _ = h.tty.write_all(leave_sequence(true));
         let _ = h.tty.write_all(wheel_restore());
         let _ = h.tty.flush();
@@ -1165,7 +1215,9 @@ pub(crate) fn screen_holds_terminal() -> bool {
 
 /// Take a screen [`suspend`] gave back again: its modes, the alternate
 /// screen, the mouse when it had it, stdout and stderr captured again, its
-/// last frame drawn, and a dump on leaving from here on. A no-op unless one
+/// last frame drawn when the terminal is the size it was drawn for (else
+/// left clear for the next frame, which reads the size anew), and a dump on
+/// leaving from here on. A no-op unless one
 /// is suspended.
 pub(crate) fn resume() {
     let mut held = HELD.lock().unwrap();
@@ -1207,7 +1259,11 @@ pub(crate) fn resume() {
     if h.mouse_on {
         enter.extend_from_slice(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
     }
-    enter.extend_from_slice(&synchronized(&h.last_frame));
+    // The last frame only at the size it was drawn for; else the screen
+    // stays clear until its next frame, which reads the size anew.
+    if h.frame_size.is_some() && h.frame_size == size_of(h.tty.as_raw_fd()) {
+        enter.extend_from_slice(&synchronized(&h.last_frame));
+    }
     let _ = h.tty.write_all(&enter).and_then(|()| h.tty.flush());
     {
         use std::io::IsTerminal;
@@ -1656,9 +1712,13 @@ impl Keys {
             }
         }
         self.answer_since = None;
-        if let Some(used) =
-            late_wheel_answer(&self.pending).or_else(|| late_background_answer(&self.pending))
-        {
+        if let Some(used) = late_wheel_answer(&self.pending).or_else(|| {
+            late_background_answer(&self.pending).inspect(|_| {
+                if da1_reply(&self.pending).is_some_and(|r| r.start == 0) {
+                    ANSWER_DUE.store(false, Ordering::SeqCst);
+                }
+            })
+        }) {
             self.pending.drain(..used);
             return Ok(None);
         }
@@ -2085,6 +2145,7 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         with_held(this, |h| {
             h.last_frame = text.as_bytes().to_vec();
+            h.frame_size = size_of(h.tty.as_raw_fd());
             if h.suspended {
                 return Ok(NoneType);
             }

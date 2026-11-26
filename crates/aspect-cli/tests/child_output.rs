@@ -168,6 +168,16 @@ def _gt_signal(ctx):
     sleep(20000)
     return 0
 
+def _handoff(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(800)
+    ctx.std.process.command("sh").args(["-c", "stty -icanon min 0 time 10; printf 'READ['; dd bs=64 count=1 2>/dev/null | od -An -c | tr -d ' \\n'; echo ']END'"]).interactive(True).spawn().wait()
+    screen.release()
+    return 0
+
+handoff = task(implementation = _handoff, summary = "An interactive child after an answer the screen asked for came late.")
+
 gt_release = task(implementation = _gt_release, summary = "Golden: take and release.")
 gt_exit = task(implementation = _gt_exit, summary = "Golden: a screen held at exit.")
 gt_hold = task(implementation = _gt_hold, summary = "Golden: Ctrl+Z and fg under a screen.")
@@ -316,6 +326,10 @@ fn on_a_pty(
     let start = std::time::Instant::now();
     let (send, chunks) = std::sync::mpsc::channel();
     let mut screen = std::fs::File::from(master);
+    MASTERS
+        .lock()
+        .unwrap()
+        .insert(child.id(), screen.try_clone().expect("dup master"));
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while let Ok(n @ 1..) = screen.read(&mut buf) {
@@ -323,6 +337,20 @@ fn on_a_pty(
         }
     });
     (child, chunks, dir)
+}
+
+/// The pty masters [`on_a_pty`] made, by the CLI's pid.
+#[cfg(unix)]
+static MASTERS: std::sync::Mutex<std::collections::BTreeMap<u32, std::fs::File>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The master of the pty `child` (from [`on_a_pty`]) runs on, to type into
+/// or resize.
+#[cfg(unix)]
+fn pty_master(child: &std::process::Child) -> std::fs::File {
+    MASTERS.lock().unwrap()[&child.id()]
+        .try_clone()
+        .expect("dup master")
 }
 
 /// Wait at most `secs` for `child`; on a timeout, fail with what it and its
@@ -1117,4 +1145,102 @@ fn golden_a_failure_under_a_screen() {
 #[test]
 fn golden_ctrl_c_under_a_screen() {
     check_golden("gt_signal", Drive::CtrlC, golden!("gt_signal"));
+}
+
+/// The terminal answers the screen's own query late (a slow link), then an
+/// interactive child gets the terminal: the answer is read out and dropped
+/// first, never the child's input.
+#[cfg(unix)]
+#[test]
+fn a_late_answer_to_the_screens_query_never_reaches_a_child() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("handoff", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    // The DA1 answer, after the take's wait for it.
+    let mut master = pty_master(&child);
+    master.write_all(b"\x1b[?62;22c").unwrap();
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    assert!(status.success(), "{status:?}");
+    let text = plain(&String::from_utf8_lossy(&raw));
+    let read = text
+        .split("READ[")
+        .nth(1)
+        .and_then(|r| r.split("]END").next())
+        .unwrap_or("<none>");
+    assert_eq!(read, "", "what the child read: {text:?}");
+}
+
+/// Ctrl+Z, the terminal resized while stopped, then fg: the screen comes
+/// back clear for its next frame, not with its last one drawn at the old size.
+#[cfg(unix)]
+#[test]
+fn fg_at_another_size_draws_no_stale_frame() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("gt-hold", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    let pid = child.id() as i32;
+    let stopped = || {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim_start()
+                    .starts_with('T')
+            })
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    // SAFETY: signals to our own child; TIOCSWINSZ on its terminal.
+    unsafe { libc::kill(pid, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped() && asked.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let master = pty_master(&child);
+    let size = libc::winsize {
+        ws_row: 30,
+        ws_col: 90,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(&master),
+            libc::TIOCSWINSZ as _,
+            &size,
+        )
+    };
+    let mark = raw.len();
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    assert!(status.success(), "{status:?}");
+    let after = String::from_utf8_lossy(&raw[mark..]).into_owned();
+    let back = after.find("\x1b[?1049h").expect("taken back");
+    let redrawn = &after[back..];
+    let next = redrawn.find("FRAME2").unwrap_or(redrawn.len());
+    assert!(
+        !redrawn[..next].contains("FRAME"),
+        "the old frame drawn again: {redrawn:?}"
+    );
 }
