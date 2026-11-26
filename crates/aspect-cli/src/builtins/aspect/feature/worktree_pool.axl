@@ -1,0 +1,11 @@
+"""Public entry point for the worktree-pool feature.
+
+`WorktreePool` is implemented with the settings trait it writes in the internal
+`private/lib/worktrees_trait.axl`; this file re-exports it at the stable public
+path so user `config.axl` files load it as
+`load("@aspect//feature/worktree_pool.axl", "WorktreePool")`.
+"""
+
+load("../private/lib/worktrees_trait.axl", _WorktreePool = "WorktreePool")
+
+WorktreePool = _WorktreePool

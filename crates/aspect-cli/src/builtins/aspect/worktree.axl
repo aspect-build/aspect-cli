@@ -31,7 +31,7 @@ the registry says.
 An agent that dies with its checkout still in place is the harder case, because
 git still knows about that worktree. When a slot is wanted, the lease is taken back if the holder's
 process has verifiably stopped — a holder with no pid recorded never has —
-`Worktrees.abandoned_grace_hours` has passed since the slot's last activity, and
+`--worktree-pool:abandoned-grace-hours` has passed since the slot's last activity, and
 the checkout is clean: nothing uncommitted is lost, and the session stays
 resumable — `list` still offers the command to return to it. A dirty checkout,
 or one git cannot read, is never taken automatically.
@@ -144,7 +144,7 @@ load(
     "worktree_porcelain",
     "write_registry",
 )
-load("./private/lib/worktrees_trait.axl", "HOOK_BUDGET_MS", "HOOK_SCORE_LIMIT", "Worktrees")
+load("./private/lib/worktrees_trait.axl", "HOOK_BUDGET_MS", "HOOK_SCORE_LIMIT", "Worktrees", "worktree_pool")
 
 def _shown(text: str) -> str:
     """`text` as a terminal is given it: whatever would act on it or hide in
@@ -1294,7 +1294,7 @@ def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_
     unknown = "" if agent.get("pid", 0) or not agent else ", whose process cannot be checked"
     if kept_ms > 0:
         unknown = (", which is not running; its slot is kept for it for another " + phrase_ms(kept_ms) +
-                   ", counted from the slot's last activity (`Worktrees.abandoned_grace_hours`), in case it comes back")
+                   ", counted from the slot's last activity (`--worktree-pool:abandoned-grace-hours`), in case it comes back")
     sibling = _sibling(me, agent)
     forced = ("--force covers uncommitted work only, not another session's lease. " if ctx.args.force == _FORCE_DIRTY and not sibling else "")
     path = slot_path(pool, slot_id)
@@ -1735,7 +1735,7 @@ def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: s
         left = _grace_ms(ctx) - (time.now_ms() - lease_last_active_ms(ctx.std, pool, slot_id, registry["slots"][slot_id], root))
         if not work and left > 0:
             kept = ("\n\nIts slot is kept for it for another " + phrase_ms(left) + ", counted from the slot's " +
-                    "last activity (`Worktrees.abandoned_grace_hours`), in case it comes back.")
+                    "last activity (`--worktree-pool:abandoned-grace-hours`), in case it comes back.")
         if work:
             kept = ("\n\nIt was not taken back because the checkout holds work that would be lost:\n" +
                     _indented(work))
@@ -2156,7 +2156,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
     # all; at the limit the second case has to give way, since the pool is a
     # disk budget and growing it forever is the one outcome worse than a cold
     # build.
-    budget = ctx.traits[Worktrees].max_slots
+    budget = worktree_pool.max_slots(ctx)
     mine = owned_slots(pool, registry)
     vetoed = sorted(views.keys(), key = lambda sid: -default_score(views[sid], want))
     if len(mine) >= budget and vetoed:
@@ -2186,7 +2186,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
             ", so it now has %d checkouts and output bases against an advisory limit of %d. " % (len(mine) + 1, budget) +
             "`aspect worktree list` shows who holds each; releasing those you are done with lets later adds " +
             "reuse them instead of growing, and `aspect worktree prune` then deletes free slots left idle. " +
-            "`Worktrees.max_slots` in config.axl sets the limit."
+            "`--worktree-pool:max-slots` sets the limit."
         )
         _warn(ctx.std, said)
         warnings.append({"code": "pool_over_limit", "message": said, "slots": len(mine) + 1, "max_slots": budget})
@@ -3000,15 +3000,15 @@ def _newer_registry(ctx: TaskContext, pool: dict) -> TaskConclusion:
     )
 
 def _grace_left_ms(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str) -> int:
-    """How much of `Worktrees.abandoned_grace_hours` a leased slot has left,
+    """How much of the `WorktreePool` grace period a leased slot has left,
     counted from its last activity; 0 once it is over."""
     left = _grace_ms(ctx) - (time.now_ms() - lease_last_active_ms(ctx.std, pool, slot_id, registry["slots"][slot_id], root))
     return left if left > 0 else 0
 
 def _grace_ms(ctx: TaskContext) -> int:
-    """`Worktrees.abandoned_grace_hours` in ms: how long a stopped session's
+    """The `WorktreePool` grace period in ms: how long a stopped session's
     slot is kept for it before automatic take-back."""
-    return ctx.traits[Worktrees].abandoned_grace_hours * 3600 * 1000
+    return worktree_pool.abandoned_grace_hours(ctx) * 3600 * 1000
 
 def _adopted(ctx: TaskContext, pool: dict, taken: list | None = None) -> dict:
     """The registry with slots of a clone gone from its path adopted by this
@@ -3151,23 +3151,24 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
     bad = _invalid_agent(ctx)
     if bad:
         return bad
-    if ctx.traits[Worktrees].max_slots < 1:
+    max_slots = worktree_pool.max_slots(ctx)
+    if max_slots < 1:
         return _refuse(
             ctx,
             "invalid_config",
-            "Worktrees.max_slots is %d; it takes 1 or more." % ctx.traits[Worktrees].max_slots,
-            facts = {"setting": "Worktrees.max_slots", "value": ctx.traits[Worktrees].max_slots},
+            "--worktree-pool:max-slots is %d; it takes 1 or more." % max_slots,
+            facts = {"setting": "--worktree-pool:max-slots", "value": max_slots},
         )
-    if ctx.traits[Worktrees].abandoned_grace_hours < 0:
+    grace_hours = worktree_pool.abandoned_grace_hours(ctx)
+    if grace_hours < 0:
         # Refused rather than read as 0: a stray minus would otherwise turn off
         # the one protection a stopped session's slot has.
         return _refuse(
             ctx,
             "invalid_config",
-            "Worktrees.abandoned_grace_hours is %d; it takes 0 or more hours, 0 taking a stopped session's " % (
-                ctx.traits[Worktrees].abandoned_grace_hours
-            ) + "clean slot back at once.",
-            facts = {"setting": "Worktrees.abandoned_grace_hours", "value": ctx.traits[Worktrees].abandoned_grace_hours},
+            "--worktree-pool:abandoned-grace-hours is %d; it takes 0 or more hours, 0 taking a stopped session's " % grace_hours +
+            "clean slot back at once.",
+            facts = {"setting": "--worktree-pool:abandoned-grace-hours", "value": grace_hours},
         )
     pool = _pool(ctx)
     if not pool:
@@ -5317,7 +5318,7 @@ add = task(
     summary = "Take a git worktree from a pool of reused paths, so Bazel starts warm.",
     description = _EXPERIMENTAL + "\n\n" + "Create a git worktree at a pooled slot, checked out on the named branch. The slot's path never changes, so the Bazel server bound to it survives being handed from one task to the next — the second and every later worktree in that slot starts with a warm server and an `external/` tree already materialized.\n\nWhich slot you get is chosen for how much of its Bazel state will apply to the branch you asked for: an identical tree first, then the slot that last held this branch — so coming back to a branch lands on the analysis cache built for it — then any other warm slot, then one whose MODULE.bazel.lock differs, then a cold one. Where the slot has Bazel state, the line `add` prints names the branch that held it last, which is as much as the pool knows: what populated an analysis cache is not recorded, and a brief lease that built nothing is still the last holder.\n\nPrefer this over `git worktree add`, which gives Bazel a path it has never seen and therefore a cold server every time.\n\nThe slot path is printed, and `aspect worktree path <branch>` prints it again later; `git worktree list` reports it too, so the worktree stays legible to git and to anyone managing it by hand.",
     implementation = _add_impl,
-    traits = [Worktrees],
+    traits = [Worktrees] + worktree_pool.TRAITS,
     args = {
         "branch": args.positional(
             minimum = 1,
@@ -5343,7 +5344,7 @@ add = task(
         ),
         "take_over": args.boolean(
             default = False,
-            description = "Claim a slot this pool already leases for the branch, re-assigning it to this session. The checkout is left exactly as it is, so anything the previous session had uncommitted is still there. Without this flag a held branch is refused, because the other session may only be suspended and resumable — except a lease whose session has verifiably stopped, more than `Worktrees.abandoned_grace_hours` since the slot's last activity, with nothing in its checkout to lose, which `add` takes back on its own, removing that checkout and checking the branch out fresh in the same slot.",
+            description = "Claim a slot this pool already leases for the branch, re-assigning it to this session. The checkout is left exactly as it is, so anything the previous session had uncommitted is still there. Without this flag a held branch is refused, because the other session may only be suspended and resumable — except a lease whose session has verifiably stopped, more than `--worktree-pool:abandoned-grace-hours` since the slot's last activity, with nothing in its checkout to lose, which `add` takes back on its own, removing that checkout and checking the branch out fresh in the same slot.",
         ),
     } | _ADD_OUTPUT_ARG,
 )
@@ -5356,9 +5357,9 @@ worktree_release = task(
     kind = "release",
     group = ["worktree"],
     summary = "End the lease on <branch>, the slot you are in, or with --all every slot: remove the worktree, keep the slot warm.",
-    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `Worktrees.abandoned_grace_hours` have passed and the checkout is clean — so call this when you can.\n\n`--all` ends every lease this clone holds in its pool, one slot at a time, each judged as naming it would judge it: the refusals above and the `--force` grades apply to each slot, a sibling subagent's lease is never released, and a slot still being set up, or whose checkout this clone's git does not list, is skipped. The pool's lock is taken for one slot at a time, so other `aspect worktree` calls go on meanwhile; a slot whose lease changed in between is skipped. One line per slot says what happened, then a count; it exits 1 when any slot was refused.",
+    description = _EXPERIMENTAL + "\n\n" + "End the lease on a branch: the worktree goes, the slot stays.\n\nRefused while the worktree holds work: modified tracked files and untracked files you wrote; a populated submodule, an edit hidden by `--assume-unchanged` or `--skip-worktree`, a ref only this worktree has, or a merge, rebase, cherry-pick, revert or bisect in progress; and commits only its HEAD reaches — made at a detached HEAD, or left behind by one — which removing the worktree would leave dangling. A checkout git cannot read is refused too, until `--force=all`. Files git ignores go with it, as `git worktree remove` takes them: what a repository ignores is disposable. Bazel's own leavings do not count — the convenience symlinks pointing into the slot's output base, and a generated lock file — because a slot that had been built in could otherwise never be released, which is every slot the pool is for. The slot's path is what Bazel keys its server and output base on, so leaving that path in place is what makes the next lease of this slot fast.\n\nSkipping this never breaks anything: git is the authority on whether a worktree exists, so a slot whose worktree git has forgotten is free regardless of what the pool recorded. A slot whose checkout is still on disk stays leased, though, until its holder has verifiably stopped, `--worktree-pool:abandoned-grace-hours` have passed and the checkout is clean — so call this when you can.\n\n`--all` ends every lease this clone holds in its pool, one slot at a time, each judged as naming it would judge it: the refusals above and the `--force` grades apply to each slot, a sibling subagent's lease is never released, and a slot still being set up, or whose checkout this clone's git does not list, is skipped. The pool's lock is taken for one slot at a time, so other `aspect worktree` calls go on meanwhile; a slot whose lease changed in between is skipped. One line per slot says what happened, then a count; it exits 1 when any slot was refused.",
     implementation = _release_impl,
-    traits = [Worktrees],
+    traits = [Worktrees] + worktree_pool.TRAITS,
     args = {
         "branch": args.positional(
             minimum = 0,
@@ -5373,7 +5374,7 @@ worktree_release = task(
             default = _FORCE_OFF,
             values = [_FORCE_OFF, _FORCE_DIRTY, _FORCE_ALL],
             bare = _FORCE_DIRTY,
-            description = "Override a refusal, in two grades as `git worktree remove` has `-f` and `-f -f`. `true` — which bare --force means — releases your own worktree with uncommitted changes, or with commits only its HEAD reaches, discarding them. `all` also ends a lease another session holds that has not verifiably stopped, or has stopped within `Worktrees.abandoned_grace_hours`, removing a checkout somebody may be working in, and discards another session's work even once its process has gone — as well as work under a lease that records no session id or process, which cannot be shown to be yours. Without it, a dirty worktree is refused with the changed files listed, and another session's lease is refused with its holder named.",
+            description = "Override a refusal, in two grades as `git worktree remove` has `-f` and `-f -f`. `true` — which bare --force means — releases your own worktree with uncommitted changes, or with commits only its HEAD reaches, discarding them. `all` also ends a lease another session holds that has not verifiably stopped, or has stopped within `--worktree-pool:abandoned-grace-hours`, removing a checkout somebody may be working in, and discards another session's work even once its process has gone — as well as work under a lease that records no session id or process, which cannot be shown to be yours. Without it, a dirty worktree is refused with the changed files listed, and another session's lease is refused with its holder named.",
         ),
     } | _IDENTITY_ARGS | _OUTPUT_ARG,
 )
@@ -5384,7 +5385,7 @@ path = task(
     summary = "Print a leased worktree's directory, for `cd`.",
     description = _EXPERIMENTAL + "\n\n" + "Print the slot directory a leased worktree lives in, and nothing else, so a shell can step into it:\n\n    slot=$(aspect worktree path fix/login) && cd \"$slot\"\n\nThe two steps matter: `cd \"$(...)\"` returns 0 even when this fails, because the substitution is empty and `cd \"\"` is a no-op, so a script would carry on where it already was.\n\nA task cannot change its caller's directory, so this prints rather than moves. Define a shell function if you want one word:\n\n    aspect-cd() { local d; d=$(aspect worktree path \"$1\") && cd \"$d\"; }",
     implementation = _path_impl,
-    traits = [Worktrees],
+    traits = [Worktrees] + worktree_pool.TRAITS,
     args = {
         "branch": args.positional(
             minimum = 1,
@@ -5407,7 +5408,7 @@ prune = task(
     summary = "Delete free slots and their Bazel output bases: one named, or all that have gone stale.",
     description = _EXPERIMENTAL + "\n\n" + "Reclaim the disk held by free slots. Name a branch, a slot id, a unique prefix of one or a slot's directory to delete that one however recently it was used; name nothing and every free slot nothing has used for a while goes. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots — and, by name, stranded ones — are considered: a slot someone is working in is never deleted, however long it has been idle. A free slot whose Bazel server is still running, or whose checkout holds work, is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nA clone that was moved or deleted leaves its slots for the next clone to take over: a free one by any clone, which then ages like its own, and a leased one by the clone whose git still lists its checkout. What no clone can take — a leased slot whose clone was deleted — is stranded, and goes only by being named, whatever its age, with `--force=all` where its checkout holds work; one whose lease's session is still running is refused, since its clone most likely moved.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
     implementation = _prune_impl,
-    traits = [Worktrees],
+    traits = [Worktrees] + worktree_pool.TRAITS,
     args = {
         "target": args.positional(
             minimum = 0,
@@ -5437,7 +5438,7 @@ inspect = task(
     summary = "Show everything about a pooled worktree: the one named, or the one this directory is in.",
     description = _EXPERIMENTAL + "\n\n" + "Report a slot: its path, the Bazel output base it keys, whether a server is holding that base, how many worktrees it has held and who has had them, and for a checked-out slot its commit, whether a remote has it, and what is uncommitted. The same detail `aspect worktree list --verbose` prints, for one slot — which otherwise means listing the pool and matching a path by eye.\n\nNamed, any slot of this clone answers, free or held by anyone, since reading one acts on nothing. Unnamed, it is the slot the working directory is in, from any subdirectory of it, since the worktree root comes from git rather than from the working directory.\n\nUnnamed outside a slot is an answer rather than an error and exits 0, since that is the expected result in the clone itself, and it lists the slots this session holds, so an agent that lost its place finds them; the two shapes of it are distinguished — the clone, or a git worktree `aspect worktree` does not manage — because they lead different places. Being outside a repository altogether is a refusal, because then there is no pool to have a slot in. `--output=json` reports which of the three in `location`.",
     implementation = _inspect_impl,
-    traits = [Worktrees],
+    traits = [Worktrees] + worktree_pool.TRAITS,
     args = {
         "slot": args.positional(
             minimum = 0,
@@ -5453,7 +5454,7 @@ worktree_list = task(
     summary = "List this repository's worktree slots, what holds them, and how warm each is.",
     description = _EXPERIMENTAL + "\n\n" + "Show every slot in this repository's pool: which are leased and to what, and which are free along with the branch each last held.\n\nA pool belongs to one repository: slots are keyed by the repository the clone you are in points at, so a slot never holds a worktree of anything else and this listing never shows one. `aspect output-bases` is the machine-wide view — every pool's slots, whatever repository they belong to, beside every other Bazel output base on this machine, with what each slot holds or last held. A pool whose builds went to a different output user root has state neither command can see; this command reads warmth under the root this workspace resolves, given as `output_user_root` in its JSON and named under `--all` when it is not Bazel's default.\n\nSlots are listed in two tables, under a line counting how many are taken and free, because what is worth knowing about a slot somebody holds and one you could take are different things.\n\n`taken` — a worktree is checked out here:\n\n    slot           the directory under the pool that holds the worktree; the pool's own path is printed above the table, with this as its last segment\n    state          `in use`, or `setup` while an `aspect worktree add` is still checking a worktree out here\n    warmth         how much of Bazel's state this slot has behind it\n      hot          a live Bazel server still holds the analysis cache, so a build with the same flags skips loading and analysis\n      warm         no server, but the output base is there\n      cold         no output base yet; the first build pays loading, analysis and fetches\n    age            how long the slot has existed\n    leases         worktrees the slot has held\n    branch         what is checked out\n    agent          the kind of agent holding the slot — `claude-code`, `codex` — where one can be identified\n    session        its session id, in full, so it can be handed straight to that harness\n    notes          anything exceptional about the row\n\n`free` — no worktree here, and the slot is keeping its Bazel state for the next one:\n\n    slot           as above\n    warmth         as above. Which free slot the next `add` takes is decided by how well its last tree fits the branch asked for, not by warmth\n    last used      how long since the slot was last used: Bazel's last activity in it, or a worktree taken or given back there, whichever is newer; what `prune` acts on\n    age            how long the slot has existed\n    leases         worktrees the slot has held\n    last branch    what it held last, which is the signal for how warm it will be for the next thing you put in it\n    notes          anything exceptional about the row\n\n`session` and `notes` are left out when no slot fills them.\n\n`--verbose` adds a block per slot — its path, its output base and why one is absent (`not created yet`, or `reclaimed`), whether a Bazel server holds it, and every holder the slot remembers — then a section per agent session those holders name: its harness, its project, the command that returns to it, and every lease it took, active first. Most leases come from subagents, which report their parent's session, so that section is where the way back into each conversation is said once. A session gets no command where the harness does not publish one, or where the harness's own store no longer has it. Durations in the tables are written in the coarsest unit that still distinguishes: minutes under an hour, hours under two days, then days; how long ago a lease ended is written in full.\n\nRows are ordered by what is happening: in use first, warmest down to cold, then the slots you could take, most recently used first.\n\n`--output=json` reports the same state as one document, with the elapsed times in milliseconds beside the rounded days. One ordering differs: a slot's `history` is oldest first there, since that is the order it was written in, while the table shows it newest first.\n\nWorking with a slot:\n\n    aspect worktree add <branch>\n        Take a free slot and check <branch> out in it, preferring the slot whose Bazel state best fits that branch — the one that last held it, where there is one. Checks out a branch this clone or a remote has; `--create` makes a new one, from HEAD or `--create=<ref>`, and `--detach` checks out any commit on no branch. With --output=path it prints only the directory, for `slot=$(aspect worktree add <branch> --output=path) && cd \"$slot\"`.\n\n    aspect worktree path <branch>\n        Print the directory of a slot you already hold, for the same idiom. Takes a slot id as well as a branch.\n\n    aspect worktree release <branch>\n        End the lease: the worktree goes, the slot keeps its Bazel state for whatever comes next. Refuses a worktree that holds work — uncommitted changes, commits only a detached HEAD has — and names it.\n\n    aspect worktree release --all\n        End every lease this clone holds, each judged as naming it would be. A slot holding work, or held by another session, is refused and named, and the rest are released.\n\n    aspect worktree prune <branch-or-slot>\n        Delete one slot and its Bazel output base, however recently it was used. Refuses a slot somebody is working in.\n\n    aspect worktree prune --dry-run\n        Show which free slots have gone stale, and how long each has been idle. Without --dry-run it asks before deleting anything. For what the disk would actually give back, `aspect output-bases --measure-sizes` reports per-base sizes and `aspect gc` acts on them.",
     implementation = _list_impl,
-    traits = [Worktrees],
+    traits = [Worktrees] + worktree_pool.TRAITS,
     args = {
         "all": args.boolean(
             default = False,

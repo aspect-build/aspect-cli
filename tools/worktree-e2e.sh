@@ -164,7 +164,7 @@ check "another session cannot" "$(outcome "$B" "$B_PID" release t2)" "held_by_an
 
 section "a session that stops, resumes, or does not"
 mkdir -p .aspect
-printf 'load("@aspect//traits.axl", "Worktrees")\ndef config(ctx):\n    ctx.traits[Worktrees].abandoned_grace_hours = 0\n' >.aspect/config.axl
+printf 'load("@aspect//feature/worktree_pool.axl", "WorktreePool")\ndef config(ctx):\n    ctx.features[WorktreePool].args.abandoned_grace_hours = 0\n' >.aspect/config.axl
 end_session "$A_PID"
 new_session
 A_PID="$SESSION_PID"
