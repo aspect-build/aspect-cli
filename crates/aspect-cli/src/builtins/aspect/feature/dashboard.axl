@@ -3034,11 +3034,12 @@ def action_split(state: dict) -> dict:
         # fewer than it counts), else internal.
         created = _get(summary, "actions_created", 0) or 0
         gap = max(0, done - whole)
+        tried = bool(ran or cached or unchanged or failed)
         if unchanged or created < done:
             unchanged += gap
         else:
             internal += gap
-        split.update(counted = True, known = True, final = True, ran = ran, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False, failed_build = not succeeded)
+        split.update(counted = True, known = True, final = True, ran = ran, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False, failed_build = not succeeded, tried = succeeded or tried)
         split["done"] = max(done, ran + cached + unchanged + internal + failed)
         if succeeded:
             split["total"] = split["done"]
@@ -3108,9 +3109,11 @@ def reused(split: dict):
     """The share of a finished build's attempted work that needed no run:
     cached or unchanged, of those that ran, were cached, were unchanged or
     failed (a failed action is work attempted; internal ones are none), a
-    whole percent rounded down; None while it runs, or with none to share."""
+    whole percent rounded down; None while it runs, with none to share, or
+    for a failed build that tried no action (an analysis failure: what its
+    done count has past its internal ones is an earlier build's, `tried`)."""
     whole = split["ran"] + split["cached"] + split["unchanged"] + split["failed"]
-    if not split["final"] or not whole:
+    if not split["final"] or not whole or not split.get("tried", True):
         return None
     return (split["unchanged"] + split["cached"]) * 100 // whole
 

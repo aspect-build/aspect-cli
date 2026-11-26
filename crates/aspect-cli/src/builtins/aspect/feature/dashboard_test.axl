@@ -516,6 +516,13 @@ def _actions_tests(ctx):
     _eq("four cached, one failed (a cold cc build, its disk cache warm)", reused(dict(action_split(_real(ctx, "cold cc failure")), ran = 0, cached = 4, internal = 11)), 80)
     _eq("the big failed build", reused(action_split(big)), 2311 * 100 // (2600 + 2311 + 2000))
 
+    # An analysis failure tried no action: "3 actions", the two past the
+    # workspace status an earlier build's, and no reused share.
+    analysis = action_split(_real(ctx, "analysis failure"))
+    _eq("an analysis failure reuses nothing it tried", reused(analysis), None)
+    _eq("its label", actions_text(analysis)[0], "3 actions")
+    _eq("a no-op success still all reused", reused(dict(analysis, tried = True)), 100)
+
     # A failed build with no action failed never draws a full bar.
     for name in ["failing test", "analysis failure", "loading failure, no count"]:
         st = _real(ctx, name)
