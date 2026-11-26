@@ -10,7 +10,7 @@
 //! a file (`bazel/<n>`, counting only those) is made at its spawn.
 //!
 //! A Bazel invocation's folder holds its compact execution log, workspace log,
-//! trace profile, build event stream and raw console log (`console.log`, with
+//! trace profile, build event stream and Bazel's raw log (`console.log`, with
 //! a `console.collapsed-<n>.log` per kind of message the console folded),
 //! each when the build has one, and the action and test logs the build was
 //! asked to keep (`actions/` and `testlogs/`, listed in `actions.json` and

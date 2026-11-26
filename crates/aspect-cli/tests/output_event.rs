@@ -1,7 +1,7 @@
 //! The `build` task's console processing, for real, against basil.
 //!
 //! * The `Console` feature's default stages collapse and shorten, its tip
-//!   rules emit tips, and Bazel's raw console is kept in a log the summary
+//!   rules emit tips, and Bazel's raw log is kept in a file the summary
 //!   names; disabled, the console is Bazel's own.
 //! * `output_intercept` hooks answer the lines an `intercept` stage holds. Its
 //!   timeout is far longer than the test, so a line nothing answered would
@@ -90,7 +90,7 @@ fn aspect(root: &Path, task: &str) -> Command {
         .envs(base_env())
         .env("BAZEL_REAL", basil_bin())
         .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
-        // The task history, where the raw console logs go, of its own.
+        // The task history, where Bazel's raw logs go, of its own.
         .env("ASPECT_HISTORY_DIR", root.join("history"))
         // Not `root` itself, whose `.aspect/` would then load as user config.
         .env("HOME", root.join("home"))
@@ -294,7 +294,7 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
     );
     let summary = stderr
         .lines()
-        .find(|l| l.starts_with("INFO: Aspect hid 2 console lines; the raw console is in "))
+        .find(|l| l.starts_with("INFO: Aspect hid 2 console lines; Bazel's raw log is in "))
         .unwrap_or_else(|| panic!("no summary:\n{stderr}"));
     assert!(
         stderr
@@ -606,7 +606,7 @@ fn a_build_keeps_its_console_and_its_logs_in_one_folder() {
     let dir = workspace("fixture.axl", |_| {
         format!(
             r#"def _impl(ctx):
-    # A stage that can drop a line, so the raw console is kept.
+    # A stage that can drop a line, so Bazel's raw log is kept.
     processor = bazel.output.processor(display = "lines", stages = [bazel.output.drop(["^never matches$"])])
     build = ctx.bazel.build(
         flags = ["--scenario=action_and_test_logs", "--basil-scratch={scratch}"] + processor.flags,

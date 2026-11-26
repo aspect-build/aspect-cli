@@ -689,21 +689,17 @@ impl LineProcessor for Summary {
                 };
                 // On the `INFO:` line, whose text is unstyled.
                 Some(format!(
-                    "the raw console{cut} is in {}",
+                    "Bazel's raw log{cut} is in {}",
                     self.path(path, "")
                 ))
             }
-            RawLogState::Failed => Some("the raw console could not be saved".to_string()),
+            RawLogState::Failed => Some("Bazel's raw log could not be saved".to_string()),
             RawLogState::Off => None,
         };
         let mut out = Vec::new();
         match (hidden, log) {
             (0, None) => return None,
-            (0, Some(log)) => {
-                // Its own sentence, so capitalised.
-                let log = format!("{}{}", log[..1].to_uppercase(), &log[1..]);
-                self.style.line(&mut out, &format!("INFO: {log}"))
-            }
+            (0, Some(log)) => self.style.line(&mut out, &format!("INFO: {log}")),
             (n, log) => {
                 let s = if n == 1 { "" } else { "s" };
                 let log = log.map(|l| format!("; {l}")).unwrap_or_default();
@@ -796,12 +792,12 @@ mod tests {
     #[test]
     fn an_info_line_looks_as_the_clis_own_do() {
         let mut out = Vec::new();
-        Style::themed(&dark()).line(&mut out, "INFO: The raw console is in x");
+        Style::themed(&dark()).line(&mut out, "INFO: Bazel's raw log is in x");
         Style::themed(&dark()).line(&mut out, "  3 more like: x");
         Style::themed(&dark()).rule(&mut out, "Error recap (3)");
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "\x1b[1;38;5;247mINFO\x1b[0m: The raw console is in x\n\x1b[38;5;247m  3 more like: x\x1b[0m\n\x1b[1;38;5;203m── Error recap (3) ──\x1b[0m\n"
+            "\x1b[1;38;5;247mINFO\x1b[0m: Bazel's raw log is in x\n\x1b[38;5;247m  3 more like: x\x1b[0m\n\x1b[1;38;5;203m── Error recap (3) ──\x1b[0m\n"
         );
         assert_eq!(
             Style::themed(&dark()).error_label(b"ERROR: //a:b failed".to_vec()),
@@ -998,7 +994,7 @@ mod tests {
         );
         assert_eq!(
             feed(&mut p, &["a"]),
-            "INFO: The raw console is in /tmp/c.log\n",
+            "INFO: Bazel's raw log is in /tmp/c.log\n",
             "a kept log is named though nothing was hidden"
         );
 
@@ -1012,7 +1008,7 @@ mod tests {
         stats.hid(2);
         assert_eq!(
             feed(&mut p, &[]),
-            "INFO: Aspect hid 6 console lines; the raw console is in /tmp/c.log\n  \
+            "INFO: Aspect hid 6 console lines; Bazel's raw log is in /tmp/c.log\n  \
              3 more like: WARNING: many\n  1 more like: WARNING: few\n"
         );
     }
@@ -1214,7 +1210,7 @@ mod tests {
             Some(links),
         );
         let out = feed(&mut p, &[]);
-        let line = out.lines().find(|l| l.contains("The raw console")).unwrap();
+        let line = out.lines().find(|l| l.contains("Bazel's raw log")).unwrap();
         assert!(line.ends_with(">\x1b[0m"), "{line:?}");
     }
 
@@ -1243,12 +1239,12 @@ mod tests {
         let p = |state| Summary::new(Arc::new(Stats::default()), state, Style::default(), None);
         assert_eq!(
             feed(&mut p(RawLogState::Failed), &[]),
-            "INFO: The raw console could not be saved\n"
+            "INFO: Bazel's raw log could not be saved\n"
         );
         let cut = Arc::new(std::sync::atomic::AtomicU8::new(Cut::Failed as u8));
         assert_eq!(
             feed(&mut p(RawLogState::Kept("/tmp/c.log".into(), cut)), &[]),
-            "INFO: The raw console (incomplete: writing it failed) is in /tmp/c.log\n"
+            "INFO: Bazel's raw log (incomplete: writing it failed) is in /tmp/c.log\n"
         );
     }
 
@@ -1320,7 +1316,7 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "INFO: Aspect hid 3 console lines; the raw console is in {}\n  \
+                "INFO: Aspect hid 3 console lines; Bazel's raw log is in {}\n  \
                  2 more like: WARNING: many 1\n    all 3 in {}\n  \
                  1 more like: WARNING: few 1\n    all 2 in {}\n",
                 log.display(),
