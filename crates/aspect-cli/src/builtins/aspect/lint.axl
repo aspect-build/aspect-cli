@@ -325,15 +325,16 @@ LintTrait = trait(
     comment_urls = attr(dict, default = {}),
 )
 
-FINDINGS_DESTINATIONS = ["auto", "both", "comments", "annotations"]
+_FINDINGS_DESTINATIONS = ["auto", "both", "comments", "annotations"]
 
 def findings_destination(ctx):
-    """Where the lint task surfaces findings, its `--findings-destination`.
+    """The lint task's `--findings-destination`: where findings surface.
 
-    Read by GithubLintComments / GitlabLintComments (SARIF + patch-derived
-    comments) and GithubStatusChecks (annotations) from the `TaskContext` of a
-    lint hook, so all three agree on one value ("auto" for a task without the
-    arg):
+    Read from the lint task's `TaskContext` by GithubLintComments /
+    GitlabLintComments (SARIF + patch-derived comments, in their lint hooks)
+    and GithubStatusChecks (annotations, in its `task_update` handler), so all
+    three agree on one value ("auto" for a task without the arg; a custom task
+    firing LintTrait hooks declares the arg to choose another):
       "auto"        - (default) annotate every SARIF finding except those whose
                       anchor matches a posted patch auto-fix comment (de-dup);
                       fix-bearing SARIF findings become comments; patches post.
@@ -1339,7 +1340,7 @@ lint = task(
         ),
         "findings_destination": args.string(
             default = "auto",
-            values = FINDINGS_DESTINATIONS,
+            values = _FINDINGS_DESTINATIONS,
             description = (
                 "Where code-review features surface findings. 'auto' " +
                 "(default): annotate findings and post fix-bearing ones and " +

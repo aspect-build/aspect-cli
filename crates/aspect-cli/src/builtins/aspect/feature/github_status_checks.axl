@@ -491,7 +491,7 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_task_kind"] = ctx.task.kind
         _create_check_run(ctx)
 
-    def _lint_annotation_plan(ctx):
+    def _lint_annotation_plan(ctx, destination):
         """Resolve live PR context, then delegate to `lint_annotation_plan`.
 
         DORMANT-SPLIT — `has_fix` is False for every rules_lint
@@ -502,7 +502,7 @@ def _github_status_checks(ctx: FeatureContext):
         """
         pr, _ = github.detect_pr(ctx.std)
         return lint_annotation_plan(
-            lint_findings_destination(ctx),
+            destination,
             has_pr = pr != None,
         )
 
@@ -632,15 +632,17 @@ def _github_status_checks(ctx: FeatureContext):
         # PATCHes, so per-tick emission duplicates them.
         extra_batches = []
         if final and update.kind == "lint_results":
-            ann_enabled, include_fix_bearing = _lint_annotation_plan(ctx)
+            destination = lint_findings_destination(ctx)
+            ann_enabled, include_fix_bearing = _lint_annotation_plan(ctx, destination)
         else:
+            destination = ""
             ann_enabled, include_fix_bearing = (False, False)
         if ann_enabled:
             # In "auto" mode only, suppress annotations at anchors where a
             # patch-derived auto-fix comment already lands ("both" wants the
             # duplication; the others have nothing to dedupe).
             suppress_anchors = {}
-            if lint_findings_destination(ctx) == "auto":
+            if destination == "auto":
                 for s in (data.get("lint", {}) or {}).get("suggestions", []) or []:
                     if not s.get("correlated"):
                         continue
