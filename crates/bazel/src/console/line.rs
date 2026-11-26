@@ -346,7 +346,9 @@ impl Classifier {
                 Kind::Other
             }
         };
-        let status = BAZEL_STATUS.is_match(record);
+        // A tool's own line coloured as Bazel colours its status line (the
+        // colon inside, the space after) is the tool's: never drawn.
+        let status = !inside && BAZEL_STATUS.is_match(record);
         let after_status = std::mem::replace(&mut self.after_status, status);
         let drawn = kind.is_progress()
             || count
@@ -490,6 +492,23 @@ pub(crate) mod tests {
     }
 
     /// A tool's own "Waiting for" line is its output, not bazel's BES wait.
+    #[test]
+    fn a_tools_line_coloured_as_bazels_status_is_not_drawn() {
+        for label in ["INFO", "WARNING", "ERROR", "DEBUG", "FAILED"] {
+            let mut c = Classifier::default();
+            c.classify(bazel("INFO: From Executing genrule //:g:").as_bytes());
+            let shaped = format!("\x1b[32m{label}:\x1b[0m two");
+            for tool in ["one", shaped.as_str(), "three", "four"] {
+                assert!(!c.classify(tool.as_bytes()).drawn, "{label}: {tool:?}");
+            }
+        }
+        let mut c = Classifier::default();
+        assert!(
+            c.classify(b"\x1b[32mINFO:\x1b[0m Build completed successfully")
+                .drawn
+        );
+    }
+
     #[test]
     fn a_tools_waiting_line_is_not_drawn() {
         let mut c = Classifier::default();
