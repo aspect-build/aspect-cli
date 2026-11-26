@@ -194,11 +194,14 @@ impl<W: std::io::Write> std::io::Write for Locked<W> {
 }
 
 /// Write all of `bytes` to std's stdout (1) or stderr (2) as one unit, or
-/// to the route that takes it ([`routed`]).
-pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
+/// to the route that takes it ([`routed`]), and `copy` them (to the task's
+/// output files) under the same turn: no screen switch comes between where
+/// they went and their copy.
+pub fn write_std(fd: i32, bytes: &[u8], copy: fn(&[u8])) -> std::io::Result<()> {
     use std::io::Write;
     let _turn = turn(fd);
     if routed(fd, bytes) {
+        copy(bytes);
         return Ok(());
     }
     let r = if fd == 1 {
@@ -207,6 +210,7 @@ pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
         std::io::stderr().write_all(bytes)
     };
     wrote(fd, bytes);
+    copy(bytes);
     r
 }
 

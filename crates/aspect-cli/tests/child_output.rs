@@ -178,6 +178,30 @@ def _handoff(ctx):
 
 handoff = task(implementation = _handoff, summary = "An interactive child after an answer the screen asked for came late.")
 
+def _exitgrand(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(3000):
+        ctx.std.io.stdout.write("OUTLINE-%d-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n" % i)
+    ctx.std.process.command("sh").args(["-c", "(i=0; while [ $i -lt 3000 ]; do echo GAPLINE$i >&2; i=$((i+1)); sleep 0.002; done) & sleep 0.2"]).spawn().wait()
+    return 0
+
+def _dashgap(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("DURING")
+    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 300 ]; do echo GAPLINE$i >&2; i=$((i+1)); sleep 0.005; done"]).spawn()
+    sleep(300)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    sleep(100)
+    if not ctx.std.term.dump_output(older = "OLDER {n}"):
+        fail("the release's dump not said")
+    child.wait()
+    return 0
+
+exitgrand = task(implementation = _exitgrand, summary = "A screen held at exit while a grandchild floods stderr.")
+dashgap = task(implementation = _dashgap, summary = "A release that dumps while a child writes stderr.")
+
 gt_release = task(implementation = _gt_release, summary = "Golden: take and release.")
 gt_exit = task(implementation = _gt_exit, summary = "Golden: a screen held at exit.")
 gt_hold = task(implementation = _gt_hold, summary = "Golden: Ctrl+Z and fg under a screen.")
@@ -1243,4 +1267,77 @@ fn fg_at_another_size_draws_no_stale_frame() {
         !redrawn[..next].contains("FRAME"),
         "the old frame drawn again: {redrawn:?}"
     );
+}
+
+/// The GAPLINE numbers a child wrote, as the terminal shows them, in order.
+#[cfg(unix)]
+fn gaplines(text: &str) -> Vec<u32> {
+    plain(text)
+        .split("GAPLINE")
+        .skip(1)
+        .filter_map(|r| {
+            let n: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+            n.parse().ok()
+        })
+        .collect()
+}
+
+/// Each line once, in the order written: none shown both live and in the
+/// dump, none live ahead of it.
+#[cfg(unix)]
+fn assert_once_in_order(what: &str, lines: &[u32]) {
+    let back: Vec<(u32, u32)> = lines
+        .windows(2)
+        .filter(|w| w[1] <= w[0])
+        .map(|w| (w[0], w[1]))
+        .collect();
+    assert!(
+        !lines.is_empty() && back.is_empty(),
+        "{what}: {} lines, out of order or twice at {:?}",
+        lines.len(),
+        back.iter().take(5).collect::<Vec<_>>()
+    );
+}
+
+/// A screen still held when the task ends, a grandchild writing stderr all
+/// the while and stdout a pipe nobody reads: the exit's dump is written
+/// with every writer held from the main screen coming back, before the
+/// stalled stdout's replay.
+#[cfg(unix)]
+#[test]
+fn the_exit_dump_shows_each_line_once_and_first() {
+    use std::time::Duration;
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, _dir) = on_a_pty("exitgrand", Some(Stdio::from(writer)));
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(300));
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    drop(drain);
+    assert!(status.success(), "{status:?}");
+    assert_once_in_order("the exit's scrollback", &gaplines(&text));
+}
+
+/// A screen's own release with a dump (as the Dashboard leaves), a child
+/// writing stderr all the while: the dump is part of the release, nothing
+/// shown twice or ahead of it, and a later dump_output says it was written.
+#[cfg(unix)]
+#[test]
+fn a_release_that_dumps_shows_each_line_once_and_first() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("dashgap", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    assert!(status.success(), "{status:?}: {}", plain(&text));
+    let lines = gaplines(&text);
+    assert_once_in_order("the release's scrollback", &lines);
+    assert_eq!(lines.len(), 300, "every line");
 }

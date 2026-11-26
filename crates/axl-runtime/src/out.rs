@@ -36,9 +36,10 @@ macro_rules! outln {
 }
 
 /// Write `bytes` to stdout (1) or stderr (2) as one unit, its target held
-/// against every other writer there (see [`axl_types::terminal`]).
+/// against every other writer there (see [`axl_types::terminal`]), and copy
+/// them to the task's output ([`copy_only`]) under the same turn.
 pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
-    axl_types::terminal::write_std(fd, bytes)
+    axl_types::terminal::write_std(fd, bytes, copy_only)
 }
 
 /// `print!` that ignores a failed write (notably a closed pipe), and copies
@@ -48,7 +49,6 @@ macro_rules! out {
     ($($arg:tt)*) => {{
         let text = format!($($arg)*);
         let _ = $crate::out::write_std(1, text.as_bytes());
-        $crate::out::copy_only(text.as_bytes());
     }};
 }
 
@@ -62,7 +62,6 @@ macro_rules! errln {
     ($($arg:tt)*) => {{
         let text = format!("{}\n", format_args!($($arg)*));
         let _ = $crate::out::write_std(2, text.as_bytes());
-        $crate::out::copy_only(text.as_bytes());
     }};
 }
 
@@ -1447,7 +1446,6 @@ impl starlark::PrintHandler for TolerantPrintHandler {
                 drop(linker);
                 line.push(b'\n');
                 let _ = write_std(2, &line);
-                copy_only(&line);
             }
             None => {
                 let text = bazel::console::links::strip_unlinked(text.as_bytes());

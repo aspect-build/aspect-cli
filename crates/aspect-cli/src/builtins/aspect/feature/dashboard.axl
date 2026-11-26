@@ -118,8 +118,10 @@ How it is built:
    down, the task's exit code 0 and nothing failed), with Ctrl+C read as a
    key
    (`screen.interrupts(False)`) since the task has already ended, then gives
-   the terminal back (`screen.release(replay_stderr = False)`), then
-   writes the console as it showed it (`replay_lines`) and the summary.
+   the terminal back (`screen.release(replay_stderr = False, dump_lines = …)`,
+   the task's output dumped to the scrollback as part of it, or, with no
+   history to dump from, the console as it showed it after,
+   `replay_lines`), then the summary.
 
 A prompt reading stdin on the terminal, and a child marked
 `interactive(True)` (`ctx.std.process.command`), get the terminal back for
@@ -4534,9 +4536,16 @@ def _dashboard_impl(ctx: FeatureContext):
                 passed = outcome.exit_code == 0 and not [r for r in state["fails"] if not _flaky(state, r)] and not c["failures"] and not c["tests_failed"]
                 _stay(task_ctx, screen, _COUNTDOWN_MS if passed and ctx.args.stay == "failure" else 0)
             _add_output(screen)
-            rest = screen.release(replay_stderr = False)
+
+            # The scrollback written as part of the release, so no line
+            # written meanwhile shows twice or ahead of it (`_report`).
+            rest = screen.release(replay_stderr = False, dump_lines = _MAX_LOG, older = _older(task_ctx))
             _add_lines([_plain(line) for line in rest], None, rest, cli = True)
         _report(task_ctx)
+
+    def _older(task_ctx):
+        """The dump's line for the lines it leaves out."""
+        return "… {n} older lines: aspect history show " + task_ctx.task.id
 
     def _report(task_ctx):
         """What the scrollback keeps once the screen is gone: the task's
@@ -4549,8 +4558,7 @@ def _dashboard_impl(ctx: FeatureContext):
         # The task's output as a run without the screen leaves it, from
         # output.ansi; the console as the screen showed it without one. Both
         # are in output.log already: not copied again.
-        older = "… {n} older lines: aspect history show " + task_ctx.task.id
-        if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = older):
+        if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = _older(task_ctx)):
             for line in replay_lines(state, err.is_tty):
                 err.write(line + "\n", copy = False)
         for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True):

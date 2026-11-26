@@ -9,13 +9,14 @@
 //! links its own) unless the feature takes it (`screen.mouse(True)`: the
 //! wheel, and the left button's presses, drags and releases, as keys),
 //! or asks for the wheel as arrow keys with the mouse still the terminal's
-//! (`screen.wheel_keys(True)`). While it is held, whatever the process
-//! writes to its stdout and stderr (the CLI's own lines, `print()`,
-//! diagnostics, a child that inherited them) is captured rather than drawn
-//! over the screen: `screen.output()` hands it to the feature, and
-//! `release()` puts the terminal back and writes it to the scrollback (the
-//! newest 8 MiB of each stream), so what was printed while the screen was up
-//! is not lost.
+//! (`screen.wheel_keys(True)`). While it is held, nothing is drawn over
+//! the screen: the CLI's own output (its lines, `print()`, diagnostics, the
+//! AXL streams, the build console) is routed to it ([`route`]), and what
+//! else reaches fds 1 and 2 (a stray writer, a child that inherited them)
+//! is captured. `screen.output()` hands both to the feature, and
+//! `release()` puts the terminal back and writes them to the scrollback
+//! (the newest 8 MiB of each stream, or the task's `output.ansi` dumped),
+//! so what was printed while the screen was up is not lost.
 //!
 //! One screen at a time, process-wide. [`release_all`] restores a screen
 //! still held when the CLI's run returns and on its forced exit; a panic
@@ -731,6 +732,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     // from here on leaving; its capture copies it to the output files.
     if alt_screen {
         *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
+        DUMPED.store(false, Ordering::SeqCst);
     }
     let forget_tty = || {
         mark_captured(None);
@@ -1297,10 +1299,12 @@ pub(crate) fn resume() {
 fn release_dumping(held: Option<Held>, order: &mut Order) -> bool {
     let was = held.is_some();
     let dumping = was && dump_ready();
-    let _ = release(held, !dumping, order);
-    if dumping {
-        dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
-    }
+    let _ = release(
+        held,
+        !dumping,
+        dumping.then_some((DUMP_LINES, "… {n} older lines: aspect history show")),
+        order,
+    );
     was
 }
 
@@ -1308,6 +1312,11 @@ fn release_dumping(held: Option<Held>, order: &mut Order) -> bool {
 /// suspend): what a dump on leaving writes from, the main screen showing
 /// what came before. None once dumped, or with no screen of its own.
 static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Whether the screen given back last had its dump written by its release
+/// ([`release`] with a dump): a later [`dump_output`] says so rather than
+/// write it again. Cleared when a screen is taken.
+static DUMPED: AtomicBool = AtomicBool::new(false);
 
 /// The most lines a dump writes, the older counted on a line before them.
 pub(crate) const DUMP_LINES: usize = 20000;
@@ -1328,6 +1337,9 @@ fn dump_ready() -> bool {
 /// of for `STALL_LIMIT` is dropped. Whether it wrote: never a second time,
 /// nor without a mark or the task's files.
 pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
+    if DUMPED.swap(false, Ordering::SeqCst) {
+        return true;
+    }
     dump_output_turned(max_lines, older, false)
 }
 
@@ -1412,7 +1424,19 @@ fn dump_text(text: &str, max_lines: usize, older: &str, link: impl Fn(&str) -> S
 /// returned as lines for the screen to write itself. Stderr's capture goes
 /// first, and its lock in `order` is let go before stdout's replay when the
 /// two are different files: a stdout nobody reads holds up stdout alone.
-fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<String> {
+///
+/// With `dump` (its newest lines, and the line saying how many older ones
+/// it left out), the task's output since the screen was taken is dumped
+/// ([`dump_output`]) right after the main screen comes back, before any
+/// replay, with every target and `order` still held from giving the
+/// descriptors back: no line written meanwhile shows both live and in the
+/// dump, nor before it.
+fn release(
+    held: Option<Held>,
+    replay_stderr: bool,
+    dump: Option<(usize, &str)>,
+    order: &mut Order,
+) -> Vec<String> {
     let Some(mut held) = held else {
         return vec![];
     };
@@ -1423,10 +1447,7 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
         .is_none_or(|r| unsafe { libc::isatty(r.saved.as_raw_fd()) } == 1);
     // Both descriptors back first, so a crash during the replays below
     // reports to the terminal.
-    drop(give_back_descriptors([
-        held.stdout.as_mut(),
-        held.stderr.as_mut(),
-    ]));
+    let moving = give_back_descriptors([held.stdout.as_mut(), held.stderr.as_mut()]);
     let leave = leave_sequence(held.alt_screen);
     let _ = held.tty.write_all(leave);
     let _ = held.tty.write_all(wheel_restore());
@@ -1436,6 +1457,12 @@ fn release(held: Option<Held>, replay_stderr: bool, order: &mut Order) -> Vec<St
     let _ = termios::tcsetattr(&held.tty, SetArg::TCSAFLUSH, &held.saved_termios);
     CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
     mark_captured(None);
+    if let Some((max_lines, older)) = dump
+        && dump_output_turned(max_lines, older, true)
+    {
+        DUMPED.store(true, Ordering::SeqCst);
+    }
+    drop(moving);
     let one_file = match (&held.stdout, &held.stderr) {
         (Some(o), Some(e)) => same_file(o.saved.as_raw_fd(), e.saved.as_raw_fd()),
         _ => false,
@@ -1634,7 +1661,7 @@ fn install_panic_hook() {
             if cfg!(panic = "abort") {
                 match HELD.try_lock() {
                     Ok(mut held) => {
-                        let _ = release(held.take(), true, &mut Order::none());
+                        let _ = release(held.take(), true, None, &mut Order::none());
                     }
                     Err(_) => restore_terminal_after_crash(),
                 }
@@ -2121,7 +2148,8 @@ fn term_methods(registry: &mut MethodsBuilder) {
     /// child's stderr lines between them, and given up after 2s of stderr
     /// taking nothing; not copied to the output files, which hold it. Whether it wrote: once
     /// per screen, never without the task's files (the history off), when
-    /// the screen's own lines are the fallback.
+    /// the screen's own lines are the fallback; true too when the screen's
+    /// `release(dump_lines = …)` wrote it.
     fn dump_output<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = DUMP_LINES as i32)] max_lines: i32,
@@ -2143,7 +2171,6 @@ fn term_methods(registry: &mut MethodsBuilder) {
             crate::out::copy_only(text.as_bytes());
         } else {
             let _ = crate::out::write_std(2, text.as_bytes());
-            crate::out::copy_only(text.as_bytes());
         }
         Ok(NoneType)
     }
@@ -2349,9 +2376,16 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// too only where stdout is not the terminal, and the lines the
     /// captures still held as they stopped are returned, with their colour,
     /// for the screen to add. A no-op once released, returning none.
+    ///
+    /// With `dump_lines` above 0, the scrollback (`dump_output`, its newest
+    /// `dump_lines` after the line `older` gives) is written as part of the
+    /// release, nothing else written between the main screen coming back
+    /// and it; a later `dump_output` then says it was written.
     fn release<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = true)] replay_stderr: bool,
+        #[starlark(require = named, default = 0)] dump_lines: i32,
+        #[starlark(require = named, default = "")] older: &str,
     ) -> anyhow::Result<Vec<String>> {
         let generation = generation_of(this)?;
         // No forwarder writes while the screen goes and its capture is
@@ -2361,7 +2395,8 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         if held.as_ref().is_some_and(|h| h.generation == generation) {
             let mine = held.take();
             drop(held);
-            return Ok(release(mine, replay_stderr, &mut order));
+            let dump = (dump_lines > 0 && dump_ready()).then_some((dump_lines as usize, older));
+            return Ok(release(mine, replay_stderr, dump, &mut order));
         }
         Ok(vec![])
     }
