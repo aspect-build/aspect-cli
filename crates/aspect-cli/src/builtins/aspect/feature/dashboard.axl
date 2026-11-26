@@ -7,8 +7,8 @@ console and Bazel's terminal UI, on the terminal's alternate screen, for
 It takes the screen when the task starts and shows:
 
 - a status bar with the task, how long it has run, and Bazel's status
-  while a build runs, its actions once it has ended (`8,563 actions · 91%
-  reused`), else the task's phase and its latest update;
+  while a build runs, once the task has ended only what its ✔/✗ cannot
+  say, else the task's phase and its latest update;
 - each build that ended folded to a row (its verdict, command, actions,
   failures and time, the newest last, `+N earlier` past three), and while a
   build runs, or `p` asks, its panes:
@@ -2788,10 +2788,10 @@ def phase_status(state: dict, bar = False) -> list:
     after too, as Bazel walks the graph), or before it counts, what it is
     doing (`loading`, `analyzing`, else `starting`); with the bar drawn,
     which has the count, Bazel's own status (`bazel_status`). Once the task
-    has ended, what its ✔/✗ cannot say, from the last build's
+    has ended, only what its ✔/✗ cannot say, from the last build's
     `BuildFinished` (`interrupted`, or `ended without a result` when none
-    came), and its actions (`actions_text`). Otherwise the task's phase and
-    its latest update."""
+    came); the bar has its actions. Otherwise the task's phase and its
+    latest update."""
     if state.get("building"):
         if bar:
             return bazel_status(state)
@@ -2800,10 +2800,8 @@ def phase_status(state: dict, bar = False) -> list:
             return ["%s of %s%s actions done" % (_thousands(done), _thousands(total), "+" if more else "")]
         return [phase_word(state)]
     if state["ended"] and state.get("builds"):
-        last = state["builds"][-1]
-        outcome = build_outcome(last["snapshot"].get("inv") or {})
-        totals = actions_text(action_split(dict(state, **last["snapshot"])))
-        return ([outcome + " · " + t for t in totals] + [outcome]) if outcome else totals
+        outcome = build_outcome(state["builds"][-1]["snapshot"].get("inv") or {})
+        return [outcome] if outcome else []
     title = state.get("phase_title", "")
     text = state.get("phase_text", "")
     if title and text:

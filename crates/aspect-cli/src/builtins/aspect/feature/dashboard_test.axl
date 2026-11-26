@@ -2316,7 +2316,8 @@ def _impl(ctx: TaskContext) -> int:
     fold_build(ran, 0)
     _eq("a folded build: its actions as the bar says them", "8,204 actions · 97% reused" in _visible(build_row(ran["builds"][0], 100)), True)
     ran.update(building = False, ended = True, progress = [])
-    _eq("and the finished header", _visible(render(ran, 100, 30)).split("\n")[0].rstrip(" \r").endswith("8,204 actions · 97% reused"), True)
+    rows = _visible(render(ran, 140, 30)).split("\n")
+    _eq("on the bar only, not in the finished header", (rows[0].rstrip(" \r").endswith("0s"), rows[1].rstrip(" \r").endswith("8,204 actions · 97% reused")), (True, True))
 
     # The finished screen stays, saying how to leave, its verdict first.
     finished = _screen(ctx, ["x"], ended = True, verdict = False)
