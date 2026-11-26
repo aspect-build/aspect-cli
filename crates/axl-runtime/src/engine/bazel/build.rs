@@ -1318,7 +1318,8 @@ fn private_temp_path() -> PathBuf {
 }
 
 /// This Bazel invocation's folder in the task invocation's history, created,
-/// or `None` when it cannot be, said once per run: a history that cannot be
+/// or `None` when it cannot be, said once per run (or the task keeps none,
+/// quietly: `keep_history = False`): a history that cannot be
 /// written never fails a build. Its logs go to the temp dir instead: the
 /// execution and workspace logs, where Bazel can still upload a recorded one,
 /// and the console's raw log. The profile is left to Bazel.
@@ -1326,7 +1327,7 @@ fn history_dir(history: &History) -> Option<PathBuf> {
     history
         .next_bazel_dir()
         .inspect_err(|err| {
-            if history.first_failure() {
+            if !history.keeps_none() && history.first_failure() {
                 crate::diag::warn(&format!(
                     "could not create a history folder under {}: {err}. Builds' \
                      execution, workspace and console logs go to the temp dir instead, and \
@@ -4034,6 +4035,29 @@ Test = task(implementation = _impl)
             history.path(),
         );
         assert_only_records(history.path(), "nothing recorded");
+    }
+
+    /// A task that keeps no history (`keep_history = False`) leaves nothing
+    /// in it, though it runs Bazel: no entry, no build's folder, no prune.
+    #[cfg(unix)]
+    #[test]
+    fn a_task_that_keeps_no_history_leaves_nothing_in_it() {
+        let history = tempfile::tempdir().unwrap();
+        run_task_with_history(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(flags = ["//..."], stderr = None)
+    return 0 if build.wait().success else 1
+
+Test = task(implementation = _impl, keep_history = False)
+"#,
+            history.path(),
+        );
+        let left: Vec<_> = std::fs::read_dir(history.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// Bazel refuses a second log format, so a caller's JSON or binary log
