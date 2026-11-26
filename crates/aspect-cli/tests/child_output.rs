@@ -126,6 +126,53 @@ def _fgslow(ctx):
     return 0
 
 fgslow = task(implementation = _fgslow, summary = "A child given the CLI's stdout across Ctrl+Z.")
+
+def _gt_release(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(200)
+    screen.release()
+    print("AFTER")
+    return 0
+
+def _gt_exit(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(200)
+    return 0
+
+def _gt_hold(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(1500)
+    print("RESUMED")
+    screen.write("FRAME2")
+    sleep(200)
+    screen.release()
+    return 0
+
+def _gt_fail(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(200)
+    fail("boom")
+
+def _gt_signal(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(20000)
+    return 0
+
+gt_release = task(implementation = _gt_release, summary = "Golden: take and release.")
+gt_exit = task(implementation = _gt_exit, summary = "Golden: a screen held at exit.")
+gt_hold = task(implementation = _gt_hold, summary = "Golden: Ctrl+Z and fg under a screen.")
+gt_fail = task(implementation = _gt_fail, summary = "Golden: a task failing under a screen.")
+gt_signal = task(implementation = _gt_signal, summary = "Golden: Ctrl+C under a screen.")
 takestall = task(implementation = _takestall, summary = "A screen taken while stdout takes nothing.")
 interactive = task(implementation = _interactive, summary = "An interactive child.")
 "#;
@@ -882,4 +929,192 @@ fn ctrl_z_passes_stdouts_captured_lines_to_a_stdout_that_is_no_terminal() {
     let stdout = String::from_utf8_lossy(&drain.join().unwrap()).into_owned();
     assert!(status.success(), "{status:?}");
     assert_every_batch_line_once("stdout", &stdout);
+}
+
+/// `bytes` a CLI wrote to its terminal, normalised for a golden file: escapes
+/// as `\e`, a carriage return not before a newline as `\r`, every duration
+/// (`1.2s`, `30ms`) as `<T>`, and `dir` (the scratch workspace) as `<DIR>`.
+#[cfg(unix)]
+fn golden_text(bytes: &[u8], dir: &std::path::Path) -> String {
+    let text = String::from_utf8_lossy(bytes).replace(&*dir.to_string_lossy(), "<DIR>");
+    let text = text.replace("/private<DIR>", "<DIR>");
+    let mut out = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() && (i == 0 || !chars[i - 1].is_ascii_alphanumeric()) {
+            let mut j = i;
+            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+                j += 1;
+            }
+            let unit = if chars[j..].starts_with(&['m', 's']) {
+                2
+            } else if chars.get(j) == Some(&'s') {
+                1
+            } else {
+                0
+            };
+            if unit > 0
+                && !chars
+                    .get(j + unit)
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                out.push_str("<T>");
+                i = j + unit;
+                continue;
+            }
+        }
+        match c {
+            '\x1b' => out.push_str("\\e"),
+            '\r' if chars.get(i + 1) != Some(&'\n') => out.push_str("\\r"),
+            '\r' => {}
+            '\x07' => out.push_str("\\a"),
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// How a golden scenario is driven once its screen is up.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum Drive {
+    Nothing,
+    CtrlZThenFg,
+    CtrlC,
+}
+
+/// Run `task` on a pty, drive it, and compare what it wrote to the terminal
+/// with `tests/testdata/terminal/<task>.golden`; `UPDATE_GOLDEN=1` writes it
+/// anew instead (under cargo).
+#[cfg(unix)]
+fn check_golden(task: &str, drive: Drive, golden: &str) {
+    use std::time::Duration;
+    let (mut child, chunks, dir) = on_a_pty(&task.replace('_', "-"), None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    let pid = child.id() as i32;
+    let stopped = |pid: i32| {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim_start()
+                    .starts_with('T')
+            })
+    };
+    match drive {
+        Drive::Nothing => {}
+        Drive::CtrlZThenFg => {
+            std::thread::sleep(Duration::from_millis(200));
+            // SAFETY: signals to our own child.
+            unsafe { libc::kill(pid, libc::SIGTSTP) };
+            let asked = std::time::Instant::now();
+            while !stopped(pid) && asked.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            unsafe { libc::kill(pid, libc::SIGCONT) };
+        }
+        Drive::CtrlC => {
+            std::thread::sleep(Duration::from_millis(200));
+            unsafe { libc::kill(pid, libc::SIGINT) };
+        }
+    }
+    let _ = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    // From the take on (the banner before it says how the CLI was built),
+    // and up to a failure's message (its traceback names lines of the
+    // tasks above, which move as they are edited).
+    let mut got = golden_text(&raw, dir.path());
+    if let Some(at) = got.find("\\e[?1049h") {
+        got = got[at..].to_string();
+    }
+    if let Some(at) = got.find("error: Traceback") {
+        let end = got[at..]
+            .find("error: fail: ")
+            .map_or(got.len(), |e| at + e);
+        let end = got[end..].find('\n').map_or(got.len(), |n| end + n + 1);
+        got = format!(
+            "{}{}",
+            &got[..at],
+            &got[end - got[at..end].lines().last().map_or(0, |l| l.len() + 1)..end]
+        );
+    }
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/testdata/terminal")
+            .join(format!("{task}.golden"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &got).unwrap();
+        return;
+    }
+    if got != golden {
+        let (g, w): (Vec<&str>, Vec<&str>) = (got.lines().collect(), golden.lines().collect());
+        let at = (0..g.len().max(w.len()))
+            .find(|&i| g.get(i) != w.get(i))
+            .unwrap_or(0);
+        panic!(
+            "{task}: the terminal's bytes differ from tests/testdata/terminal/{task}.golden \
+             (UPDATE_GOLDEN=1 cargo test rewrites it) at line {at}:\n  got:  {:?}\n  want: {:?}\n\nall of it:\n{got}",
+            g.get(at),
+            w.get(at)
+        );
+    }
+}
+
+/// A golden file's contents, compiled in (Bazel: `compile_data`).
+#[cfg(unix)]
+macro_rules! golden {
+    ($name:literal) => {
+        include_str!(concat!("testdata/terminal/", $name, ".golden"))
+    };
+}
+
+/// What a take and a release write: the screen's modes in, its frame,
+/// then everything put back and the task's output dumped to the scrollback.
+#[cfg(unix)]
+#[test]
+fn golden_take_and_release() {
+    check_golden("gt_release", Drive::Nothing, golden!("gt_release"));
+}
+
+/// A screen still held when the task ends: given back on the way out,
+/// its output dumped.
+#[cfg(unix)]
+#[test]
+fn golden_a_screen_held_at_exit() {
+    check_golden("gt_exit", Drive::Nothing, golden!("gt_exit"));
+}
+
+/// Ctrl+Z under a screen and `fg`: given back with a dump, then taken back
+/// and its last frame drawn, then released.
+#[cfg(unix)]
+#[test]
+fn golden_ctrl_z_and_fg() {
+    check_golden("gt_hold", Drive::CtrlZThenFg, golden!("gt_hold"));
+}
+
+/// A task failing under a screen: the terminal restored, the error after.
+#[cfg(unix)]
+#[test]
+fn golden_a_failure_under_a_screen() {
+    check_golden("gt_fail", Drive::Nothing, golden!("gt_fail"));
+}
+
+/// Ctrl+C under a screen: the terminal restored as the task is cancelled.
+#[cfg(unix)]
+#[test]
+fn golden_ctrl_c_under_a_screen() {
+    check_golden("gt_signal", Drive::CtrlC, golden!("gt_signal"));
 }

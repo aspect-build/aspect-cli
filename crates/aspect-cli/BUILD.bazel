@@ -132,6 +132,7 @@ rust_test(
 rust_test(
     name = "child_output_test",
     srcs = ["tests/child_output.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    compile_data = glob(["tests/testdata/terminal/*.golden"]),
     crate_root = "tests/child_output.rs",
     data = [":aspect-cli"],
     env = {

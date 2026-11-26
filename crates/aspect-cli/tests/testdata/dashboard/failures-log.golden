@@ -1,0 +1,30 @@
+ ✗ aspect build · 0s
+┌─ Running (0) ───────────────────────────────────────────────────┐┌─ Results ─────────────────────┐
+│                                                                 ││ Targets  0 configured         │
+│                                                                 ││          0 built, 0 failed    │
+│                                                                 ││ Tests    0 passed, 0 failed   │
+│                                                                 ││ Failed   ✗ 1                  │
+│                                                                 ││                               │
+│                                                                 ││                               │
+│                                                                 ││                               │
+└─────────────────────────────────────────────────────────────────┘└───────────────────────────────┘
+┌─ Console  Failures ✗1 ▹ //pkg:broken ▹ Genrule  Metrics  Invocation  Tips  the end · following ──┐
+│ ── stderr ──                                                                                     │
+│ ERROR: broken                                                                                    │
+│ ── stdout ──                                                                                     │
+│ some out                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Done ✗ · Esc back · q leave · ] [ next/prev failure · / find · e filter · ? keys

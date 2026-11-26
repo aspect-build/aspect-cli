@@ -1,0 +1,2 @@
+\e[?1049h\e[?7l\e[?25l\e[?2004h\e[2J\e[H\e]11;?\e\\e[c\e[?2026hFRAME\e[?2026l\e[?2026l\e[?1006l\e[?1003l\e[?1002l\e[?1000l\e[?2004l\e[?7h\e[?25h\e[?1049lDURING
+error: fail: boom

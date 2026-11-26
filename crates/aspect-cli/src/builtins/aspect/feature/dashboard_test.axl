@@ -3,6 +3,9 @@
 
 Run with:
   aspect dev test-dashboard
+
+Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
+`aspect dev test-dashboard --update` writes them anew.
 """
 
 load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "attempt_state", "bar", "bazel_line", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
@@ -109,6 +112,67 @@ def _role(name):
 
 def _fake_env(values):
     return struct(var = lambda k: values.get(k))
+
+_GOLDEN_DIR = "crates/aspect-cli/tests/testdata/dashboard"
+
+def _frame_text(drawn: str) -> str:
+    """A rendered frame as its visible rows, one per line, ends trimmed."""
+    body = drawn[drawn.find("\x1b[H") + 3:] if "\x1b[H" in drawn else drawn
+    return "\n".join([_visible(r).rstrip() for r in body.split("\r\n")]) + "\n"
+
+def _goldens(ctx, view_state, act, update):
+    """Golden frames: what `render` draws for the screens a change to the
+    layout, keys or output paths must not move by accident. `--update`
+    writes them anew; review the diff."""
+    fs = ctx.std.fs
+    root = ctx.std.env.aspect_root_dir() + "/" + _GOLDEN_DIR
+    running = dict(
+        progress = ["[3 / 9] 2 actions running", "    Compiling src/a.cc; 3s", "    Linking //app:bin; 1s"],
+        now_ms = 12000,
+    )
+    log = ["INFO: Analyzed 3 targets (12 packages loaded).", "INFO: Found 3 targets...", "src/a.cc:3:1: warning: unused variable", "Building..."]
+    tipped = _screen(ctx, ["x"], tips = [
+        {"id": "remote-miss", "severity": "suggestion", "title": "41% of actions missed the cache", "body": "Use a remote cache."},
+        {"id": "disk-full", "severity": "warning", "title": "the disk is 98% full", "body": ""},
+    ], tab = "tips", ended = True, building = False)
+    viewed = dict(_screen(ctx, ["console line"], fails = [act], ended = True, building = False, verdict = False), **{k: view_state[k] for k in ["read", "ansi", "controls", "env"] if k in view_state})
+    for k in view_state:
+        if k not in viewed:
+            viewed[k] = view_state[k]
+    on_key(viewed, "tab", 10)
+    on_key(viewed, "enter", 10)
+    states = [
+        ("running", _screen(ctx, log, **running), 100, 30),
+        ("success", _screen(ctx, log + ["INFO: Build completed successfully, 9 total actions"], ended = True, verdict = True, building = False), 100, 30),
+        ("failure", _screen(ctx, log + ["ERROR: Build did NOT complete successfully"], fails = [act], ended = True, verdict = False, building = False), 100, 30),
+        ("failures-log", viewed, 100, 30),
+        ("tips", tipped, 100, 30),
+        ("narrow", _screen(ctx, log, **running), 40, 12),
+        ("short", _screen(ctx, log, **running), 100, 10),
+        ("keys", _screen(ctx, log, help = True, **running), 100, 30),
+    ]
+    stale = []
+    for name, state, cols, rows in states:
+        got = _frame_text(render(state, cols, rows))
+        path = "%s/%s.golden" % (root, name)
+        if update:
+            fs.create_dir_all(root)
+            fs.write(path, got)
+            continue
+        want = fs.read_to_string(path) if fs.exists(path) else None
+        if got != want:
+            stale.append((name, got, want))
+    for name, got, want in stale:
+        print("golden frame %s differs (aspect dev test-dashboard --update rewrites it):" % name)
+        g, w = got.split("\n"), (want or "").split("\n")
+        for i in range(max(len(g), len(w))):
+            a = g[i] if i < len(g) else "<none>"
+            b = w[i] if i < len(w) else "<none>"
+            if a != b:
+                print("  row %d\n    got:  %r\n    want: %r" % (i, a, b))
+                break
+    if stale:
+        fail("%d golden frame(s) differ: %s" % (len(stale), ", ".join([s[0] for s in stale])))
 
 def _impl(ctx: TaskContext) -> int:
     sink = {"aspect_results_url": "https://app.example.com/", "sink_invocation_id": "sink-1"}
@@ -1738,6 +1802,7 @@ def _impl(ctx: TaskContext) -> int:
     head = _visible(render(narrow, 40, 24)).split("\n")[0]
     _eq("no cut status", ("actions done" in head) or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
 
+    _goldens(ctx, view_state, act, ctx.args.update)
     print("dashboard_test.axl: OK")
     return 0
 
@@ -1746,5 +1811,7 @@ dashboard_tests = task(
     kind = "test-dashboard",
     group = ["dev"],
     implementation = _impl,
-    args = {},
+    args = {
+        "update": args.boolean(default = False),
+    },
 )
