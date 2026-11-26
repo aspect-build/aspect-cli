@@ -277,11 +277,40 @@ _STRATEGIES = {
     "hold-the-file": StrategyHoldTheFile,
 }
 
+# Passed to each `lint_start` hook: the change set findings are scoped to.
+LintStartInfo = record(
+    # [{"file": str, "lines": [int 0-based added line indices]}].
+    changed_files = field(list),
+    # False when change detection could not determine the set (e.g. a shallow
+    # checkout), which also forces `strategy=hard`. An empty `changed_files`
+    # then means "no change context", not "nothing changed": surfaces gating
+    # per line must not treat the two alike.
+    scoped = field(bool),
+)
+
+# Optionally returned by a `lint_end` hook; the task merges every hook's
+# result into `data["lint"]` for the rendered detail body.
+LintEndResult = record(
+    # Suggested-fix comment records; the task filters them by strategy. Each:
+    #   {tool (SARIF driver name when correlated, else the linter name),
+    #    linter (rules_lint linter name, the --linter-strategy key),
+    #    file, start_line, end_line (1-based new-side incl),
+    #    severity ("error"|"warning"|"info"|"" uncorrelated),
+    #    rule_id (SARIF ruleId or ""), correlated (bool: same linter's SARIF
+    #    diag on the same (file, line)),
+    #    comment_url (Files Changed link; "" when post failed or deduped)}
+    suggestions = field(list, default = []),
+    # `(file, line) -> comment_url` for posted SARIF-derived comments, so the
+    # renderer links a finding row to its comment. Patch comments live on
+    # `suggestions`.
+    comment_urls = field(dict, default = {}),
+)
+
 LintTrait = trait(
     # Lifecycle hooks. Each is a list of callables; features append to compose.
 
-    # Once before the build, after changed_files is set. (ctx) -> None
-    lint_start = attr(list[typing.Callable[[TaskContext], None]], default = []),
+    # Once before the build, after change detection. (ctx, LintStartInfo) -> None
+    lint_start = attr(list[typing.Callable[[TaskContext, LintStartInfo], None]], default = []),
 
     # Per SARIF file as it streams in. (ctx, sarif_filepath) -> None
     lint_report = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
@@ -293,37 +322,28 @@ LintTrait = trait(
     lint_patch = attr(list[typing.Callable[[TaskContext, str, str], None]], default = []),
 
     # Once after all SARIF collected, with strategy-filtered diagnostics.
-    # (ctx, relevant_diagnostics) -> None
-    lint_end = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
-
-    # Canonical changed-file set, populated by the task impl via
-    # detect_changed_files BEFORE any hook fires so features read it as data.
-    # Shape: [{"file": str, "lines": [int 0-based added line indices]}].
-    changed_files = attr(list, default = []),
-
-    # False when change detection could not determine the changed-file set (e.g.
-    # a shallow checkout), which also forces `strategy=hard`. Distinguishes an
-    # empty `changed_files` meaning "no change context" from a scoped run where a
-    # file's absence genuinely means "unchanged" — features gating per-line
-    # surfaces must not treat the two alike.
-    changed_files_scoped = attr(bool, default = True),
-
-    # Suggested-fix comment records posted by GithubLintComments during lint_end,
-    # threaded into data["lint"]["suggestions"]. Each record:
-    #   {tool (SARIF driver name when correlated, else the linter name),
-    #    linter (rules_lint linter name, the --linter-strategy key),
-    #    file, start_line, end_line (1-based new-side incl),
-    #    severity ("error"|"warning"|"info"|"" uncorrelated),
-    #    rule_id (SARIF ruleId or ""), correlated (bool: same linter's SARIF
-    #    diag on the same (file, line)),
-    #    comment_url (html_url; "" when post failed or deduped)}
-    suggestions = attr(list, default = []),
-
-    # `(file, line) → comment_url` for every posted SARIF-derived comment, so the
-    # renderer links a finding row to its 💬 comment. "comments" mode links every
-    # finding; "auto"/"both" only fix-bearing. Patch comments live on `suggestions`.
-    comment_urls = attr(dict, default = {}),
+    # (ctx, relevant_diagnostics) -> LintEndResult | None
+    lint_end = attr(list[typing.Callable[[TaskContext, list], LintEndResult | None]], default = []),
 )
+
+def merge_lint_end_results(results: list) -> LintEndResult:
+    """Merge what the `lint_end` hooks returned, in hook order.
+
+    `None` contributes nothing. Suggestions concatenate; for a `(file, line)`
+    two hooks both link, the later hook's URL wins. Any other return value
+    fails the task naming it, rather than dropping that hook's suggestions
+    without a trace.
+    """
+    suggestions = []
+    comment_urls = {}
+    for r in results:
+        if r == None:
+            continue
+        if not isinstance(r, LintEndResult):
+            fail("a LintTrait.lint_end hook returned %s (%r); return a LintEndResult or None" % (type(r), r))
+        suggestions.extend(r.suggestions)
+        comment_urls.update(r.comment_urls)
+    return LintEndResult(suggestions = suggestions, comment_urls = comment_urls)
 
 _FINDINGS_DESTINATIONS = ["auto", "both", "comments", "annotations"]
 
@@ -854,9 +874,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     endpoint_auth_flags.extend(pattern_flags)
     data["target_pattern"] = " ".join(targets)
 
-    # Detect changed files BEFORE lint_start hooks so features read the canonical
-    # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
-    # `git diff <base> --unified=0`. Lives in lib/github.axl (format wants it too).
+    # Detect changed files BEFORE lint_start hooks, which receive them. Prefers
+    # the GitHub PR Files API, falls back to local `git diff <base> --unified=0`.
+    # Lives in lib/github.axl (format wants it too).
     status = _pick_status(data, had_failure = False, terminal = False)
     ph.update(
         status,
@@ -885,16 +905,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["lint"]["strategy"] = _strategy_name(strategy)
     data["lint"]["strategies"] = strategy_overrides
     strategy_for = strategy_lookup(strategy, strategy_overrides)
-    lint_trait.changed_files = changed_files
-    lint_trait.changed_files_scoped = not detect_result.get("unscoped")
     data["lint"]["changed_files"] = changed_files
 
     # Shared changed-file listing (announces source, prints sorted entries).
     # See lib/github.axl::print_changed_files_listing for row format / rename rules.
     print_changed_files_listing(ctx, detect_result)
 
+    start_info = LintStartInfo(changed_files = changed_files, scoped = not detect_result.get("unscoped"))
     for hook in lint_trait.lint_start:
-        hook(ctx)
+        hook(ctx, start_info)
 
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
@@ -1175,21 +1194,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # from the high-volume raw output streamed during the Lint phase.
     _print_relevant_findings(ctx, relevant, lint_strategy_label(_strategy_name(strategy), strategy_overrides))
 
-    # 11. lint_end hooks receive filtered diagnostics
-    for hook in lint_trait.lint_end:
-        hook(ctx, relevant)
-
-    # 11b. Copy lint_end suggestion records onto data, applying the same strategy
-    # filter as the diagnostics — otherwise hold-the-line surfaces auto-fixes for
-    # excluded lines ("0 findings but 3 auto-fixes?").
-    data["lint"]["suggestions"] = _filter_suggestions_by_strategy(
-        list(lint_trait.suggestions),
-        strategy_for,
-        changed_files,
-    )
-
-    # Threaded the same way; see LintTrait.comment_urls for link semantics.
-    data["lint"]["comment_urls"] = dict(lint_trait.comment_urls)
+    # 11. lint_end hooks receive filtered diagnostics. Suggestions get the same
+    # strategy filter, or hold-the-line shows auto-fixes for excluded lines.
+    end_result = merge_lint_end_results([hook(ctx, relevant) for hook in lint_trait.lint_end])
+    data["lint"]["suggestions"] = _filter_suggestions_by_strategy(end_result.suggestions, strategy_for, changed_files)
+    data["lint"]["comment_urls"] = end_result.comment_urls
 
     # 12. Exit code. `not lint_tools_run` guards the silent zero-aspect case —
     # a green `aspect lint` in CI must mean "passed", not "never ran".
@@ -1221,7 +1230,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         exit_code = 0
 
     # Repro reruns the same scope. The fix variant (adds --fix) is gated on the
-    # strategy-filtered suggestion set, not the raw trait list, so we don't offer
+    # strategy-filtered suggestion set, not the hooks' raw records, so we don't offer
     # a fix command for patches the strategy excluded.
     repro_flags = explicit_flags(ctx, [
         ("strategy", "--strategy"),

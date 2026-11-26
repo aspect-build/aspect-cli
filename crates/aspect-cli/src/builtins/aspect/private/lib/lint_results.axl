@@ -134,7 +134,7 @@ def init_data():
         "counts_by_severity": {},  # {"error": 3, ...}
         "counts_by_tool": {},  # {"eslint": 7, ...}
 
-        # Suggestion records from lint.axl post-lint_end. See LintTrait.suggestions.
+        # Suggestion records the lint_end hooks returned. See LintEndResult.
         "suggestions": [],
     }
     return r

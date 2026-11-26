@@ -16,7 +16,7 @@ API requires. Lint findings sit on the new (added/changed) side, so
 omitted.
 """
 
-load("@aspect//lint.axl", "LintTrait", lint_findings_destination = "findings_destination")
+load("@aspect//lint.axl", "LintStartInfo", "LintTrait", lint_findings_destination = "findings_destination")
 load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
@@ -530,12 +530,12 @@ def _gitlab_lint_impl(ctx: FeatureContext):
     # `destination` is the lint task's --findings-destination, read in _lint_start.
     state = {"destination": "auto", "all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
 
-    def _lint_start(ctx):
+    def _lint_start(ctx, start: LintStartInfo):
         state["destination"] = lint_findings_destination(ctx)
         gl["window"] = diff_window(
-            lint_trait.changed_files,
+            start.changed_files,
             prefix = gl["prefix"],
-            scoped = lint_trait.changed_files_scoped,
+            scoped = start.scoped,
         )
 
     def _lint_report(ctx, filepath):
