@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "aged_time", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "aged_time", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1475,6 +1475,12 @@ def _impl(ctx: TaskContext) -> int:
     own = _screen(ctx, ["x"], exec_log_read = True, inv = {"options_parsed": struct(cmd_line = ["--keep_going", "--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])})
     _eq("spawns beside the caller's log", spawns(own), ["spawns not read: this build writes its own execution log (--execution_log_binary_file)"])
     _eq("no cache row in Results", "Cached" in _visible(render(own, 120, 30)), False)
+    for flags, want in [
+        (["--execution_log_binary_file="], None),
+        (["--execution_log_binary_file=/tmp/rc.binlog", "--execution_log_binary_file="], None),
+        (["--execution_log_json_file=", "--execution_log_json_file=/tmp/x.json"], "--execution_log_json_file"),
+    ]:
+        _eq("the caller's own log from %r" % flags, own_execution_log({"options_parsed": struct(cmd_line = flags, explicit_cmd_line = [])}), want)
 
     # A cached build's slowest pane: that nothing ran, not an empty box, only
     # where the build succeeded and its metrics say so: not mid-build, nor

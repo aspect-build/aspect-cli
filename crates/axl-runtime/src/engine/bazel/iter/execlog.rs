@@ -130,15 +130,32 @@ pub struct ExecLogIter {
     /// `recv()` and the AXL body would stop answering signals — see `iter_next`.
     #[allocative(skip)]
     signals: Arc<Signals>,
+    /// Whether the handle feeds `exec_log_event` hooks (made by
+    /// `bazel/exec_log.axl`'s `open`) rather than a task's own loop.
+    #[allocative(skip)]
+    hook: bool,
 }
 
 impl ExecLogIter {
+    /// A task's own handle (not a hook's), for the tests.
+    #[cfg(test)]
     pub fn new(signals: Arc<Signals>, kinds: Option<HashSet<i32>>) -> Self {
+        Self::with_hook(signals, kinds, false)
+    }
+
+    /// [`ExecLogIter::new`], `hook` saying whether it feeds hooks.
+    pub fn with_hook(signals: Arc<Signals>, kinds: Option<HashSet<i32>>, hook: bool) -> Self {
         Self {
             kinds: kinds.map(Arc::new),
             sub: Subscription::pending(),
             signals,
+            hook,
         }
+    }
+
+    /// Whether the handle feeds `exec_log_event` hooks, not a task's own loop.
+    pub fn is_hook(&self) -> bool {
+        self.hook
     }
 
     /// Whether this handle still holds a subscriber.

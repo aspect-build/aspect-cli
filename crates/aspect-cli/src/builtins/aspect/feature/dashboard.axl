@@ -3451,14 +3451,19 @@ _OWN_EXEC_LOGS = ["--execution_log_binary_file", "--execution_log_json_file"]
 
 def own_execution_log(inv: dict):
     """The flag a build was given for an execution log of the caller's own
-    (`_OWN_EXEC_LOGS`, on its command line or from an rc file), which leaves
-    the Dashboard none to read; None without one."""
+    (`_OWN_EXEC_LOGS`), which leaves the Dashboard none to read; None without
+    one. Its last occurrence counts, as Bazel takes it, from the whole
+    command line Bazel parsed (rc files' flags in it), an empty value being
+    none (the way to clear one an rc file set)."""
     options = inv.get("options_parsed")
-    for flag in (_get(options, "cmd_line") or []) + (_get(options, "explicit_cmd_line") or []):
-        name = str(flag).partition("=")[0]
+    flags = _get(options, "cmd_line") or _get(options, "explicit_cmd_line") or []
+    last = {}
+    for flag in flags:
+        name, eq, value = str(flag).partition("=")
         if name in _OWN_EXEC_LOGS:
-            return name
-    return None
+            last[name] = value if eq else "true"
+    named = [name for name in _OWN_EXEC_LOGS if last.get(name)]
+    return named[0] if named else None
 
 def metrics_lines(state: dict) -> list:
     """The Metrics tab: what ran and what a cache served (actions from

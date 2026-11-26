@@ -1269,6 +1269,10 @@ fn execlog_demand(
     (asked, record_only || history_records)
 }
 
+/// Whether a task's own execution-log iterator was said to get no entries
+/// beside the caller's own log: once a process.
+static OWN_LOG_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Whether a build writes its compact execution log: when something `asked`
 /// for it, or when it is only `recording` on Bazel 7.4 or later (or a version
 /// that cannot be told). Recording starts at 7.4, where the flag has the name
@@ -1439,9 +1443,10 @@ impl Build {
         let profile_kept =
             rc_visible && !profile_unplaced && !bazel::profile::turned_off(&flags, verb);
         // Bazel refuses a build naming more than one log format. Beside the
-        // caller's binary or JSON one, hooks that only read entries (a
-        // feature's, with no file of the compact log asked for) get none:
-        // their handles end at once, rather than the build be refused.
+        // caller's binary or JSON one, iterators that only read entries (with
+        // no file of the compact log asked for) get none: every handle, a
+        // hook's or a task's own, ends at once, rather than the build be
+        // refused; a task's own with a warning, once.
         let other_format = bazel::execlog::other_format(&flags, verb);
         let mut execlog_iters = execlog_iters;
         if other_format
@@ -1450,6 +1455,13 @@ impl Build {
                 .iter()
                 .all(|s| matches!(s, ExecLogSink::Record))
         {
+            if execlog_iters.iter().any(|i| !i.is_hook())
+                && !OWN_LOG_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::diag::warn(
+                    "an execution_log iterator gets no entries: the build writes the caller's own execution log (--execution_log_binary_file or --execution_log_json_file), and Bazel writes only one format",
+                );
+            }
             execlog_iters.iter().for_each(ExecLogIter::release);
             execlog_iters.clear();
         }

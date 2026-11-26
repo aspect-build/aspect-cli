@@ -1016,4 +1016,30 @@ fn a_callers_binary_log_beside_a_hook_adds_no_compact_one() {
         Vec::<String>::new(),
         "no compact log beside it"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("gets no entries"),
+        "a hook's handle ends quietly: {stderr}"
+    );
+}
+
+/// A task's own iterator beside the caller's binary log ends with no
+/// entries, and the CLI says why, once.
+#[test]
+fn a_tasks_own_iterator_beside_a_callers_binary_log_is_told() {
+    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None);
+    let binary = case.dir.path().join("own.binlog");
+    std::fs::write(
+        case.dir.path().join(".aspect/own.axl"),
+        format!(
+            "def _impl(ctx):\n    it = bazel.execution_log.iterator()\n    b = ctx.bazel.build(\"//...\", flags = [\"--execution_log_binary_file={}\"], execution_log = [it])\n    n = 0\n    for _ in it:\n        n += 1\n    b.wait()\n    print(\"ENTRIES %d\" % n)\n    return 0\n\nown = task(implementation = _impl, summary = \"x\")\n",
+            binary.display()
+        ),
+    )
+    .expect("own.axl");
+    let output = case.command(&["own"]).output().expect("running the CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("ENTRIES 0"), "{stderr}");
+    assert_eq!(stderr.matches("gets no entries").count(), 1, "{stderr}");
 }

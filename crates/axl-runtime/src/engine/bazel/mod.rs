@@ -678,6 +678,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   undrained one cannot hang the build. `[]` writes the log with no consumer;
     ///   `[execution_log.record()]` only records it in the task invocation's
     ///   history, which is skipped where recording cannot be done (see `record`).
+    ///   Beside the caller's own binary or JSON log (`--execution_log_binary_file`,
+    ///   `--execution_log_json_file`), which Bazel will not write with a compact
+    ///   one, a list of only iterators (and `record()`) writes none: each
+    ///   iterator ends with no entries, a task's own with a warning.
     ///
     /// **Examples**
     ///
@@ -893,6 +897,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   undrained one cannot hang the build. `[]` writes the log with no consumer;
     ///   `[execution_log.record()]` only records it in the task invocation's
     ///   history, which is skipped where recording cannot be done (see `record`).
+    ///   Beside the caller's own binary or JSON log (`--execution_log_binary_file`,
+    ///   `--execution_log_json_file`), which Bazel will not write with a compact
+    ///   one, a list of only iterators (and `record()`) writes none: each
+    ///   iterator ends with no entries, a task's own with a warning.
     ///
     /// **Examples**
     ///
@@ -1756,6 +1764,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// rather than parking in it, so the task's body still reaches its next blocking
     /// call and the signal deadline is still effective.
     ///
+    /// `hook = True` marks the handle `bazel/exec_log.axl` feeds
+    /// `exec_log_event` hooks from; a task's own leaves it unset.
+    ///
     /// ```python
     /// entries = bazel.execution_log.iterator(kinds = ["spawn"])
     /// build = ctx.bazel.build("//...", execution_log = [entries])
@@ -1768,6 +1779,7 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
+        #[starlark(require = named, default = false)] hook: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<iter::ExecLogIter> {
         let kinds = match kinds {
@@ -1787,9 +1799,10 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         };
         // The run's signals travel with the handle, so blocking iteration over it
         // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
-        Ok(iter::ExecLogIter::new(
+        Ok(iter::ExecLogIter::with_hook(
             Env::from_eval(eval)?.signals.clone(),
             kinds,
+            hook,
         ))
     }
 }
