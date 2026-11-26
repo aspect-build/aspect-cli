@@ -1072,6 +1072,7 @@ def attempt_state(now_ms: int) -> dict:
         exec_log_read = False,
         done_total = None,
         bep_done_total = None,
+        settled = 0,
         kept_errors = None,
     )
 
@@ -1094,7 +1095,7 @@ def _clear_build(state: dict):
 
 # What a build has of its own, which the next build (or a retried attempt)
 # starts afresh; the console and what is open in it are the task's.
-_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "kept_errors"]
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "settled", "kept_errors"]
 
 def new_build(state: dict, now_ms: int):
     """Start the next build (or a retried attempt) in the task's screen: its
@@ -2659,12 +2660,17 @@ _MAX_SLOW = 200
 
 def note_progress(state: dict, progress: list):
     """Note how long each action Bazel shows running has run, the most
-    seen, for the finished screen's slowest (`slowest_rows`), and the last
+    seen, for the finished screen's slowest (`slowest_rows`), the last
     `[done / total]` with whether Bazel was still analysing
-    (`build_progress`)."""
+    (`build_progress`), and, as the count moves on, how much of the count
+    before it no event has come for (`settled`: unchanged, for
+    `_published_split`)."""
     at = status_row(progress)
     counts = progress_counts(progress[at]) if at >= 0 else None
     if counts:
+        before = state.get("done_total")
+        if before and before[0] != counts[0]:
+            state["settled"] = max(0, before[0] - _events_seen(state))
         state["done_total"] = (counts[0], counts[1], analysing(progress))
     slowest = state.setdefault("slowest", {})
     for row in running_actions(progress):
@@ -3065,7 +3071,11 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     says a cache served it (`cached`, as its entries arrive); the actions
     that failed apart; what the done count has past them, with no event at
     all, is `unchanged` (Bazel's own action cache posts none). Events ahead
-    of Bazel's count take from `ran`, never from the others."""
+    of Bazel's count take from `ran`, never from the others. A gap is
+    unchanged only as far as it outlasted the count it opened at
+    (`settled`, `note_progress`): Bazel's count can lead the events by a
+    frame, and until it has, that part is `settling`, which Results and the
+    bar show as running."""
     c = state.get("counts") or {}
     failed = len(failed_actions(state))
     internal = c.get("actions_internal", 0)
@@ -3077,9 +3087,16 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
         cut = min(seen - done, ran)
         ran -= cut
         seen -= cut
-    split.update(known = True, published = True, ran = ran, cached = cached, internal = internal, failed = failed, unchanged = max(0, done - seen), done = max(done, seen))
+    gap = max(0, done - seen)
+    unchanged = min(gap, state.get("settled", 0))
+    split.update(known = True, published = True, ran = ran, cached = cached, internal = internal, failed = failed, unchanged = unchanged, settling = gap - unchanged, done = max(done, seen))
     split["total"] = max(split["total"], split["done"])
     return split
+
+def _events_seen(state: dict) -> int:
+    """The actions a build's events have reported so far, every action
+    published: those executed and those that failed."""
+    return (state.get("counts") or {}).get("actions_seen", 0) + len(failed_actions(state))
 
 def failed_actions(state: dict) -> list:
     """The build's actions its event stream reports failed, as the
@@ -3130,10 +3147,11 @@ _UNDONE = ("─", "border")
 def action_bar(split: dict, width: int) -> str:
     """`width` cells of a build's actions (`action_split`): a segment of
     each kind there is, in `_SEGMENTS` order, then what is not done (at
-    least a cell of it for a failed build none of whose actions failed);
-    the done count alone (`_DONE`) where nothing tells its kinds apart."""
+    least a cell of it for a failed build none of whose actions failed, and
+    with what is still `settling`); the done count alone (`_DONE`) where
+    nothing tells its kinds apart."""
     parts = [(split[key], glyph, role) for key, glyph, role in _SEGMENTS] if split["known"] else [(split["done"], _DONE[0], _DONE[1])]
-    undone = max(0, split["total"] - split["done"])
+    undone = max(0, split["total"] - split["done"]) + split.get("settling", 0)
 
     # A failed build with no action failed (analysis, a test, a cancel):
     # a cell of what it never reached, never a full bar.
@@ -3205,8 +3223,10 @@ def action_parts(split: dict) -> list:
         return []
     remaining = []
     undone = split["total"] - split["done"]
-    if split.get("running") and undone > 0:
-        now = min(split.get("running_now", 0), undone)
+    settling = split.get("settling", 0)
+    if split.get("running") and undone + settling > 0:
+        now = min(split.get("running_now", 0), undone) + settling
+        undone += settling
         remaining = [(_UNDONE[0], now, "running", _UNDONE[1]), ("" if now else _UNDONE[0], undone - now, "pending", "" if now else _UNDONE[1])]
     if not split["known"]:
         return [(_DONE[0], split["done"], "done", _DONE[1])] + remaining

@@ -454,8 +454,24 @@ def _actions_tests(ctx):
     for i in range(1, 11):
         _action(live, i, "Genrule", True, True)
         count_spawn(live["counts"], struct(cache_hit = True, runner = "disk cache hit"))
-    half = action_split(dict(live, progress = ["[20 / 30] 3 actions running"]))
-    _eq("part told: the rest unchanged so far", [half[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")], [0, 10, 1, 0, 9, 20])
+    # Bazel's count leads the events by a frame: a gap is running until it
+    # has outlasted the count it opened at, then unchanged, the sum exact.
+    half = dict(live, done_total = None, settled = 0)
+    for row in ["[20 / 30] 3 actions running", "[21 / 30] 3 actions running"]:
+        half["progress"] = [row]
+        note_progress(half, half["progress"])
+        if row.startswith("[20"):
+            fresh = action_split(half)
+            _eq("a fresh gap is running", [fresh[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "settling", "done")], [0, 10, 1, 0, 0, 9, 20])
+            _eq("Results: no unchanged yet", [(p[2], p[1]) for p in action_parts(fresh) if p[1]], [("cached", 10), ("internal", 1), ("running", 12), ("pending", 7)])
+            _eq("nor on the bar", "▒" in _visible(action_bar(fresh, 30)), False)
+    told = action_split(half)
+    _eq("part told: what outlasted a count unchanged", [told[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "settling", "done")], [0, 10, 1, 0, 9, 1, 21])
+    total = 0
+    for p in action_parts(told):
+        total += p[1]
+    _eq("the parts sum to the total", total, 30)
+    _eq("an event for a settled one takes it back", action_split(dict(half, counts = dict(half["counts"], actions_seen = half["counts"]["actions_seen"] + 2)))["unchanged"], 8)
 
     # The execution log late: an action that spawned is ran until its entry
     # says a cache served it; unchanged only what has no event at all.
