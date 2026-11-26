@@ -29,8 +29,9 @@ It takes the screen when the task starts and shows:
   - links to the invocation's results pages: the Aspect Build Results page
     the CLI streams to, and the BES results page Bazel streams to itself
     with `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
-  - a Results pane: targets, tests with their cache hits (from their
-    results), each kind of action there is any of in words, the bar's
+  - a Results pane: targets, tests with the share of those finished a
+    cache gave whole (`N% cached`) and, while a `test` build runs, the test
+    targets running and pending (`test_progress`), each kind of action there is any of in words, the bar's
     glyph a coloured key before its count (while the build runs,
     what ran and what a cache served from the compact execution log; at its
     end the exact split from its `BuildMetrics`), and the failures counted
@@ -1770,6 +1771,10 @@ def new_counts() -> dict:
         "failed_roots": {},
         "test_runs": 0,
         "test_cached": 0,
+        "tests_cached": 0,
+        "test_resulted": {},
+        "test_finished": {},
+        "test_uncached": {},
         "spawns": 0,
         "spawn_hits": 0,
         "runners": {},
@@ -1894,9 +1899,18 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
         if str(_get(payload, "status", "") or "").lower() == "failed_to_build":
             counts["failed_attempts"][(label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))] = True
         info = _get(payload, "execution_info")
+        key = (label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        counts["test_resulted"][key] = True
         if _get(payload, "cached_locally", False) or _get(info, "cached_remotely", False):
             counts["test_cached"] += 1
+        else:
+            counts["test_uncached"][key] = True
     elif kind == "test_summary":
+        counts["test_finished"][label] = True
+        key = (label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        if key in counts["test_resulted"] and key not in counts["test_uncached"]:
+            # Every run of the target a cache gave.
+            counts["tests_cached"] += 1
         status = str(_get(payload, "overall_status", "") or "")
         if status == "passed":
             counts["tests_passed"] += 1
@@ -2942,6 +2956,50 @@ def running_count(state: dict) -> int:
     progress = state.get("progress") or []
     return max(len(running_actions(progress)), action_counts(progress)[0])
 
+def tests_cached_text(counts: dict) -> str:
+    """`N% cached`: of the test targets finished so far (passed, failed,
+    flaky, or failed to build; a skipped one has no result), those every
+    run of which a cache gave, a whole percent rounded down as `reused` is,
+    but 1% for any at all, so only none says 0% and only every one 100%;
+    empty before one finished."""
+    finished = counts.get("tests_passed", 0) + counts.get("tests_failed", 0) + counts.get("tests_flaky", 0)
+    if not finished:
+        return ""
+    cached = min(counts.get("tests_cached", 0), finished)
+    pct = cached * 100 // finished
+    if cached and not pct:
+        pct = 1
+    return "%d%% cached" % pct
+
+def test_progress(state: dict):
+    """`(running, pending)` test targets while a `test` build runs, None
+    otherwise: running, the targets with a test action in Bazel's running
+    list (`Testing //t:a (shard 2 of 3)`, a run or an attempt alike, each
+    target once, not one with its result in: Bazel's list can lag it by a
+    frame), at most the `--ui_actions_shown` Bazel lists (8 by default;
+    the rest count as pending; `[Sched]` ones wait); pending, the test targets
+    configured less those with a result (passed, failed, flaky, skipped,
+    or failed to build) and those running, None while Bazel analyses and
+    the test count is not known yet."""
+    c = state.get("counts") or {}
+    if not state.get("building") or not c.get("testing"):
+        return None
+    labels = {}
+    done = c.get("test_finished") or {}
+    unbuilt = c.get("test_unbuilt") or {}
+    for row in running_actions(state.get("progress") or []):
+        if row.startswith("Testing "):
+            label = row[len("Testing "):].split(";")[0].split(" ")[0]
+            if label not in done and label not in unbuilt:
+                labels[label] = True
+    running = len(labels)
+    known = len(c.get("test_targets") or {})
+    if build_progress(state)[2] or not known:
+        return (running, None) if running else None
+    finished = c.get("tests_passed", 0) + c.get("tests_failed", 0) + c.get("tests_flaky", 0) + c.get("tests_skipped", 0)
+    running = min(running, max(0, known - finished))
+    return (running, known - finished - running)
+
 def action_split(state: dict) -> dict:
     """A build's actions by what became of each, for the bar, Results and
     Metrics, in one unit, Bazel's actions, summing to the done count:
@@ -3146,6 +3204,22 @@ _DONE = ("━", "")
 
 # Not done yet.
 _UNDONE = ("─", "border")
+
+def tests_text(progress) -> str:
+    """`test_progress` in words as Results' Actions row has them, its `─`
+    a coloured key: `─ 3 running · 5 pending`, a part there is none of left
+    out; empty for none."""
+    if not progress:
+        return ""
+    running, pending = progress
+    parts = []
+    if running:
+        parts.append(_counts("%d running", running))
+    if pending:
+        parts.append(_counts("%d pending", pending))
+    if not parts:
+        return ""
+    return _c(_UNDONE[1]) + _UNDONE[0] + _RESET + " " + " · ".join(parts)
 
 def action_bar(split: dict, width: int) -> str:
     """`width` cells of a build's actions (`action_split`): a segment of
@@ -3474,11 +3548,21 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # unscrolled counts the rest, Bazel's unlisted ones too, on its last row.
     pane = max(1, min(limit, rows // 3, results_capacity(wide)))
 
-    # Tests' cache hits, from their results: on the Tests row where it has
-    # room, else on a row of their own under it.
+    # Tests running and pending while a build runs, the actions' `─`
+    # words: on the Tests row where it has room, else on a row under it.
+    tests_row = None
+    tests_now = tests_text(test_progress(state))
+    if tests_now:
+        if text_width(_plain(summary[-1]) + " · " + _plain(tests_now)) <= right_w - 4:
+            summary[-1] += " · " + tests_now
+        else:
+            tests_row = " " * (9 if wide else 8) + tests_now
+
+    # The share of the finished test targets a cache gave: on the Tests
+    # row where it has room, else on a row of their own under it.
     cached_row = None
-    if c.get("test_runs"):
-        cached = _counts("%d/%d cached", (c["test_cached"], c["test_runs"]))
+    cached = tests_cached_text(c)
+    if cached:
         if text_width(_plain(summary[-1]) + " · " + cached) <= right_w - 4:
             summary[-1] += " · " + cached
         else:
@@ -3495,12 +3579,12 @@ def _top(state: dict, cols: int, rows: int) -> list:
         failed_row = _counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n))
 
     # Too many for the pane (a short terminal): the tests' cache row goes
-    # first, then the critical path, then the actions fold to fewer rows;
-    # the failures' row stays, last.
+    # first, then the critical path, then the actions fold to fewer rows,
+    # then the tests' running row; the failures' row stays, last.
     most = 3
-    for _ in range(6):
+    for _ in range(7):
         actions_rows = action_results(split, right_w - 4 - len(lead), most)
-        wanted = len(summary) + len(actions_rows) + len([r for r in (cached_row, critical, failed_row) if r != None])
+        wanted = len(summary) + len(actions_rows) + len([r for r in (tests_row, cached_row, critical, failed_row) if r != None])
         if wanted <= pane:
             break
         if cached_row != None:
@@ -3509,9 +3593,11 @@ def _top(state: dict, cols: int, rows: int) -> list:
             critical = None
         elif most > 1:
             most -= 1
+        elif tests_row != None:
+            tests_row = None
         else:
             break
-    rest = ([cached_row] if cached_row != None else []) + [(lead if i == 0 else " " * len(lead)) + row for i, row in enumerate(actions_rows)] + ([critical] if critical != None else [])
+    rest = ([tests_row] if tests_row != None else []) + ([cached_row] if cached_row != None else []) + [(lead if i == 0 else " " * len(lead)) + row for i, row in enumerate(actions_rows)] + ([critical] if critical != None else [])
     summary = (summary + rest)[:max(0, pane - (1 if failed_row != None else 0))]
     failed_i = -1
     if failed_row != None:
@@ -5220,7 +5306,7 @@ def help_rows(state: dict, width = 0) -> list:
             continue
         rows.append(group)
         rows += ["  " + fit(k.help[0], 20) + " " + k.help[1] for k in entries]
-    return rows + _actions_key(width, state.get("all_actions", True))
+    return rows + _actions_key(width, state.get("all_actions", True)) + _key_rows("Tests", _TESTS_KEY, width)
 
 # What the bar's and Results' glyphs are, for the `?` overlay.
 _ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged", "░ internal", "╳ failed", "─ running · pending"]
@@ -5234,12 +5320,20 @@ def _actions_key(width: int, published = True) -> list:
     then the glyphs as many to a row of `width` cells as fit (all on one
     without a width); without every action `published` (`actions =
     "failed"`), what `▒ other` is while a build runs."""
+    return _key_rows("Actions", _ACTIONS_KEY if published else [_OTHER_KEY if p.startswith("▒") else p for p in _ACTIONS_KEY], width)
+
+# What the Tests row says past its counts (`test_progress`, `tests_cached_text`).
+_TESTS_KEY = ["─ running · pending: test targets", "N% cached: all runs from a cache"]
+
+def _key_rows(title: str, parts: list, width: int) -> list:
+    """`title`, then `parts` as many to a row of `width` cells as fit (all
+    on one without a width), indented under it."""
     rows = [[]]
-    for part in _ACTIONS_KEY if published else [_OTHER_KEY if p.startswith("▒") else p for p in _ACTIONS_KEY]:
+    for part in parts:
         if width and rows[-1] and 2 + text_width(" · ".join(rows[-1] + [part])) > width:
             rows.append([])
         rows[-1].append(part)
-    return ["Actions"] + ["  " + " · ".join(row) for row in rows]
+    return [title] + ["  " + " · ".join(row) for row in rows]
 
 def row_labels(state: dict) -> list:
     """The keys row's labels for what has focus (`_ROW_FAILURES`,

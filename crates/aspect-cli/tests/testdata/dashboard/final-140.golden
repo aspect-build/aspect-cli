@@ -3,7 +3,7 @@
 ┌─ Slowest seen ─────────────────────────────────────────────────────────────────────────────┐┌─ Results ──────────────────────────────────┐
 │                                                                                            ││ Targets  3 configured                      │
 │                                                                                            ││          3 built, 0 failed                 │
-│                                                                                            ││ Tests    15 passed, 0 failed · 9/15 cached │
+│                                                                                            ││ Tests    15 passed, 0 failed · 60% cached  │
 │                                                                                            ││ Actions  █ 105 ran · ▓ 640 cached          │
 │                                                                                            ││          ▒ 7,359 unchanged                 │
 │                                                                                            ││          ░ 459 internal                    │

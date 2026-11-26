@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "test_progress", "tests_cached_text", "tests_text", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -151,7 +151,7 @@ def _goldens(ctx, view_state, act, update):
     analysing = _screen(ctx, log, progress = ["Analyzing: 8000 targets (1 packages loaded, 3879 targets configured)", "[3,830 / 8,563] 16 actions, 15 running", "    Compiling src/a.cc; 3s", "    Linking //app:bin; 1s"], now_ms = 12000)
     analysing["counts"].update(spawns = 1300, spawn_hits = 1100, configured = 3)
     finished = _screen(ctx, log + ["INFO: Build completed successfully, 8563 total actions"], ended = True, verdict = True, building = False, critical = "Linking //app:bin 4.1s", done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED})
-    finished["counts"].update(configured = 3, built = 3, test_runs = 15, test_cached = 9, tests_passed = 15)
+    finished["counts"].update(configured = 3, built = 3, test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 15)
     fold_build(finished, 9000)
     states = [
         ("running", _screen(ctx, log, **running), 100, 30),
@@ -697,17 +697,19 @@ def _actions_tests(ctx):
 
     # Results on a short terminal: the tests' cache row, the critical path
     # and then the actions' third row go before the failures' row does.
-    short = dict(greg_screen, critical = "Linking //app:bin 4.1s", counts = dict(greg_screen["counts"], test_runs = 15, test_cached = 9, tests_passed = 1400, tests_failed = 100, tests_flaky = 3), fails = _failed_records(4))
+    short = dict(greg_screen, critical = "Linking //app:bin 4.1s", counts = dict(greg_screen["counts"], test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 1400, tests_failed = 100, tests_flaky = 3, tests_skipped = 12), fails = _failed_records(4))
     for height in [20, 24, 26, 30]:
         rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(short, 80, height)).split("\n") if "││ " in r]
         _eq("Failed kept at %d rows" % height, any([r.startswith("Failed") or r.startswith("✗4 ") for r in rows]), True)
         if height == 30:
-            _eq("all there at 30 rows", [any([r.strip().startswith(w) for r in rows]) for w in ("9/15 cached", "Crit", "░ 33 internal")], [True, True, True])
+            _eq("all there at 30 rows", [any([r.strip().startswith(w) for r in rows]) for w in ("1% cached", "Crit", "░ 33 internal")], [True, True, True])
 
     # The `?` overlay's key to the glyphs, wrapped to the width.
     for width in range(36, 101, 4):
-        key = help_rows(greg_screen, width)[-3:]
-        _eq("the glyphs' key at %d" % width, [text_width(r) <= width for r in key if r != "Actions"], [True for r in key if r != "Actions"])
+        rows = help_rows(greg_screen, width)
+        key = rows[rows.index("Actions"):]
+        _eq("the glyphs' key at %d" % width, [text_width(r) <= width for r in key if r not in ("Actions", "Tests")], [True for r in key if r not in ("Actions", "Tests")])
+    _eq("the Tests row keyed", help_rows(greg_screen, 100)[-2:], ["Tests", "  ─ running · pending: test targets · N% cached: all runs from a cache"])
     _eq("every glyph keyed", all([g in "".join(help_rows(greg_screen, 40)) for g in ["█", "▓", "▒", "░", "╳"]]), True)
 
     # Before Bazel counts, the bar says what it is doing; the header no
@@ -728,7 +730,7 @@ def _actions_tests(ctx):
 
     # Every row of the screen as wide as it, from 40 to 200 columns, while
     # the build runs and at its end.
-    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("four kinds", greg_screen), ("tests cached", dict(greg_screen, counts = dict(greg_screen["counts"], test_runs = 1500, test_cached = 1200, tests_passed = 1400, tests_failed = 100, tests_flaky = 3))), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
+    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("four kinds", greg_screen), ("tests cached", dict(greg_screen, counts = dict(greg_screen["counts"], test_runs = 1500, test_cached = 1200, tests_cached = 1200, tests_passed = 1400, tests_failed = 100, tests_flaky = 3))), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
         for cols in list(range(40, 201, 7)) + [80, 140, 200]:
             frame = render(st, cols, 30)
             body = frame[frame.find("\x1b[H") + 3:]
@@ -1405,9 +1407,11 @@ def _impl(ctx: TaskContext) -> int:
     count_spawn(kept["counts"], struct(cache_hit = False, runner = "darwin-sandbox"))
     count_event(kept["counts"], "test_result", struct(label = "//t:a"), struct(cached_locally = True, execution_info = None))
     count_event(kept["counts"], "test_result", struct(label = "//t:b"), struct(cached_locally = False, execution_info = struct(cached_remotely = False)))
+    for label in ("//t:a", "//t:b"):
+        count_event(kept["counts"], "test_summary", struct(label = label), struct(overall_status = "passed"))
     kept["progress"] = ["[5 / 9] 2 actions running"]
     drawn = _visible(render(kept, 140, 30))
-    for want in ["Actions  █ 1 ran · ▓ 1 cached", "▒ 3 other", "0 failed · 1/2 cached", "55% · 5 of 9"]:
+    for want in ["Actions  █ 1 ran · ▓ 1 cached", "▒ 3 other", "0 failed · 50% cached", "55% · 5 of 9"]:
         if want not in drawn:
             fail("render: %r should be drawn:\n%s" % (want, drawn))
     _eq("no spawns row in Results", ("spawns" in drawn, "test runs" in drawn, "Cached " in drawn), (False, False, False))
@@ -1416,17 +1420,48 @@ def _impl(ctx: TaskContext) -> int:
     shown = _visible(render(many, 140, 30))
     _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
     _eq("whole counts in three rows, what runs and is pending too", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "▒ 2,378 other" in shown, "─ 16 running · 4,717 pending" in shown], [True, True, True, True])
-    many["counts"].update(test_runs = 15, test_cached = 9, tests_passed = 9, tests_failed = 6)
-    _eq("the Tests row's cache hits", "Tests    9 passed, 6 failed · 9/15 cached" in _visible(render(many, 140, 30)), True)
-    _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 76, 30)), True)
+    many["counts"].update(test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 9, tests_failed = 6)
+    _eq("the Tests row's share cached", "Tests    9 passed, 6 failed · 60% cached" in _visible(render(many, 140, 30)), True)
+    _eq("narrow, the same", "Tests   ✗6 ✓9 · 60% cached" in _visible(render(many, 76, 30)), True)
     many["counts"].update(tests_passed = 14, tests_failed = 1)
     rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(many, 100, 30)).split("\n") if "││ " in r]
     at = [i for i, r in enumerate(rows) if r.startswith("Tests")][0]
-    _eq("on a row of its own where the Tests row has no room", rows[at:at + 2], ["Tests    14 passed, 1 failed", "         9/15 cached"])
-    many["counts"].update(test_runs = 1500, test_cached = 1200)
+    _eq("on a row of its own where the Tests row has no room", rows[at:at + 2], ["Tests    14 passed, 1 failed", "         60% cached"])
+    many["counts"].update(tests_cached = 1200, tests_passed = 1400, tests_failed = 100)
     rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(many, 140, 30)).split("\n") if "││ " in r]
     at = [i for i, r in enumerate(rows) if r.startswith("Tests")][0]
-    _eq("never left out", rows[at + 1], "         1,200/1,500 cached")
+    _eq("never left out", rows[at + 1], "         80% cached")
+
+    # The share of the finished test targets every run of which a cache
+    # gave: rounded down, but never 0% for some nor 100% short of all.
+    for got, want in [((0, 0), ""), ((0, 7), "0% cached"), ((1, 300), "1% cached"), ((299, 300), "99% cached"), ((300, 300), "100% cached")]:
+        _eq("cached %d of %d" % got, tests_cached_text({"tests_cached": got[0], "tests_passed": got[1]}), want)
+    sharded = new_counts()
+    for shard, hit in [(1, True), (2, False)]:
+        count_event(sharded, "test_result", struct(label = "//t:s"), struct(cached_locally = hit, execution_info = None))
+    count_event(sharded, "test_result", struct(label = "//t:c"), struct(cached_locally = True, execution_info = None))
+    for label in ("//t:s", "//t:c"):
+        count_event(sharded, "test_summary", struct(label = label), struct(overall_status = "passed"))
+    _eq("a skipped one is not finished", tests_cached_text({"tests_cached": 3, "tests_passed": 3, "tests_skipped": 9}), "100% cached")
+    _eq("a target with a shard run is not cached", (sharded["tests_cached"], tests_cached_text(sharded)), (1, "50% cached"))
+
+    # Tests running and pending while a `test` build runs: targets in
+    # Bazel's running list (a shard, a run, an attempt alike, each target
+    # once), the rest of those configured pending once analysed, the parts
+    # summing to the test targets.
+    t = _screen(ctx, ["x"], progress = ["[40 / 52] 4 actions running", "    Testing //t:s (shard 1 of 3); 2s darwin-sandbox", "    Testing //t:s (shard 2 of 3); 2s darwin-sandbox", "    Testing //t:r (run 2 of 3); 1s darwin-sandbox", "    Testing //t:a; 0s darwin-sandbox", "    Compiling x.cc; 1s darwin-sandbox"])
+    t["counts"].update(testing = True, tests_passed = 2, tests_failed = 1, test_targets = {"//t:%d" % i: True for i in range(9)})
+    _eq("running and pending", test_progress(t), (3, 3))
+    _eq("in words", _visible(tests_text(test_progress(t))), "─ 3 running · 3 pending")
+    drawn = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(t, 140, 30)).split("\n") if "││ " in r]
+    at = [i for i, r in enumerate(drawn) if r.startswith("Tests")][0]
+    _eq("on a row under Tests", drawn[at:at + 2], ["Tests    2 passed, 1 failed · 0% cached", "         ─ 3 running · 3 pending"])
+    _eq("while it analyses, no pending", test_progress(dict(t, progress = ["Analyzing: 9 targets (1 packages loaded)", "[40 / 52] 4 actions running", "    Testing //t:a; 0s darwin-sandbox"])), (1, None))
+    _eq("not a test build", test_progress(dict(t, counts = dict(t["counts"], testing = False))), None)
+    _eq("nothing at the end", test_progress(dict(t, building = False)), None)
+    _eq("never more running than not finished", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 7))), (1, 0))
+    _eq("a target with its result in is not running", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 3, test_finished = {"//t:a": True}))), (2, 3))
+    _eq("a scheduled one waits", test_progress(dict(t, progress = ["[40 / 52] 4 actions running", "    Testing //t:a; 0s darwin-sandbox", "    [Sched] Testing //t:b; 2s"])), (1, 5))
     metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
     if "2 · 1 from a cache (50%) · 1 run" not in metrics or "remote cache hit" not in metrics:
         fail("metrics: actions by the execution log:\n" + metrics)
