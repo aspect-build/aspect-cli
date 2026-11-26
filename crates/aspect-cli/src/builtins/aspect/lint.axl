@@ -138,6 +138,27 @@ def _ignored_rejects(said: str) -> list:
             out.append(name)
     return out
 
+def _created_text(text: str, path: str):
+    """What a diff's hunks make of `path` where its header's old side is
+    `/dev/null`: the added lines, their last line end dropped where the
+    diff says `\\ No newline at end of file`; None where it makes none."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if not (line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ ")):
+            continue
+        if _header_path(line) != None or _header_path(lines[i + 1]) != path:
+            continue
+        made = []
+        for body in lines[i + 2:]:
+            if body.startswith("+"):
+                made.append(body[1:] + "\n")
+            elif body.startswith("\\") and made:
+                made[-1] = made[-1].removesuffix("\n")
+            elif not body.startswith("@@ "):
+                break
+        return "".join(made)
+    return None
+
 def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     """Apply one auto-fix patch with `patch -p1`, asking nothing (no
     terminal answers it): a hunk that looks applied already is skipped, not
@@ -165,9 +186,20 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     patch identical to one of them is skipped (one source in two lint
     targets gives two), and this one's bytes are added. In `cwd`, the
     task's own directory unless given. Returns the directory the rejects
-    are kept in, or None."""
+    are kept in, or None.
+
+    A relative `patch` (a lint output path) is taken in `cwd`: patch runs
+    in the copies' directory. One that isn't there, or that patch can't
+    read, is named in a warning. A file the patch makes (its header's old
+    side `/dev/null`) that is there already, with other bytes, keeps its
+    hunks as a reject though BSD patch calls them applied already."""
     cwd = cwd or ctx.std.env.current_dir()
     fs = ctx.std.fs
+    if not patch.startswith("/"):
+        patch = cwd + "/" + patch
+    if not _is_file(fs, patch):
+        print("WARNING: %s was not applied: it isn't there" % patch)
+        return None
     if seen != None:
         content = fs.open(patch).read()
         if content in seen:
@@ -175,7 +207,8 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
         seen.append(content)
 
     # Lossy: a hunk may hold any bytes; only the header paths are read.
-    headers = patch_headers(fs.try_read_to_string_capped(patch, 64 * 1024 * 1024))
+    text = fs.try_read_to_string_capped(patch, 64 * 1024 * 1024)
+    headers = patch_headers(text)
     if headers == None:
         print("WARNING: %s was not applied: a hunk's line range isn't numbers" % patch)
         return None
@@ -203,7 +236,13 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     said = out.stdout + out.stderr
     if said:
         ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
+    if out.status.code not in (0, 1):
+        print("WARNING: %s was not applied: patch exited with %s" % (patch, out.status.code))
     ignored = _ignored_rejects(said)
+    for old, new in headers:
+        if not old and new in had and new + ".rej" in ignored:
+            if _created_text(text, new) != fs.try_read_to_string_capped(cwd + "/" + new, 64 * 1024 * 1024):
+                ignored.remove(new + ".rej")
     rejects = []
     for path in paths:
         patched = work + "/" + path

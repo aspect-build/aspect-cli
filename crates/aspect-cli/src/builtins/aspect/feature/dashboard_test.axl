@@ -1457,10 +1457,11 @@ def _impl(ctx: TaskContext) -> int:
 
     # The tabs: 1 to 5 show each, Esc goes back to the console; the
     # Invocation tab redacts what may be a secret.
-    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "//..."], explicit_startup_options = [])})
+    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "--define=API_TOKEN=d1", "--test_arg=--password=t1", "--copt=-DKEY=c1", "--define=mode=fast", "//..."], explicit_startup_options = [])})
     on_key(tabs, "4", 10)
     shown = _visible(render(tabs, 100, 40))
     _eq("the invocation tab, its secrets hidden", ("Flags given" in shown, "abc" in shown, "zzz" in shown, "u:p@" in shown, "--action_env=TOKEN=<REDACTED>" in shown), (True, False, False, False, True))
+    _eq("a secret's setting inside a flag's value hidden", [w in shown for w in ("d1", "t1", "c1", "--define=API_TOKEN=<REDACTED>", "--define=mode=fast")], [False, False, False, True, True])
     on_key(tabs, "3", 10)
     _eq("metrics", "Actions" in _visible(render(tabs, 100, 40)), True)
     for tab in ("metrics", "invocation", "failures"):
@@ -1571,6 +1572,23 @@ def _impl(ctx: TaskContext) -> int:
         seen.append(crumbs(runs)[-1])
     _eq("} steps each run, round to the first", seen, ["//t:r ▹ run 2/3", "//t:r ▹ run 3/3", "//t:r ▹ run 1/3", "//t:r ▹ run 2/3"])
 
+    # ] [ } { with the pick on a target without a log (past the logged
+    # records): the last logged one stands in. } with the open log's target
+    # no longer listed (a newer build's failures): the chosen one's.
+    unlogged = _screen(ctx, ["x"], fails = [_attempt("//t:a", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    count_aborted(unlogged["counts"], "//b:b", "analysis_failure")
+    for key in ["]", "[", "}", "{"]:
+        unlogged["view"] = None
+        on_key(unlogged, "2", 10)
+        on_key(unlogged, "J", 10)
+        _eq("%s: the pick past the logged records" % key, unlogged["selected"], 1)
+        on_key(unlogged, key, 10)
+        _eq("%s on a target without a log" % key, crumbs(unlogged), ["//t:a"])
+    unlogged["fails"] = [_attempt("//t:z", 1), _attempt("//t:z", 2)]
+    unlogged["selected"] = 0
+    on_key(unlogged, "}", 10)
+    _eq("} with the open target gone: the chosen one's", crumbs(unlogged)[-1].partition(" ")[0], "//t:z")
+
     # The CLI's version at the keys row's right end, with room for the keys.
     versioned = _screen(ctx, ["x"], cli_version = "2026.47.3")
     bottom = _visible(render(versioned, 100, 20)).split("\n")[-1]
@@ -1670,6 +1688,21 @@ def _impl(ctx: TaskContext) -> int:
     _eq("never before the first", picked_build(many_builds), 0)
     on_key(many_builds, ">", 10)
     _eq("> the next", picked_build(many_builds), 1)
+
+    # A build folded before any frame noted what it blocked, picked again
+    # with <: its Metrics draw, timed by its own run, not the task's.
+    unframed = _screen(ctx, ["x"], building = True, build_start_ms = 1000)
+    unframed.pop("blocked", None)
+    fold_build(unframed, 13000)
+    new_build(unframed, 14000)
+    unframed["building"] = True
+    unframed["now_ms"] = 99000
+    unframed["tab"] = "metrics"
+    on_key(unframed, "<", 10)
+    took = [r for r in _visible(render(unframed, 100, 60)).split("\n") if "elapsed" in r]
+    _eq("a folded build's own time", len(took) == 1 and took[0].split()[2] == "12s", True)
+    never = _screen(ctx, ["x"], building = False, ended = True, tab = "metrics", fails = [act])
+    _eq("Metrics with no build at all", "elapsed" in _visible(render(never, 100, 60)), True)
 
     # Finished: one build's panes stay open for build and test, every other
     # task's builds stay folded.

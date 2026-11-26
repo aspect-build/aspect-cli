@@ -1487,7 +1487,7 @@ fn dump_text(text: &str, max_lines: usize, older: &str, link: impl Fn(&str) -> S
 /// With `dump` (its newest lines, and the line saying how many older ones
 /// it left out), the task's output since the screen was taken is dumped
 /// ([`dump_output`]) right after the main screen comes back, before any
-/// replay, with `order` and the targets giving the descriptors back held
+/// replay, with `order` and every target giving the descriptors back took
 /// still held: no line written meanwhile shows both live and in the dump,
 /// nor before it. A target given up on there (a writer stalled on it) is
 /// not held; the dump takes stderr's turn itself if it is that one.

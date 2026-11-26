@@ -155,6 +155,32 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// Force colour on (`FORCE_COLOR`, `CLICOLOR_FORCE`) for one spawn of
+/// `cmd`, or take back what an earlier one forced. `added` lists the
+/// variables the runtime owns on `cmd`: set or removed by it, never by the
+/// task since (the task's `.env()` drops a variable from it), so a removal of
+/// the runtime's own is no task's choice and a later spawn forces it again.
+/// The task's values, and what the CLI inherited, are kept.
+fn set_colour(cmd: &mut process::Command, added: &mut Vec<String>, colour: bool) {
+    for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
+        let ours = added.iter().any(|a| a == var);
+        let theirs = !ours
+            && (cmd.get_envs().any(|(k, _)| k.to_string_lossy() == var)
+                || std::env::var_os(var).is_some());
+        if theirs {
+            continue;
+        }
+        if colour {
+            cmd.env(var, "1");
+            if !ours {
+                added.push(var.to_string());
+            }
+        } else if ours {
+            cmd.env_remove(var);
+        }
+    }
+}
+
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Command>")]
 pub struct Command {
@@ -263,25 +289,7 @@ impl Command {
         // Colour as the stream the child's stdout reaches through the CLI
         // shows it; the task's own values, and what the CLI inherited, kept.
         let colour = !interactive && !chosen.stdout && crate::color::stdout_supports_color();
-        let mut added = self.added_env.borrow_mut();
-        for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
-            let ours = added.iter().any(|a| a == var);
-            let theirs = !ours
-                && (cmd.get_envs().any(|(k, _)| k.to_string_lossy() == var)
-                    || std::env::var_os(var).is_some());
-            if theirs {
-                continue;
-            }
-            if colour {
-                cmd.env(var, "1");
-                if !ours {
-                    added.push(var.to_string());
-                }
-            } else if ours {
-                cmd.env_remove(var);
-                added.retain(|a| a != var);
-            }
-        }
+        set_colour(&mut cmd, &mut self.added_env.borrow_mut(), colour);
 
         // One closure for the command's life, which reads at each fork
         // whether this spawn drops the terminal.
@@ -718,6 +726,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] value: NoneOr<values::StringValue>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.added_env.borrow_mut().retain(|a| a != key.as_str());
         match value {
             NoneOr::None => cmd.inner.borrow_mut().env_remove(key.as_str()),
             NoneOr::Other(v) => cmd.inner.borrow_mut().env(key.as_str(), v.as_str()),
@@ -1481,6 +1490,34 @@ t = task(implementation = _impl)
         assert_eq!(result.expect("run_task"), Some(0));
         let got = std::fs::read_to_string(dir.path().join("out")).unwrap();
         assert_eq!(got, "x\nx\n");
+    }
+
+    /// Colour forced, taken back, then forced again on one command: the
+    /// runtime's own removal is no task's choice. A task's own setting
+    /// after it is kept.
+    #[test]
+    fn colour_comes_back_on_a_reused_command() {
+        let forced = |cmd: &process::Command| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == "FORCE_COLOR")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned())
+        };
+        let mut cmd = process::Command::new("true");
+        let mut added = vec![];
+        if std::env::var_os("FORCE_COLOR").is_some() {
+            return;
+        }
+        set_colour(&mut cmd, &mut added, true);
+        assert_eq!(forced(&cmd).as_deref(), Some("1"));
+        set_colour(&mut cmd, &mut added, false);
+        assert_eq!(forced(&cmd), None);
+        set_colour(&mut cmd, &mut added, true);
+        assert_eq!(forced(&cmd).as_deref(), Some("1"), "forced again");
+        added.retain(|a| a != "FORCE_COLOR");
+        cmd.env("FORCE_COLOR", "0");
+        set_colour(&mut cmd, &mut added, true);
+        assert_eq!(forced(&cmd).as_deref(), Some("0"), "the task's own kept");
     }
 
     /// A task's own `FORCE_COLOR` is the child's, never overridden.

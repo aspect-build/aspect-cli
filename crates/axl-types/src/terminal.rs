@@ -233,8 +233,17 @@ pub fn write_std(fd: i32, bytes: &[u8], copy: fn(&[u8])) -> std::io::Result<()> 
 mod tests {
     use super::*;
 
+    /// One test at a time over the targets' locks and mid-line flags,
+    /// which stdout and stderr share where they are one target.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn a_write_notes_whether_it_left_its_target_mid_line() {
+        let _serial = serial();
         wrote(1, b"partial");
         assert!(mid_line(1));
         wrote(1, b"rest\n");
@@ -245,8 +254,9 @@ mod tests {
 
     #[test]
     fn a_turn_at_a_line_end_waits_out_a_line_left_mid_way_for_a_while() {
-        // Stderr's target, which these other tests leave alone where the two
-        // are one target only in the sense of locks; mid-line is per target.
+        let _serial = serial();
+        // Stderr's target, stdout's too where they are one: `serial` keeps
+        // the other tests off it meanwhile.
         wrote(2, b"cut");
         let start = Instant::now();
         let turn = turn_at_line_end(2, Duration::from_secs(1), Duration::from_millis(30));
@@ -269,6 +279,7 @@ mod tests {
 
     #[test]
     fn a_held_target_is_given_up_on_after_the_bound() {
+        let _serial = serial();
         let held = turn(1).unwrap();
         let start = Instant::now();
         assert!(turn_within(1, Duration::from_millis(50)).is_none());

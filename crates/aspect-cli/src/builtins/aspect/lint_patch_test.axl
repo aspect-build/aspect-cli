@@ -96,6 +96,27 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
 
     apply_fix_patch(ctx, root + "/escape.patch", cwd = tree)
     _eq("a path outside the tree is not patched", fs.exists(root + "/escape.txt"), False)
+
+    # A lint output's path, relative to the workspace (a remote cache's
+    # bytestream file): taken there, not in the copies' directory.
+    fs.create_dir_all(tree + "/bazel-out/bin")
+    fs.write(tree + "/src/rel.txt", "old\n")
+    fs.write(tree + "/bazel-out/bin/fix.patch", "--- a/src/rel.txt\n+++ b/src/rel.txt\n@@ -1 +1 @@\n-old\n+new\n")
+    _eq("a relative patch path", apply_fix_patch(ctx, "bazel-out/bin/fix.patch", cwd = tree), None)
+    _eq("is applied", fs.read_to_string(tree + "/src/rel.txt"), "new\n")
+    _eq("a patch that isn't there", apply_fix_patch(ctx, "bazel-out/bin/none.patch", cwd = tree), None)
+
+    # A patch making a file that is there already: other bytes keep its
+    # hunk as a reject (BSD patch calls it applied already), the same ones
+    # are applied indeed.
+    fs.write(tree + "/src/m.txt", "mine\n")
+    fs.write(root + "/create.patch", "--- /dev/null\n+++ b/src/m.txt\n@@ -0,0 +1 @@\n+made\n")
+    kept = apply_fix_patch(ctx, root + "/create.patch", cwd = tree)
+    _eq("a made file there with other bytes stays", fs.read_to_string(tree + "/src/m.txt"), "mine\n")
+    _eq("and its hunk is a reject", kept != None and _names(fs, kept + "/src"), ["m.txt.rej"])
+    fs.remove_dir_all(kept)
+    fs.write(tree + "/src/m.txt", "made\n")
+    _eq("the same bytes: applied already", apply_fix_patch(ctx, root + "/create.patch", cwd = tree), None)
     print("lint_patch_test.axl: OK")
     return 0
 

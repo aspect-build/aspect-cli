@@ -1191,7 +1191,9 @@ def note_blocked(state: dict, event):
         if root and root not in roots:
             roots.append(root)
     if label and roots and label not in roots:
-        state.setdefault("blocked", {})[label] = roots
+        if not state.get("blocked"):
+            state["blocked"] = {}
+        state["blocked"][label] = roots
 
 def blocked_text(label: str, roots: list) -> str:
     """`blocked by :broken`: a root cause in `label`'s package by its name,
@@ -1219,7 +1221,7 @@ def _open_unlogged(state: dict, i: int):
     it (its first root cause's log, chosen in the list); another says why
     there is nothing to show."""
     label = _unlogged_label(state, i)
-    roots = state.get("blocked", {}).get(label, [])
+    roots = (state.get("blocked") or {}).get(label, [])
     for root in roots:
         for j, rec in enumerate(state["fails"]):
             if rec["label"] == root:
@@ -1252,7 +1254,7 @@ def failure_rows(state: dict, room: int, width: int) -> list:
     wanted = start + shown - len(fails)
     unlogged = first_unlogged(index, wanted) if wanted > 0 else []
 
-    blocked = state.get("blocked", {})
+    blocked = (state.get("blocked") or {})
 
     def row(i):
         if i >= len(fails):
@@ -3004,7 +3006,7 @@ _INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "bui
 def _failure_counts(state: dict):
     """`(failed, blocked)`: targets and tests that failed themselves, and
     targets not built for a failed dependency."""
-    blocked = len(state.get("blocked", {}))
+    blocked = len(state.get("blocked") or {})
     index = logged_index(state)
     failed = len(state["fails"]) + len(state["counts"]["failures"]) - index["both"] - blocked
     return (max(0, failed), blocked)
@@ -3084,19 +3086,30 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     info = fit(" " + status, rest - 1).rstrip(" ") + " " if status and rest > 4 else ""
     return text + _c("muted") + info + _RESET + _c("border") + "─" * max(0, rest - text_width(info)) + "┐" + _RESET
 
+_SECRET_WORDS = ("header", "token", "password", "secret", "credential", "auth", "key")
+
+def _secret_name(name: str) -> bool:
+    """Whether a flag's or setting's `name` names what may be a secret."""
+    lower = name.lower()
+    return any([word in lower for word in _SECRET_WORDS])
+
 def _redacted(flag: str) -> str:
     """`flag` with what may be a secret's value hidden: a header's, a
     token's, a password's or a key's, an env var's value, a URL's
-    user and password."""
+    user and password. A value that is itself a setting named so
+    (`--define=API_TOKEN=x`, `--test_arg=--password=x`, `--copt=-DKEY=x`)
+    has its own value hidden."""
     name, eq, value = flag.partition("=")
     if not eq:
         return flag
     lower = name.lower()
-    for word in ("header", "token", "password", "secret", "credential", "auth", "key"):
-        if word in lower:
-            return name + "=<REDACTED>"
+    if _secret_name(name):
+        return name + "=<REDACTED>"
     if lower.endswith("_env") or lower in ("--client_env", "--action_env", "--repo_env", "--test_env", "--host_action_env"):
         return name + "=" + value.partition("=")[0] + ("=<REDACTED>" if "=" in value else "")
+    inner, inner_eq, _ = value.partition("=")
+    if inner_eq and "://" not in inner and _secret_name(inner):
+        return name + "=" + inner + "=<REDACTED>"
     scheme, sep, rest = value.partition("://")
     if sep and "@" in rest.partition("/")[0]:
         value = scheme + "://<REDACTED>@" + rest.partition("@")[2]
@@ -3136,7 +3149,12 @@ def metrics_lines(state: dict) -> list:
     out.append(_row_of("built", "%d · %d failed · %d blocked by a dependency" % (c["built"], failed, blocked)))
     timing = _get(bm, "timing_metrics")
     out += ["", _c("heading") + "Time" + _RESET]
-    out.append(_row_of("elapsed", elapsed(state["now_ms"] - state["start_ms"])))
+
+    # A folded build's own time; the running (or newest unfolded) one's so far.
+    picked = picked_build(state)
+    builds = state.get("builds", [])
+    took = builds[picked]["ms"] if 0 <= picked and picked < len(builds) else state["now_ms"] - state["start_ms"]
+    out.append(_row_of("elapsed", elapsed(took)))
     if state.get("critical"):
         out.append(_row_of("critical path", state["critical"]))
     for field, name in (("analysis_phase_time_in_ms", "analysis"), ("execution_phase_time_in_ms", "execution"), ("cpu_time_in_ms", "CPU")):
@@ -3784,9 +3802,12 @@ def _k_list(state, key, page):
 
 def _k_step_record(state, key, page):
     # The chosen record first, unless it is the one the Failures tab shows:
-    # then a step.
+    # then a step. The pick may be past the logged records (on a target
+    # without a log): the last of them stands in.
     items = _items(state)
-    chosen = state.get(_pick(state), 0)
+    if not items:
+        return False
+    chosen = min(state.get(_pick(state), 0), len(items) - 1)
     show_tab(state, "failures")
     step = 1 if key == "]" else -1
     shown = _shown_record(state) == items[chosen]
@@ -3794,12 +3815,19 @@ def _k_step_record(state, key, page):
     return False
 
 def _k_step_attempt(state, key, page):
-    # Another attempt, shard or run of the target shown (or chosen).
+    # Another attempt, shard or run of the target shown (or chosen). One
+    # shown from a list it is no longer in (another list, a newer build's)
+    # gives way to the chosen record's target.
     items = _items(state)
-    chosen = state.get(_pick(state), 0)
+    if not items:
+        return False
+    chosen = min(state.get(_pick(state), 0), len(items) - 1)
     show_tab(state, "failures")
     label = (_shown_record(state) or items[chosen])["label"]
     same = [i for i, r in enumerate(items) if r["label"] == label]
+    if not same:
+        label = items[chosen]["label"]
+        same = [i for i, r in enumerate(items) if r["label"] == label]
     at = same.index(chosen) if chosen in same else 0
     _open_failure(state, same[(at + (1 if key == "}" else -1)) % len(same)])
     return False
@@ -4154,7 +4182,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
         if total > len(shown) and state.get("log_path"):
             out.append("  … %d more in Bazel's console log: %s" % (total - len(shown), state["log_path"]))
     index = logged_index(state)
-    blocked = state.get("blocked", {})
+    blocked = (state.get("blocked") or {})
     unlogged = [label for label in index["unlogged"] if label not in index["logged"] and label not in blocked]
     stopped = [label for label in index["unlogged"] if label not in index["logged"] and label in blocked]
     fails = [rec for rec in state["fails"] if not _flaky(state, rec)]
