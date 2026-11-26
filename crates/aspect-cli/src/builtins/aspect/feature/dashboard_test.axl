@@ -1525,13 +1525,31 @@ def _impl(ctx: TaskContext) -> int:
         count_aborted(anal["counts"], "//examples/r29tmp:" + label, "analysis_failure")
     _eq("blocked by a root posted after them", sorted(blocked_targets(anal)), ["//examples/r29tmp:a%d" % i for i in range(5)])
 
-    # r30's mix.json: t_anal is blocked by anal_broken, which it was not
-    # asked for and which Bazel reports only as an Aborted configured_label.
-    mix = _screen(ctx, ["x"])
-    note_blocked(mix, struct(kind = "target_configured", id = struct(label = "//examples/r30tmp:t_anal"), payload = struct(), children = [struct(id = struct(label = "//examples/r30tmp:anal_broken"))]))
-    count_aborted(mix["counts"], "//examples/r30tmp:t_anal", "analysis_failure")
-    mix["counts"]["failed_roots"]["//examples/r30tmp:anal_broken"] = True
-    _eq("blocked by a dependency that failed analysis, unasked", sorted(blocked_targets(mix)), ["//examples/r30tmp:t_anal"])
+    # r31's load.json: t_nopkg is blocked by a target in a package that is
+    # not there, which it was not asked for and which Bazel reports only as
+    # an Aborted configured_label, once per configuration. That root is a
+    # failure of its own, once, its log Bazel's error; the build shows it
+    # failed. An Aborted payload's type can't be made here: `aborted` says
+    # what a real one's type would.
+    mix = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    root = "//examples/r31_nonexistent:x"
+    error = "no such package 'examples/r31_nonexistent': BUILD file not found in any of the following directories."
+    for config in ("ddf13d99", "6eed62c4"):
+        rid = struct(label = root, configuration = struct(id = config))
+        aborted = struct(reason = "ANALYSIS_FAILURE", description = error)
+        count_event(mix["counts"], "configured_label", rid, aborted, aborted = True)
+        note_event(mix, "configured_label", rid, aborted, True)
+    note_blocked(mix, struct(kind = "target_configured", id = struct(label = "//examples/r30tmp:t_nopkg"), payload = struct(), children = [struct(id = struct(label = root))]))
+    count_aborted(mix["counts"], "//examples/r30tmp:t_nopkg", "analysis_failure")
+    _eq("blocked by a dependency that failed analysis, unasked", sorted(blocked_targets(mix)), ["//examples/r30tmp:t_nopkg"])
+    _eq("the root counted once", mix["counts"]["failed_labels"].get(root), True)
+    rows = [(r["label"], r["detail"]) for r in mix["fails"]]
+    _eq("the root's row", rows, [(root, "analysis failed")])
+    results = _visible(render(mix, 140, 40))
+    _eq("Results says it failed", "1 failed, 1 blocked" in results, True)
+    on_key(mix, "2", 10)
+    on_key(mix, "enter", 10)
+    _eq("Enter shows Bazel's error", "no such package" in _visible(render(mix, 140, 40)), True)
 
     ok = _screen(ctx, ["x"])
     note_blocked(ok, struct(kind = "target_configured", id = struct(label = "//p:ok"), payload = struct(), children = [struct(id = struct(label = "//p:ok"))]))

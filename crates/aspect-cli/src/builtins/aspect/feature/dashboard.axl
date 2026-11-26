@@ -1039,8 +1039,22 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     runs and shards it has been seen to have, `spread`). A summary
     the build announced but did not get to (`aborted`, an interrupt) has no
     counts. A test's summary arriving shows its open log anew, now
-    findable, from its end."""
+    findable, from its end. A root cause that failed analysis (an Aborted
+    `configured_label`) is a failure, once, its log the error Bazel gives
+    (`description`)."""
     if aborted:
+        reason = str(_get(payload, "reason", "") or "").lower()
+        label = str(_get(event_id, "label", "") or "")
+        if kind == "configured_label" and label and reason in _FAILED_ABORTS and not any([r["label"] == label and r["detail"] == "analysis failed" for r in state["fails"]]):
+            _add_failure(state, {
+                "kind": "action",
+                "label": label,
+                "detail": "analysis failed",
+                "files": [("error", (str(_get(payload, "description", "") or "") or "(Bazel gave no description)", False))],
+                "output": "",
+                "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
+                "success": False,
+            })
         return
     if kind == "workspace_config":
         state["exec_root"] = str(_get(payload, "local_exec_root", "") or "")
@@ -1723,15 +1737,22 @@ def count_aborted(counts: dict, label: str, reason: str):
     else:
         counts["skipped"] += 1
 
-def count_event(counts: dict, kind: str, event_id, payload):
-    """Tally one build event into `counts`. A target that failed to build
-    arrives as `target_completed` without `success`; one that never got that
-    far (failed in loading or analysis, skipped, interrupted) as an Aborted
-    payload under its own id (`count_aborted`). An aspect's own completion is
-    not a target. A test's `overall_status` is lowercase (`passed`, `flaky`,
-    `failed`, …); only `_FAILED_TEST_STATUSES` count as failed. A test whose
-    summary is Aborted is failed or skipped by `count_aborted_test`. A label
-    is listed in `failures` once."""
+def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
+    """Tally one build event into `counts`. `build_started` says whether the
+    command tests (`testing`: `test` or `coverage`), which gates counting a
+    test target that failed to build. A target that failed to build arrives
+    as `target_completed` without `success`; one that never got that far
+    (failed in loading or analysis, skipped, interrupted) as an Aborted
+    payload under its own id (`count_aborted`). An Aborted `configured_label`
+    with a failing reason is a root cause not asked for that failed
+    analysis: in `failed_roots`, and a failed target, once per label. An
+    aspect's own completion is not a target. A test's `overall_status` is
+    lowercase (`passed`, `flaky`, `failed`, …); only `_FAILED_TEST_STATUSES`
+    count as failed. A test whose summary is Aborted is failed or skipped by
+    `count_aborted_test`. A label is listed in `failures` once. `aborted`
+    says whether `payload` is an Aborted one, its type by default."""
+    if aborted == None:
+        aborted = type(payload) == "aborted"
     label = str(_get(event_id, "label", "") or "")
     if kind == "build_started":
         # Only a test or coverage run tests what it builds.
@@ -1741,16 +1762,18 @@ def count_event(counts: dict, kind: str, event_id, payload):
     # A target's own Aborted payload, under its `target_configured` or
     # `target_completed` id; under `configured_label` or `unconfigured_label`
     # it names a root cause (a dependency), not a target asked for.
-    if type(payload) == "aborted":
+    if aborted:
         reason = str(_get(payload, "reason", "") or "")
         if kind in ("target_configured", "target_completed") and not _get(event_id, "aspect", ""):
             count_aborted(counts, label, reason)
         elif kind == "test_summary":
             count_aborted_test(counts, label, reason, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
-        elif kind == "configured_label" and label and reason.lower() in _FAILED_ABORTS:
+        elif kind == "configured_label" and label and reason.lower() in _FAILED_ABORTS and label not in counts["failed_roots"]:
             # A root cause that failed analysis, not asked for itself: what
-            # a target it blocks failed for (`blocked_targets`).
+            # a target it blocks failed for (`blocked_targets`), and a
+            # failure of its own.
             counts["failed_roots"][label] = True
+            _fail(counts, label)
         return
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):
