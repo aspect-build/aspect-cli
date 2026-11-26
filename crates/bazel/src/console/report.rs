@@ -1130,6 +1130,50 @@ mod tests {
         );
     }
 
+    /// What Bazel and the CLI write after an error is never part of its
+    /// body: the history's note of a kept log, in the CLI's own colours
+    /// (`INFO` then a reset, then the colon), and Bazel's status rows after
+    /// its progress lines (w44's `//tc:tc`, Bazel 9.3.3).
+    #[test]
+    fn notes_and_status_rows_stay_out_of_a_kept_body() {
+        let toolchain = [
+            "\x1b[31m\x1b[1mERROR: \x1b[0mtc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
+            "  //tc:toolchain_type",
+            "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
+            "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.",
+        ];
+        let note = "\x1b[1;90mINFO\x1b[0m: //:bad Genrule stderr: /h/bad.stderr";
+        let analyzed =
+            "\x1b[32mINFO: \x1b[0mAnalyzed 8 targets (2 packages loaded, 53 targets configured).";
+        let cases: [(&str, Vec<&str>); 2] = [
+            (
+                "in a pipe",
+                [&toolchain[..], &[note, "\x1b[32mAnalyzing:\x1b[0m 8 targets (2 packages loaded, 24 targets configured)", "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat(),
+            ),
+            ("the note right after", [&toolchain[..], &[note, "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat()),
+        ];
+        for (name, records) in cases {
+            let observations =
+                std::sync::Arc::new(super::super::processors::Observations::default());
+            let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
+            for r in &records {
+                p.process(r.as_bytes());
+            }
+            assert_eq!(p.report(), None);
+            let kept = observations.errors().expect("kept");
+            assert_eq!(
+                kept.errors[0].lines,
+                vec![
+                    "ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:".to_string(),
+                    "  //tc:toolchain_type".to_string(),
+                    "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'".to_string(),
+                    "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.".to_string(),
+                ],
+                "{name}"
+            );
+        }
+    }
+
     /// With the failure summary naming the raw log, the end of the console
     /// leaves it out, but still says what it hid.
     #[test]
