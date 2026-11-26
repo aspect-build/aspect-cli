@@ -530,12 +530,12 @@ def _gitlab_lint_impl(ctx: FeatureContext):
     # `destination` is the lint task's --findings-destination, read in _lint_start.
     state = {"destination": "auto", "all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
 
-    def _lint_start(ctx):
+    def _lint_start(ctx, start):
         state["destination"] = lint_findings_destination(ctx)
         gl["window"] = diff_window(
-            lint_trait.changed_files,
+            start.changed_files,
             prefix = gl["prefix"],
-            scoped = lint_trait.changed_files_scoped,
+            scoped = start.scoped,
         )
 
     def _lint_report(ctx, filepath):

@@ -14,6 +14,7 @@ load("@aspect//delivery_state.axl", "delivery_api", "delivery_state", "deliveryd
 load("@aspect//feature/github_status_comments.axl", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset", "terminal_post_withheld_error")
 load(
     "@aspect//lint.axl",
+    "LintEndResult",
     "StrategyHard",
     "StrategyHoldTheLine",
     "fails_on_severity",
@@ -22,6 +23,7 @@ load(
     "filter_hunks",
     "gating_linter_errors",
     "linter_error_message",
+    "merge_lint_end_results",
     "parse_linter_strategies",
     "parse_patch_hunks",
     "report_diagnostics",
@@ -2933,6 +2935,24 @@ def test_lint_filters(tc: int) -> int:
 
     return tc
 
+def test_merge_lint_end_results(tc: int) -> int:
+    """Coverage for merging what `lint_end` hooks return."""
+    empty = merge_lint_end_results([])
+    tc = test_case(tc, empty.suggestions == [] and empty.comment_urls == {}, "merge_lint_end_results: no hooks")
+    tc = test_case(tc, merge_lint_end_results([None, None]).suggestions == [], "merge_lint_end_results: None contributes nothing")
+    a = LintEndResult(suggestions = [{"file": "a.py"}], comment_urls = {("a.py", 1): "u1", ("a.py", 2): "u2"})
+    b = LintEndResult(suggestions = [{"file": "b.py"}], comment_urls = {("a.py", 2): "u2b"})
+    merged = merge_lint_end_results([a, None, b])
+    tc = test_case(tc, [s["file"] for s in merged.suggestions] == ["a.py", "b.py"], "merge_lint_end_results: suggestions concatenate in hook order")
+    tc = test_case(tc, merged.comment_urls == {("a.py", 1): "u1", ("a.py", 2): "u2b"}, "merge_lint_end_results: later hook wins a shared (file, line)")
+    tc = test_case(tc, len(a.suggestions) == 1, "merge_lint_end_results: inputs untouched")
+    tc = test_case(tc, merge_lint_end_results([LintEndResult()]).comment_urls == {}, "merge_lint_end_results: defaults are empty")
+    err, _ = catch(merge_lint_end_results, [{"suggestions": []}])
+    tc = test_case(tc, err != None and "LintEndResult or None" in err.message, "merge_lint_end_results: rejects another return type")
+    err, _ = catch(merge_lint_end_results, [struct(suggestions = None, comment_urls = {})])
+    tc = test_case(tc, err != None and "LintEndResult or None" in err.message, "merge_lint_end_results: rejects fields of the wrong type")
+    return tc
+
 def test_lint_per_linter_strategy(tc: int) -> int:
     """Coverage for --linter-strategy: parsing, lookup, filtering, gating."""
     overrides = parse_linter_strategies(["ruff=hard"])
@@ -4470,6 +4490,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
     tc = test_lint_per_linter_strategy(tc)
+    tc = test_merge_lint_end_results(tc)
     tc = test_parse_patch_hunks(tc)
     tc = test_linter_error_message(tc)
     tc = test_fmt_elapsed(tc)

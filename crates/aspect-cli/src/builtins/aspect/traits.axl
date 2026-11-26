@@ -11,6 +11,9 @@ files can load the full trait set with a single import:
          "DeliveryTrait",
          "DeliveryState",
          "HealthCheckTrait",
+         "LintEndResult",
+         "LintStartInfo",
+         "LintTrait",
          "REPRO_FIX_ACCEPT",
          "REPRO_FIX_REJECT",
          "ReproFixAction",
@@ -44,7 +47,7 @@ into the task's trait list).
 
 load("@aspect//bazel.axl", _BazelTrait = "BazelTrait", _ExecLogHook = "ExecLogHook")
 load("@aspect//delivery.axl", _DeliveryPlan = "DeliveryPlan", _DeliverySelector = "DeliverySelector", _DeliveryTrait = "DeliveryTrait")
-load("@aspect//lint.axl", _LintTrait = "LintTrait")
+load("@aspect//lint.axl", _LintEndResult = "LintEndResult", _LintStartInfo = "LintStartInfo", _LintTrait = "LintTrait")
 load("./private/lib/delivery_state.axl", _DeliveryState = "DeliveryState")
 load("./private/lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
@@ -77,6 +80,8 @@ DeliveryState = _DeliveryState
 DeliveryTrait = _DeliveryTrait
 ExecLogHook = _ExecLogHook
 HealthCheckTrait = _HealthCheckTrait
+LintEndResult = _LintEndResult
+LintStartInfo = _LintStartInfo
 LintTrait = _LintTrait
 REPRO_FIX_ACCEPT = _REPRO_FIX_ACCEPT
 REPRO_FIX_REJECT = _REPRO_FIX_REJECT

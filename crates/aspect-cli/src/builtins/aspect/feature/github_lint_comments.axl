@@ -46,7 +46,7 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 "different runs" and reap each other.
 """
 
-load("@aspect//lint.axl", "LintTrait", lint_findings_destination = "findings_destination")
+load("@aspect//lint.axl", "LintEndResult", "LintTrait", lint_findings_destination = "findings_destination")
 load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
@@ -557,7 +557,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_due_to_cap"] += 1
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
-    def _lint_start(ctx):
+    def _lint_start(ctx, start):
         state["destination"] = lint_findings_destination(ctx)
 
         # Workspace prefix relative to the git root. _post_individually prepends it
@@ -568,12 +568,10 @@ def _github_lint_impl(ctx: FeatureContext):
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
 
-        # Read changed_files from the trait (already computed by the task impl) to
-        # avoid a duplicate PR Files API call / git diff.
         gh["window"] = lc_diff_window(
-            lint_trait.changed_files,
+            start.changed_files,
             prefix = gh["prefix"],
-            scoped = lint_trait.changed_files_scoped,
+            scoped = start.scoped,
         )
 
     def _lint_report(ctx, filepath):
@@ -663,8 +661,8 @@ def _github_lint_impl(ctx: FeatureContext):
         ("uncorrelated" — patch-only, or SARIF dropped upstream; see
         shellcheck-sarif-investigation.md). Each comment dict carries internal
         `_severity`, `_correlated`, `_rule_id`, `_hunk_start`, `_hunk_end`,
-        `_tool`, `_linter`, `_file` for the `_lint_end` bookkeeping that fills
-        lint_trait.suggestions.
+        `_tool`, `_linter`, `_file` for the suggestion records `_lint_end`
+        returns.
         """
         comments = []
         task_key = ctx.task.name
@@ -774,9 +772,17 @@ def _github_lint_impl(ctx: FeatureContext):
         return comments
 
     def _lint_end(ctx, relevant_diagnostics):
+        """Post the buffered comments and clean up stale ones.
+
+        Returns a `LintEndResult` with the suggestion records and comment URLs
+        for the rendered detail body; empty when nothing was posted.
+        """
+
         # Reason string for the trace summary; every code path sets it so the
         # summary explains why `posted comments: N`.
         outcome = ""
+        suggestions = []
+        comment_urls = {}
 
         if _ensure_token(ctx):
             if gh["stale"] or _check_staleness(ctx, gh):
@@ -851,13 +857,12 @@ def _github_lint_impl(ctx: FeatureContext):
                     if m:
                         suggestion_markers.append(m)
 
-                # Stash suggestion records on the trait for the rendered detail body.
                 # `_html_url` is set on successful posts; "" when deduped against a
                 # prior run (we don't fetch existing comments' URLs).
                 for c in suggestion_comments:
                     if not c.get("_is_suggestion"):
                         continue
-                    lint_trait.suggestions.append({
+                    suggestions.append({
                         "tool": c.get("_tool", ""),
                         "linter": c.get("_linter", ""),
                         "file": c.get("_file", ""),
@@ -869,11 +874,10 @@ def _github_lint_impl(ctx: FeatureContext):
                         "comment_url": _files_changed_url(c.get("_html_url", "")),
                     })
 
-                # (file, line) → comment_url for every posted SARIF comment so the
-                # renderer links each finding row (every finding in "comments" mode,
-                # fix-bearing only in auto/both). Patch comments are tracked via
-                # lint_trait.suggestions. Prior-run-deduped comments lack _html_url
-                # so their rows render link-less (vs. a list_review_comments roundtrip).
+                # Every finding in "comments" mode has a SARIF comment to link,
+                # only fix-bearing ones in auto/both. Prior-run-deduped comments
+                # lack _html_url, so their rows render link-less (vs. a
+                # list_review_comments round trip).
                 for c in state["all_comments"]:
                     url = c.get("_html_url", "") or ""
                     if not url:
@@ -881,7 +885,7 @@ def _github_lint_impl(ctx: FeatureContext):
                     path = c.get("path", "") or ""
                     line = c.get("line", 0) or 0
                     if path and line:
-                        lint_trait.comment_urls[(path, line)] = _files_changed_url(url)
+                        comment_urls[(path, line)] = _files_changed_url(url)
 
                 _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, destination = state["destination"])
 
@@ -928,6 +932,8 @@ def _github_lint_impl(ctx: FeatureContext):
             for c in state["all_comments"]:
                 lines = c["body"].split("\n")
                 debug(ctx.std, "  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
+
+        return LintEndResult(suggestions = suggestions, comment_urls = comment_urls)
 
     lint_trait.lint_start.append(_lint_start)
     lint_trait.lint_report.append(_lint_report)

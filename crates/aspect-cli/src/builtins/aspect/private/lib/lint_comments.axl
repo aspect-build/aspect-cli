@@ -129,9 +129,9 @@ def diff_window(changed_files: list, prefix: str = "", scoped: bool = True) -> D
     validating an N-line span would otherwise scan the region list per line.
 
     Args:
-      changed_files: `LintTrait.changed_files` entries.
+      changed_files: `LintStartInfo.changed_files` entries.
       prefix:        workspace path relative to the repo root ("" at the root).
-      scoped:        `LintTrait.changed_files_scoped` — False disables gating
+      scoped:        `LintStartInfo.scoped` - False disables gating
                      entirely (see `can_attempt_comment`).
     """
     lines_by_path = {}
