@@ -148,6 +148,25 @@ static GRAPH_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// What follows the label on a row of Bazel's own status line: nothing (a
+/// row curses erases), or one of the phrases it ends a build with.
+const STATUS_PHRASES: &[&str] = &[
+    "Build completed",
+    "Build did NOT complete",
+    "Elapsed time",
+    "Found ",
+    "Streaming build results",
+    "Invocation ID",
+    "Analyzed ",
+    "Build Event Protocol",
+];
+
+/// Whether `text` (escapes stripped) is a row Bazel's status line could be.
+fn is_status_text(text: &str) -> bool {
+    let rest = text.split_once(':').map_or("", |(_, rest)| rest).trim();
+    rest.is_empty() || STATUS_PHRASES.iter().any(|p| rest.starts_with(p))
+}
+
 /// A header whose body is an action's or a test's output.
 static ACTION_OUTPUT: LazyLock<Regex> =
     // A cached test's `INFO: From Testing //:t` has no trailing colon.
@@ -347,8 +366,13 @@ impl Classifier {
             }
         };
         // A tool's own line coloured as Bazel colours its status line (the
-        // colon inside, the space after) is the tool's: never drawn.
-        let status = !inside && BAZEL_STATUS.is_match(record);
+        // colon inside, the space after) is the tool's: never drawn inside
+        // an action's output. Streamed test output never ends, so there
+        // only a row Bazel's own could be (nothing after the label, or one
+        // of its status phrases) is taken for its status line.
+        let status = !self.in_action_output
+            && BAZEL_STATUS.is_match(record)
+            && (!self.streamed || is_status_text(&text));
         let after_status = std::mem::replace(&mut self.after_status, status);
         let drawn = kind.is_progress()
             || count
@@ -491,7 +515,9 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// A tool's own "Waiting for" line is its output, not bazel's BES wait.
+    /// A tool's line coloured as Bazel colours its status line, inside an
+    /// action's output, is the tool's; Bazel's own status rows, after
+    /// streamed test output too, are still drawn.
     #[test]
     fn a_tools_line_coloured_as_bazels_status_is_not_drawn() {
         for label in ["INFO", "WARNING", "ERROR", "DEBUG", "FAILED"] {
@@ -509,6 +535,27 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn bazels_status_rows_after_streamed_test_output_are_drawn() {
+        let mut c = Classifier::default();
+        c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
+        assert!(
+            c.classify(b"\x1b[32mINFO:\x1b[0m ").drawn,
+            "a bare status row"
+        );
+        assert!(
+            c.classify(b"\x1b[32mINFO:\x1b[0m Build completed successfully")
+                .drawn
+        );
+        let mut c = Classifier::default();
+        c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
+        assert!(
+            !c.classify(b"\x1b[32mINFO:\x1b[0m two").drawn,
+            "a test's own line"
+        );
+    }
+
+    /// A tool's own "Waiting for" line is its output, not bazel's BES wait.
     #[test]
     fn a_tools_waiting_line_is_not_drawn() {
         let mut c = Classifier::default();

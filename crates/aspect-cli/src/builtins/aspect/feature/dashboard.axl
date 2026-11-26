@@ -692,7 +692,7 @@ def step_match(state: dict, step: int, page: int):
     if at < 0:
         at = _match_from(search["pattern"], lines, 0 if step > 0 else len(lines) - 1, step)
         if at >= 0:
-            state["note"] = "wrapped round to the oldest match" if step > 0 else "wrapped round to the newest match"
+            say_note(state, "wrapped round to the oldest match" if step > 0 else "wrapped round to the newest match")
     if at >= 0:
         _show_match(state, lines, at, page)
 
@@ -2372,7 +2372,7 @@ def _select_word(state: dict, col: int, row: int) -> bool:
     word = "".join([c for _, _, c in cells[first:last + 1]])
     cols = state.get("cols", 80)
     state["select"] = {"from": (cells[first][0], row), "to": (cells[last][1] - 1, row), "dragged": True, "done": True, "bounds": (0, cols), "rows": (0, 1 << 30)}
-    state["note"] = "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s")
+    say_note(state, "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s"))
     return True
 
 def mouse_key(state: dict, key: str) -> bool:
@@ -2425,7 +2425,7 @@ def mouse_key(state: dict, key: str) -> bool:
     if sel["dragged"]:
         text = selected_text(state, cols)
         if text:
-            state["note"] = "%s %d character%s" % (copy_text(state, text), len(text), "" if len(text) == 1 else "s")
+            say_note(state, "%s %d character%s" % (copy_text(state, text), len(text), "" if len(text) == 1 else "s"))
         return True
     state["select"] = None
     if row == state.get("tab_row"):
@@ -2448,9 +2448,9 @@ def mouse_key(state: dict, key: str) -> bool:
         io = state.get("io")
         target = io.editor_target(url) if io != None else None
         if target != None and open_peek(state, target[0], target[1]):
-            state["note"] = "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back"
+            say_note(state, "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back")
         else:
-            state["note"] = open_link(state, url)
+            say_note(state, open_link(state, url))
     return True
 
 def links_row(pages: list, cols: int) -> str:
@@ -3312,7 +3312,8 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     shown one in reverse video (the failures counted, `✗` failed and `○`
     blocked) and named by its crumbs (a log or a file opened in it, the
     current one bold); then, at the border's right end, apart from the tabs
-    and in a style none of them has, what the shown one says of itself
+    and in a style none of them has (`heading`: bold, so apart where colour
+    is not shown), what the shown one says of itself
     (`status`: following, lines up, a run replayed). Where each tab and
     crumb is drawn is kept (`tab_spans`, on row `row`) for a click to take
     it, or go back to it, and the pointer to light it. Too narrow, the
@@ -3330,7 +3331,10 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     muted = [] if built(state) else _BUILD_TABS
     parts = [names[shown]] + crumbs(state)
     whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " ▹ ".join(parts) + " ")
-    tabs = [t for t, _ in _TABS] if whole <= cols else [shown]
+
+    # Every tab where the shown one keeps the room it is drawn in: `room`
+    # below leaves it the row but its own two cells and the others'.
+    tabs = [t for t, _ in _TABS] if whole < cols else [shown]
     text = _c("border") + "┌─" + _RESET
     at = 2
     spans = []
@@ -3369,7 +3373,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     rest = max(0, cols - at - 1)
     info = (" " + fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
     lead = rest - text_width(info) - (1 if info else 0)
-    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("accent") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
+    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("heading") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
 
 _SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
 
@@ -3716,10 +3720,29 @@ def _closing(line: str) -> bool:
 def _folded_line(n: int) -> str:
     return "  … +%d line%s (Ctrl+O shows them)" % (n, "" if n == 1 else "s")
 
+def _tools_own(coloured) -> bool:
+    """Whether a line as written (`coloured`) is coloured as a tool colours
+    `INFO:` (the colon inside the colour, the space after), not as Bazel
+    colours its own message (`INFO: ` inside): a tool's line, which no
+    block of Bazel's starts with."""
+    if not coloured:
+        return False
+    rest = coloured
+    for _ in range(8):
+        if not rest.startswith("\x1b["):
+            break
+        end = rest.find("m")
+        if end < 0:
+            return False
+        rest = rest[end + 1:]
+    head, colon, after = rest.partition(":")
+    return bool(colon) and head.isalpha() and head.isupper() and after.startswith("\x1b[0m")
+
 def _fold_line(state: dict, line: str):
     """Take `line` into the console's folded view (`folded`): the lines
     under an `INFO: From` (a successful action's output) counted on one
-    row after it rather than shown."""
+    row after it rather than shown, a tool's line coloured like one of
+    Bazel's (`_tools_own`, from its colours) among them."""
     folded = state.setdefault("folded", [])
     src = state.setdefault("fold_src", [])
     at = state.get("fold_seen", 0)
@@ -3729,7 +3752,7 @@ def _fold_line(state: dict, line: str):
         src.append(at)
         state["fold_n"] = 0
         return
-    if state.get("fold_n", -1) >= 0 and not _starts_block(line):
+    if state.get("fold_n", -1) >= 0 and (not _starts_block(line) or _tools_own(state.get("colour_of", {}).get(line))):
         state["fold_n"] += 1
         if state["fold_n"] == 1:
             folded.append(_folded_line(1))
@@ -3934,7 +3957,7 @@ def keys_row(state: dict, cols: int) -> str:
         return fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
     if state.get("help"):
         return fit(" ↑↓ scroll · any other key closes", cols)
-    if state.get("note") and (state.get("note_until") == None or state.get("now_ms", 0) < state["note_until"]):
+    if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
         return fit(" " + state["note"], cols)
     if state.get("tab") in ("metrics", "invocation"):
         return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
@@ -3966,8 +3989,7 @@ def on_key(state: dict, key: str, page: int) -> bool:
 
     if mouse_key(state, key):
         return False
-    state["note"] = ""
-    state["note_until"] = None
+    say_note(state, "")
     for k in KEYS:
         if k.early and key in k.keys and k.when(state):
             return k.do(state, key, page)
@@ -3993,13 +4015,26 @@ def on_key(state: dict, key: str, page: int) -> bool:
             leaves = k.do(state, key, page)
             if k.said != None:
                 # What the toggle did and how to undo it, for a moment.
-                state["note"] = k.said(state)
-                state["note_until"] = state.get("now_ms", 0) + _SAID_MS
+                say_note(state, k.said(state), _SAID_MS)
             return leaves
     return False
 
 # How long the keys row says what a toggle did.
 _SAID_MS = 2000
+
+def say_note(state: dict, text: str, ms = None):
+    """Have the keys row say `text` (`""` for nothing), until the next key,
+    or for `ms` when given: the one way a note is set, so none keeps an
+    older one's deadline."""
+    state["note"] = text
+    state["note_until"] = _clock(state) + ms if ms != None else None
+
+def _clock(state: dict) -> int:
+    """The time notes are timed by, in milliseconds: the screen's own clock
+    (`clock`), which runs on the finished screen too, whose header time
+    stays; else the frame's `now_ms`."""
+    clock = state.get("clock")
+    return clock() if clock != None else state.get("now_ms", 0)
 
 # Key bindings, as data: one table (`KEYS`) drives `on_key`, the keys row
 # (`keys_row`) and the `?` overlay (`help_rows`), so none of them can name a
@@ -4240,9 +4275,9 @@ def _k_help(state, key, page):
 def _k_open(state, key, page):
     if key == "o":
         path, line = _view_file(state)
-        state["note"] = open_in_editor(state, path, line)
+        say_note(state, open_in_editor(state, path, line))
     else:
-        state["note"] = next_editor(state)
+        say_note(state, next_editor(state))
     return False
 
 def _k_wrap(state, key, page):
@@ -4341,7 +4376,7 @@ KEYS = [
     _key(["ctrl-l"], _always, _k_redraw, help = ("^L", "redraw the screen"), group = "Screen", early = True),
     _key(["1", "2", "3", "4", "5"], _bar_closed, _k_tab_number, help = ("1-5", "a tab: console, failures, metrics, invocation, tips"), group = "Screen"),
     _key(["tab", "shift-tab"], _bar_closed, _k_tab_cycle, help = ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation, tips (or click one)"), group = "Screen"),
-    _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen", said = lambda s: "build panes open · p folds them" if panes_shown(s) else "build panes folded · p opens them"),
+    _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen", said = lambda s: ("build panes open · p folds them" if panes_shown(s) else "build panes folded · p opens them") if built(s) else "no build panes yet: p opens them once a build runs"),
     _key(["up", "k", "down", "j", "s"], _tips_listed, _k_tips, help = ("s", "in Tips, ↑↓ choose a tip and s silences it on this machine, or undoes it"), group = "Failures", shown = lambda s: s.get("tab") == "tips" or tips_count(s) > 0),
     _key(["wheel-up", "wheel-down"], _over_actions, _k_actions_wheel),
     _key(["<", ">"], lambda s: s.get("tab") in _PICKED_TABS and s["view"] == None, _k_pick_build, help = ("<  >", "in Metrics and Invocation, the previous or next build"), group = "Screen", shown = lambda s: len(s.get("builds", [])) > 0),
@@ -4369,7 +4404,7 @@ KEYS = [
     _key(["o", "O"], _always, _k_open, help = ("o  O", "open the log (or the task's output) in your editor; pick the editor"), group = "Screen", row = _row_open),
     _key(["w"], _always, _k_wrap, help = ("w", "wrap long lines (the default), or cut them at the edge"), group = "Screen", row = lambda s: ["w " + ("cut" if s.get("wrap", True) else "wrap")], said = lambda s: "long lines wrapped · w cuts them" if s.get("wrap", True) else "long lines cut · w wraps them"),
     _key(["ctrl-o"], _always, _k_unfold, help = ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold them again"), group = "Screen", said = lambda s: "lines under each INFO: From shown · ^O folds them" if s.get("unfolded") else "lines under each INFO: From folded · ^O shows them"),
-    _key(["z"], _always, _k_zoom, help = ("z", "the console fills the screen, and back"), group = "Screen", row = lambda s: ["z " + ("unzoom" if s.get("zoom") else "zoom")], said = lambda s: "console zoomed · z shows the panes" if s.get("zoom") else "panes shown · z zooms the console"),
+    _key(["z"], _always, _k_zoom, help = ("z", "the console fills the screen, and back"), group = "Screen", row = lambda s: ["z " + ("unzoom" if s.get("zoom") else "zoom")], said = lambda s: "console zoomed · z unzooms it" if s.get("zoom") else "console unzoomed · z zooms it"),
     _key(["m"], _always, _k_mouse, help = ("m", "the mouse to the terminal and back"), group = "Screen", said = lambda s: "mouse on: the wheel scrolls, a click picks · m gives it to the terminal" if s.get("mouse") else "mouse off: the terminal selects text · m takes it back"),
     _key(["q", "enter"], _always, _k_leave, help = ("q", "cancel the build; once it is done, leave"), group = "Leave", row = _row_leave),
 ]
@@ -4613,6 +4648,7 @@ def _dashboard_impl(ctx: FeatureContext):
         "cols": 80,
         "osc": "",
         "note": "",
+        "clock": lambda: int(monotonic() * 1000),
         "process": None,
         "unseen": 0,
         "cache": None,

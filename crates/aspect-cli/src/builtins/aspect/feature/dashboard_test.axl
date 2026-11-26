@@ -8,12 +8,12 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "aged_time", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "aged_time", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
 # The style the console's state is drawn in, apart from every tab's.
-ANSI_ACCENT = theme.sgr("accent")
+ANSI_ACCENT = theme.sgr("heading")
 
 # The roles a running action's time and the header's time are drawn in.
 ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong")}
@@ -2141,11 +2141,26 @@ def _impl(ctx: TaskContext) -> int:
             long_top = _visible([r for r in render(long, cols, 30).split("\n") if "Console" in _visible(r) and "┌" in _visible(r)][0])
             _eq("the tabs whatever the state's length at %d" % cols, "Failures" in plain, "Failures" in long_top)
 
+    # A tool's line coloured as Bazel colours a message's label, inside an
+    # action's output, stays in the fold: only Bazel's own starts a block.
+    shaped = _screen(ctx, [])
+    lines = ["INFO: From Executing genrule //:g:", "one", "INFO: two", "three", "INFO: Build completed"]
+    colours = ["\x1b[32mINFO: \x1b[0mFrom Executing genrule //:g:", "one", "\x1b[32mINFO:\x1b[0m two", "three", "\x1b[32mINFO: \x1b[0mBuild completed"]
+    add_lines(shaped, lines, colours = colours)
+    _eq("one fold, then Bazel's next line", [l for l in shaped["folded"] if not l.startswith("INFO: From")][-1:], ["INFO: Build completed"])
+    _eq("the tool's lines folded together", len(shaped["folded"]), 3)
+
+    # At every width the shown tab's name is drawn whole: the other tabs go
+    # first, never a cut of it.
+    for cols in range(30, 81):
+        top = [_visible(r) for r in render(_screen(ctx, ["x"]), cols, 30).split("\n") if "┌" in _visible(r) and "onsole" in _visible(r)][0]
+        _eq("the shown tab whole at %d" % cols, " Console " in top, True)
+
     # A toggle says, for a moment, the state it left and how to undo it;
     # then the keys row is its own again, and Ctrl+C's warning wins.
     for key, first, second in [
         ("w", "long lines cut · w wraps them", "long lines wrapped · w cuts them"),
-        ("z", "console zoomed · z shows the panes", "panes shown · z zooms the console"),
+        ("z", "console zoomed · z unzooms it", "console unzoomed · z zooms it"),
         ("p", "build panes folded · p opens them", "build panes open · p folds them"),
         ("ctrl-o", "lines under each INFO: From shown · ^O folds them", "lines under each INFO: From folded · ^O shows them"),
         ("e", "errors and warnings only · e errors only", "errors only · e every line"),
@@ -2159,6 +2174,29 @@ def _impl(ctx: TaskContext) -> int:
             _eq("%s's row the frame's width" % key, text_width(row), 120)
         toggled["now_ms"] += 2000
         _eq("%s's note gone after a moment" % key, second in _visible(keys_row(toggled, 120)), False)
+
+    # Before any build, p says there are no panes yet.
+    unbuilt = _screen(ctx, ["x"], now_ms = 0, building = False)
+    on_key(unbuilt, "p", 10)
+    _eq("p before any build", _visible(keys_row(unbuilt, 120)).strip(), "no build panes yet: p opens them once a build runs")
+
+    # A later note keeps no earlier note's deadline: w twice, the moment
+    # past, then a copy's note shows.
+    later = _screen(ctx, ["x"], now_ms = 0)
+    on_key(later, "w", 10)
+    on_key(later, "w", 10)
+    later["now_ms"] = 2500
+    say_note(later, "copied 3 characters")
+    _eq("a note after an expired one shows", "copied 3 characters" in _visible(keys_row(later, 120)), True)
+
+    # On the finished screen the frame's time stays, but notes go by the
+    # screen's own clock.
+    ticks = [10000]
+    still = _screen(ctx, ["x"], now_ms = 10000, ended = True, building = False, clock = lambda: ticks[0])
+    on_key(still, "w", 10)
+    ticks[0] += 2500
+    _eq("a note expires on the finished screen", "long lines" in _visible(keys_row(still, 120)), False)
+
     urgent = _screen(ctx, ["x"], now_ms = 0)
     on_key(urgent, "w", 10)
     urgent["cancelling"] = True

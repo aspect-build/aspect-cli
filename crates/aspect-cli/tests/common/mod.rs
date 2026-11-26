@@ -9,9 +9,10 @@
 /// built for this test; `option_env!` because that variable does not exist in a
 /// Bazel build, where `env!` would fail to compile.
 ///
-/// The first call also points the task history and the CLI's cache at
-/// folders of this test process's own ([`isolate_writes`]), so every CLI a
-/// test spawns writes there, whether or not it clears its environment.
+/// The first call also points the task history and the CLI's cache at the
+/// test binary's own folders ([`isolate_writes`]): every CLI a test spawns
+/// inherits them, and one whose command clears its environment
+/// (`env_clear()`) gets them back through [`base_env`].
 pub fn aspect_cli() -> String {
     isolate_writes();
     match std::env::var("ASPECT_CLI_BIN") {
@@ -25,23 +26,41 @@ pub fn aspect_cli() -> String {
     }
 }
 
-/// The test process's own task history folder, which every CLI it spawns
-/// writes to unless a test names its own.
+/// The test binary's own task history folder, which every CLI a test spawns
+/// writes to unless the test names its own: one per binary (its name
+/// without cargo's hash), reused run to run, so they never pile up.
 #[allow(dead_code)]
 pub fn test_history_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("aspect-test-history-{}", std::process::id()))
+    std::env::temp_dir().join(format!("aspect-test-history-{}", test_binary()))
+}
+
+/// The test binary's name, without the `-<hash>` cargo adds.
+fn test_binary() -> String {
+    let exe = std::env::current_exe().ok();
+    let stem = exe
+        .as_deref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tests".into());
+    match stem.rsplit_once('-') {
+        Some((name, hash)) if hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
+            name.to_string()
+        }
+        _ => stem,
+    }
 }
 
 /// Once per test process: `ASPECT_HISTORY_DIR` and `ASPECT_CLI_CACHE` set in
-/// its own environment, which every CLI it spawns inherits, to folders of
-/// its own under the temp dir, so no test writes the developer's task
-/// history or cache, whatever its command keeps of the environment. A test
-/// that names its own still wins. Before then the process may not have
+/// its own environment, which every CLI it spawns inherits, to the test
+/// binary's own folders under the temp dir ([`test_history_dir`]), so no
+/// test writes the developer's task history or cache. A command that clears
+/// its environment gets them back through [`base_env`]; a test that names
+/// its own still wins. Before then the process may not have
 /// started a thread that reads the environment outside std's lock.
 pub fn isolate_writes() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let cache = std::env::temp_dir().join(format!("aspect-test-cache-{}", std::process::id()));
+        let cache = std::env::temp_dir().join(format!("aspect-test-cache-{}", test_binary()));
         // SAFETY: std's `set_var` and every std read of the environment
         // (a `Command`'s spawn among them) take its lock; the test harness's
         // threads read it only through std.
@@ -64,8 +83,8 @@ pub fn isolate_writes() {
 /// The colour theme gets a known dark background (`COLORFGBG`), 256 colours
 /// (`TERM`), and none of the developer's `COLORTERM`, `NO_COLOR`, or the
 /// variables that say which terminal or session it is (hyperlinks, SSH).
-/// `HOME` and `PATH` stay. The task history and the CLI's cache go to temp
-/// folders of the test process's own ([`isolate_writes`]).
+/// `HOME` and `PATH` stay. The task history and the CLI's cache go to the
+/// test binary's own temp folders ([`isolate_writes`]).
 #[allow(dead_code)]
 pub fn base_env() -> std::collections::HashMap<String, String> {
     watch_for_hangs();
