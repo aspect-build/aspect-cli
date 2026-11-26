@@ -5,7 +5,8 @@ wrong fails quietly, so none of them live at the call sites:
 
   `open(trait)`      before the spawn. Returns the `execution_log=` list to pass
                      to `ctx.bazel.build` / `.test` — the trait's own sinks, plus
-                     one `bazel.execution_log.iterator()` handle when a hook is
+                     one `bazel.execution_log._hook_iterator()` handle (an
+                     `iterator()` marked as the hooks') when a hook is
                      registered. The handle has to exist *before* the spawn:
                      `execution_log = [...]` is the only thing that subscribes
                      one, so a handle made later never binds.

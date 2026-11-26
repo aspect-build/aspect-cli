@@ -1755,7 +1755,7 @@ def count_spawn(counts: dict, spawn):
     counts["spawns"] += 1
     if _get(spawn, "cache_hit", False):
         counts["spawn_hits"] += 1
-    if _get(spawn, "exit_code", 0):
+    if _get(spawn, "exit_code", 0) and str(_get(spawn, "mnemonic", "") or "") != "TestRunner":
         counts["spawn_failed"] = counts.get("spawn_failed", 0) + 1
     runner = str(_get(spawn, "runner", "") or "") or "unknown"
     counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
@@ -2893,13 +2893,15 @@ def action_split(state: dict) -> dict:
     (split in proportion with the runners that ran where both claim more
     than there are, as dynamic execution does) and the rest ran;
     `action_cache_statistics.hits` (else an `action cache hit` runner) are
-    unchanged. Bazel 9 counts an action whose spawn failed among the
-    internal ones and not in its done count: on a failed build those are
-    the execution log's failed spawns, else what the internal mnemonics of
-    `action_data` (`_INTERNAL_MNEMONICS`) leave of them, moved to `failed`,
-    the done count raised to match. A successful build's done count is
-    their sum; a failed build's total is at least what it created, so its
-    bar is never full when Bazel never drew a count.
+    unchanged, and so is what Bazel's done count has past them (actions it
+    had from an earlier build, run nowhere). Bazel 9 counts an action whose
+    spawn failed or was cancelled among the internal ones: on a failed
+    build, what the internal mnemonics of `action_data`
+    (`_INTERNAL_MNEMONICS`) leave of them is `failed`; only without
+    `action_data`, the execution log's failed spawns (a test's own aside).
+    The done count is at least their sum; a failed build's total at least
+    what it created, and its bar never full of what did not fail
+    (`action_bar`).
 
     While it runs, `ran` and `cached` are the execution log's spawns, as it
     has them, clamped to the done count, and `rest` what is left of it:
@@ -2913,7 +2915,7 @@ def action_split(state: dict) -> dict:
     inv = state.get("inv") or {}
     summary = _get(inv.get("build_metrics"), "action_summary")
     executed = _get(summary, "actions_executed")
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0)
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0, failed_build = False)
     if not state.get("building") and type(executed) == "int":
         internal, cache, ran_spawns, hit_runner = 0, 0, 0, 0
         for runner in _get(summary, "runner_count", None) or []:
@@ -2929,32 +2931,33 @@ def action_split(state: dict) -> dict:
                 ran_spawns += n
         internal = min(internal, executed)
         spawned = executed - internal
+
+        # Dynamic execution: a spawn both cached and run; at least one ran.
         cached = min(cache, spawned)
-        if ran_spawns and cache and ran_spawns + cache > spawned:
-            cached = min(spawned - 1, spawned * cache // (ran_spawns + cache)) if spawned else 0
+        if ran_spawns and cached == spawned and spawned:
+            cached = spawned - 1
         stats = _get(summary, "action_cache_statistics")
         unchanged = (_get(stats, "hits", 0) or 0) if stats != None else hit_runner
         succeeded = build_succeeded(inv)
         failed = 0
         if not succeeded and internal:
-            logged = c.get("spawn_failed", 0)
-            if logged:
-                failed = min(logged, internal)
+            data = _get(summary, "action_data", None) or []
+            if data:
+                kinds = 0
+                for d in data:
+                    if str(_get(d, "mnemonic", "") or "") in _INTERNAL_MNEMONICS:
+                        kinds += _get(d, "actions_executed", 0) or 0
+                failed = max(0, internal - kinds)
             else:
-                kinds, listed = 0, False
-                for data in _get(summary, "action_data", None) or []:
-                    if str(_get(data, "mnemonic", "") or "") in _INTERNAL_MNEMONICS:
-                        kinds += _get(data, "actions_executed", 0) or 0
-                        listed = True
-                if listed:
-                    failed = max(0, internal - kinds)
+                failed = min(c.get("spawn_failed", 0), internal)
         internal -= failed
         whole = spawned + unchanged + internal + failed
-        split.update(counted = True, known = True, final = True, ran = spawned - cached, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False)
-        if succeeded or done < whole:
-            split["done"] = whole
-        else:
-            split["failed"] += done - whole
+
+        # Actions Bazel's done count has that its summary does not: those
+        # it already had from an earlier build, run nowhere. Up to date.
+        unchanged += max(0, done - whole)
+        split.update(counted = True, known = True, final = True, ran = spawned - cached, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False, failed_build = not succeeded)
+        split["done"] = max(done, whole)
         if succeeded:
             split["total"] = split["done"]
         else:
@@ -3009,10 +3012,17 @@ _UNDONE = ("─", "border")
 
 def action_bar(split: dict, width: int) -> str:
     """`width` cells of a build's actions (`action_split`): a segment of
-    each kind there is, in `_SEGMENTS` order, then what is not done; the
-    done count alone (`_DONE`) where nothing tells its kinds apart."""
+    each kind there is, in `_SEGMENTS` order, then what is not done (at
+    least a cell of it for a failed build none of whose actions failed);
+    the done count alone (`_DONE`) where nothing tells its kinds apart."""
     parts = [(split[key], glyph, role) for key, glyph, role in _SEGMENTS] if split["known"] else [(split["done"], _DONE[0], _DONE[1])]
-    parts.append((max(0, split["total"] - split["done"]), _UNDONE[0], _UNDONE[1]))
+    undone = max(0, split["total"] - split["done"])
+
+    # A failed build with no action failed (analysis, a test, a cancel):
+    # a cell of what it never reached, never a full bar.
+    if split.get("failed_build") and not split["failed"] and not undone:
+        undone = 1
+    parts.append((undone, _UNDONE[0], _UNDONE[1]))
     cells = shares([n for n, _, _ in parts], width)
     if not _total(cells):
         return _c(_UNDONE[1]) + _UNDONE[0] * width + _RESET
@@ -3506,6 +3516,9 @@ def render(state: dict, cols: int, rows: int) -> str:
     `?` shows them) and the search bar, or the keys row while it is closed,
     the keys shown or the countdown running."""
     out = _top(state, cols, rows)
+
+    # Which console rows hold which folded line: none but the console's.
+    state["row_lines"] = {}
     if state.get("tab", "console") != "console" and state["view"] == None and not state.get("help"):
         return _frame_of(state, _tab_pane(state, out, cols, rows), rows, cols)
 
@@ -3680,7 +3693,6 @@ def render(state: dict, cols: int, rows: int) -> str:
     state["page_h"] = log_h
 
     # Which of the folded view's lines each row is, for a click on a fold.
-    state["row_lines"] = {}
     folded_view = view == None and not state.get("help") and folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and bool(state.get("folded"))
     first = len(out)
     for i in range(log_h):
@@ -3940,7 +3952,7 @@ def action_lines(state: dict) -> list:
     under = {
         "ran": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
         "cached": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if _cache_runner(k)})],
-        "unchanged": [("", "Bazel's own action cache: nothing to run")],
+        "unchanged": [("", "up to date: in Bazel's action cache, or from an earlier build")],
         "internal": [(name, _thousands(n)) for name, n in _by_count(kinds)],
         "other": [("", "unchanged, internal, or not yet in the execution log")],
     }
@@ -4335,27 +4347,63 @@ def refold(state: dict):
     for line in state.get("log", []):
         _fold_line(state, line)
 
+def _rows_of(state: dict, lines: list) -> int:
+    """How many screen rows `lines` take in the console, wrapped as drawn."""
+    if not state.get("wrap", True):
+        return len(lines)
+    width = max(1, state.get("cols", 80) - 4)
+    rows = 0
+    for line in lines:
+        rows += len(wrap_line(line, width))
+    return rows
+
 def toggle_fold(state: dict, row: int) -> bool:
-    """A click on the console's `row`: on an `INFO: From` with lines under
-    it, or on its count, shows them, or folds them again; the rest kept as
-    they were, that line where it was on the screen. Whether it was one."""
+    """A click on the console's `row`: on an `INFO: From` with lines folded
+    under it, or on their count, shows them; on an open one's `INFO: From`,
+    folds them again. That line stays on its row of the screen (the view
+    moved by the rows that came or went below it; a row off at most where a
+    wrapped line straddles the bottom), unless the console was following,
+    which it goes on doing. Not in another tab, nor on an `INFO:
+    From` with nothing under it yet. Whether it was one."""
+    if state.get("tab", "console") != "console" or not folding(state):
+        return False
     at = state.get("row_lines", {}).get(row)
     heads = state.get("fold_head", [])
-    if at == None or at >= len(heads) or heads[at] < 0 or not folding(state):
+    if at == None or at >= len(heads) or heads[at] < 0:
         return False
-    key = state.get("log_base", 0) + heads[at]
+    head = heads[at]
+    key = state.get("log_base", 0) + head
     opened = state.setdefault("fold_open", {})
     shown = key in opened
-    if not shown and at + 1 < len(heads) and heads[at + 1] != heads[at] and not state["folded"][at].startswith("  … +"):
-        # An `INFO: From` with nothing under it.
+    folded = state.get("folded", [])
+    if not shown and not (at + 1 < len(heads) and heads[at + 1] == head) and not folded[at].startswith("  … +"):
+        # An `INFO: From` with nothing under it yet.
         return False
-    before = len(state.get("folded", []))
+
+    # The rows between the clicked block's line and the view's bottom.
+    scroll = state.get("scroll", 0)
+    line_at = [i for i, h in enumerate(heads) if h == head][0]
+    end = len(folded) - scroll
+    below = _rows_of(state, folded[line_at + 1:end])
     if shown:
         opened.pop(key)
     else:
         opened[key] = True
     refold(state)
-    state["scroll"] = max(0, state.get("scroll", 0) + len(state["folded"]) - before)
+    folded = state["folded"]
+    if scroll > 0:
+        # As many rows below the line: the view's new bottom where they end,
+        # or a row off where a wrapped line straddles that.
+        filled, end, short, short_end = 0, line_at + 1, 0, line_at + 1
+        for i in range(line_at + 1, len(folded)):
+            if filled >= below:
+                break
+            short, short_end = filled, end
+            filled += _rows_of(state, [folded[i]])
+            end = i + 1
+        if filled - below > below - short:
+            end = short_end
+        state["scroll"] = max(0, len(folded) - end)
     state["search"]["anchored_view"] = False
     say_note(state, "expanded · click again to fold" if not shown else "folded · click to expand")
     return True
