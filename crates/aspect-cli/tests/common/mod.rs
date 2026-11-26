@@ -383,12 +383,14 @@ mod hang_diag {
     /// The most one process's stacks take, every tool tried.
     const STACKS_PER_PROCESS: Duration = Duration::from_secs(40);
 
-    /// The most every process's stacks take, in all, from the first capture:
-    /// a tool that hangs attaching never pushes the dump past a CI timeout.
+    /// The most time every process's stacks take in all: a tool that hangs
+    /// attaching never pushes the dump past a CI timeout.
     const STACKS_IN_ALL: Duration = Duration::from_secs(60);
 
-    /// When the first capture began, for [`STACKS_IN_ALL`].
-    static STACKS_BEGAN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    /// The time spent capturing stacks so far, in milliseconds, against
+    /// [`STACKS_IN_ALL`]: time spent, not since the first, so an early
+    /// capture of a slow CLI leaves the budget for a later hang.
+    static STACKS_SPENT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// Whether `pid` is gone: no longer there, or a zombie (`Z` in its
     /// `stat`), which no tool attaches to.
@@ -406,11 +408,20 @@ mod hang_diag {
     /// too), or a tool, [`STACKS_PER_PROCESS`] or [`STACKS_IN_ALL`] ran out
     /// of time, so another may yet work.
     fn stacks(pid: u32) -> Result<String, bool> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let began = std::time::Instant::now();
+        let spent = Duration::from_millis(STACKS_SPENT_MS.load(SeqCst));
+        let until = began + STACKS_PER_PROCESS.min(STACKS_IN_ALL.saturating_sub(spent));
+        let result = stacks_until(pid, until);
+        STACKS_SPENT_MS.fetch_add(began.elapsed().as_millis() as u64, SeqCst);
+        result
+    }
+
+    /// [`stacks`], every tool given up on at `until`.
+    fn stacks_until(pid: u32, until: std::time::Instant) -> Result<String, bool> {
         let p = pid.to_string();
         let gdb = ["-batch", "-nx", "-p", &p, "-ex", "thread apply all bt"];
         let eu = ["-p", &p];
-        let began = *STACKS_BEGAN.get_or_init(std::time::Instant::now);
-        let until = (std::time::Instant::now() + STACKS_PER_PROCESS).min(began + STACKS_IN_ALL);
         let left = || {
             until
                 .saturating_duration_since(std::time::Instant::now())

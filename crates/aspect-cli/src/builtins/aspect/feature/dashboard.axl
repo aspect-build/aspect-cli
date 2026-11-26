@@ -758,6 +758,7 @@ def _action_record(label: str, payload, event_id = None) -> dict:
         "detail": str(_get(payload, "type", "") or "") or "Action",
         "files": files,
         "output": str(_get(event_id, "primary_output", "") or ""),
+        "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
         "success": bool(_get(payload, "success", False)),
     }
 
@@ -1001,6 +1002,13 @@ def reset_attempt(state: dict, now_ms: int):
     state["search"]["origin"] = 0
     state["search"]["anchored"] = False
     state.update(attempt_state(now_ms))
+    _clear_build(state)
+
+def _clear_build(state: dict):
+    """What a build keeps beside `attempt_state`'s, which the next build and a
+    retried attempt alike start without: the root causes it noted."""
+    state["root_causes"] = {}
+    state["blocked_cache"] = None
 
 # What a build has of its own, which the next build (or a retried attempt)
 # starts afresh; the console and what is open in it are the task's.
@@ -1014,8 +1022,7 @@ def new_build(state: dict, now_ms: int):
     fresh = attempt_state(now_ms)
     for key in _PER_BUILD:
         state[key] = fresh[key]
-    state["root_causes"] = {}
-    state["blocked_cache"] = None
+    _clear_build(state)
     state["progress"] = []
     state["fresh"] = False
     state["build_failed"] = False
@@ -1109,7 +1116,8 @@ def _runner_place(record: dict):
     return (number("run"), number("shard"))
 
 def _runner_attempt(state: dict, record: dict):
-    """The attempt a `TestRunner` action ran, `(label, run, shard, attempt)`:
+    """The attempt a `TestRunner` action ran, `(label, config, run, shard,
+    attempt)`:
     its run and shard from its output (`_runner_place`), and, as Bazel
     sends an attempt's action before its result, the attempt after the
     last whose result came; None where its output names no test log."""
@@ -1117,13 +1125,14 @@ def _runner_attempt(state: dict, record: dict):
     if place == None:
         return None
     run, shard = place
-    seen = [n for key, n in state.get("last_attempts", {}).items() if key[0] == record["label"] and key[2] == run and key[3] == shard]
-    return (record["label"], run, shard, max(seen + [0]) + 1)
+    config = record.get("config", "")
+    seen = [n for key, n in state.get("last_attempts", {}).items() if key == (record["label"], config, run, shard)]
+    return (record["label"], config, run, shard, max(seen + [0]) + 1)
 
 def _same_attempt(runner: dict, test: dict) -> bool:
     """Whether a `TestRunner` action failure is `test`'s attempt."""
     at = runner.get("attempt_key")
-    return at != None and at == (test["label"], test["run"], test["shard"], test["attempt"])
+    return at != None and at == (test["label"], test["config"], test["run"], test["shard"], test["attempt"])
 
 def _add_failure(state: dict, record: dict):
     """List a failure once. A test attempt Bazel posts again (Bazel 9 posts
@@ -1295,19 +1304,21 @@ def note_blocked(state: dict, event):
 def blocked_targets(state: dict) -> dict:
     """The targets not built for a failed dependency, by label, each with its
     root causes: one with a root cause that failed in this build (a failed
-    target, or one with a failed action listed). One whose roots are a
+    target, a dependency that failed analysis though not asked for, or one
+    with a failed action listed). One whose roots are a
     source file (one missing) or targets that never failed failed itself.
     Decided from the failures so far, so a target Bazel reported before its
     root cause's failure counts once that comes; cached until they or the
     root causes change."""
     causes = state.get("root_causes") or {}
     failed = state["counts"]["failed_labels"]
+    roots = state["counts"].get("failed_roots") or {}
     logged = logged_index(state)["logged"]
-    key = (len(causes), len(failed), len(logged))
+    key = (len(causes), len(failed), len(roots), len(logged))
     cached = state.get("blocked_cache")
     if cached != None and cached[0] == key:
         return cached[1]
-    blocked = {label: roots for label, roots in causes.items() if any([r in failed or r in logged for r in roots])}
+    blocked = {label: rs for label, rs in causes.items() if any([r in failed or r in roots or r in logged for r in rs])}
     state["blocked_cache"] = (key, blocked)
     return blocked
 
@@ -1653,6 +1664,8 @@ def new_counts() -> dict:
         "failed_attempts": {},
         "test_targets": {},
         "test_unbuilt": {},
+        "testing": False,
+        "failed_roots": {},
         "test_runs": 0,
         "test_cached": 0,
         "spawns": 0,
@@ -1720,6 +1733,10 @@ def count_event(counts: dict, kind: str, event_id, payload):
     summary is Aborted is failed or skipped by `count_aborted_test`. A label
     is listed in `failures` once."""
     label = str(_get(event_id, "label", "") or "")
+    if kind == "build_started":
+        # Only a test or coverage run tests what it builds.
+        counts["testing"] = str(_get(payload, "command", "") or "") in ("test", "coverage")
+        return
 
     # A target's own Aborted payload, under its `target_configured` or
     # `target_completed` id; under `configured_label` or `unconfigured_label`
@@ -1730,6 +1747,10 @@ def count_event(counts: dict, kind: str, event_id, payload):
             count_aborted(counts, label, reason)
         elif kind == "test_summary":
             count_aborted_test(counts, label, reason, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        elif kind == "configured_label" and label and reason.lower() in _FAILED_ABORTS:
+            # A root cause that failed analysis, not asked for itself: what
+            # a target it blocks failed for (`blocked_targets`).
+            counts["failed_roots"][label] = True
         return
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):
@@ -1743,7 +1764,7 @@ def count_event(counts: dict, kind: str, event_id, payload):
             counts["built"] += 1
         else:
             _fail(counts, label)
-            if label in counts["test_targets"] and label not in counts["test_unbuilt"]:
+            if counts["testing"] and label in counts["test_targets"] and label not in counts["test_unbuilt"]:
                 # A test that failed to build (or was blocked): Bazel posts
                 # no summary for it, and counts it as failing to build.
                 counts["test_unbuilt"][label] = True
@@ -2527,8 +2548,11 @@ def slowest_rows(state: dict) -> list:
         if secs > 0:
             rows.append("%s; %ds" % (what, secs))
     if not rows and _nothing_ran(state):
-        return [_c("muted") + "nothing ran: every action was cached" + _RESET]
+        return [_NOTHING_RAN]
     return rows
+
+# The finished pane's row for a build that ran nothing, muted where drawn.
+_NOTHING_RAN = "nothing ran: every action was cached"
 
 # Run on every build whatever is cached (`UNCONDITIONAL_EXECUTION`): not a
 # sign that anything of the build's own ran.
@@ -2792,7 +2816,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     if open_panes and not state.get("building") and folded:
         folded = folded[:-1]
     if len(folded) > _MAX_FOLDED:
-        out.append(fit(" " + _c("muted") + "+%d earlier" % (len(folded) - _MAX_FOLDED + 1) + _RESET, cols))
+        out.append(_c("muted") + fit(" +%d earlier" % (len(folded) - _MAX_FOLDED + 1), cols) + _RESET)
         folded = folded[len(folded) - _MAX_FOLDED + 1:]
     state["folded_at"] = len(out)
     for b in folded:
@@ -2883,7 +2907,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
         s_cell = _c("border") + "│ " + _RESET + s + " " * max(0, right_w - 4 - visible) + _c("border") + " │" + _RESET
         if visible > right_w - 4:
             s_cell = _box_row(_plain(s), right_w)
-        out.append(_box_row(action_row(a, left_w - 4), left_w, _aged(a), edge = edge[i] if edge else None) + s_cell)
+        colour = (lambda text: _c("muted") + text + _RESET) if a == _NOTHING_RAN else _aged(a)
+        out.append(_box_row(action_row(a, left_w - 4), left_w, colour, edge = edge[i] if edge else None) + s_cell)
     out.append(_box_bottom(left_w) + _box_bottom(right_w))
 
     return out

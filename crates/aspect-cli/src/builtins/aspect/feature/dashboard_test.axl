@@ -1386,7 +1386,7 @@ def _impl(ctx: TaskContext) -> int:
         return (struct(label = lab, run = run, shard = shard, attempt = attempt, configuration = struct(id = "c")), struct(status = status, test_action_output = files))
 
     def _runner(folder):
-        return (struct(label = lab, primary_output = out + folder + "/test.log"), runner)
+        return (struct(label = lab, primary_output = out + folder + "/test.log", configuration = struct(id = "c")), runner)
 
     real = _screen(ctx, ["x"])
     for kind, (eid, payload) in [
@@ -1405,9 +1405,9 @@ def _impl(ctx: TaskContext) -> int:
     _eq("each attempt once; the actions of cut-off attempts kept", rows, [
         ("test", 1, 2, 1, None),
         ("test", 1, 1, 1, None),
-        ("action", None, None, None, (lab, 1, 1, 2)),
+        ("action", None, None, None, (lab, "c", 1, 1, 2)),
         ("test", 1, 2, 2, None),
-        ("action", None, None, None, (lab, 1, 2, 3)),
+        ("action", None, None, None, (lab, "c", 1, 2, 3)),
     ])
     first = _screen(ctx, ["x"])
     note_event(first, "action_completed", _runner("shard_2_of_2_run_1_of_2")[0], runner, False)
@@ -1418,7 +1418,7 @@ def _impl(ctx: TaskContext) -> int:
     # only log) before its result, which has none: one row, the action's.
     combo = _screen(ctx, ["x"])
     combo_out = "bazel-out/darwin_arm64-fastbuild/testlogs/examples/r29tmp/combo/shard_1_of_2_run_1_of_2/test.log"
-    note_event(combo, "action_completed", struct(label = "//examples/r29tmp:combo", primary_output = combo_out), runner, False)
+    note_event(combo, "action_completed", struct(label = "//examples/r29tmp:combo", primary_output = combo_out, configuration = struct(id = "c")), runner, False)
     note_event(combo, "test_result", struct(label = "//examples/r29tmp:combo", run = 1, shard = 1, attempt = 1, configuration = struct(id = "c")), struct(status = "FAILED_TO_BUILD", test_action_output = []), False)
     _eq("a shard that failed to build: the action's row alone", [r["kind"] for r in combo["fails"]], ["action"])
 
@@ -1429,8 +1429,8 @@ def _impl(ctx: TaskContext) -> int:
         note_event(st, "action_completed", struct(label = label, primary_output = path), runner, False)
         return st["fails"][0]["attempt_key"]
 
-    _eq("a test named shard_9_x", _place("//p:shard_9_x", "bazel-out/k8/testlogs/p/shard_9_x/test.log"), ("//p:shard_9_x", 1, 1, 1))
-    _eq("a package folder run_2", _place("//run_2/p:t", "bazel-out/k8/testlogs/run_2/p/t/shard_2_of_3/test.log"), ("//run_2/p:t", 1, 2, 1))
+    _eq("a test named shard_9_x", _place("//p:shard_9_x", "bazel-out/k8/testlogs/p/shard_9_x/test.log"), ("//p:shard_9_x", "", 1, 1, 1))
+    _eq("a package folder run_2", _place("//run_2/p:t", "bazel-out/k8/testlogs/run_2/p/t/shard_2_of_3/test.log"), ("//run_2/p:t", "", 1, 2, 1))
 
     # Metrics' spawns: after the build until its execution log is read, then
     # what it held, none included.
@@ -1469,6 +1469,12 @@ def _impl(ctx: TaskContext) -> int:
     ]
     for what, kw, want in cases:
         _eq("slowest: " + what, [_visible(r) for r in slowest_rows(_screen(ctx, [], critical = "a.cc 1s", **kw))], want)
+
+    # Drawn in the finished pane, the row is as wide as the others.
+    cached_screen = _screen(ctx, [], critical = "a.cc 1s", ended = True, building = False, inv = {"build_finished": success, "build_metrics": cached5})
+    end_build(cached_screen, 1000)
+    framed = [r for r in render(cached_screen, 100, 30).split("\n") if "nothing ran" in _visible(r)]
+    _eq("the nothing-ran row's width", [text_width(_visible(r).rstrip("\r")) for r in framed], [100])
     mid = _screen(ctx, ["x"], building = True)
     _eq("Metrics keeps no Slowest mid-build", any(["Slowest" in _visible(l) for l in metrics_lines(mid)]), False)
 
@@ -1498,13 +1504,16 @@ def _impl(ctx: TaskContext) -> int:
 
     # A test target that failed to build, or was blocked, gets no summary:
     # failed, as Bazel counts it ("fails to build"), once.
-    unbuilt = new_counts()
-    count_event(unbuilt, "target_configured", tid("needs_bad"), struct(target_kind = "sh_test rule"))
-    count_event(unbuilt, "target_configured", tid("bad"), struct(target_kind = "genrule rule"))
-    count_event(unbuilt, "target_completed", tid("needs_bad"), struct(success = False))
-    count_event(unbuilt, "target_completed", tid("bad"), struct(success = False))
-    count_aborted_test(unbuilt, "//examples/r29tmp:needs_bad", "unknown", "c")
-    _eq("a test that failed to build", unbuilt["tests_failed"], 1)
+    # Under `aspect build` no test runs: none failed.
+    for command, want in [("test", 1), ("build", 0)]:
+        unbuilt = new_counts()
+        count_event(unbuilt, "build_started", struct(), struct(command = command))
+        count_event(unbuilt, "target_configured", tid("needs_bad"), struct(target_kind = "sh_test rule"))
+        count_event(unbuilt, "target_configured", tid("bad"), struct(target_kind = "genrule rule"))
+        count_event(unbuilt, "target_completed", tid("needs_bad"), struct(success = False))
+        count_event(unbuilt, "target_completed", tid("bad"), struct(success = False))
+        count_aborted_test(unbuilt, "//examples/r29tmp:needs_bad", "unknown", "c")
+        _eq("a test that failed to build, under %s" % command, unbuilt["tests_failed"], want)
 
     # r29's anal.json: a0 to a4 fail in analysis for zz_broken, Bazel
     # posting three before it. Blocked whatever came first.
@@ -1515,6 +1524,15 @@ def _impl(ctx: TaskContext) -> int:
         note_blocked(anal, configured("//examples/r29tmp:" + label))
         count_aborted(anal["counts"], "//examples/r29tmp:" + label, "analysis_failure")
     _eq("blocked by a root posted after them", sorted(blocked_targets(anal)), ["//examples/r29tmp:a%d" % i for i in range(5)])
+
+    # r30's mix.json: t_anal is blocked by anal_broken, which it was not
+    # asked for and which Bazel reports only as an Aborted configured_label.
+    mix = _screen(ctx, ["x"])
+    note_blocked(mix, struct(kind = "target_configured", id = struct(label = "//examples/r30tmp:t_anal"), payload = struct(), children = [struct(id = struct(label = "//examples/r30tmp:anal_broken"))]))
+    count_aborted(mix["counts"], "//examples/r30tmp:t_anal", "analysis_failure")
+    mix["counts"]["failed_roots"]["//examples/r30tmp:anal_broken"] = True
+    _eq("blocked by a dependency that failed analysis, unasked", sorted(blocked_targets(mix)), ["//examples/r30tmp:t_anal"])
+
     ok = _screen(ctx, ["x"])
     note_blocked(ok, struct(kind = "target_configured", id = struct(label = "//p:ok"), payload = struct(), children = [struct(id = struct(label = "//p:ok"))]))
     _eq("a configured target's own completion is no root cause", blocked_targets(ok), {})
