@@ -82,6 +82,7 @@ load("@aspect//private/lib/resp_test.axl", "resp_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
+load("@aspect//private/lib/shell_prompt_test.axl", "shell_tests")
 load("@aspect//private/lib/table_test.axl", "table_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/text_test.axl", "text_tests")
@@ -631,6 +632,10 @@ def config(ctx: ConfigContext):
 
     # Run with: aspect dev test-dashboard
     ctx.tasks.add(dashboard_tests)
+
+    # The aspect shell (`aspect ui`): its line editor and prompt.
+    # Run with: aspect dev test-shell
+    ctx.tasks.add(shell_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

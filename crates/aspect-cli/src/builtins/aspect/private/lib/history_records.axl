@@ -20,6 +20,14 @@ def outcome(record) -> str:
     code = record.get("exit_code", 0)
     return "ok" if code == 0 else "exit %d" % code
 
+def shown_outcome(record) -> str:
+    """`outcome`, as the run's verdict says it: `stopped by you` for one its
+    record says the user stopped (`stopped_by_user`), as the History screen
+    shows it."""
+    if record.get("stopped_by_user") and outcome(record) == "cancelled":
+        return "stopped by you"
+    return outcome(record)
+
 def when(stamp: str) -> str:
     """An RFC 3339 time as `YYYY-MM-DD HH:MM:SSZ`."""
     if len(stamp) < 19:
@@ -86,7 +94,7 @@ def _printable(line: str) -> str:
 
 def list_lines(records: list) -> list:
     """One line per record, in columns, each safe to draw (`_printable`)."""
-    rows = [(r.get("task", {}).get("id", "")[:8], when(r.get("started", "")), outcome(r), took(r), task_name(r), command(r)) for r in records]
+    rows = [(r.get("task", {}).get("id", "")[:8], when(r.get("started", "")), shown_outcome(r), took(r), task_name(r), command(r)) for r in records]
     widths = [0, 0, 0, 0, 0]
     for row in rows:
         for i in range(5):
@@ -101,7 +109,7 @@ def show_lines(record) -> list:
         "ID        %s" % task.get("id", ""),
         "Command   %s" % command(record),
     ]
-    ended = [outcome(record)]
+    ended = [shown_outcome(record)]
     if took(record):
         ended.append(took(record))
     if record.get("conclusion"):

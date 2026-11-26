@@ -26,15 +26,15 @@ There `r` runs a run's command again, as typed, once Enter confirms it: as a chi
 reporting over the bridge (`private/feature/bridge.axl`,
 `private/lib/history_child.axl`), shown live on the same screen, the
 screen staying this process's; `R`, or a task that needs the terminal
-(`aspect run`), with the terminal the child's until it exits.
+(`aspect run`), with the terminal the child's until it exits. The screen's
+loop is `private/lib/history_screen.axl`'s, which the `aspect` shell
+(`private/task/shell.axl`) shares.
 
 `aspect history`'s own runs are not kept in the history.
 """
 
-load("@aspect//feature/dashboard.axl", "ONE_AT_A_TIME", "fresh_view", "new_browser", "new_run", "new_ui", "on_key", "open_history", "page_of", "refusal", "render", "show_run", "use_context", "workspace_of")
-load("@std//time.axl", "monotonic", "sleep")
-load("./private/lib/history_child.axl", "child_running", "hand_over", "needs_terminal", "pump_child", "start_child", "stopping_child")
 load("./private/lib/history_records.axl", "list_lines", "show_lines")
+load("./private/lib/history_screen.axl", "run_screen")
 
 def _list_impl(ctx: TaskContext) -> int:
     records = [
@@ -73,108 +73,7 @@ def _show_impl(ctx: TaskContext) -> int:
     return 0
 
 def _browse_impl(ctx: TaskContext) -> int:
-    # As the dashboard refuses a terminal (CI, a coding agent, a dumb or
-    # tiny one), with stdin a terminal too, for the keys.
-    if refusal(ctx.std) != "" or not ctx.std.io.stdin.is_tty:
-        ctx.std.io.stderr.write("error: aspect history browse needs a terminal; `aspect history list` prints the runs.\n")
-        return 1
-    screen = ctx.std.term.take()
-    screen.interrupts(False)
-    state = new_ui()
-    state.update(new_run(task = "history browse"))
-    state["screen"] = screen
-    screen.wheel_keys(True)
-    screen.mouse(True)
-    use_context(state, ctx)
-    state["browser"] = new_browser(ctx.std.history, exclude = ctx.task.id, standalone = True, workspace = workspace_of(ctx.std))
-    open_history(state)
-    code = 0
-    drawn = None
-    for _ in range(1 << 30):
-        if ctx.cancellation.root.cancelled:
-            # Asked to stop (SIGINT, SIGTERM, SIGHUP): the screen given back,
-            # nothing drawn on a terminal that may be gone, a run started
-            # again here asked to stop once and waited for, and the shell's
-            # code for the signal.
-            stopping_child(state)
-            if state["screen"].held:
-                state["screen"].release()
-            for _ in range(1 << 30):
-                if not child_running(state):
-                    break
-                pump_child(state, int(monotonic() * 1000))
-                sleep(50)
-            return ctx.cancellation.exit_code or 130
-        if not state["screen"].held:
-            break
-        now = int(monotonic() * 1000)
-        pump_child(state, now)
-        cols, rows = state["screen"].size()
-        frame = render(state, cols, rows)
-        if frame != drawn or state.get("drawn") == None:
-            state["screen"].write(frame)
-            drawn = frame
-            state["drawn"] = frame
-
-        # The keys typed since the last frame, the first waited for. Ctrl+C
-        # leaves (130), but for a run started again here, which it stops.
-        leave = False
-        for i in range(16):
-            key = state["screen"].key(timeout_ms = 100 if i == 0 else 0)
-            if key == None:
-                break
-            if on_key(state, key, page_of(state, cols, rows)):
-                code = 130 if key == "ctrl-c" else 0
-                leave = True
-                break
-            request = state.pop("request", None)
-            if request != None:
-                _run_again(state, ctx, request, now)
-                drawn = None
-                break
-        if leave:
-            break
-    state["screen"].release()
-    return code
-
-def _run_again(state, ctx, request, now):
-    """Run a record's command again, as `request` asks (`r`, `R`): on this
-    screen as a child run, its run the live one shown, or, with `R` or for
-    a task that needs the terminal (`needs_terminal`), with the terminal its
-    own. Not while a child run is going."""
-    what, record = request
-    b = state["browser"]
-    if child_running(state):
-        b["note"] = ONE_AT_A_TIME
-        open_history(state, back = True)
-        return
-    if what == "run_in_terminal" or needs_terminal(record):
-        ended = hand_over(state, ctx, record)
-        if type(ended) == "string":
-            open_history(state, back = True)
-            b["note"] = "cannot run it: " + ended
-            return
-
-        # A run started again here before is no longer the one to go back
-        # to; one the user stopped reads so in the list.
-        if state.get("child") != None:
-            state.pop("child")
-        if ended != None and ended["stopped"] and ended["record"] != None:
-            b.setdefault("stopped", {})[ended["record"]["task"]["id"]] = True
-        open_history(state, back = True)
-        return
-    run = start_child(state, ctx, record, now)
-    if type(run) == "string":
-        open_history(state, back = True)
-        state["browser"]["note"] = "cannot run it: " + run
-        return
-
-    # The child's run is the live one; whatever was shown, and any run
-    # before it, let go.
-    state["live"] = None
-    show_run(state, run)
-    fresh_view(state)
-    state["mode"] = "run"
+    return run_screen(ctx, "aspect history browse")
 
 _OUTPUT = args.string(
     default = "text",

@@ -1,0 +1,24 @@
+"""The `aspect` shell: the full-screen History screen with a prompt under
+it, where a command typed runs as a live run shown above it, one at a time,
+the rest queued. An internal task: a bare `aspect` on a terminal is the
+only way in (`main.rs`'s `opens_shell`), and `"shell": false` in the user's
+`~/.aspect/config.json` makes a bare `aspect` print the help instead. It
+takes no name from a repository's tasks, shows no header or verdict around
+its screen, and keeps no history of its own.
+
+The prompt's keys, completion and queue are
+`private/lib/shell_prompt.axl`'s; the screen's loop is
+`private/lib/history_screen.axl`'s, as `aspect history browse`'s is.
+"""
+
+load("../lib/history_screen.axl", "run_screen")
+
+def _shell_impl(ctx: TaskContext) -> int:
+    return run_screen(ctx, "aspect", shell = True)
+
+shell = task(
+    kind = "shell",
+    summary = "The aspect shell: a prompt under the full-screen history, where each command runs live.",
+    keep_history = False,
+    implementation = _shell_impl,
+)

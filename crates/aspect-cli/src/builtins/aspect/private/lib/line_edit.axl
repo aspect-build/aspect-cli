@@ -1,0 +1,277 @@
+"""A one-line editor over `std.term`'s keys, for a prompt drawn on a held
+screen, and the shell's words.
+
+`new_line` is the line: its characters (whole, so an edit never
+splits one), the cursor, and what the last kill took (`ctrl-y` puts it
+back). `edit_key` applies one key, Emacs's and readline's: the arrows,
+Home/End, Ctrl+A/E/B/F, Alt+B/F (Ctrl+ or Alt+←/→) a word, Backspace and Delete,
+Ctrl+W (Alt+Backspace) the word before, Alt+D the word after, Ctrl+U and
+Ctrl+K to either end, a paste whole (its newlines and other control
+characters as spaces, so none reaches the terminal). `line_row`
+draws it `width` cells wide, scrolled to keep the cursor in sight, the
+cursor an inverse cell (a held screen hides the terminal's own), a
+control character the line holds (from recall) in caret notation.
+
+`split_words` reads a line as a POSIX shell does its words, without its
+expansions: single quotes keep everything, double quotes all but a
+backslash before `$`, `` ` ``, `"` or `\\`, and a backslash outside them the
+character after it. `join_words` writes words back so `split_words` reads
+them again, each quoted only when it needs to be.
+"""
+
+load("./text.axl", "display_width")
+
+def new_line(text = "") -> dict:
+    """A line holding `text`, the cursor at its end."""
+    chars = list(text.elems())
+    return {"chars": chars, "cursor": len(chars), "kill": ""}
+
+def line_text(line: dict) -> str:
+    """What `line` holds."""
+    return "".join(line["chars"])
+
+def set_text(line: dict, text: str):
+    """Make `line` hold `text`, the cursor at its end."""
+    line["chars"] = list(text.elems())
+    line["cursor"] = len(line["chars"])
+
+def replace_range(line: dict, start: int, end: int, text: str):
+    """Put `text` in place of the characters `start` to `end`, the cursor
+    after it."""
+    put = list(text.elems())
+    line["chars"] = line["chars"][:start] + put + line["chars"][end:]
+    line["cursor"] = start + len(put)
+
+def _is_control(c: str) -> bool:
+    """Whether `c` is a control character (C0, DEL or C1), which a line
+    drawn on the screen must not hold."""
+    n = ord(c)
+    return n < 0x20 or (n >= 0x7f and n < 0xa0)
+
+def _shown(c: str) -> str:
+    """How `line_row` draws the character `c`: a control character (a
+    recalled argument may hold one) as caret notation, `^J`, or `^?` for
+    DEL, a C1 one as `\\x9b`; the rest as itself."""
+    n = ord(c)
+    if n < 0x20:
+        return "^" + chr(n + 0x40)
+    if n == 0x7f:
+        return "^?"
+    if n < 0xa0 and n >= 0x80:
+        return "\\x%x" % n
+    return c
+
+def shown_text(text: str) -> str:
+    """`text` as `line_row` draws it: each control character in caret
+    notation (`_shown`), so text quoting the line (a note, a completion) is
+    safe to write to the screen too."""
+    return "".join([_shown(c) for c in text.elems()])
+
+def _is_word(c: str) -> bool:
+    return c.isalnum() or c == "_" or ord(c) > 127
+
+def _word_left(chars: list, at: int, word = _is_word) -> int:
+    """Where the word before `at` starts: back over what is not a word, then
+    over the word."""
+    i = at
+    for _ in range(at):
+        if i == 0 or word(chars[i - 1]):
+            break
+        i -= 1
+    for _ in range(i):
+        if i == 0 or not word(chars[i - 1]):
+            break
+        i -= 1
+    return i
+
+def _word_right(chars: list, at: int) -> int:
+    """Where the word after `at` ends."""
+    i = at
+    for _ in range(len(chars) - at):
+        if i == len(chars) or _is_word(chars[i]):
+            break
+        i += 1
+    for _ in range(len(chars) - i):
+        if i == len(chars) or not _is_word(chars[i]):
+            break
+        i += 1
+    return i
+
+def _kill(line: dict, start: int, end: int):
+    if end > start:
+        line["kill"] = "".join(line["chars"][start:end])
+        replace_range(line, start, end, "")
+
+def edit_key(line: dict, key: str) -> bool:
+    """Apply `key` to `line`; whether it was one of the editor's. A key that
+    is one character inserts it; Ctrl+D deletes, as Delete does (a caller
+    that leaves on Ctrl+D at an empty line looks first)."""
+    chars = line["chars"]
+    at = line["cursor"]
+    if key.startswith("paste:"):
+        text = key[len("paste:"):].replace("\r\n", " ")
+        replace_range(line, at, at, "".join([" " if _is_control(c) else c for c in text.elems()]))
+    elif len(list(key.elems())) == 1 and key >= " ":
+        replace_range(line, at, at, key)
+    elif key in ("left", "ctrl-b"):
+        line["cursor"] = max(0, at - 1)
+    elif key in ("right", "ctrl-f"):
+        line["cursor"] = min(len(chars), at + 1)
+    elif key in ("home", "ctrl-a"):
+        line["cursor"] = 0
+    elif key in ("end", "ctrl-e"):
+        line["cursor"] = len(chars)
+    elif key in ("alt-b", "ctrl-left", "alt-left"):
+        line["cursor"] = _word_left(chars, at)
+    elif key in ("alt-f", "ctrl-right", "alt-right"):
+        line["cursor"] = _word_right(chars, at)
+    elif key == "backspace":
+        if at > 0:
+            replace_range(line, at - 1, at, "")
+    elif key in ("delete", "ctrl-d"):
+        if at < len(chars):
+            replace_range(line, at, at + 1, "")
+    elif key == "ctrl-w":
+        _kill(line, _word_left(chars, at, lambda c: c != " "), at)
+    elif key == "alt-backspace":
+        _kill(line, _word_left(chars, at), at)
+    elif key == "alt-d":
+        _kill(line, at, _word_right(chars, at))
+    elif key == "ctrl-u":
+        _kill(line, 0, at)
+    elif key == "ctrl-k":
+        _kill(line, at, len(chars))
+    elif key == "ctrl-y":
+        replace_range(line, at, at, line["kill"])
+    else:
+        return False
+    return True
+
+def word_at_cursor(line: dict):
+    """Where the word the cursor ends starts, as `(start, word)`: back from
+    the cursor to a space."""
+    chars = line["chars"]
+    start = line["cursor"]
+    for _ in range(line["cursor"]):
+        if start == 0 or chars[start - 1] == " ":
+            break
+        start -= 1
+    return start, "".join(chars[start:line["cursor"]])
+
+_CURSOR = "\x1b[7m"
+
+_NO_CURSOR = "\x1b[27m"
+
+def line_row(line: dict, width: int, cursor = True) -> str:
+    """`line` as `width` cells: from the first character that keeps the
+    cursor in sight, as many as fit; with `cursor`, the character under it
+    (a space at the end) inverse. Only the characters around the cursor
+    that fit are measured, so a long line (a paste) draws as fast as a
+    short one."""
+    chars = line["chars"]
+    at = line["cursor"]
+    if width <= 0:
+        return ""
+    n = len(chars)
+
+    def shown(i):
+        return _shown(chars[i]) if i < n else " "
+
+    start = 0
+    used = 0
+    for i in range(at, -1, -1):
+        w = display_width(shown(i))
+        if used + w > width:
+            break
+        used += w
+        start = i
+    out = []
+    used = 0
+    for i in range(start, n + 1):
+        c = shown(i)
+        w = display_width(c)
+        if used + w > width:
+            break
+        used += w
+        if cursor and i == at:
+            out.append(_CURSOR + c + _NO_CURSOR)
+        elif i < len(chars):
+            out.append(c)
+    return "".join(out)
+
+def open_quote(text: str, quote = "") -> str:
+    """The quote `text` leaves open (`'`, `"`, or "" for none), read on from
+    one already open (`quote`), as `split_words` reads quotes."""
+    escaped = False
+    for c in text.elems():
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            if c == "'":
+                quote = ""
+        elif c == "\\":
+            escaped = True
+        elif quote == "\"":
+            if c == "\"":
+                quote = ""
+        elif c in ("'", "\""):
+            quote = c
+    return quote
+
+def split_words(text: str):
+    """`text`'s words, as a shell reads them (see the module docs), as
+    `(words, None)`; or `(None, why)` for a quote left open."""
+    words = []
+    word = None
+    quote = ""
+    escaped = False
+    for c in text.elems():
+        if escaped:
+            if quote == "\"" and c not in ("$", "`", "\"", "\\"):
+                word += "\\"
+            word += c
+            escaped = False
+        elif quote == "'":
+            if c == "'":
+                quote = ""
+            else:
+                word += c
+        elif quote == "\"":
+            if c == "\"":
+                quote = ""
+            elif c == "\\":
+                escaped = True
+            else:
+                word += c
+        elif c == "\\":
+            word = word or ""
+            escaped = True
+        elif c in ("'", "\""):
+            word = word or ""
+            quote = c
+        elif c in (" ", "\t"):
+            if word != None:
+                words.append(word)
+                word = None
+        else:
+            word = (word or "") + c
+    if quote:
+        return None, "a %s quote is not closed" % ("single" if quote == "'" else "double")
+    if escaped:
+        word += "\\"
+    if word != None:
+        words.append(word)
+    return words, None
+
+_SAFE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-"
+
+def quote_word(word: str) -> str:
+    """`word` as a shell reads it back as one word: as it is when it needs
+    no quotes, else in single quotes."""
+    if word and all([c in _SAFE for c in word.elems()]):
+        return word
+    return "'" + word.replace("'", "'\\''") + "'"
+
+def join_words(words: list) -> str:
+    """`words` as one line `split_words` reads back as them."""
+    return " ".join([quote_word(w) for w in words])

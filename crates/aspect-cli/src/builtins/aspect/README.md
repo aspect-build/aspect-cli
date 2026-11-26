@@ -293,6 +293,18 @@ The session can then run `aspect worktree release` itself. Without the `SessionS
 
 ---
 
+## The aspect shell
+
+[`private/task/shell.axl`](private/task/shell.axl) · a bare `aspect` on a terminal (not under CI or a coding agent, not in the background, and with `TERM` set and not `dumb`): the `aspect` shell, the History screen of `aspect history browse` with a prompt under it. A command typed there (`aspect` before it optional) runs as a live run shown above it, one at a time, the rest queued; `!` before it gives it the terminal instead, as `R` does. Tab completes tasks, their flags and the features', a flag's values, and `//` targets from the workspace's directories (but those `.bazelignore` leaves out) and BUILD files; ↑↓ recall what was typed, then this workspace's command lines from the history as `aspect history list` shows them, a run recalled unedited running as it was typed, here. Esc gives the keys to the screen above, Esc or `:` gives them back; `?` on an empty prompt lists every key. It is an internal task: it has no name to type, and takes none from a repository's tasks.
+
+To have a bare `aspect` print the help instead, set `"shell": false` in `~/.aspect/config.json`:
+
+```json
+{ "shell": false }
+```
+
+---
+
 ## Cross-cutting features
 
 | Feature                  | File                                                                       | Activation                                              | What it does |

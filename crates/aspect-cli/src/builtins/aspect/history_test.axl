@@ -6,7 +6,7 @@ Run with:
   aspect dev test-history
 """
 
-load("./private/lib/history_records.axl", "command", "list_lines", "outcome", "show_lines", "took", "when")
+load("./private/lib/history_records.axl", "command", "list_lines", "outcome", "show_lines", "shown_outcome", "took", "when")
 
 def _eq(label, got, want):
     if got != want:
@@ -36,6 +36,10 @@ def _test_outcome(_ctx):
         ("abandoned", _record(status = "abandoned")),
     ]:
         _eq("outcome " + want, outcome(record), want)
+
+def _test_shown_outcome(_ctx):
+    _eq("stopped by you, where the record says so", shown_outcome(_record(cancelled = True, exit_code = 8, stopped_by_user = True)), "stopped by you")
+    _eq("else cancelled", shown_outcome(_record(cancelled = True, exit_code = 8)), "cancelled")
 
 def _test_formats(_ctx):
     _eq("when", when("2026-11-21T15:39:39.143Z"), "2026-11-21 15:39:39Z")
@@ -98,6 +102,7 @@ def _test_show_lines(_ctx):
 _UNIT_TESTS = [
     _test_outcome,
     _test_formats,
+    _test_shown_outcome,
     _test_list_lines,
     _test_show_lines,
 ]

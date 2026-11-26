@@ -1,0 +1,851 @@
+"""The `aspect` shell's prompt: a line at the foot of the full-screen
+History screen and runs (`feature/dashboard.axl`), where a command typed
+runs as a child run (`history_child.axl`) shown above it.
+
+The prompt has the keys (`shell_key`) until Esc gives them to the screen
+above (Esc there, with nothing of its own open, or `:` gives them back).
+At the prompt, Enter runs the line (`aspect` before it may be left out;
+`!` before it gives the run the terminal, as `R` does; `exit` or `quit`
+leaves; `history` shows the History screen), or a paste of several
+commands, held until it (`pasted_commands`); Tab completes the word before
+the cursor (`complete_word`): a task's name, its flags and a feature's,
+a flag's values, and a `//` target from the workspace's packages and
+their BUILD files' `name`s; ↑↓ recall what was typed here, then the
+history's command lines (as `aspect history list` shows them, redacted:
+one recalled and run unedited runs as typed, through
+`ctx.std.history.command`), newest first; Ctrl+C clears the line,
+else stops the run going (and drops the queue), else, twice, leaves, as
+Ctrl+D at an empty line does with no run going; PageUp/PageDown, Shift+↑↓,
+the wheel and the mouse act on the screen above; the rest edit the line
+(`line_edit.axl`).
+
+One run goes at a time, since Bazel locks its output base per command: a
+command typed (or an `r` confirmed) while one goes waits in a queue, and
+`shell_frame` starts the next once it ends.
+
+What the CLI's surface is (its tasks, their flags, the features') comes
+from `aspect describe`, run once each for the index (as the shell starts)
+and each task or feature completed (`shell["describe"]`).
+"""
+
+load("@aspect//feature/dashboard.axl", "child_running", "fit", "interrupt_child", "open_history", "page_of", "render", "text_width", dispatch = "on_key")
+load("@std//time.axl", "monotonic")
+load("./bazel_ignores.axl", "bazel_ignores")
+load("./history_child.axl", "run_again", "shown_command", "terminal_task_of", "typed_record")
+load("./history_records.axl", "command")
+load("./line_edit.axl", "edit_key", "line_row", "line_text", "new_line", "open_quote", "replace_range", "set_text", "shown_text", "split_words", "word_at_cursor")
+
+_DIM = "\x1b[2m"
+
+_BOLD = "\x1b[1m"
+
+_RESET = "\x1b[0m"
+
+# The rows under the screen above: the status and the prompt.
+_ROWS = 2
+
+# How many of the history's runs ↑ recalls.
+_RECALL_LIMIT = 200
+
+# How long a first Ctrl+C that would stop a run waits for the second.
+_STOP_MS = 2000
+
+# How long what was dropped is said once the run has stopped.
+_SAID_MS = 4000
+
+# What the shell says until the first command is typed, the first that
+# fits.
+_WELCOME = [
+    "aspect shell · type a task (build //…, test …) · help lists them · aspect --help prints the CLI help · ^D leaves",
+    "aspect shell · type a task (build //…) · help lists them · aspect --help: CLI help · ^D leaves",
+    "type a task (build //…) · help lists them · aspect --help: CLI help · ^D leaves",
+    "type a task (build //…) · help lists them · ^D leaves",
+]
+
+# The keys at the prompt, as the `?` overlay lists them.
+PROMPT_HELP = [
+    ("Enter", "run the line (`aspect` before it optional)"),
+    ("Tab", "complete a task, a flag, a value, a // target"),
+    ("↑ ↓  ^P ^N", "recall what was typed, then the history's commands"),
+    ("!cmd", "run cmd with the terminal its own"),
+    ("Esc  :", "keys to the screen above, and back"),
+    ("history", "show the list of runs"),
+    ("^C", "clear the line; stop the run (twice); leave (twice)"),
+    ("^D  exit", "leave, with no run going"),
+]
+
+# The Alt keys the line editor has (`line_edit.axl`); any other is nothing
+# at the prompt, and with the screen's keys an Esc and a key read together.
+_EDITOR_ALT_KEYS = ["alt-b", "alt-f", "alt-d", "alt-backspace", "alt-left", "alt-right"]
+
+# The features the shell sets on the runs it starts itself, which a typed
+# flag of theirs would fight.
+_OWN_FEATURES = ["bridge", "dashboard"]
+
+# The keys at the prompt that go to the screen above, besides the mouse's.
+_SCREEN_KEYS = ["pageup", "pagedown", "shift-up", "shift-down", "wheel-up", "wheel-down", "alt-up", "alt-down", "ctrl-l"]
+
+def new_shell(ctx, prefetch = True) -> dict:
+    """The prompt's state, the line empty, for a shell run by `ctx`: run in
+    its working directory, its targets those of its Bazel workspace. With
+    `prefetch`, the CLI's surface (`aspect describe`) is asked for at once,
+    while nothing needs it yet."""
+    exe = ctx.std.env.current_exe()
+    cwd = ctx.std.env.current_dir()
+
+    # The modifier that selects text while the screen has the mouse.
+    select = {"iTerm.app": "⌥", "Apple_Terminal": "fn"}.get(ctx.std.env.var("TERM_PROGRAM") or "", "⇧")
+
+    def start(what):
+        proc = (
+            ctx.std.process.command(exe)
+                .args(["describe"] + ([what] if what else []))
+                .current_dir(cwd)
+                .stdin("null")
+                .stdout("piped")
+                .stderr("null")
+                .spawn()
+        )
+        return {"proc": proc, "out": proc.stdout().poller(), "lines": []}
+
+    def finish(pending):
+        lines = pending["lines"]
+        for _ in range(_DESCRIBE_POLLS):
+            lines += pending["out"].poll(timeout_ms = 100)
+            if pending["out"].ended:
+                break
+        if not pending["out"].ended:
+            pending["proc"].kill()
+            pending["proc"].wait()
+            return None
+        lines += pending["out"].poll()
+        if not pending["proc"].wait().success:
+            return {}
+        return describe_document(lines)
+
+    return {
+        "line": new_line(),
+        "focus": "prompt",
+        "queue": [],
+        "typed": [],
+        "recall": None,
+        "recall_at": -1,
+        "draft": "",
+        "note": "",
+        "welcome": True,
+        "help": PROMPT_HELP + [(select + "+drag", "select text while the screen has the mouse")],
+        "choices": [],
+        "ctrl_c": False,
+        "running": False,
+        "cwd": cwd,
+        "exe": exe,
+        "root": ctx.std.env.bazel_root_dir(),
+        "fs": ctx.std.fs,
+        "describe": lambda what: finish(start(what)),
+        "start": start,
+        "finish": finish,
+        "pending": {"": start("")} if prefetch else {},
+        "described": {},
+    }
+
+def close_shell(state: dict):
+    """As the shell is left: every `aspect describe` still asked for
+    (`shell["pending"]`, the prefetch or a retry) killed and waited for,
+    rather than left running past the shell."""
+    shell = state.get("shell")
+    if shell == None:
+        return
+    for pending in shell["pending"].values():
+        pending["proc"].kill()
+        pending["proc"].wait()
+    shell["pending"] = {}
+
+def describe_document(lines: list) -> dict:
+    """The document `aspect describe` printed as `lines`: its JSON, from the
+    last `{` alone on a line (the document's own objects inside it are
+    indented) to the `}` that ends the output, as a `config.axl` may write
+    lines of its own to stdout before it, a JSON object among them; `{}`
+    when there is none."""
+    start = [i for i, line in enumerate(lines) if line == "{"][-1:]
+    if not start or lines[-1] != "}":
+        return {}
+    return json.decode("\n".join(lines[start[0]:]))
+
+# How many tenths of a second `aspect describe` gets before it is given up.
+_DESCRIBE_POLLS = 300
+
+def _described(shell: dict, what: str) -> dict:
+    """`aspect describe <what>` (the index for ""), once. What was asked for
+    ahead (`new_shell`'s `prefetch`) is waited for the first time it is
+    needed; the rest run now. One that ran out of time (None) counts as
+    nothing and is asked for again in the background, taken once it has
+    answered, so a describe that never answers costs one wait, not one a
+    key."""
+    pending = shell["pending"].get(what)
+    if pending != None and (what not in shell["described"] or _drained(pending)):
+        shell["pending"].pop(what)
+        doc = shell["finish"](pending)
+    elif what in shell["described"]:
+        return shell["described"][what]
+    else:
+        doc = shell["describe"](what)
+    if doc == None:
+        shell["pending"][what] = shell["start"](what)
+        doc = {}
+    shell["described"][what] = doc
+    return doc
+
+def _drained(pending: dict) -> bool:
+    """Whether the describe `pending` has answered: what it wrote so far
+    taken into its `lines`, without waiting, as a poller learns its stream
+    ended only by being polled."""
+    pending["lines"] += pending["out"].poll()
+    return pending["out"].ended
+
+def _paths(shell: dict) -> list:
+    """Every task's command words, `["history", "browse"]` for `aspect
+    history browse`."""
+    return [c["command"].split(" ")[1:] for c in _described(shell, "").get("commands", []) if c.get("command", "").startswith("aspect ")]
+
+def _command_words(words: list) -> list:
+    """The words naming the task in a command line's `words`: after the
+    flags before it, up to the next flag."""
+    out = []
+    for w in words:
+        if w.startswith("-"):
+            if out:
+                break
+            continue
+        out.append(w)
+    return out
+
+def command_path(shell: dict, words: list):
+    """The longest task path that starts `words`' command words, or None."""
+    named = _command_words(words)
+    best = None
+    for path in _paths(shell):
+        if len(path) <= len(named) and named[:len(path)] == path and (best == None or len(path) > len(best)):
+            best = path
+    return best
+
+def _strip(words: list) -> list:
+    """`words` without the `!` and the `aspect` that may start a line."""
+    words = list(words)
+    if words and words[0].startswith("!"):
+        words[0] = words[0][1:]
+        if not words[0]:
+            words = words[1:]
+    if words and words[0] == "aspect":
+        words = words[1:]
+    return words
+
+def _flags(doc: dict) -> list:
+    """A described task's or feature's flags, as `(flag, type, values)`."""
+    out = []
+    for a in doc.get("args", []) + doc.get("flags", []):
+        if a.get("flag"):
+            out.append((a["flag"], a.get("type", ""), a.get("allowed_values") or []))
+    return out
+
+def _flag_candidates(shell: dict, path, word: str) -> list:
+    """What a flag `word` completes to: a flag of the task at `path` or of a
+    feature, or, past its `=`, one of its values."""
+    flags = _flags(_described(shell, " ".join(path))) if path != None else []
+    features = _described(shell, "").get("features", [])
+    if word.startswith("--") and ":" in word:
+        name = word[2:].partition(":")[0]
+        if name in features:
+            flags += _flags(_described(shell, "feature " + name))
+    if "=" in word:
+        name, _, value = word.partition("=")
+        for flag, kind, values in flags:
+            if flag == name:
+                values = ["true", "false"] if kind == "boolean" else values
+                return [name + "=" + v for v in values if v.startswith(value)]
+        return []
+    out = [flag + ("" if kind == "boolean" else "=") for flag, kind, _ in flags]
+    out += ["--%s:" % f for f in features if f not in _OWN_FEATURES]
+    if path != None:
+        out.append("--help")
+
+    # A feature's `--<name>:` already typed is no candidate; a whole flag
+    # typed is, beside the longer ones it starts.
+    return [c for c in out if c.startswith(word) and not (c == word and c.endswith(":"))]
+
+def _listing(shell: dict, package: str) -> list:
+    """The entries of `package`'s directory in the workspace, sorted, but
+    those `.bazelignore` and `REPO.bazel`'s `ignore_directories` leave out;
+    none when it is not one that can be read (gone, a file, no
+    permission)."""
+    path = shell["root"] + ("/" + package if package else "")
+    err, entries = catch(shell["fs"].try_read_dir, path, types = [std.io.Error])
+    if err != None:
+        return []
+    if shell.get("ignored") == None:
+        fs = shell["fs"]
+        shell["ignored"] = (bazel_ignores.read_bazelignore(fs, shell["root"]), bazel_ignores.read_repo_bazel(fs, shell["root"]))
+    prefixes, patterns = shell["ignored"]
+    kept = [e for e in entries if not bazel_ignores.is_ignored(path + "/" + e.path, prefixes, patterns, is_directory = e.is_dir)]
+    return sorted(kept, key = lambda e: e.path)
+
+def _build_file(shell: dict, package: str, listing: list):
+    """The BUILD file of `package`, whose directory lists as `listing`, or
+    None."""
+    names = [e.path for e in listing if not e.is_dir]
+    for name in ("BUILD.bazel", "BUILD"):
+        if name in names:
+            return shell["root"] + "/" + package + ("/" if package else "") + name
+    return None
+
+def _target_names(text: str) -> list:
+    """The `name = "…"` a BUILD file gives its targets, in order."""
+    out = []
+    for line in text.split("\n"):
+        for start in ("name = \"", "name=\""):
+            at = line.find(start)
+            if at >= 0 and (at == 0 or line[at - 1] in " \t(,"):
+                name = line[at + len(start):].partition("\"")[0]
+                if name and name not in out:
+                    out.append(name)
+    return out
+
+def _target_candidates(shell: dict, word: str) -> list:
+    """What a `//` target `word` completes to: past a `:`, the package's
+    targets (`all` first); else its directories, the package's own `:` and
+    `/...` when it is one."""
+    rest = word[2:]
+    if ":" in rest:
+        package, _, name = rest.partition(":")
+        package = package.rstrip("/")
+        build = _build_file(shell, package, _listing(shell, package))
+        text = shell["fs"].read_to_string_if_complete(build) if build != None else None
+        if text == None:
+            return []
+        names = ["all"] + _target_names(text)
+        return ["//%s:%s" % (package, n) for n in names if n.startswith(name)]
+    at = rest.rfind("/")
+    parent = rest[:at] if at >= 0 else ""
+    base = rest[at + 1:]
+    listing = _listing(shell, parent)
+    if parent and not listing:
+        return []
+    out = []
+    if not base:
+        out.append("//" + parent + ("/..." if parent else "..."))
+        if _build_file(shell, parent, listing) != None:
+            out.append("//" + parent + ":")
+    for entry in listing:
+        name = entry.path
+        if entry.is_dir and not entry.is_symlink and not name.startswith(".") and not name.startswith("bazel-") and name.startswith(base):
+            out.append("//" + parent + ("/" if parent else "") + name + "/")
+    return out
+
+def candidates(shell: dict, before: list, word: str) -> list:
+    """What `word` completes to after the words `before` it on the line: a
+    task's next command word, a flag (`_flag_candidates`), or a target
+    (`_target_candidates`)."""
+    bang = not before and word.startswith("!")
+    words = _strip(before)
+    if bang:
+        word = word[1:]
+    path = command_path(shell, words)
+    named = _command_words(words)
+    if word.startswith("-"):
+        # Past a `--`, what is typed is Bazel's, not the CLI's flags.
+        if "--" in words:
+            return []
+        return _flag_candidates(shell, path, word) if path != None or named else []
+    if word.startswith("//"):
+        return _target_candidates(shell, word) if path != None else []
+    if path != None and len(named) >= len(path):
+        return []
+    out = []
+    for p in _paths(shell):
+        if len(p) > len(named) and p[:len(named)] == named and p[len(named)].startswith(word) and p[len(named)] not in out:
+            out.append(p[len(named)])
+    return [("!" if bang else "") + c for c in sorted(out)]
+
+def _common(words: list) -> str:
+    """The longest start all of `words` share."""
+    first = words[0]
+    n = len(first)
+    for w in words[1:]:
+        for i in range(n):
+            if i >= len(w) or w[i] != first[i]:
+                n = i
+                break
+        n = min(n, len(w))
+    return first[:n]
+
+def complete_word(shell: dict):
+    """Complete the word before the cursor (`candidates`): one candidate in
+    its place, a space after unless it goes on (`/`, `:`, `=`); several,
+    their common start, or, when that adds nothing, them, listed on the
+    status row. Candidates that spell the word another way replace it with
+    their common start too."""
+    line = shell["line"]
+    start, word = word_at_cursor(line)
+    before, why = split_words(line_text(line)[:start] if start else "")
+    if why != None:
+        return
+    found = candidates(shell, before, word)
+    shell["choices"] = []
+    if not found:
+        shell["note"] = "nothing completes " + (word or "here")
+        return
+    if len(found) == 1:
+        done = found[0]
+        at = line["cursor"]
+        spaced = at < len(line["chars"]) and line["chars"][at] == " "
+        replace_range(line, start, at, done + ("" if done[-1] in "/:=" or spaced else " "))
+        if spaced:
+            line["cursor"] += 1
+        return
+    common = _common(found)
+    if not common.startswith(word) and not word.startswith(common):
+        # The candidates spell the word another way (`//app/:` as `//app:`).
+        replace_range(line, start, line["cursor"], common)
+        shell["choices"] = found
+    elif len(common) > len(word):
+        replace_range(line, start, line["cursor"], common)
+    else:
+        shell["choices"] = found
+
+def _recalled(state: dict) -> list:
+    """What ↑ steps through: the lines typed here, newest first, then the
+    runs the history keeps in the scope the History screen lists (this
+    workspace, or every one), each once, as `(text, record)`: a run's command
+    line as `aspect history list` shows it, without `aspect` (redacted, the
+    flags the History screen adds left out), and its record, so it runs as
+    typed when recalled unedited (`_submit`); a line typed here has none,
+    but for one that ran such a run again."""
+    shell = state["shell"]
+    out = []
+    seen = {}
+    for text, record in reversed(shell["typed"]):
+        if text not in seen:
+            seen[text] = True
+            out.append((text, record))
+    b = state["browser"]
+    workspace = b["workspace"] if b["here"] and b["workspace"] else None
+    for record in b["history"].list(limit = _RECALL_LIMIT, workspace = workspace):
+        if record.get("task", {}).get("id") == b["exclude"]:
+            continue
+        text = command(record).removeprefix("aspect").strip()
+        if text and text not in seen:
+            seen[text] = True
+            out.append((text, record))
+    return out
+
+def _recall(state: dict, step: int):
+    """Step `step` through what was typed and run (`_recalled`), the line
+    being typed coming back past the newest. An entry edited keeps its edit
+    while the line is not run, as readline's history does."""
+    shell = state["shell"]
+    if shell["recall"] == None:
+        shell["recall"] = _recalled(state)
+        shell["recall_at"] = -1
+    at = max(-1, min(len(shell["recall"]) - 1, shell["recall_at"] + step))
+    if at == shell["recall_at"]:
+        return
+    if shell["recall_at"] == -1:
+        shell["draft"] = line_text(shell["line"])
+    else:
+        # An entry edited keeps its edit, and is then the line typed: it
+        # runs as it reads, not as the history's run did.
+        text, record = shell["recall"][shell["recall_at"]]
+        edited = line_text(shell["line"])
+        shell["recall"][shell["recall_at"]] = (edited, record if edited == text else None)
+    shell["recall_at"] = at
+    set_text(shell["line"], shell["draft"] if at == -1 else shell["recall"][at][0])
+
+def enqueue(state: dict, request):
+    """Run `request` (`(what, record)`, as `run_again` takes it) once the
+    run going, and those queued before it, end."""
+    state["shell"]["queue"].append(request)
+
+def _submit(state: dict) -> bool:
+    """Run the line (see the module docs); whether it leaves."""
+    shell = state["shell"]
+    text = line_text(shell["line"])
+    words, why = split_words(text)
+    if why != None:
+        shell["note"] = why
+        return False
+    if not words:
+        return False
+    in_terminal = words[0].startswith("!")
+    words = _strip(words)
+
+    # A run of the history's, recalled and not edited: its command as typed,
+    # secrets and all, which the line shown has redacted.
+    entry = shell["recall"][shell["recall_at"]] if shell["recall"] != None and shell["recall_at"] >= 0 else None
+    again = entry[1] if entry != None and entry[1] != None and entry[0] == text else None
+    if again == None and "<REDACTED>" in text:
+        shell["note"] = "a secret the history redacted is in the line: recall it unedited to run it as typed, or type the secret"
+        return False
+    shell["typed"].append((text.strip(), again))
+    shell["recall"] = None
+    shell["recall_at"] = -1
+    shell["welcome"] = False
+    set_text(shell["line"], "")
+    if not words:
+        return False
+    if again != None:
+        # Where the shell is, as every command typed here: one that ran
+        # elsewhere says so.
+        enqueue(state, ("run_in_terminal" if in_terminal else "run", dict(again, cwd = shell["cwd"], ran_in = again.get("cwd", ""))))
+        return False
+    if words in (["exit"], ["quit"]):
+        if child_running(state) or shell["queue"]:
+            shell["note"] = "a run is going: Ctrl+C stops it"
+            return False
+        return True
+    if words == ["history"]:
+        open_history(state)
+        return False
+    path = command_path(shell, words)
+    asks_help = "--help" in words or "-h" in words
+    if not asks_help and (path == ["history", "browse"] or (path == None and _command_words(words)[:2] == ["history", "browse"])):
+        shell["note"] = "this is it: the History screen is above (`history` shows it)"
+        return False
+    if path == None and "commands" not in _described(shell, ""):
+        # The task list is not known (`aspect describe` failed): run it as
+        # typed, without the bridge a non-task would refuse, but give the
+        # terminal to a task that prompts.
+        shell["note"] = "the task list is not known (`aspect describe` failed): running as typed, without the dashboard"
+        group, kind = terminal_task_of(_command_words(words)) or ([], words[0])
+        record = typed_record(["aspect"] + words, shell["cwd"], group = group, kind = kind, task = False)
+    elif path == None:
+        record = typed_record(["aspect"] + words, shell["cwd"], kind = words[0], task = False)
+        if words[0] == "help":
+            shell["note"] = "here, `aspect` before a command is optional"
+    else:
+        record = typed_record(["aspect"] + words, shell["cwd"], group = path[:-1], kind = path[-1])
+    enqueue(state, ("run_in_terminal" if in_terminal else "run", record))
+    return False
+
+def pasted_commands(text: str) -> list:
+    """The commands a paste of several lines holds: a line ending in a
+    backslash goes on in the next, as does one with a quote still open (its
+    line break a space); blank lines hold none. Each line is read once, the
+    quote it leaves open carried to the next, so a paste with a stray
+    apostrophe is as quick as any."""
+    out = []
+    pending = []
+    quote = ""
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        joined = line.endswith("\\")
+        if joined:
+            line = line[:-1]
+        pending.append(line)
+        quote = open_quote((" " if len(pending) > 1 else "") + line, quote)
+        if joined or quote:
+            continue
+        command = " ".join(pending).strip()
+        if command:
+            out.append(command)
+        pending = []
+    command = " ".join(pending).strip()
+    if command:
+        out.append(command)
+    return out
+
+def _paste_lines(state: dict, text: str):
+    """A paste of several lines at the prompt, as bracketed paste means it:
+    not run, but held (`shell["batch"]`, its commands, `pasted_commands`)
+    until Enter runs them in turn or Esc drops them. A paste of one command
+    is typed into the line."""
+    shell = state["shell"]
+    commands = pasted_commands(text)
+    if len(commands) <= 1:
+        edit_key(shell["line"], "paste:" + (commands[0] if commands else ""))
+        return
+    shell["batch"] = commands
+
+def _view_open(state: dict) -> bool:
+    """Whether the screen above has something of its own open that Esc
+    closes first: a question (`r`'s), the keys, and on a run the search
+    bar, a tab other than the console, a log."""
+    if state.get("confirm") != None or state.get("help"):
+        return True
+    if state.get("mode") == "history":
+        return False
+    return state["search"]["open"] or state.get("tab", "console") != "console" or state["view"] != None
+
+def shell_key(state: dict, key: str, page: int) -> bool:
+    """A key for the shell (see the module docs); whether it leaves. `page`
+    is how far the screen above pages."""
+    shell = state["shell"]
+    if key.startswith("paste:") and shell["focus"] == "prompt":
+        # A long or slow paste comes as several: held until the terminal
+        # has sent its end (`screen.pasting`), then taken whole.
+        shell["paste_buf"] = shell.get("paste_buf", "") + key[len("paste:"):]
+        if not _pasting(state):
+            flush_paste(state)
+        return False
+    flush_paste(state)
+    if key != "ctrl-c":
+        shell["ctrl_c"] = False
+    if key == "ctrl-c":
+        if shell["focus"] == "prompt" and line_text(shell["line"]):
+            # A fresh line, as readline's: recall starts over from it.
+            set_text(shell["line"], "")
+            shell["choices"] = []
+            shell["recall"] = None
+            shell["recall_at"] = -1
+        elif child_running(state) or shell["queue"]:
+            _ctrl_c_stops(state)
+        elif shell["ctrl_c"]:
+            return True
+        else:
+            shell["ctrl_c"] = True
+            shell["note"] = "Ctrl+C again, Ctrl+D or exit leaves" if shell["focus"] == "prompt" else "Ctrl+C again leaves"
+        return False
+    if key == "esc" and shell.get("stop_ms") != None:
+        # The first Ctrl+C's stop not wanted: the run goes on.
+        shell["stop_ms"] = None
+        shell["note"] = ""
+        return False
+    shell["stop_ms"] = None
+    shell["note"] = ""
+    shell["note_until"] = None
+    searching = shell["focus"] == "view" and state.get("mode") != "history" and state["search"]["open"]
+    if key.startswith("alt-") and shell["focus"] == "prompt" and key not in _EDITOR_ALT_KEYS:
+        # An Alt key the editor has no use for (readline's Alt+R): nothing,
+        # rather than Esc and the key, which would act on the screen above
+        # (`r` running a past build again).
+        return False
+    if key in ("alt-left", "alt-right") and shell["focus"] == "view":
+        # Alt with an arrow is one key, and none of the screen's.
+        return False
+    if key.startswith("alt-") and key not in ("alt-up", "alt-down") and not (searching and key in ("alt-c", "alt-w", "alt-backspace")) and shell["focus"] == "view":
+        # An Esc typed just before a key reads as Alt with it: the two keys.
+        if shell_key(state, "esc", page):
+            return True
+        return shell_key(state, key[len("alt-"):], page)
+    if shell["focus"] == "view":
+        if (key == ":" and not searching) or (key == "esc" and not _view_open(state)):
+            # The keys overlay is the screen's keys': it goes with them.
+            state["help"] = False
+            shell["focus"] = "prompt"
+        elif dispatch_view(state, key, page):
+            shell["focus"] = "prompt"
+        if shell.get("help_from_prompt") and not state.get("help"):
+            # The overlay `?` opened at the prompt closed: the keys go back.
+            shell["help_from_prompt"] = False
+            shell["focus"] = "prompt"
+        return False
+    if key in _SCREEN_KEYS or key.startswith("mouse-"):
+        dispatch_view(state, key, page)
+        return False
+    if key == "esc":
+        if shell.get("batch"):
+            shell.pop("batch")
+        elif shell["choices"]:
+            shell["choices"] = []
+        else:
+            shell["focus"] = "view"
+        return False
+    if key == "?" and not shell["line"]["chars"]:
+        # The keys overlay, the prompt's own among them; the screen takes
+        # the keys while it is open, and gives them back as it closes.
+        state["help"] = True
+        state["help_top"] = 0
+        shell["focus"] = "view"
+        shell["help_from_prompt"] = True
+        return False
+    if key == "ctrl-d" and not shell["line"]["chars"]:
+        if child_running(state) or shell["queue"]:
+            shell["note"] = "a run is going: Ctrl+C stops it"
+            return False
+        return True
+    shell["choices"] = []
+    if key == "enter" and shell.get("batch") and not shell["line"]["chars"]:
+        for text in shell.pop("batch"):
+            set_text(shell["line"], text)
+            if _submit(state):
+                return True
+        return False
+    if key == "enter":
+        return _submit(state)
+    if key == "tab":
+        complete_word(shell)
+    elif key in ("up", "ctrl-p"):
+        _recall(state, 1)
+    elif key in ("down", "ctrl-n"):
+        _recall(state, -1)
+    else:
+        edit_key(shell["line"], key)
+    return False
+
+def _ctrl_c_stops(state: dict):
+    """Ctrl+C with a run going (or queued) and nothing on the line: a
+    first one says what a second, within `_STOP_MS`, does; that one stops
+    the run going and drops the queue, counted over every Ctrl+C until the
+    run has stopped."""
+    shell = state["shell"]
+    now = int(monotonic() * 1000)
+    if shell.get("stop_ms") == None or now - shell["stop_ms"] > _STOP_MS:
+        shell["stop_ms"] = now
+        child = state.get("child")
+        what = shown_command(child["record"]) if child_running(state) else ""
+        queued = len(shell["queue"])
+        shell["note"] = _stop_warning(what, queued)
+        shell["stop_what"] = (what, queued)
+        return
+    shell["stop_ms"] = None
+    shell["dropped"] = shell.get("dropped", 0) + len(shell["queue"])
+    shell["queue"] = []
+    interrupt_child(state)
+    dropped = shell["dropped"]
+    if not child_running(state):
+        # Nothing to stop: the count is final, said for a moment.
+        shell["dropped"] = 0
+        shell["note"] = "%d queued dropped" % dropped
+        shell["note_until"] = now + _SAID_MS
+    else:
+        shell["note"] = "stopping" + (" · %d queued dropped" % dropped if dropped else "")
+
+def _stop_warning(what: str, queued: int, width = None) -> str:
+    """What a first Ctrl+C says a second does: stop `what` (a command) and
+    drop the `queued`; in `width` cells when given, the command cut short
+    so the rest is always said."""
+    tail = (" and drops %d queued" % queued if what and queued else ("drops %d queued" % queued if queued else "")) + " · Esc keeps it"
+    if what:
+        if width != None:
+            room = width - text_width("Ctrl+C again stops " + tail)
+            if text_width(what) > room:
+                what = what[:max(1, room - 1)] + "…"
+        return "Ctrl+C again stops " + what + tail
+    return "Ctrl+C again " + tail.lstrip(" ")
+
+def dispatch_view(state: dict, key: str, page: int) -> bool:
+    """`key` for the screen above (`on_key`'s), a request it makes (`r` or
+    `R`, confirmed) queued; whether it would leave."""
+    leave = dispatch(state, key, page)
+    if key == "w":
+        # The list's scope is recall's: read anew at the next ↑.
+        state["shell"]["recall"] = None
+        state["shell"]["recall_at"] = -1
+    request = state.pop("request", None)
+    if request != None:
+        enqueue(state, request)
+    return leave
+
+def _pasting(state: dict) -> bool:
+    """Whether the terminal is still sending a paste (`screen.pasting`)."""
+    screen = state.get("screen")
+    return screen != None and screen.pasting
+
+def flush_paste(state: dict):
+    """Take in the paste the prompt has gathered (`_paste_lines`), whole."""
+    text = state["shell"].pop("paste_buf", None)
+    if text != None:
+        _paste_lines(state, text)
+
+def shell_frame(state: dict, ctx, now_ms: int):
+    """Each frame: a paste the terminal has finished sending taken in;
+    once the run going ends, the History screen's runs read anew, and the
+    next queued run started."""
+    shell = state["shell"]
+    if shell.get("paste_buf") != None and not _pasting(state):
+        flush_paste(state)
+    running = child_running(state)
+    if shell["running"] and not running:
+        state["browser"]["records"] = None
+        if shell["note"].startswith("stopping"):
+            # What was dropped stays said, for a moment.
+            shell["note"] = shell["note"].partition(" · ")[2]
+            shell["note_until"] = now_ms + _SAID_MS
+        shell["dropped"] = 0
+
+        # A first Ctrl+C's warning was about the run that ended: a Ctrl+C
+        # now warns anew about what goes next.
+        if shell.get("stop_ms") != None:
+            shell["stop_ms"] = None
+            if shell["note"].startswith("Ctrl+C again"):
+                shell["note"] = ""
+    if shell.get("note_until") != None and now_ms > shell["note_until"]:
+        shell["note"] = ""
+        shell["note_until"] = None
+    shell["running"] = running
+    if running or not shell["queue"]:
+        return
+    request = shell["queue"].pop(0)
+    why = run_again(state, ctx, request, now_ms)
+    shell["running"] = child_running(state)
+    if why != None:
+        shell["note"] = "cannot run it: " + why
+
+def shell_page(state: dict, cols: int, rows: int) -> int:
+    """How far the scroll keys page the screen above, `cols` by `rows`."""
+    return page_of(state, cols, max(1, rows - _ROWS))
+
+def _queued_text(shell: dict) -> str:
+    """`1 queued: build //app:server`, `3 queued: build //… (+2)`."""
+    queue = shell["queue"]
+    first = shown_command(queue[0][1]).removeprefix("aspect ")
+    more = len(queue) - 1
+    return "%d queued: %s%s" % (len(queue), first, (" (+%d)" % more) if more else "")
+
+def _status_row(state: dict, cols: int) -> str:
+    """The row over the prompt: what goes on (a run, the queue, a paste
+    held), what was said, the completions, else the keys: `Enter run · Tab
+    complete · ↑ recall · Esc screen · ^D leave`, `! in terminal` when it
+    fits; with the screen's keys, how to give them back. Until the first
+    command, the widest of `_WELCOME` that fits."""
+    shell = state["shell"]
+    parts = []
+    warning = shell["note"].startswith("Ctrl+C again")
+    if warning:
+        # Before all else, so it is never the part cut, and its command cut
+        # to keep the rest of it.
+        what, queued = shell.get("stop_what", ("", 0))
+        parts.append(shown_text(_stop_warning(what, queued, cols - 2)))
+    if child_running(state):
+        parts.append("▶ running")
+    if shell["queue"]:
+        parts.append(_queued_text(shell))
+    if shell.get("batch"):
+        parts.append("%d commands pasted: Enter runs them in turn · Esc drops them" % len(shell["batch"]))
+    if shell["note"] and not warning:
+        parts.append(shown_text(shell["note"]))
+    if shell["choices"]:
+        text = " " + " · ".join(parts + [""]) if parts else " "
+        shown = 0
+        for c in [shown_text(c) for c in shell["choices"]]:
+            if text_width(text) + text_width(c) + 12 > cols:
+                break
+            text += c + "  "
+            shown += 1
+        rest = len(shell["choices"]) - shown
+        return fit(text + ("+%d more" % rest if rest else ""), cols)
+    if shell["focus"] == "view" and state["search"]["open"]:
+        parts.append("keys: screen · Esc closes the bar")
+    elif shell["focus"] == "view":
+        parts.append("keys: screen · Esc or : prompt")
+    elif shell["welcome"] and not parts:
+        fits = [w for w in _WELCOME if text_width(" " + w) <= cols]
+        parts.append(fits[0] if fits else _WELCOME[-1])
+    else:
+        keys = "Enter run · Tab complete · ↑ recall · Esc screen · ^D leave"
+        text = " " + " · ".join(parts + [keys])
+        if text_width(text + " · ! in terminal") <= cols:
+            text += " · ! in terminal"
+        return fit(text, cols)
+    return fit(" " + " · ".join(parts), cols)
+
+def draw_shell(state: dict, cols: int, rows: int) -> str:
+    """The whole screen: what `draw` shows, over the status row and the
+    prompt; on a screen too short for all three, the prompt, and the status
+    row when there is room for it."""
+    shell = state["shell"]
+    above = rows - _ROWS
+    out = render(state, cols, above) if above >= 1 else "\x1b[H\x1b[J"
+    prompt = _BOLD + "› " + _RESET if shell["focus"] == "prompt" else _DIM + "› "
+    foot = [prompt + line_row(shell["line"], max(1, cols - 2), cursor = shell["focus"] == "prompt") + _RESET]
+    if rows >= 2:
+        foot.insert(0, _DIM + _status_row(state, cols) + _RESET)
+    out += "\x1b[%d;1H" % max(1, rows - len(foot) + 1) + "\r\n".join(["\x1b[K" + r for r in foot])
+    return out

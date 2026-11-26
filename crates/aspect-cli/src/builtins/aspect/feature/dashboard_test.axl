@@ -1125,6 +1125,10 @@ def _test_child(ctx):
     _eq("still draining just after the stop", child_running(state), True)
     pump_child(state, 25100)
     _eq("but not past a moment after the exit", child_running(state), False)
+    marked = _history_state(ctx, [_record("ssss1111", "cancelled", stopped_by_user = True), _record("tttt2222", "cancelled")], standalone = True)
+    marked["mode"] = "history"
+    rows = _visible(render(marked, 140, 20))
+    _eq("the list says by you only where the run's record does", rows.count("stopped by you"), 1)
     _eq("a run the user stopped reads so, whatever it exited with", (state["stopped"], phase_status(state), _visible(render(state, 140, 30)).split("\n")[0].strip().startswith("■ aspect")), (True, ["stopped by you"], True))
     _eq("stopped, nothing left to cancel", (state["cancelling"], "cancelling" in keys_row(state, 140), "Ctrl+C" in keys_row(state, 140)), (False, False, False))
     state.update(ended = False, stopped = False)
@@ -1171,6 +1175,8 @@ def _test_child(ctx):
     secret = _record("ssss1111", cwd = "/repo", argv = ["/bin/aspect", "deploy", "--token=<REDACTED>"])
     state["confirm"] = ("run", secret)
     _eq("a redacted command says its secrets are kept", "aspect deploy --token=<REDACTED> (secrets kept) · Enter runs" in _visible(render(state, 160, 20)), True)
+    narrow = _visible(confirm_row(state, 66))
+    _eq("not when narrow, the command cut in its middle", ("(secrets kept)" in narrow, "? aspect de" in narrow, "…" in narrow, narrow.endswith("TED> · Enter runs · Esc cancels")), (False, True, True, True))
     state.pop("confirm")
 
     # A long directory gives way, cut in its middle, to the command and the
@@ -1184,7 +1190,7 @@ def _test_child(ctx):
     state["confirm"] = ("run", far)
     for cols in (80, 100, 120):
         row = _visible(confirm_row(state, cols))
-        _eq("at %d columns, the keys kept, and the command as far as it fits" % cols, (text_width(row) <= cols, ("? aspect test //services/backend/... · Enter runs · Esc cancels" if cols > 80 else "? aspect test //services/back") in row, row.endswith(" · Enter runs · Esc cancels"), row.startswith(" Run again in ~/")), (True, True, True, True))
+        _eq("at %d columns, the keys kept, and the command as far as it fits" % cols, (text_width(row) <= cols, ("? aspect test //services/backend/... · Enter runs · Esc cancels" if cols > 80 else "/backend/... · Enter runs") in row, row.endswith(" · Enter runs · Esc cancels"), row.startswith(" Run again in ~/")), (True, True, True, True))
     _eq("cut in its middle only when it must", "…" in _visible(confirm_row(state, 80)), True)
     _eq("whole when it fits", _visible(confirm_row(state, 200)).startswith(" Run again in ~/src/github.com/an-org/a-rather-long-repository-name/services/backend? "), True)
     state["confirm"] = ("run_in_terminal", _record("hhhh1111", cwd = "/ws", argv = ["/bin/aspect", "build", "//..."]))
