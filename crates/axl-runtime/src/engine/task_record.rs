@@ -760,7 +760,10 @@ impl BazelSlot {
 /// Give each failure the logs its build's history folder kept for it, from
 /// the indexes there (`actions.json`, `testlogs.json`), as paths relative to
 /// the task's entry. An action's are matched by label and mnemonic in order,
-/// a test attempt's by label, run, shard and attempt.
+/// among the last build attempt's entries (`build_attempt`, the last being
+/// the index's `build_attempts`: a build Bazel restarted in place lists
+/// every attempt's); a test attempt's by label, run, shard and attempt, the
+/// last entry that matches.
 fn attach_logs(summary: &mut Summary, folder: &Path) {
     let Some(entry) = folder.parent().and_then(Path::parent) else {
         return;
@@ -779,22 +782,43 @@ fn attach_logs(summary: &mut Summary, folder: &Path) {
             .and_then(|v| v.get(key).and_then(|a| a.as_array()).cloned())
             .unwrap_or_default()
     };
-    let mut actions: Vec<serde_json::Value> = index("actions.json", "actions")
+    let str_of =
+        |v: &serde_json::Value, k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_owned();
+    let mnemonic_of = |a: &serde_json::Value| match str_of(a, "mnemonic") {
+        m if m.is_empty() => "Action".to_owned(),
+        m => m,
+    };
+    // A build Bazel restarted in place lists every attempt's actions; the
+    // summary is its last, so only the last attempt's are matched, in
+    // order, as the summary lists its first failures when it cuts the list.
+    let attempt_of =
+        |a: &serde_json::Value| a.get("build_attempt").and_then(|n| n.as_u64()).unwrap_or(0);
+    let actions_index = fs::read(folder.join("actions.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let failed: Vec<serde_json::Value> = index("actions.json", "actions")
         .into_iter()
         .filter(|a| a.get("success").and_then(|s| s.as_bool()) == Some(false))
         .collect();
+    // The index says how many attempts there were: the last may have kept
+    // none of a key's failures (one that wrote no output).
+    let last = actions_index
+        .as_ref()
+        .and_then(|i| i.get("build_attempts"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or_else(|| failed.iter().map(attempt_of).max().unwrap_or(0));
+    let mut actions: Vec<serde_json::Value> = failed
+        .into_iter()
+        .filter(|a| attempt_of(a) == last)
+        .collect();
     let tests = index("testlogs.json", "tests");
-    let str_of =
-        |v: &serde_json::Value, k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_owned();
     let int_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|s| s.as_i64()).unwrap_or(0);
     for f in &mut summary.failures {
         match f.kind.as_str() {
             "action" => {
-                let at = actions.iter().position(|a| {
-                    str_of(a, "label") == f.label
-                        && (str_of(a, "mnemonic") == f.detail
-                            || (str_of(a, "mnemonic").is_empty() && f.detail == "Action"))
-                });
+                let at = actions
+                    .iter()
+                    .position(|a| str_of(a, "label") == f.label && mnemonic_of(a) == f.detail);
                 if let Some(at) = at {
                     let a = actions.remove(at);
                     for stream in ["stderr", "stdout"] {
@@ -808,7 +832,8 @@ fn attach_logs(summary: &mut Summary, folder: &Path) {
                 let Some((run, shard, attempt)) = f.attempt else {
                     continue;
                 };
-                let found = tests.iter().find(|t| {
+                // The last attempt's, as the summary is.
+                let found = tests.iter().rev().find(|t| {
                     str_of(t, "label") == f.label
                         && int_of(t, "run") == run as i64
                         && int_of(t, "shard") == shard as i64
@@ -1236,6 +1261,127 @@ mod tests {
                 &s(&["bazel/1/testlogs/t/l", "bazel/1/testlogs/t/x"]),
                 &vec![],
             ]
+        );
+    }
+
+    /// A build Bazel restarted in place lists both attempts in each index,
+    /// oldest first; the summary is the last's, and so are its logs.
+    #[test]
+    fn a_restarted_builds_failures_get_the_last_attempts_logs() {
+        let entry = tempfile::tempdir().unwrap();
+        let folder = entry.path().join("bazel/1");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("actions.json"),
+            serde_json::to_vec(&serde_json::json!({"actions": [
+                {"label": "//a", "mnemonic": "Genrule", "success": false, "stderr": "actions/a/Genrule-1.stderr", "build_attempt": 1},
+                {"label": "//a", "mnemonic": "Genrule", "success": false, "stderr": "actions/a/Genrule-2.stderr", "build_attempt": 2},
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            folder.join("testlogs.json"),
+            serde_json::to_vec(&serde_json::json!({"tests": [
+                {"label": "//t", "run": 1, "shard": 1, "attempt": 1, "files": {"test.log": "testlogs/t/first"}},
+                {"label": "//t", "run": 1, "shard": 1, "attempt": 1, "files": {"test.log": "testlogs/t/retry"}},
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let failure =
+            |kind: &str, label: &str, detail: &str, attempt| bazel::bes::sink::summary::Failure {
+                kind: kind.into(),
+                label: label.into(),
+                detail: detail.into(),
+                attempt,
+                logs: vec![],
+            };
+        let mut summary = Summary {
+            failures: vec![
+                failure("action", "//a", "Genrule", None),
+                failure("test", "//t", "attempt 1", Some((1, 1, 1))),
+            ],
+            ..Default::default()
+        };
+        attach_logs(&mut summary, &folder);
+        let logs: Vec<&Vec<String>> = summary.failures.iter().map(|f| &f.logs).collect();
+        assert_eq!(
+            logs,
+            [
+                &s(&["bazel/1/actions/a/Genrule-2.stderr"]),
+                &s(&["bazel/1/testlogs/t/retry"]),
+            ]
+        );
+    }
+
+    /// A summary cut at its failure cap lists a key's first failures, so they
+    /// get the first of its logs, not the last.
+    #[test]
+    fn a_cut_summarys_failures_get_their_own_logs() {
+        let entry = tempfile::tempdir().unwrap();
+        let folder = entry.path().join("bazel/1");
+        fs::create_dir_all(&folder).unwrap();
+        let actions: Vec<serde_json::Value> = (1..=3)
+            .map(|n| serde_json::json!({"label": "//x", "mnemonic": "CppCompile", "success": false, "stderr": format!("actions/x/CppCompile-{n}.stderr"), "build_attempt": 1}))
+            .collect();
+        fs::write(
+            folder.join("actions.json"),
+            serde_json::to_vec(&serde_json::json!({ "actions": actions })).unwrap(),
+        )
+        .unwrap();
+        let failure = || bazel::bes::sink::summary::Failure {
+            kind: "action".into(),
+            label: "//x".into(),
+            detail: "CppCompile".into(),
+            attempt: None,
+            logs: vec![],
+        };
+        let mut summary = Summary {
+            failures: vec![failure(), failure()],
+            ..Default::default()
+        };
+        attach_logs(&mut summary, &folder);
+        let logs: Vec<&Vec<String>> = summary.failures.iter().map(|f| &f.logs).collect();
+        assert_eq!(
+            logs,
+            [
+                &s(&["bazel/1/actions/x/CppCompile-1.stderr"]),
+                &s(&["bazel/1/actions/x/CppCompile-2.stderr"]),
+            ]
+        );
+    }
+
+    /// The index's attempt count is the last attempt even when that attempt
+    /// kept no failure of a key: the earlier attempt's log is not its.
+    #[test]
+    fn a_last_attempt_that_kept_nothing_gets_no_earlier_log() {
+        let entry = tempfile::tempdir().unwrap();
+        let folder = entry.path().join("bazel/1");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("actions.json"),
+            serde_json::to_vec(&serde_json::json!({"build_attempts": 2, "actions": [
+                {"label": "//a", "mnemonic": "Genrule", "success": false, "stderr": "actions/a/Genrule-1.stderr", "build_attempt": 1},
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut summary = Summary {
+            failures: vec![bazel::bes::sink::summary::Failure {
+                kind: "action".into(),
+                label: "//a".into(),
+                detail: "Genrule".into(),
+                attempt: None,
+                logs: vec![],
+            }],
+            ..Default::default()
+        };
+        attach_logs(&mut summary, &folder);
+        assert!(
+            summary.failures[0].logs.is_empty(),
+            "{:?}",
+            summary.failures[0].logs
         );
     }
 }
