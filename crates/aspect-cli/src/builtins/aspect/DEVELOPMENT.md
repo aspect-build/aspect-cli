@@ -191,7 +191,7 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 | **`TipsTrait`**              | [private/lib/tips.axl](private/lib/tips.axl)                                              | `tip_suggestion`, `rules`                                                                                   | ✅ Clean. A hook list and a registration list of `tip_rule(...)` values that config and features append to, like `output_stages`: it registers values rather than setting a knob. Tip state lives on the private `_TipsTrait`, reached through the `tips` wrapper. |
 | **`Worktrees`**              | [private/lib/worktrees_trait.axl](private/lib/worktrees_trait.axl)                        | `score_slot`                                                                                                | ✅ Clean. Hook list only. |
 | **`_WorktreePoolSettings`**  | [private/lib/worktrees_trait.axl](private/lib/worktrees_trait.axl)                        | `max_slots`, `abandoned_grace_hours`                                                                        | ✅ Clean. Private settings written only by the `WorktreePool` feature from its options; the worktree tasks read it through `worktree_pool`. |
-| **`_BuildEventsSettings`**  | [private/lib/build_events_settings.axl](private/lib/build_events_settings.axl)            | `max_retries`, `retry_min_delay`, `retry_max_buffer_bytes`, `timeout`, `max_event_bytes`                    | ✅ Clean. Private settings written only by the `BuildEvents` feature from its options; the Bazel-spawning tasks read it through `build_events_settings`. |
+| **`_BuildEventsSettings`**  | [private/lib/build_events_settings.axl](private/lib/build_events_settings.axl)            | `max_retries`, `retry_min_delay`, `retry_max_buffer_bytes`, `timeout`, `max_event_bytes`                    | ✅ Clean. Private settings written only by the `BuildEvents` feature from its options, read through `build_events_settings` by `grpc_sink` ([bazel/build_events.axl](bazel/build_events.axl)), so every gRPC sink a task streams to carries them. |
 | **`LintTrait`**              | [lint.axl](lint.axl)                                                      | `lint_start`, `lint_report`, `lint_patch`, `lint_end` | ✅ Clean. Hook lists. The change set reaches `lint_start` as a `LintStartInfo` argument, and `lint_end` hooks return a `LintEndResult` (suggestion records, comment URLs) that the task merges into `data["lint"]`. |
 
 > **Note:** All public traits are re-exported from [`traits.axl`](traits.axl) for user `config.axl` ergonomics (`load("@aspect//:traits.axl", ...)`). Internal modules load from the owning module directly — the facade is a user-facing convenience, not the source of truth.
@@ -395,7 +395,7 @@ rate_limit = struct(
 
 3. **No new shared-state primitives.** Don't add a Bag, an accumulator type, a `ctx.std.kv`, a `ctx.std.db`, a per-task slot for arbitrary feature data, or any other ambient surface that lets two features pass data to each other without going through the patterns above. Every such proposal in framework history has been rejected because it relocates the abuse pattern under a different name. The three patterns above are sufficient.
 
-4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, or, for a knob several features must agree on, the owning task's `args` (e.g. `aspect lint --findings-destination`), not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features. When tasks need a setting a feature owns, the feature writes it to a private trait they read, as `WorktreePool` does with `_WorktreePoolSettings` and `BuildEvents` with `_BuildEventsSettings`.
+4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, or, for a knob several features must agree on, the owning task's `args` (e.g. `aspect lint --findings-destination`), not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features. When tasks need a setting a feature owns, the feature writes it to a private trait that they, or a helper they call, read: `WorktreePool` writes `_WorktreePoolSettings` for the worktree tasks, and `BuildEvents` writes `_BuildEventsSettings` for `grpc_sink`.
 
 5. **Don't bypass the wrappers.** Even when a trait or library is reachable, callers should always go through `lib.method(ctx, ...)`. Writing `ctx.traits[X].method(...)` directly couples the caller to the trait shape, prevents the library from changing its implementation, and defeats the wrapper's encapsulation. **The trait is implementation; the struct is API.**
 
@@ -830,7 +830,6 @@ The flow of a task that drives one Bazel invocation itself, condensed from [`war
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_link_data", "collect_bes_sinks", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "now_ms", "process_event", "usable_bb_clientd_root")
-load("./private/lib/build_events_settings.axl", "build_events_settings")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/<kind>_results.axl", "conclusion", "init_data")
 
@@ -849,8 +848,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     announce_version, announce_command = bazel_announce.resolve(ctx)
 
     # 2. BES: the task's own iterator plus the sinks the CLI streams to. Both
-    #    subscribe before the spawn. `tick_ms` makes the iterator yield `None`
-    #    when Bazel is quiet, so the drain loop still answers signals.
+    #    subscribe before the spawn. The gRPC sinks carry the `BuildEvents`
+    #    options, the event size limit among them. `tick_ms` makes the
+    #    iterator yield `None` when Bazel is quiet, so the drain loop still
+    #    answers signals.
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
     events = bazel.build_events.iterator(tick_ms = BES_DRAIN_TICK_MS)
@@ -869,7 +870,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         flags = bazel_rc.hook_flags(ctx, rc, "build"),
         build_events = [events] + bes_sinks,
-        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,

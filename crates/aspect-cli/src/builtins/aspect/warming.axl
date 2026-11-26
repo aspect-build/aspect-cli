@@ -31,7 +31,6 @@ load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "ba
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
-load("./private/lib/build_events_settings.axl", "build_events_settings")
 load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/warming_results.axl", warming_conclusion = "conclusion", warming_init_data = "init_data")
@@ -165,7 +164,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         flags = ["--nobuild"] + endpoint_auth_flags,
         build_events = build_events,
-        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,

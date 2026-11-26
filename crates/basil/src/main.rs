@@ -927,6 +927,20 @@ fn scenario(name: &str) -> Scenario {
             ..Default::default()
         },
 
+        // A failed action whose command line, 2000 arguments of 100 bytes,
+        // is past any event size limit from 64 KiB to 128 KiB but within the
+        // default 4 MiB, so how much of it survives says which limit the
+        // stream was held to.
+        "oversized_command_line" => Scenario {
+            attempts: vec![vec![
+                build_started(),
+                failed_action_with_command_line(2000, 100),
+                build_finished(1, true),
+            ]],
+            exit: ExitBehavior::Code(1),
+            ..Default::default()
+        },
+
         // Two actions and two tests whose logs are real files, as Bazel names
         // them: a failed action with stderr and a successful one with stdout
         // (Bazel reports that one only under `--build_event_publish_all_actions`),
@@ -1013,6 +1027,16 @@ fn action_executed() -> BuildEvent {
         })),
         ..Default::default()
     }
+}
+
+/// A failed `Genrule` action whose command line is `args` arguments of
+/// `arg_bytes` bytes each.
+fn failed_action_with_command_line(args: usize, arg_bytes: usize) -> BuildEvent {
+    let mut event = action_with_logs("//pkg:huge", false, None, None);
+    if let Some(Payload::Action(action)) = &mut event.payload {
+        action.command_line = (0..args).map(|_| "x".repeat(arg_bytes)).collect();
+    }
+    event
 }
 
 /// A failed or successful `Genrule` action for `label`, with its logs.

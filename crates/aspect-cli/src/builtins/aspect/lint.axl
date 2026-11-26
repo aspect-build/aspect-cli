@@ -31,7 +31,6 @@ load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "local_output_path", "now_ms", "process_event", "usable_bb_clientd_root")
-load("./private/lib/build_events_settings.axl", "build_events_settings")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -946,7 +945,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Bazel's stdout/stderr. Today suppressing both hides build failures.
     build = ctx.bazel.build(
         build_events = build_events,
-        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         execution_log = xl.sinks or False,
         announce_version = announce_version,
         announce_command = announce_command,

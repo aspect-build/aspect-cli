@@ -46,7 +46,6 @@ load("@aspect//bazel/exec_log.axl", "bazel_exec_log")
 load("@aspect//bazel/flags.axl", "bazel_flags")
 load("@aspect//bazel/rc.axl", "bazel_rc")
 load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "exit_code_of", "may_retry", "retry_attempts")
-load("../private/lib/build_events_settings.axl", "build_events_settings")
 load("../private/lib/text.axl", "join_url")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
@@ -290,7 +289,6 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     if inv.command == "test":
         handle = inv.ctx.bazel.test(
             build_events = build_events,
-            max_event_bytes = build_events_settings.max_event_bytes(inv.ctx),
             execution_log = xl.sinks or False,
             keep_action_logs = inv.trait.keep_action_logs,
             keep_test_logs = inv.trait.keep_test_logs,
@@ -303,7 +301,6 @@ def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, ev
     else:
         handle = inv.ctx.bazel.build(
             build_events = build_events,
-            max_event_bytes = build_events_settings.max_event_bytes(inv.ctx),
             execution_log = xl.sinks or False,
             keep_action_logs = inv.trait.keep_action_logs,
             keep_test_logs = inv.trait.keep_test_logs,

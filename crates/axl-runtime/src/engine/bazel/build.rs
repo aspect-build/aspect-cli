@@ -217,6 +217,9 @@ enum SinkConfig {
         uri: String,
         metadata: HashMap<String, String>,
         retry: RetryConfig,
+        /// The largest message the backend accepts; None for
+        /// [`bazel::bes::cap::DEFAULT_MAX_MESSAGE_BYTES`].
+        max_message_bytes: Option<usize>,
     },
     File {
         path: String,
@@ -284,11 +287,17 @@ impl std::fmt::Debug for SinkPhase {
 }
 
 impl BuildEventSink {
-    pub fn new_grpc(uri: String, metadata: HashMap<String, String>, retry: RetryConfig) -> Self {
+    pub fn new_grpc(
+        uri: String,
+        metadata: HashMap<String, String>,
+        retry: RetryConfig,
+        max_message_bytes: Option<usize>,
+    ) -> Self {
         Self::new(SinkConfig::Grpc {
             uri,
             metadata,
             retry,
+            max_message_bytes,
         })
     }
 
@@ -311,6 +320,17 @@ impl BuildEventSink {
         }
     }
 
+    /// The largest message a gRPC sink's backend accepts, None for a file
+    /// sink.
+    fn grpc_max_message_bytes(&self) -> Option<usize> {
+        match &*self.config {
+            SinkConfig::Grpc {
+                max_message_bytes, ..
+            } => Some(max_message_bytes.unwrap_or(bazel::bes::cap::DEFAULT_MAX_MESSAGE_BYTES)),
+            _ => None,
+        }
+    }
+
     fn grpc_uri(&self) -> Option<String> {
         match &*self.config {
             SinkConfig::Grpc { uri, .. } => Some(uri.clone()),
@@ -329,6 +349,7 @@ impl BuildEventSink {
             uri,
             metadata,
             retry,
+            ..
         } = &*self.config
         else {
             anyhow::bail!("BUG: bind_grpc called on a non-gRPC sink");
@@ -1168,7 +1189,7 @@ impl Unstarted {
         file: Option<Reservation>,
         gate: Gate,
         file_sinks: Vec<FileSink>,
-        max_event_bytes: Option<usize>,
+        max_message_bytes: Option<usize>,
     ) -> Self {
         Self {
             pending: file.map(|file| {
@@ -1176,7 +1197,7 @@ impl Unstarted {
                 // user learns of a lost copy or upload.
                 bazel::bes::sink::set_warn(crate::diag::warn);
                 let stream = BuildEventStream::new();
-                let stream = match max_event_bytes {
+                let stream = match max_message_bytes {
                     Some(n) => stream.max_message_bytes(n),
                     None => stream,
                 };
@@ -1339,6 +1360,11 @@ impl Build {
     /// pid exists, since its exit is what ends them (see `PidPair`); and the
     /// build event reader starts last, after every subscriber (iterators, gRPC
     /// and tracing sinks) is bound, so none misses the start of the stream.
+    ///
+    /// Every event is held, once for the whole stream, to the smallest
+    /// `max_event_bytes` of the gRPC sinks in `build_events` (each unset one
+    /// counting as 4 MiB), and to 4 MiB with none: iterators, file sinks and
+    /// the history read the same capped stream the backends do.
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
@@ -1361,7 +1387,6 @@ impl Build {
         history: &History,
         keep_logs: bazel::bes::sink::keep::Keep,
         publish_all_actions: bool,
-        max_event_bytes: Option<usize>,
     ) -> Result<Build, std::io::Error> {
         // Logs to keep are read from the stream, which a build keeping some
         // has even with no other consumer; and keeping them makes the history
@@ -1507,6 +1532,10 @@ impl Build {
                 grpc_sinks.push(sink);
             }
         }
+        let max_message_bytes = grpc_sinks
+            .iter()
+            .filter_map(BuildEventSink::grpc_max_message_bytes)
+            .min();
         if build_events && let Some(path) = requested_bep_path {
             tee_requested_bep_file(&mut file_sinks, path, trim_downstream);
         }
@@ -1686,7 +1715,8 @@ impl Build {
             }
             None => (None, None, None, None, None, None, None),
         };
-        let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks, max_event_bytes);
+        let build_event_stream =
+            Unstarted::new(bes_file, pids.gate(), file_sinks, max_message_bytes);
 
         // Everything that can fail once bazel runs. A failure abandons the
         // stream (see `Unstarted`), and releases the handles this spawn bound.
@@ -5807,9 +5837,106 @@ Test = task(implementation = _impl)
     retry_min_delay = "500ms",
     retry_max_buffer_bytes = 1048576,
     timeout = "30s",
+    max_event_bytes = 16777216,
 )"#
         )
         .expect("snippet should validate");
+    }
+
+    #[test]
+    fn grpc_rejects_a_max_event_bytes_under_64_kib() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", max_event_bytes = 1000)"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(
+            err.contains("max_event_bytes must be at least 65536 (64 KiB), got 1000"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The event size limit is the gRPC sink's alone: the build takes none.
+    #[test]
+    fn build_takes_no_max_event_bytes() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.bazel.build(max_event_bytes = 65536)
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect_err("max_event_bytes is not a parameter of ctx.bazel.build");
+        assert!(
+            format!("{err:?}").contains("max_event_bytes"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// How many of basil's `oversized_command_line` action's 2000 arguments
+    /// reach an iterator, with gRPC sinks of the given `max_event_bytes` (a
+    /// Starlark list, None for unset) bound to the same build.
+    fn command_line_kept(max_event_bytes: &str) -> u8 {
+        use std::time::Duration;
+        let code = format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator(kinds = ["action_executed"])
+    sinks = [
+        bazel.build_events.grpc(
+            uri = "http://127.0.0.1:1",
+            max_retries = 0,
+            retry_min_delay = "0s",
+            max_event_bytes = n,
+        )
+        for n in {max_event_bytes}
+    ]
+    build = ctx.bazel.build(
+        flags = ["--scenario=oversized_command_line"],
+        build_events = [iter] + sinks,
+        stderr = None,
+    )
+    kept = [len(event.payload.command_line) for event in iter]
+    build.wait()
+    for sink in sinks:
+        sink.wait()
+    if len(kept) != 1:
+        return 255
+    # Hundreds of arguments, so the exit code holds the count.
+    return kept[0] // 10
+
+Test = task(implementation = _impl)
+"#
+        );
+        let result = crate::test::with_timeout(Duration::from_secs(60), move || {
+            crate::test::eval(&code).with_fake_bazel().run_task(0)
+        })
+        .expect("test hung");
+        result.expect("run_task").expect("an exit code")
+    }
+
+    /// Of the event-size limits of a build's gRPC sinks, the smallest holds
+    /// the whole stream, an unset one counting as 4 MiB; with none, 4 MiB.
+    /// Each argument is 102 bytes encoded, and 4 KiB of each limit is left
+    /// for the request wrapping the event.
+    #[test]
+    fn the_smallest_grpc_sink_limit_holds_the_stream() {
+        let tenths = |limit: usize| ((limit - 4096) / 102 / 10) as u8;
+        assert_eq!(command_line_kept("[]"), 200, "no gRPC sink: 4 MiB");
+        assert_eq!(command_line_kept("[None]"), 200, "unset: 4 MiB");
+        let kept = command_line_kept("[131072]");
+        assert!(
+            (tenths(131072) - 1..=tenths(131072)).contains(&kept),
+            "one sink at 128 KiB kept {kept}0"
+        );
+        let kept = command_line_kept("[None, 131072, 98304]");
+        assert!(
+            (tenths(98304) - 1..=tenths(98304)).contains(&kept),
+            "the 96 KiB sink of three kept {kept}0"
+        );
     }
 
     #[test]
