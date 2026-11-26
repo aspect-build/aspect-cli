@@ -758,11 +758,15 @@ def _test_history(ctx):
     # `f` cycles builds, failed builds and all runs; `w` all workspaces.
     on_key(state, "h", 10)
     on_key(state, "f", 10)
+    _eq("f says what it now lists, and what it lists next", "listing failed builds · f lists all runs" in _visible(render(state, 120, 20)), True)
+    state["history_said"] = None
     failed = _visible(render(state, 120, 20))
     _eq("f: failed builds", ("f filter: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
     _eq("its count", "1 failed build of 7,701 runs in all workspaces" in failed, True)
     on_key(state, "f", 10)
     on_key(state, "w", 10)
+    _eq("w says whose runs, and how to go back", "every workspace's runs · w lists this one's" in _visible(render(state, 120, 20)), True)
+    state["history_said"] = None
     every = _visible(render(state, 120, 20))
     _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "w: all workspaces" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
     on_key(state, "f", 10)

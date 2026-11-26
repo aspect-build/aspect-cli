@@ -4953,6 +4953,7 @@ _UI_KEYS = {k: True for k in list(new_ui().keys()) + [
     "unseen_errors",
     "holding",
     "ctrl_c_ms",
+    "history_said",
     "leave_on_return",
 ]}
 
@@ -5429,7 +5430,7 @@ def render_history(state: dict, cols: int, rows: int) -> str:
         out.append(_c("border") + "└─" + _RESET + _c("muted") + note + _RESET + _c("border") + "─" * max(0, cols - 3 - text_width(note)) + "┘" + _RESET)
     else:
         out.append(_box_bottom(cols))
-    note = _ctrl_c_note(state)
+    note = _ctrl_c_note(state) or _history_said(state)
     if state.get("help"):
         keys = " ↑↓ scroll · any other key closes"
     elif note:
@@ -5506,12 +5507,33 @@ def _show_live(state: dict):
     state["ctrl_c_ms"] = None
     _browsing_interrupts(state)
 
+# What the History screen's toggles say they did, and how to undo it, as
+# the dashboard's own toggles do (`said`).
+_HISTORY_SAID = {
+    "f": lambda s: "listing %s · f lists %s" % (s["browser"]["filter"], _HISTORY_FILTERS[(_HISTORY_FILTERS.index(s["browser"]["filter"]) + 1) % len(_HISTORY_FILTERS)]),
+    "w": lambda s: "this workspace's runs · w lists every workspace's" if s["browser"]["here"] else "every workspace's runs · w lists this one's",
+    "m": lambda s: "mouse on: the wheel scrolls, a click picks · m gives it to the terminal" if s.get("mouse") else "mouse off: the terminal selects text · m takes it back",
+}
+
+def _history_said(state) -> str:
+    """What the History screen's last toggle said, for `_SAID_MS` after it;
+    else ""."""
+    said = state.get("history_said")
+    if said == None or int(monotonic() * 1000) > said[1]:
+        return ""
+    return said[0]
+
 def _k_history(state, key, page):
+    state["history_said"] = None
     if key == "m":
-        return _k_mouse(state, key, page)
+        _k_mouse(state, key, page)
+        state["history_said"] = (_HISTORY_SAID["m"](state), int(monotonic() * 1000) + _SAID_MS)
+        return False
     if key == "?":
         return _k_help(state, key, page)
     what = history_key(state, key, page)
+    if key in ("f", "w") and (key == "f" or state["browser"]["workspace"]):
+        state["history_said"] = (_HISTORY_SAID[key](state), int(monotonic() * 1000) + _SAID_MS)
     b = state["browser"]
     if what == "open":
         row = history_rows(state)[b["selected"]]
