@@ -18,7 +18,9 @@ It takes the screen when the task starts and shows:
     while it runs from the actions Bazel reports with every one published
     (`--dashboard:actions=all`, the default: internal ones have no command
     line) and the execution log's cache hits, and with only failures
-    published (`failed`), `other` for what is neither ran nor cached; at its right end how far it is
+    published (`failed`, or a build whose events Bazel sends out itself:
+    `publish_all_actions_unless_sent_out`), `other` for what is neither ran
+    nor cached; at its right end how far it is
     (`45% · 3,830 of 8,563+`, `+` while Bazel analyses), at the end its
     actions and what was reused; a build `<`/`>` picked, its own;
   - the actions running now, from Bazel's own progress area, oldest first,
@@ -166,7 +168,7 @@ load("@std//base64.axl", "base64")
 load("@std//theme.axl", "theme")
 load("@std//time.axl", "monotonic")
 load("../private/lib/agent.axl", "under_agent")
-load("../private/lib/aspect_flags.axl", "publish_all_actions")
+load("../private/lib/aspect_flags.axl", "publish_all_actions_unless_sent_out")
 load("../private/lib/results_pages.axl", "bes_results_url", "results_pages")
 load("../private/lib/tips.axl", "SURFACE_DASHBOARD", "collect_tips_sorted", "severity_rank", "silence_tip", "unsilence_tip")
 
@@ -5873,7 +5875,7 @@ def _dashboard_impl(ctx: FeatureContext):
     t.output_display = "none"
     if ctx.args.actions == "all":
         # Every action reported to this task alone, not to its BES sinks.
-        publish_all_actions(t)
+        publish_all_actions_unless_sent_out(t, state)
 
     # A processor needs a stage; the console's defaults may be off.
     t.output_stages.append(bazel.output.observe({"dashboard:error": r"^ERROR:"}))
@@ -5912,7 +5914,7 @@ Dashboard = feature(
         "actions": args.string(
             default = "all",
             values = ["failed", "all"],
-            description = "Which actions Bazel reports to the screen: `all` (the default) adds --build_event_publish_all_actions for this task alone (BES backends get the extra events only if your own flags or rc ask), so Results tells what ran, was cached or was internal while the build runs, and `a` lists the actions that wrote output; `failed` reports only those that failed (the screen then says `other` for the rest until the build's metrics come).",
+            description = "Which actions Bazel reports to the screen: `all` (the default) adds --build_event_publish_all_actions for this task alone (BES backends the CLI streams to get the extra events only if your own flags or rc ask), so Results tells what ran, was cached or was internal while the build runs, and `a` lists the actions that wrote output; `failed` reports only those that failed (the screen then says `other` for the rest until the build's metrics come). A build with a --remote_cache or --remote_executor (unless --experimental_build_event_upload_strategy=local) or a --bes_backend of its own reports only failed actions either way: Bazel would send every action's event out itself, and with the cache down it stops the whole event stream at the first one.",
         ),
     },
 )

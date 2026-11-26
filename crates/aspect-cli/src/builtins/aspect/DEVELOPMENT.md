@@ -490,7 +490,10 @@ flag, and unless the user's own flags or rc ask for it, the BES backends the
 CLI streams to, its file sinks and a requested `--build_event_binary_file` get
 the stream as Bazel sends it without the flag, while hooks and iterators see
 every action. A `--bes_backend` or `--build_event_json_file` Bazel serves
-itself is not trimmed.
+itself is not trimmed. A feature that can do without every action when Bazel
+sends the events out itself (a `--bes_backend`, or a remote cache it uploads
+the events' files to, whose outage stops the stream at the first successful
+action) asks through `publish_all_actions_unless_sent_out` instead.
 
 The mpsc channel between the broadcaster and the iterator is unbounded; iterate promptly to keep memory in check, or call `events.drain()` to stop accumulating events.
 

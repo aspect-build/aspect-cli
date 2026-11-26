@@ -425,6 +425,17 @@ def _actions_tests(ctx):
     _eq("and on the bar", "╳" in _visible(action_bar(split, 40)), True)
     _eq("not while it runs", action_split(dict(cut, building = True, progress = ["[4 / 4] no actions running"]))["failed"], 0)
 
+    # The same run with every action asked for: each event names a local
+    # file the dead cache would get, and Bazel's stream stopped after
+    # `configuration` (16 events, no action, no target, no count; 31 with
+    # failed ones only). So with a remote cache the build gets failed ones
+    # only (`publish_all_actions_unless_sent_out`), and says `other`.
+    early = _screen(ctx, ["x"], building = False, ended = True, done_total = (4, 4, False), all_actions = False, inv = {"build_finished": struct(exit_code = struct(name = "REMOTE_ERROR", code = 34))})
+    split = action_split(early)
+    _eq("cut after configuration", [split[k] for k in ("final", "ran", "rest", "failed", "done")], [False, 0, 4, 0, 4])
+    _eq("drawn as other", [_visible(r) for r in action_results(split, 40)], ["▒ 4 other"])
+    _eq("its key says what other is", any(["other: unchanged" in r for r in help_rows(early, 200)]), True)
+
     # Every action published (the default), live: r39's run of //dc:all
     # //two:all with --build_event_publish_all_actions posted 14 executed
     # actions: the workspace status with no command line (internal), ten
