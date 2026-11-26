@@ -1,12 +1,12 @@
-"""Unit tests for history.axl: how `aspect history` words and lays out a
-record. Reading the records is `ctx.std.history`'s, covered by the
+"""Unit tests for history_records.axl: how `aspect history` words and lays
+out a record. Reading the records is `ctx.std.history`'s, covered by the
 runtime's tests.
 
 Run with:
   aspect dev test-history
 """
 
-load("@aspect//history.axl", "command", "list_lines", "outcome", "show_lines", "took", "when")
+load("./private/lib/history_records.axl", "command", "list_lines", "outcome", "show_lines", "took", "when")
 
 def _eq(label, got, want):
     if got != want:
@@ -48,6 +48,11 @@ def _test_list_lines(_ctx):
     _eq("columns line up", lines[0].index("ok"), lines[1].index("exit 1"))
     _eq("the id's start", lines[1][:8], "fedcba98")
     _eq("the task, as typed", "worktree list" in lines[1], True)
+    hostile = list_lines([_record(argv = ["aspect", "run", "//t", "--", "--msg=one\ntwo\x1b[2J\u009b"])])[0]
+    _eq("a recorded line break, escape or C1 control is shown, not drawn", ("\n" in hostile, "\x1b" in hostile, "\u009b" in hostile, "one\\u000atwo" in hostile), (False, False, False, True))
+    trojan = list_lines([_record(argv = ["aspect", "run", "x\u202eabc\u200b"])])[0]
+    _eq("so are a bidi override and a zero-width mark", ("\u202e" in trojan, "\u200b" in trojan), (False, False))
+    _eq("and so in a run's own lines", [l for l in show_lines(_record(argv = ["aspect", "x\ny"])) if "\n" in l], [])
 
 def _test_show_lines(_ctx):
     record = _record(

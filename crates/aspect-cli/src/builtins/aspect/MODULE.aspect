@@ -18,7 +18,7 @@ use_task("wrapper.axl", "tools_bazel_wrapper")
 use_task("init.axl", "init")
 use_task("mcp.axl", "mcp")
 use_task("gc.axl", "gc")
-use_task("history.axl", "history_list", "history_show")
+use_task("history.axl", "history_list", "history_show", "history_browse")
 use_task(
     "worktree.axl",
     "add",
