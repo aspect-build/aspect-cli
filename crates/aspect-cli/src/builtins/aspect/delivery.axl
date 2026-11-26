@@ -82,8 +82,7 @@ Either fails at startup when it cannot be used; the task never falls back to
 the other. A runner opts into the delivery API explicitly:
 
     load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api")
-    if DeliveryState in ctx.traits:
-        ctx.traits[DeliveryState].connect = delivery_api.connect
+    ctx.traits[DeliveryState].connect = delivery_api.connect
 
 deliveryd is the Unix-socket HTTP daemon Aspect Workflows runners start. One
 that advertises API v2 serves the delivery API's routes, so it behaves like
@@ -304,7 +303,6 @@ load("./private/lib/delivery_state.axl", "DeliveryState", "delivery_state")
 load("./private/lib/deliveryd.axl", "deliveryd")
 load("./private/lib/environment.axl", "debug", "detail", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
-load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/links.axl", "CLI_DELIVERY_STATE_URL")
 load("./private/lib/random.axl", "random_hex")
@@ -313,7 +311,6 @@ load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_an
 load("./private/lib/runnable.axl", "normalize_label")
 load("./private/lib/text.axl", "pluralize", "utf8_len")
 load("./private/lib/timestamp.axl", "rfc3339_utc")
-load("./private/lib/tips.axl", "tips")
 
 # `--dry-run`'s three states. `false` delivers; `true` (what a bare --dry-run
 # means) previews without building; `build` previews and runs the delivery
@@ -331,6 +328,7 @@ ONCE_PER_DIGEST = "once_per_digest"
 SKIP_POLICIES = [WHEN_CHANGED, ONCE_PER_DIGEST]
 ONCE_PER_DIGEST_TAG = "delivery:once_per_digest"
 
+# Fired by the `delivery` task.
 DeliveryTrait = trait(
     create_scheduler = attr(
         typing.Callable[[TaskContext, DeliveryPlan], DeliverySelector] | None,
@@ -2572,12 +2570,6 @@ Delivery state is kept in the runner's deliveryd on an Aspect Workflows runner, 
     } | bazel_flags.passthrough_args(
         post_note = " A forwarded flag applies to every build phase, change detection included — so one that adds non-determinism to release artifacts (--stamp, --workspace_status_command) belongs in --release-bazel-flag instead.",
     ) | bazel_announce.args("the delivery build phases") | bes_args(),
-    traits = [
-        BazelTrait,
-        DeliveryTrait,
-        DeliveryState,
-        HealthCheckTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _delivery_impl,
 )
 

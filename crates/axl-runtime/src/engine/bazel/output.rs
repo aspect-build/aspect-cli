@@ -1043,7 +1043,7 @@ BazelTrait = trait(
         let root = logs.path().to_path_buf();
         let body = body.replace("HISTORY", &root.display().to_string());
         let script = format!(
-            "{TRAIT}\n{prelude}\ndef _impl(ctx):\n    t = ctx.traits[BazelTrait]\n{body}\nTest = task(implementation = _impl, traits = [BazelTrait])\n"
+            "{TRAIT}\n{prelude}\ndef _impl(ctx):\n    t = ctx.traits[BazelTrait]\n{body}\nTest = task(implementation = _impl)\n"
         );
         crate::test::with_timeout(Duration::from_secs(60), move || {
             crate::test::eval(&script)
@@ -1379,13 +1379,45 @@ def _impl(ctx):
     if not build.wait().success: return 1
     if build.output_log != None: return 2
     return 0
-Test = task(implementation = _impl, traits = [Lookalike])
+Test = task(implementation = _impl)
 "#;
         let exit = crate::test::with_timeout(Duration::from_secs(60), move || {
             crate::test::eval(script)
                 .with_fake_bazel()
                 .with_config("def config(ctx):\n    pass\n")
                 .run_task(0)
+        })
+        .expect("the task hung")
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// The console's trait is found even when nothing has read it: its
+    /// default instance is created for the build, so its default
+    /// `output_start` hook adds a stage that processes the console.
+    #[test]
+    fn the_consoles_trait_applies_when_nothing_has_read_it() {
+        let script = r#"
+def _start(ctx):
+    return [bazel.output.rewrite("hunter2", "***")]
+
+BazelTrait = trait(
+    output_stages = attr(list, default = []),
+    output_display = attr(str, default = "auto"),
+    output_intercept = attr(list, default = []),
+    output_end = attr(list, default = []),
+    output_start = attr(list, default = [_start]),
+)
+
+def _impl(ctx):
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
+    if not build.wait().success: return 1
+    if build.output_log == None: return 2
+    return 0
+Test = task(implementation = _impl)
+"#;
+        let exit = crate::test::with_timeout(Duration::from_secs(60), move || {
+            crate::test::eval(script).with_fake_bazel().run_task(0)
         })
         .expect("the task hung")
         .expect("run_task");

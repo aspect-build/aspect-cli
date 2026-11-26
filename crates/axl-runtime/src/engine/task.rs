@@ -32,7 +32,6 @@ use super::arguments::Arguments;
 use super::names::{to_command_name, to_display_name, validate_arg_name, validate_command_name};
 use super::store::Env;
 use super::task_context::TaskContext;
-use super::r#trait::{FrozenTraitType, TraitType, extract_trait_type_id};
 
 pub const MAX_TASK_GROUPS: usize = 5;
 
@@ -61,18 +60,6 @@ pub trait TaskLike<'v> {
     fn overrides(&self) -> Value<'v>;
     /// Implementation function lifted to the live heap via `to_value()`.
     fn implementation(&self) -> Value<'v>;
-    /// Trait values this task opts into, lifted to the live heap via
-    /// `to_value()`. The returned `Vec` is suitable for storing on a fresh
-    /// `Task<'v>` (e.g. when building an alias).
-    fn trait_values(&self) -> Vec<Value<'v>>;
-
-    /// Trait type ids this task opts into (via the `traits = [...]` kwarg).
-    fn trait_type_ids(&self) -> Vec<u64> {
-        self.trait_values()
-            .into_iter()
-            .filter_map(extract_trait_type_id)
-            .collect()
-    }
 
     /// Returns only the CLI-exposed args (non-Custom entries), as (name, &Arg) pairs.
     fn cli_args(&self) -> Vec<(&str, &Arg)> {
@@ -149,7 +136,6 @@ pub struct Task<'v> {
     pub(super) show_task_options: bool,
     pub(super) group: Vec<String>,
     pub(super) kind: RefCell<String>,
-    pub(super) traits: Vec<values::Value<'v>>,
     pub(super) path: PathBuf,
     /// Mutable override store for `ctx.tasks["k"].args.foo = ...`.
     /// Always points to an `Arguments` value on the same heap.
@@ -178,22 +164,12 @@ impl<'v> Task<'v> {
     pub fn kind(&self) -> String {
         self.kind.borrow().clone()
     }
-    pub fn traits(&self) -> &[values::Value<'v>] {
-        &self.traits
-    }
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
     /// `Arguments` value carrying config.axl overrides for this task.
     pub fn overrides(&self) -> Value<'v> {
         self.overrides
-    }
-    /// Get trait type IDs this task opts into.
-    pub fn trait_type_ids(&self) -> Vec<u64> {
-        self.traits
-            .iter()
-            .filter_map(|v| extract_trait_type_id(*v))
-            .collect()
     }
 
     /// Allocate a live `Task` on `heap` from a `FrozenTask` reference.
@@ -207,7 +183,6 @@ impl<'v> Task<'v> {
             .downcast_ref::<FrozenTask>()
             .expect("from_frozen called with non-FrozenTask value");
         let overrides = heap.alloc(Arguments::with_schema(frozen.args.keys().cloned()));
-        let traits: Vec<Value<'v>> = frozen.traits.iter().map(|fv| fv.to_value()).collect();
         Task {
             r#impl: frozen.r#impl.to_value(),
             args: frozen.args.clone(),
@@ -217,7 +192,6 @@ impl<'v> Task<'v> {
             show_task_options: frozen.show_task_options,
             group: frozen.group.clone(),
             kind: RefCell::new(frozen.kind.clone()),
-            traits,
             path: frozen.path.clone(),
             overrides,
         }
@@ -251,9 +225,6 @@ impl<'v> TaskLike<'v> for Task<'v> {
     }
     fn implementation(&self) -> Value<'v> {
         self.r#impl
-    }
-    fn trait_values(&self) -> Vec<Value<'v>> {
-        self.traits.clone()
     }
     fn overrides(&self) -> Value<'v> {
         self.overrides
@@ -315,8 +286,6 @@ impl<'v> values::Freeze for Task<'v> {
     type Frozen = FrozenTask;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
         let frozen_impl = self.r#impl.freeze(freezer)?;
-        let frozen_traits: Result<Vec<_>, _> =
-            self.traits.iter().map(|f| f.freeze(freezer)).collect();
         Ok(FrozenTask {
             args: self.args,
             r#impl: frozen_impl,
@@ -326,7 +295,6 @@ impl<'v> values::Freeze for Task<'v> {
             show_task_options: self.show_task_options,
             group: self.group,
             kind: self.kind.into_inner(),
-            traits: frozen_traits?,
             path: self.path,
             overrides: self.overrides.freeze(freezer)?,
         })
@@ -345,7 +313,6 @@ pub struct FrozenTask {
     pub(super) show_task_options: bool,
     pub(super) group: Vec<String>,
     pub(super) kind: String,
-    pub(super) traits: Vec<values::FrozenValue>,
     pub(super) path: PathBuf,
     pub(super) overrides: values::FrozenValue,
 }
@@ -369,21 +336,11 @@ impl FrozenTask {
     pub fn args(&self) -> &SmallMap<String, Arg> {
         &self.args
     }
-    pub fn traits(&self) -> &[values::FrozenValue] {
-        &self.traits
-    }
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
     pub fn overrides(&self) -> values::FrozenValue {
         self.overrides
-    }
-    /// Get trait type IDs this task opts into.
-    pub fn trait_type_ids(&self) -> Vec<u64> {
-        self.traits
-            .iter()
-            .filter_map(|f| extract_trait_type_id(f.to_value()))
-            .collect()
     }
 }
 
@@ -414,9 +371,6 @@ impl<'v> TaskLike<'v> for FrozenTask {
     }
     fn implementation(&self) -> Value<'v> {
         self.r#impl.to_value()
-    }
-    fn trait_values(&self) -> Vec<Value<'v>> {
-        self.traits.iter().map(|f| f.to_value()).collect()
     }
     fn overrides(&self) -> Value<'v> {
         self.overrides.to_value()
@@ -480,7 +434,7 @@ fn resolve_task_metadata(
 }
 
 /// Build a fresh `Task<'v>` that aliases `base`. The alias shares the base's
-/// `implementation` callable, `traits` vector and `show_task_options` setting
+/// `implementation` callable and `show_task_options` setting
 /// (all properties of the shared implementation) and inherits nothing else —
 /// `kind`, `group`, `summary`, `description`, and `friendly_kind` come from
 /// the alias's own kwargs. An empty `kind` defers naming to `export_as`.
@@ -537,7 +491,6 @@ fn build_alias<'v>(
         show_task_options: base.show_task_options(),
         group,
         kind: RefCell::new(kind),
-        traits: base.trait_values(),
         path: Env::current_script_path(eval)?,
         overrides,
     })
@@ -548,7 +501,7 @@ fn task_methods(builder: &mut MethodsBuilder) {
     /// Define an alias of this task with overridden arg defaults.
     ///
     /// The alias is a new top-level CLI command that shares this task's
-    /// `implementation`, `traits` and `show_task_options`, but exposes
+    /// `implementation` and `show_task_options`, but exposes
     /// overridden defaults for one or more of its args. The base task is
     /// undisturbed — both commands coexist, and a CLI flag still wins over the
     /// alias's default (so `aspect buildifier --formatter-target=X` overrides
@@ -615,6 +568,11 @@ fn task_methods(builder: &mut MethodsBuilder) {
     }
 }
 
+/// The error for `task(traits = ...)`. The parameter is accepted only to
+/// fail with this, rather than Starlark's generic unexpected-parameter error.
+pub(crate) const TRAITS_REMOVED: &str = "task(traits = ...) was removed: tasks no longer declare \
+     traits; ctx.traits[T] works for any trait. Delete the traits argument.";
+
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Declares a task — a named CLI command with an implementation function.
@@ -649,6 +607,13 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// - `show_task_options` — list the `--task:*` flags (a `Task Options` section) and the
     ///   features footer in `--help`. Set it on tasks that report to CI status surfaces, where
     ///   naming the invocation matters. The flags are accepted either way; default `False`.
+    ///
+    /// ## Traits
+    ///
+    /// Tasks do not declare traits: `ctx.traits[T]` works for any trait type
+    /// and reads the run's one instance, the one configs write and features
+    /// register hooks on. Passing `traits` fails with a message saying to
+    /// delete it.
     ///
     /// ## Aliases
     ///
@@ -686,7 +651,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] friendly_kind: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] kind: String,
-        #[starlark(require = named, default = UnpackList::default())] traits: UnpackList<Value<'v>>,
+        #[starlark(require = named)] traits: Option<Value<'v>>,
         #[starlark(require = named, default = false)] show_task_options: bool,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
@@ -728,17 +693,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             args_.insert(arg_name, cli_arg);
         }
 
-        // Trait list elements must be TraitType / FrozenTraitType values.
-        let all_traits = traits.items;
-        for t in &all_traits {
-            if t.downcast_ref::<TraitType>().is_none()
-                && t.downcast_ref::<FrozenTraitType>().is_none()
-            {
-                return Err(anyhow::anyhow!(
-                    "traits list must contain trait types, got '{}'",
-                    t.get_type()
-                ));
-            }
+        if traits.is_some() {
+            return Err(anyhow::anyhow!("{}", TRAITS_REMOVED));
         }
 
         let overrides = eval
@@ -753,7 +709,6 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             show_task_options,
             group: group.items,
             kind: RefCell::new(kind),
-            traits: all_traits,
             path: Env::current_script_path(eval)?,
             overrides,
         })
@@ -1129,6 +1084,17 @@ base = task(implementation = _impl)
 aliased = base.alias(group = ["a", "b", "c", "d", "e", "f"])
 "#,
             "group levels",
+        );
+    }
+
+    #[test]
+    fn task_traits_argument_fails_with_the_removal_message() {
+        assert_eval_err_contains(
+            r#"
+MyTrait = trait(x = attr(int, default = 0))
+base = task(implementation = _impl, traits = [MyTrait])
+"#,
+            super::TRAITS_REMOVED,
         );
     }
 }

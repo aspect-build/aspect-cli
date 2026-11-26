@@ -860,11 +860,10 @@ def config(ctx: ConfigContext):
     # Delivery state in Aspect Cloud, except in a job that sets
     # ASPECT_CLI_DELIVERY_BACKEND=deliveryd, which fails at startup on a runner
     # without a deliveryd rather than falling back to Aspect Cloud.
-    if DeliveryState in ctx.traits:
-        if ctx.std.env.var("ASPECT_CLI_DELIVERY_BACKEND") == "deliveryd":
-            ctx.traits[DeliveryState].connect = deliveryd.connect
-        else:
-            ctx.traits[DeliveryState].connect = delivery_api.connect
+    if ctx.std.env.var("ASPECT_CLI_DELIVERY_BACKEND") == "deliveryd":
+        ctx.traits[DeliveryState].connect = deliveryd.connect
+    else:
+        ctx.traits[DeliveryState].connect = delivery_api.connect
 
     testing = ctx.std.env.var("ASPECT_CLI_TESTING")
 

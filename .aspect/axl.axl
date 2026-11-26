@@ -55,7 +55,6 @@ load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_a
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
 load("@aspect//private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments", "scope_files")
 load("@aspect//private/lib/template_presets.axl", "TemplatePreset", "template_presets")
-load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
 load("@std//base64.axl", "base64")
 load("./lambda.axl", "lambda_with_global_bind")
@@ -4614,10 +4613,4 @@ axl = task(
     summary = "Run the AXL unit test suite defined in .aspect/axl.axl.",
     implementation = impl,
     args = {},
-    # tips.TRAITS must be in the trait list because several tested
-    # helpers (`detect_build_url`, `_preferred_token_pair`, …) emit
-    # tips on certain env-state branches and `add_tip` dispatches
-    # through the underlying trait. The tip emit is dedup-by-id so
-    # the test run sees at most one fire per id.
-    traits = tips.TRAITS,
 )

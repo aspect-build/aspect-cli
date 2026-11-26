@@ -19,7 +19,7 @@ Exits non-zero when the Bazel server is unhealthy. Off an Aspect Workflows runne
 there is no runner to check, so it prints an informational line and exits 0.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_flags", "bazel_rc")
+load("@aspect//bazel.axl", "bazel_announce", "bazel_flags", "bazel_rc")
 load(
     "./private/lib/environment.axl",
     "error",
@@ -52,9 +52,5 @@ runner_health_check = task(
     summary = "Run the Aspect Workflows runner health check.",
     description = "Run the runner health check that other tasks run during their Setup phase: wait for cache warming to complete, print the last runner health check and warming status, then probe the runner's Bazel server and signal the runner unhealthy if it is wedged. Exits non-zero when the Bazel server is unhealthy. Off a Workflows runner there is nothing to check, so it prints an informational line and exits 0.",
     implementation = _impl,
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-    ],
     args = bazel_flags.args("the health check") | bazel_announce.args("the health check"),
 )

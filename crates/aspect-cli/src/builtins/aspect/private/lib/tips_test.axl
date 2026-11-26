@@ -1154,5 +1154,4 @@ tips_tests = task(
     summary = "Run the tips AXL unit tests.",
     implementation = _test_impl,
     args = {},
-    traits = tips.TRAITS,
 )

@@ -1556,5 +1556,4 @@ rate_limit_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = [],
 )

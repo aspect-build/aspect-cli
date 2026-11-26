@@ -20,7 +20,7 @@ use crate::color::StreamColor;
 ///
 /// Runs after all config.axl files have been evaluated.
 /// - `ctx.args` — the feature's resolved args (config values and CLI args merged)
-/// - `ctx.traits` — the full mutable fragment map (inject hooks into fragments)
+/// - `ctx.traits` - the run's mutable trait map, shared with configs and the task
 /// - `ctx.std` — standard library
 /// - `ctx.http` — HTTP client
 /// - `ctx.hooks` — pre-task and post-task hooks around the task body
@@ -156,7 +156,8 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
         Ok(ctx.args)
     }
 
-    /// The full mutable trait map. Inject into traits via `ctx.traits[TraitType].hook.append(...)`.
+    /// The run's mutable trait map, the one configs wrote and the task reads.
+    /// Inject into traits via `ctx.traits[TraitType].hook.append(...)`.
     #[starlark(attribute)]
     fn traits<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
         let ctx = this

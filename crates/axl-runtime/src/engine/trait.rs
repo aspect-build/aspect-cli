@@ -1001,7 +1001,13 @@ pub fn extract_trait_instance_type_id(value: Value) -> Option<u64> {
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
-    /// Creates a trait type — a shared configuration object that tasks opt into.
+    /// Creates a trait type - a shared configuration object.
+    ///
+    /// A run has one instance of each trait type, created with its defaults
+    /// the first time anything reads `ctx.traits[T]`: a config, a feature or
+    /// a task. Configs write it, features register hooks on it, and any task
+    /// reads it; tasks do not declare the traits they use. A trait's own
+    /// docstring names the tasks that read it or fire its hooks.
     ///
     /// ## Naming
     ///

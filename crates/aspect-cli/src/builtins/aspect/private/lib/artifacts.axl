@@ -10,16 +10,6 @@ callers degrade gracefully without probing for the feature.
 
 CI platforms: GitHub Actions, Buildkite, CircleCI, GitLab.
 
-Task registration:
-
-    load("./private/lib/artifacts.axl", "artifacts")
-
-    def task():
-        return Task(
-            traits = [BazelTrait, ...] + artifacts.TRAITS,
-            ...
-        )
-
 Producer:
 
     load("./private/lib/artifacts.axl", "artifacts")
@@ -211,7 +201,6 @@ artifacts = struct(
     list_kind = _list_kind,
     by_label = _by_label,
     browse_url = lambda ctx: detect_artifacts_browse_url(ctx),
-    TRAITS = [_ArtifactsTrait],
 )
 
 # Artifact naming convention per CI platform

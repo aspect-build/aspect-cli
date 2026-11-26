@@ -29,7 +29,7 @@ use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
 use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
-use crate::engine::r#trait::{TraitInstance, extract_trait_type_id};
+use crate::engine::r#trait::TraitInstance;
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
 use crate::eval::exit::TaskExit;
@@ -227,8 +227,10 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// Global feature map on the shared heap. Eagerly allocated empty in `new()`;
     /// Phase 1 inserts each discovered feature.
     features: Value<'v>,
-    /// Global trait map allocated on the shared heap during Phase 2.
-    trait_map_value: Option<Value<'v>>,
+    /// The run's one trait map on the shared heap, eagerly allocated empty
+    /// in `new()`: `ctx.traits` for configs, features and the task. Any
+    /// trait type's instance is created in it on first access.
+    trait_map_value: Value<'v>,
     /// Telemetry handle allocated on the heap and shared between
     /// ConfigContext and FeatureContext as `ctx.telemetry`. The runtime
     /// drains exporter specs out of it (via `drain_exporters`) after phase 3.
@@ -246,7 +248,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             loader,
             tasks: heap.alloc(TaskMap::new()),
             features: heap.alloc(FeatureMap::new()),
-            trait_map_value: None,
+            trait_map_value: heap.alloc(TraitMap::new()),
             telemetry_value: Telemetry::alloc(heap, loader.env.telemetry.clone()),
             hooks_value: TaskHooks::alloc(heap),
         }
@@ -578,7 +580,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     /// Phase 2: evaluate config files against the task and feature values from Phase 1.
     ///
-    /// A `TraitMap` is allocated on the shared heap. Config functions mutate `Task`
+    /// Configs write trait instances into the run's shared `TraitMap`
+    /// (`ctx.traits`), which features and the task read. Config functions mutate `Task`
     /// and `Feature` values in-place via `set_attr` — the same `Value<'v>` objects
     /// discovered in Phase 1 are reused, so subsequent phases see the updated state.
     /// `ctx.tasks.add(...)` may insert additional tasks into `self.tasks`.
@@ -616,29 +619,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     pub fn execute_configs(&mut self, configs: &[(&Path, &'l Mod)]) -> PhaseFailures {
         let heap = self.heap();
 
-        // Register trait types from all tasks into a TraitMap; instances are created lazily
-        // on first access (from config.axl or the task implementation).
-        let trait_map = TraitMap::new();
-        for task_val in self
-            .tasks
-            .downcast_ref::<TaskMap>()
-            .expect("self.tasks is a TaskMap")
-            .values()
-        {
-            if let Some(task) = task_val.downcast_ref::<Task>() {
-                for trait_value in task.traits() {
-                    if let Some(id) = extract_trait_type_id(*trait_value) {
-                        trait_map.insert(id, *trait_value);
-                    }
-                }
-            }
-        }
-        let trait_map_value = heap.alloc(trait_map);
-        self.trait_map_value = Some(trait_map_value);
-
         let context_value = heap.alloc(ConfigContext::new(
             self.tasks,
-            self.trait_map_value.unwrap(),
+            self.trait_map_value,
             self.features,
             self.telemetry_value,
             self.hooks_value,
@@ -671,8 +654,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // instance a config touched is checked once they have all run.
         let trait_map = self
             .trait_map_value
-            .and_then(|v| v.downcast_ref::<TraitMap>())
-            .expect("trait map was just allocated");
+            .downcast_ref::<TraitMap>()
+            .expect("self.trait_map_value is a TraitMap");
         let mismatches: Vec<String> = trait_map
             .entries()
             .into_iter()
@@ -825,11 +808,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     ) -> Result<(), EvalError> {
         let heap = self.heap();
 
-        let trait_map_value = self.trait_map_value.ok_or_else(|| {
-            EvalError::UnknownError(anyhow!(
-                "execute_configs() must be called before execute_features_with_args()"
-            ))
-        })?;
+        let trait_map_value = self.trait_map_value;
         let task_paths = Arc::new(self.task_paths());
 
         for feature in self.features() {
@@ -969,16 +948,20 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let (error_style, _) = role_style(&palette, "label.error", color);
         let reset = if color { aspect_theme::RESET } else { "" };
 
-        let task_trait_map = match self.trait_map_value {
-            Some(tmap_val) => {
-                if let Some(tmap) = tmap_val.downcast_ref::<TraitMap>() {
-                    tmap.scoped(&task.trait_type_ids(), heap)
-                } else {
-                    heap.alloc(TraitMap::new())
-                }
+        // The task shares the run's map. Every exported trait type is
+        // registered (not instantiated) so the console finds `BazelTrait`
+        // by its fields even when nothing has read it yet.
+        let trait_map = self
+            .trait_map_value
+            .downcast_ref::<TraitMap>()
+            .expect("self.trait_map_value is a TraitMap");
+        for owned in self.loader.exported_trait_types() {
+            let type_value = heap.access_owned_frozen_value(&owned).to_value();
+            if let Some(id) = crate::engine::r#trait::extract_trait_type_id(type_value) {
+                trait_map.insert(id, type_value);
             }
-            None => heap.alloc(TraitMap::new()),
-        };
+        }
+        let task_trait_map = self.trait_map_value;
 
         // Allocate `task_info` on the heap and keep the resulting Value
         // so we can read back timing + phases after `_impl` returns.

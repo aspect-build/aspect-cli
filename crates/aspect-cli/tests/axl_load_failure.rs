@@ -1186,7 +1186,7 @@ MyTrait = trait(scores = attr(list[int], default = []))
 def _impl(ctx: TaskContext) -> int:
     return 0
 
-traittask = task(summary = "Uses a trait.", traits = [MyTrait], implementation = _impl)
+traittask = task(summary = "Uses a trait.", implementation = _impl)
 "#;
     // Assignment is type-checked as it happens; a list mutated in place is
     // not, which is why the check runs once at the end of phase 2.

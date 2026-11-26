@@ -42,7 +42,7 @@ message the task ended on, so no surface is left on "running".
 # the bottom is the task-facing surface, and `traits.axl` re-exports the
 # trait + repro records for user `config.axl` files.
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation", "bazel_rc")
+load("@aspect//bazel.axl", "bazel_invocation", "bazel_rc")
 load("./ansi.axl", "ansi")
 load("./environment.axl", "detect_ci", "feature_logger")
 load("./health_check.axl", "HealthCheckTrait", "run_health_checks")
@@ -467,8 +467,9 @@ def resolve_surface_update(ctx, lifecycle, surface, status, final, style, body) 
     ))
 
 # Lifecycle hooks any task can fire, so features like GithubStatusChecks
-# observe progress without coupling to Bazel-specific hooks. Tasks add it to
-# their trait list via `phases.TRAITS`; features index `ctx.traits[Phases]`.
+# observe progress without coupling to Bazel-specific hooks. Features index
+# `ctx.traits[Phases]`. Fired by every task that drives a `phases.new` handle:
+# build, test, run, lint, format, gazelle, ci warming and delivery.
 Phases = trait(
     # Primary hook: `(ctx, update: TaskUpdate) -> None`, called for every
     # structured update. Features close over their own state.
@@ -504,10 +505,10 @@ Phases = trait(
     # and features register first, so a config hook always runs *after* the
     # surface has posted.
     #
-    # Lives on the lifecycle trait (not the surface's own) because a feature
-    # can't contribute a trait — `feature()` takes no `traits` — and tasks must
-    # not reference features. Every task already declares this trait, so a hook
-    # here is reachable from `.aspect/config.axl` with no task changes.
+    # Lives on the lifecycle trait (not the surface's own) because tasks must
+    # not reference features, and every task that drives a surface fires
+    # this trait's hooks, so a hook here is reachable from
+    # `.aspect/config.axl` with no task changes.
     status_surface_update = attr(list[typing.Callable[[TaskContext, StatusSurfaceUpdate], StatusSurfaceDecision]], default = []),
 )
 
@@ -906,13 +907,13 @@ def pick_task_status(data, kind_key, had_failure, terminal):
     return "passed" if terminal else "running"
 
 def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []):
-    """Run the `setup` phase — all pre-task work — and return the task's
-    `Bazelrc` (or `None` for a non-building task).
+    """Run the `setup` phase - all pre-task work - and return the task's
+    `Bazelrc`.
 
-    Every built-in task opens with this as the first thing in `_impl`. The
-    `Phases`, `HealthCheckTrait`, and `BazelTrait` traits are read from
-    `ctx.traits`; a task that omits `HealthCheckTrait`/`BazelTrait` simply
-    skips that step. Steps, in execution order:
+    The Bazel entry point: every built-in Bazel task opens with this as the
+    first thing in `_impl` (a task that resolves its own rc uses
+    `_setup_surface`). The `Phases` and `HealthCheckTrait` traits are read
+    from `ctx.traits`. Steps, in execution order:
 
       1. `append_runner_job_history` — self-gates on the Workflows env var.
       2. Open the `🔧 Setup` phase mark, carrying `kind`/`data`/`subject`.
@@ -920,11 +921,9 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
          self-init (GHSC check run / BK annotation) and render the first
          surface body from `data`. Runs before the steps that can fail
          (rc parse, health check) so failures surface on a created check run.
-      3. Bazel setup (only when `BazelTrait` is declared): `bazel_rc.setup`
-         resolves flags, parses `.bazelrc`, sets the result with
-         `ctx.bazel.use_rc`, and returns it. Else `None`.
-      4. `health_check` hooks (only when `HealthCheckTrait` is declared) — must
-         run after step 3 (they read its startup flags). On unhealthy, concludes
+      3. Bazel setup: `bazel_rc.setup` resolves flags, parses `.bazelrc`,
+         sets the result with `ctx.bazel.use_rc`, and returns it.
+      4. `health_check` hooks - must run after step 3 (they read its startup flags). On unhealthy, concludes
          the surface ("Health check failed") and ends the task with the
          message and no traceback — never returns.
 
@@ -936,13 +935,12 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
       kind:        result-library kind (e.g. `"bazel_results"`) for renderer dispatch.
       data:        results dict (from `init_data()`); rendered on the first
                    surface body and the health-failure terminal.
-      command:     rc sections to expand ("build"/"test"); ignored sans BazelTrait.
-      base_flags:  default flags for `bazel_rc.setup`; ignored sans BazelTrait.
+      command:     rc sections to expand ("build"/"test").
+      base_flags:  default flags for `bazel_rc.setup`.
 
     Returns:
-      Bazelrc | None: the parsed rc when `BazelTrait` is declared
-      (also set with `ctx.bazel.use_rc`), else `None`. Does not return
-      when a health check fails (step 4).
+      Bazelrc: the parsed rc (also set with `ctx.bazel.use_rc`). Does not
+      return when a health check fails (step 4).
     """
     append_runner_job_history(ctx)
 
@@ -966,16 +964,12 @@ def _setup(ctx, surface, subject, kind, data, command = "build", base_flags = []
         subject = subject,
     )
 
-    # Bazel rc parse + use_rc (building tasks only). Must precede the health
-    # checks, which inspect that rc's startup flags.
-    rc = None
-    if BazelTrait in ctx.traits:
-        rc = bazel_rc.setup(ctx, command, base_flags = base_flags)
+    # Must precede the health checks, which inspect the rc's startup flags.
+    rc = bazel_rc.setup(ctx, command, base_flags = base_flags)
 
     # Health checks last. A non-None result is fatal: concludes the surface
     # and fails the task — never returns.
-    hc_trait = ctx.traits[HealthCheckTrait] if HealthCheckTrait in ctx.traits else None
-    health_error = run_health_checks(ctx, hc_trait)
+    health_error = run_health_checks(ctx, ctx.traits[HealthCheckTrait])
     if health_error != None:
         _fail_health_check(ctx, surface, kind, data, health_error)
 
@@ -1022,8 +1016,7 @@ def _setup_surface(ctx, surface, subject, kind, data):
         subject = subject,
     )
 
-    hc_trait = ctx.traits[HealthCheckTrait] if HealthCheckTrait in ctx.traits else None
-    health_error = run_health_checks(ctx, hc_trait)
+    health_error = run_health_checks(ctx, ctx.traits[HealthCheckTrait])
     if health_error != None:
         _fail_health_check(ctx, surface, kind, data, health_error)
 
@@ -1066,7 +1059,7 @@ def _new(ctx, data):
     Methods:
       ph.ctx  — the bound TaskContext (for helpers that also need ctx directly).
       ph.data — the bound data dict. Kept a stable reference across `reset`.
-      ph.setup(subject, kind, command="build", base_flags=[]) -> Bazelrc|None
+      ph.setup(subject, kind, command="build", base_flags=[]) -> Bazelrc
       ph.update(status, progress, kind="", data=None, priority=True, phase=None,
                 final=False, conclusion="", exit_code=0, subject="")
                 — `data=None` uses the held dict; pass `data={}` for a data-less
@@ -1163,14 +1156,12 @@ def _new(ctx, data):
     )
 
 # The task-facing lifecycle surface. `phases.new(ctx, data)` returns the handle
-# above; tasks import only `phases`, splat `phases.TRAITS` into their trait
-# list, and construct records off it (`phases.Phase` / `.ProgressStyles` /
-# `.Update` / `.ReproFixCommand`) — so `lifecycle.axl` is a single import at
-# the use site. `publish_expanded_phases` / `bk_phase_section_marker` stay
+# above; tasks import only `phases` and construct records off it
+# (`phases.Phase` / `.ProgressStyles` / `.Update` / `.ReproFixCommand`), so
+# `lifecycle.axl` is a single import at the use site. `publish_expanded_phases` / `bk_phase_section_marker` stay
 # free functions (they're ctx/phase utilities, not bound to a task's data).
 phases = namespace(
     new = _new,
-    TRAITS = [Phases],
     publish_expanded_phases = _publish_expanded_phases,
     bk_phase_section_marker = _bk_phase_section_marker,
     Phase = Phase,

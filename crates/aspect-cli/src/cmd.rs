@@ -2945,12 +2945,6 @@ mod tests {
         fn implementation(&self) -> Value<'v> {
             unimplemented!("test stub")
         }
-        fn trait_type_ids(&self) -> Vec<u64> {
-            vec![]
-        }
-        fn trait_values(&self) -> Vec<starlark::values::Value<'v>> {
-            vec![]
-        }
     }
 
     /// Summary is non-empty so `Cmd::build` doesn't warn in every test.

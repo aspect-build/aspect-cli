@@ -23,14 +23,14 @@ def _show_impl(ctx: TaskContext) -> int:
     print("fields:%s|%s|%s|%s|%s" % (t.bes_max_retries, t.bes_retry_min_delay, t.bes_retry_max_buffer_bytes, t.bes_timeout, t.max_build_event_bytes))
     return 0
 
-show = task(implementation = _show_impl, traits = [BazelTrait], args = {})
+show = task(implementation = _show_impl, args = {})
 
 def _sink_impl(ctx: TaskContext) -> int:
     grpc_sink(ctx.traits[BazelTrait], "grpc://127.0.0.1:1")
     print("sink built")
     return 0
 
-sink = task(implementation = _sink_impl, traits = [BazelTrait], args = {})
+sink = task(implementation = _sink_impl, args = {})
 "#;
 
 /// Run `aspect show <args>` in a scratch workspace under an empty `$HOME`.

@@ -34,6 +34,7 @@ output; the feature only carries the options to the tasks.
 HOOK_BUDGET_MS = 2000
 HOOK_SCORE_LIMIT = 1000000000
 
+# Fired by `aspect worktree add`, which scores slots.
 Worktrees = trait(
     score_slot = attr(
         list[typing.Callable[[TaskContext, dict, dict], int]],
@@ -79,10 +80,9 @@ WorktreePool = feature(
     },
 )
 
-# The worktree tasks' view of the `WorktreePool` options: tasks add `TRAITS` to
-# their own and read the values through the accessors.
+# The worktree tasks' view of the `WorktreePool` options, read through the
+# accessors.
 worktree_pool = struct(
-    TRAITS = [_WorktreePoolSettings],
     max_slots = lambda ctx: ctx.traits[_WorktreePoolSettings].max_slots,
     abandoned_grace_hours = lambda ctx: ctx.traits[_WorktreePoolSettings].abandoned_grace_hours,
 )

@@ -16,10 +16,8 @@ use std::process::Command;
 use common::{aspect_cli, base_env};
 
 const FIXTURE: &str = r#"
-load("@aspect//private/lib/artifacts.axl", "artifacts")
 load("@aspect//private/lib/bazel_results.axl", "init_data")
 load("@aspect//private/lib/lifecycle.axl", "phases")
-load("@aspect//private/lib/tips.axl", "tips")
 
 def _impl(ctx):
     ph = phases.new(ctx, init_data())
@@ -33,7 +31,7 @@ def _impl(ctx):
     )
     return ph.update("passed", "Done", kind = "bazel_results", final = True, conclusion = "Done")
 
-probe = task(summary = "Test fixture.", implementation = _impl, traits = phases.TRAITS + artifacts.TRAITS + tips.TRAITS)
+probe = task(summary = "Test fixture.", implementation = _impl)
 "#;
 
 /// Appends each `annotate` body to `$AGENT_LOG`, separated by a marker line.

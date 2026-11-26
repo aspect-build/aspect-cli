@@ -26,14 +26,12 @@ load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_con
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
 load("./private/lib/git_diff.axl", "git_diff_args")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
-load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/path_utils.axl", "normalize_files_for_cwd")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in")
 load("./private/lib/text.axl", "pluralize")
-load("./private/lib/tips.axl", "tips")
 
 def _git_capture(ctx, *args):
     """Run `git <args>` → (stdout, exit_code, stderr). Stdout untrimmed."""
@@ -715,9 +713,5 @@ format = task(
             minimum = 0,
         ),
     } | bazel_flags.args("the formatter build") | bazel_announce.args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

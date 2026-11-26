@@ -297,6 +297,9 @@ def _display_runner_health(environment, job_history, color):
     report = rewrite_runner_health_output(data["output"], job_history)
     print(report if color else ansi.strip(report))
 
+# Fired by every task that opens its setup phase through `phases.setup` or
+# `phases.setup_surface`: build, test, run, lint, format, gazelle, ci warming
+# and delivery.
 HealthCheckTrait = trait(
     health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks run during the task's setup phase to validate system health. Return a non-None error message to fail the task (e.g. an unhealthy Bazel server); return None when healthy."),
 )

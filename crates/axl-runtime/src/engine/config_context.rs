@@ -228,7 +228,9 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
         Ok(ctx.tasks)
     }
 
-    /// Access to the trait map for configuring trait instances.
+    /// Access to the trait map for configuring trait instances. It is the
+    /// run's one map, which features and the task read too; any trait type
+    /// can be indexed, its instance created with its defaults on first access.
     ///
     /// Usage:
     /// ```starlark

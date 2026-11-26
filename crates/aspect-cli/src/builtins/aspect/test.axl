@@ -5,10 +5,7 @@ A default 'test' task that wraps a 'bazel test' command.
 load("@aspect//bazel.axl", "BazelTrait", "bazel_invocation", "exit_code_of")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
-load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
-load("./private/lib/tips.axl", "tips")
 
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
 # `bazel info output_path`. Bazel has no flag to redirect this, so
@@ -146,9 +143,5 @@ test = task(
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
     } | bazel_invocation.targets_arg("test") | bazel_invocation.args("the test invocation") | repro_flavor_args(),
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )
