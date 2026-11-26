@@ -1,0 +1,442 @@
+"""The History screen's child runs (`aspect history browse`, `r` and `R`): a
+history record's command run again as a child `aspect-cli`.
+
+`start_child` runs it with the bridge on (`private/feature/bridge.axl`) and
+the dashboard off, its stdout and stderr read on threads of their own
+(`Readable.poller()`), in a process group of its own, which, with the
+screen up, has no controlling terminal (as every unmarked child a screen
+runs), so a prompt in it fails rather than competing with the screen's
+keys. It is told this screen's size by `COLUMNS` and `LINES`, and by
+`ASPECT_GROUP_SIGNALLER` that this process's SIGINT to its group is one its
+Bazel has, as a terminal's Ctrl+C. Its run is the screen's live one
+(`feature/dashboard.axl`): `pump_child`, called every frame, takes what has
+come since, the bridge's messages (console lines, progress, results pages,
+a build's start and end, an attempt's end), the build events it follows
+from the file the child names (`bazel.build_events.follow`), and the task's
+own output, which joins the console; once the child has exited and both
+streams ended, the run ends with its exit code. While a past run is shown,
+all of it goes to the live run aside (`on_run`), out of sight.
+
+A task that needs the terminal itself (`needs_terminal`: `aspect run`, this
+screen), or any run with `R`, cannot run so: `hand_over` gives the child the
+terminal instead (`Command.foreground()`, so Ctrl+C is the child's alone),
+the screen released until it exits and Enter is pressed, as vim's `:!` does.
+
+Both take the run's command line as typed from the history as a command
+(`ctx.std.history.command`), whose arguments are never handed back; what
+is shown of it is the history's redacted line (`shown_command`).
+
+Both run this process's own binary (`std.env.current_exe()`), not the one
+that ran the record.
+"""
+
+load("@aspect//feature/dashboard.axl", "add_lines", "end_build", "new_build", "new_run", "on_run", "take_event")
+load("@std//time.axl", "now_ms", "sleep")
+load("./history_records.axl", "BRIDGE_ADDED", "outcome", "task_name")
+load("./results_pages.axl", "results_pages")
+load("../feature/bridge.axl", "bridge_message")
+
+# The flags a run's own command line goes without when run again: with
+# `r`, the dashboard's and the bridge's (a flag may be given once, and a run
+# `r` made has the bridge's), the one that takes a value without `=` taking
+# the next argument too (the booleans, and `stay`, which has a bare form,
+# never do), the bridge on and the dashboard off added instead; with `R`,
+# only what `r` added.
+_DROP = ["--dashboard", "--bridge", "--task:id"]
+_DROP_WITH_VALUE = ["--dashboard:actions", "--task:id"]
+_DROP_IN_TERMINAL = ["--bridge", "--task:id"] + BRIDGE_ADDED[1:]
+_DROP_WITH_VALUE_IN_TERMINAL = ["--task:id"]
+
+# How long after the child exits, or a backlog of its output is drained,
+# the rest is still waited for: a process it left behind may hold its
+# stdout or stderr open for good, and write to it.
+_EXIT_GRACE_MS = 2000
+
+# The most lines one poll takes of a stream; a poll that took this many
+# had more waiting, a backlog still being drained.
+_POLL_LINES = 10000
+
+# The longest a backlog is drained after the child exits, and once a stop
+# is asked, both counted from the exit, so one a process it left behind
+# keeps writing never holds the run open.
+_DRAIN_MAX_MS = 15000
+_STOP_DRAIN_MS = 5000
+
+# The tasks that need the terminal to themselves, as their group and kind.
+_TERMINAL_TASKS = [([], "run"), (["history"], "browse")]
+
+def needs_terminal(record: dict) -> bool:
+    """Whether `record`'s task needs the terminal to itself (`aspect run`,
+    this screen), so runs again only with it (`hand_over`)."""
+    task = record.get("task", {})
+    return (task.get("group", []), task.get("kind", "")) in _TERMINAL_TASKS
+
+def _dropped(arg: str, drop: list) -> bool:
+    """Whether `drop` leaves `arg` out, as `ctx.std.history.command` does."""
+    return [d for d in drop if arg == d or ("=" not in d and (arg.startswith(d + ":") or arg.startswith(d + "=")))] != []
+
+def child_args(argv: list, bridged = True) -> list:
+    """A run's command line (`argv`, the program first; as the history
+    shows it, redacted) as it runs again, for showing it: what
+    `ctx.std.history.command` makes of the line as typed, with `r`
+    (`bridged`) or `R`."""
+    drop = _DROP if bridged else _DROP_IN_TERMINAL
+    with_value = _DROP_WITH_VALUE if bridged else _DROP_WITH_VALUE_IN_TERMINAL
+    args = argv[1:]
+    end = args.index("--") if "--" in args else len(args)
+    kept = []
+    skip = False
+    for arg in args[:end]:
+        if skip:
+            skip = False
+            continue
+        if _dropped(arg, drop):
+            skip = arg in with_value
+            continue
+        kept.append(arg)
+    return kept + (BRIDGE_ADDED if bridged else []) + args[end:]
+
+def shown_command(record: dict, bridged = True) -> str:
+    """How a run's command reads as it runs again: its redacted command
+    line as `child_args` has it (any `--task:id` left out, as it gets a new
+    one), without the flags the History screen adds."""
+    return " ".join(["aspect"] + [a for a in child_args(record.get("argv") or ["aspect"], bridged) if a not in BRIDGE_ADDED])
+
+def redacted(record: dict) -> bool:
+    """Whether the command line the history shows of `record` is not as
+    typed: it has a secret the run again keeps."""
+    return bool(record.get("secret_flags")) or "<REDACTED>" in " ".join(record.get("argv") or [])
+
+def again_command(state: dict, record: dict, bridged: bool, task_id = ""):
+    """`record`'s run as a command to run again (`ctx.std.history.command`,
+    its arguments as typed, never handed back), or None when its command
+    line was not kept so. Any `--task:id` the run was given is left out,
+    as an ID is a run's own: it gets a new one, `task_id` when given."""
+    history = state["browser"]["history"]
+    id = record.get("task", {}).get("id", "")
+    if bridged:
+        return history.command(id, drop = _DROP, drop_with_value = _DROP_WITH_VALUE, add = BRIDGE_ADDED)
+    return history.command(id, drop = _DROP_IN_TERMINAL, drop_with_value = _DROP_WITH_VALUE_IN_TERMINAL, add = ["--task:id=" + task_id] if task_id else [])
+
+def _hex(n: int, digits: int) -> str:
+    """`n`'s last `digits` hex digits, zero-padded."""
+    text = "%x" % n
+    return ("0" * digits + text)[-digits:]
+
+def new_task_id(pid: int, ms: int, n: int) -> str:
+    """A task ID (a version 4 UUID's form) for the `n`th run this process,
+    `pid`, starts at `ms`, for finding the run's record by it: a hash of
+    all three first, as the first 8 characters are the ID as shown, then
+    the time and the count, which keep it unique."""
+    key = "%d:%d:%d" % (pid, ms, n)
+    head = hash("a" + key) % (1 << 32)
+    mid = hash("b" + key) % (1 << 32)
+    return "%s-%s-4%s-8%s-%s" % (
+        _hex(head, 8),
+        _hex(mid, 4),
+        _hex(mid // 65536, 3),
+        _hex(n, 3),
+        _hex(ms, 12),
+    )
+
+def child_running(state: dict) -> bool:
+    """Whether a child run is going."""
+    child = state.get("child")
+    return child != None and not child["done"]
+
+# Why a run cannot run again when this aspect-cli's own binary is gone
+# (replaced by an upgrade, a launcher cache pruned, a rebuild elsewhere).
+_EXE_GONE = "this aspect-cli's binary is gone (replaced or removed): start the browser again"
+
+def _cannot_run(ctx, record: dict, cmd):
+    """Why `record` cannot run again, or None."""
+    if cmd == None:
+        return "its command line was not kept as typed"
+    cwd = record.get("cwd", "")
+    if not cwd or not ctx.std.fs.exists(cwd) or not ctx.std.fs.is_dir(cwd):
+        return "the directory it ran in is gone"
+    if not ctx.std.fs.exists(ctx.std.env.current_exe()):
+        return _EXE_GONE
+    return None
+
+def start_child(state: dict, ctx, record: dict, now_ms: int):
+    """Run `record`'s command again as a child reporting over the bridge,
+    its run the live one, to show; or say why not, as a string."""
+    cmd = again_command(state, record, True)
+    why = _cannot_run(ctx, record, cmd)
+    if why != None:
+        return why
+    cols, rows = state["screen"].size() if state.get("screen") != None else (120, 40)
+    proc = (
+        cmd
+            .current_dir(record["cwd"])
+            .stdin("null")
+            .stdout("piped")
+            .stderr("piped")
+            .env("COLUMNS", str(cols))
+            .env("LINES", str(rows))
+            .env(
+            # This process signals the child's group as a terminal would.
+            "ASPECT_GROUP_SIGNALLER",
+            str(ctx.std.process.id()),
+        )
+            .process_group(0)
+            .spawn(
+            # Its own token: the task's stop does not run its ladder on it,
+            # whose SIGTERM 1.5s later is a child aspect-cli's cue to kill
+            # all it runs; the browser sends it the one SIGINT
+            # (`stopping_child`).
+            cancellation = ctx.cancellation.new(),
+        )
+    )
+    state["child"] = {
+        "proc": proc,
+        "out": proc.stdout().poller(),
+        "err": proc.stderr().poller(),
+        "events": None,
+        "status": None,
+        "exited_ms": 0,
+        "done": False,
+        "asked": 0,
+        "record": record,
+        "task_id": None,
+    }
+    run = new_run(task = task_name(record), phase = "Starting…")
+    run.update(
+        start_ms = now_ms,
+        task_start_ms = now_ms,
+        now_ms = now_ms,
+        rerun_of = record.get("task", {}).get("id", "")[:8],
+        note = "Running again: %s · q stops it" % shown_command(record),
+        note_until = now_ms + 2000,
+    )
+    return run
+
+def pump_child(state: dict, now_ms: int):
+    """Take what the child sent since the last frame into the live run. It
+    ends once the child has exited and both its streams ended, or a moment
+    after it exited (`_EXIT_GRACE_MS`, counted from when a backlog of its
+    output was drained, so all of it is read), as a process it left behind
+    may hold them open and write to them. However much that writes, a
+    drain is cut `_DRAIN_MAX_MS` after the exit, `_STOP_DRAIN_MS` once asked
+    to stop. Its streams are then closed."""
+    child = state.get("child")
+    if child == None or child["done"]:
+        return
+    change = lambda s: _pump(s, child, now_ms)
+    if state.get("live") != None:
+        state["live"] = on_run(state, state["live"], change)
+    else:
+        change(state)
+
+    # One the user stopped reads so in the list, once it is no longer
+    # pinned.
+    if child["done"] and child["asked"] > 0 and child.get("task_id"):
+        state["browser"].setdefault("stopped", {})[child["task_id"]] = True
+
+def _take_events(s: dict, child: dict) -> bool:
+    """The child's build events since the last call (`take_event`, which
+    starts a build's events over when Bazel restarts it in place); whether
+    there were any."""
+    if child["events"] == None:
+        return False
+    events = child["events"].poll()
+    for event in events:
+        take_event(s, event)
+    return len(events) > 0
+
+def _take_output(s: dict, child: dict, now_ms: int) -> bool:
+    """What the child wrote to its stdout (the task's text and the bridge's
+    messages) and stderr since the last call, at most `_POLL_LINES` of each;
+    whether either had that many, a backlog still being drained."""
+    out = child["out"].poll(limit = _POLL_LINES)
+    err = child["err"].poll(limit = _POLL_LINES)
+    for line in out:
+        text, message = bridge_message(line)
+        if message == None or text:
+            add_lines(s, [text], cli = True)
+        if message != None:
+            _take_message(s, child, message, now_ms)
+    if err:
+        add_lines(s, err, cli = True)
+    return len(out) >= _POLL_LINES or len(err) >= _POLL_LINES
+
+def _pump(s: dict, child: dict, now_ms: int):
+    _take_events(s, child)
+    if _take_output(s, child, now_ms):
+        child["draining_ms"] = now_ms
+    s["pages"] = results_pages(s["bes_base"], s["bazel_uuid"], s["update"])
+    s["now_ms"] = now_ms
+    if child["status"] == None:
+        child["status"] = child["proc"].try_wait()
+        if child["status"] != None:
+            child["exited_ms"] = now_ms
+    streams_ended = child["out"].ended and child["err"].ended
+
+    # Once it exited: ended when its streams did, else a moment after its
+    # output went quiet, and whatever is left behind writes, a while after
+    # the exit, shorter asked to stop.
+    exited = child["status"] != None
+    quiet_since = max(child["exited_ms"], child.get("draining_ms", 0))
+    cap = _STOP_DRAIN_MS if child["asked"] > 0 else _DRAIN_MAX_MS
+    if exited and (streams_ended or now_ms - quiet_since >= _EXIT_GRACE_MS or now_ms - child["exited_ms"] >= cap):
+        # What reached its streams by now, its last messages among them,
+        # and the rest of its events, however many are left.
+        _take_output(s, child, now_ms)
+        for _ in range(1 << 20):
+            if not _take_events(s, child):
+                break
+        if s.get("building"):
+            end_build(s, now_ms)
+
+        # Nothing more is read: a process left behind that still writes no
+        # longer fills memory.
+        child["out"].close()
+        child["err"].close()
+        code = child["status"].code
+        child["done"] = True
+        s.update(ended = True, cancelling = False, progress = [], verdict = code == 0)
+        if child["asked"] > 0:
+            # However it then exited (Bazel's 8, an interrupt's 130), the
+            # user stopped it.
+            s.update(stopped = True, phase = "Stopped by you")
+        elif code == 0:
+            s["phase"] = "Done"
+        else:
+            s["phase"] = "Exit %d" % code if code != None else "Ended by a signal"
+
+def _take_message(s: dict, child: dict, message: dict, now_ms: int):
+    """One bridge message (`private/feature/bridge.axl`) into the run `s`, as the
+    dashboard's own hooks take a build in process: its first frame (or a
+    retried attempt's) starts the build's own counts (`new_build`), its end
+    folds it to a row (`end_build`)."""
+    kind = message["t"]
+    if kind == "task":
+        child["task_id"] = message.get("id")
+        return
+    if kind in ("events", "frame") and (not s.get("building") or s["fresh"]):
+        new_build(s, now_ms)
+        s["building"] = True
+    if kind == "events" and message.get("path"):
+        # A new build's stream, or the same one after a restart in place,
+        # which `take_event` starts over on its own.
+        child["events"] = bazel.build_events.follow(message["path"])
+    elif kind == "frame":
+        add_lines(s, message.get("lines", []), message.get("links"), message.get("colours"))
+        s["dropped"] = s.get("dropped", 0) + (message.get("dropped", 0) or 0)
+        progress = message.get("progress", [])
+        if progress:
+            s["progress"] = progress
+            s["phase"] = progress[0]
+    elif kind == "update":
+        s["update"] = message.get("data") or {}
+    elif kind == "attempt_end":
+        s["fresh"] = True
+    elif kind == "end":
+        # The build's last events first, so its row folds with all of them.
+        for _ in range(1 << 20):
+            if not _take_events(s, child):
+                break
+        s["log_path"] = message.get("log") or s["log_path"]
+        s["progress"] = []
+        if s.get("building"):
+            end_build(s, now_ms)
+
+def stopping_child(state: dict):
+    """Ask the running child to stop because the task was told to (SIGTERM,
+    the terminal closed): one SIGINT, the first, and never more, as a
+    second is a child aspect-cli's cue to kill all it runs and exit before
+    its record is written. It winds down on its own clock, inside the
+    task's own grace; the run reads as cancelling, and its wait after it
+    exits is the shorter one asked to stop."""
+    child = state.get("child")
+    if child == None or child["done"]:
+        return
+    live = state["live"] if state.get("live") != None else state
+    if child["asked"] == 0:
+        child["proc"].interrupt()
+        child["asked"] = 1
+    live["cancelling"] = True
+
+def hand_over(state: dict, ctx, record: dict):
+    """Run `record`'s command again with the terminal its own: the screen
+    released, the child run in the foreground, then Enter (or Ctrl+C)
+    waited for before the screen is taken again (`state["screen"]`); a stop
+    meanwhile leaves it released, for the caller's loop to end on. Returns
+    the reason it could not run, as a string, or how it ended: a dict of
+    `stopped` (the user's Ctrl+C ended it) and `record` (its record in the
+    history, or None)."""
+    b = state["browser"]
+    b["started"] = b.get("started", 0) + 1
+    task_id = new_task_id(ctx.std.process.id(), now_ms(), b["started"])
+    cmd = again_command(state, record, False, task_id = task_id)
+    why = _cannot_run(ctx, record, cmd)
+    if why != None:
+        return why
+    state["screen"].release()
+    err = ctx.std.io.stderr
+    shown = shown_command(record, bridged = False)
+    err.write("\n» %s has the terminal · Ctrl+C goes to it · Enter returns when it ends\n" % shown)
+
+    # In the terminal's foreground, so its Ctrl+C is the child's alone. On
+    # a token of its own, as a bridged child is, so the task's stop does not
+    # run its ladder on it: told to stop, this task asks it once (SIGTERM)
+    # and waits for it, inside the task's own grace.
+    proc = (
+        cmd
+            .current_dir(record["cwd"])
+            .stdin("inherit")
+            .stdout("inherit")
+            .stderr("inherit")
+            .foreground()
+            .spawn(cancellation = ctx.cancellation.new())
+    )
+    asked = False
+    status = None
+    for _ in range(1 << 30):
+        status = proc.try_wait()
+        if status != None:
+            break
+        if ctx.cancellation.root.cancelled and not asked:
+            proc.terminate()
+            asked = True
+        sleep(50)
+
+    # Stopped meanwhile (SIGTERM, the terminal closed): nothing more is
+    # written to it nor the screen taken again, its state["screen"] left
+    # released, so the browser's loop ends as it would on the list.
+    if ctx.cancellation.root.cancelled:
+        return None
+
+    # The terminal's Ctrl+C reaches the child alone: an interrupt's exit,
+    # or its record saying it was cancelled, is the user's stop.
+    code = status.code
+    mine = b["history"].get(task_id)
+    stopped = code == 130 or status.signal == 2 or (mine != None and outcome(mine) == "cancelled")
+    if stopped:
+        ended = "■ stopped by you"
+    elif code == 0:
+        ended = "✔ done"
+    else:
+        ended = "✗ exit %d" % code if code != None else "✗ ended by a signal"
+    err.write("\n» %s · Enter goes back to the history\n" % ended)
+
+    # Waited for on the main screen, the child's output still on it, with
+    # Ctrl+C a key that goes back too, rather than a signal ending the
+    # browser. A stop (SIGTERM, a hangup) ends the wait too, so the
+    # browser's own quit path runs rather than the runtime's backstop.
+    wait = ctx.std.term.take(alt_screen = False)
+    wait.interrupts(False)
+    for _ in range(1 << 20):
+        if wait.key(timeout_ms = 200) in ("enter", "ctrl-c", "ctrl-d") or ctx.cancellation.root.cancelled:
+            break
+    wait.release()
+    if ctx.cancellation.root.cancelled:
+        return None
+    screen = ctx.std.term.take()
+    screen.interrupts(False)
+    screen.wheel_keys(True)
+    if state.get("mouse"):
+        screen.mouse(True)
+    state["screen"] = screen
+    return {"stopped": stopped, "record": mine}
