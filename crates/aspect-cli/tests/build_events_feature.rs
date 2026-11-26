@@ -166,6 +166,31 @@ fn show_configured(option: &str, value: &str) -> Output {
     show_in(&[], &[], Some(&configured(option, value)))
 }
 
+/// A `config.axl` value is held to the bounds a command-line one is.
+#[test]
+fn a_bad_config_value_is_refused_before_the_task_runs() {
+    assert_refused(
+        show_configured("max_retries", "-1"),
+        "--build-events:max-retries must be at least 0, got -1",
+    );
+    assert_refused(
+        show_configured("retry_max_buffer_bytes", "-1"),
+        "--build-events:retry-max-buffer-bytes must be at least 0, got -1",
+    );
+    assert_refused(
+        show_configured("max_event_bytes", "1000"),
+        "--build-events:max-event-bytes must be at least 65536 (64 KiB), got 1000",
+    );
+    assert_refused(
+        show_configured("retry_min_delay", "\"soon\""),
+        "--build-events:retry-min-delay must be a duration such as '500ms', '2s' or '1m', got 'soon'",
+    );
+    assert_refused(
+        show_configured("timeout", "\"later\""),
+        "--build-events:timeout must be a duration such as '500ms', '2s' or '1m', got 'later'",
+    );
+}
+
 /// A `config.axl` value skips the flag parser's range check, so the feature
 /// refuses one past what the runtime takes instead of failing when a sink is
 /// built.
