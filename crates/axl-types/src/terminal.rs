@@ -135,18 +135,25 @@ pub fn turn_at_line_end(fd: i32, bound: Duration, settle: Duration) -> Option<Tu
 /// Every target held, stdout's first, each given up after `bound`: for
 /// moving fds 1 and 2 (a screen's capture taken or given back), so no write
 /// lands half on either side of the move.
-pub fn every_turn_within(bound: Duration) -> Vec<Turn> {
-    let mut held: Vec<Turn> = turn_within(1, bound).into_iter().collect();
+pub fn every_turn_within(bound: Duration) -> Turns {
+    let mut held = Turns([None, None]);
+    held.0[0] = turn_within(1, bound);
     if target(2) != target(1) {
-        held.extend(turn_within(2, bound));
+        held.0[1] = turn_within(2, bound);
     }
     held
 }
 
-/// Whether `turns` (from [`every_turn_within`]) holds every target: none
-/// was given up on.
-pub fn holds_every(turns: &[Turn]) -> bool {
-    turns.len() == if target(2) == target(1) { 1 } else { 2 }
+/// The targets [`every_turn_within`] held, by target: a stalled one given
+/// up on is not among them.
+pub struct Turns([Option<Turn>; 2]);
+
+impl Turns {
+    /// Whether `fd`'s target (1 or 2) is held, so its turn must not be taken
+    /// again on this thread.
+    pub fn holds(&self, fd: i32) -> bool {
+        target(fd).is_some_and(|t| self.0[t].is_some())
+    }
 }
 
 /// Note `bytes` written to `fd`'s target: whether it is left mid-line.

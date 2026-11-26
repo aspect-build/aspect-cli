@@ -1023,7 +1023,7 @@ pub(crate) fn suspend() -> bool {
         finishing = (h.stdout.take(), h.stderr.take());
         h.suspended = true;
     }
-    let held = axl_types::terminal::holds_every(&moving);
+    let held = moving.holds(2);
     if dump_output_turned(DUMP_LINES, "… {n} older lines: aspect history show", held) {
         DUMPED.store(true, Ordering::SeqCst);
     }
@@ -1376,12 +1376,13 @@ fn dump_test_delay() {
     }
 }
 
-/// [`dump_output`], with every target already held by the caller (`held`):
-/// for a release or a suspend, which holds them from giving the descriptors
-/// back to the end of the dump, so no line printed meanwhile shows both live
-/// and in it. Where giving the descriptors back gave up on one (a writer
-/// stalled on it), `held` is false and the dump takes stderr's turn itself,
-/// as a dump of its own does.
+/// [`dump_output`], with stderr's target already held by the caller
+/// (`held`): for a release or a suspend, which holds the targets from giving
+/// the descriptors back to the end of the dump, so no line printed meanwhile
+/// shows both live and in it. Where giving the descriptors back gave up on
+/// stderr's (a writer stalled on it), `held` is false and the dump takes
+/// stderr's turn itself, as a dump of its own does; one given up on stdout's
+/// alone leaves `held` true.
 fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
     // Said to be dumped as the mark is taken, under its lock: a release or
     // suspend racing this one sees either the mark or that it is dumped.
@@ -1423,10 +1424,15 @@ fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
     let turned = held || turn.as_ref().is_some_and(|t| t.is_some());
     // What std's stdout holds of an unended line goes out first where it
     // shares the terminal, so it is not left to surface after everything.
-    // Only with the target held (by the caller, or the turn just taken):
-    // else a writer stalled on it holds std's lock too.
+    // Only with the target held (stderr's is stdout's here), else a writer
+    // stalled on it holds std's lock too; and only while the terminal takes
+    // writes, so one stopped (Ctrl+S) never blocks it with every target held.
     // SAFETY: isatty on fd 1.
-    if turned && unsafe { libc::isatty(1) } == 1 && axl_types::terminal::one_target(1, 2) {
+    if turned
+        && unsafe { libc::isatty(1) } == 1
+        && axl_types::terminal::one_target(1, 2)
+        && writable(1, Duration::from_millis(200))
+    {
         use std::io::Write as _;
         let _ = std::io::stdout().lock().flush();
     }
@@ -1481,9 +1487,10 @@ fn dump_text(text: &str, max_lines: usize, older: &str, link: impl Fn(&str) -> S
 /// With `dump` (its newest lines, and the line saying how many older ones
 /// it left out), the task's output since the screen was taken is dumped
 /// ([`dump_output`]) right after the main screen comes back, before any
-/// replay, with every target and `order` still held from giving the
-/// descriptors back: no line written meanwhile shows both live and in the
-/// dump, nor before it.
+/// replay, with `order` and the targets giving the descriptors back held
+/// still held: no line written meanwhile shows both live and in the dump,
+/// nor before it. A target given up on there (a writer stalled on it) is
+/// not held; the dump takes stderr's turn itself if it is that one.
 fn release(
     held: Option<Held>,
     replay_stderr: bool,
@@ -1510,7 +1517,7 @@ fn release(
     let _ = termios::tcsetattr(&held.tty, SetArg::TCSAFLUSH, &held.saved_termios);
     CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
     mark_captured(None);
-    let all_held = axl_types::terminal::holds_every(&moving);
+    let all_held = moving.holds(2);
     if let Some((max_lines, older)) = dump
         && dump_output_turned(max_lines, older, all_held)
     {
@@ -1596,7 +1603,7 @@ pub fn route_cli_output() {
 /// it lets them go): no write lands half in a capture and half on the terminal, and
 /// none is copied between the capture's last chunks (its readers drained
 /// first), or goes uncopied.
-fn give_back_descriptors(redirects: [Option<&mut Redirect>; 2]) -> Vec<axl_types::terminal::Turn> {
+fn give_back_descriptors(redirects: [Option<&mut Redirect>; 2]) -> axl_types::terminal::Turns {
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
     let mut redirects: Vec<&mut Redirect> = redirects.into_iter().flatten().collect();
     for r in &redirects {
@@ -2111,7 +2118,7 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
         [0x1b, b'[', d @ (b'a' | b'b' | b'c' | b'd'), ..] => {
             (Some(format!("shift-{}", arrow(d.to_ascii_uppercase()))), 3)
         }
-        // SS3 (`ESC O x`), F1–F4 among them: three bytes, unnamed unless
+        // SS3 (`ESC O x`), F1-F4 among them: three bytes, unnamed unless
         // above.
         [0x1b, b'O', _, ..] => (None, 3),
         [0x1b, b'[', b'1' | b'7', b'~', ..] => named("home", 4),

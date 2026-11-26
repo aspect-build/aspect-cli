@@ -390,7 +390,20 @@ gt_exit = task(implementation = _gt_exit, summary = "Golden: a screen held at ex
 gt_hold = task(implementation = _gt_hold, summary = "Golden: Ctrl+Z and fg under a screen.")
 gt_fail = task(implementation = _gt_fail, summary = "Golden: a task failing under a screen.")
 gt_signal = task(implementation = _gt_signal, summary = "Golden: Ctrl+C under a screen.")
+def _releasestall(ctx):
+    child = ctx.std.process.command("sh").args(["-c", "head -c 300000 /dev/zero | tr '\\0' x; echo"]).spawn()
+    sleep(800)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(300)
+    ctx.std.io.stderr.write("RELEASING\n")
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    child.wait()
+    return 0
+
 takestall = task(implementation = _takestall, summary = "A screen taken while stdout takes nothing.")
+releasestall = task(implementation = _releasestall, summary = "A dump while a forwarder is stalled on stdout.")
 interactive = task(implementation = _interactive, summary = "An interactive child.")
 "#;
 
@@ -717,6 +730,51 @@ fn output_log(dir: &std::path::Path) -> String {
         })
         .map(|p| String::from_utf8_lossy(&std::fs::read(p).expect("output.log")).into_owned())
         .unwrap_or_default()
+}
+
+/// A release's dump while a child's forwarder is stalled on a stdout FIFO
+/// nobody reads, stderr the terminal: giving the descriptors back gives up
+/// on stdout's target, and the dump, holding stderr's, follows the main
+/// screen's return at once rather than waiting on its own turn.
+#[cfg(unix)]
+#[test]
+fn a_dump_waits_not_on_a_stalled_stdout() {
+    use std::time::Duration;
+
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, _dir) = on_a_pty("releasestall", Some(Stdio::from(writer)));
+    let (mut text, mut left, mut dumped) = (String::new(), None, None);
+    let start = std::time::Instant::now();
+    while !text.contains("-CLITAIL") {
+        match chunks.recv_timeout(Duration::from_secs(20).saturating_sub(start.elapsed())) {
+            Ok((at, bytes)) => {
+                text.push_str(&String::from_utf8_lossy(&bytes));
+                if left.is_none() && text.contains("\x1b[?1049l") {
+                    left = Some(at);
+                }
+                if let Some(back) = text.find("\x1b[?1049l")
+                    && dumped.is_none()
+                    && text[back..].contains("RELEASING")
+                {
+                    dumped = Some(at);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let status = wait_bounded(&mut child, 60, &chunks);
+    let _ = drain.join();
+    assert!(status.success(), "{status:?}: {text:?}");
+    let (Some(left), Some(dumped)) = (left, dumped) else {
+        panic!("no leave or no dump: {text:?}");
+    };
+    assert!(
+        dumped.saturating_sub(left) < Duration::from_secs(1),
+        "the dump {:?} after the main screen came back",
+        dumped.saturating_sub(left)
+    );
 }
 
 /// Taking the screen, and giving it back, while a child's stdout fills a
