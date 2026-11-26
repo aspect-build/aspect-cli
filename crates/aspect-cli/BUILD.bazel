@@ -112,6 +112,20 @@ rust_test(
 )
 
 rust_test(
+    name = "worktree_pool_feature_test",
+    srcs = ["tests/worktree_pool_feature.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/worktree_pool_feature.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "console_test",
     srcs = ["tests/console.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/console.rs",

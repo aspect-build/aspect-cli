@@ -2186,7 +2186,7 @@ def _pick_slot(ctx: TaskContext, pool: dict, registry: dict, want: dict, root: s
             ", so it now has %d checkouts and output bases against an advisory limit of %d. " % (len(mine) + 1, budget) +
             "`aspect worktree list` shows who holds each; releasing those you are done with lets later adds " +
             "reuse them instead of growing, and `aspect worktree prune` then deletes free slots left idle. " +
-            "`--worktree-pool:max-slots` sets the limit."
+            "`--worktree-pool:max-slots` (`ctx.features[WorktreePool].args.max_slots` in config.axl) sets the limit."
         )
         _warn(ctx.std, said)
         warnings.append({"code": "pool_over_limit", "message": said, "slots": len(mine) + 1, "max_slots": budget})
