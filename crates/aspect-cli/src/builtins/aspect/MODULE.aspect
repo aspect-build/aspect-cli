@@ -50,6 +50,7 @@ use_feature("feature/gitlab_lint_comments.axl", "GitlabLintComments")
 use_feature("feature/history.axl", "History")
 use_feature("feature/telemetry.axl", "Telemetry")
 use_feature("feature/workflows.axl", "Workflows")
+use_feature("feature/worktree_pool.axl", "WorktreePool")
 
 
 use_feature("feature/buildkite_annotations.axl", "BuildkiteAnnotations")
