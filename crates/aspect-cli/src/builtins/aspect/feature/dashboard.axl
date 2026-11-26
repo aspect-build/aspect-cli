@@ -2948,9 +2948,11 @@ def action_split(state: dict) -> dict:
     has them, clamped to the done count, and `rest` what is left of it:
     unchanged or internal, which only `BuildMetrics` tells apart, or not yet
     in the log, which Bazel writes in batches (a small build's all at its
-    end), so `other` and never named one of those; with no
-    execution log to read (`own_execution_log`), only the done count is
-    `known`. `counted` once there is a done count."""
+    end), so `other` and never named one of those; a build that ended
+    without its `BuildMetrics` (the event stream cut short) keeps that
+    split, but for the actions the stream said failed, `failed`, out of
+    the rest. With no execution log to read (`own_execution_log`), only
+    the done count is `known`. `counted` once there is a done count."""
     done, total, more = build_progress(state)
     c = state.get("counts") or {}
     inv = state.get("inv") or {}
@@ -3014,7 +3016,16 @@ def action_split(state: dict) -> dict:
         return split
     cached = min(c.get("spawn_hits", 0), done)
     ran = min(max(0, c.get("spawns", 0) - c.get("spawn_hits", 0)), done - cached)
-    split.update(known = True, ran = ran, cached = cached, rest = done - ran - cached)
+    rest = done - ran - cached
+
+    # Ended without its BuildMetrics (the stream cut short): the actions
+    # it said failed, out of the rest, then what ran.
+    failed = 0 if state.get("building") else len(failed_actions(state))
+    took = min(failed, rest)
+    rest -= took
+    ran = max(0, ran - (failed - took))
+    split.update(known = True, ran = ran, cached = cached, rest = rest, failed = failed, done = max(done, ran + cached + rest + failed), failed_build = failed > 0)
+    split["total"] = max(split["total"], split["done"])
     return split
 
 def failed_actions(state: dict) -> list:
@@ -3138,7 +3149,8 @@ def action_parts(split: dict) -> list:
         return [(_DONE[0], split["done"], "done", _DONE[1])]
     parts = [("█", split["ran"], "ran", "accent"), ("▓", split["cached"], "cached", "success")]
     if not split["final"]:
-        return parts + [("▒", split["rest"], "other", "muted")]
+        parts.append(("▒", split["rest"], "other", "muted"))
+        return parts + ([("╳", split["failed"], "failed", "error")] if split["failed"] else [])
     parts += [("▒", split["unchanged"], "unchanged", "muted"), ("░", split["internal"], "internal", "subtle")]
     if split["failed"]:
         parts.append(("╳", split["failed"], "failed", "error"))

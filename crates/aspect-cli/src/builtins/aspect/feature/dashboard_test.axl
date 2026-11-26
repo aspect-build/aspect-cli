@@ -412,6 +412,18 @@ def _actions_tests(ctx):
     _eq("a frame's while the build runs", build_progress(dict(late, building = True, progress = ["[3 / 9] 1 action running"])), (3, 9, False))
     _eq("no count in it", bep_progress("Analyzing: 3 targets\n"), None)
 
+    # The stream cut short (a remote cache unreachable: "Unable to write
+    # all BEP events", exit 34), no BuildMetrics, as r42's run had it:
+    # "4 processes: 4 internal", three genrules failed, no spawn logged.
+    cut = _screen(ctx, ["x"], building = False, ended = True, done_total = (4, 4, False), inv = {"build_finished": struct(exit_code = struct(name = "REMOTE_ERROR", code = 34))})
+    for i in range(3):
+        _fail_event(cut, "Genrule:remote_execution:CAPABILITIES_QUERY_FAILURE", i)
+    split = action_split(cut)
+    _eq("cut short: the known failures", [split[k] for k in ("final", "ran", "rest", "failed", "done")], [False, 0, 1, 3, 4])
+    _eq("drawn as failed", [_visible(r) for r in action_results(split, 40)], ["▒ 1 other · ╳ 3 failed"])
+    _eq("and on the bar", "╳" in _visible(action_bar(split, 40)), True)
+    _eq("not while it runs", action_split(dict(cut, building = True, progress = ["[4 / 4] no actions running"]))["failed"], 0)
+
     tested = _real(ctx, "failing test")
     _fail_event(tested, "TestRunner:spawn", 9)
     _eq("a test's failed action is no ╳", action_split(tested)["failed"], 0)
