@@ -240,6 +240,10 @@ struct Stream {
     /// carriage return, an escape or a secret split across writes is
     /// handled whole.
     pending: Vec<u8>,
+    /// How many bytes of `pending` were on the terminal already when a
+    /// dump's mark was set ([`output_ansi_mark`]): a dump leaves them out,
+    /// pending still or written since as the start of their line.
+    shown: usize,
     /// Its colour as its last line left it.
     style: Style,
 }
@@ -299,6 +303,13 @@ struct OutputLog {
     /// The colour `output.ansi` leaves set.
     emitted: Style,
     console_start: Option<ConsoleStart>,
+    /// Ranges of `output.ansi` (from, to) that were on the terminal before
+    /// the dump's mark (a line's start, `Stream::shown`), for the dump to
+    /// leave out.
+    shown_ranges: Vec<(u64, u64)>,
+    /// Whether the terminal was in the middle of one of the task's or the
+    /// console's lines at the dump's mark: a dump then goes on from it.
+    mark_mid_line: bool,
 }
 
 /// Where this process's output is copied: the task's files, or before
@@ -459,10 +470,26 @@ pub fn output_ansi_mark() -> Option<u64> {
     copies.log.as_ref().map(|log| log.ansi.written)
 }
 
+/// [`output_ansi_mark`], for a dump's mark: what the terminal shows of each
+/// stream's unended line now is noted too, for the dump to leave out
+/// (`Stream::shown`), written since or not.
+pub fn mark_dump() -> Option<u64> {
+    let mut copies = OUTPUT.lock().ok()?;
+    let log = copies.log.as_mut()?;
+    log.task.shown = log.task.pending.len();
+    log.console.shown = log.console.pending.len();
+    log.shown_ranges.clear();
+    log.mark_mid_line = log.task.shown > 0 || log.console.shown > 0;
+    Some(log.ansi.written)
+}
+
 /// `output.ansi` from `mark` on, its unended lines (the task's, then the
-/// console's) at its end, and the file's path; None without the task's
-/// files or when it cannot be read.
-pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf)> {
+/// console's, each on a line of its own) at its end, and the file's path,
+/// without what the terminal showed before the mark ([`mark_dump`]), and
+/// whether it goes on from a line the terminal shows the start of (so a dump
+/// starts no line of its own); None without the task's files or when it
+/// cannot be read.
+pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf, bool)> {
     use std::io::{Read as _, Seek as _};
     let copies = OUTPUT.lock().ok()?;
     let log = copies.log.as_ref()?;
@@ -473,18 +500,46 @@ pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf)> {
     file.take(end.saturating_sub(mark))
         .read_to_end(&mut text)
         .ok()?;
+    // What the terminal showed before the mark, left out.
+    for &(from, to) in log.shown_ranges.iter().rev() {
+        if from >= mark && to <= end {
+            let (from, to) = ((from - mark) as usize, (to - mark) as usize);
+            if to <= text.len() {
+                text.drain(from..to);
+            }
+        }
+    }
     let mut emitted = log.emitted;
+    let mut tails = vec![];
     for stream in [&log.task, &log.console] {
         let mut stream = stream.clone();
-        let (_, ansi) = render(
-            &stream.pending,
+        let shown = stream.shown.min(stream.pending.len());
+        // Its colour carried over the shown start, which is left out.
+        let _ = render(
+            &stream.pending[..shown],
             &mut stream.style,
             &mut emitted,
             &log.secrets,
         );
-        text.extend_from_slice(&ansi);
+        let (_, ansi) = render(
+            &stream.pending[shown..],
+            &mut stream.style,
+            &mut emitted,
+            &log.secrets,
+        );
+        if !ansi.is_empty() {
+            tails.push(ansi);
+        }
     }
-    Some((text, log.ansi.path.clone()))
+    // Each unended line on a line of its own: the task's and the console's
+    // are two lines, not one.
+    for (i, tail) in tails.into_iter().enumerate() {
+        if i > 0 {
+            text.push(b'\n');
+        }
+        text.extend_from_slice(&tail);
+    }
+    Some((text, log.ansi.path.clone(), log.mark_mid_line))
 }
 
 /// Where `output.ansi` is, for a line naming it when it cannot be dumped.
@@ -557,6 +612,8 @@ impl OutputLog {
             console: Stream::default(),
             emitted: Style::default(),
             console_start: None,
+            shown_ranges: vec![],
+            mark_mid_line: false,
         })
     }
 
@@ -607,7 +664,28 @@ impl OutputLog {
         let Some(lines) = stream.take(&self.secrets, all) else {
             return;
         };
-        let (plain, ansi) = render(&lines, &mut stream.style, &mut self.emitted, &self.secrets);
+        // A start the terminal showed before the dump's mark, rendered
+        // apart so the dump can leave it out.
+        let shown = stream.shown.min(lines.len());
+        stream.shown -= shown;
+        if shown > 0 {
+            let (plain, ansi) = render(
+                &lines[..shown],
+                &mut stream.style,
+                &mut self.emitted,
+                &self.secrets,
+            );
+            let from = self.ansi.written;
+            self.plain.write(&plain, self.cap);
+            self.ansi.write(&ansi, self.cap);
+            self.shown_ranges.push((from, self.ansi.written));
+        }
+        let (plain, ansi) = render(
+            &lines[shown..],
+            &mut stream.style,
+            &mut self.emitted,
+            &self.secrets,
+        );
         self.plain.write(&plain, self.cap);
         self.ansi.write(&ansi, self.cap);
     }

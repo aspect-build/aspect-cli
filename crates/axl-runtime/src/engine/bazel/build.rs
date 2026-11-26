@@ -964,10 +964,10 @@ impl Console {
             None if stdout_inherited => {
                 let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
-                let after = forwarder.ordered_after(
-                    Box::new(axl_types::terminal::Routed::new(std::io::stdout(), 1)),
-                    probe.into(),
-                );
+                // The wait for stderr's forwarder runs before stdout's
+                // target is held (`gate`), the write and its copy under it.
+                let gate = std::sync::Arc::new(forwarder.gate(probe.into()));
+                let after = axl_types::terminal::Routed::new(std::io::stdout(), 1);
                 // Colour asked for the stages' sake is shown as the user
                 // asked, else as the CLI's own stdout would carry it, as it
                 // is for stderr.
@@ -979,6 +979,7 @@ impl Console {
                     // console UI: shown as written even when nothing else is.
                     copy: Some(crate::out::copy_only),
                     hold: Some(axl_types::terminal::hold_stdout),
+                    gate: Some(gate),
                     ..Default::default()
                 };
                 (

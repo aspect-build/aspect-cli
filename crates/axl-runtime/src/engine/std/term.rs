@@ -731,7 +731,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     // A screen of its own shows what is written meanwhile, and is dumped
     // from here on leaving; its capture copies it to the output files.
     if alt_screen {
-        *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
+        *DUMP_MARK.lock().unwrap() = crate::out::mark_dump();
         DUMPED.store(false, Ordering::SeqCst);
     }
     let forget_tty = || {
@@ -1052,7 +1052,9 @@ pub(crate) fn suspend() -> bool {
 /// child's output never lands inside the replay, nor goes through the
 /// capture's pipe as the screen goes, where it would be copied twice, and a
 /// stream nobody reads stalls no one else (stderr's is let go before
-/// stdout's replay, unless the two are one file).
+/// stdout's replay, unless the two are one file). A line a forwarder feeds
+/// the screen is copied to the output files under it too, so a release's
+/// dump has it.
 static OUTPUT_ORDER: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
 
 /// [`OUTPUT_ORDER`] as a release holds it, a lock it gave up on `None`.
@@ -1236,17 +1238,17 @@ pub(crate) fn resume() {
     if h.suspends > 0 {
         return;
     }
-    *DUMP_MARK.lock().unwrap() = crate::out::output_ansi_mark();
-    DUMPED.store(false, Ordering::SeqCst);
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
     let redirected = (
         Redirect::new(1, h.capture.clone(), Source::Stdout, true),
         Redirect::new(2, h.capture.clone(), Source::Stderr, true),
     );
     if let (Ok(out), Ok(err)) = &redirected {
-        // Once both are captured, as at the take.
+        // Once both are captured, as at the take: the next dump starts here.
         crate::out::set_capture_copies(true);
         set_sink(Some((&h.capture, out, err)));
+        *DUMP_MARK.lock().unwrap() = crate::out::mark_dump();
+        DUMPED.store(false, Ordering::SeqCst);
     }
     drop(moving);
     match redirected {
@@ -1316,10 +1318,11 @@ fn release_dumping(held: Option<Held>, order: &mut Order) -> bool {
 /// what came before. None once dumped, or with no screen of its own.
 static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
 
-/// Whether the screen given back last had its dump written by its release
-/// ([`release`] with a dump) or by a suspend still in force: a later
+/// Whether the screen given back last had its dump written, or is having it
+/// written (set as the mark is taken): by its release ([`release`] with a
+/// dump), by a suspend still in force, or by a dump of its own. A later
 /// [`dump_output`] says so rather than write it again. Cleared when a screen
-/// is taken or comes back from a suspend.
+/// of its own (the alternate screen) is taken or comes back from a suspend.
 static DUMPED: AtomicBool = AtomicBool::new(false);
 
 /// The most lines a dump writes, the older counted on a line before them.
@@ -1337,8 +1340,11 @@ fn dump_ready() -> bool {
 /// where the terminal shows them as text (the CLI's own lines write
 /// theirs). Its newest `max_lines`,
 /// after a line `older` gives, `{n}` the count of those it leaves out.
-/// An unended last line (the CLI's, still to be ended) is written as far as
-/// it goes, its end following on the terminal. Not copied to the output
+/// An unended last line (the task's, the console's, or a stray writer's the
+/// capture copied) is written as far as it goes, its end following on the
+/// terminal; a start the terminal already showed when the mark was set is
+/// left out ([`crate::out::mark_dump`]), and the dump then goes on from it
+/// rather than start a line of its own. Not copied to the output
 /// files, which hold it; what stderr takes nothing of for `STALL_LIMIT` is
 /// dropped. Whether the screen's dump is written: by this call, or already
 /// by the release or suspend that gave the screen back ([`DUMPED`]); never
@@ -1351,15 +1357,15 @@ pub(crate) fn dump_output(max_lines: usize, older: &str) -> bool {
 }
 
 /// A pause between a dump reading `output.ansi` and writing it, from
-/// `ASPECT_TEST_DUMP_DELAY_MS` (read once): for tests, to widen the window
-/// a writer not held off would land in.
+/// `ASPECT_TEST_DUMP_DELAY_MS` (read once, at most 5s): for tests, to widen
+/// the window a writer not held off would land in.
 fn dump_test_delay() {
     static DELAY: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
     let delay = DELAY.get_or_init(|| {
         std::env::var("ASPECT_TEST_DUMP_DELAY_MS")
             .ok()
-            .and_then(|ms| ms.parse().ok())
-            .map(Duration::from_millis)
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .map(|ms| Duration::from_millis(ms.min(5000)))
     });
     if let Some(delay) = delay {
         std::thread::sleep(*delay);
@@ -1371,10 +1377,21 @@ fn dump_test_delay() {
 /// back to the end of the dump, so no line printed meanwhile shows both live
 /// and in it.
 fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
-    let Some(mark) = DUMP_MARK.lock().unwrap().take() else {
+    // Said to be dumped as the mark is taken, under its lock: a release or
+    // suspend racing this one sees either the mark or that it is dumped.
+    let mark = {
+        let mut mark = DUMP_MARK.lock().unwrap();
+        let taken = mark.take();
+        if taken.is_some() {
+            DUMPED.store(true, Ordering::SeqCst);
+        }
+        taken
+    };
+    let Some(mark) = mark else {
         return false;
     };
-    let Some((text, _)) = crate::out::output_ansi_since(mark) else {
+    let Some((text, _, goes_on)) = crate::out::output_ansi_since(mark) else {
+        DUMPED.store(false, Ordering::SeqCst);
         return false;
     };
     dump_test_delay();
@@ -1397,8 +1414,9 @@ fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> bool {
     let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
     let _turn = (!held)
         .then(|| axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, Duration::from_millis(200)));
-    // On a line of its own: a child's line left unended past the wait.
-    if axl_types::terminal::mid_line(2) {
+    // On a line of its own: a child's line left unended past the wait. Not
+    // where the dump goes on from a line of the CLI's the terminal shows.
+    if axl_types::terminal::mid_line(2) && !goes_on {
         write_patiently(&mut err, b"\n");
     }
     write_patiently(&mut err, out.as_bytes());
@@ -2167,7 +2185,7 @@ fn term_methods(registry: &mut MethodsBuilder) {
     /// taking nothing; not copied to the output files, which hold it. Whether it wrote: once
     /// per screen, never without the task's files (the history off), when
     /// the screen's own lines are the fallback; true too when the screen's
-    /// `release(dump_lines = …)` wrote it.
+    /// `release(dump_lines = …)`, or a suspend still in force, wrote it.
     fn dump_output<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = DUMP_LINES as i32)] max_lines: i32,

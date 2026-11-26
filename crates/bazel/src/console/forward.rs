@@ -168,7 +168,8 @@ impl Forwarder {
                     Destination::new(forward, shape.strip_colour)
                         .feeding(shape.feed.clone(), shape.hidden)
                         .copying(shape.copy)
-                        .holding(shape.hold),
+                        .holding(shape.hold)
+                        .gating(shape.gate.clone()),
                     screen,
                 )
                 .with_notes(shape.notes.clone());
@@ -235,9 +236,17 @@ impl Forwarder {
     pub fn ordered_after(&self, inner: Box<dyn Write + Send>, fd: std::os::fd::OwnedFd) -> After {
         After {
             inner,
+            gate: self.gate(fd),
+        }
+    }
+
+    /// [`Forwarder::ordered_after`]'s wait on its own, for a forwarder to run
+    /// before it takes what it holds across a write ([`Shape::gate`]).
+    pub fn gate(&self, fd: std::os::fd::OwnedFd) -> Gate {
+        Gate {
             other: self.activity.clone(),
             fd,
-            skip_until: None,
+            skip_until: std::sync::Mutex::new(None),
         }
     }
 
@@ -263,18 +272,30 @@ const AFTER_WAIT: Duration = Duration::from_millis(200);
 /// See [`Forwarder::ordered_after`].
 pub struct After {
     inner: Box<dyn Write + Send>,
+    gate: Gate,
+}
+
+/// See [`Forwarder::gate`].
+pub struct Gate {
     other: Activity,
     fd: std::os::fd::OwnedFd,
     /// No waiting until then: see [`AFTER_BACKOFF`].
-    skip_until: Option<Instant>,
+    skip_until: std::sync::Mutex<Option<Instant>>,
 }
 
-impl After {
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gate").finish_non_exhaustive()
+    }
+}
+
+impl Gate {
     /// Until the other forwarder is waiting with nothing left to read, or has
     /// ended, for at most [`AFTER_WAIT`]: a stalled one must not stall this
     /// stream. A wait that runs out pauses waiting for [`AFTER_BACKOFF`].
-    fn wait(&mut self) {
-        if self.skip_until.is_some_and(|t| Instant::now() < t) {
+    pub fn wait(&self) {
+        let mut skip_until = self.skip_until.lock().unwrap_or_else(|p| p.into_inner());
+        if skip_until.is_some_and(|t| Instant::now() < t) {
             return;
         }
         let deadline = Instant::now() + AFTER_WAIT;
@@ -288,7 +309,7 @@ impl After {
                 return;
             }
             if Instant::now() >= deadline {
-                self.skip_until = Some(Instant::now() + AFTER_BACKOFF);
+                *skip_until = Some(Instant::now() + AFTER_BACKOFF);
                 return;
             }
             thread::sleep(AFTER_POLL);
@@ -303,7 +324,7 @@ fn readable(fd: &impl std::os::fd::AsRawFd) -> bool {
 
 impl Write for After {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.wait();
+        self.gate.wait();
         self.inner.write(buf)
     }
 
@@ -590,6 +611,9 @@ pub struct Shape {
     /// Held across each write's copy and the write itself (the CLI's
     /// terminal write lock), so nothing comes between the two.
     pub hold: Option<fn() -> Box<dyn std::any::Any>>,
+    /// Waited on before each write, ahead of `hold` ([`Forwarder::gate`]):
+    /// the wait for the other forwarder holds nothing.
+    pub gate: Option<Arc<Gate>>,
 }
 
 /// The failed actions' logs the history kept, in the order it kept them:
@@ -670,6 +694,8 @@ struct Destination {
     settled: bool,
     /// Held across a write's copy and the write ([`Shape::hold`]).
     hold: Option<fn() -> Box<dyn std::any::Any>>,
+    /// Waited on before a write, ahead of `hold` ([`Shape::gate`]).
+    gate: Option<Arc<Gate>>,
     strip_colour: bool,
     feed: Option<Arc<Feed>>,
     hidden: bool,
@@ -685,6 +711,7 @@ impl Destination {
             copy: None,
             settled: true,
             hold: None,
+            gate: None,
             strip_colour,
             feed: None,
             hidden: false,
@@ -705,6 +732,12 @@ impl Destination {
         self
     }
 
+    /// Wait on `gate` before each write, ahead of the hold.
+    fn gating(mut self, gate: Option<Arc<Gate>>) -> Self {
+        self.gate = gate;
+        self
+    }
+
     /// Also write to `feed`, and with `hidden` only there.
     fn feeding(mut self, feed: Option<Arc<Feed>>, hidden: bool) -> Self {
         self.feed = feed;
@@ -713,6 +746,9 @@ impl Destination {
     }
 
     fn write(&mut self, bytes: &[u8]) {
+        if let Some(gate) = &self.gate {
+            gate.wait();
+        }
         let _held = self.hold.map(|hold| hold());
         if let Some(&last) = ansi::strip(bytes).last() {
             self.at_line_start = last == b'\n' || last == b'\r';
@@ -738,6 +774,8 @@ impl Destination {
     }
 
     fn flush(&mut self) {
+        // Held as a write is: what the flush writes is a write.
+        let _held = self.hold.map(|hold| hold());
         while !self.failed {
             match self.inner.flush() {
                 Ok(()) => return,

@@ -488,6 +488,7 @@ impl Config {
             notes: None,
             copy: None,
             hold: None,
+            gate: None,
         }
     }
 

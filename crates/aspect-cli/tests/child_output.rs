@@ -224,6 +224,31 @@ def _splitcli(ctx):
     return 0
 
 givenback = task(implementation = _givenback, summary = "A screen released while given back to an interactive child.")
+
+def _pretake(ctx):
+    ctx.std.io.stderr.write("PRETAKE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("INSCREEN")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("END\n")
+    return 0
+
+def _prompt(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("BEFOREQ")
+    ctx.std.io.stderr.write("QUESTION? ")
+    ctx.std.io.stdin.read(64)
+    print("ANSWERED")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    return 0
+
+pretake = task(implementation = _pretake, summary = "A line begun before the take, ended under the screen.")
+prompt = task(implementation = _prompt, summary = "A question asked under a screen and answered.")
 splitcli = task(implementation = _splitcli, summary = "A CLI line unended when its screen is released with a dump.")
 
 gt_release = task(implementation = _gt_release, summary = "Golden: take and release.")
@@ -1427,4 +1452,79 @@ fn a_cli_line_unended_at_release_keeps_its_start() {
     let text = plain(&text);
     assert!(status.success(), "{status:?}: {text}");
     assert!(text.contains("CLIHEAD-CLITAIL"), "the line whole: {text:?}");
+}
+
+/// What the terminal shows of `raw`: escapes left out, and the alternate
+/// screen's text (between entering and leaving it) too.
+#[cfg(unix)]
+fn main_screen(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(at) = rest.find("\x1b[?1049h") {
+        out.push_str(&rest[..at]);
+        rest = rest[at..]
+            .find("\x1b[?1049l")
+            .map_or("", |end| &rest[at + end..]);
+    }
+    out.push_str(rest);
+    plain(&out).replace('\r', "")
+}
+
+/// A line the task began before taking the screen and ended under it: the
+/// dump leaves out the start the terminal already shows and goes on from it,
+/// so the line shows once, whole.
+#[cfg(unix)]
+#[test]
+fn a_line_begun_before_the_take_shows_once_whole() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("pretake", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    assert_eq!(
+        text.matches("PRETAKE-").count(),
+        1,
+        "the start once: {text:?}"
+    );
+    assert!(
+        text.contains("PRETAKE-INSCREEN\nEND"),
+        "the line whole: {text:?}"
+    );
+}
+
+/// A question the task asked under the screen, answered at the prompt the
+/// screen gave the terminal back for: the release's dump leaves out the
+/// question the prompt's dump showed, so it shows once.
+#[cfg(unix)]
+#[test]
+fn a_question_answered_at_a_prompt_shows_once() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("prompt", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !String::from_utf8_lossy(&raw).contains("QUESTION? ")
+        && start.elapsed() < Duration::from_secs(30)
+    {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    pty_master(&child).write_all(b"y\n").unwrap();
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    assert_eq!(
+        text.matches("QUESTION? ").count(),
+        1,
+        "the question once: {text:?}"
+    );
+    assert!(text.contains("ANSWERED"), "{text:?}");
 }
