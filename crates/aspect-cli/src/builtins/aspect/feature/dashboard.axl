@@ -3445,6 +3445,21 @@ def _row_of(name: str, value) -> str:
     """A `name  value` row of a tab, the names in a column."""
     return "  " + name + " " * max(1, 24 - len(name)) + str(value)
 
+# The execution logs Bazel writes in a format of the caller's, beside which
+# it writes no compact one for the Dashboard to read.
+_OWN_EXEC_LOGS = ["--execution_log_binary_file", "--execution_log_json_file"]
+
+def own_execution_log(inv: dict):
+    """The flag a build was given for an execution log of the caller's own
+    (`_OWN_EXEC_LOGS`, on its command line or from an rc file), which leaves
+    the Dashboard none to read; None without one."""
+    options = inv.get("options_parsed")
+    for flag in (_get(options, "cmd_line") or []) + (_get(options, "explicit_cmd_line") or []):
+        name = str(flag).partition("=")[0]
+        if name in _OWN_EXEC_LOGS:
+            return name
+    return None
+
 def metrics_lines(state: dict) -> list:
     """The Metrics tab: what ran and what a cache served (actions from
     Bazel's execution log, the source of truth; tests from their results),
@@ -3457,6 +3472,8 @@ def metrics_lines(state: dict) -> list:
         out.append(_row_of("spawns", _counts("%d · %d from a cache (%d%%) · %d run", (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"]))))
         for runner in sorted(c["runners"], key = lambda r: -c["runners"][r]):
             out.append(_row_of("  " + runner, c["runners"][runner]))
+    elif own_execution_log(state.get("inv") or {}):
+        out.append(_row_of("spawns", "not read: this build writes its own execution log (%s)" % own_execution_log(state.get("inv") or {})))
     elif state.get("exec_log_read"):
         out.append(_row_of("spawns", "0 run: the execution log has none"))
     else:

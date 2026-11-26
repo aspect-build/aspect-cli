@@ -1470,6 +1470,12 @@ def _impl(ctx: TaskContext) -> int:
     reading["exec_log_read"] = True
     _eq("a log with none", spawns(reading), ["spawns 0 run: the execution log has none"])
 
+    # The caller's own binary or JSON log: Bazel writes no compact one, so
+    # the Dashboard read none; Results shows no cache row.
+    own = _screen(ctx, ["x"], exec_log_read = True, inv = {"options_parsed": struct(cmd_line = ["--keep_going", "--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])})
+    _eq("spawns beside the caller's log", spawns(own), ["spawns not read: this build writes its own execution log (--execution_log_binary_file)"])
+    _eq("no cache row in Results", "Cached" in _visible(render(own, 120, 30)), False)
+
     # A cached build's slowest pane: that nothing ran, not an empty box, only
     # where the build succeeded and its metrics say so: not mid-build, nor
     # after a failed one.
