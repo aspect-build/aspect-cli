@@ -423,6 +423,20 @@ impl Config {
         Some(links::Linker::new(bases).with_files(self.files(written)))
     }
 
+    /// The links of the errors kept for the failure summary, which the CLI
+    /// writes on its own stderr whether this console is shown or hidden: as
+    /// a shown one styles them, never with a URL written beside one, which
+    /// the summary's writer adds where the terminal needs it
+    /// (`ctx.std.io.linked`).
+    fn summary_linker(&self, written: &links::WrittenCount) -> Option<links::Linker> {
+        let bases = self.links.clone()?;
+        let files = links::FileLinks::new(self.link_format.clone())
+            .written(false)
+            .styled(self.shown_palette().map(links::LinkStyle::of))
+            .counted(written.clone());
+        Some(links::Linker::new(bases).with_files(files))
+    }
+
     /// How this pipeline's links to files are made, the URLs they write out
     /// counted in `written`, which all of a pipeline's share: hidden, plain
     /// links for the feed's screen to open, no URL written beside one.
@@ -607,7 +621,7 @@ impl Config {
                 ),
                 Stage::ErrorsForSummary { max } => Box::new(
                     RecapErrors::new(max, 0, self.style.clone())
-                        .linking(self.linker(&written))
+                        .linking(self.summary_linker(&written))
                         .naming(kept_logs.clone(), self.link_bases())
                         .keeping(observations.clone()),
                 ),
@@ -1584,6 +1598,47 @@ mod tests {
         config.link_text = false;
         let (_, pipeline) = run(&config, b"ERROR: a.cc:3:1: bad\n");
         assert_eq!(pipeline.links_written.get(), 0, "with no URL written out");
+    }
+
+    /// The errors kept for the failure summary are linked alike whether the
+    /// console is shown or hidden behind the Dashboard: an OSC 8 link on
+    /// each path, never the URL beside it, which the summary's writer adds
+    /// for the macOS Terminal (`ctx.std.io.linked`) as for every other line
+    /// of it.
+    #[test]
+    fn errors_kept_for_the_summary_link_alike_shown_or_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
+        let mut kept = vec![];
+        for hidden in [false, true] {
+            let mut config = Config::new(
+                Mode::Pipe,
+                vec![Stage::ErrorsForSummary { max: 10 }],
+                Style::default(),
+            );
+            config.links = Some(vec![dir.path().to_path_buf()]);
+            config.link_format = links::LinkFormat::parse("cursor").unwrap();
+            config.link_text = true;
+            if hidden {
+                config.output = Output::Hidden;
+            }
+            let (_, pipeline) = run(
+                &config,
+                b"ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)\n[1 / 2] 1 action running\n",
+            );
+            let errors = pipeline.observations.errors().expect("kept");
+            let line = errors.errors[0].lines[0].clone();
+            assert!(
+                line.contains("\x1b]8;;cursor://file"),
+                "hidden {hidden}: linked: {line:?}"
+            );
+            assert!(
+                !line.contains(" <cursor:"),
+                "hidden {hidden}: no URL beside it: {line:?}"
+            );
+            kept.push(ansi::text(line.as_bytes()));
+        }
+        assert_eq!(kept[0], kept[1], "the same either way");
     }
 
     /// A redaction hook dropping every `Fetching` line of a real PTY console

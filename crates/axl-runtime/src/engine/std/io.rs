@@ -115,6 +115,23 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
         Ok(crate::diag::debugging())
     }
 
+    /// `text` with its URLs and the paths to files that exist linked as the
+    /// CLI's own lines on stderr are (`print()`'s): an OSC 8 link where the
+    /// terminal takes one, its URL written beside it on the macOS Terminal,
+    /// none off a terminal or with links off. A link `text` already has is
+    /// kept, and gets its URL beside it there too.
+    fn linked<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] text: &str,
+    ) -> anyhow::Result<String> {
+        this.downcast_ref_err::<Stdio>().into_anyhow_result()?;
+        Ok(text
+            .split('\n')
+            .map(crate::out::linked)
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     /// The editor a link to a file opens in, as the console makes them
     /// (`--console:file-hyperlink-format`, or `auto`'s pick): `(format,
     /// name)`, `format` the alias (`cursor`), `template` for a URL template

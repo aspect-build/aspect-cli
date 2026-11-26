@@ -1845,6 +1845,15 @@ def _impl(ctx: TaskContext) -> int:
         "All of it: aspect history show t-9",
     ])
 
+    # Every line through the writer's linker, the raw log a bare path it
+    # links as the CLI's own lines are (the console and the Dashboard alike).
+    seen = []
+    tested = dict(kinds, fails = kinds["fails"] + [{"kind": "test", "label": "//t:log", "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 0, "files": [("test.log", ("file:///out/t/log/test.log", False))]}])
+    linked = failure_summary(tested, tested["kept_errors"], "t-9", True, "/h/console.log", lambda l: seen.append(l) or "<" + l + ">")
+    _eq("each line linked", (len(seen), all([l.startswith("<") and l.endswith(">") for l in linked])), (len(linked), True))
+    _eq("the raw log a bare path", seen[-2].endswith("Bazel's raw log: /h/console.log"), True)
+    _eq("through report_lines too", report_lines(dict(tested, log_path = "/h/console.log", closing = [], closing_tail = [], bes_base = "", bazel_uuid = "", update = {}), "t-9", True, linked = lambda l: "L")[-1], "L")
+
     # One target, two of its actions failed: both said.
     def _cc(name):
         header = "ERROR: cc/BUILD.bazel:1:8: Compiling cc/%s failed: (Exit 1)" % name

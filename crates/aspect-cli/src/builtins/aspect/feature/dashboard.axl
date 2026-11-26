@@ -5431,7 +5431,7 @@ def replay_lines(state: dict, tty: bool) -> list:
         out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
 
-def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list:
+def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked = None) -> list:
     """What the scrollback keeps once the screen is gone, for a person and
     for an agent reading a cut capture's tail alike: Bazel's closing block
     as it wrote it (its test summary, `Elapsed time`, `Build completed`),
@@ -5442,7 +5442,8 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     it, the counts, Bazel's raw log and `aspect history show`). The summary
     goes only here, never to the console the screen shows nor to the task's
     output it dumps, so a run replayed from the history shows it no more
-    than the screen did."""
+    than the screen did. `linked` links the summary's paths
+    (`failure_summary`)."""
     out = []
     bold = _c("strong") if tty else ""
     reset = _RESET if tty else ""
@@ -5460,7 +5461,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
             out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
         out.append("%s: %s" % (label, link(url, url) if tty else url))
-    return out + failure_summary(state, state.get("kept_errors"), task_id, tty, state.get("log_path", ""))
+    return out + failure_summary(state, state.get("kept_errors"), task_id, tty, state.get("log_path", ""), linked)
 
 def summary_state(read, env = None) -> dict:
     """A fresh state for `failure_summary` to read, collected by the build
@@ -5513,7 +5514,7 @@ def _failed_action(header: str) -> str:
     at = header.find(" failed: ")
     return header[:at] if at >= 0 else ""
 
-def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = "") -> list:
+def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = "", linked = None) -> list:
     """The end of a build's console, the same with the Dashboard or
     without: a `── Failures (N) ──` rule when anything failed, then each root
     cause once, the first `_SUMMARY_MAX` (`first 10 of 14`), each with what
@@ -5533,7 +5534,11 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
       not parse, a toolchain not found), as Bazel wrote it.
 
     `kept` is None without the console's errors (`--console=false`): rows
-    then have no `ERROR:` lines but their own."""
+    then have no `ERROR:` lines but their own. Each line goes through
+    `linked` (`ctx.std.io.linked`) when given, so its paths (a kept log, a
+    test's `test.log`, Bazel's raw log) are links as the CLI's own lines on
+    that terminal are: OSC 8, the URL beside it on the macOS Terminal, or
+    none."""
     bold = _c("strong") if tty else ""
     red = _c("error") if tty else ""
     reset = _RESET if tty else ""
@@ -5623,10 +5628,10 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
         out.append(red + bold + "── " + title + " ──" + reset)
         for r in shown:
             out.extend(r)
-    raw = (" · Bazel's raw log: " + (link("file://" + log_path, log_path) if tty else log_path)) if log_path else ""
+    raw = (" · Bazel's raw log: " + log_path) if log_path else ""
     out.append(summary_counts(state) + raw)
     out.append("All of it: aspect history show %s" % task_id)
-    return out
+    return [linked(l) for l in out] if linked else out
 
 def _dashboard_impl(ctx: FeatureContext):
     why = refusal(ctx.std)
@@ -5993,7 +5998,7 @@ def _dashboard_impl(ctx: FeatureContext):
         if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = _older(task_ctx)):
             for line in replay_lines(state, err.is_tty):
                 err.write(line + "\n", copy = False)
-        for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True):
+        for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True, linked = task_ctx.std.io.linked):
             err.write(line + "\n")
         gone = sorted(state.get("silenced_tips", {}).keys())
         if gone:

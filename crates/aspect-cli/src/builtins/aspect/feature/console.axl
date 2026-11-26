@@ -298,7 +298,7 @@ def _console_impl(ctx: FeatureContext):
         state["build"] = build
         state["cancelling"] = task_ctx.cancellation.root.cancelled
         err = task_ctx.std.io.stderr
-        for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or ""):
+        for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked):
             err.write(line + "\n")
         summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env)
 
