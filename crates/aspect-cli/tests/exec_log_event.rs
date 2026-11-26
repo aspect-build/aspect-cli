@@ -989,3 +989,31 @@ fn a_task_id_already_in_the_history_is_refused() {
         "{stderr}"
     );
 }
+
+/// The caller's own binary execution log, beside a hook: Bazel takes one log
+/// format, so the CLI adds no compact one for the hook (which then gets no
+/// entries) rather than have Bazel refuse the build.
+#[test]
+fn a_callers_binary_log_beside_a_hook_adds_no_compact_one() {
+    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None);
+    let binary = case.dir.path().join("own.binlog");
+    let flag = format!("--execution_log_binary_file={}", binary.display());
+    let output = case
+        .command(&["build", "//...", &flag])
+        .output()
+        .expect("running the CLI");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        case.bazel_argv().iter().any(|a| a == &flag),
+        "the caller's flag reaches Bazel"
+    );
+    assert_eq!(
+        case.execution_log_paths(),
+        Vec::<String>::new(),
+        "no compact log beside it"
+    );
+}

@@ -148,23 +148,12 @@ static GRAPH_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// What follows the label on a row of Bazel's own status line: nothing (a
-/// row curses erases), or one of the phrases it ends a build with.
-const STATUS_PHRASES: &[&str] = &[
-    "Build completed",
-    "Build did NOT complete",
-    "Elapsed time",
-    "Found ",
-    "Streaming build results",
-    "Invocation ID",
-    "Analyzed ",
-    "Build Event Protocol",
-];
-
-/// Whether `text` (escapes stripped) is a row Bazel's status line could be.
-fn is_status_text(text: &str) -> bool {
-    let rest = text.split_once(':').map_or("", |(_, rest)| rest).trim();
-    rest.is_empty() || STATUS_PHRASES.iter().any(|p| rest.starts_with(p))
+/// Whether `text` (escapes stripped) is bare: a label and nothing after it,
+/// as Bazel's own colon-inside status row always is (curses draws the
+/// label, then erases it).
+fn is_bare_status(text: &str) -> bool {
+    text.split_once(':')
+        .is_some_and(|(_, rest)| rest.trim().is_empty())
 }
 
 /// A header whose body is an action's or a test's output.
@@ -368,11 +357,10 @@ impl Classifier {
         // A tool's own line coloured as Bazel colours its status line (the
         // colon inside, the space after) is the tool's: never drawn inside
         // an action's output. Streamed test output never ends, so there
-        // only a row Bazel's own could be (nothing after the label, or one
-        // of its status phrases) is taken for its status line.
+        // only a bare row, as Bazel's own always is, is its status line.
         let status = !self.in_action_output
             && BAZEL_STATUS.is_match(record)
-            && (!self.streamed || is_status_text(&text));
+            && (!self.streamed || is_bare_status(&text));
         let after_status = std::mem::replace(&mut self.after_status, status);
         let drawn = kind.is_progress()
             || count
@@ -540,19 +528,23 @@ pub(crate) mod tests {
         let mut c = Classifier::default();
         c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
         assert!(
-            c.classify(b"\x1b[32mINFO:\x1b[0m ").drawn,
+            c.classify(b"\x1b[1;32mINFO:\x1b[0m ").drawn,
             "a bare status row"
         );
         assert!(
-            c.classify(b"\x1b[32mINFO:\x1b[0m Build completed successfully")
-                .drawn
+            c.classify(b"\x1b[31m\x1b[1mFAILED:\x1b[0m ").drawn,
+            "a bare failure row"
         );
-        let mut c = Classifier::default();
-        c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
-        assert!(
-            !c.classify(b"\x1b[32mINFO:\x1b[0m two").drawn,
-            "a test's own line"
-        );
+        for line in [
+            &b"\x1b[32mINFO:\x1b[0m two"[..],
+            b"\x1b[32mINFO:\x1b[0m Build completed successfully, 12 total actions",
+            b"\x1b[32mINFO:\x1b[0m Elapsed time: 1.2s, Critical Path: 1.0s",
+            b"\x1b[31m\x1b[1mFAILED:\x1b[0m Build did NOT complete successfully",
+        ] {
+            let mut c = Classifier::default();
+            c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
+            assert!(!c.classify(line).drawn, "a test's own line: {line:?}");
+        }
     }
 
     /// A tool's own "Waiting for" line is its output, not bazel's BES wait.

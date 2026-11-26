@@ -2502,19 +2502,33 @@ def scrollbar(total: int, height: int, up: int):
 def _box_bottom(width: int) -> str:
     return _c("border") + "└" + "─" * max(0, width - 2) + "┘" + _RESET
 
+def _word_seconds(word: str):
+    """The seconds a time word says, or None for a word that is no time:
+    Bazel's (`12s`, `2.5s`, `1m`, `1h`) and `elapsed`'s (`1m05s`)."""
+    total = 0
+    number = ""
+    for c in word.elems():
+        if c.isdigit() or (c == "." and "." not in number):
+            number += c
+        elif c in ("h", "m", "s") and number and number != ".":
+            total += int(number.partition(".")[0] or "0") * {"h": 3600, "m": 60, "s": 1}[c]
+            number = ""
+        else:
+            return None
+    return total if word and not number else None
+
 def action_seconds(row: str) -> int:
     """How long a running action has run, in whole seconds, from the time
     Bazel's progress row gives it (`Compiling a.cc; 12s remote`, `…; 1m 30s
-    local`); 0 without one."""
+    local`, `1m05s` as `elapsed` writes it); 0 without one."""
     if "; " not in row:
         return 0
     total = 0
     for word in row.rpartition("; ")[2].split(" "):
-        unit = word[-1:]
-        number = word[:-1]
-        if unit not in ("h", "m", "s") or not number or not number.replace(".", "", 1).isdigit():
+        seconds = _word_seconds(word)
+        if seconds == None:
             break
-        total += int(number.partition(".")[0] or "0") * {"h": 3600, "m": 60, "s": 1}[unit]
+        total += seconds
     return total
 
 def _middle(text: str, width: int) -> str:
@@ -2620,23 +2634,22 @@ def note_spawn_time(state: dict, spawn):
 
 def _tenths(ms: int) -> str:
     """`ms` as seconds to a tenth (`12.4s`), or minutes and seconds past a
-    minute (`1m 30s`)."""
+    minute as `elapsed` writes them (`1m05s`)."""
     if ms >= 60000:
         return elapsed(ms)
     return "%d.%ds" % (ms // 1000, (ms % 1000) // 100)
 
 def aged_time(row: str):
     """`(time, role)` for a running action's row: its time as Bazel wrote it
-    (`12s`, `1m 30s`), and the role it is drawn in by its age, as
+    (`12s`, `1m 30s`), or as `elapsed` does (`1m05s`), and the role it is drawn in by its age, as
     BuildBuddy's theme colours the seconds in Bazel's progress area:
     `muted` while young, `warning` once slow, `error` once stuck. None for a
     row with no time."""
     words = row.rpartition("; ")[2].split(" ") if "; " in row else []
     kept = []
     for word in words:
-        # The words `action_seconds` reads: `1m`, `30s`, `2.5s`.
-        number = word[:-1]
-        if word[-1:] not in ("h", "m", "s") or not number or not number.replace(".", "", 1).isdigit():
+        # The words `action_seconds` reads: `1m`, `30s`, `2.5s`, `1m05s`.
+        if _word_seconds(word) == None:
             break
         kept.append(word)
     if not kept:
@@ -2860,12 +2873,13 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # Whole or not at all: a status cut to a bare number says nothing.
     right = shown + " " if shown and text_width(shown) <= room - 2 else ""
 
-    # A status bar: the whole row in the theme's `status_bar`, the time it
-    # has run `strong` (as BuildBuddy's theme has Bazel's elapsed time),
-    # coloured once the row's width is settled.
+    # A status bar: the whole row in the theme's `status_bar`, but the time
+    # it has run, out of the bar's reverse video and in `heading` (as
+    # BuildBuddy's theme makes Bazel's elapsed time stand out): apart in
+    # every theme, coloured once the row's width is settled.
     pad = " " * max(0, room - text_width(right))
     if (" · " + took) in title:
-        title = title.replace(" · " + took, " · " + _c("strong") + took + _RESET + _c("status_bar"), 1)
+        title = title.replace(" · " + took, " · " + _RESET + _c("heading") + took + _RESET + _c("status_bar"), 1)
     out.append(_c("status_bar") + title + pad + right + _RESET)
     if state.get("zoom") or state.get("help"):
         return out

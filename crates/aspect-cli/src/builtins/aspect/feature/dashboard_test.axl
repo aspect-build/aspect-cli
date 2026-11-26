@@ -16,7 +16,7 @@ load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results
 ANSI_ACCENT = theme.sgr("heading")
 
 # The roles a running action's time and the header's time are drawn in.
-ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong")}
+ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong", "heading", "status_bar")}
 
 def _visible(row):
     """`row` without its escape sequences (`ESC [ … letter`)."""
@@ -990,8 +990,13 @@ def _impl(ctx: TaskContext) -> int:
             _eq("%s's time in %s" % (label, role), (ANSI_ROLES[role] + took) in row, True)
             _eq("%s's label plain" % label, (ANSI_ROLES[role] + label) in row, False)
     _eq("no time, no colour", aged_time("Analyzing"), None)
-    if ANSI_ROLES["strong"]:
-        _eq("the header's time strong", (ANSI_ROLES["strong"] + "1m05s") in rows[0], True)
+    _eq("the slowest pane's minutes", aged_time("CppCompile //a:long; 1m05s"), ("1m05s", "warning"))
+    _eq("and its seconds", aged_time("CppCompile //a:short; 12.4s"), ("12.4s", "muted"))
+
+    # The header's time stands apart from its bar: out of the bar's reverse
+    # video (a reset before it), in `heading`, then the bar again.
+    _eq("the header's time out of the bar", (theme.reset + ANSI_ROLES["heading"] + "1m05s" + theme.reset + ANSI_ROLES["status_bar"]) in rows[0], True)
+    _eq("in attributes not the bar's", ANSI_ROLES["heading"] != ANSI_ROLES["status_bar"] or not ANSI_ROLES["status_bar"], True)
 
     # The actions that wrote output: their own list, under `a`.
     wrote = output_of("action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")))

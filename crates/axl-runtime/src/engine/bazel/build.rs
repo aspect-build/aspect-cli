@@ -1438,16 +1438,35 @@ impl Build {
                 .is_some_and(|v| !v.is_empty());
         let profile_kept =
             rc_visible && !profile_unplaced && !bazel::profile::turned_off(&flags, verb);
+        // Bazel refuses a build naming more than one log format. Beside the
+        // caller's binary or JSON one, hooks that only read entries (a
+        // feature's, with no file of the compact log asked for) get none:
+        // their handles end at once, rather than the build be refused.
+        let other_format = bazel::execlog::other_format(&flags, verb);
+        let mut execlog_iters = execlog_iters;
+        if other_format
+            && requested_execlog_path.is_none()
+            && execlog_sinks
+                .iter()
+                .all(|s| matches!(s, ExecLogSink::Record))
+        {
+            execlog_iters.iter().for_each(ExecLogIter::release);
+            execlog_iters.clear();
+        }
         let (asked, recording) = execlog_demand(
-            execlog_enabled,
+            execlog_enabled
+                && !(other_format
+                    && execlog_iters.is_empty()
+                    && execlog_sinks
+                        .iter()
+                        .all(|s| matches!(s, ExecLogSink::Record))),
             &execlog_sinks,
             !execlog_iters.is_empty(),
             requested_execlog_path.is_some(),
             history_asked || history.records_every_build(),
         );
-        // Bazel refuses a build naming more than one log format, so a log
-        // only recorded is skipped beside the caller's binary or JSON one.
-        let other_format = bazel::execlog::other_format(&flags, verb);
+        // A log only recorded is skipped beside the caller's binary or JSON
+        // one too (`other_format`, above).
         let recording = recording && rc_visible && !other_format;
 
         // Asked with the same startup flags the build below will use, because
@@ -1470,6 +1489,12 @@ impl Build {
         let (log_on, execlog_telemetry) = telemetry
             .execution_log()
             .resolve(asked || recording, telemetry.exporting());
+        // Nor does telemetry turn on a second format beside the caller's.
+        let (log_on, execlog_telemetry) = if other_format && !asked {
+            (false, false)
+        } else {
+            (log_on, execlog_telemetry)
+        };
         let asked = asked || (log_on && !recording);
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
         // Every file below that stays goes into this one folder, made only
