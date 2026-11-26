@@ -7,7 +7,10 @@ that isn't numbers, a path outside the tree, a relative patch path, a
 patch that isn't there or isn't a file, one patch can't read (nothing of it
 applied), and a patch making a file that is there already (the same bytes,
 other ones, other bytes not UTF-8, an empty file), and each patch refused
-whole, every file untouched (a path in two headers, case folded, one with
+whole, every file untouched (a header name patch would read otherwise:
+with a space and no tab, or git-quoted; a git mode, rename or symlink
+header; a name patch writes its `.rej`, `.orig` or `.~N~` to; a symlink
+patch made in the copies; a path in two headers, case folded, one with
 a `.` or empty component, one that isn't a regular file, a parent that
 isn't a directory, a symlink leading out of the tree or to nothing, a patch
 past the read cap), and a symlink within the tree followed. Two names one
@@ -170,6 +173,7 @@ ln src/ok.txt src/hard
 ln -s f src/lf
 printf 'n\\n' > "$(printf 'src/\\303\\251.txt')"
 mkdir src/locked
+printf 'a\\n' > 'src/my file'
 """)
 
     # Searchable again before the tree goes, however the test ends (defers
@@ -200,6 +204,14 @@ mkdir src/locked
         ("an empty component", first + make("src//n.txt")),
         ("a hard link to a file named beside it", first + "--- a/src/hard\n+++ b/src/hard\n@@ -1 +1 @@\n-a\n+H\n"),
         ("removing a symlink, not what it names", first + "--- a/src/lf\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n"),
+        ("a name with a space and no tab", first + "--- a/src/my file\n+++ b/src/my file\n@@ -1 +1 @@\n-a\n+b\n"),
+        ("a git-quoted name", first + "--- \"a/src/f\"\n+++ \"b/src/f\"\n@@ -1 +1 @@\n-f\n+g\n"),
+        ("a symlink by git's mode", first + "diff --git a/src/n b/src/n\nnew file mode 120000\n" + make("src/n")),
+        ("a git mode change", first + "diff --git a/src/f b/src/f\nold mode 100644\nnew mode 100755\n--- a/src/f\n+++ b/src/f\n@@ -1 +1 @@\n-f\n+g\n"),
+        ("a git rename", first + "diff --git a/src/f b/src/g\nsimilarity index 90%\nrename from src/f\nrename to src/g\n"),
+        ("a name patch writes its reject to", first + make("src/ok.txt.rej")),
+        ("a name patch writes its backup to", first + make("src/ok.txt.orig")),
+        ("a name patch writes a numbered backup to", first + make("src/ok.txt.~1~")),
     ] + ([
         ("a case-only rename where the disk takes them as one", first + "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F")),
     ] if one_case else []) + ([
@@ -210,7 +222,7 @@ mkdir src/locked
         fs.write(refuse + "/p.patch", body)
         _eq("refused: " + reason, apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
         _eq("%s: the first file untouched" % reason, fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
-        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", sorted(["away", "d", "dangling.txt", "f", "hard", "lf", "link.txt", "linked", "locked", "ok.txt", nfc.partition("/")[2]]), []))
+        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", sorted(["away", "d", "dangling.txt", "f", "hard", "lf", "link.txt", "linked", "locked", "my file", "ok.txt", nfc.partition("/")[2]]), []))
         _eq("%s: nothing outside" % reason, (fs.exists(root + "/outside.txt"), _names(fs, root + "/away")), (False, []))
 
     # A patch past the read cap, its first hunk one patch would apply: the
@@ -237,6 +249,16 @@ mkdir src/locked
         fs.write(refuse + "/p.patch", "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F"))
         _eq("a case-only rename on a case-sensitive disk", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
         _eq("applies", (fs.exists(refuse + "/src/f"), fs.read_to_string(refuse + "/src/F")), (False, "made\n"))
+
+    # What patch leaves in the copies is checked before anything is copied
+    # back: a symlink it made (GNU patch, from git's `120000`) is refused,
+    # never followed. A stand-in patch makes one.
+    shim = root + "/shim-patch"
+    fs.write(shim, "#!/bin/sh\nln -s /etc/hosts src/n\nexit 0\n")
+    fs.set_permissions(shim, 493)
+    fs.write(refuse + "/p.patch", first + make("src/n"))
+    _eq("a symlink patch made", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, program = shim), None)
+    _eq("nothing copied back", (fs.read_to_string(refuse + "/src/ok.txt"), fs.try_metadata(refuse + "/src/n")), ("a\n", None))
 
     # A symlink within the workspace is followed.
     fs.write(refuse + "/real/x.py", "a\n")

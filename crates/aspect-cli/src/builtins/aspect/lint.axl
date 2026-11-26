@@ -41,13 +41,34 @@ load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_s
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "did_you_mean_then", "pluralize")
 
+def _header_name(line: str):
+    """The path a `--- `/`+++ ` header names as `patch -p1` opens it, its
+    prefix gone (None for `/dev/null`), and why it can't be known, or None.
+    BSD and GNU patch end a name at a tab, else at the first whitespace: a
+    name with whitespace and no tab after it (`diff --label` gives that)
+    would open another file than it names, and a git-quoted one (`"a/x"`)
+    is unquoted by GNU patch only."""
+    rest = line[4:].removesuffix("\r").lstrip(" ")
+    if rest.startswith("\""):
+        return None, "a quoted (git) name, which BSD and GNU patch read apart"
+    if "\t" in rest:
+        name = rest.partition("\t")[0]
+    else:
+        name = rest.rstrip(" ")
+        if any([c in name for c in (" ", "\f", "\v")]):
+            return None, "a name with a space and no tab after it, which patch ends at the space"
+    if name == "/dev/null":
+        return None, None
+    return (name.partition("/")[2] if "/" in name else name), None
+
 def _header_path(line: str):
-    """The path a `--- `/`+++ ` header names as `patch -p1` takes it, or None
-    for `/dev/null`: its prefix and any timestamp gone."""
-    path = line[4:].split("\t")[0].strip()
-    if path == "/dev/null":
-        return None
-    return path.partition("/")[2] if "/" in path else path
+    """`_header_name`'s path alone."""
+    return _header_name(line)[0]
+
+# Git extended header lines patch acts on, or binary data it can't apply,
+# that the copy-back by bytes would not carry: a mode change, a rename or
+# copy, a binary patch.
+_GIT_HEADERS = ("old mode ", "new mode ", "rename from ", "rename to ", "copy from ", "copy to ", "GIT binary patch", "Binary files ")
 
 def _hunk_count(spec: str):
     """The line count of a hunk range, `-a,b` or `+c,d` (1 when `,b` is left
@@ -64,7 +85,19 @@ def patch_headers(text: str):
     range that isn't numbers. A `--- ` line followed by a `+++ ` one is a
     header only outside a hunk's body: a removed `-- x` line reads as
     `--- x` there."""
+    headers, why = _scan(text)
+    return None if why == _BAD_RANGE else headers
+
+_BAD_RANGE = "a hunk's line range isn't numbers"
+
+def _scan(text: str):
+    """`(headers, why)`: `patch_headers`'s headers, and why the patch is not
+    applied, or None: a hunk range that isn't numbers, a header name patch
+    would read otherwise (`_header_name`), a git header in `_GIT_HEADERS`,
+    or a file mode other than a regular file's (`new file mode 120000`, a
+    symlink patch would make). Only outside a hunk's body."""
     out = []
+    why = None
     lines = text.split("\n")
     old_left = 0
     new_left = 0
@@ -86,10 +119,20 @@ def patch_headers(text: str):
                 old_left = _hunk_count(ranges[1])
                 new_left = _hunk_count(ranges[2])
                 if old_left == None or new_left == None:
-                    return None
+                    return out, _BAD_RANGE
         elif line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
-            out.append((_header_path(line), _header_path(lines[i + 1])))
-    return out
+            (old, old_why), (new, new_why) = _header_name(line), _header_name(lines[i + 1])
+            why = why or old_why or new_why
+            out.append((old, new))
+        elif line.startswith("GIT binary patch") or line.startswith("Binary files "):
+            why = why or "a binary patch, which patch can't apply"
+        elif any([line.startswith(h) for h in _GIT_HEADERS]):
+            why = why or "a git `%s` line, which the copy-back would not carry" % line.rpartition(" ")[0]
+        elif line.startswith("new file mode ") or line.startswith("deleted file mode ") or line.startswith("index "):
+            mode = line.rpartition(" ")[2].strip()
+            if mode.isdigit() and len(mode) == 6 and not mode.startswith("100"):
+                why = why or "a file of mode %s (a symlink or submodule), not a regular file" % mode
+    return out, why
 
 def patched_files(text: str) -> list:
     """The files a unified diff touches, each side of each header (see
@@ -187,16 +230,21 @@ def _identity(fs, resolved: list):
     return tuple(resolved)
 
 def _escaped(path: str) -> str:
-    """`path` with each character past ASCII as `\\u` and its code, so two
-    spellings that look alike (NFC and NFD) read apart."""
+    """`path` as a line can show it: `\\` doubled, a control character and
+    each one past ASCII as `\\u` and four hex digits (`\\U` and eight past
+    the Basic Multilingual Plane), so two spellings that look alike (NFC
+    and NFD) read apart and none ends or rewrites the line."""
     out = []
     for c in path.elems():
         n = ord(c)
-        if n < 128:
+        if c == "\\":
+            out.append("\\\\")
+        elif n >= 0x20 and n < 0x7f:
             out.append(c)
         else:
             code = "%x" % n
-            out.append("\\u" + "0" * max(0, 4 - len(code)) + code)
+            width = 4 if n < 0x10000 else 8
+            out.append(("\\u" if width == 4 else "\\U") + "0" * max(0, width - len(code)) + code)
     return "".join(out)
 
 def _copy_collision(fs, work: str, keys: dict):
@@ -204,7 +252,8 @@ def _copy_collision(fs, work: str, keys: dict):
     the copies' directory `work` (a disk that folds case or Unicode where
     the workspace doesn't, or two new names it folds into one), or None:
     patch would put both their hunks on one copy, and copying it back would
-    write one result over both."""
+    write one result over both. A case-only rename in a case-sensitive
+    checkout is refused so where the copies' directory folds case."""
     seen = {}
     for path, key in keys.items():
         resolved, _ = _resolved(fs, work + "/" + path)
@@ -302,7 +351,7 @@ def _creation_diff(text: str, path: str) -> str:
         return "\n".join(out) + "\n"
     return ""
 
-def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
+def apply_fix_patch(ctx, patch: str, cwd = None, seen = None, program = "patch"):
     """Apply one auto-fix patch with `patch -p1`, asking nothing (no
     terminal answers it): a hunk that looks applied already is skipped, not
     reversed (`--forward --batch`, BSD and GNU patch both). It is applied to
@@ -346,17 +395,23 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     larger than `_PATCH_CAP`; what follows takes a simple, well-formed
     patch. It is refused too, with nothing copied back, where two of its
     files are one in the copies' directory, once made and again once
-    patched (`_copy_collision`)."""
+    patched (`_copy_collision`), and where, once patched, a named path in
+    the copies isn't a regular file (a symlink GNU patch makes from git's
+    `120000`) or is gone though the patch doesn't remove it. Before then: a
+    header name patch would open otherwise (`_header_name`), a git header
+    the copy-back would not carry, or a named path that another is with
+    `.rej`, `.orig` or `.~N~` after it (patch's own output). `program` is
+    the `patch` run, for a test to stand in for one."""
     cwd = cwd or ctx.std.env.current_dir()
     fs = ctx.std.fs
     if not patch.startswith("/"):
         patch = cwd + "/" + patch
     if not _is_file(fs, patch):
-        print("WARNING: %s was not applied: %s" % (patch, "it isn't a file" if fs.exists(patch) else "it isn't there"))
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), "it isn't a file" if fs.exists(patch) else "it isn't there"))
         return None
     too_large = patch_too_large(fs, patch)
     if too_large:
-        print("WARNING: %s was not applied: %s" % (patch, too_large))
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), too_large))
         return None
     if seen != None:
         content = fs.open(patch).read()
@@ -366,18 +421,28 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
 
     # Lossy: a hunk may hold any bytes; only the header paths are read.
     text = fs.try_read_to_string_capped(patch, _PATCH_CAP)
-    headers = patch_headers(text)
-    if headers == None:
-        print("WARNING: %s was not applied: a hunk's line range isn't numbers" % patch)
+    headers, why = _scan(text)
+    if why:
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), why))
         return None
     paths = _files_of(headers)
     outside = [p for p in paths if not _inside(p)]
     if outside:
-        print("WARNING: %s was not applied: it names %s, outside the workspace" % (patch, ", ".join(outside)))
+        print("WARNING: %s was not applied: it names %s, outside the workspace" % (_escaped(patch), ", ".join([_escaped(p) for p in outside])))
         return None
+
+    # patch writes `x.rej` and `x.orig` (or `x.~N~`) beside `x` in the
+    # copies: one the patch names too would be overwritten by them.
+    for path in paths:
+        for other in paths:
+            tail = other.removeprefix(path)
+            numbered = tail.startswith(".~") and tail.endswith("~") and tail[2:-1].isdigit()
+            if other != path and other.startswith(path) and (tail in (".rej", ".orig") or numbered):
+                print("WARNING: %s was not applied: it names %s and %s, which patch writes its own output to" % (_escaped(patch), _escaped(path), _escaped(other)))
+                return None
     refused, keys = _refusal(fs, cwd, headers)
     if refused:
-        print("WARNING: %s was not applied: %s" % (patch, refused))
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), refused))
         return None
     removed = [old for old, new in headers if old and not new]
     changed = [old for old, new in headers if old]
@@ -397,21 +462,33 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
             fs.copy(cwd + "/" + path, work + "/" + path)
     collision = _copy_collision(fs, work, keys)
     if collision:
-        print("WARNING: %s was not applied: %s" % (patch, collision))
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), collision))
         return None
-    out = ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
-        .current_dir(work).env("TMPDIR", scratch).stdout("piped").stderr("piped").spawn().wait_with_output()
+
+    # Backups as patch makes them by default, whatever the environment asks.
+    out = ctx.std.process.command(program).arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
+        .current_dir(work).env("TMPDIR", scratch).env("VERSION_CONTROL", None).env("PATCH_VERSION_CONTROL", None) \
+        .env("SIMPLE_BACKUP_SUFFIX", None).stdout("piped").stderr("piped").spawn().wait_with_output()
     said = out.stdout + out.stderr
     if said:
         ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
     code = out.status.code
     if code not in (0, 1):
-        print("WARNING: %s was not applied: %s" % (patch, "patch exited with %d" % code if code != None else "patch was ended by a signal"))
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), "patch exited with %d" % code if code != None else "patch was ended by a signal"))
         return None
     collision = _copy_collision(fs, work, keys)
     if collision:
-        print("WARNING: %s was not applied: %s" % (patch, collision))
+        print("WARNING: %s was not applied: %s" % (_escaped(patch), collision))
         return None
+
+    # Nothing but regular files copied back: a symlink patch made (git's
+    # `120000`) would be followed, and a file it took away unasked lost.
+    for path in paths:
+        meta, err = _look(fs, work + "/" + path)
+        if err != None or (meta != None and not meta.is_file) or (meta == None and path in had and path not in removed):
+            what = "is gone" if meta == None and err == None else "isn't a regular file"
+            print("WARNING: %s was not applied: %s %s after patch ran" % (_escaped(patch), _escaped(path), what))
+            return None
     ignored = _ignored_rejects(said)
     rejects = []
     for path in paths:
@@ -443,7 +520,7 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     for old, new in headers:
         made = new and new != old and _is_file(fs, work + "/" + new)
         if old and new and old not in had and not made and not _is_file(fs, work + "/" + old):
-            print("INFO: %s changes %s, which isn't there: its hunks for it were not applied" % (patch, old))
+            print("INFO: %s changes %s, which isn't there: its hunks for it were not applied" % (_escaped(patch), _escaped(old)))
     if rejects:
         kept = fs.mkdtemp()
         for rej in rejects:
@@ -451,7 +528,7 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
             if parent:
                 fs.create_dir_all(kept + "/" + parent)
             fs.copy(work + "/" + rej, kept + "/" + rej)
-        print("INFO: %s did not apply in full; its rejected hunks are in %s" % (patch, kept))
+        print("INFO: %s did not apply in full; its rejected hunks are in %s" % (_escaped(patch), _escaped(kept)))
         return kept
     return None
 
