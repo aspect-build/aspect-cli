@@ -307,9 +307,9 @@ fn intercepted_line_methods(registry: &mut MethodsBuilder) {
 /// What the running task's `BazelTrait` (the trait with its `output_*`
 /// fields, [`CONSOLE_FIELDS`]) says about the console: the stages a build
 /// with no `output =` and no redirected stdout or stderr is processed with,
-/// and the hooks every build's console calls. Read from the task context the runtime records
-/// ([`crate::engine::module_values::task_context`]); a task without the trait has
-/// none of it.
+/// and the hooks every build's console calls. Read from the task context the
+/// runtime records ([`crate::engine::module_values::task_context`]); there is
+/// none when no loaded trait type has those fields.
 pub(crate) struct TraitConsole<'v> {
     pub ctx: Value<'v>,
     pub stages: Vec<Stage>,

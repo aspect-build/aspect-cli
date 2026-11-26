@@ -2,7 +2,7 @@
 
 Every Bazel-calling task already runs this during its Setup phase: the `Workflows`
 feature registers `agent_health_check` as a `HealthCheckTrait` hook (see
-`feature/workflows.axl`), and `lib/lifecycle.axl::setup_phase` runs it before the
+`feature/workflows.axl`), and `phases.setup` (`private/lib/lifecycle.axl`) runs it before the
 build. This command runs just that step on demand — it waits for cache warming to
 complete, prints the last runner health check and warming status, then probes the
 runner's Bazel server (`ctx.bazel.health_check()`), signaling the runner unhealthy
@@ -26,7 +26,7 @@ load(
     "get_workflows_environment",
     "info",
 )
-load("./private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
+load("./private/lib/health_check.axl", "agent_health_check")
 
 def _impl(ctx: TaskContext) -> int:
     environment = get_workflows_environment(ctx.std)

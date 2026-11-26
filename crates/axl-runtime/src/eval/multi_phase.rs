@@ -29,7 +29,7 @@ use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
 use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
-use crate::engine::r#trait::TraitInstance;
+use crate::engine::r#trait::{TraitInstance, extract_trait_type_id};
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
 use crate::eval::exit::TaskExit;
@@ -957,7 +957,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .expect("self.trait_map_value is a TraitMap");
         for owned in self.loader.exported_trait_types() {
             let type_value = heap.access_owned_frozen_value(&owned).to_value();
-            if let Some(id) = crate::engine::r#trait::extract_trait_type_id(type_value) {
+            if let Some(id) = extract_trait_type_id(type_value) {
                 trait_map.insert(id, type_value);
             }
         }

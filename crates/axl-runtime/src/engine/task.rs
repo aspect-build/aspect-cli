@@ -570,8 +570,8 @@ fn task_methods(builder: &mut MethodsBuilder) {
 
 /// The error for `task(traits = ...)`. The parameter is accepted only to
 /// fail with this, rather than Starlark's generic unexpected-parameter error.
-pub(crate) const TRAITS_REMOVED: &str = "task(traits = ...) was removed: tasks no longer declare \
-     traits; ctx.traits[T] works for any trait. Delete the traits argument.";
+pub(crate) const TRAITS_REMOVED: &str = "task(traits = ...) was removed: ctx.traits[T] reads any \
+     trait type without declaring it. Delete the `traits` argument.";
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
@@ -1087,14 +1087,17 @@ aliased = base.alias(group = ["a", "b", "c", "d", "e", "f"])
         );
     }
 
+    /// Any `traits` value fails, an empty list included.
     #[test]
     fn task_traits_argument_fails_with_the_removal_message() {
-        assert_eval_err_contains(
-            r#"
-MyTrait = trait(x = attr(int, default = 0))
-base = task(implementation = _impl, traits = [MyTrait])
-"#,
-            super::TRAITS_REMOVED,
-        );
+        for traits in ["[MyTrait]", "[]"] {
+            assert_eval_err_contains(
+                &format!(
+                    "MyTrait = trait(x = attr(int, default = 0))\n\
+                     base = task(implementation = _impl, traits = {traits})\n"
+                ),
+                super::TRAITS_REMOVED,
+            );
+        }
     }
 }

@@ -68,7 +68,7 @@ Tasks own the *flow* (which Bazel command runs when, what extra processing happe
 
 `Phases` (defined in [`private/lib/lifecycle.axl`](private/lib/lifecycle.axl)) has a **single** slot, **`task_update(ctx, TaskUpdate)`**, fired zero or more times during the task. The *first* and *last* updates carry extra meaning, so one hook covers the whole lifecycle:
 
-- **First update → init.** A handler's first `task_update` is its cue to initialize: authenticate, create the GitHub check run / first BK annotation, and read `update.subject` for the rendered title. `setup_phase` (see below) emits this first update — the `🔧 Setup` phase mark — at the very start of every task, so init always lands inside the Setup phase. Each handler guards init with a private `_state["_initialized"]` flag.
+- **First update → init.** A handler's first `task_update` is its cue to initialize: authenticate, create the GitHub check run / first BK annotation, and read `update.subject` for the rendered title. `ph.setup` (see below) emits this first update — the `🔧 Setup` phase mark — at the very start of every task, so init always lands inside the Setup phase. Each handler guards init with a private `_state["_initialized"]` flag.
 
 - **Middle updates → progress.** Tasks emit running updates as they make progress (lint emits one per SARIF report; build/test emit on every BES event that updates the failure / test-summary state). The per-surface throttle in `private/lib/check_dispatch` collapses chatty updates.
 
@@ -78,7 +78,7 @@ Each `TaskUpdate` carries:
 - `kind` — the result-library identifier (e.g. `"lint_results"`). Drives renderer dispatch.
 - `status` — `"running"`, `"failing"`, `"passed"`, `"failed"`, `"warning"`, or `"aborted"`.
 - `data` — kind-specific data dict (the `init_data()` accumulator, see [Results dict shape](#results-dict-shape)).
-- `subject` — the task's target patterns / formatter target / etc. `setup_phase` sets it on the first emit so handlers can read it during init; a later emit may carry a refined subject (handlers latch the last non-empty value and refresh the surface title).
+- `subject` — the task's target patterns / formatter target / etc. `ph.setup` sets it on the first emit so handlers can read it during init; a later emit may carry a refined subject (handlers latch the last non-empty value and refresh the surface title).
 - `final` — `True` on the terminal emit.
 
 There is **no** separate `task_started` / `task_complete` hook — the first and last `task_update` carry that intent. The `subject` rides on the first update so init has what it needs without a dedicated start signal.
@@ -86,7 +86,7 @@ There is **no** separate `task_started` / `task_complete` hook — the first and
 The order at runtime, end-to-end:
 
 ```
-setup_phase(ctx, lifecycle, subject, …)          # FIRST thing in every _impl
+ph.setup(subject, kind, …)                       # FIRST thing in every _impl
   └─ lifecycle.task_update(🔧 Setup, subject=…)   # the first update
        └─ GithubStatusChecks inits → creates the check run
        └─ BuildkiteAnnotations inits → posts the first "info" annotation
@@ -1018,7 +1018,7 @@ When writing a new task, feature, or library, sanity-check:
 
 - [ ] If the task iterates BES events, create the iterator handle with `bazel.build_events.iterator(tick_ms = …)` *before* calling `ctx.bazel.build(...)`, and include it in the `build_events=[...]` list. The runtime subscribes it pre-spawn; the race is closed by construction. Omitting `tick_ms` makes the drain loop block in `recv()` and stop answering signals whenever BES goes quiet.
 - [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` after `ctx.bazel.build` returns, then emit a running `task_update` so the Aspect Workflows link surfaces live.
-- [ ] Call `setup_phase(ctx, lifecycle, subject, kind, data, hc_trait, bazel_trait, ...)` as the FIRST thing in `_impl` — it emits the Setup phase mark (the first `task_update`, which inits the status surfaces and renders their first body from `kind` + `data`), resolves Bazel flags, and runs `health_check` (a failed check concludes the surface and fails the task).
+- [ ] Call `ph.setup(subject, kind, ...)` on a `phases.new(ctx, data)` handle as the FIRST thing in `_impl` — it emits the Setup phase mark (the first `task_update`, which inits the status surfaces and renders their first body from `kind` + `data`), resolves Bazel flags, and runs `health_check` (a failed check concludes the surface and fails the task).
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).
 - [ ] No `traits = [...]` in the `task(...)` call (`task()` rejects it); `ctx.traits[T]` works for any trait. Add the task to the definition comment of each trait whose hooks it fires.
 - [ ] Emit a terminal `task_update` with `final=True` and a terminal `status` (`"passed"` / `"failed"` / `"warning"` / `"aborted"`) on every `return` path, and return the `TaskConclusion` it hands back. There is no separate `task_complete` hook.
