@@ -3818,9 +3818,9 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     """The main pane's top border: its tabs, always in the same order, the
     shown one in reverse video (the failures counted, `✗` failed and `○`
     blocked) and named by its crumbs (a log or a file opened in it, the
-    current one bold); then, at the border's right end, apart from the tabs
-    and in a style none of them has (`heading`: bold, so apart where colour
-    is not shown), what the shown one says of itself
+    current one bold); then, at the border's right end, set off by dashes
+    so it never reads as a tab, muted (`muted`), what the shown one says
+    of itself
     (`status`: following, lines up, a run replayed). Where each tab and
     crumb is drawn is kept (`tab_spans`, on row `row`) for a click to take
     it, or go back to it, and the pointer to light it. Too narrow, the
@@ -3880,7 +3880,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     rest = max(0, cols - at - 1)
     info = (" " + fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
     lead = rest - text_width(info) - (1 if info else 0)
-    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("heading") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
+    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("muted") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
 
 _SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
 

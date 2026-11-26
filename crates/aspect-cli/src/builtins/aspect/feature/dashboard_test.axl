@@ -12,8 +12,9 @@ load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar",
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
-# The style the console's state is drawn in, apart from every tab's.
-ANSI_ACCENT = theme.sgr("heading")
+# The style the console's state is drawn in, muted, at the border's end.
+ANSI_MUTED = theme.sgr("muted", stream = True)
+ANSI_HEADING = theme.sgr("heading", stream = True)
 
 # The roles a running action's time and the header's time are drawn in.
 ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong", "heading", "status_bar")}
@@ -2695,8 +2696,8 @@ def _impl(ctx: TaskContext) -> int:
     _eq("no cut status", head.rstrip(" \r").endswith("1 action running") or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
 
     # The console's state (following, lines up) at the tab border's right
-    # end, a dash apart from the tabs and in a style none of them has, at
-    # every width; cut, then gone, rather than the tabs collapse for it.
+    # end, a dash apart from the tabs, muted (never the accent, nor bold),
+    # at every width; cut, then gone, rather than the tabs collapse for it.
     lines = ["line %d" % i for i in range(200)]
     for scroll, said in [(0, "following"), (12, "12 lines up")]:
         for cols in range(24, 161, 7):
@@ -2708,7 +2709,9 @@ def _impl(ctx: TaskContext) -> int:
             if said in plain:
                 _eq("%s apart from the tabs at %d" % (said, cols), said in tabs, False)
                 _eq("%s at the right end at %d" % (said, cols), plain.endswith(said + " ─┐") or tail.endswith("… ─┐"), True)
-                _eq("%s in its own style at %d" % (said, cols), (ANSI_ACCENT + " " + said) in top or ANSI_ACCENT in top, True)
+                _eq("%s muted at %d" % (said, cols), (ANSI_MUTED + " " + said) in top or (ANSI_MUTED + " ") in top, True)
+                if ANSI_HEADING and ANSI_HEADING != ANSI_MUTED:
+                    _eq("%s not in the accent at %d" % (said, cols), ANSI_HEADING + " " in top, False)
             long = _screen(ctx, lines, scroll = 12, unseen = 999, unseen_errors = 99, dropped = 9999)
             long_top = _visible([r for r in render(long, cols, 30).split("\n") if "Console" in _visible(r) and "┌" in _visible(r)][0])
             _eq("the tabs whatever the state's length at %d" % cols, "Failures" in plain, "Failures" in long_top)
