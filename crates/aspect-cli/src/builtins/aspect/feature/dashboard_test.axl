@@ -509,23 +509,35 @@ def _actions_tests(ctx):
     own_inv = {"options_parsed": struct(cmd_line = ["--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])}
     blind = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"], inv = own_inv)
     blind["counts"].update(spawns = 0)
-    _eq("no log: the done count alone, and what is in progress", action_parts(action_split(blind)), [("━", 3830, "done", ""), ("─", 4733, "in progress", "border")])
+    _eq("no log: the done count alone, what runs and what is pending", action_parts(action_split(blind)), [("━", 3830, "done", ""), ("─", 16, "running", "border"), ("", 4717, "pending", "")])
 
     # While it runs, Results' parts sum to the bar's total: what is not
-    # done yet too, under the bar's glyph; at the end it is gone.
-    for st in (mid, blind, meld):
+    # done yet too, the actions running now (the Running pane's count)
+    # under the bar's glyph and the rest pending; at the end both are gone.
+    def _sums(st):
         sp = action_split(dict(st, building = True))
         total = 0
         for _, n, _, _ in action_parts(sp):
             total += n
-        _eq("Results sum to the bar's total", total, sp["total"])
-    _eq("drawn", "─ 4,733 in progress" in _visible(render(dict(mid, building = True), 140, 30)), True)
-    _eq("none at the end", [p for p in action_parts(action_split(cached)) if p[2] == "in progress"], [])
+        return (total, sp["total"])
+
+    for st in (mid, blind, meld):
+        got, want = _sums(st)
+        _eq("Results sum to the bar's total", got, want)
+    over = dict(mid, progress = ["[8,560 / 8,590] 200 actions running"])
+    _eq("more running than not done: clamped, still the total", _sums(over)[0], _sums(over)[1])
+    _eq("all of it running", [p[1:3] for p in action_parts(action_split(dict(over, building = True))) if p[2] in ("running", "pending")], [(30, "running"), (0, "pending")])
+    lag = dict(mid, progress = ["[8,560 / 8,590] no actions running"])
+    _eq("none running: all pending, under the bar's glyph", [p for p in action_parts(action_split(dict(lag, building = True))) if p[2] in ("running", "pending")], [("─", 0, "running", "border"), ("─", 30, "pending", "border")])
+    _eq("its sum", _sums(lag)[0], _sums(lag)[1])
+    drawn = _visible(render(dict(mid, building = True), 140, 30))
+    _eq("drawn, running and pending on one row", "─ 16 running · 4,717 pending" in drawn, True)
+    _eq("none at the end", [p for p in action_parts(action_split(cached)) if p[2] in ("running", "pending")], [])
     progress_split = dict(action_split(dict(mid, building = True)), ran = 5691, rest = 2869, cached = 0, done = 8560, total = 8590)
-    _eq("Greg's numbers", [_visible(r) for r in action_results(progress_split, 33)], ["█ 5,691 ran · ▒ 2,869 other", "─ 30 in progress"])
-    _eq("narrow: its own row before shorter words", [_visible(r) for r in action_results(progress_split, 19)], ["█ 5,691 ran", "▒ 2,869 other", "─ 30 in progress"])
-    _eq("shorter words only where unavoidable", [_visible(r) for r in action_results(progress_split, 12)][-1].endswith("in prog."), True)
-    _eq("the ? key names it", any(["─ in progress" in r for r in help_rows(mid, 100)]), True)
+    _eq("Greg's numbers", [_visible(r) for r in action_results(progress_split, 33)], ["█ 5,691 ran · ▒ 2,869 other", "─ 16 running · 14 pending"])
+    _eq("at 80 columns, wrapped, words whole", [_visible(r) for r in action_results(progress_split, 26)], ["█ 5,691 ran", "▒ 2,869 other", "─ 16 running · 14 pending"])
+    _eq("shorter words only where three rows hold nothing else", [_visible(r) for r in action_results(progress_split, 19)], ["█ 5.6k ran", "▒ 2.8k other", "─ 16 run. · 14 pend."])
+    _eq("the ? key names it", any(["─ running · pending" in r for r in help_rows(mid, 100)]), True)
     shown = _visible(render(blind, 140, 30))
     _eq("no log: drawn as done", ("Actions  ━ 3,830 done" in shown, "unchanged" in shown, "━" * 10 in shown), (True, False, True))
     blind.update(building = False, ended = True, inv = dict(own_inv, build_finished = _SUCCESS, build_metrics = _REUSED), done_total = (8563, 8563, False))
@@ -1315,7 +1327,7 @@ def _impl(ctx: TaskContext) -> int:
     many["counts"].update(spawns = 1452, spawn_hits = 58, test_runs = 1500, test_cached = 1200, configured = 12345, built = 12000)
     shown = _visible(render(many, 140, 30))
     _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
-    _eq("whole counts in three rows, what is in progress too", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "─ 4,733 in progress" in shown], [True, True, True])
+    _eq("whole counts in three rows, what runs and is pending too", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "▒ 2,378 other" in shown, "─ 16 running · 4,717 pending" in shown], [True, True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cache hits", "Tests    9 passed, 6 failed · 9/15 cached" in _visible(render(many, 140, 30)), True)
     _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 76, 30)), True)

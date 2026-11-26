@@ -4,9 +4,9 @@
 │ Compiling src/a.cc; 3s                ││ Targets  3 configured               │
 │ Linking //app:bin; 1s                 ││          0 built, 0 failed          │
 │ … and 13 more                         ││ Tests    0 passed, 0 failed         │
-│                                       ││ Actions  █ 200 ran · ▓ 1,100 cached │
-│                                       ││          ▒ 2,530 other              │
-│                                       ││          ─ 4,733 in progress        │
+│                                       ││ Actions  █ 200 ran · ▓ 1.1k cached  │
+│                                       ││          ▒ 2.5k other               │
+│                                       ││          ─ 15 run. · 4.7k pend.     │
 │                                       ││                                     │
 │                                       ││                                     │
 │                                       ││                                     │

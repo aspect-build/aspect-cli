@@ -25,6 +25,6 @@
 │   o  O                 open the log (or the task's output) in your editor; pick the editor       │
 │   w                    wrap long lines (the default), or cut them at the edge                    │
 │   ^O                   show the lines under each INFO: From (a successful action's output, fold… │
-│ … 7 more: ↓                                                                                      │
+│ … 8 more: ↓                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ scroll · any other key closes

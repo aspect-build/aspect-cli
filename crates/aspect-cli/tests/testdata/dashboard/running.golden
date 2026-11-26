@@ -5,7 +5,7 @@
 │ Linking //app:bin; 1s                                     ││          0 built, 0 failed          │
 │                                                           ││ Tests    0 passed, 0 failed         │
 │                                                           ││ Actions  ▒ 3 other                  │
-│                                                           ││          ─ 6 in progress            │
+│                                                           ││          ─ 2 running · 4 pending    │
 │                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │

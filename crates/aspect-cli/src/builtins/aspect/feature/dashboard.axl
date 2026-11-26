@@ -2911,6 +2911,15 @@ def _cache_runner(name: str) -> bool:
     not one that ran the spawn, nor Bazel's own action cache."""
     return name.endswith("cache hit") and name not in _NOT_RUNNERS
 
+def running_count(state: dict) -> int:
+    """How many actions a running build has running now, as its Running
+    pane counts them (Bazel's status line, else the rows it lists); 0 once
+    it has ended."""
+    if not state.get("building"):
+        return 0
+    progress = state.get("progress") or []
+    return max(len(running_actions(progress)), action_counts(progress)[0])
+
 def action_split(state: dict) -> dict:
     """A build's actions by what became of each, for the bar, Results and
     Metrics, in one unit, Bazel's actions, summing to the done count:
@@ -2958,7 +2967,7 @@ def action_split(state: dict) -> dict:
     inv = state.get("inv") or {}
     summary = _get(inv.get("build_metrics"), "action_summary")
     executed = _get(summary, "actions_executed")
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0, failed_build = False, running = bool(state.get("building")))
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state))
     if not state.get("building") and type(executed) == "int":
         internal, cache, ran_spawns, hit_runner = 0, 0, 0, 0
         for runner in _get(summary, "runner_count", None) or []:
@@ -3143,29 +3152,36 @@ def action_parts(split: dict) -> list:
     glyphs their legend: ran and cached, then while the build runs what
     else is done (`other`, as `action_split` has it), and at its end
     unchanged, internal and failed; with nothing to tell them apart, the
-    done count; while it runs, what is not done yet too (`in progress`, the
-    bar's `─`), so they sum to the bar's total; none before it counts."""
+    done count; while it runs, what is not done yet too, the bar's `─`:
+    the actions running now (`running_count`, at most what is not done)
+    and the rest pending, so they sum to the bar's total; none before it
+    counts."""
     if not split["counted"]:
         return []
-    to_go = [(_UNDONE[0], split["total"] - split["done"], "in progress", _UNDONE[1])] if split.get("running") and split["total"] > split["done"] else []
+    remaining = []
+    undone = split["total"] - split["done"]
+    if split.get("running") and undone > 0:
+        now = min(split.get("running_now", 0), undone)
+        remaining = [(_UNDONE[0], now, "running", _UNDONE[1]), ("" if now else _UNDONE[0], undone - now, "pending", "" if now else _UNDONE[1])]
     if not split["known"]:
-        return [(_DONE[0], split["done"], "done", _DONE[1])] + to_go
+        return [(_DONE[0], split["done"], "done", _DONE[1])] + remaining
     parts = [("█", split["ran"], "ran", "accent"), ("▓", split["cached"], "cached", "success")]
     if not split["final"]:
         parts.append(("▒", split["rest"], "other", "muted"))
-        return parts + ([("╳", split["failed"], "failed", "error")] if split["failed"] else []) + to_go
+        return parts + ([("╳", split["failed"], "failed", "error")] if split["failed"] else []) + remaining
     parts += [("▒", split["unchanged"], "unchanged", "muted"), ("░", split["internal"], "internal", "subtle")]
     if split["failed"]:
         parts.append(("╳", split["failed"], "failed", "error"))
     return parts
 
 # Results' shorter words for a kind, where the whole ones do not fit.
-_SHORT_WORDS = {"unchanged": "unch.", "internal": "int.", "in progress": "in prog."}
+_SHORT_WORDS = {"unchanged": "unch.", "internal": "int.", "running": "run.", "pending": "pend."}
 
 def action_results(split: dict, room: int, rows = 3) -> list:
     """`action_parts` there is any of (none of a kind there is none of),
     each in words with the bar's glyph before its count as a coloured key
-    (`█ 5.6k ran`), packed into rows of `room` cells, the first of these
+    (`█ 5.6k ran`; a part without one stays on the row of the one before
+    it), packed into rows of `room` cells, the first of these
     that fits: whole counts in two rows (or `rows`, fewer), then in
     `rows`, then `short_count` ones in two or `rows`, then shorter words
     (`_SHORT_WORDS`) in two or `rows`. The words are never dropped: what
@@ -3180,9 +3196,12 @@ def action_results(split: dict, room: int, rows = 3) -> list:
         for glyph, n, words, role in parts:
             count = _thousands(n) if level == 0 else short_count(n)
             word = _SHORT_WORDS.get(words, words) if level == 2 else words
-            text = glyph + " " + count + " " + word
+            text = (glyph + " " if glyph else "") + count + " " + word
             if packed[-1] and text_width(" · ".join([t for _, t, _ in packed[-1]] + [text])) > room:
-                packed.append([])
+                # A part without a glyph goes on with the one before it
+                # (pending after running): to a new row together.
+                moved = [packed[-1].pop()] if not glyph and len(packed[-1]) > 1 else []
+                packed.append(moved)
             packed[-1].append((glyph, text, role))
         if len(packed) <= most and all([text_width(" · ".join([t for _, t, _ in row])) <= room for row in packed]):
             return [_results_row(row) for row in packed]
@@ -4030,7 +4049,7 @@ def action_lines(state: dict) -> list:
     names = [len(words) + 2 for _, _, words, _ in parts] + [len(name) + 2 for _, n, words, _ in parts for name, _ in under.get(words.partition(" ")[0], []) if name]
     column = max([22] + [w + 1 for w in names])
     for glyph, n, words, role in parts:
-        out.append("  " + _c(role) + glyph + _RESET + " " + words + " " * (column - len(words)) + _thousands(n))
+        out.append("  " + ((_c(role) + glyph + _RESET) if role else (glyph or " ")) + " " + words + " " * (column - len(words)) + _thousands(n))
         for name, value in under.get(words.partition(" ")[0], []):
             out.append(("    " + name + " " * (column - len(name)) + value) if name else "      " + _c("muted") + value + _RESET)
 
@@ -5139,7 +5158,7 @@ def help_rows(state: dict, width = 0) -> list:
     return rows + _actions_key(width)
 
 # What the bar's and Results' glyphs are, for the `?` overlay.
-_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged (while it runs, other)", "░ internal", "╳ failed", "─ in progress"]
+_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged (while it runs, other)", "░ internal", "╳ failed", "─ running · pending"]
 
 def _actions_key(width: int) -> list:
     """The `?` overlay's rows saying what the actions' glyphs are: a heading,
