@@ -257,6 +257,10 @@ sleeper = task(implementation = _impl, summary = "x")
         out.contains("interrupted"),
         "stopped as by an interrupt:\n{out}"
     );
+    assert!(
+        out.contains("■ Stopped sleeper task") && !out.contains("(by you)"),
+        "a stop it asked itself is not the user's:\n{out}"
+    );
 }
 
 /// What a bridged child starts (a nested CLI, or the credential helper Bazel
@@ -443,6 +447,10 @@ slow_stop = task(implementation = _impl, summary = "x")
         dir.path().join("done.txt").exists(),
         "it was stopped hard:\n{out}"
     );
+    assert!(
+        out.contains("■ Stopped slow-stop task (by you)"),
+        "the browser's stop is the user's:\n{out}"
+    );
 }
 
 /// A bridged child whose browser was gone before it started (its parent
@@ -561,4 +569,54 @@ again = task(implementation = _again, summary = "x")
     cli(&["hi", "--task:id=11111111-1111-4111-8111-111111111111"]);
     cli(&["hi", "--task:id", "22222222-2222-4222-8222-222222222222"]);
     cli(&["again"]);
+}
+
+/// A run the browser stopped that then ends in an error is the error's:
+/// its record says so, and never that the user stopped it.
+#[cfg(unix)]
+#[test]
+fn a_stopped_run_that_ends_in_an_error_is_not_recorded_as_stopped_by_the_user() {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
+    std::fs::create_dir_all(dir.path().join(".aspect")).expect(".aspect");
+    std::fs::create_dir(dir.path().join("history")).expect("history");
+    std::fs::write(
+        dir.path().join(".aspect/errer.axl"),
+        r#"load("@std//time.axl", "sleep")
+
+def _impl(ctx):
+    ctx.std.fs.write("up.txt", "")
+    for _ in range(600):
+        if ctx.cancellation.root.cancelled:
+            fail("the build it waited on was interrupted")
+        sleep(50)
+    return 0
+
+errer = task(implementation = _impl, summary = "x")
+"#,
+    )
+    .expect("errer.axl");
+    let script = r#"set -m; export ASPECT_GROUP_SIGNALLER=$$; "$0" errer > out.txt 2>&1 & p=$!; for _ in $(seq 300); do [ -f up.txt ] && break; sleep 0.1; done; kill -INT -$p; wait $p"#;
+    let output = Command::new("/bin/sh")
+        .args(["-c", script, &aspect_cli()])
+        .current_dir(dir.path())
+        .env_clear()
+        .envs(base_env())
+        .env("ASPECT_HISTORY_DIR", dir.path().join("history"))
+        .env("HOME", dir.path().join("home"))
+        .stdin(Stdio::null())
+        .process_group(0)
+        .output()
+        .expect("sh");
+    let out = std::fs::read_to_string(dir.path().join("out.txt")).unwrap_or_default();
+    let record = std::fs::read_dir(dir.path().join("history"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("task.json"))
+        .find(|p| p.exists())
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .unwrap_or_default();
+    assert!(record.contains("\"error\""), "{output:?}\n{out}\n{record}");
+    assert!(!record.contains("stopped_by_user"), "{out}\n{record}");
 }

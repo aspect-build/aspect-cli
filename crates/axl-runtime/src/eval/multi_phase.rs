@@ -38,6 +38,13 @@ use crate::eval::outcome::{Ending, Outcome};
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
 
+/// The module the CLI's own tasks come from (`@aspect//`).
+const BUILTIN_MODULE: &str = "aspect";
+
+/// Where in the CLI's own module its internal tasks are defined: run by the
+/// CLI itself, never by name (`TaskMap::insert_internal`).
+const INTERNAL_TASKS_DIR: &str = "private/task/";
+
 /// `(open, reset)` for `role` of `palette` on a console line, both empty when
 /// color is off or the role has no styling. The opening "Running" line takes
 /// `highlight`, as AXL's phase lines do, and the closing verdict
@@ -446,7 +453,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 )));
             }
         }
-        self.register_tasks(&frozen, symbols.iter().map(String::as_str))
+        let internal = !scope.is_root()
+            && scope.name == BUILTIN_MODULE
+            && label.starts_with(INTERNAL_TASKS_DIR);
+        self.register_tasks_as(&frozen, symbols.iter().map(String::as_str), internal)
     }
 
     /// Thaw `symbols` out of `frozen` and insert them into the shared
@@ -461,6 +471,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         &self,
         frozen: &FrozenModule,
         symbols: impl IntoIterator<Item = &'s str>,
+    ) -> Result<(), EvalError> {
+        self.register_tasks_as(frozen, symbols, false)
+    }
+
+    /// [`Self::register_tasks`], `internal` ones apart
+    /// ([`TaskMap::insert_internal`]): the CLI's own under
+    /// [`INTERNAL_TASKS_DIR`].
+    fn register_tasks_as<'s>(
+        &self,
+        frozen: &FrozenModule,
+        symbols: impl IntoIterator<Item = &'s str>,
+        internal: bool,
     ) -> Result<(), EvalError> {
         let heap = self.heap();
         let task_map = self
@@ -481,7 +503,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             thawed.push(Task::from_frozen(frozen_value, heap));
         }
         for live_task in thawed {
-            task_map.insert(heap.alloc(live_task));
+            if internal {
+                live_task.mark_internal();
+                task_map.insert_internal(heap.alloc(live_task));
+            } else {
+                task_map.insert(heap.alloc(live_task));
+            }
         }
         Ok(())
     }
@@ -528,12 +555,16 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Snapshot of all tasks discovered in Phase 1 (plus any added during Phase 2 via
     /// `ctx.tasks.add(...)`), borrowed as `&dyn TaskLike` so callers don't have to
     /// downcast `Value`s themselves.
+    /// Every task: those `ctx.tasks` holds, then the CLI's internal ones
+    /// ([`Self::internal_task_count`] of them, last).
     pub fn tasks(&self) -> Vec<&'v dyn TaskLike<'v>> {
-        self.tasks
+        let map = self
+            .tasks
             .downcast_ref::<TaskMap>()
-            .expect("self.tasks is a TaskMap")
-            .values()
+            .expect("self.tasks is a TaskMap");
+        map.values()
             .into_iter()
+            .chain(map.internal_values())
             .map(|v| -> &'v dyn TaskLike<'v> {
                 if let Some(t) = v.downcast_ref::<Task<'v>>() {
                     return t;
@@ -549,14 +580,25 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// The command path of every task in [`Self::tasks`], sorted: what a
     /// `task_presets` or `task_templates` key is checked against.
     pub fn task_paths(&self) -> Vec<String> {
+        let visible = self.tasks().len() - self.internal_task_count();
         let mut paths: Vec<String> = self
             .tasks()
             .into_iter()
+            .take(visible)
             .map(|t| task_command_path(t.group(), &t.kind()))
             .collect();
         paths.sort();
         paths.dedup();
         paths
+    }
+
+    /// How many of [`Self::tasks`] are the CLI's internal ones, at its end.
+    pub fn internal_task_count(&self) -> usize {
+        self.tasks
+            .downcast_ref::<TaskMap>()
+            .expect("self.tasks is a TaskMap")
+            .internal_values()
+            .len()
     }
 
     /// Snapshot of all features discovered in Phase 1, borrowed as `&dyn FeatureLike`.
@@ -727,6 +769,27 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             path: task_command_path(task.group(), &task.kind()),
         };
         let host = Host::of(&self.loader.env).map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
+        let internal = task_index >= self.tasks().len() - self.internal_task_count();
+        if internal {
+            // An internal task's own screen is all it shows, whatever the
+            // `Console` feature's config says, or whether it can be read;
+            // but what a link to a file opens is the user's, as for any task.
+            let editor = (self.loader.env.config_editor)();
+            match self
+                .features()
+                .into_iter()
+                .find(|f| f.name() == CONSOLE_FEATURE)
+            {
+                Some(feature) => {
+                    console_value::link_format_only(&args_builder(feature, self.heap()), editor)
+                }
+                None => crate::out::set_unconfigured_link_format(editor),
+            }
+            let console =
+                Console::silent(identity, host).with_palette(&self.loader.env.theme.get());
+            diag::set_verbose(console.verbosity());
+            return Ok(Arc::new(console));
+        }
         let console = match self
             .features()
             .into_iter()
@@ -1001,6 +1064,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             Err(e) => Err(e),
         };
         let (mut outcome, ending) = Outcome::resolve(body_result, &self.loader.env.signals);
+        // Whether a signal had come by the time the body ended: one that
+        // comes during the post-task hooks and defers stopped nothing.
+        let signalled_in_body = self.loader.env.signals.kind().is_some();
+        let cancelled_in_body = self.loader.env.signals.root().is_cancelled();
         // The body has ended: from here the post-task hooks, defers and
         // bookend run to completion whatever the root token says. Starlark
         // runs the cancel check after every `eval_function`, so an armed
@@ -1021,7 +1088,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let conclusion = heap.alloc(outcome.to_conclusion());
         hooks.run_post(context, conclusion, &mut eval);
         run_deferred(context, &mut eval);
-        let cancelled = self.loader.env.signals.root().is_cancelled();
+        // Cancelled: the root was cancelled (a signal, or the task itself)
+        // while the body ran, and the task failed. One cancelled in the
+        // hooks and defers, or that the task caught and passed after,
+        // cancelled nothing. The verdict's `stopped` asks the same of a
+        // signal alone. A run that ended in an error is the error's, so
+        // never the user's stop.
+        let failed = matches!(&ending, Ending::Failed(_))
+            || matches!(outcome.exit_code, Some(code) if code != 0);
+        let cancelled = cancelled_in_body && failed;
+        if cancelled && !matches!(&ending, Ending::Failed(_)) && self.loader.env.signals.user_stop()
+        {
+            self.loader.env.history.stopped_by_user();
+        }
         if let Ending::Failed(e) = ending {
             let error = e.to_string();
             self.loader.env.history.end_task(
@@ -1064,6 +1143,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
 
         let failed = matches!(exit_code, Some(code) if code != 0);
+        // Ended short by a signal that came while the body ran, and whether
+        // that was known to be the user's own (`Signals::mark_user_stop`).
+        let signals = &self.loader.env.signals;
+        let interrupted = signalled_in_body;
         let exit_suffix = match exit_code {
             Some(code) if code != 0 => format!(" (exit {})", code),
             _ => String::new(),
@@ -1080,6 +1163,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let context = minijinja::context! {
             verdict => verdict.name,
             cancelled => exit_code == Some(INTERRUPTED_EXIT_CODE),
+            stopped => failed && interrupted,
+            by_you => failed && interrupted && signals.user_stop(),
             glyph => verdict.glyph,
             shortcode => verdict.bk_shortcode,
             verb => verdict.verb,

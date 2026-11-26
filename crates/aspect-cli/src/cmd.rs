@@ -118,9 +118,39 @@ pub struct Dispatch {
     matches: ArgMatches,
 }
 
+/// What an internal task's command is named (`__shell`): no task's kind can
+/// start so, so it takes no name from a repository's tasks.
+pub const INTERNAL_COMMAND_PREFIX: &str = "__";
+
 impl<'a, 'v> Cmd<'a, 'v> {
-    /// Build the full root Clap command (`aspect`) with all task subcommands.
+    /// Whether `task` is one of the CLI's internal tasks, as it was
+    /// registered (`TaskMap::insert_internal` in `axl_runtime`): run by the
+    /// CLI itself, never by the name a user types. The same task a
+    /// repository loads and registers as its own is the repository's.
+    fn internal_task(&self, task: &dyn TaskLike<'v>) -> bool {
+        task.internal()
+    }
+
+    /// The tasks a user can name: all but the internal ones.
+    fn named_tasks(&self) -> Vec<&'v dyn TaskLike<'v>> {
+        self.tasks
+            .iter()
+            .copied()
+            .filter(|t| !self.internal_task(*t))
+            .collect()
+    }
+
+    /// Build the full root Clap command (`aspect`) with all task subcommands
+    /// a user can name.
+    #[cfg(test)]
     pub fn build(&self, version: &str) -> Result<Command, CmdError> {
+        self.build_with(version, false)
+    }
+
+    /// [`Cmd::build`], with `internal` the internal tasks too, hidden, each
+    /// under [`INTERNAL_COMMAND_PREFIX`] and its kind, for `main` to select
+    /// (never there otherwise, so no suggestion names one).
+    pub fn build_with(&self, version: &str, internal: bool) -> Result<Command, CmdError> {
         let reserved = shorthand_reserved(&self.tasks, &self.features);
         let feature_blocks: Vec<FeatureBlock> = self
             .features
@@ -134,6 +164,20 @@ impl<'a, 'v> Cmd<'a, 'v> {
         for (idx, task) in self.tasks.iter().enumerate() {
             let label = defined_in_label(task.path(), self.aspect_root, self.modules);
             let task_cmd = task_command(idx, *task, &label, &feature_blocks, &cli_header);
+            if self.internal_task(*task) {
+                if !internal {
+                    continue;
+                }
+                let name = format!("{INTERNAL_COMMAND_PREFIX}{}", task.kind());
+                tree.insert_at(
+                    &name,
+                    &[],
+                    &[],
+                    &label,
+                    task_cmd.name(name.clone()).hide(true),
+                )?;
+                continue;
+            }
             tree.insert(*task, &label, task_cmd)?;
         }
 
@@ -416,11 +460,11 @@ impl<'a, 'v> Cmd<'a, 'v> {
     /// than it is piped into another program, and diffs of it are useful.
     pub fn print_describe(&self, version: &str, task: Option<&str>) -> ExitCode {
         let doc = match task {
-            None => describe_index(version, &self.tasks, &self.features),
+            None => describe_index(version, &self.named_tasks(), &self.features),
             Some(name) => {
                 let full = describe_json(
                     version,
-                    &self.tasks,
+                    &self.named_tasks(),
                     &self.features,
                     self.aspect_root,
                     self.modules,

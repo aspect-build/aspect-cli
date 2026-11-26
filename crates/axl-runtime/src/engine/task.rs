@@ -51,6 +51,11 @@ pub trait TaskLike<'v> {
     /// Whether a run keeps an entry in the task history (the
     /// `keep_history=` kwarg).
     fn keep_history(&self) -> bool;
+    /// Whether it is one of the CLI's internal tasks, as registered
+    /// (`TaskMap::insert_internal`): run by the CLI itself, never by name.
+    fn internal(&self) -> bool {
+        false
+    }
     fn group(&self) -> &Vec<String>;
     /// The task kind — the command being run (e.g. `build`, `test`, `lint`),
     /// derived from the snake_case export variable (or the `kind=` kwarg).
@@ -144,9 +149,16 @@ pub struct Task<'v> {
     /// Mutable override store for `ctx.tasks["k"].args.foo = ...`.
     /// Always points to an `Arguments` value on the same heap.
     pub(super) overrides: Value<'v>,
+    /// Registered as one of the CLI's internal tasks ([`TaskLike::internal`]).
+    #[allocative(skip)]
+    pub(super) internal: std::cell::Cell<bool>,
 }
 
 impl<'v> Task<'v> {
+    /// Mark it one of the CLI's internal tasks ([`TaskLike::internal`]).
+    pub fn mark_internal(&self) {
+        self.internal.set(true);
+    }
     pub fn implementation(&self) -> values::Value<'v> {
         self.r#impl
     }
@@ -199,11 +211,15 @@ impl<'v> Task<'v> {
             kind: RefCell::new(frozen.kind.clone()),
             path: frozen.path.clone(),
             overrides,
+            internal: std::cell::Cell::new(false),
         }
     }
 }
 
 impl<'v> TaskLike<'v> for Task<'v> {
+    fn internal(&self) -> bool {
+        self.internal.get()
+    }
     fn args(&self) -> &SmallMap<String, Arg> {
         &self.args
     }
@@ -507,6 +523,7 @@ fn build_alias<'v>(
         kind: RefCell::new(kind),
         path: Env::current_script_path(eval)?,
         overrides,
+        internal: std::cell::Cell::new(false),
     })
 }
 
@@ -731,6 +748,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             kind: RefCell::new(kind),
             path: Env::current_script_path(eval)?,
             overrides,
+            internal: std::cell::Cell::new(false),
         })
     }
 }

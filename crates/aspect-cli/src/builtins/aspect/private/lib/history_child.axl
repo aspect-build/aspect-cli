@@ -1,5 +1,6 @@
-"""The History screen's child runs (`aspect history browse`, `r` and `R`): a
-history record's command run again as a child `aspect-cli`.
+"""The History screen's child runs (`aspect history browse`, `r` and `R`,
+and the `aspect` shell's commands): a history record's command run again,
+or a command typed at the shell, as a child `aspect-cli`.
 
 `start_child` runs it with the bridge on (`private/feature/bridge.axl`) and
 the dashboard off, its stdout and stderr read on threads of their own
@@ -24,13 +25,15 @@ the screen released until it exits and Enter is pressed, as vim's `:!` does.
 
 Both take the run's command line as typed from the history as a command
 (`ctx.std.history.command`), whose arguments are never handed back; what
-is shown of it is the history's redacted line (`shown_command`).
+is shown of it is the history's redacted line (`shown_command`). A command
+typed at the shell is a record of its own (`typed_record`), its words as
+typed. `run_again` picks between the two for a request.
 
 Both run this process's own binary (`std.env.current_exe()`), not the one
 that ran the record.
 """
 
-load("@aspect//feature/dashboard.axl", "add_lines", "end_build", "new_build", "new_run", "on_run", "take_event")
+load("@aspect//feature/dashboard.axl", "ONE_AT_A_TIME", "add_lines", "end_build", "fresh_view", "new_build", "new_run", "on_run", "open_history", "show_run", "take_event")
 load("@std//time.axl", "now_ms", "sleep")
 load("./history_records.axl", "BRIDGE_ADDED", "outcome", "task_name")
 load("./results_pages.axl", "results_pages")
@@ -62,12 +65,35 @@ _POLL_LINES = 10000
 _DRAIN_MAX_MS = 15000
 _STOP_DRAIN_MS = 5000
 
-# The tasks that need the terminal to themselves, as their group and kind.
-_TERMINAL_TASKS = [([], "run"), (["history"], "browse")]
+# The tasks that need the terminal to themselves, as their group and kind:
+# full screens of their own, and ones that ask their user (`init`'s
+# questions, `gc`'s, the wrapper's and `axl add`'s confirmations, a
+# login's pasted code), which, given no terminal, would take their
+# answer as given.
+_TERMINAL_TASKS = [([], "run"), (["history"], "browse"), ([], "init"), ([], "gc"), (["auth"], "login"), (["auth"], "configure"), (["setup"], "tools-bazel-wrapper"), (["setup"], "tools_bazel_wrapper"), (["axl"], "add")]
+
+def typed_record(argv: list, cwd: str, group = [], kind = "", task = True) -> dict:
+    """A record of a command typed at the shell (`argv`, the program first,
+    run in `cwd`), as `start_child` and `hand_over` take a history record:
+    the task it names as `group` and `kind`, when known. Not a `task` (`aspect
+    version`, `help`, a name no task has), it runs without the bridge, whose
+    flags only a task takes: its output is the console, and it ends with its
+    exit code."""
+    return {"typed": argv, "argv": argv, "cwd": cwd, "task": {"id": "", "group": group, "kind": kind}, "bridged": task}
+
+def terminal_task_of(named: list):
+    """The task among those that need the terminal (`needs_terminal`) that a
+    command line's task words `named` start with, as `(group, kind)`, or
+    None: for when the CLI's task list is not known."""
+    for group, kind in _TERMINAL_TASKS:
+        if named[:len(group) + 1] == group + [kind]:
+            return (group, kind)
+    return None
 
 def needs_terminal(record: dict) -> bool:
     """Whether `record`'s task needs the terminal to itself (`aspect run`,
-    this screen), so runs again only with it (`hand_over`)."""
+    this screen, a task that asks its user), so runs again only
+    with it (`hand_over`)."""
     task = record.get("task", {})
     return (task.get("group", []), task.get("kind", "")) in _TERMINAL_TASKS
 
@@ -111,7 +137,19 @@ def again_command(state: dict, record: dict, bridged: bool, task_id = ""):
     """`record`'s run as a command to run again (`ctx.std.history.command`,
     its arguments as typed, never handed back), or None when its command
     line was not kept so. Any `--task:id` the run was given is left out,
-    as an ID is a run's own: it gets a new one, `task_id` when given."""
+    as an ID is a run's own: it gets a new one, `task_id` when given. A
+    command typed at the shell (`typed_record`) is its words, the same left
+    out and added when it names a task; as typed when it does not."""
+    typed = record.get("typed")
+    if typed != None:
+        if not record.get("bridged", True):
+            args = typed[1:]
+        else:
+            args = child_args(typed, bridged)
+            if not bridged and task_id:
+                end = args.index("--") if "--" in args else len(args)
+                args = args[:end] + ["--task:id=" + task_id] + args[end:]
+        return state["process"].command(state["env"].current_exe()).args(args)
     history = state["browser"]["history"]
     id = record.get("task", {}).get("id", "")
     if bridged:
@@ -194,7 +232,7 @@ def start_child(state: dict, ctx, record: dict, now_ms: int):
             # Its own token: the task's stop does not run its ladder on it,
             # whose SIGTERM 1.5s later is a child aspect-cli's cue to kill
             # all it runs; the browser sends it the one SIGINT
-            # (`stopping_child`).
+            # (`interrupt_child`), or, gone, it stops itself.
             cancellation = ctx.cancellation.new(),
         )
     )
@@ -216,7 +254,12 @@ def start_child(state: dict, ctx, record: dict, now_ms: int):
         task_start_ms = now_ms,
         now_ms = now_ms,
         rerun_of = record.get("task", {}).get("id", "")[:8],
-        note = "Running again: %s · q stops it" % shown_command(record),
+        note = "%s: %s%s · q stops it" % (
+            "Running" if record.get("typed") != None else "Running again",
+            shown_command(record),
+            # A run recalled at the shell runs where the shell is.
+            (" · in " + record["cwd"]) if record.get("ran_in") and record["ran_in"] != record["cwd"] else "",
+        ),
         note_until = now_ms + 2000,
     )
     return run
@@ -237,11 +280,6 @@ def pump_child(state: dict, now_ms: int):
         state["live"] = on_run(state, state["live"], change)
     else:
         change(state)
-
-    # One the user stopped reads so in the list, once it is no longer
-    # pinned.
-    if child["done"] and child["asked"] > 0 and child.get("task_id"):
-        state["browser"].setdefault("stopped", {})[child["task_id"]] = True
 
 def _take_events(s: dict, child: dict) -> bool:
     """The child's build events since the last call (`take_event`, which
@@ -351,22 +389,6 @@ def _take_message(s: dict, child: dict, message: dict, now_ms: int):
         if s.get("building"):
             end_build(s, now_ms)
 
-def stopping_child(state: dict):
-    """Ask the running child to stop because the task was told to (SIGTERM,
-    the terminal closed): one SIGINT, the first, and never more, as a
-    second is a child aspect-cli's cue to kill all it runs and exit before
-    its record is written. It winds down on its own clock, inside the
-    task's own grace; the run reads as cancelling, and its wait after it
-    exits is the shorter one asked to stop."""
-    child = state.get("child")
-    if child == None or child["done"]:
-        return
-    live = state["live"] if state.get("live") != None else state
-    if child["asked"] == 0:
-        child["proc"].interrupt()
-        child["asked"] = 1
-    live["cancelling"] = True
-
 def hand_over(state: dict, ctx, record: dict):
     """Run `record`'s command again with the terminal its own: the screen
     released, the child run in the foreground, then Enter (or Ctrl+C)
@@ -423,12 +445,14 @@ def hand_over(state: dict, ctx, record: dict):
     mine = b["history"].get(task_id)
     stopped = code == 130 or status.signal == 2 or (mine != None and outcome(mine) == "cancelled")
     if stopped:
-        ended = "■ stopped by you"
+        # As the child's own verdict says it, which knows a stop for the
+        # user's only where the terminal says so.
+        ended = "■ stopped"
     elif code == 0:
         ended = "✔ done"
     else:
         ended = "✗ exit %d" % code if code != None else "✗ ended by a signal"
-    err.write("\n» %s · Enter goes back to the history\n" % ended)
+    err.write("\n» %s · Enter goes back to the %s\n" % (ended, "prompt" if state.get("shell") != None else "history"))
 
     # Waited for on the main screen, the child's output still on it, with
     # Ctrl+C a key that goes back too, rather than a signal ending the
@@ -449,3 +473,46 @@ def hand_over(state: dict, ctx, record: dict):
         screen.mouse(True)
     state["screen"] = screen
     return {"stopped": stopped, "record": mine}
+
+def run_again(state: dict, ctx, request, now_ms: int):
+    """Run a record's command again (or a command typed at the shell), as
+    `request` (`(what, record)`: `r` and `R` confirmed, or the shell) asks:
+    on this screen as a child run, its run the live one shown, or, with
+    `run_in_terminal` or for a task that needs the terminal
+    (`needs_terminal`), with the terminal its own, the History screen
+    shown after. Not while a child run is going. Why it could not run, as a
+    string, said on the History screen too, or None."""
+    what, record = request
+    b = state["browser"]
+    if child_running(state):
+        b["note"] = ONE_AT_A_TIME
+        open_history(state, back = True)
+        return ONE_AT_A_TIME
+    if what == "run_in_terminal" or needs_terminal(record):
+        ended = hand_over(state, ctx, record)
+        if type(ended) == "string":
+            open_history(state, back = True)
+            b["note"] = "cannot run it: " + ended
+            return ended
+
+        # A run started again here before is no longer the one to go back
+        # to.
+        if state.get("child") != None:
+            state.pop("child")
+        open_history(state, back = True)
+        return None
+    run = start_child(state, ctx, record, now_ms)
+    if type(run) == "string":
+        open_history(state, back = True)
+        b["note"] = "cannot run it: " + run
+        return run
+
+    # The child's run is the live one; whatever was shown, and any run
+    # before it, let go. A command that is no task has no build to show:
+    # its console alone.
+    run["console_only"] = not record.get("bridged", True)
+    state["live"] = None
+    show_run(state, run)
+    fresh_view(state)
+    state["mode"] = "run"
+    return None

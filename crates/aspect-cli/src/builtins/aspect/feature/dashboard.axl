@@ -78,7 +78,9 @@ says a second cancels the live build, which then shows; once the task has
 ended, it goes back to the live screen. A task that ends while a past run
 or the list is open keeps the screen up until the user is back on the live
 one, whatever `stay` says. `aspect history browse` is the same screen
-without a task to go back to.
+without a task to go back to, and the `aspect` shell (a bare `aspect`) the
+same again over a prompt (`private/lib/shell_prompt.axl`), which has the
+keys until Esc gives them to the screen (`prompt_has_keys`).
 
 The keys, as in `less`, lazygit and Claude Code's transcript: `↑`/`↓` or
 `k`/`j` scroll a line and the wheel three; Shift or Option with `↑`/`↓`,
@@ -2627,9 +2629,9 @@ def links_row(pages: list, cols: int) -> str:
         parts.append(_c("link") + link(url, shown) + _RESET)
     return lead + " · ".join(parts)
 
-def _box_top(title: str, width: int) -> str:
+def _box_top(title: str, width: int, edge = "border") -> str:
     title = fit(title, width - 5).rstrip(" ")
-    return _c("border") + "┌─ " + _RESET + _c("strong") + title + _RESET + _c("border") + " " + "─" * max(0, width - text_width(title) - 5) + "┐" + _RESET
+    return _c(edge) + "┌─ " + _RESET + _c("strong") + title + _RESET + _c(edge) + " " + "─" * max(0, width - text_width(title) - 5) + "┐" + _RESET
 
 def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, links = None) -> str:
     """A row of a box `width` wide, `coloured` (a function of its text) when
@@ -3947,7 +3949,9 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     crumb is drawn is kept (`tab_spans`, on row `row`) for a click to take
     it, or go back to it, and the pointer to light it. Too narrow, the
     status is cut, then goes, then the other tabs, then the shown one's
-    middle crumbs."""
+    middle crumbs. Its border is in the accent while the `aspect` shell's
+    screen has the keys (`screen_has_keys`); a command that is no task
+    (`console_only`) has the console's tab alone."""
     failed, blocked = _failure_counts(state)
     shown = state.get("tab", "console")
     names = {}
@@ -3963,8 +3967,9 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
 
     # Every tab where the shown one keeps the room it is drawn in: `room`
     # below leaves it the row but its own two cells and the others'.
-    tabs = [t for t, _ in _TABS] if whole < cols else [shown]
-    text = _c("border") + "┌─" + _RESET
+    tabs = [t for t, _ in _TABS] if whole < cols and not state.get("console_only") else [shown]
+    edge = "accent" if screen_has_keys(state) else "border"
+    text = _c(edge) + "┌─" + _RESET
     at = 2
     spans = []
     for tab in tabs:
@@ -4002,7 +4007,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     rest = max(0, cols - at - 1)
     info = (" " + fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
     lead = rest - text_width(info) - (1 if info else 0)
-    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("muted") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
+    return text + _c(edge) + "─" * max(0, lead) + _RESET + (_c("muted") + info + _RESET + _c(edge) + "─" if info else _c(edge)) + "┐" + _RESET
 
 _SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
 
@@ -4788,6 +4793,8 @@ def keys_row(state: dict, cols: int) -> str:
         return fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
     if state.get("help"):
         return fit(" ↑↓ scroll · any other key closes", cols)
+    if prompt_has_keys(state):
+        return fit(" keys: prompt · Esc screen", cols)
     if _ctrl_c_note(state):
         return fit(" " + _ctrl_c_note(state), cols)
     if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
@@ -4981,6 +4988,7 @@ _UI_KEYS = {k: True for k in list(new_ui().keys()) + [
     "child",
     "request",
     "confirm",
+    "shell",
     "leave_on_return",
 ]}
 
@@ -5033,16 +5041,19 @@ def on_run(state: dict, run: dict, change) -> dict:
     change(scratch)
     return run_of(scratch)
 
-def new_browser(history, exclude = "", standalone = False, workspace = "") -> dict:
+def new_browser(history, exclude = "", standalone = False, workspace = "", back = "quit") -> dict:
     """What the History screen keeps: `history` (`ctx.std.history`), the
     run it leaves out (`exclude`, the live task's ID, listed first as the
     live build), whether it is the whole screen (`standalone`, no live run
-    to go back to), and the workspace it was opened in (`workspace`, its
-    root, "" outside one), whose runs it lists first."""
+    to go back to), the workspace it was opened in (`workspace`, its
+    root, "" outside one), whose runs it lists first, and where its Esc
+    goes when standalone (`back`, as its keys row says it: `quit`, or the
+    `aspect` shell's prompt)."""
     return {
         "history": history,
         "exclude": exclude,
         "standalone": standalone,
+        "back": back,
         "workspace": workspace,
         "here": workspace != "",
         "filter": _HISTORY_FILTERS[0],
@@ -5176,6 +5187,17 @@ def open_history(state: dict, back = False):
     state["select"] = None
     _browsing_interrupts(state)
 
+def prompt_has_keys(state: dict) -> bool:
+    """Whether the `aspect` shell's prompt (`private/lib/shell_prompt.axl`)
+    has the keys, so this screen's own are not live."""
+    shell = state.get("shell")
+    return shell != None and shell["focus"] == "prompt"
+
+def screen_has_keys(state: dict) -> bool:
+    """Whether the `aspect` shell's screen above its prompt has the keys."""
+    shell = state.get("shell")
+    return shell != None and shell["focus"] == "view"
+
 def _history_open(state) -> bool:
     return state.get("mode") == "history"
 
@@ -5270,11 +5292,11 @@ def _history_row(state) -> list:
     leave."""
     b = state["browser"]
     if b["standalone"] and state.get("child") == None:
-        leave = "q/Esc quit"
+        leave = "q/Esc " + b.get("back", "quit")
     else:
         leave = "Esc live build" if not b["standalone"] else "Esc live run"
     if not b["records"] and not (b["census"] or {}).get("runs"):
-        return ["q quit"] if b["standalone"] and state.get("child") == None else [leave]
+        return ["q " + b.get("back", "quit")] if b["standalone"] and state.get("child") == None else [leave]
     parts = ["Enter open", "f filter: " + b["filter"]]
     if b["standalone"]:
         parts += ["r again", "R in terminal"]
@@ -5391,8 +5413,9 @@ def ago(stamp: str, now: int) -> str:
 
 def _status_text(record: dict, stopped = False):
     """A run's status column and its role: `✔ ok`, `✗ exit 1`, `✗ error`,
-    `■ cancelled`, `◌ running`; `■ stopped by you` for one the user stopped
-    on this screen (`stopped`)."""
+    `■ cancelled`, `◌ running`; `■ stopped by you` for one its record says
+    the user stopped (`stopped`: its `stopped_by_user`, as its own verdict
+    says it)."""
     if stopped:
         return "■ stopped by you", "warning"
     ended = outcome(record)
@@ -5410,7 +5433,7 @@ def _command_text(record: dict) -> str:
 
 def _run_row(record: dict, width: int, now: int, chosen: bool, stopped = False, status_w = 11):
     """A run's row as drawn, `width` wide: its status (`status_w` wide;
-    `stopped` one the user stopped here), when it started, how long it took
+    `stopped` one its record says the user stopped), when it started, how long it took
     and its command, its ID dimmed at the right end, which goes first when
     the row is narrow."""
     status, role = _status_text(record, stopped)
@@ -5480,12 +5503,12 @@ def render_history(state: dict, cols: int, rows: int) -> str:
         title += " · reading " + b["reading"] + "…"
     if b.get("note"):
         title += " · " + b["note"]
-    out.append(_box_top("Keys" if state.get("help") else title, cols))
+    out.append(_box_top("Keys" if state.get("help") else title, cols, "accent" if screen_has_keys(state) else "border"))
     census = b["census"] or {}
     w = cols - 4
     body = []
-    stopped = b.get("stopped", {})
-    status_w = 17 if [r for r in rows_shown if r != None and row_id(r) in stopped] else 11
+    listed_at = []
+    status_w = 17 if [r for r in rows_shown if r != None and r.get("stopped_by_user")] else 11
     if state.get("help"):
         body = [fit(l, w) for l in _history_help(state, cols, height)]
     elif not records and not census.get("runs"):
@@ -5494,20 +5517,30 @@ def render_history(state: dict, cols: int, rows: int) -> str:
             _c("muted") + fit(b["history"].root(), w) + _RESET,
         ]
     else:
+        # Which row of the list each line of the box is, for its mark: a
+        # run queued at the `aspect` shell, pinned under the live one, is
+        # none.
+        queued = (state.get("shell") or {}).get("queue", [])
         for i in range(height):
             at = top + i
-            if at >= len(rows_shown):
+            if at >= len(rows_shown) or len(body) >= height:
                 break
             row = rows_shown[at]
             chosen = at == b["selected"]
-            body.append(_live_row(state, w, chosen) if row == None else _run_row(row, w, b["now_ms"], chosen, row_id(row) in stopped, status_w))
+            body.append(_live_row(state, w, chosen) if row == None else _run_row(row, w, b["now_ms"], chosen, bool(row.get("stopped_by_user")), status_w))
+            listed_at.append(at)
+            if row == None:
+                for request in queued[:max(0, height - len(body) - 1)]:
+                    body.append(_c("muted") + fit(printable("◌ queued · " + _command_text(request[1]), keep = "\t"), w) + _RESET)
+                    listed_at.append(None)
         if not records:
             where = " in this workspace" if b["here"] and b["workspace"] else ""
             body.append(_c("muted") + fit("No %s%s." % (b["filter"].replace("all runs", "runs"), where), w) + _RESET)
     edge = None if state.get("help") else scrollbar(len(rows_shown), height, max(0, len(rows_shown) - top - height))
     for i in range(height):
         drawn = body[i] if i < len(body) else " " * w
-        marked = not state.get("help") and top + i == b["selected"] and i < len(body)
+        at = listed_at[i] if i < len(listed_at) else top + i
+        marked = not state.get("help") and at == b["selected"] and i < len(body)
         left = (_c("marker") + "┃" if marked else _c("border") + "│") + _RESET + " "
         out.append(left + drawn + _RESET + (" " + edge[i] if edge else _c("border") + " │" + _RESET))
     damaged = []
@@ -5530,6 +5563,8 @@ def render_history(state: dict, cols: int, rows: int) -> str:
         keys = " ↑↓ scroll · any other key closes"
     elif state.get("confirm") != None:
         keys = None
+    elif prompt_has_keys(state):
+        keys = " keys: prompt · Esc screen"
     elif note:
         keys = " " + note
     else:
@@ -5662,9 +5697,10 @@ ONE_AT_A_TIME = "One run at a time · Esc to it, then q stops it"
 
 def _ask_again(state: dict, what: str, record: dict):
     """`r` or `R` on `record`: asked first (`confirm`, which Enter carries
-    out as a `request` that `aspect history browse` runs), or, while a run
-    started again here is going, said that only one runs at a time."""
-    if child_running(state):
+    out as a `request` that `aspect history browse` runs, or the `aspect`
+    shell queues), or, while a run started again here is going and there
+    is no shell to queue it, said that only one runs at a time."""
+    if child_running(state) and state.get("shell") == None:
         state["browser"]["note"] = ONE_AT_A_TIME
         say_note(state, ONE_AT_A_TIME)
         state["history_said"] = (ONE_AT_A_TIME, int(monotonic() * 1000) + _SAID_MS)
@@ -5676,11 +5712,12 @@ def confirm_row(state: dict, cols: int) -> str:
     again here? <command> · Enter runs · Esc cancels` for this workspace,
     else `Run again in <dir>? …`, the directory in the accent, the home
     folder as `~`; `(secrets kept)` when the command shown is redacted, as
-    it runs as typed. In `cols` cells the keys are kept, and the command
-    as far as it can be: the directory is cut in its middle to make room,
-    down to a quarter of what is left, and only past that the command's
-    end; narrower than the keys and the question, the question goes first.
-    "" with nothing to ask."""
+    it runs as typed, said only while the command fits whole. In `cols`
+    cells the keys are kept, and the command as far as it can be: the
+    directory is cut in its middle to make room, down to 8 cells, and only
+    past that the command, its last word (the target pattern) kept whole
+    where it can be (`_command_cut`); narrower than the keys and the
+    question, the question goes first. "" with nothing to ask."""
     pending = state.get("confirm")
     if pending == None:
         return ""
@@ -5690,12 +5727,18 @@ def confirm_row(state: dict, cols: int) -> str:
     cmd = printable(command(record), keep = "\t").replace("\t", "  ")
     secret = bool(record.get("secret_flags")) or "<REDACTED>" in cmd
     head = " Run again" + (" in the terminal" if what == "run_in_terminal" else "")
-    keys = (" (secrets kept)" if secret else "") + " · Enter runs · Esc cancels"
+    keys = " · Enter runs · Esc cancels"
+    if secret:
+        # Said while there is room for it with the command whole.
+        kept = " (secrets kept)"
+        whole = text_width(head + (" here? " if here else " in ~? ") + cmd + kept + keys)
+        if whole <= cols:
+            keys = kept + keys
     if here:
         room = cols - text_width(head + " here? " + keys)
         if room <= 0:
             return _narrow_confirm(head + " here?", keys, cols)
-        return _c("muted") + head + " here? " + _end_cut(cmd, room) + keys + _RESET
+        return _c("muted") + head + " here? " + _command_cut(cmd, room) + keys + _RESET
     home = (state.get("home") or "").rstrip("/")
     shown = printable(cwd, keep = "")
     if home and (shown == home or shown.startswith(home + "/")):
@@ -5703,11 +5746,22 @@ def confirm_row(state: dict, cols: int) -> str:
     room = cols - text_width(head + " in ? " + keys)
     if room <= 0:
         return _narrow_confirm(head + "?", keys, cols)
-    path = _path_cut(shown, max(room - text_width(cmd), min(text_width(shown), room // 4)))
+    path = _path_cut(shown, max(room - text_width(cmd), min(text_width(shown), 8)))
     cmd_room = room - text_width(path)
     row = (_c("muted") + head + " in " + _RESET + _c("accent") + path + _RESET +
-           _c("muted") + "? " + _end_cut(cmd, cmd_room) + keys + _RESET)
+           _c("muted") + "? " + _command_cut(cmd, cmd_room) + keys + _RESET)
     return row
+
+def _command_cut(cmd: str, width: int) -> str:
+    """`cmd` in `width` cells: whole, else its start and its last word (a
+    target pattern, typically) with `…` between, else cut in its middle."""
+    if text_width(cmd) <= width:
+        return cmd
+    head, _, last = cmd.rpartition(" ")
+    room = width - text_width(last) - 2
+    if head and room >= 4:
+        return _cell_slice(head, 0, room) + "… " + last
+    return _middle(cmd, width)
 
 def _narrow_confirm(ask: str, keys: str, cols: int) -> str:
     """The confirm row with no room for the command: `ask` and the `keys`,
@@ -5727,14 +5781,6 @@ def _path_cut(path: str, width: int) -> str:
         return _middle(path, width)
     lead = "~/…" if path.startswith("~/") and width >= 4 else "…"
     return lead + _tail(path, width - len(lead))
-
-def _end_cut(text: str, width: int) -> str:
-    """`text` in `width` cells, its end cut (`…`) when longer."""
-    if width <= 0:
-        return ""
-    if text_width(text) <= width:
-        return text
-    return _cell_slice(text, 0, width - 1) + "…"
 
 def _k_open_history(state, key, page):
     open_history(state)
@@ -6485,8 +6531,13 @@ _ROW_CONSOLE = ["esc", "o", "q", "h", "]", "ctrl-f", "n", "e", "pageup", "K", "a
 def help_rows(state: dict, width = 0) -> list:
     """The `?` overlay's rows, grouped (`_KEY_GROUPS`), the keys that do not
     apply now left out, then what the actions' glyphs are (`_actions_key`,
-    in rows of `width` cells); on the History screen, its own group alone."""
+    in rows of `width` cells); on the History screen, its own group alone.
+    Under the `aspect` shell, its prompt's keys first (`shell["help"]`)."""
     rows = []
+    shell = state.get("shell")
+    if shell != None:
+        rows.append("Prompt")
+        rows += ["  " + fit(k, 20) + " " + what for k, what in shell["help"]]
     for group in (["History"] if _history_open(state) else _KEY_GROUPS):
         entries = [k for k in KEYS if k.group == group and k.help != None and k.shown(state)]
         if not entries:
@@ -6525,7 +6576,8 @@ def row_labels(state: dict) -> list:
 # and the keys row keep their place.
 _SHORT_ROWS = 16
 
-# The smallest terminal the screen draws in.
+# The smallest terminal the screen draws in; `main.rs`'s `SCREEN_MIN`, by which
+# a bare `aspect` opens the `aspect` shell, says the same.
 _MIN_COLS = 40
 _MIN_ROWS = 12
 

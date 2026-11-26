@@ -7,8 +7,9 @@
 //! `crate::out::config_link_format`). Both hold `tips` too, unioned (see
 //! `crate::user_config`, which also writes the user's file). Only the user's
 //! file holds the colour keys ([`theme`]): what a user's terminal looks like
-//! is theirs. A file that is not a JSON object is one warning however many of
-//! its keys are read ([`first_time`]).
+//! is theirs, and `shell` ([`shell_opens`]): whether a bare `aspect` opens the
+//! `aspect` shell. A file that is not a JSON object is one warning however
+//! many of its keys are read ([`first_time`]).
 
 use std::path::{Path, PathBuf};
 
@@ -84,6 +85,45 @@ pub(crate) fn first_time(warning: &str) -> bool {
         .insert(warning.to_owned())
 }
 
+/// Whether a bare `aspect` on a terminal opens the `aspect` shell: unless
+/// the user's `config.json` says `"shell": false`, when it prints the help
+/// as before. A `shell` that is no boolean is warned about once and leaves
+/// it on, as a file that cannot be read does (its own readers say what is
+/// wrong with it).
+pub fn shell_opens() -> bool {
+    let path = match user_path() {
+        Ok(path) => path,
+        Err(_) => return true,
+    };
+    let (opens, warning) = shell_opens_at(&path);
+    if let Some(warning) = warning
+        && first_time(&warning)
+    {
+        crate::diag::warn(&warning);
+    }
+    opens
+}
+
+/// [`shell_opens`] for the `config.json` at `path`, and what is wrong with
+/// its `shell`, if anything.
+fn shell_opens_at(path: &Path) -> (bool, Option<String>) {
+    match object(path)
+        .ok()
+        .flatten()
+        .and_then(|json| json.get("shell").cloned())
+    {
+        None | Some(serde_json::Value::Bool(true)) => (true, None),
+        Some(serde_json::Value::Bool(false)) => (false, None),
+        Some(other) => (
+            true,
+            Some(format!(
+                "{} \"shell\" must be true or false, got {other}; the shell stays on",
+                path.display()
+            )),
+        ),
+    }
+}
+
 /// The top-level `editor` string of the `config.json` at `path`: `None` when
 /// the file or the key is missing, else an error naming the file: the
 /// file's own ([`object`]), or that the value is not a string.
@@ -149,6 +189,34 @@ pub(crate) fn theme(path: &Path) -> Result<ThemeKeys, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shell_opens_unless_the_user_says_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(shell_opens_at(&path), (true, None), "no file");
+        std::fs::write(&path, r#"{"editor": "zed"}"#).unwrap();
+        assert_eq!(shell_opens_at(&path), (true, None), "no key");
+        std::fs::write(&path, r#"{"shell": true}"#).unwrap();
+        assert_eq!(shell_opens_at(&path), (true, None));
+        std::fs::write(&path, r#"{"shell": false}"#).unwrap();
+        assert_eq!(shell_opens_at(&path), (false, None));
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(
+            shell_opens_at(&path),
+            (true, None),
+            "a broken file leaves it on"
+        );
+        for wrong in [r#"{"shell": "false"}"#, r#"{"shell": 0}"#] {
+            std::fs::write(&path, wrong).unwrap();
+            let (opens, warning) = shell_opens_at(&path);
+            assert!(opens, "{wrong}");
+            assert!(
+                warning.is_some_and(|w| w.contains("\"shell\" must be true or false")),
+                "{wrong}"
+            );
+        }
+    }
 
     #[test]
     fn editor_reads_the_key_and_reports_a_missing_file_or_key_as_none() {

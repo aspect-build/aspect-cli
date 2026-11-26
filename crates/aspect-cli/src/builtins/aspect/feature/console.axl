@@ -289,7 +289,7 @@ Console = feature(
                           "(`line`, `version`, `debug_build`, `docs_url`), \"header\" (`label`), " +
                           "\"phase\" (`text`, `title`, `emoji`, `continued`: an update to the phase " +
                           "already shown) and \"progress\" (`text`, `title`, `emoji`), \"verdict\" " +
-                          "(`verdict`, `cancelled`, `glyph`, `shortcode`, `verb`, `label`, `exit_code`, `exit`, " +
+                          "(`verdict`, `cancelled`, `stopped`, `by_you`, `glyph`, `shortcode`, `verb`, `label`, `exit_code`, `exit`, " +
                           "`elapsed`, `elapsed_ms`, `timing`, `conclusion`, `breakdown`, " +
                           "`plain_breakdown`, `timings`, `phases`; `timing` and the breakdowns follow " +
                           "--task:timing-summary), \"section\" (`icon`, `title`), the title of " +

@@ -6,6 +6,10 @@
 //! their own interior mutability for config.axl overrides. A key naming no
 //! task fails, naming the task path it is most likely a typo of
 //! ([`crate::suggest`]).
+//!
+//! An internal task ([`TaskMap::insert_internal`]: one of the CLI's own the
+//! CLI runs itself, never by its name) is kept apart: nothing `ctx.tasks`
+//! hands out or looks up holds it, so it takes no name from a repository.
 
 use std::cell::RefCell;
 use std::fmt::{self, Display};
@@ -67,18 +71,23 @@ fn lookup<'v>(key: &str, values: impl Iterator<Item = Value<'v>>) -> starlark::R
 pub struct TaskMap<'v> {
     #[allocative(skip)]
     entries: RefCell<Vec<Value<'v>>>,
+    /// The internal tasks ([`TaskMap::insert_internal`]), not in `entries`.
+    #[allocative(skip)]
+    internal: RefCell<Vec<Value<'v>>>,
 }
 
 impl<'v> TaskMap<'v> {
     pub fn new() -> Self {
         TaskMap {
             entries: RefCell::new(Vec::new()),
+            internal: RefCell::new(Vec::new()),
         }
     }
 
     pub fn from_values(values: Vec<Value<'v>>) -> Self {
         TaskMap {
             entries: RefCell::new(values),
+            internal: RefCell::new(Vec::new()),
         }
     }
 
@@ -86,8 +95,20 @@ impl<'v> TaskMap<'v> {
         self.entries.borrow_mut().push(task);
     }
 
+    /// Insert one of the CLI's own tasks that the CLI runs itself: kept
+    /// out of `values` and every lookup, so it shares no name with a
+    /// repository's task.
+    pub fn insert_internal(&self, task: Value<'v>) {
+        self.internal.borrow_mut().push(task);
+    }
+
     pub fn values(&self) -> Vec<Value<'v>> {
         self.entries.borrow().clone()
+    }
+
+    /// The internal tasks, in the order they were inserted.
+    pub fn internal_values(&self) -> Vec<Value<'v>> {
+        self.internal.borrow().clone()
     }
 }
 
@@ -100,6 +121,9 @@ impl<'v> Display for TaskMap<'v> {
 unsafe impl<'v> Trace<'v> for TaskMap<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         for v in self.entries.get_mut().iter_mut() {
+            v.trace(tracer);
+        }
+        for v in self.internal.get_mut().iter_mut() {
             v.trace(tracer);
         }
     }

@@ -539,6 +539,14 @@ impl History {
         }
     }
 
+    /// The task was stopped, by a stop known to be the user's own
+    /// (`stopped_by_user` in its record).
+    pub fn stopped_by_user(&self) {
+        if let Some(file) = self.task_record.lock().unwrap().as_ref() {
+            file.update(|r| r.stopped_by_user = true);
+        }
+    }
+
     /// The task has ended: its record says how, with the summaries of its
     /// builds whose streams are over (one never waited for may not be).
     pub fn end_task(

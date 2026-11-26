@@ -335,7 +335,7 @@ const FALLBACK_SIZE: (i32, i32) = (80, 24);
 
 /// The controlling terminal's size, held or not; None without one, or,
 /// unheld, while this process is in the background.
-fn terminal_size() -> Option<(i32, i32)> {
+pub fn terminal_size() -> Option<(i32, i32)> {
     if let Some(h) = HELD.lock().unwrap().as_ref() {
         return size_of(h.tty.as_raw_fd());
     }
@@ -2110,6 +2110,11 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
         [0x1b, 0x1b, b'[' | b'O', d @ (b'A' | b'B' | b'C' | b'D'), ..] => {
             (Some(format!("alt-{}", arrow(*d))), 4)
         }
+        // Ctrl with ← or →, a word at a time at a prompt; with ↑ or ↓ it is
+        // skipped below.
+        [0x1b, b'[', b'1', b';', b'5', d @ (b'C' | b'D'), ..] => {
+            (Some(format!("ctrl-{}", arrow(*d))), 6)
+        }
         // Shift+arrows as other terminals send them: older xterm's
         // `ESC [ 2 <dir>` and `ESC O 2 <dir>`, rxvt's `ESC [ a`…`d`.
         [0x1b, b'[' | b'O', b'2', d @ (b'A' | b'B' | b'C' | b'D'), ..] => {
@@ -2125,6 +2130,7 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
         [0x1b, b'[', b'4' | b'8', b'~', ..] => named("end", 4),
         [0x1b, b'[', b'5', b'~', ..] => named("pageup", 4),
         [0x1b, b'[', b'6', b'~', ..] => named("pagedown", 4),
+        [0x1b, b'[', b'3', b'~', ..] => named("delete", 4),
         // A mouse report (`mouse(True)`): SGR's `ESC [ < b ; x ; y M` (or
         // `m`, a release), or the legacy `ESC [ M` and three bytes, each
         // offset by 32, from a terminal without SGR ([`mouse_key`]).
@@ -2328,23 +2334,24 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// The next key typed, by name, waiting up to `timeout_ms` (default 0,
-    /// not at all); None when none was, or the terminal is gone (closed, a
-    /// hangup, which the task's cancellation says). A printable character is itself;
+    /// The next key typed, by name, waiting up to `timeout_ms` (default 0, not
+    /// at all); None when none was, or the terminal is gone (closed, a hangup,
+    /// which the task's cancellation says). A printable character is itself;
     /// otherwise `up`, `down`, `left`, `right`, `shift-up`, `shift-down`,
-    /// `shift-left`, `shift-right`, `pageup`, `pagedown`, `home`,
-    /// `end`, `enter`, `tab`, `backspace`, `esc`, `ctrl-<letter>`,
-    /// `alt-<key>` (where the terminal sends Alt as Meta, and for an Esc
-    /// typed just before a key), `alt-backspace`, `paste:<text>` (pasted text: bracketed
-    /// paste is on while the screen is held; a long paste comes as several,
-    /// the last maybe empty, `pasting` True until it has), `wheel-up` and
-    /// `wheel-down` (the mouse's wheel, once `mouse(True)`), and its left
-    /// button's `mouse-press:<col>:<row>`, `mouse-move:<col>:<row>` (the
-    /// pointer moved, no button held), `mouse-drag:<col>:<row>` (moved
-    /// while held) and `mouse-release:<col>:<row>`, from 0 at the top left
-    /// (its other buttons are skipped), or `ctrl-@`,
-    /// `ctrl-\`, `ctrl-]`, `ctrl-^`, `ctrl-_`. A key it does not
-    /// know (a function key) is skipped.
+    /// `shift-left`, `shift-right`, `alt-up`, `alt-down`, `alt-left`,
+    /// `alt-right`, `ctrl-left`, `ctrl-right` (Ctrl with ↑ or ↓ is skipped),
+    /// `pageup`, `pagedown`, `home`, `end`, `enter`, `tab`, `shift-tab`,
+    /// `backspace`, `delete`, `esc`, `ctrl-<letter>`, `alt-<key>` (where the
+    /// terminal sends Alt as Meta, and for an Esc typed just before a key),
+    /// `alt-backspace`, `paste:<text>` (pasted text: bracketed paste is on
+    /// while the screen is held; a long paste comes as several, the last
+    /// maybe empty, `pasting` True until it has), `wheel-up` and `wheel-down`
+    /// (the mouse's wheel, once `mouse(True)`), and its left button's
+    /// `mouse-press:<col>:<row>`, `mouse-move:<col>:<row>` (the pointer
+    /// moved, no button held), `mouse-drag:<col>:<row>` (moved while held)
+    /// and `mouse-release:<col>:<row>`, from 0 at the top left (its other
+    /// buttons are skipped), or `ctrl-@`, `ctrl-\`, `ctrl-]`, `ctrl-^`,
+    /// `ctrl-_`. A key it does not know (a function key) is skipped.
     fn key<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = 0)] timeout_ms: u32,
@@ -2943,9 +2950,17 @@ mod tests {
         );
         assert_eq!(k(b"\x1b[5~"), (Some("pageup".into()), 4), "Fn+up on a Mac");
         assert_eq!(k(b"\x1b[Z"), (Some("shift-tab".into()), 3), "Shift+Tab");
+        assert_eq!(k(b"\x1b[1;5D"), (Some("ctrl-left".into()), 6));
+        assert_eq!(
+            k(b"\x1b[1;5B"),
+            (None, 6),
+            "Ctrl+Down is no key of a screen"
+        );
+        assert_eq!(k(b"\x1b[3~x"), (Some("delete".into()), 4));
+        assert_eq!(k(b"\x1b\x7f"), (Some("alt-backspace".into()), 2));
         assert_eq!(k("é".as_bytes()), (Some("é".into()), 2));
         assert_eq!(
-            k(b"\x1b[1;5Cz"),
+            k(b"\x1b[1;6Cz"),
             (None, 6),
             "an unknown sequence is skipped whole"
         );

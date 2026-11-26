@@ -1,0 +1,561 @@
+"""Tests for the `aspect` shell (a bare `aspect`): its line editor
+(`line_edit.axl`), word splitting and quoting, and its prompt
+(`shell_prompt.axl`): completion, recall, the queue, a paste, and its keys
+over the History screen and a run.
+
+Run with:
+  aspect dev test-shell
+"""
+
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "new_browser", "new_run", "new_ui")
+load("./history_child.axl", "needs_terminal", "typed_record")
+load("./line_edit.axl", "edit_key", "join_words", "line_row", "line_text", "new_line", "set_text", "shown_text", "split_words")
+load("./shell_prompt.axl", "candidates", "close_shell", "command_path", "describe_document", "draw_shell", "new_shell", "pasted_commands", "shell_frame", "shell_key")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _visible(row):
+    """`row` without its escape sequences (`ESC [ … letter`)."""
+    out = []
+    skipping = False
+    for c in row.elems():
+        if c == "\x1b":
+            skipping = True
+        elif skipping:
+            if c.isalpha():
+                skipping = False
+        else:
+            out.append(c)
+    return "".join(out)
+
+def _history(records):
+    """A `ctx.std.history` over `records`."""
+
+    def list(limit = 50, outcome = None, builds = False, workspace = None):
+        return [
+            r
+            for r in records
+            if (outcome == None or r["outcome"] == outcome) and (not builds or r["bazel"]) and (workspace == None or r.get("workspace") == workspace)
+        ][:limit]
+
+    def get(id):
+        found = [r for r in records if r["task"]["id"] == id]
+        return found[0] if found else None
+
+    return struct(
+        list = list,
+        get = get,
+        root = lambda: "/h",
+        census = lambda: {"runs": len(records), "unreadable": 0, "without_record": 0, "newer": 0},
+        read_output = lambda record, limit = 5000: None,
+    )
+
+def _record(id, ended = "ok", **kw):
+    record = {
+        "status": "ended",
+        "outcome": ended,
+        "task": {"id": id, "name": "build-x", "kind": "build", "group": []},
+        "argv": ["/bin/aspect", "build", "//..."],
+        "cwd": "/ws",
+        "started": "2026-11-21T15:39:39.143Z",
+        "duration_ms": 6300,
+        "exit_code": 0 if ended == "ok" else 1,
+        "dir": "/h/" + id,
+        "workspace": "/ws",
+        "bazel": [{"command": "build"}],
+    }
+    record.update(kw)
+    return record
+
+def _fake_stream(lines, ended = False):
+    return struct(poll = lambda timeout_ms = 0, limit = 10000: [], ended = ended, close = lambda: None)
+
+def _fake_child(record):
+    """A child run as `start_child` keeps it, still going; and the signals
+    sent to it."""
+    signals = []
+    proc = struct(
+        try_wait = lambda: None,
+        interrupt = lambda: signals.append("int"),
+        terminate = lambda: signals.append("term"),
+        kill = lambda: signals.append("kill"),
+    )
+    child = {"proc": proc, "out": _fake_stream([]), "err": _fake_stream([]), "events": None, "status": None, "exited_ms": 0, "done": False, "asked": 0, "record": record, "task_id": None}
+    return child, signals
+
+def _keys(line, keys):
+    for k in keys:
+        edit_key(line, k)
+    return (line_text(line), line["cursor"])
+
+def _test_line_edit():
+    line = new_line()
+    _eq("typing inserts", _keys(line, ["a", "b", "c"]), ("abc", 3))
+    _eq("← then typing inserts there", _keys(line, ["left", "X"]), ("abXc", 3))
+    _eq("Home and End", (_keys(line, ["home"]), _keys(line, ["ctrl-e"])), (("abXc", 0), ("abXc", 4)))
+    _eq("Backspace", _keys(line, ["backspace"]), ("abX", 3))
+    _eq("Delete at the end does nothing", _keys(line, ["delete"]), ("abX", 3))
+    _eq("Delete under the cursor", _keys(line, ["home", "ctrl-d"]), ("bX", 0))
+    line = new_line("build //foo/bar:baz --keep")
+    _eq("Ctrl+W takes the word before, to a space", _keys(line, ["ctrl-w"]), ("build //foo/bar:baz ", 20))
+    _eq("Ctrl+Y puts it back", _keys(line, ["ctrl-y"]), ("build //foo/bar:baz --keep", 26))
+    line = new_line("build //foo/bar:baz")
+    _eq("Alt+Backspace stops at punctuation", _keys(line, ["alt-backspace"]), ("build //foo/bar:", 16))
+    _eq("Alt+B a word left", _keys(line, ["alt-b"]), ("build //foo/bar:", 12))
+    _eq("Ctrl+K to the end", _keys(line, ["ctrl-k"]), ("build //foo/", 12))
+    _eq("Ctrl+U to the start", _keys(line, ["alt-b", "ctrl-u"]), ("foo/", 0))
+    _eq("Alt+F a word right", _keys(line, ["alt-f"]), ("foo/", 3))
+    _eq("Ctrl+← and Alt+← a word left too", (_keys(new_line("a bc"), ["ctrl-left"]), _keys(new_line("a bc"), ["alt-left"])), (("a bc", 2), ("a bc", 2)))
+    _eq("a paste whole, its newlines spaces", _keys(new_line(), ["paste:a\nb\tc"]), ("a b c", 5))
+    _eq("and every other control character", _keys(new_line(), ["paste:a\x1b[?1049lb\x07\r\n\x9bc"]), ("a [?1049lb   c", 14))
+    _eq("a key not the editor's", edit_key(new_line(), "f5"), False)
+    wide = new_line("修修修修")
+    _eq("drawn to the cursor, the cursor inverse", line_row(wide, 5), "修修\x1b[7m \x1b[27m")
+    wide["cursor"] = 0
+    _eq("from the start", line_row(wide, 5), "\x1b[7m修\x1b[27m修")
+    _eq("no cursor", line_row(new_line("ab"), 10, cursor = False), "ab")
+    _eq("a control character in caret notation", line_row(new_line("a\nb\x7f"), 10, cursor = False), "a^Jb^?")
+    _eq("as text quoting the line is drawn", shown_text("x\ny"), "x^Jy")
+
+    _eq("words", split_words("build  //a:b --x=1"), (["build", "//a:b", "--x=1"], None))
+    _eq("single quotes keep all", split_words("echo 'a \\ \"b' c"), (["echo", "a \\ \"b", "c"], None))
+    _eq("double quotes keep a backslash but before $ ` \" \\", split_words("x \"a\\n \\\" b\""), (["x", "a\\n \" b"], None))
+    _eq("a backslash outside escapes", split_words("a\\ b c"), (["a b", "c"], None))
+    _eq("an empty quoted word", split_words("a '' b"), (["a", "", "b"], None))
+    _eq("an open quote", split_words("a 'b")[1], "a single quote is not closed")
+    _eq("nothing", split_words("   "), ([], None))
+    words = ["build", "//a:b", "a b", "", "it's", "--x=1"]
+    _eq("join quotes only what needs it", join_words(words), "build //a:b 'a b' '' 'it'\\''s' --x=1")
+    _eq("and reads back", split_words(join_words(words))[0], words)
+
+def _fake_fs(files, dirs):
+    entry = lambda name, is_dir = True, is_symlink = False: struct(path = name, is_dir = is_dir, is_file = not is_dir, is_symlink = is_symlink)
+    return struct(
+        read_to_string_if_complete = lambda p: files.get(p),
+        try_read_dir = lambda p: [entry(*e) if type(e) == "tuple" else entry(e) for e in dirs.get(p, [])],
+        try_read_to_string = lambda p: files.get(p, ""),
+        entry = entry,
+    )
+
+_SURFACE = {
+    "": {"commands": [{"command": "aspect build"}, {"command": "aspect history browse"}, {"command": "aspect history list"}, {"command": "aspect run"}], "features": ["bridge", "console", "dashboard"]},
+    "build": {"args": [
+        {"flag": "--keep-going", "type": "boolean"},
+        {"flag": "--mode", "type": "string", "allowed_values": ["fast", "slow"]},
+        {"flag": None, "type": "positional"},
+    ]},
+    "feature console": {"flags": [{"flag": "--console:enabled", "type": "boolean"}]},
+}
+
+def _shell_state(ctx, records):
+    """The shell's whole state, as `run_screen` starts it, over a History
+    screen of `records` and a CLI whose surface is `_SURFACE`."""
+    state = new_ui(mouse = False)
+    state.update(new_run(task = "aspect"))
+    state.update(re = ctx.std.re, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env, process = ctx.std.process, read = lambda p, c: None)
+    state["browser"] = new_browser(_history(records), exclude = "live", standalone = True, workspace = "/ws", back = "the prompt")
+    state["mode"] = "history"
+    shell = new_shell(ctx, prefetch = False)
+    asked = []
+
+    def describe(what):
+        asked.append(what)
+        return _SURFACE.get(what, {})
+
+    shell.update(
+        describe = describe,
+        asked = asked,
+        root = "/ws",
+        cwd = "/nowhere/at/all",
+        fs = _fake_fs(
+            {"/ws/app/BUILD.bazel": "go_binary(\n    name = \"server\",\n)\nfilegroup(name=\"srcs\")\n", "/ws/BUILD": ""},
+            {"/ws": ["app", "apis", ".git", "bazel-out", ("link", True, True), ("README.md", False), ("BUILD", False), ("MODULE.bazel", False)], "/ws/app": ["cmd", ("BUILD.bazel", False)], "/ws/unreadable": []},
+        ),
+    )
+    state["shell"] = shell
+    return state
+
+def _type(state, text):
+    for c in text.elems():
+        shell_key(state, c, 10)
+
+def _test_shell(ctx):
+    secret = _record("ssss0000", "ok", argv = ["/bin/aspect", "deploy", "--token=<REDACTED>"])
+    elsewhere = _record("eeee0000", "ok", argv = ["/bin/aspect", "lint", "//other"], workspace = "/other", cwd = "/other")
+    state = _shell_state(ctx, [_record("aaaa1111", "ok", argv = ["/bin/aspect", "test", "//x", "--bridge:enabled=true", "--dashboard:enabled=false"]), elsewhere, _record("bbbb2222", "failed"), secret])
+    shell = state["shell"]
+    _eq("a task's path", command_path(shell, ["--x", "history", "browse", "--y"]), ["history", "browse"])
+    _eq("none, for a group", command_path(shell, ["history"]), None)
+    _eq("command words", candidates(shell, [], "h"), ["history"])
+    _eq("a group's tasks", candidates(shell, ["history"], ""), ["browse", "list"])
+    _eq("after aspect and !", (candidates(shell, ["aspect"], "b"), candidates(shell, [], "!b")), (["build"], ["!build"]))
+    _eq("nothing past a task's words", candidates(shell, ["build"], "x"), [])
+    _eq("a task's flags, a value's =", candidates(shell, ["build"], "--k"), ["--keep-going"])
+    _eq("and features'", candidates(shell, ["build"], "--c"), ["--console:"])
+    _eq("not the shell's own", (candidates(shell, ["build"], "--b"), candidates(shell, ["build"], "--d")), ([], []))
+    _eq("a feature's flags, not the prefix typed", (candidates(shell, ["build"], "--console:e"), candidates(shell, ["build"], "--console:")), (["--console:enabled"], ["--console:enabled"]))
+    _eq("a flag's values", candidates(shell, ["build"], "--mode=f"), ["--mode=fast"])
+    _eq("a boolean's", candidates(shell, ["build"], "--keep-going="), ["--keep-going=true", "--keep-going=false"])
+    _eq("targets: the workspace's directories", candidates(shell, ["build"], "//a"), ["//apis/", "//app/"])
+    _eq("the root's own", candidates(shell, ["build"], "//"), ["//...", "//:", "//apis/", "//app/"])
+    _eq("a package's", candidates(shell, ["build"], "//app/"), ["//app/...", "//app:", "//app/cmd/"])
+    _eq("its targets, all first", candidates(shell, ["build"], "//app:"), ["//app:all", "//app:server", "//app:srcs"])
+    _eq("by name", candidates(shell, ["build"], "//app:s"), ["//app:server", "//app:srcs"])
+    _eq("no package, no targets", candidates(shell, ["build"], "//nope:"), [])
+    _eq("a directory's / before the :", candidates(shell, ["build"], "//app/:s"), ["//app:server", "//app:srcs"])
+    _eq("no CLI flags past --", (candidates(shell, ["build", "--"], "--k"), candidates(shell, ["build", "--"], "//app:se")), ([], ["//app:server"]))
+    _eq("a file is no package", (candidates(shell, ["build"], "//MODULE.bazel/"), candidates(shell, ["build"], "//MODULE.bazel:")), ([], []))
+    _eq("the index described once, each task once", shell["asked"], ["", "build", "feature console"])
+
+    ignoring = _shell_state(ctx, [])["shell"]
+    ignoring["fs"] = _fake_fs({"/ws/.bazelignore": "apis\n"}, {"/ws": ["app", "apis"]})
+    _eq("what .bazelignore leaves out is no target", candidates(ignoring, ["build"], "//a"), ["//app/"])
+    mid = _shell_state(ctx, [])
+    set_text(mid["shell"]["line"], "bu --x")
+    mid["shell"]["line"]["cursor"] = 2
+    shell_key(mid, "tab", 10)
+    _eq("completing before a space adds no other", (line_text(mid["shell"]["line"]), mid["shell"]["line"]["cursor"]), ("build --x", 6))
+
+    # Tab completes at the cursor: one in place, a space after; the common
+    # start of several; else lists them.
+    _type(state, "bu")
+    shell_key(state, "tab", 10)
+    _eq("one completes, a space after", line_text(shell["line"]), "build ")
+    _type(state, "//app")
+    shell_key(state, "tab", 10)
+    _eq("a directory goes on", line_text(shell["line"]), "build //app/")
+    shell_key(state, "tab", 10)
+    _eq("several, nothing in common, listed", (line_text(shell["line"]), shell["choices"]), ("build //app/", ["//app/...", "//app:", "//app/cmd/"]))
+    _eq("on the status row", "//app/cmd/" in _visible(draw_shell(state, 120, 20)), True)
+    shell_key(state, "esc", 10)
+    _eq("Esc puts them away, keeping the prompt's keys", (shell["choices"], shell["focus"]), ([], "prompt"))
+    shell_key(state, "ctrl-c", 10)
+    _eq("Ctrl+C clears the line", line_text(shell["line"]), "")
+    _type(state, "build //app/:")
+    shell_key(state, "tab", 10)
+    _eq("a word spelled another way is put right", (line_text(shell["line"]), len(shell["choices"])), ("build //app:", 3))
+    shell_key(state, "ctrl-c", 10)
+
+    # Enter runs a line: a task's record of its own, queued until no run
+    # goes; `!` in the terminal.
+    _type(state, "aspect build //app:server")
+    shell_key(state, "enter", 10)
+    _eq("queued as a typed record", shell["queue"], [("run", typed_record(["aspect", "build", "//app:server"], "/nowhere/at/all", group = [], kind = "build"))])
+    _eq("the line cleared", line_text(shell["line"]), "")
+    _eq("pasted commands: a backslash and an open quote go on", pasted_commands("build //a \\\n  --keep_going\r\ntest 'x\ny'\n\nlint\n"), ["build //a    --keep_going", "test 'x y'", "lint"])
+    _eq("a quote opened in one line and closed in a later one", pasted_commands("a \"x\nit's\ny\" b\nc"), ["a \"x it's y\" b", "c"])
+    _eq("an escaped quote opens none", pasted_commands("a \\'b\nc"), ["a \\'b", "c"])
+    log = "it's\n" + "\n".join(["line %d of a log" % i for i in range(3000)])
+    _eq("a long paste with a stray apostrophe is one command, read once", len(pasted_commands(log)), 1)
+    queued = len(shell["queue"])
+    state["screen"] = struct(size = lambda: (120, 40), pasting = True)
+    shell_key(state, "paste:build //a\rte", 10)
+    shell_key(state, "paste:st //b", 10)
+    _eq("a paste in pieces waits for its end", (shell.get("batch"), shell["paste_buf"]), (None, "build //a\rtest //b"))
+    state["screen"] = struct(size = lambda: (120, 40), pasting = False)
+    shell_key(state, "paste:", 10)
+    state["screen"] = None
+    _eq("a paste of commands is held, not run", (len(shell["queue"]), shell["batch"], "2 commands pasted" in _visible(draw_shell(state, 160, 20))), (queued, ["build //a", "test //b"], True))
+    shell_key(state, "enter", 10)
+    _eq("Enter runs them in turn", [r[1]["typed"] for r in shell["queue"][-2:]], [["aspect", "build", "//a"], ["aspect", "test", "//b"]])
+    shell["queue"] = shell["queue"][:-2]
+    shell_key(state, "paste:a\nb", 10)
+    shell_key(state, "esc", 10)
+    _eq("Esc drops them", (shell.get("batch"), shell["focus"]), (None, "prompt"))
+    _eq("a whole flag typed lists the longer ones", candidates(shell, ["build"], "--keep-going"), ["--keep-going"])
+    _eq("the screen's keys say the prompt has them", "keys: prompt · Esc screen" in _visible(draw_shell(state, 160, 20)), True)
+    queued = len(shell["queue"])
+    _type(state, "history browse")
+    shell_key(state, "enter", 10)
+    _eq("the History screen asked for is no nested one", (len(shell["queue"]), "this is it" in shell["note"]), (queued, True))
+    _type(state, "ui --help")
+    shell_key(state, "enter", 10)
+    _eq("its help is no screen: it runs", len(shell["queue"]), queued + 1)
+    shell["queue"].pop()
+    _type(state, "version")
+    shell_key(state, "enter", 10)
+    _eq("not a task: no bridge", (shell["queue"][-1][1]["bridged"], shell["queue"][-1][1]["task"]["kind"]), (False, "version"))
+    shell["queue"].pop()
+    known = shell["described"]
+    shell["described"] = {"": {}}
+    _type(state, "auth login --org x")
+    shell_key(state, "enter", 10)
+    unknown = shell["queue"].pop()[1]
+    _eq("the task list unknown: as typed, a prompting task given the terminal, and said so", (unknown["bridged"], needs_terminal(unknown), "not known" in shell["note"]), (False, True, True))
+    shell["described"] = known
+    _eq("describe's JSON", describe_document(["{", "  \"features\": []", "}"]), {"features": []})
+    _eq("after a config's own lines", describe_document(["hello from config", "{", "  \"a\": 1", "}"]), {"a": 1})
+    _eq("a config's own JSON object among them", describe_document(["{", "  \"note\": 1", "}", "{", "  \"a\": {", "    \"b\": 2", "  }", "}"]), {"a": {"b": 2}})
+    _eq("none", (describe_document(["hello"]), describe_document([])), ({}, {}))
+    answered = [False]
+    later = {"out": struct(poll = lambda: [], ended = False), "lines": [], "doc": _SURFACE[""]}
+
+    def poll():
+        # A poller learns its stream ended only when polled.
+        later["out"] = struct(poll = poll, ended = answered[0])
+        return []
+
+    later["out"] = struct(poll = poll, ended = False)
+    slow = dict(shell, described = {}, pending = {}, describe = lambda what: None, start = lambda what: later, finish = lambda p: p["doc"])
+    _eq("one that ran out of time completes nothing", command_path(slow, ["build"]), None)
+    _eq("nor waits again while asked again", command_path(slow, ["build"]), None)
+    answered[0] = True
+    _eq("and is taken once answered", command_path(slow, ["build"]), ["build"])
+    _type(state, "!run //app:server")
+    shell_key(state, "enter", 10)
+    _eq("! in the terminal", shell["queue"][1][0], "run_in_terminal")
+    _eq("aspect run needs it anyway", needs_terminal(shell["queue"][1][1]), True)
+    _type(state, "build 'a")
+    shell_key(state, "enter", 10)
+    _eq("an open quote is not run", (len(shell["queue"]), shell["note"], line_text(shell["line"])), (2, "a single quote is not closed", "build 'a"))
+    shell_key(state, "ctrl-c", 10)
+
+    # With a run going, nothing starts; once none goes, the next does (here
+    # it cannot: its directory is gone).
+    going, signals = _fake_child(_record("cccc3333"))
+    state["child"] = going
+    shell_frame(state, ctx, 100)
+    _eq("nothing starts while one goes", len(shell["queue"]), 2)
+    _eq("Ctrl+D does not leave with one going", (shell_key(state, "ctrl-d", 10), shell["note"]), (False, "a run is going: Ctrl+C stops it"))
+    _type(state, "exit")
+    _eq("nor exit", shell_key(state, "enter", 10), False)
+    state["child"]["done"] = True
+    shell_frame(state, ctx, 100)
+    _eq("the next starts once it ends", (len(shell["queue"]), shell["note"]), (1, "cannot run it: the directory it ran in is gone"))
+    _eq("the list read anew", state["browser"]["records"], None)
+    state["child"] = going
+    going["done"] = False
+    shell_key(state, "ctrl-c", 10)
+    _eq("a first Ctrl+C at an empty prompt says what a second does", (signals, len(shell["queue"]), shell["note"]), ([], 1, "Ctrl+C again stops aspect build //... and drops 1 queued · Esc keeps it"))
+    shell_key(state, "esc", 10)
+    _eq("Esc keeps it, the keys still the prompt's", (signals, len(shell["queue"]), shell["note"], shell["focus"]), ([], 1, "", "prompt"))
+    shell_key(state, "ctrl-c", 10)
+    shell["stop_ms"] -= 3000
+    shell_key(state, "ctrl-c", 10)
+    _eq("a second too late only asks again", (signals, "Ctrl+C again" in shell["note"]), ([], True))
+    shell_key(state, "ctrl-c", 10)
+    _eq("a second in time stops the run and drops the queue", (signals, shell["queue"], shell["note"]), (["int"], [], "stopping · 1 queued dropped"))
+    shell_frame(state, ctx, 100)
+    shell_key(state, "ctrl-c", 10)
+    shell_key(state, "ctrl-c", 10)
+    _eq("a second stop keeps the count", shell["note"], "stopping · 1 queued dropped")
+    going["done"] = True
+    shell_frame(state, ctx, 200)
+    _eq("once it stopped, what was dropped is still said", shell["note"], "1 queued dropped")
+    state.pop("child")
+
+    # ↑↓ recall what was typed here, newest first, then the history's, as
+    # `aspect history list` shows them.
+    shell_key(state, "up", 10)
+    _eq("↑ the newest typed", line_text(shell["line"]), "exit")
+    for _ in range(9):
+        shell_key(state, "up", 10)
+    _eq("then the history's, without what the screen added", line_text(shell["line"]), "test //x")
+    shell_key(state, "up", 10)
+    shell_key(state, "up", 10)
+    _eq("redacted", line_text(shell["line"]), "deploy --token=<REDACTED>")
+    shell_key(state, "up", 10)
+    _eq("no further than the oldest", line_text(shell["line"]), "deploy --token=<REDACTED>")
+    shell_key(state, "enter", 10)
+    _eq("one recalled unedited runs as it ran, its record's, here", shell["queue"], [("run", dict(secret, cwd = "/nowhere/at/all", ran_in = "/ws"))])
+    shell["queue"] = []
+    shell_key(state, "up", 10)
+    _eq("none of another workspace's, as the list", "lint //other" in [t for t, _ in shell["recall"]], False)
+    shell_key(state, "ctrl-c", 10)
+    state["browser"]["here"] = False
+    shell_key(state, "up", 10)
+    _eq("every workspace's when the list shows every one", "lint //other" in [t for t, _ in shell["recall"]], True)
+    shell_key(state, "ctrl-c", 10)
+    state["browser"]["here"] = True
+    shell_key(state, "up", 10)
+    shell_key(state, "enter", 10)
+    shell["queue"] = []
+    shell_key(state, "up", 10)
+    shell_key(state, "enter", 10)
+    _eq("and again, from what was typed", shell["queue"][-1], ("run", dict(secret, cwd = "/nowhere/at/all", ran_in = "/ws")))
+    shell["queue"] = []
+    shell_key(state, "up", 10)
+    _type(state, " x")
+    shell_key(state, "enter", 10)
+    _eq("edited, a redacted secret is not run", (shell["queue"], "redacted" in shell["note"], line_text(shell["line"])), ([], True, "deploy --token=<REDACTED> x"))
+    shell_key(state, "ctrl-c", 10)
+    for _ in range(14):
+        shell_key(state, "down", 10)
+    _eq("↓ past the newest, the line being typed", line_text(shell["line"]), "")
+    shell_key(state, "up", 10)
+    _type(state, "XX")
+    shell_key(state, "up", 10)
+    shell_key(state, "down", 10)
+    _eq("an edited entry keeps its edit", line_text(shell["line"]), "deploy --token=<REDACTED>XX")
+    shell_key(state, "ctrl-c", 10)
+
+    # Esc gives the keys to the screen above; its Esc, or `:`, gives them back.
+    shell_key(state, "esc", 10)
+    shell_key(state, "j", 10)
+    _eq("the screen has them", (shell["focus"], state["browser"]["selected"], line_text(shell["line"])), ("view", 1, ""))
+    _eq("and says so", "keys: screen · Esc or : prompt" in _visible(draw_shell(state, 160, 20)), True)
+    _eq("the list's Esc goes back to the prompt", "q/Esc the prompt" in _visible(draw_shell(state, 160, 20)), True)
+    shell_key(state, "r", 10)
+    _eq("r asks first", ("Run again" in _visible(draw_shell(state, 160, 20)), shell["queue"]), (True, []))
+    shell_key(state, "enter", 10)
+    _eq("Enter queues the chosen run", shell["queue"][-1], ("run", state["browser"]["records"][1]))
+    shell["queue"] = []
+    shell_key(state, "esc", 10)
+    _eq("Esc gives them back", shell["focus"], "prompt")
+    shell_key(state, "esc", 10)
+    shell_key(state, ":", 10)
+    _eq(": too", (shell["focus"], line_text(shell["line"])), ("prompt", ""))
+    shell_key(state, "pagedown", 10)
+    _eq("the prompt pages the screen above", state["browser"]["selected"], 2)
+
+    # On a run, with the screen's keys: the search bar's Alt toggles stay
+    # its own; `:` puts the keys overlay away; the status row says what Esc
+    # and `:` do.
+    state["mode"] = "run"
+    shell["focus"] = "view"
+    shell_key(state, "/", 10)
+    shell_key(state, "a", 10)
+    shell_key(state, "alt-c", 10)
+    _eq("Alt with an arrow is no Esc", (shell_key(state, "alt-left", 10), state["search"]["open"]), (False, True))
+    _eq("Alt+C in the bar", (state["search"]["open"], state["search"]["query"]), (True, "a"))
+    _eq("which Esc closes", "Esc closes the bar" in _visible(draw_shell(state, 160, 20)), True)
+    shell_key(state, "esc", 10)
+    shell_key(state, "?", 10)
+    shell_key(state, ":", 10)
+    _eq(": puts the keys away", (shell["focus"], state["help"]), ("prompt", False))
+    state["mode"] = "history"
+    shell_key(state, "esc", 10)
+    shell_key(state, ":", 10)
+    selected = state["browser"]["selected"]
+    shell_key(state, "alt-k", 10)
+    shell_key(state, "alt-r", 10)
+    _eq("an Alt key the prompt has no use for is nothing, not Esc and the key", (shell["focus"], state["browser"]["selected"], state.get("confirm")), ("prompt", selected, None))
+    shell_key(state, "alt-b", 10)
+    _eq("but the editor's own Alt keys", shell["focus"], "prompt")
+
+    # `?` on an empty prompt: every key, the prompt's first; any other key
+    # closes it and the keys are the prompt's again.
+    state["mode"] = "history"
+    shell_key(state, "?", 10)
+    overlay = _visible(draw_shell(state, 120, 40))
+    _eq("? opens the keys, the prompt's first", (state["help"], "Prompt" in overlay, "Tab" in overlay, "!cmd" in overlay, "History" in overlay), (True, True, True, True, True))
+    shell_key(state, "x", 10)
+    _eq("any other key closes it, the keys the prompt's", (state["help"], shell["focus"], line_text(shell["line"])), (False, "prompt", ""))
+    _type(state, "b")
+    shell_key(state, "?", 10)
+    _eq("? on a line is typed", (state["help"], line_text(shell["line"])), (False, "b?"))
+    shell_key(state, "ctrl-c", 10)
+
+    # The status row: until the first command, what to do, then the keys,
+    # each fit at 80 columns.
+    fresh = _shell_state(ctx, [])
+    _eq("a welcome until the first command", "aspect shell · type a task" in _visible(draw_shell(fresh, 120, 20)), True)
+    _eq("fit at 80", "help lists them" in _visible(draw_shell(fresh, 80, 20)), True)
+    _eq("the keys after it, at 80", "Enter run · Tab complete · ↑ recall · Esc screen · ^D leave" in _visible(draw_shell(state, 80, 20)), True)
+    _eq("! in terminal when it fits", ("! in terminal" in _visible(draw_shell(state, 100, 20)), "! in terminal" in _visible(draw_shell(state, 60, 20))), (True, False))
+
+    # Leaving: exit, Ctrl+D at an empty line, Ctrl+C twice.
+    _type(state, "exit")
+    _eq("exit leaves", shell_key(state, "enter", 10), True)
+    _eq("Ctrl+D leaves", shell_key(state, "ctrl-d", 10), True)
+    _eq("Ctrl+C once does not", (shell_key(state, "ctrl-c", 10), shell["note"]), (False, "Ctrl+C again, Ctrl+D or exit leaves"))
+    _eq("twice does", shell_key(state, "ctrl-c", 10), True)
+    shell["focus"] = "view"
+    shell_key(state, "?", 10)
+    shell_key(state, "?", 10)
+    shell_key(state, "ctrl-c", 10)
+    _eq("with the screen's keys, only Ctrl+C is said", shell["note"], "Ctrl+C again leaves")
+    shell_key(state, "x", 10)
+    shell["focus"] = "prompt"
+    shell_key(state, "x", 10)
+    _eq("another key between starts over", shell_key(state, "ctrl-c", 10), False)
+
+    # `history` shows the list; the prompt sits under the screen.
+    state["mode"] = "run"
+    shell_key(state, "ctrl-c", 10)
+    _type(state, "history")
+    shell_key(state, "enter", 10)
+    _eq("history shows the list", state["mode"], "history")
+    screen = draw_shell(state, 100, 12)
+    _eq("the prompt on the last row", screen.endswith("\x1b[K\x1b[1m› \x1b[0m\x1b[7m \x1b[27m\x1b[0m"), True)
+    _eq("the status above it", "\x1b[11;1H" in screen, True)
+    _eq("two rows: the status and the prompt", draw_shell(state, 100, 2).startswith("\x1b[H\x1b[J\x1b[1;1H"), True)
+    _eq("one row: the prompt", (draw_shell(state, 100, 1).count("\r\n"), "› " in draw_shell(state, 100, 1)), (0, True))
+
+def _test_recall_edit(ctx):
+    """An entry of the history's recalled, edited, left and recalled again
+    is the line typed, not the run it came from."""
+    plain = _record("aaaa1111", "ok", argv = ["/bin/aspect", "test", "//x"])
+    secret = _record("ssss0000", "ok", argv = ["/bin/aspect", "deploy", "--token=<REDACTED>"])
+    state = _shell_state(ctx, [plain, secret])
+    shell = state["shell"]
+    shell_key(state, "up", 10)
+    _type(state, " --y")
+    shell_key(state, "down", 10)
+    shell_key(state, "up", 10)
+    _eq("the edit kept", line_text(shell["line"]), "test //x --y")
+    shell_key(state, "enter", 10)
+    _eq("it runs as edited, typed", (len(shell["queue"]), shell["queue"][0][1].get("typed")), (1, ["aspect", "test", "//x", "--y"]))
+    shell["queue"] = []
+    shell_key(state, "up", 10)
+    shell_key(state, "up", 10)
+    shell_key(state, "up", 10)
+    _eq("the redacted run recalled", line_text(shell["line"]), "deploy --token=<REDACTED>")
+    _type(state, "x")
+    shell_key(state, "down", 10)
+    shell_key(state, "up", 10)
+    shell_key(state, "enter", 10)
+    _eq("edited, it is refused, not run as it ran", (shell["queue"], "redacted" in shell["note"]), ([], True))
+
+def _test_stop_warning(ctx):
+    """A first Ctrl+C's warning is about the run going then: once that run
+    ends, a Ctrl+C warns anew, never stopping the next run unwarned."""
+    state = _shell_state(ctx, [])
+    shell = state["shell"]
+    first, signals = _fake_child(_record("cccc3333"))
+    state["child"] = first
+    shell_frame(state, ctx, 100)
+    shell_key(state, "ctrl-c", 10)
+    _eq("warned", shell["note"].startswith("Ctrl+C again"), True)
+    first["done"] = True
+    shell_frame(state, ctx, 200)
+    _eq("the warning goes with the run", (shell.get("stop_ms"), shell["note"]), (None, ""))
+    second, later = _fake_child(_record("dddd4444"))
+    state["child"] = second
+    shell_frame(state, ctx, 300)
+    shell_key(state, "ctrl-c", 10)
+    _eq("a Ctrl+C for the next run warns first", (later, shell["note"].startswith("Ctrl+C again")), ([], True))
+    shell_key(state, "esc", 10)
+    long, _ = _fake_child(_record("eeee5555", argv = ["/bin/aspect", "build", "//a/very/long/package/path/of/many/parts:target_with_a_long_name"]))
+    state["child"] = long
+    shell["queue"] = [("run", _record("ffff6666"))]
+    shell_key(state, "ctrl-c", 10)
+    row = _visible(draw_shell(state, 80, 20)).split("\n")[-2]
+    _eq("a long command is cut, the rest of the warning kept", ("and drops 1 queued · Esc keeps it" in row, "…" in row), (True, True))
+
+def _test_close(ctx):
+    """Leaving kills every `aspect describe` still asked for."""
+    state = _shell_state(ctx, [])
+    killed = []
+    proc = struct(kill = lambda: killed.append("kill"), wait = lambda: killed.append("wait"))
+    state["shell"]["pending"] = {"": {"proc": proc, "out": None, "lines": []}}
+    close_shell(state)
+    _eq("killed and waited for", (killed, state["shell"]["pending"]), (["kill", "wait"], {}))
+
+def _impl(ctx: TaskContext) -> int:
+    _test_close(ctx)
+    _test_line_edit()
+    _test_shell(ctx)
+    _test_recall_edit(ctx)
+    _test_stop_warning(ctx)
+    print("shell_prompt_test.axl: OK")
+    return 0
+
+shell_tests = task(
+    summary = "Run the aspect shell's tests.",
+    kind = "test-shell",
+    group = ["dev"],
+    implementation = _impl,
+)

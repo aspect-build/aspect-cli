@@ -1,0 +1,100 @@
+"""The History screen as a task of its own, with no build of its own:
+`aspect history browse`, and the `aspect` shell (a bare `aspect`,
+`private/task/shell.axl`, `shell_prompt.axl`), its prompt under the screen. `run_screen` takes the
+terminal, shows the History screen (`feature/dashboard.axl`) and runs the
+screen's loop: a frame drawn, then the keys typed since, the first waited
+for, a child run's output taken in between (`history_child.axl`).
+"""
+
+load("@aspect//feature/dashboard.axl", "child_running", "new_browser", "new_run", "new_ui", "on_key", "open_history", "page_of", "refusal", "render", "use_context", "workspace_of")
+load("@std//time.axl", "monotonic")
+load("./history_child.axl", "pump_child", "run_again")
+load("./shell_prompt.axl", "close_shell", "draw_shell", "new_shell", "shell_frame", "shell_key", "shell_page")
+
+def run_screen(ctx, name: str, shell = False) -> int:
+    """Show the History screen until it is left, as the task `name` (for
+    the error the screen refuses with: CI, a coding agent, a dumb or tiny
+    terminal, stdin not one), with the shell's prompt under it when
+    `shell`. Left, 0, but `aspect history browse` with Ctrl+C, 130; asked
+    to stop (SIGINT, SIGTERM, SIGHUP), the screen is given back, nothing
+    more queued, and the shell's code for the signal, a child run going
+    left to stop itself. Its exit code."""
+    if refusal(ctx.std) != "" or not ctx.std.io.stdin.is_tty:
+        ctx.std.io.stderr.write("error: %s needs a terminal; `aspect history list` prints the runs.\n" % name)
+        return 1
+    screen = ctx.std.term.take()
+    screen.interrupts(False)
+    state = new_ui()
+    state.update(new_run(task = name.removeprefix("aspect ")))
+    state["screen"] = screen
+    screen.wheel_keys(True)
+    screen.mouse(True)
+    use_context(state, ctx)
+    state["browser"] = new_browser(ctx.std.history, exclude = ctx.task.id, standalone = True, workspace = workspace_of(ctx.std), back = "the prompt" if shell else "quit")
+    if shell:
+        state["shell"] = new_shell(ctx)
+    open_history(state)
+    code = 0
+    drawn = None
+    for _ in range(1 << 30):
+        if ctx.cancellation.root.cancelled:
+            # Asked to stop: nothing more queued, the screen given back, and
+            # gone at once. A child run going is not asked here: it stops
+            # itself once its screen is gone (`main.rs`'s `bridged_child`),
+            # a stop that is not the user's, so its verdict says no more
+            # than that it stopped.
+            if shell:
+                state["shell"]["queue"] = []
+                close_shell(state)
+            if state["screen"].held:
+                state["screen"].release()
+            return ctx.cancellation.exit_code or 130
+        if not state["screen"].held:
+            break
+        now = int(monotonic() * 1000)
+        pump_child(state, now)
+        if shell:
+            shell_frame(state, ctx, now)
+
+            # A command handed the terminal and stopped meanwhile: the
+            # screen given back, for the top of the loop to end on.
+            if not state["screen"].held:
+                continue
+        cols, rows = state["screen"].size()
+        frame = draw_shell(state, cols, rows) if shell else render(state, cols, rows)
+        if frame != drawn or state.get("drawn") == None:
+            state["screen"].write(frame)
+            drawn = frame
+            state["drawn"] = frame
+        page = shell_page(state, cols, rows) if shell else page_of(state, cols, rows)
+
+        # The keys typed since the last frame, the first waited for. Ctrl+C
+        # leaves (130), but for a run started again here, which it stops.
+        leave = False
+        for i in range(16):
+            key = state["screen"].key(timeout_ms = 100 if i == 0 else 0)
+            if key == None:
+                break
+            if shell:
+                leave = shell_key(state, key, page)
+            else:
+                leave = on_key(state, key, page)
+            if leave:
+                # The shell is left on purpose (Ctrl+D, `exit`, Ctrl+C twice
+                # at an idle prompt), so with 0; `aspect history browse`'s
+                # Ctrl+C is the shell's code for it.
+                code = 130 if key == "ctrl-c" and not shell else 0
+                break
+            request = state.pop("request", None)
+            if request != None:
+                run_again(state, ctx, request, now)
+                drawn = None
+                break
+            if shell and state["shell"]["queue"] and not child_running(state):
+                # A command to start: drawn at once.
+                break
+        if leave:
+            break
+    close_shell(state)
+    state["screen"].release()
+    return code

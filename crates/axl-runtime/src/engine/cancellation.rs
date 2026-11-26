@@ -94,6 +94,8 @@ pub struct Signals {
     /// A signal reached our whole process group (it came from the terminal),
     /// so children in that group already have it.
     group_signalled: AtomicBool,
+    /// The stop is known to be the user's own ([`Signals::mark_user_stop`]).
+    user_stop: AtomicBool,
     /// Set once the task body has ended and the post-task hooks and defers
     /// are running: blocking builtins block normally again so cleanup can
     /// wait on things.
@@ -129,6 +131,7 @@ impl Signals {
             kind: OnceLock::new(),
             count: AtomicU32::new(0),
             group_signalled: AtomicBool::new(false),
+            user_stop: AtomicBool::new(false),
             unwinding: AtomicBool::new(false),
             on_ci,
             stops: Mutex::new(Vec::new()),
@@ -187,6 +190,19 @@ impl Signals {
     /// What the OS asked for, if it did.
     pub fn kind(&self) -> Option<Kind> {
         self.kind.get().copied()
+    }
+
+    /// The stop asked is known to be the user's own: a Ctrl+C the kernel
+    /// sent from the terminal, a full screen's own interrupt of its group,
+    /// or the History screen's of the child it runs; never a stop a process
+    /// asked, or one a child asked itself because its screen went away.
+    pub fn mark_user_stop(&self) {
+        self.user_stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the stop is known to be the user's ([`Signals::mark_user_stop`]).
+    pub fn user_stop(&self) -> bool {
+        self.user_stop.load(Ordering::SeqCst)
     }
 
     /// Whether a signal already reached every child in our process group.

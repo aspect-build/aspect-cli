@@ -249,8 +249,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // finished surface, so it is one of the raise paths that has to
             // report what did not load on its way out.
             let cli_step = StepTimer::start("cli");
+            let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+            let typed_internal = typed_internal_command(&argv);
+            let opening = unloadable.is_empty() && opens_shell(&argv);
             let mut root_cmd = cmd
-                .build(&cli_version)
+                .build_with(&cli_version, opening)
                 .map_err(|err| unloadable.reporting(err.into()))?;
             // Finalize the surface (this is what injects `--help`) so routing
             // sees every flag Clap knows, then let the selected task collect the
@@ -259,7 +262,19 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // forwards nothing still gets Clap's parse error.
             root_cmd.build();
             let mut cmd_for_help = root_cmd.clone();
-            let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
+            let mut argv = argv;
+            if opening {
+                argv.push(SHELL_COMMAND.into());
+            }
+            if let Some(name) = typed_internal {
+                // The internal tasks are the CLI's to run, not a user's to
+                // name.
+                errln!(
+                    "error: unrecognized subcommand '{name}'\n\nFor more information, try '--help'."
+                );
+                return Ok(ExitCode::from(2));
+            }
+            let argv = cmd.route_unrecognized_flags(&root_cmd, argv);
 
             let parsed = root_cmd.try_get_matches_from_mut(argv);
             cli_step.finish();
@@ -349,18 +364,27 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             )
             .map_err(anyhow::Error::from)?;
 
-            // Phase 3: run enabled feature impls.
-            time("features", || {
-                mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
-            })
-            .map_err(anyhow::Error::from)?;
+            let internal_task = cmd.tasks[dispatch.task_id].internal();
+            // Phase 3: run enabled feature impls; none around an internal
+            // task (the shell), whose screen is all it shows.
+            if !internal_task {
+                time("features", || {
+                    mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
+                })
+                .map_err(anyhow::Error::from)?;
+            }
 
             // Phase 3.5: install exporters from any registered via
             // `ctx.telemetry.exporters.add(...)`. Replays buffered spans
             // and logs to them before phase 4 starts emitting task traces.
             // No-op (and disables further OTel work for the rest of the run)
             // if no exporter was registered.
+            // None for an internal task: the shell's runs are its children's
+            // to report.
             let mut exporters = mpe.drain_exporters();
+            if internal_task {
+                exporters.clear();
+            }
             // These tasks' stdout carries a protocol payload another program
             // parses, so a configured stdout telemetry sink would interleave
             // with it and corrupt it. Redirect such sinks to stderr for them;
@@ -671,6 +695,51 @@ fn runs_without_tasks(subcommand: Option<&str>) -> bool {
     subcommand.is_some_and(|name| cmd::IDENTITY_COMMANDS.contains(&name))
 }
 
+/// The internal task a bare `aspect` on a terminal opens ([`opens_shell`]):
+/// the `aspect` shell (`@aspect//private/task/shell.axl`).
+const SHELL_COMMAND: &str = "__shell";
+
+/// The internal command (`cmd::INTERNAL_COMMAND_PREFIX`) `argv` names as
+/// its command (its first word that is no flag), if any: refused, as only
+/// the CLI runs one.
+fn typed_internal_command(argv: &[std::ffi::OsString]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .map(|a| a.to_string_lossy())
+        .find(|a| !a.starts_with('-'))
+        .filter(|a| a.starts_with(cmd::INTERNAL_COMMAND_PREFIX))
+        .map(|a| a.into_owned())
+}
+
+/// The smallest terminal the full screen draws in: `feature/dashboard.axl`'s
+/// `_MIN_COLS` and `_MIN_ROWS`, which `refusal()` there refuses under.
+const SCREEN_MIN: (i32, i32) = (40, 12);
+
+/// Whether `argv` opens the shell: a bare `aspect` (the only way in), on a
+/// terminal the full screen takes, which is just what the shell's own
+/// `refusal()` check (`feature/dashboard.axl`) and its stdin check accept,
+/// so a bare `aspect` prints the help wherever the shell would refuse:
+/// stdin, stdout and stderr a terminal, `TERM` set and not `dumb`, the
+/// controlling terminal's size read in its foreground (none for a
+/// background job, or on a pty `script` or `ssh -tt` gave no size) and at
+/// least [`SCREEN_MIN`], neither `CI` nor a coding agent's marker
+/// ([`axl_runtime::agent`]) set (a CI step or an agent may run on a
+/// terminal with nobody at it); and the user's `~/.aspect/config.json` not
+/// saying `"shell": false` ([`axl_runtime::config_json::shell_opens`]).
+fn opens_shell(argv: &[std::ffi::OsString]) -> bool {
+    use std::io::IsTerminal;
+    argv.len() == 1
+        && !std::env::var_os("CI").is_some_and(|v| !v.is_empty())
+        && !axl_runtime::agent::detected(|name| std::env::var_os(name))
+        && std::env::var("TERM").is_ok_and(|t| !t.is_empty() && t != "dumb")
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal()
+        && axl_runtime::engine::terminal_size()
+            .is_some_and(|(cols, rows)| cols >= SCREEN_MIN.0 && rows >= SCREEN_MIN.1)
+        && axl_runtime::config_json::shell_opens()
+}
+
 /// Whether Clap stopped to render help or the version rather than to reject
 /// the command line. `DisplayHelpOnMissingArgumentOrSubcommand` covers both a
 /// bare `aspect` and `aspect <group>` with no leaf, each of which prints that
@@ -828,6 +897,10 @@ fn install_signal_watcher() {
         #[cfg(unix)]
         STOP_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
         let signals = Signals::global();
+        // Before the record, which cancels the root that the task sees.
+        if user_stop(first, origin) && !signals.on_ci() {
+            signals.mark_user_stop();
+        }
         signals.record(first, origin);
         errln!("aspect-cli: {}, stopping…", first.message());
 
@@ -1002,6 +1075,33 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
 #[cfg(unix)]
 static GROUP_SIGNALLER: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
 
+/// Set before a bridged child stops itself because its browser is gone,
+/// so that stop, though from this process, is not taken for the user's
+/// ([`user_stop`]).
+#[cfg(unix)]
+static SELF_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the first stop asked, `kind` from `origin`, is known to be the
+/// user's own (`Signals::mark_user_stop`): an interrupt from the terminal
+/// as [`origin_of`] tells it (the kernel's, which only Linux reports as
+/// such, a full screen's own interrupt of its group, or the History
+/// screen's of the child it runs), but for one a bridged child asked
+/// itself ([`SELF_STOP`]). On macOS a Ctrl+C at the terminal reads as
+/// another process's, so is not known to be the user's; on CI none is (a
+/// signal from outside the pid namespace also reads as the kernel's).
+#[cfg(unix)]
+fn user_stop(kind: SignalKind, origin: SignalOrigin) -> bool {
+    kind == SignalKind::Interrupt
+        && origin == SignalOrigin::Terminal
+        && !SELF_STOP.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// On Windows no stop is known to be the user's.
+#[cfg(windows)]
+fn user_stop(_kind: SignalKind, _origin: SignalOrigin) -> bool {
+    false
+}
+
 /// Whether a stop was asked of this process (its first SIGINT or SIGTERM),
 /// so a bridged child's watcher never asks a second one.
 #[cfg(unix)]
@@ -1087,6 +1187,8 @@ fn bridged_child() {
                     && out.revents & (libc::POLLERR | libc::POLLHUP) != 0;
                 if reader_gone || unsafe { libc::getppid() } != signaller {
                     if !STOP_ASKED.load(std::sync::atomic::Ordering::SeqCst) {
+                        // Not the user's: their screen went away.
+                        SELF_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
                         // SAFETY: a signal to this process's own group.
                         unsafe {
                             libc::kill(-libc::getpgrp(), libc::SIGINT);
@@ -1273,6 +1375,16 @@ mod degrade_policy_tests {
 #[cfg(all(test, unix))]
 mod signal_origin_tests {
     use super::{SignalOrigin, origin_of};
+
+    /// An interrupt from the terminal is the user's; a stop another process
+    /// asked, or a SIGTERM, is not known to be.
+    #[test]
+    fn only_an_interrupt_from_the_terminal_is_the_users_stop() {
+        use super::{SignalKind, user_stop};
+        assert!(user_stop(SignalKind::Interrupt, SignalOrigin::Terminal));
+        assert!(!user_stop(SignalKind::Interrupt, SignalOrigin::Process));
+        assert!(!user_stop(SignalKind::Terminate, SignalOrigin::Terminal));
+    }
 
     #[test]
     fn a_signal_to_our_own_group_counts_as_the_terminals() {

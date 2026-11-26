@@ -15,7 +15,7 @@ mod wasm;
 pub use self::bazel::follow_build_events;
 pub use self::std::process::finish_forwarders;
 pub use self::std::term::{
-    release_all as release_terminal, restore_terminal_after_crash, route_cli_output,
+    release_all as release_terminal, restore_terminal_after_crash, route_cli_output, terminal_size,
 };
 pub use ::bazel::console::capture::set_screen_size;
 pub use axl_types::stream::{stderr_is_terminal, stdout_is_terminal};
