@@ -370,7 +370,7 @@ def _actions_tests(ctx):
 
     # Every row of the screen as wide as it, from 40 to 200 columns, while
     # the build runs and at its end.
-    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("four kinds", greg_screen), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
+    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("four kinds", greg_screen), ("tests cached", dict(greg_screen, counts = dict(greg_screen["counts"], test_runs = 1500, test_cached = 1200, tests_passed = 1400, tests_failed = 100, tests_flaky = 3))), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
         for cols in list(range(40, 201, 7)) + [80, 140, 200]:
             frame = render(st, cols, 30)
             body = frame[frame.find("\x1b[H") + 3:]
@@ -529,8 +529,8 @@ def _impl(ctx: TaskContext) -> int:
         _eq("action_counts %r" % status, action_counts([status]), want)
     state["progress"] = ["[1,204 / 9,000] 400 actions, 300 running"] + ["    a%d; 1s remote" % i for i in range(8)]
     remote = render(state, 100, 30)
-    if "Running (300 of 400 started)" not in remote or "and 293 more" not in remote:
-        fail("render: a remote build's pane should count all 300, the 400 started, and the 293 it has no room for")
+    if "Running (300 of 400 started)" not in remote or "and 292 more" not in remote:
+        fail("render: a remote build's pane should count all 300, the 400 started, and the 292 it has no room for")
 
     counts = new_counts()
     target = struct(label = "//a:a")
@@ -1060,8 +1060,14 @@ def _impl(ctx: TaskContext) -> int:
     many["counts"].update(test_runs = 15, test_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cache hits", "Tests    9 passed, 6 failed · 9/15 cached" in _visible(render(many, 140, 30)), True)
     _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 76, 30)), True)
+    many["counts"].update(tests_passed = 14, tests_failed = 1)
+    rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(many, 100, 30)).split("\n") if "││ " in r]
+    at = [i for i, r in enumerate(rows) if r.startswith("Tests")][0]
+    _eq("on a row of its own where the Tests row has no room", rows[at:at + 2], ["Tests    14 passed, 1 failed", "         9/15 cached"])
     many["counts"].update(test_runs = 1500, test_cached = 1200)
-    _eq("left out where it does not fit", "cached" in [r for r in _visible(render(many, 140, 30)).split("\n") if "Tests " in r][0], False)
+    rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(many, 140, 30)).split("\n") if "││ " in r]
+    at = [i for i, r in enumerate(rows) if r.startswith("Tests")][0]
+    _eq("never left out", rows[at + 1], "         1,200/1,500 cached")
     metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
     if "2 · 1 from a cache (50%) · 1 run" not in metrics or "remote cache hit" not in metrics:
         fail("metrics: actions by the execution log:\n" + metrics)
@@ -2238,7 +2244,7 @@ def _impl(ctx: TaskContext) -> int:
         rows = _visible(render(sized, 100, 30)).split("\n")
         heights.append([i for i, r in enumerate(rows) if r.startswith("┌─ Console")][0])
     _eq("one height across running counts", heights, [heights[0]] * 4)
-    _eq("as tall as the most Results rows", results_capacity(True), 8)
+    _eq("as tall as the most Results rows", results_capacity(True), 9)
 
     # The list scrolls in it: unscrolled the rest counted, scrolled a window
     # and a scrollbar.

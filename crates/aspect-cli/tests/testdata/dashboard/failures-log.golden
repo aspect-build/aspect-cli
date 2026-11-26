@@ -8,13 +8,13 @@
 │                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │
+│                                                           ││                                     │
 └───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
 ┌─ Console  Failures ✗1 ▹ //pkg:broken ▹ Genrule  Metrics  Invocation  Tips ─ the end · following ─┐
 │ ── stderr ──                                                                                     │
 │ ERROR: broken                                                                                    │
 │ ── stdout ──                                                                                     │
 │ some out                                                                                         │
-│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

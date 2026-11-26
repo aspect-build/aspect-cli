@@ -3260,11 +3260,14 @@ def _top(state: dict, cols: int, rows: int) -> list:
             _counts("Tests   %s✗%d%s %s✓%d%s%s%s", (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (_counts(" %s~%d%s", (_c("warning"), c["tests_flaky"], _RESET))) if c.get("tests_flaky") else "", (_counts(" ⊘%d", c["tests_skipped"])) if c.get("tests_skipped") else "")),
         ]
 
-    # Tests' cache hits, from their results, where the row has room.
+    # Tests' cache hits, from their results: on the Tests row where it has
+    # room, else on a row of their own under it.
     if c.get("test_runs"):
-        cached = _counts(" · %d/%d cached", (c["test_cached"], c["test_runs"]))
-        if text_width(_plain(summary[-1] + cached)) <= right_w - 4:
-            summary[-1] += cached
+        cached = _counts("%d/%d cached", (c["test_cached"], c["test_runs"]))
+        if text_width(_plain(summary[-1]) + " · " + cached) <= right_w - 4:
+            summary[-1] += " · " + cached
+        else:
+            summary.append(" " * (9 if wide else 8) + cached)
 
     # The build's actions, one unit with the bar's, its glyphs their legend.
     lead = "Actions  " if wide else "Actions "
@@ -3315,9 +3318,10 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
     return out
 
-# The Results rows a build may come to have past its targets and tests: its
-# actions (up to three), critical path and failures.
-_OPTIONAL_RESULTS = 5
+# The Results rows a build may come to have past its targets and tests: the
+# tests' cache hits (where the Tests row has no room for them), its actions
+# (up to three), critical path and failures.
+_OPTIONAL_RESULTS = 6
 
 def results_capacity(wide: bool) -> int:
     """The most rows the Results pane can have: targets (two rows wide) and

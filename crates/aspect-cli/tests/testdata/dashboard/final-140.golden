@@ -9,6 +9,7 @@
 │                                                                                            ││ Critical path Linking //app:bin 4.1s       │
 │                                                                                            ││                                            │
 │                                                                                            ││                                            │
+│                                                                                            ││                                            │
 └────────────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 ┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────────────────────────────────────────────── following ─┐
 │ INFO: Analyzed 3 targets (12 packages loaded).                                                                                           │
@@ -16,7 +17,6 @@
 │ src/a.cc:3:1: warning: unused variable                                                                                                   │
 │ Building...                                                                                                                              │
 │ INFO: Build completed successfully, 8563 total actions                                                                                   │
-│                                                                                                                                          │
 │                                                                                                                                          │
 │                                                                                                                                          │
 │                                                                                                                                          │
