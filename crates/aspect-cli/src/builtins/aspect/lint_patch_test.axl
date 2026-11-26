@@ -7,15 +7,16 @@ that isn't numbers, a path outside the tree, a relative patch path, a
 patch that isn't there or isn't a file, one patch can't read (nothing of it
 applied), and a patch making a file that is there already (the same bytes,
 other ones, other bytes not UTF-8, an empty file), and each patch refused
-whole, every file untouched (a path in two headers, one that isn't a
-regular file, a parent that isn't a directory, a symlink, a patch past the
-read cap). Run it with BSD and GNU patch both: GNU removes a file's copy
+whole, every file untouched (a path in two headers, case folded, one with
+a `.` or empty component, one that isn't a regular file, a parent that
+isn't a directory, a symlink leading out of the tree or to nothing, a patch
+past the read cap), and a symlink within the tree followed. Run it with BSD and GNU patch both: GNU removes a file's copy
 itself.
 
     aspect dev test-lint-patch
 """
 
-load("@aspect//lint.axl", "apply_fix_patch", "patch_headers", "patched_files")
+load("@aspect//lint.axl", "apply_fix_patch", "patch_headers", "patch_too_large", "patched_files")
 
 def _eq(label, got, want):
     if got != want:
@@ -153,8 +154,8 @@ printf 'a\\n' > src/ok.txt
 printf 'f\\n' > src/f
 ln -s ../../outside.txt src/dangling.txt
 ln -s ok.txt src/link.txt
-mkdir real && ln -s real src/linked
-dd if=/dev/null of=big.patch bs=1 seek=67108865 2>/dev/null
+mkdir real && ln -s ../real src/linked
+mkdir ../away && ln -s ../../away src/away
 """)
     first = "--- a/src/ok.txt\n+++ b/src/ok.txt\n@@ -1 +1 @@\n-a\n+A\n"
     make = lambda path: "--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+made\n" % path
@@ -165,15 +166,32 @@ dd if=/dev/null of=big.patch bs=1 seek=67108865 2>/dev/null
         ("a path that is a directory", first + make("src/d")),
         ("a parent that is a file", first + make("src/f/z.txt")),
         ("a dangling symlink", first + make("src/dangling.txt")),
-        ("a symlink to a file", first + "--- a/src/link.txt\n+++ b/src/link.txt\n@@ -1 +1 @@\n-a\n+B\n"),
-        ("a symlinked parent", first + make("src/linked/z.txt")),
+        ("a symlink to a file named beside it", first + "--- a/src/link.txt\n+++ b/src/link.txt\n@@ -1 +1 @@\n-a\n+B\n"),
+        ("a symlinked parent out of the tree", first + make("src/away/z.txt")),
+        ("a `.` component", first + make("src/./n.txt")),
+        ("an empty component", first + make("src//n.txt")),
+        ("a case-only rename", first + "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F")),
     ]:
         fs.write(refuse + "/p.patch", body)
         _eq("refused: " + reason, apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
         _eq("%s: the first file untouched" % reason, fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
-        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", ["d", "dangling.txt", "f", "link.txt", "linked", "ok.txt"], []))
-        _eq("%s: nothing outside" % reason, fs.exists(root + "/outside.txt"), False)
-    _eq("refused: larger than the read cap", apply_fix_patch(ctx, refuse + "/big.patch", cwd = refuse), None)
+        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", ["away", "d", "dangling.txt", "f", "link.txt", "linked", "ok.txt"], []))
+        _eq("%s: nothing outside" % reason, (fs.exists(root + "/outside.txt"), _names(fs, root + "/away")), (False, []))
+
+    # A patch past the read cap, its first hunk one patch would apply: the
+    # rest of it lines nobody reads.
+    fs.write(refuse + "/big.patch", first)
+    _sh(ctx, refuse, "head -c 67108864 /dev/zero | tr '\\0' '\\n' >> big.patch")
+    _eq("larger than the read cap", patch_too_large(fs, refuse + "/big.patch"), "it is larger than 64 MiB")
+    _eq("refused", apply_fix_patch(ctx, refuse + "/big.patch", cwd = refuse), None)
+    _eq("its first hunk not applied", fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
+    fs.remove_file(refuse + "/big.patch")
+
+    # A symlink within the workspace is followed.
+    fs.write(refuse + "/real/x.py", "a\n")
+    fs.write(refuse + "/p.patch", make("src/linked/z.txt") + "--- a/src/linked/x.py\n+++ b/src/linked/x.py\n@@ -1 +1 @@\n-a\n+A\n")
+    _eq("through a link in the tree", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
+    _eq("applies there", (fs.read_to_string(refuse + "/real/z.txt"), fs.read_to_string(refuse + "/real/x.py")), ("made\n", "A\n"))
     print("lint_patch_test.axl: OK")
     return 0
 

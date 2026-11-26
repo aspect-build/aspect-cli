@@ -114,33 +114,82 @@ def _is_file(fs, path: str) -> bool:
 # be missed.
 _PATCH_CAP = 64 * 1024 * 1024
 
+def patch_too_large(fs, patch: str):
+    """Why `patch` is too large to apply (past `_PATCH_CAP`), or None."""
+    if fs.metadata(patch).size > _PATCH_CAP:
+        return "it is larger than %d MiB" % (_PATCH_CAP // (1024 * 1024))
+    return None
+
+# Symlinks followed on one path at most, as the kernel's own limit.
+_LINK_HOPS = 40
+
+def _resolved(fs, path: str):
+    """Absolute `path` with every symlink on it followed (`..` taken as the
+    link's target asks), as a list of components from the root; what isn't
+    there yet stays as named. None for a symlink whose target isn't there,
+    a loop, or a component past a file. Looked at from the root down, so a
+    file where a directory should be never raises."""
+
+    # Each component still to walk, and whether a link's target named it.
+    todo = [(p, False) for p in path.split("/") if p]
+    done = []
+    hops = 0
+    for _ in range(100000):
+        if not todo:
+            return done
+        part, linked = todo.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            done = done[:-1]
+            continue
+        at = "/" + "/".join(done + [part])
+        meta = fs.try_metadata(at)
+        if meta == None:
+            if linked:
+                return None
+            return done + [part] + [p for p, _ in todo if p != "."]
+        if meta.is_symlink:
+            hops += 1
+            if hops > _LINK_HOPS:
+                return None
+            target = fs.read_link(at)
+            todo = [(p, True) for p in target.split("/") if p] + todo
+            if target.startswith("/"):
+                done = []
+            continue
+        if todo and not meta.is_dir:
+            return None
+        done.append(part)
+    return None
+
 def _refusal(fs, cwd: str, headers: list):
     """Why a patch with `headers` is refused before anything is copied or
-    patched, or None: a path in more than one header (a type change, two
-    creations, a rename onto a made file), one there that isn't a regular
-    file, a parent that isn't a directory, or a symlink on the way. Each
-    path is looked at from its first component down, so a missing one
-    ends the walk and a file where a directory should be never raises."""
-    counts = {}
+    patched, or None: a path with a `.` or empty component; a path in more
+    than one header, its symlinks followed and its case folded (a type
+    change, two creations, a rename onto a made file, a case-only rename on
+    a case-insensitive disk); one whose symlinks lead out of the workspace,
+    or to nothing; one there that isn't a regular file; or a parent that
+    isn't a directory. A symlink within the workspace is followed."""
+    root = _resolved(fs, cwd)
+    seen = {}
     for old, new in headers:
         for path in {p: True for p in (old, new) if p}:
-            counts[path] = counts.get(path, 0) + 1
-    for path, n in counts.items():
-        if n > 1:
-            return "%s is named in %d headers" % (path, n)
-    for path in counts:
-        parts = path.split("/")
-        at = cwd
-        for i, part in enumerate(parts):
-            at = at + "/" + part
+            parts = path.split("/")
+            if "" in parts or "." in parts:
+                return "%s has a `.` or empty component" % path
+            resolved = _resolved(fs, cwd + "/" + path)
+            if resolved == None:
+                return "%s leads to nothing (a symlink to what isn't there, or a file where a directory should be)" % path
+            if root == None or resolved[:len(root)] != root or len(resolved) == len(root):
+                return "%s leads out of the workspace" % path
+            key = "/".join(resolved).lower()
+            if key in seen:
+                return "%s is named in more than one header" % path if seen[key] == path else "%s and %s are one file" % (seen[key], path)
+            seen[key] = path
+            at = "/" + "/".join(resolved)
             meta = fs.try_metadata(at)
-            if meta == None:
-                break
-            if meta.is_symlink:
-                return "%s is a symlink" % "/".join(parts[:i + 1])
-            if i < len(parts) - 1 and not meta.is_dir:
-                return "%s isn't a directory" % "/".join(parts[:i + 1])
-            if i == len(parts) - 1 and not meta.is_file:
+            if meta != None and not meta.is_file:
                 return "%s isn't a regular file" % path
     return None
 
@@ -239,15 +288,15 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     if not _is_file(fs, patch):
         print("WARNING: %s was not applied: %s" % (patch, "it isn't a file" if fs.exists(patch) else "it isn't there"))
         return None
+    too_large = patch_too_large(fs, patch)
+    if too_large:
+        print("WARNING: %s was not applied: %s" % (patch, too_large))
+        return None
     if seen != None:
         content = fs.open(patch).read()
         if content in seen:
             return None
         seen.append(content)
-
-    if fs.metadata(patch).size > _PATCH_CAP:
-        print("WARNING: %s was not applied: it is larger than %d MiB" % (patch, _PATCH_CAP // (1024 * 1024)))
-        return None
 
     # Lossy: a hunk may hold any bytes; only the header paths are read.
     text = fs.try_read_to_string_capped(patch, _PATCH_CAP)
