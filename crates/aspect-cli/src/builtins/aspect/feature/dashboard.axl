@@ -26,7 +26,8 @@ It takes the screen when the task starts and shows:
     the CLI streams to, and the BES results page Bazel streams to itself
     with `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
   - a Results pane: targets, tests with their cache hits (from their
-    results), the actions under the bar's glyphs (while the build runs,
+    results), each kind of action there is any of in words, the bar's
+    glyph a coloured key before its count (while the build runs,
     what ran and what a cache served from the compact execution log; at its
     end the exact split from its `BuildMetrics`), and the failures counted
     (a click shows them);
@@ -59,7 +60,8 @@ It takes the screen when the task starts and shows:
     build yet`; with several builds, Metrics and Invocation show the newest,
     `<`/`>` another (`Metrics ▹ 1 of 2`), and Failures the newest's;
 - a row of the keys for what has focus, and `?` for those that apply now,
-  grouped (both from `KEYS`, which `on_key` dispatches through).
+  grouped (both from `KEYS`, which `on_key` dispatches through), then what
+  the actions' glyphs are.
 
 The keys, as in `less`, lazygit and Claude Code's transcript: `↑`/`↓` or
 `k`/`j` scroll a line and the wheel three; Shift or Option with `↑`/`↓`,
@@ -3027,30 +3029,39 @@ def action_parts(split: dict) -> list:
         parts.append(("╳", split["failed"], "failed or skipped", "error"))
     return parts
 
-def action_results(split: dict, room: int, rows = 2) -> list:
-    """`action_parts` packed into at most `rows` rows of `room` cells, as
-    many to a row as fit, coloured: with words and whole counts, else with
-    words and `short_count` counts, else glyphs and `short_count` counts alone."""
-    parts = action_parts(split)
+# Results' words for a kind, where Metrics has more room, and the shorter
+# ones where those do not fit.
+_RESULT_WORDS = {"failed or skipped": "failed"}
+_SHORT_WORDS = {"unchanged": "unch.", "internal": "int.", "failed or skipped": "failed"}
+
+def action_results(split: dict, room: int, rows = 3) -> list:
+    """`action_parts` there is any of (none of a kind there is none of),
+    each in words with the bar's glyph before its count as a coloured key
+    (`█ 5.6k ran`), packed into rows of `room` cells, the first of these
+    that fits: two rows with whole counts, then with `short_count` ones,
+    three rows with either, then shorter words (`_SHORT_WORDS`) in two or
+    three. The words are never dropped: what fits none has its last row
+    cut where it is drawn."""
+    parts = [p for p in action_parts(split) if p[1]]
     if not parts:
         return []
     packed = []
-    for level in range(3):
-        texts = []
+    for level, most in [(0, 2), (1, 2), (0, rows), (1, rows), (2, 2), (2, rows)]:
+        packed = [[]]
         for glyph, n, words, role in parts:
             count = _thousands(n) if level == 0 else short_count(n)
-            text = (glyph + " " + count + " " + words) if level < 2 else (glyph + count)
-            texts.append((text, role))
-        sep = " · " if level < 2 else " "
-        packed = [[]]
-        for text, role in texts:
-            line = sep.join([t for t, _ in packed[-1]] + [text])
-            if packed[-1] and text_width(line) > room:
+            word = (_SHORT_WORDS if level == 2 else _RESULT_WORDS).get(words, words)
+            text = glyph + " " + count + " " + word
+            if packed[-1] and text_width(" · ".join([t for _, t, _ in packed[-1]] + [text])) > room:
                 packed.append([])
-            packed[-1].append((text, role))
-        if len(packed) <= rows and all([text_width(sep.join([t for t, _ in row])) <= room for row in packed]):
-            break
-    return [sep.join([(_c(role) + t + _RESET) if role else t for t, role in row]) for row in packed[:rows]]
+            packed[-1].append((glyph, text, role))
+        if len(packed) <= most and all([text_width(" · ".join([t for _, t, _ in row])) <= room for row in packed]):
+            return [_results_row(row) for row in packed]
+    return [_results_row(row) for row in packed[:rows - 1]] + [_results_row([part for row in packed[rows - 1:] for part in row])]
+
+def _results_row(row: list) -> str:
+    """A Results row of `action_results`' parts, each glyph coloured."""
+    return " · ".join([((_c(role) + glyph + _RESET) if role else glyph) + text[len(glyph):] for glyph, text, role in row])
 
 def build_outcome(inv: dict) -> str:
     """What a finished build's `BuildFinished` says that ✔/✗ cannot:
@@ -3229,7 +3240,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     finished = state["ended"] and not actions and (state.get("slowest") or state.get("critical"))
     if finished:
         actions = slowest_rows(state)
-    right_w = min(46 if cols >= 140 else 44, max(cols // 3, 32 if cols >= 70 else cols // 2))
+    right_w = min(46 if cols >= 140 else 44, max(cols // 3, 39 if cols >= 80 else (32 if cols >= 70 else cols // 2)))
     left_w = cols - right_w
     c = state["counts"]
     built_n, targets_failed, targets_blocked = target_counts(state)
@@ -3305,8 +3316,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
     return out
 
 # The Results rows a build may come to have past its targets and tests: its
-# actions (two), critical path and failures.
-_OPTIONAL_RESULTS = 4
+# actions (up to three), critical path and failures.
+_OPTIONAL_RESULTS = 5
 
 def results_capacity(wide: bool) -> int:
     """The most rows the Results pane can have: targets (two rows wide) and
@@ -4836,7 +4847,7 @@ _ROW_CONSOLE = ["esc", "o", "q", "]", "ctrl-f", "n", "e", "pageup", "K", "a", "z
 
 def help_rows(state: dict) -> list:
     """The `?` overlay's rows, grouped (`_KEY_GROUPS`), the keys that do not
-    apply now left out."""
+    apply now left out, then what the actions' glyphs are (`_ACTIONS_KEY`)."""
     rows = []
     for group in _KEY_GROUPS:
         entries = [k for k in KEYS if k.group == group and k.help != None and k.shown(state)]
@@ -4844,7 +4855,10 @@ def help_rows(state: dict) -> list:
             continue
         rows.append(group)
         rows += ["  " + fit(k.help[0], 20) + " " + k.help[1] for k in entries]
-    return rows
+    return rows + [_ACTIONS_KEY]
+
+# The `?` overlay's last row: what the bar's and Results' glyphs are.
+_ACTIONS_KEY = "Actions: █ ran · ▓ cached · ▒ unchanged (while it runs, other) · ░ internal · ╳ failed or skipped"
 
 def row_labels(state: dict) -> list:
     """The keys row's labels for what has focus (`_ROW_FAILURES`,

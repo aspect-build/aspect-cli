@@ -1,9 +1,9 @@
  ⠋ aspect build · 12s                                                           3 of 9 actions done
-┌─ Running (2) ───────────────────────────────────────────────────┐┌─ Results ─────────────────────┐
-│ Compiling src/a.cc; 3s                                          ││ Targets  0 configured         │
-│ Linking //app:bin; 1s                                           ││          0 built, 0 failed    │
-│                                                                 ││ Tests    0 passed, 0 failed   │
-└─────────────────────────────────────────────────────────────────┘└───────────────────────────────┘
+┌─ Running (2) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
+│ Compiling src/a.cc; 3s                                    ││ Targets  0 configured               │
+│ Linking //app:bin; 1s                                     ││          0 built, 0 failed          │
+│                                                           ││ Tests    0 passed, 0 failed         │
+└───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
 ┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────── following ─┐
 │ Building...                                                                                      ┃
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

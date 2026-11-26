@@ -25,6 +25,6 @@
 │   w                    wrap long lines (the default), or cut them at the edge                    │
 │   ^O                   show the lines under each INFO: From (a successful action's output, fold… │
 │   z                    the console fills the screen, and back                                    │
-│ … 4 more: ↓                                                                                      │
+│ … 5 more: ↓                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ scroll · any other key closes

@@ -1,21 +1,21 @@
  ✔ aspect build · 0s
  █▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░░ 8,563 · 98% reused
-┌─ Slowest seen ───────────────────────────────┐┌─ Results ────────────────────┐
-│                                              ││ Targets  3 configured        │
-│                                              ││          3 built, 0 failed   │
-│                                              ││ Tests    15 passed, 0 failed │
-│                                              ││ Actions  █105 ▓640 ▒7.3k     │
-│                                              ││          ░459                │
-│                                              ││ Critical path Linking //app… │
-│                                              ││                              │
-└──────────────────────────────────────────────┘└──────────────────────────────┘
+┌─ Slowest seen ────────────────────────┐┌─ Results ───────────────────────────┐
+│                                       ││ Targets  3 configured               │
+│                                       ││          3 built, 0 failed          │
+│                                       ││ Tests    15 passed, 0 failed        │
+│                                       ││ Actions  █ 105 ran · ▓ 640 cached   │
+│                                       ││          ▒ 7,359 unchanged          │
+│                                       ││          ░ 459 internal             │
+│                                       ││ Critical path Linking //app:bin 4.… │
+│                                       ││                                     │
+└───────────────────────────────────────┘└─────────────────────────────────────┘
 ┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────── following ─┐
 │ INFO: Analyzed 3 targets (12 packages loaded).                               │
 │ INFO: Found 3 targets...                                                     │
 │ src/a.cc:3:1: warning: unused variable                                       │
 │ Building...                                                                  │
 │ INFO: Build completed successfully, 8563 total actions                       │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

@@ -310,14 +310,31 @@ def _actions_tests(ctx):
     blind.update(building = False, ended = True, inv = dict(own_inv, build_finished = _SUCCESS, build_metrics = _REUSED), done_total = (8563, 8563, False))
     _eq("no log, at the end: BuildMetrics' split", [p[2] for p in action_parts(action_split(blind))], ["ran", "cached", "unchanged", "internal"])
 
-    # Results: words and whole counts where they fit, `k` counts where not,
-    # glyphs alone narrower still.
-    _eq("wide", [_visible(r) for r in action_results(final, 34)], ["█ 105 ran · ▓ 640 cached", "▒ 7,359 unchanged · ░ 459 internal"])
-    _eq("in thousands", [_visible(r) for r in action_results(final, 33)], ["█ 105 ran · ▓ 640 cached", "▒ 7.3k unchanged · ░ 459 internal"])
-    _eq("narrow", [_visible(r) for r in action_results(final, 15)], ["█105 ▓640 ▒7.3k", "░459"])
+    # Results: each kind in words, its glyph a key before its count; none of
+    # a kind there is none of; whole counts where they fit, `k` counts where
+    # not, shorter words narrower still, onto a third row rather than
+    # dropping any.
+    greg = dict(final, ran = 5612, cached = 0, unchanged = 2834, internal = 33, failed = 4, done = 8483, total = 8483)
+    _eq("wide", [_visible(r) for r in action_results(greg, 33)], ["█ 5,612 ran · ▒ 2,834 unchanged", "░ 33 internal · ╳ 4 failed"])
+    _eq("in thousands", [_visible(r) for r in action_results(greg, 29)], ["█ 5.6k ran · ▒ 2.8k unchanged", "░ 33 internal · ╳ 4 failed"])
+    _eq("a third row", [_visible(r) for r in action_results(greg, 26)], ["█ 5,612 ran", "▒ 2,834 unchanged", "░ 33 internal · ╳ 4 failed"])
+    _eq("shorter words", [_visible(r) for r in action_results(greg, 22)], ["█ 5.6k ran", "▒ 2.8k unch.", "░ 33 int. · ╳ 4 failed"])
+    _eq("never a word dropped", "╳ 4 failed" in _visible(action_results(greg, 12)[-1]), True)
+    _eq("no kind there is none of", "▓" in "".join([_visible(r) for r in action_results(greg, 80)]), False)
+    _eq("nothing at all", action_results(dict(greg, ran = 0, unchanged = 0, internal = 0, failed = 0), 40), [])
+    _eq("the glyph alone coloured", action_results(greg, 33)[0].startswith(_role("accent") + "█" + theme.reset + " 5,612 ran"), True)
     _eq("k", [short_count(n) for n in (526, 1999, 48123, 1250000)], ["526", "1.9k", "48k", "1.2M"])
-    drawn = _visible(render(cached, 80, 30))
-    _eq("the narrow Results", ("Actions  █105 ▓640 ▒7.3k" in drawn, "░459" in drawn), (True, True))
+    greg_screen = dict(cached, done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
+        actions_executed = 5645,
+        runner_count = [struct(name = "total", count = 5645), struct(name = "internal", count = 33), struct(name = "linux-sandbox", count = 5612)],
+        action_cache_statistics = struct(hits = 2834, misses = 5645),
+    ))})
+    _eq("the same numbers", _split_of(action_split(greg_screen)), dict(done = 8483, total = 8483, ran = 5612, cached = 0, unchanged = 2834, internal = 33, rest = 0, failed = 4))
+    for cols, want in [(140, ["Actions  █ 5,612 ran · ▒ 2,834 unchanged", "         ░ 33 internal · ╳ 4 failed"]), (80, ["Actions  █ 5,612 ran", "         ▒ 2,834 unchanged", "         ░ 33 internal · ╳ 4 failed"])]:
+        drawn = _visible(render(greg_screen, cols, 30)).split("\n")
+        rows = [r.partition("││ ")[2].rstrip(" │\r") for r in drawn if "││ " in r]
+        at = [i for i, r in enumerate(rows) if r.startswith("Actions")][0]
+        _eq("Results at %d columns" % cols, rows[at:at + len(want)], want)
     wide_meld = dict(meld, building = True, progress = [both[0], "[3,830 / 8,563] 16 actions, 15 running"])
     _eq("the bar's label at 140 columns", _visible(render(wide_meld, 140, 30)).split("\n")[1].rstrip(" \r").endswith(" 44% · 3,830 of 8,563+"), True)
     _eq("and at 80", _visible(render(wide_meld, 80, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830/8,563+"), True)
@@ -351,10 +368,10 @@ def _actions_tests(ctx):
     two["picked_build"] = 0
     _eq("the picked build's", bar_of(two).endswith("2 actions · 0% reused"), True)
 
-    # Every row of the screen as wide as it, at every width, while the build
-    # runs and at its end.
-    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
-        for cols in range(40, 181, 7):
+    # Every row of the screen as wide as it, from 40 to 200 columns, while
+    # the build runs and at its end.
+    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("four kinds", greg_screen), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
+        for cols in list(range(40, 201, 7)) + [80, 140, 200]:
             frame = render(st, cols, 30)
             body = frame[frame.find("\x1b[H") + 3:]
             drawn = [_visible(r) for r in body.split("\r\n")]
@@ -512,8 +529,8 @@ def _impl(ctx: TaskContext) -> int:
         _eq("action_counts %r" % status, action_counts([status]), want)
     state["progress"] = ["[1,204 / 9,000] 400 actions, 300 running"] + ["    a%d; 1s remote" % i for i in range(8)]
     remote = render(state, 100, 30)
-    if "Running (300 of 400 started)" not in remote or "and 294 more" not in remote:
-        fail("render: a remote build's pane should count all 300, the 400 started, and the 294 it has no room for")
+    if "Running (300 of 400 started)" not in remote or "and 293 more" not in remote:
+        fail("render: a remote build's pane should count all 300, the 400 started, and the 293 it has no room for")
 
     counts = new_counts()
     target = struct(label = "//a:a")
@@ -1042,7 +1059,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("counts with thousands separators", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "12,345 configured" in shown, "12,000 built" in shown], [True, True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cache hits", "Tests    9 passed, 6 failed · 9/15 cached" in _visible(render(many, 140, 30)), True)
-    _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 100, 30)), True)
+    _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 76, 30)), True)
     many["counts"].update(test_runs = 1500, test_cached = 1200)
     _eq("left out where it does not fit", "cached" in [r for r in _visible(render(many, 140, 30)).split("\n") if "Tests " in r][0], False)
     metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
@@ -2221,7 +2238,7 @@ def _impl(ctx: TaskContext) -> int:
         rows = _visible(render(sized, 100, 30)).split("\n")
         heights.append([i for i, r in enumerate(rows) if r.startswith("┌─ Console")][0])
     _eq("one height across running counts", heights, [heights[0]] * 4)
-    _eq("as tall as the most Results rows", results_capacity(True), 7)
+    _eq("as tall as the most Results rows", results_capacity(True), 8)
 
     # The list scrolls in it: unscrolled the rest counted, scrolled a window
     # and a scrollbar.
