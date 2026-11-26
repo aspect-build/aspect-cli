@@ -734,7 +734,8 @@ def config(ctx: ConfigContext):
     ctx.tasks.add(detect_lint_tool_tests)
 
     # Auto-fix patches: a file not UTF-8, a removed file, the user's own
-    # .orig and .rej left alone.
+    # .orig and .rej left alone, relative and missing patch paths, a patch
+    # patch can't read, and one making a file that is there already.
     # Run with: aspect dev test-lint-patch
     ctx.tasks.add(lint_patch_tests)
 

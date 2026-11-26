@@ -138,26 +138,22 @@ def _ignored_rejects(said: str) -> list:
             out.append(name)
     return out
 
-def _created_text(text: str, path: str):
-    """What a diff's hunks make of `path` where its header's old side is
-    `/dev/null`: the added lines, their last line end dropped where the
-    diff says `\\ No newline at end of file`; None where it makes none."""
+def _creation_diff(text: str, path: str) -> str:
+    """The part of a diff that makes `path` (its header's old side
+    `/dev/null`): the header and its hunks, as a reject file holds them."""
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if not (line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ ")):
             continue
         if _header_path(line) != None or _header_path(lines[i + 1]) != path:
             continue
-        made = []
+        out = lines[i:i + 2]
         for body in lines[i + 2:]:
-            if body.startswith("+"):
-                made.append(body[1:] + "\n")
-            elif body.startswith("\\") and made:
-                made[-1] = made[-1].removesuffix("\n")
-            elif not body.startswith("@@ "):
+            if not (body.startswith("+") or body.startswith("\\") or body.startswith("@@ ")):
                 break
-        return "".join(made)
-    return None
+            out.append(body)
+        return "\n".join(out) + "\n"
+    return ""
 
 def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     """Apply one auto-fix patch with `patch -p1`, asking nothing (no
@@ -190,15 +186,19 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
 
     A relative `patch` (a lint output path) is taken in `cwd`: patch runs
     in the copies' directory. One that isn't there, or that patch can't
-    read, is named in a warning. A file the patch makes (its header's old
-    side `/dev/null`) that is there already, with other bytes, keeps its
-    hunks as a reject though BSD patch calls them applied already."""
+    read, is named in a warning, and nothing of it is applied: patch
+    exiting with trouble (2 or more, or a signal) leaves the tree as it was,
+    whatever it did to the copies. A file the patch makes (its header's old
+    side `/dev/null`, and no other header changing it) that is there already,
+    not empty, is made apart from it, whichever patch runs: the same bytes
+    count as applied already, other bytes leave it as it is and keep the
+    hunks as a reject."""
     cwd = cwd or ctx.std.env.current_dir()
     fs = ctx.std.fs
     if not patch.startswith("/"):
         patch = cwd + "/" + patch
     if not _is_file(fs, patch):
-        print("WARNING: %s was not applied: it isn't there" % patch)
+        print("WARNING: %s was not applied: %s" % (patch, "it isn't a file" if fs.exists(patch) else "it isn't there"))
         return None
     if seen != None:
         content = fs.open(patch).read()
@@ -218,6 +218,8 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
         print("WARNING: %s was not applied: it names %s, outside the workspace" % (patch, ", ".join(outside)))
         return None
     removed = [old for old, new in headers if old and not new]
+    changed = [old for old, new in headers if old]
+    made = [new for old, new in headers if not old and new and new not in changed]
 
     work = fs.mkdtemp()
     ctx.defer(fs.remove_dir_all, work)
@@ -228,7 +230,7 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
         parent = path.rpartition("/")[0]
         if parent:
             fs.create_dir_all(work + "/" + parent)
-        if _is_file(fs, cwd + "/" + path):
+        if _is_file(fs, cwd + "/" + path) and path not in made:
             had[path] = True
             fs.copy(cwd + "/" + path, work + "/" + path)
     out = ctx.std.process.command("patch").arg("-p1").arg("--forward").arg("--batch").arg("--input=" + patch) \
@@ -236,17 +238,21 @@ def apply_fix_patch(ctx, patch: str, cwd = None, seen = None):
     said = out.stdout + out.stderr
     if said:
         ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
-    if out.status.code not in (0, 1):
-        print("WARNING: %s was not applied: patch exited with %s" % (patch, out.status.code))
+    code = out.status.code
+    if code not in (0, 1):
+        print("WARNING: %s was not applied: %s" % (patch, "patch exited with %d" % code if code != None else "patch was ended by a signal"))
+        return None
     ignored = _ignored_rejects(said)
-    for old, new in headers:
-        if not old and new in had and new + ".rej" in ignored:
-            if _created_text(text, new) != fs.try_read_to_string_capped(cwd + "/" + new, 64 * 1024 * 1024):
-                ignored.remove(new + ".rej")
     rejects = []
     for path in paths:
         patched = work + "/" + path
         mine = cwd + "/" + path
+        if path in made and _is_file(fs, mine) and len(fs.open(mine).read()) > 0:
+            # Made apart from the file that is there: never written over it.
+            if not (_is_file(fs, patched) and _same_bytes(fs, patched, mine)):
+                fs.write(patched + ".rej", _creation_diff(text, path))
+                rejects.append(path + ".rej")
+            continue
         if _is_file(fs, patched + ".rej") and path + ".rej" not in ignored:
             if path in removed and path not in had:
                 continue

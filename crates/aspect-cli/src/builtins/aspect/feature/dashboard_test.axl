@@ -1457,11 +1457,12 @@ def _impl(ctx: TaskContext) -> int:
 
     # The tabs: 1 to 5 show each, Esc goes back to the console; the
     # Invocation tab redacts what may be a secret.
-    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "--define=API_TOKEN=d1", "--test_arg=--password=t1", "--copt=-DKEY=c1", "--define=mode=fast", "//..."], explicit_startup_options = [])})
+    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "--define=API_TOKEN=d1", "--test_arg=--password=t1", "--copt=-DKEY=c1", "--define=mode=fast", "--test_arg=--password", "--test_arg=hunter2", "--test_arg=--token x9", "--google_default_credentials", "//keep:me", "--bes_header=Cookie=sess1", "//..."], explicit_startup_options = [])})
     on_key(tabs, "4", 10)
     shown = _visible(render(tabs, 100, 40))
     _eq("the invocation tab, its secrets hidden", ("Flags given" in shown, "abc" in shown, "zzz" in shown, "u:p@" in shown, "--action_env=TOKEN=<REDACTED>" in shown), (True, False, False, False, True))
     _eq("a secret's setting inside a flag's value hidden", [w in shown for w in ("d1", "t1", "c1", "--define=API_TOKEN=<REDACTED>", "--define=mode=fast")], [False, False, False, True, True])
+    _eq("a secret's value in the next argument hidden", [w in shown for w in ("hunter2", "x9", "sess1", "--test_arg=<REDACTED>", "//keep:me")], [False, False, False, True, True])
     on_key(tabs, "3", 10)
     _eq("metrics", "Actions" in _visible(render(tabs, 100, 40)), True)
     for tab in ("metrics", "invocation", "failures"):
@@ -1584,10 +1585,34 @@ def _impl(ctx: TaskContext) -> int:
         _eq("%s: the pick past the logged records" % key, unlogged["selected"], 1)
         on_key(unlogged, key, 10)
         _eq("%s on a target without a log" % key, crumbs(unlogged), ["//t:a"])
-    unlogged["fails"] = [_attempt("//t:z", 1), _attempt("//t:z", 2)]
-    unlogged["selected"] = 0
-    on_key(unlogged, "}", 10)
-    _eq("} with the open target gone: the chosen one's", crumbs(unlogged)[-1].partition(" ")[0], "//t:z")
+
+    # } { step from the record shown, not the one chosen; one shown from a
+    # list it is no longer in opens its target's first record here, unstepped.
+    a1, a2, a3, c1, z1 = _attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:a", 3), _attempt("//t:c", 1), _attempt("//t:z", 1)
+    steps = _screen(ctx, ["x"], fails = [a1, a2, a3, c1], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+
+    def _open_one():
+        return steps["view"]["record"] if steps["view"] != None else None
+
+    seen = []
+    for key in ["}", "}", "}", "{"]:
+        on_key(steps, key, 10)
+        seen.append(steps["fails"].index(_open_one()))
+    _eq("} { from the one shown", seen, [1, 2, 0, 2])
+    steps["selected"] = 3
+    on_key(steps, "}", 10)
+    _eq("} from the shown one, not the chosen", _open_one(), a1)
+    on_key(steps, "}", 10)
+    on_key(steps, "}", 10)
+    steps["fails"] = [z1, a1, a2]
+    steps["selected"] = 0
+    on_key(steps, "}", 10)
+    _eq("the shown one gone: its target's first here, unstepped", _open_one(), a1)
+    on_key(steps, "}", 10)
+    _eq("then } steps on", _open_one(), a2)
+    steps["fails"] = [z1]
+    on_key(steps, "{", 10)
+    _eq("its target gone too: the chosen one", _open_one(), z1)
 
     # The CLI's version at the keys row's right end, with room for the keys.
     versioned = _screen(ctx, ["x"], cli_version = "2026.47.3")
@@ -1701,6 +1726,9 @@ def _impl(ctx: TaskContext) -> int:
     on_key(unframed, "<", 10)
     took = [r for r in _visible(render(unframed, 100, 60)).split("\n") if "elapsed" in r]
     _eq("a folded build's own time", len(took) == 1 and took[0].split()[2] == "12s", True)
+    unframed["picked_build"] = None
+    took = [r for r in _visible(render(unframed, 100, 60)).split("\n") if "elapsed" in r]
+    _eq("the running build's own time", len(took) == 1 and took[0].split()[2], "1m25s")
     never = _screen(ctx, ["x"], building = False, ended = True, tab = "metrics", fails = [act])
     _eq("Metrics with no build at all", "elapsed" in _visible(render(never, 100, 60)), True)
 

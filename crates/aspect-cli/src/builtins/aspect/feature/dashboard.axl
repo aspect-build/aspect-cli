@@ -3086,7 +3086,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     info = fit(" " + status, rest - 1).rstrip(" ") + " " if status and rest > 4 else ""
     return text + _c("muted") + info + _RESET + _c("border") + "─" * max(0, rest - text_width(info)) + "┐" + _RESET
 
-_SECRET_WORDS = ("header", "token", "password", "secret", "credential", "auth", "key")
+_SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
 
 def _secret_name(name: str) -> bool:
     """Whether a flag's or setting's `name` names what may be a secret."""
@@ -3098,7 +3098,8 @@ def _redacted(flag: str) -> str:
     token's, a password's or a key's, an env var's value, a URL's
     user and password. A value that is itself a setting named so
     (`--define=API_TOKEN=x`, `--test_arg=--password=x`, `--copt=-DKEY=x`)
-    has its own value hidden."""
+    has its own value hidden, as is what follows one with a space
+    (`--test_arg=--token x`)."""
     name, eq, value = flag.partition("=")
     if not eq:
         return flag
@@ -3110,10 +3111,31 @@ def _redacted(flag: str) -> str:
     inner, inner_eq, _ = value.partition("=")
     if inner_eq and "://" not in inner and _secret_name(inner):
         return name + "=" + inner + "=<REDACTED>"
+    head, space, _ = value.partition(" ")
+    if space and "://" not in head and _secret_name(head):
+        return name + "=" + head + " <REDACTED>"
     scheme, sep, rest = value.partition("://")
     if sep and "@" in rest.partition("/")[0]:
         value = scheme + "://<REDACTED>@" + rest.partition("@")[2]
     return name + "=" + value
+
+def _redacted_args(flags: list) -> list:
+    """`flags` each `_redacted`, and the one after a secret-named flag
+    passed in another's value that left its own value to the next argument
+    (`--test_arg=--password` then `--test_arg=hunter2`) hidden too. A bare
+    flag is never taken to own the next argument: a boolean one
+    (`--google_default_credentials`) takes none."""
+    out = []
+    hide = False
+    for flag in flags:
+        if hide:
+            name, eq, _ = flag.partition("=")
+            out.append(name + "=<REDACTED>" if eq else "<REDACTED>")
+        else:
+            out.append(_redacted(flag))
+        last = flag.partition("=")[2] if not hide else ""
+        hide = "=" not in last and " " not in last and last.startswith("-") and _secret_name(last)
+    return out
 
 def _row_of(name: str, value) -> str:
     """A `name  value` row of a tab, the names in a column."""
@@ -3150,10 +3172,10 @@ def metrics_lines(state: dict) -> list:
     timing = _get(bm, "timing_metrics")
     out += ["", _c("heading") + "Time" + _RESET]
 
-    # A folded build's own time; the running (or newest unfolded) one's so far.
+    # A folded build's own time; the running one's since it started.
     picked = picked_build(state)
     builds = state.get("builds", [])
-    took = builds[picked]["ms"] if 0 <= picked and picked < len(builds) else state["now_ms"] - state["start_ms"]
+    took = builds[picked]["ms"] if 0 <= picked and picked < len(builds) else state["now_ms"] - state.get("build_start_ms", state["start_ms"])
     out.append(_row_of("elapsed", elapsed(took)))
     if state.get("critical"):
         out.append(_row_of("critical path", state["critical"]))
@@ -3186,10 +3208,10 @@ def invocation_lines(state: dict) -> list:
     for label, url in state.get("pages", []):
         out.append(_row_of(label, url))
     options = inv.get("options_parsed")
-    explicit = [_redacted(str(f)) for f in (_get(options, "explicit_cmd_line") or [])]
+    explicit = _redacted_args([str(f) for f in (_get(options, "explicit_cmd_line") or [])])
     if explicit:
         out += ["", _c("heading") + "Flags given" + _RESET] + ["  " + f for f in explicit]
-    startup = [_redacted(str(f)) for f in (_get(options, "explicit_startup_options") or [])]
+    startup = _redacted_args([str(f) for f in (_get(options, "explicit_startup_options") or [])])
     if startup:
         out += ["", _c("heading") + "Startup options given" + _RESET] + ["  " + f for f in startup]
     status = _get(inv.get("workspace_status"), "item") or []
@@ -3815,21 +3837,23 @@ def _k_step_record(state, key, page):
     return False
 
 def _k_step_attempt(state, key, page):
-    # Another attempt, shard or run of the target shown (or chosen). One
-    # shown from a list it is no longer in (another list, a newer build's)
-    # gives way to the chosen record's target.
+    # Another attempt, shard or run of the target shown, stepped from the
+    # one shown (else the chosen one). One shown from a list it is no
+    # longer in (another list, a newer build's) opens its target's first
+    # record here, or the chosen one where it has none, without a step.
     items = _items(state)
     if not items:
         return False
     chosen = min(state.get(_pick(state), 0), len(items) - 1)
     show_tab(state, "failures")
-    label = (_shown_record(state) or items[chosen])["label"]
-    same = [i for i, r in enumerate(items) if r["label"] == label]
-    if not same:
-        label = items[chosen]["label"]
-        same = [i for i, r in enumerate(items) if r["label"] == label]
-    at = same.index(chosen) if chosen in same else 0
-    _open_failure(state, same[(at + (1 if key == "}" else -1)) % len(same)])
+    shown = _shown_record(state)
+    if shown != None and shown not in items:
+        same = [i for i, r in enumerate(items) if r["label"] == shown["label"]]
+        _open_failure(state, same[0] if same else chosen)
+        return False
+    at = items.index(shown) if shown != None else chosen
+    same = [i for i, r in enumerate(items) if r["label"] == items[at]["label"]]
+    _open_failure(state, same[(same.index(at) + (1 if key == "}" else -1)) % len(same)])
     return False
 
 def _k_find(state, key, page):
