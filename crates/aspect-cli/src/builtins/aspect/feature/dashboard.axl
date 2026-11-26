@@ -4948,6 +4948,7 @@ def new_ui(mouse = True) -> dict:
 # is the shown run's.
 _UI_KEYS = {k: True for k in list(new_ui().keys()) + [
     "drawn",
+    "home",
     "ticking",
     "io",
     "fs",
