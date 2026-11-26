@@ -817,19 +817,18 @@ def _action_record(label: str, payload, event_id = None) -> dict:
         "output": str(_get(event_id, "primary_output", "") or ""),
         "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
         "success": bool(_get(payload, "success", False)),
-        "spawn_failed": spawn_failure(payload),
+        "counted_internal": counted_internal(payload),
     }
 
-def spawn_failure(payload):
-    """Whether a failed action's own spawn failed (its `failure_detail` a
-    `spawn` one), rather than the action after it (`execution`: its outputs
-    not created); None when Bazel said neither."""
+def counted_internal(payload):
+    """Whether Bazel counts a failed action among `runner_count`'s internal
+    ones: every failure but one whose outputs were not created
+    (`failure_detail`'s `ACTION_OUTPUTS_NOT_CREATED`), which it counts
+    under the runner its spawn ran in; None when it said nothing."""
     category = _get(_get(payload, "failure_detail", None), "category", None)
     if category == None:
         return None
-
-    # Only a `Spawn` failure has a spawn's exit code.
-    return hasattr(category, "spawn_exit_code")
+    return str(_get(category, "code", "") or "").upper() != "ACTION_OUTPUTS_NOT_CREATED"
 
 def output_of(kind: str, event_id, payload):
     """A record for the actions list from a build event, or None: an action
@@ -2931,11 +2930,12 @@ def action_split(state: dict) -> dict:
     unchanged. `failed` are the actions the build event stream reports
     failed (`failed_actions`: the Failures list's actions, a test's aside,
     which Tests counts; a missing input file posts no `action_completed`,
-    so is not one). Bazel 9 counts one whose spawn failed among
-    `runner_count`'s internal ones, and one whose spawn succeeded (its
-    outputs not created) under its runner, as each one's own
-    `failure_detail` says (`spawn_failure`): each is taken out of where it
-    was counted; what else is internal (cancelled, skipped) stays there.
+    so is not one). Bazel (7 to 9) counts a failed action among
+    `runner_count`'s internal ones, whatever failed (its spawn, an
+    undeclared inclusion, a symlink's input), but one whose outputs were
+    not created under the runner its spawn ran in, as each one's own
+    `failure_detail` says (`counted_internal`): each is taken out of where
+    it was counted; what else is internal (cancelled, skipped) stays there.
     What Bazel's done count (its last, from the event stream's progress,
     `build_progress`) has past the summary is unchanged where the action
     cache had hits or the build analysed nothing new (created fewer than it
@@ -2982,12 +2982,11 @@ def action_split(state: dict) -> dict:
         succeeded = build_succeeded(inv)
         ran = spawned - cached
 
-        # Bazel counts a failed action among the internal ones where its
-        # spawn failed (or it said neither), else under the runner its
-        # spawn ran in (it ran, then its outputs were missing).
+        # Bazel counts a failed action among the internal ones but where
+        # its outputs were not created, under the runner its spawn ran in.
         failures = failed_actions(state)
         failed = len(failures)
-        from_internal = min(internal, len([r for r in failures if r.get("spawn_failed") != False]))
+        from_internal = min(internal, len([r for r in failures if r.get("counted_internal") != False]))
         internal -= from_internal
         rest = failed - from_internal
         took = min(rest, ran)
@@ -5250,9 +5249,9 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
     attempts; Bazel's closing block as it wrote it (its test summary,
     `Elapsed time`, `Build completed`), its head and its tail, unless
     `replayed`; the results pages; the counts, after `interrupted · `
-    where the build was cut short, or a task of several builds was between
-    them (not a Ctrl+C or `q` after the one build of `build` or `test` had
-    finished); and how to see the rest (`aspect history show`)."""
+    where the build was cut short or the task cancelled before it returned
+    (between its builds too; `cancelling`, which a key on the finished
+    screen never sets); and how to see the rest (`aspect history show`)."""
     out = []
     bold = _c("strong") if tty else ""
     reset = _RESET if tty else ""
@@ -5310,7 +5309,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
 
     # An interrupted build's counts are of what it got to.
     inv = state.get("inv") or {}
-    interrupted = build_outcome(inv) == "interrupted" or (state.get("cancelling") and (inv.get("build_finished") == None or state.get("task") not in _ONE_BUILD_KINDS))
+    interrupted = build_outcome(inv) == "interrupted" or bool(state.get("cancelling"))
     out.append(_counts("%s%d built, %d failed%s · %d %s passed, %d failed%s%s%s", (
         "interrupted · " if interrupted else "",
         built_n,

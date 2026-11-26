@@ -276,6 +276,12 @@ _REAL = {
     "truncated kinds, missing output": ("BUILD_FAILURE", (45, 45), 45, 45, [("internal", 2), ("darwin-sandbox", 43)], 0, 45, [("Mn%d" % i, 2) for i in range(20)], ["Genrule:execution"]),
     # build --nokeep_going //nk:all: a missing output, the rest cancelled.
     "nokeep_going, missing output": ("BUILD_FAILURE", (7, 7), 7, 7, [("internal", 3), ("darwin-sandbox", 4)], 0, 7, [("Genrule", 6), ("BazelWorkspaceStatusAction", 1)], ["Genrule:execution"]),
+    # build --keep_going --spawn_strategy=standalone //ui:all: a C++ file
+    # including an undeclared header: "6 processes: 3 internal, 3 local".
+    "undeclared inclusion": ("BUILD_FAILURE", (7, 7), 6, 10, [("internal", 3), ("local", 3)], 0, 6, [("Genrule", 3), ("CppModuleMap", 1), ("BazelWorkspaceStatusAction", 1), ("CppCompile", 1)], ["CppCompile:cpp_compile:UNDECLARED_INCLUSIONS"]),
+    # build --keep_going //sym:all: a symlink to a file not executable:
+    # "5 processes: 2 internal, 3 darwin-sandbox" (Bazel 7.7.1 to 9.3.3).
+    "symlink input": ("BUILD_FAILURE", (5, 5), 5, 5, [("internal", 2), ("darwin-sandbox", 3)], 0, 5, [("Genrule", 3), ("BazelWorkspaceStatusAction", 1), ("ExecutableSymlink", 1)], ["ExecutableSymlink:symlink_action:EXECUTABLE_INPUT_IS_NOT"]),
     # test --keep_going //tb:all, a test's dependency failing: the last
     # frame caught [2 / 2]; Bazel went on to [13 / 13].
     "test build failure, early frame": ("BUILD_FAILURE", (2, 2), 11, 19, [("internal", 10), ("darwin-sandbox", 2)], 0, 11, [("RepoMappingManifest", 2), ("SymlinkTree", 2), ("SourceSymlinkManifest", 2), ("ExecutableSymlink", 1), ("Genrule", 1), ("TestRunner", 1), ("BazelWorkspaceStatusAction", 1), ("RunfilesTree", 1)], ["Genrule:spawn"]),
@@ -307,13 +313,20 @@ def _failed_records(n):
     """`n` failed genrules as the Failures list has them."""
     return [{"kind": "action", "label": "//x:f%d" % i, "detail": "Genrule", "files": [], "output": "", "success": False} for i in range(n)]
 
+# The code a decoded failure's category had, where a fixture names only it.
+_CODES = {"spawn": "NON_ZERO_EXIT", "execution": "ACTION_OUTPUTS_NOT_CREATED"}
+
 def _fail_event(st, kind, i):
     """An `action_completed` event saying action `i` failed, `kind` its
-    mnemonic and how (`Genrule:spawn`): its failure_detail's category a
-    `Spawn` (`NON_ZERO_EXIT`, its exit code) or an `Execution`
-    (`ACTION_OUTPUTS_NOT_CREATED`), as the decoded events have them."""
-    mnemonic, _, how = kind.partition(":")
-    category = struct(code = "NON_ZERO_EXIT", spawn_exit_code = 1) if how == "spawn" else struct(code = "ACTION_OUTPUTS_NOT_CREATED")
+    mnemonic, its failure_detail's category and that's code
+    (`CppCompile:cpp_compile:UNDECLARED_INCLUSIONS`; a `spawn` one's
+    `NON_ZERO_EXIT`, an `execution` one's `ACTION_OUTPUTS_NOT_CREATED`
+    unless named), as the decoded events have them."""
+    parts = kind.split(":")
+    mnemonic = parts[0]
+    how = parts[1] if len(parts) > 1 else ""
+    code = parts[2] if len(parts) > 2 else _CODES.get(how, "")
+    category = struct(code = code, spawn_exit_code = 1) if how == "spawn" else struct(code = code)
     detail = struct(message = "failed", category = category) if how else None
     note_event(st, "action_completed", struct(label = "//x:f%d" % i, primary_output = "bazel-out/f%d" % i, configuration = None), struct(success = False, type = mnemonic, stderr = None, stdout = None, failure_detail = detail), False)
 
@@ -376,6 +389,8 @@ def _actions_tests(ctx):
         ("truncated kinds, missing output", dict(done = 45, total = 45, ran = 42, cached = 0, unchanged = 0, internal = 2, rest = 0, failed = 1)),
         ("nokeep_going, missing output", dict(done = 7, total = 7, ran = 3, cached = 0, unchanged = 0, internal = 3, rest = 0, failed = 1)),
         ("test build failure, early frame", dict(done = 11, total = 11, ran = 1, cached = 0, unchanged = 0, internal = 9, rest = 0, failed = 1)),
+        ("undeclared inclusion", dict(done = 7, total = 7, ran = 3, cached = 0, unchanged = 0, internal = 3, rest = 0, failed = 1)),
+        ("symlink input", dict(done = 5, total = 5, ran = 3, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 1)),
     ]:
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
 
@@ -1606,8 +1621,9 @@ def _impl(ctx: TaskContext) -> int:
     stopped = dict(done, inv = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}, cancelling = False)
     _eq("an interrupted build's counts say so", [l for l in report_lines(stopped, "t-3", False) if " built, " in l][0].startswith("interrupted · "), True)
     late = dict(done, cancelling = True, inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))})
-    _eq("a Ctrl+C after Bazel finished is no interruption", [l for l in report_lines(late, "t-5", False) if " built, " in l][0].startswith("interrupted"), False)
-    _eq("a Ctrl+C between a task's builds is", [l for l in report_lines(dict(late, task = "lint"), "t-7", False) if " built, " in l][0].startswith("interrupted · "), True)
+    _eq("a task cancelled before it returned, its build done", [l for l in report_lines(late, "t-5", False) if " built, " in l][0].startswith("interrupted · "), True)
+    _eq("q or Enter on the finished screen is no interruption", [l for l in report_lines(dict(late, cancelling = False, ended = True), "t-8", False) if " built, " in l][0].startswith("interrupted"), False)
+    _eq("a Ctrl+C between a build task's builds is", [l for l in report_lines(dict(late, task = "build", builds = [{}]), "t-7", False) if " built, " in l][0].startswith("interrupted · "), True)
     _eq("one before it finished is", [l for l in report_lines(dict(done, cancelling = True, inv = {}), "t-6", False) if " built, " in l][0].startswith("interrupted · "), True)
     _eq("a finished one's do not", [l for l in report_lines(dict(done, cancelling = False, inv = {"build_finished": struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))}), "t-4", False) if " built, " in l][0].startswith("interrupted"), False)
 
