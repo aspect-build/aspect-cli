@@ -100,6 +100,7 @@ def config(ctx):
         ctx.std.env.set_var(name, value)
 """)
     ctx.std.fs.write(root + "/.aspect/probe.axl", """
+load("@aspect//lint.axl", "merge_lint_end_results")
 load("@aspect//traits.axl", "LintStartInfo", "LintTrait")
 
 def _impl(ctx):
@@ -141,15 +142,9 @@ def _impl(ctx):
     ctx.std.fs.write("posted.json", json.encode(posted))
     for callback in lint.lint_patch:
         callback(proxy, "fix.patch", "subject.AspectRulesLintESLint.patch")
-    urls = {}
-    suggestions = []
-    for callback in lint.lint_end:
-        result = callback(proxy, [])
-        for (path, line), url in result.comment_urls.items():
-            urls["%s:%d" % (path, line)] = url
-        suggestions.extend(result.suggestions)
-    ctx.std.fs.write("comment_urls.json", json.encode(urls))
-    ctx.std.fs.write("suggestions.json", json.encode(suggestions))
+    result = merge_lint_end_results([callback(proxy, []) for callback in lint.lint_end])
+    ctx.std.fs.write("comment_urls.json", json.encode({"%s:%d" % key: url for key, url in result.comment_urls.items()}))
+    ctx.std.fs.write("suggestions.json", json.encode(result.suggestions))
     return 0
 
 probe = task(kind = "probe", summary = "Capture native lint review comments.", implementation = _impl, traits = [LintTrait])

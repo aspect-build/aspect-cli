@@ -298,7 +298,7 @@ LintEndResult = record(
     #    severity ("error"|"warning"|"info"|"" uncorrelated),
     #    rule_id (SARIF ruleId or ""), correlated (bool: same linter's SARIF
     #    diag on the same (file, line)),
-    #    comment_url (html_url; "" when post failed or deduped)}
+    #    comment_url (Files Changed link; "" when post failed or deduped)}
     suggestions = field(list, default = []),
     # `(file, line) -> comment_url` for posted SARIF-derived comments, so the
     # renderer links a finding row to its comment. Patch comments live on
