@@ -486,6 +486,12 @@ fn on_a_pty(
     on_a_pty_with(task, stdout, &[])
 }
 
+/// How long a run on a loaded machine may take to get to what a test waits
+/// for, from its start: long, as only the times measured from the event a
+/// test is about are its property.
+#[cfg(unix)]
+const STARTED_WITHIN: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// [`on_a_pty`], with `args` after the task's name.
 #[cfg(unix)]
 fn on_a_pty_with_args(
@@ -747,7 +753,7 @@ fn a_dump_waits_not_on_a_stalled_stdout() {
     let (mut text, mut left, mut dumped) = (String::new(), None, None);
     let start = std::time::Instant::now();
     while !text.contains("-CLITAIL") {
-        match chunks.recv_timeout(Duration::from_secs(20).saturating_sub(start.elapsed())) {
+        match chunks.recv_timeout(STARTED_WITHIN.saturating_sub(start.elapsed())) {
             Ok((at, bytes)) => {
                 text.push_str(&String::from_utf8_lossy(&bytes));
                 if left.is_none() && text.contains("\x1b[?1049l") {
@@ -810,7 +816,7 @@ fn a_stdout_nobody_reads_stalls_no_take_nor_stderr() {
     };
     let start = std::time::Instant::now();
     while !got.iter().any(|(_, l)| l == "TICK40") {
-        match chunks.recv_timeout(Duration::from_secs(20).saturating_sub(start.elapsed())) {
+        match chunks.recv_timeout(STARTED_WITHIN.saturating_sub(start.elapsed())) {
             Ok((at, bytes)) => see(at, &bytes, &mut got),
             Err(_) => break,
         }
@@ -1146,12 +1152,17 @@ fn ctrl_z_during_a_stalled_release_stops_at_once() {
     let mut raw = Vec::new();
     let start = std::time::Instant::now();
     // The release has begun once the screen is left.
-    while !raw.windows(8).any(|w| w == b"\x1b[?1049l") && start.elapsed() < Duration::from_secs(30)
-    {
+    let left = |raw: &[u8]| raw.windows(8).any(|w| w == b"\x1b[?1049l");
+    while !left(&raw) && start.elapsed() < STARTED_WITHIN {
         if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(10)) {
             raw.extend(bytes);
         }
     }
+    assert!(
+        left(&raw),
+        "the screen never left: {:?}",
+        String::from_utf8_lossy(&raw)
+    );
     let stopped = |pid: u32| {
         std::process::Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])

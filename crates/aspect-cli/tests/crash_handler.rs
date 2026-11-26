@@ -192,8 +192,12 @@ fn crash_log_is_written_when_stderr_blocks() {
         .spawn()
         .expect("failed to spawn aspect-cli");
 
+    // The marker, not the file: the handler opens the log before it writes
+    // to it, and a kill between the two leaves it empty.
     let start = std::time::Instant::now();
-    while !path.exists() && start.elapsed() < CRASH_TIMEOUT {
+    while !std::fs::read_to_string(&path).is_ok_and(|l| l.contains("fatal signal"))
+        && start.elapsed() < CRASH_TIMEOUT
+    {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 

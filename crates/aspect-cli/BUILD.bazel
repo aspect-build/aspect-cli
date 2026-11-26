@@ -138,6 +138,10 @@ rust_test(
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
     },
+    # Its pty tests time a take, a release and a Ctrl+Z against bounds
+    # under the stalls they guard against; run alone, not beside the rest
+    # of //... loading the machine.
+    tags = ["exclusive"],
     deps = [
         "//crates/axl-runtime",
         "@crates//:libc",
