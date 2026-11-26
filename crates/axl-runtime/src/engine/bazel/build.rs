@@ -1085,6 +1085,10 @@ pub struct Build {
     #[allocative(skip)]
     console_log: Option<std::path::PathBuf>,
 
+    /// The history's copy of the build event stream, when it keeps one.
+    #[allocative(skip)]
+    kept_build_events: Option<std::path::PathBuf>,
+
     /// Tells the console's gate the client is gone once `wait()` reaps it.
     #[allocative(skip)]
     console_gone: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -1185,7 +1189,21 @@ fn tee_requested_bep_file(file_sinks: &mut Vec<FileSink>, path: PathBuf, trim: b
         path: path.to_string_lossy().into_owned(),
         signal: Arc::new(FileSignal::new()),
         trim,
+        flush_each: false,
     });
+}
+
+/// Set once this process is a full screen's child that reports its builds
+/// to it (the History screen's re-run): see [`follow_build_events`].
+static BUILD_EVENTS_FOLLOWED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Have the history's copy of each build's events (`build_events_file`)
+/// flushed after every event, for the screen following it from another
+/// process; otherwise it is written a buffer at a time, as every other file
+/// sink is.
+pub fn follow_build_events() {
+    BUILD_EVENTS_FOLLOWED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// How long [`Build::spawn`] gives a cancelled client to exit before killing
@@ -1586,6 +1604,7 @@ impl Build {
                     path,
                     signal,
                     trim: trim_downstream,
+                    flush_each: false,
                 });
             } else {
                 grpc_sinks.push(sink);
@@ -1601,12 +1620,18 @@ impl Build {
         // The history keeps the whole stream, redacted. Bazel's
         // own file is a temp file the reader moves away at each attempt and
         // removes, since nothing reads it by path once the stream is over.
-        if build_events && let Some(dir) = &history_dir {
-            let path = dir.join(bazel::bes::binary_file::FILE_NAME);
-            file_sinks.push(FileSink::new(
-                path.to_string_lossy().into_owned(),
-                Arc::new(FileSignal::new()),
-            ));
+        let kept_build_events = history_dir
+            .as_ref()
+            .filter(|_| build_events)
+            .map(|dir| dir.join(bazel::bes::binary_file::FILE_NAME));
+        if let Some(path) = &kept_build_events {
+            file_sinks.push(FileSink {
+                flush_each: BUILD_EVENTS_FOLLOWED.load(std::sync::atomic::Ordering::SeqCst),
+                ..FileSink::new(
+                    path.to_string_lossy().into_owned(),
+                    Arc::new(FileSignal::new()),
+                )
+            });
         }
 
         // Reserve the BEP path now, before `cmd.spawn()`, so it can go on the
@@ -1997,6 +2022,7 @@ impl Build {
             console_observations,
             console_links_written,
             console_log,
+            kept_build_events,
             console_gone,
             console_events: RefCell::new(console_events),
             hook_error: RefCell::new(None),
@@ -2078,6 +2104,14 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 Some(path) => heap.alloc_str(&path.to_string_lossy()).to_value(),
                 None => Value::new_none(),
             }),
+            // The task history's copy of the build event stream, written as
+            // the build runs, or None when the history keeps none: for a
+            // reader following the build from outside (`bazel.build_events
+            // .follow`).
+            "build_events_file" => Some(match &self.kept_build_events {
+                Some(path) => heap.alloc_str(&path.to_string_lossy()).to_value(),
+                None => Value::new_none(),
+            }),
             _ => None,
         }
     }
@@ -2090,6 +2124,7 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 | "output_fatal_line"
                 | "output_idle_ms"
                 | "output_log"
+                | "build_events_file"
         )
     }
 }
@@ -3756,6 +3791,58 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#;
         run_task_with_history(script, history.path());
+    }
+
+    /// A build names the history's copy of its stream, which another
+    /// process could follow as it is written: polled after the build, it
+    /// has every event, and then nothing more.
+    #[cfg(unix)]
+    #[test]
+    fn a_builds_kept_stream_can_be_followed() {
+        let history = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(flags = ["--scenario=success"], build_events = [iter], stderr = None)
+    path = build.build_events_file
+    if not path or not path.endswith("/build_events.binpb"): return 1
+    followed = bazel.build_events.follow(path)
+    live = [type(e.payload) for e in iter]
+    if not build.wait().success: return 2
+    got = [type(e.payload) for e in followed.poll()]
+    if got != live or not followed.complete or followed.error != None: return 3
+    if followed.poll(): return 4
+    if bazel.build_events.follow(path + ".missing").poll(): return 6
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        run_task_with_history(script, history.path());
+    }
+
+    /// A child's output, polled line by line as it comes, never waiting
+    /// unless asked, until it ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_childs_output_can_be_polled() {
+        let script = r#"
+def _impl(ctx):
+    child = ctx.std.process.command("/bin/sh").args(["-c", "printf 'one\r\ntwo\nthree'"]).stdout("piped").spawn()
+    lines = child.stdout().poller()
+    got = []
+    for _ in range(200):
+        got += lines.poll(timeout_ms = 50)
+        if lines.ended:
+            break
+    child.wait()
+    if got != ["one", "two", "three"]: return 1
+    if lines.poll() != [] or not lines.ended: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        let exit = crate::test::eval(script).run_task(0).expect("run_task");
+        assert_eq!(exit, Some(0));
     }
 
     #[test]

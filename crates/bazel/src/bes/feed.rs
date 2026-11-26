@@ -65,6 +65,9 @@ pub struct FileSink {
     /// Write the stream through a [`Trim`], as it would have been without the
     /// actions the CLI asked Bazel for, instead of every event.
     pub trim: bool,
+    /// Flush after every event, for a reader following the file as it is
+    /// written; otherwise it is written a buffer at a time.
+    pub flush_each: bool,
 }
 
 impl FileSink {
@@ -74,6 +77,7 @@ impl FileSink {
             path,
             signal,
             trim: false,
+            flush_each: false,
         }
     }
 }
@@ -98,6 +102,8 @@ struct Mirror {
     /// Set for a trimmed sink, which is written the frames it lets through
     /// instead of the raw bytes.
     trim: Option<Trim>,
+    /// [`FileSink::flush_each`].
+    flush_each: bool,
 }
 
 impl Mirror {
@@ -113,8 +119,16 @@ impl Mirror {
         self.signal.is_complete()
     }
 
+    /// Write one event's `bytes`, flushed with it for a sink that is
+    /// followed ([`FileSink::flush_each`]), so its reader has each event as
+    /// it comes, not a buffer's worth later.
     fn write(&mut self, bytes: &[u8]) {
-        if let Some(Err(e)) = self.out.as_mut().map(|out| out.write_all(bytes)) {
+        let flush = self.flush_each;
+        let wrote = self.out.as_mut().map(|out| {
+            out.write_all(bytes)
+                .and_then(|()| if flush { out.flush() } else { Ok(()) })
+        });
+        if let Some(Err(e)) = wrote {
             self.fail(format!("write failed: {e}"));
         }
     }
@@ -152,6 +166,7 @@ impl Mirrors {
                     signal: sink.signal,
                     out: None,
                     trim: sink.trim.then(Trim::new),
+                    flush_each: sink.flush_each,
                 })
                 .collect(),
         };
@@ -1004,6 +1019,37 @@ mod tests {
         Rig::of(BuildEventStream::new(), client, client, sinks)
     }
 
+    /// A followed sink has each event on disk once the reader has passed
+    /// it on; any other is written a buffer at a time.
+    #[test]
+    fn only_a_followed_file_sink_is_flushed_per_event() {
+        let events = [started(), plain(false)];
+        let client = sleeper();
+        let (followed, (path, signal)) = file_sink();
+        let (buffered, (plain_path, plain_signal)) = file_sink();
+        let rig = sinks_rig(
+            client.id(),
+            vec![
+                FileSink {
+                    flush_each: true,
+                    ..FileSink::new(path, signal)
+                },
+                FileSink::new(plain_path, plain_signal),
+            ],
+        );
+        rig.attempt(&events);
+        rig.recv(events.len());
+        assert_eq!(std::fs::read(&followed).unwrap(), encoded_all(&events));
+        assert!(std::fs::read(&buffered).unwrap().is_empty());
+        rig.append(&encoded(&plain(true)));
+        let (joined, _, _) = rig.finish();
+        stop(client);
+        assert_eq!(joined, Ok(()));
+        let all = [started(), plain(false), plain(true)];
+        assert_eq!(take_sink(&followed), encoded_all(&all));
+        assert_eq!(take_sink(&buffered), encoded_all(&all));
+    }
+
     #[test]
     fn a_trimmed_file_sink_loses_only_the_successful_actions() {
         let events = [
@@ -1022,6 +1068,7 @@ mod tests {
                     path,
                     signal,
                     trim: true,
+                    flush_each: false,
                 },
                 FileSink::new(whole_path, whole_signal),
             ],
@@ -1055,6 +1102,7 @@ mod tests {
                 path,
                 signal,
                 trim: true,
+                flush_each: false,
             }],
         );
         rig.attempt(&first);

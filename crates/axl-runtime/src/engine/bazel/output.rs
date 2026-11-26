@@ -509,10 +509,16 @@ pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
     // output for the stages. The output then follows the destination.
     // Where its raw log goes is the build's to say, at its spawn.
     let mut config = Config::new(Mode::Pty, s.stages, style);
-    // Through a PTY wherever stderr is a terminal and curses is shown, or
-    // nothing is: Bazel lists its running actions only on a terminal, and a
-    // feature drawing its own screen wants them.
-    config.pty = (curses_out || s.display == DisplayMode::None) && stderr_tty;
+    // Through a PTY wherever stderr is a terminal and curses or nothing is
+    // shown: Bazel lists its running actions only on a terminal, and a
+    // feature drawing its own screen wants them. With nothing shown, also
+    // where a screen elsewhere gives the size (a full screen running this
+    // build's task as its child, its terminal this process's controlling
+    // one, or `COLUMNS` and `LINES`); never with no terminal at all, as on
+    // CI, where a PTY would have no size.
+    let hidden = s.display == DisplayMode::None;
+    config.pty = (curses_out || hidden)
+        && (stderr_tty || (hidden && bazel::console::capture::has_terminal_size()));
     config.output = if s.display == DisplayMode::None {
         Output::Hidden
     } else if curses_out {
@@ -706,7 +712,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///   are both terminals. Pass `curses` or `lines` for the user's
     ///   `--curses` when they gave one: it is their choice of what they see.
     ///   Captured through a PTY when stderr is a terminal and curses or
-    ///   nothing is shown, otherwise a pipe. The processor's own `display` is
+    ///   nothing is shown, or nothing is and a terminal or `COLUMNS` and
+    ///   `LINES` give its size, otherwise a pipe. The processor's own `display` is
     ///   the resolved `curses`, `lines` or `none`.
     /// * `stages` - `bazel.output.<stage>(...)` values.
     /// * `color` - Ask Bazel for colour (`--color=yes` in `flags`). Default

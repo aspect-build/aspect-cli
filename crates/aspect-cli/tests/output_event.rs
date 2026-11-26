@@ -8,6 +8,8 @@
 //!   show up unchanged and late: both the rewritten output and the elapsed
 //!   time say the drain happened.
 //! * A cancelled build still forwards what Bazel prints while it winds down.
+//! * A console nothing shows gives Bazel a PTY only where there is a size
+//!   for it.
 
 #![cfg(unix)]
 
@@ -651,4 +653,120 @@ both = task(implementation = _impl)
             .join("actions/pkg/broken/Genrule-1.stderr")
             .is_file()
     );
+}
+
+/// A console nothing shows (`display = "none"`) with no terminal anywhere
+/// and no `COLUMNS` and `LINES`, as on CI, gives Bazel a pipe, not a PTY
+/// with no size; with `COLUMNS` and `LINES` (a full screen running the task
+/// as its child), a PTY of that size.
+#[test]
+fn a_hidden_console_with_no_terminal_is_piped() {
+    use std::os::unix::process::CommandExt;
+    let dir = workspace("hidden.axl", |root| {
+        let report = root.join("feed.txt");
+        format!(
+            r#"load("@aspect//traits.axl", "BazelTrait")
+
+def _impl(ctx):
+    t = ctx.traits[BazelTrait]
+    t.output_display = "none"
+    seen = []
+    t.output_frame.append(lambda ctx, build: seen.extend(build.output_feed()["lines"]))
+    build = ctx.bazel.build(flags = ["--scenario=stderr_kind"])
+    build.wait()
+    ctx.std.fs.write("{report}", "\n".join(seen))
+    return 0
+
+hidden = task(implementation = _impl, summary = "x")
+"#,
+            report = report.display()
+        )
+    });
+    let feed = |sized: bool| {
+        let mut cmd = aspect(dir.path(), "hidden");
+        if sized {
+            cmd.env("COLUMNS", "91").env("LINES", "17");
+        }
+        // SAFETY: setsid in the child before exec: a session of its own,
+        // with no controlling terminal.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let out = cmd.output().expect("aspect hidden");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{stderr}");
+        std::fs::read_to_string(dir.path().join("feed.txt")).unwrap_or_default()
+    };
+    let plain = feed(false);
+    assert!(plain.contains("stderr: not a terminal"), "{plain}");
+    let sized = feed(true);
+    assert!(sized.contains("stderr: a terminal of 91x17"), "{sized}");
+}
+
+/// `aspect build` in a fresh workspace as the History screen's bridged
+/// child would run it, basil playing `scenario`, the browser's screen
+/// 91x17: its stdout and its `output.ansi`.
+fn bridged_build(scenario: &str) -> (String, String) {
+    use std::os::unix::process::CommandExt;
+    let dir = workspace("config.axl", |_| {
+        format!(
+            r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario={scenario}")
+"#
+        )
+    });
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"set -m; export ASPECT_GROUP_SIGNALLER=$$ COLUMNS=91 LINES=17; "$0" build --bridge:enabled=true --dashboard:enabled=false //... > out.txt 2>&1 & wait $!"#,
+            &aspect_cli(),
+        ])
+        .current_dir(dir.path())
+        .env_clear()
+        .envs(base_env())
+        .env("BAZEL_REAL", basil_bin())
+        .env("ASPECT_CREDENTIALS_FILE", dir.path().join("credentials.json"))
+        .env("ASPECT_HISTORY_DIR", dir.path().join("history"))
+        .env("HOME", dir.path().join("home"))
+        .stdin(Stdio::null())
+        .process_group(0)
+        .status()
+        .expect("sh");
+    let out = std::fs::read_to_string(dir.path().join("out.txt")).unwrap_or_default();
+    assert!(status.success(), "{out}");
+    let ansi = std::fs::read_dir(dir.path().join("history"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("output.ansi"))
+        .find(|p| p.exists())
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .expect("output.ansi");
+    (out, ansi)
+}
+
+/// A build run as the History screen's bridged child keeps the same record
+/// as any run: its `output.ansi` has Bazel's console lines, and none of the
+/// bridge's messages, which go to the screen alone.
+#[test]
+fn a_bridged_runs_record_has_its_console_and_no_bridge_messages() {
+    let (out, ansi) = bridged_build("stderr_chatter");
+    assert!(
+        out.contains("\u{1e}aspect-bridge "),
+        "the screen gets the messages:\n{out}"
+    );
+    assert!(ansi.contains("Analyzed 1 target"), "{ansi}");
+    assert!(!ansi.contains("aspect-bridge"), "{ansi}");
+}
+
+/// A bridged child's Bazel has a PTY of the browser's screen size, which
+/// the child takes out of its environment.
+#[test]
+fn a_bridged_childs_bazel_has_the_browsers_size() {
+    let (_, ansi) = bridged_build("stderr_kind");
+    assert!(ansi.contains("stderr: a terminal of 91x17"), "{ansi}");
 }

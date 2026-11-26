@@ -1,0 +1,180 @@
+"""`Bridge`: a task run as a child of the dashboard's History screen reports
+to it. Internal to the builtins.
+
+`aspect history browse` (its `r`) runs a task as a child
+`aspect-cli` with `--bridge:enabled=true`, its stdout piped, and
+draws the child's run on its own screen, at its own pace, the terminal its
+own: the child never takes it, so a prompt the task makes does not compete
+with the screen's keys, and the time the screen stays up after is not the
+task's. The child shows nothing of Bazel's console (`output_display =
+"none"`, captured through a PTY so Bazel still lists its running actions)
+and writes what the dashboard needs to its stdout instead, a message a
+line: `BRIDGE_PREFIX`, the length of the JSON that follows and a space,
+then a JSON object whose `t` says what it is, kept out of the run's
+output files (`output.ansi`, `output.log`), which have the console's own
+lines as any run's do:
+
+- `task`, with `id`: the run's task ID, first, so the screen knows its
+  record in the history;
+- `events`, with `path`: the task history's copy of a build's event
+  stream (`build.build_events_file`), which the dashboard follows itself
+  (`bazel.build_events.follow`), as the events have no JSON form;
+- `frame`, with `lines` (the console's new lines, after its stages, a
+  burst split over several frames), `links` and `colours` (each line's,
+  at the same index), `dropped` (lines let go between frames) and
+  `progress` (Bazel's progress area), as `build.output_feed()` has them;
+- `update`, with `data`: what of a task update's (`Phases.task_update`)
+  the results pages are made from;
+- `attempt_end`, with `exit_code`: a Bazel attempt ended, so the next one
+  starts afresh;
+- `end`, with `log`: a build's console ended, and where its raw log is.
+
+Any other text on the child's stdout is the task's own (a message may
+follow some on its line, which the task left unended), or the CLI's, whose
+stderr the child writes to its stdout too, so all of it keeps its order
+(`ASPECT_GROUP_SIGNALLER`, see `main.rs`): the screen shows it in the
+console. An internal switch: only the screen sets `--bridge:enabled=true`,
+and `aspect feature` does not list it.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//traits.axl", "Phases")
+
+# What starts a bridge message on the child's stdout: a record separator,
+# which no task's own output starts a line with.
+BRIDGE_PREFIX = "\x1easpect-bridge "
+
+# The most characters of console lines one `frame` message carries, as JSON
+# writes them, so a message stays well within the line a reader keeps
+# (`Readable.poller()`'s 16 MiB): a burst goes as several, and a line longer
+# than one is cut.
+_FRAME_CHARS = 1 << 20
+
+# What of a task update's data an `update` message carries: what the
+# results pages are made from.
+_UPDATE_KEYS = ["aspect_results_url", "sink_invocation_id", "bes_streamed_by_bazel"]
+
+def bridge_message(line: str):
+    """A line of the child's stdout as `(text, message)`: the task's own text
+    on it (all of it, for a line with no message) and the message it
+    carries, as a dict, or None. A message may follow text the task left
+    unended on the line, since the task and the bridge share the stream;
+    the last message on it is the one, as one cut short by an interrupted
+    write runs into the next."""
+    at = line.rfind(BRIDGE_PREFIX)
+    size, _, body = line[at + len(BRIDGE_PREFIX):].partition(" ") if at >= 0 else ("", "", "")
+
+    # A message carries its length and is a JSON object with a kind: one cut
+    # short (a reader's line cap) or not the bridge's is the task's text.
+    if at < 0 or not size.isdigit() or len(body) != int(size):
+        return line, None
+    message = json.try_decode(body, None)
+    if type(message) != "dict" or type(message.get("t")) != "string":
+        return line, None
+    return line[:at], message
+
+def frames(feed: dict, cap = _FRAME_CHARS) -> list:
+    """A console feed (`build.output_feed()`) as `frame` messages of at most
+    `cap` characters each of lines, colours, links and the progress area,
+    as JSON writes them, escapes and all: a burst as several, a line longer
+    than one cut (its colour and links dropped), the lines dropped on the
+    last."""
+    lines = list(feed["lines"])
+    links = list(feed.get("links") or [])
+    colours = list(feed.get("colours") or [])
+
+    def frame(at, end, dropped):
+        return {
+            "t": "frame",
+            "lines": lines[at:end],
+            "links": links[at:end],
+            "colours": colours[at:end],
+            "dropped": dropped,
+            "progress": feed["progress"],
+        }
+
+    # Every frame carries the progress area.
+    base = len(json.encode(feed["progress"]))
+    out = []
+    at, size = 0, base
+    for i in range(len(lines)):
+        colour = colours[i] if i < len(colours) else ""
+        link = links[i] if i < len(links) else []
+        cost = len(json.encode(lines[i])) + len(json.encode(colour)) + len(json.encode(link))
+        if base + cost > cap:
+            # No escape is more than six characters.
+            lines[i] = lines[i][:max(1, (cap - base) // 8)] + "…"
+            if i < len(colours):
+                colours[i] = ""
+            if i < len(links):
+                links[i] = []
+            cost = len(json.encode(lines[i])) + 4
+        if i > at and size + cost > cap:
+            out.append(frame(at, i, 0))
+            at, size = i, base
+        size += cost
+    out.append(frame(at, len(lines), feed["dropped"]))
+    return out
+
+def _bridge_impl(ctx: FeatureContext):
+    state = {"followed": {}, "progress": []}
+
+    def send(task_ctx, message):
+        out = task_ctx.std.io.stdout
+        body = json.encode(message)
+
+        # Kept out of the run's output files, which have the console's
+        # lines from the console itself, as any run's do.
+        out.write(BRIDGE_PREFIX + str(len(body)) + " " + body + "\n", copy = False)
+        out.flush()
+
+    def drain(task_ctx, build):
+        feed = build.output_feed()
+        if feed == None:
+            return
+        path = build.build_events_file
+        if path and path not in state["followed"]:
+            state["followed"][path] = True
+            send(task_ctx, {"t": "events", "path": path})
+        if feed["lines"] or feed["dropped"] or feed["progress"] != state["progress"]:
+            state["progress"] = feed["progress"]
+            for message in frames(feed):
+                send(task_ctx, message)
+
+    def _frame(task_ctx, build):
+        drain(task_ctx, build)
+
+    def _end(task_ctx, build):
+        drain(task_ctx, build)
+        send(task_ctx, {"t": "end", "log": build.output_log or ""})
+
+    def _pre(task_ctx):
+        send(task_ctx, {"t": "task", "id": task_ctx.task.id})
+
+    def _attempt_end(task_ctx, exit_code):
+        send(task_ctx, {"t": "attempt_end", "exit_code": exit_code})
+
+    def _update(task_ctx, update):
+        # Only what the results pages are made from: the rest of a task
+        # update's data grows with the build.
+        data = {k: update.data[k] for k in _UPDATE_KEYS if k in (update.data or {})}
+        if data:
+            send(task_ctx, {"t": "update", "data": data})
+
+    t = ctx.traits[BazelTrait]
+    t.output_display = "none"
+
+    # A processor needs a stage; the console's defaults may be off.
+    t.output_stages.append(bazel.output.observe({"bridge:error": r"^ERROR:"}))
+    t.output_frame.append(_frame)
+    t.output_end.append(_end)
+    t.bazel_attempt_end.append(_attempt_end)
+    ctx.traits[Phases].task_update.append(_update)
+    ctx.hooks.pre_task(_pre)
+
+Bridge = feature(
+    display_name = "Bridge",
+    summary = "Report a task's console, progress and build events to the History screen that runs it as a child (`aspect history browse`, `r`), instead of showing them.",
+    implementation = _bridge_impl,
+    enabled = False,
+)

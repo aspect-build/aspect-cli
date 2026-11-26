@@ -463,6 +463,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
             .features
             .iter()
+            .filter(|f| !internal_feature(**f))
             .filter_map(|f| feature_block(*f, &reserved).map(|b| (*f, b)))
             .collect();
         blocks.sort_by(|(a, _), (b, _)| a.name().cmp(&b.name()));
@@ -1647,6 +1648,17 @@ fn typed_shorthand(prefix: &str, matches: &ArgMatches) -> Option<bool> {
     matches.get_one::<bool>(&id).copied()
 }
 
+/// Whether `feat` is an internal switch of the builtins (defined under
+/// `private/feature/`, as the History screen's `Bridge` is), which only
+/// the CLI itself sets: left out of `aspect feature` and `aspect describe`,
+/// its flags parsed as any feature's.
+fn internal_feature(feat: &dyn FeatureLike<'_>) -> bool {
+    feat.path()
+        .to_string_lossy()
+        .replace('\\', "/")
+        .contains("/private/feature/")
+}
+
 fn feature_block(feat: &dyn FeatureLike<'_>, reserved: &HashSet<String>) -> Option<FeatureBlock> {
     let (mut args, config_args): (Vec<(String, Arg)>, Vec<(String, Arg)>) = feat
         .args()
@@ -1901,7 +1913,7 @@ fn describe_index(
     json!({
         "aspect_cli_version": version,
         "commands": commands,
-        "features": features.iter().map(|f| f.name()).collect::<Vec<_>>(),
+        "features": features.iter().filter(|f| !internal_feature(**f)).map(|f| f.name()).collect::<Vec<_>>(),
         "next": {
             "task_detail": "aspect describe '<command without the leading `aspect `>' — e.g. aspect describe 'cache diff'",
             "feature_detail": "aspect describe 'feature <name>' - e.g. aspect describe 'feature console'",
@@ -2057,6 +2069,7 @@ fn describe_json(
     let reserved = shorthand_reserved(tasks, features);
     let described_features: Vec<serde_json::Value> = features
         .iter()
+        .filter(|feat| !internal_feature(**feat))
         .filter_map(|feat| {
             let block = feature_block(*feat, &reserved)?;
             let (shorthand, unavailable) = shorthand_coverage(&block, tasks);

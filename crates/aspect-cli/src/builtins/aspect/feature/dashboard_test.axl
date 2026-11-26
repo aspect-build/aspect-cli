@@ -9,9 +9,11 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "ago", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "history_key", "history_records", "history_rows", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_paths", "log_view", "mark_cells", "metrics_lines", "new_browser", "new_build", "new_counts", "new_run", "new_search", "new_ui", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "on_run", "open_history", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "page_of", "panes_shown", "past_header", "past_run", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "row_id", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "show_run", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "stamp_ms", "status_row", "step_match", "take_event", "text_width", "tips_count", "tips_lines", "tips_role", "use_kept_logs", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "ago", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "child_running", "classify", "confirm_row", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "history_key", "history_records", "history_rows", "interrupt_child", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_paths", "log_view", "mark_cells", "metrics_lines", "new_browser", "new_build", "new_counts", "new_run", "new_search", "new_ui", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "on_run", "open_history", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "page_of", "panes_shown", "past_header", "past_run", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "row_id", "run_of", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "show_run", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "stamp_ms", "status_row", "step_match", "take_event", "text_width", "tips_count", "tips_lines", "tips_role", "use_kept_logs", "wrap_line")
 load("@std//theme.axl", "theme")
-load("../private/lib/history_records.axl", "show_lines")
+load("../private/feature/bridge.axl", "BRIDGE_PREFIX", "bridge_message", "frames")
+load("../private/lib/history_child.axl", "child_args", "needs_terminal", "new_task_id", "pump_child", "shown_command", "start_child")
+load("../private/lib/history_records.axl", "command", "show_lines")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
 # The style the console's state is drawn in, muted, at the border's end.
@@ -735,8 +737,8 @@ def _test_history(ctx):
     screen = _visible(render(state, 120, 20))
     _eq("the live build pinned first, its progress in the header", ("● now running build //examples:demo (live)" in screen, "live build running 21/35" in screen), (True, True))
     _eq("builds in this workspace, by default", ("aaaa1111" in screen, "bbbb2222" in screen, "hhhh0000" in screen, "oooo0000" in screen), (True, True, False, False))
-    _eq("the count, of the whole history", "aspect history · 2 builds of 7,701 runs in all workspaces" in screen, True)
-    _eq("the filter and workspace keys say what is shown", ("f filter: builds" in screen, "w: this workspace" in screen, "Esc live build" in screen, "? keys" in screen), (True, True, True, True))
+    _eq("the count, of the whole history", "aspect history · 2 builds (this workspace)" in screen, True)
+    _eq("the filter and workspace keys say what is shown", ("f filter: builds" in screen, "w: this workspace" in screen, "Esc live build" in screen, "? keys" in screen), (True, False, True, True))
     _eq("asked for builds here", state["browser"]["history"].asked[-1], (None, True, "/ws"))
     _eq("a row: status, when, time, command, id last", [l for l in screen.split("\n") if "aaaa1111" in l][0].strip("│ ").startswith("✗ exit 1"), True)
     _eq("no aspect before the command", " aspect build" in [l for l in screen.split("\n") if "bbbb2222" in l][0], False)
@@ -762,13 +764,13 @@ def _test_history(ctx):
     state["history_said"] = None
     failed = _visible(render(state, 120, 20))
     _eq("f: failed builds", ("f filter: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
-    _eq("its count", "1 failed build of 7,701 runs in all workspaces" in failed, True)
+    _eq("its count", "1 failed build (this workspace)" in failed, True)
     on_key(state, "f", 10)
     on_key(state, "w", 10)
     _eq("w says whose runs, and how to go back", "every workspace's runs · w lists this one's" in _visible(render(state, 120, 20)), True)
     state["history_said"] = None
     every = _visible(render(state, 120, 20))
-    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "w: all workspaces" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
+    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "(all workspaces)" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
     on_key(state, "f", 10)
     on_key(state, "w", 10)
 
@@ -855,10 +857,10 @@ def _test_history(ctx):
     full["browser"]["filter"] = "all runs"
     full["browser"]["records"] = None
     _eq("500 listed, not the live one", (len(history_records(full)), [r for r in full["browser"]["records"] if r["task"]["id"] == "live"]), (500, []))
-    _eq("and says they are the newest, of the runs it could list", "500 newest runs of 600 runs in all workspaces" in _visible(render(full, 120, 20)), True)
+    _eq("and says they are the newest, of the runs it could list", "500 newest runs (this workspace)" in _visible(render(full, 120, 20)), True)
     one = _history_state(ctx, [_record("live", "running"), _record("only0000")])
     open_history(one)
-    _eq("one build of one run", "1 build of 1 run in all workspaces" in _visible(render(one, 120, 20)), True)
+    _eq("one build of one run", "1 build (this workspace)" in _visible(render(one, 120, 20)), True)
 
     # The chosen run stays chosen as newer runs come above it.
     runs = [_record("aaaa1111"), _record("bbbb2222"), _record("cccc3333")]
@@ -998,6 +1000,286 @@ def _test_history(ctx):
     for event in attempt("u3"):
         take_event(live, event)
     _eq("a retried attempt's start is its own, not a restart", live["started_early"], True)
+
+def _bridged(message):
+    """`message` as the bridge writes it on a line."""
+    body = json.encode(message)
+    return BRIDGE_PREFIX + str(len(body)) + " " + body
+
+def _fake_stream(lines, ended = True):
+    """A `LinePoller` that hands out `lines` once, then reports `ended`."""
+    pending = list(lines)
+
+    def poll(timeout_ms = 0, limit = 10000):
+        out = pending[:limit]
+        rest = pending[limit:]
+        pending.clear()
+        pending.extend(rest)
+        return out
+
+    def close():
+        pending.clear()
+
+    return struct(poll = poll, ended = ended, close = close)
+
+def _fake_child(record, out = [], err = [], code = None):
+    """A child run as `start_child` keeps it, its streams handing out `out`
+    and `err`, exited with `code` (None: still going); and the signals sent
+    to it."""
+    signals = []
+    status = struct(code = code) if code != None else None
+    proc = struct(
+        try_wait = lambda: status,
+        interrupt = lambda: signals.append("int"),
+        terminate = lambda: signals.append("term"),
+        kill = lambda: signals.append("kill"),
+    )
+    child = {"proc": proc, "out": _fake_stream(out, ended = code != None), "err": _fake_stream(err, ended = code != None), "events": None, "status": None, "exited_ms": 0, "done": False, "asked": 0, "record": record}
+    return child, signals
+
+def _test_child(ctx):
+    """Running a run again from the History screen (`r`, `R`): the child's
+    arguments, the bridge's messages, the child's run as the live one,
+    stopping it, and the keys."""
+    _eq("the bridge goes before a --", child_args(["/bin/aspect", "test", "--keep_going", "--", "//...", "-//x/..."]), ["test", "--keep_going", "--bridge:enabled=true", "--dashboard:enabled=false", "--", "//...", "-//x/..."])
+    _eq("in place of the run's own", child_args(["/bin/aspect", "build", "--dashboard", "--dashboard:actions", "all", "--dashboard:stay", "--dashboard:mouse=false", "//..."]), ["build", "//...", "--bridge:enabled=true", "--dashboard:enabled=false"])
+    _eq("a run r made, for the terminal: without what it added", child_args(["/bin/aspect", "build", "//...", "--bridge:enabled=true", "--dashboard:enabled=false"], bridged = False), ["build", "//..."])
+    _eq("Bazel's arguments are left alone", child_args(["/bin/aspect", "build", "--", "--dashboard"]), ["build", "--bridge:enabled=true", "--dashboard:enabled=false", "--", "--dashboard"])
+    _eq("as typed, for the terminal", child_args(["/bin/aspect", "run", "//a"], bridged = False), ["run", "//a"])
+    _eq("aspect run and this screen need the terminal", (needs_terminal({"task": {"group": [], "kind": "run"}}), needs_terminal({"task": {"group": ["history"], "kind": "browse"}}), needs_terminal({"task": {"group": [], "kind": "build"}})), (True, True, False))
+    _eq("a bridge message", bridge_message(_bridged({"t": "end", "log": "/l"})), ("", {"t": "end", "log": "/l"}))
+    _eq("a task's own line", bridge_message("hello"), ("hello", None))
+    cut = _bridged({"t": "frame", "lines": ["a}"]})[:-3] + "}"
+    _eq("a message cut short is text, though it ends in a brace", bridge_message(cut), (cut, None))
+    _eq("a whole one after one cut short is still read", bridge_message(cut + _bridged({"t": "end"})), (cut, {"t": "end"}))
+    _eq("one without its length too", bridge_message(BRIDGE_PREFIX + '{"t": "end"}'), (BRIDGE_PREFIX + '{"t": "end"}', None))
+    _eq("one that is no JSON is text", bridge_message(BRIDGE_PREFIX + "2 {x"), (BRIDGE_PREFIX + "2 {x", None))
+    _eq("a message after text the task left unended", bridge_message("building... " + _bridged({"t": "end"})), ("building... ", {"t": "end"}))
+    _eq("a run the screen ran again, as the history shows it", command({"argv": ["/bin/aspect", "build", "//a", "--bridge:enabled=true", "--dashboard:enabled=false", "--", "--dashboard"]}), "aspect build //a -- --dashboard")
+    _eq("the dashboard typed off stays", command({"argv": ["/bin/aspect", "build", "--dashboard:enabled=false"]}), "aspect build --dashboard:enabled=false")
+
+    record = _record("cccc3333", "ok", cwd = "/repo")
+    state = _history_state(ctx, [record], standalone = True)
+    child, signals = _fake_child(record, out = [
+        _bridged({"t": "frame", "lines": ["INFO: one"], "links": [[]], "colours": ["INFO: one"], "dropped": 0, "progress": ["[1 / 2] 1 action running", "    a.cc; 1s"]}),
+        "a line of the task's own",
+        _bridged({"t": "update", "data": {"aspect_results_url": "https://app.example.com/", "sink_invocation_id": "s-1"}}),
+    ], err = ["INFO: the CLI's"])
+    state["child"] = child
+    pump_child(state, 1000)
+    _eq("a frame's lines, the task's and the CLI's", state["log"], ["INFO: one", "a line of the task's own", "INFO: the CLI's"])
+    _eq("its progress, its build begun", (state["progress"][1], state["phase"], state["building"]), ("    a.cc; 1s", "[1 / 2] 1 action running", True))
+    _eq("an update's results page", state["pages"], [(ASPECT_PAGE, "https://app.example.com/s-1")])
+    _eq("still going", (child_running(state), state["ended"]), (True, False))
+
+    # `q` asks the child to stop, then harder, the keys row saying how.
+    on_key(state, "q", 10)
+    _eq("q interrupts the child", (signals, state["cancelling"]), (["int"], True))
+    _eq("and says how to stop it harder", "stopping… · q again: stop harder · q a third time: kill" in _visible(render(state, 140, 30)), True)
+    interrupt_child(state)
+    _eq("then terminates it", signals, ["int", "term"])
+    interrupt_child(state)
+    _eq("then kills it", (signals, "killing…" in _visible(render(state, 140, 30))), (["int", "term", "kill"], True))
+    state["cancelling"] = False
+    state["child"]["asked"] = 0
+
+    # A build's end folds it; a retried attempt starts the next build's
+    # own counts at its next message, the console going on.
+    state["child"]["out"] = _fake_stream([
+        _bridged({"t": "end", "log": "/h/c/bazel/1/console.log"}),
+        _bridged({"t": "attempt_end", "exit_code": 37}),
+        _bridged({"t": "events", "path": "/nowhere/build_events.binpb"}),
+        _bridged({"t": "frame", "lines": ["INFO: again"], "dropped": 0, "progress": []}),
+    ], ended = False)
+    pump_child(state, 2000)
+    _eq("the build folded, the next begun", (len(state["builds"]), state["building"], state["build_start_ms"]), (1, True, 2000))
+    _eq("the console goes on", state["log"][-2:], ["INFO: the CLI's", "INFO: again"])
+    _eq("its events followed", state["child"]["events"] != None, True)
+    followed = state["child"]["events"]
+
+    # A child that exited, its output held open by what it left behind,
+    # ends a moment later; a backlog is drained first.
+    held, _ = _fake_child(record, code = 0)
+    held["out"] = _fake_stream([], ended = False)
+    held["events"] = followed
+    state["child"] = held
+    pump_child(state, 5000)
+    _eq("still waited for, just after it exited", child_running(state), True)
+    held["out"] = _fake_stream(["line %d" % i for i in range(10000)], ended = False)
+    pump_child(state, 6500)
+    _eq("while a backlog of its output is drained", (child_running(state), state["log"][-1]), (True, "line 9999"))
+    held["out"] = _fake_stream(["tick"], ended = False)
+    pump_child(state, 8600)
+    _eq("but not while what it left behind trickles on", (child_running(state), state["phase"], state["verdict"]), (False, "Done", True))
+    state["ended"] = False
+
+    # What it left behind flooding its output never holds the run open:
+    # a stop cuts the drain a moment after the exit.
+    flooded, _ = _fake_child(record, code = 0)
+    flooded["out"] = struct(poll = lambda timeout_ms = 0, limit = 10000: ["y"] * limit, ended = False, close = lambda: None)
+    flooded["events"] = followed
+    state["child"] = flooded
+    pump_child(state, 20000)
+    interrupt_child(state)
+    pump_child(state, 20100)
+    _eq("still draining just after the stop", child_running(state), True)
+    pump_child(state, 25100)
+    _eq("but not past a moment after the exit", child_running(state), False)
+    _eq("a run the user stopped reads so, whatever it exited with", (state["stopped"], phase_status(state), _visible(render(state, 140, 30)).split("\n")[0].strip().startswith("■ aspect")), (True, ["stopped by you"], True))
+    _eq("stopped, nothing left to cancel", (state["cancelling"], "cancelling" in keys_row(state, 140), "Ctrl+C" in keys_row(state, 140)), (False, False, False))
+    state.update(ended = False, stopped = False)
+
+    # Done once it exited and both streams ended.
+    done, _ = _fake_child(record, out = [_bridged({"t": "end", "log": "/h/c/bazel/1/console.log"})], code = 3)
+    done["events"] = followed
+    state["child"] = done
+    pump_child(state, 3000)
+    _eq("ended with its exit code", (state["ended"], state["phase"], state["log_path"], child_running(state), state["verdict"]), (True, "Exit 3", "/h/c/bazel/1/console.log", False, False))
+    shown = _visible(render(state, 140, 30))
+    _eq("its keys: the list, or run it again", "q history · r run again · R in the terminal" in shown, True)
+
+    # Its finished screen's leave keys go back to the list, the run pinned
+    # first, said how it ended; `r` asks first, Enter runs it.
+    _eq("q on a child's run goes to the list", (on_key(state, "q", 10), state["mode"]), (False, "history"))
+    listed = _visible(render(state, 140, 20))
+    _eq("they fit at 80 columns", _visible(render(state, 80, 20)).rstrip().endswith("? keys"), True)
+    _eq("the list's keys, short", ("r again · R in terminal" in listed, "↑↓ choose" in listed, "(this workspace)" in listed), (True, False, True))
+    _eq("the run pinned first, how it ended first, no live", ("● ✗ exit 3 · this session · build //..." in listed, "(live" in listed), (True, False))
+    state["child"]["task_id"] = record["task"]["id"]
+    state["browser"]["records"] = None
+    _eq("its own record not listed while it is pinned", "cccc3333" in _visible(render(state, 140, 20)), False)
+    state["child"]["task_id"] = None
+    state["browser"]["records"] = None
+    render(state, 140, 20)
+    on_key(state, "j", 10)
+    on_key(state, "r", 10)
+    asked = _visible(render(state, 140, 20))
+    _eq("r asks first, naming where and what", ("Run again in /repo? aspect build //... · Enter runs · Esc cancels" in asked, state.get("request")), (True, None))
+    _eq("the directory in the accent, not this workspace", (_role("accent") + "/repo") in render(state, 140, 20), True)
+    on_key(state, "esc", 10)
+    _eq("Esc cancels", (state.get("confirm"), state.get("request"), state["mode"]), (None, None, "history"))
+    on_key(state, "r", 10)
+    chosen = state["browser"]["selected"]
+    on_key(state, "mouse-move:3:5", 10)
+    _eq("the pointer moving leaves it asked", state.get("confirm") != None, True)
+    on_key(state, "mouse-press:3:5", 10)
+    _eq("a click cancels, the choice where it was", (state.get("confirm"), state.get("request"), state["browser"]["selected"]), (None, None, chosen))
+    on_key(state, "R", 10)
+    on_key(state, "enter", 10)
+    _eq("Enter runs it, R in the terminal", state["request"], ("run_in_terminal", record))
+    state.pop("request")
+    secret = _record("ssss1111", cwd = "/repo", argv = ["/bin/aspect", "deploy", "--token=<REDACTED>"])
+    state["confirm"] = ("run", secret)
+    _eq("a redacted command says its secrets are kept", "aspect deploy --token=<REDACTED> (secrets kept) · Enter runs" in _visible(render(state, 160, 20)), True)
+    state.pop("confirm")
+
+    # A long directory gives way, cut in its middle, to the command and the
+    # keys; the home folder reads `~`, this workspace `here`.
+    state["home"] = "/Users/someone"
+    shown = run_of(state)
+    show_run(state, new_run(task = "build"))
+    _eq("the home folder is the UI's, kept as a run is shown", state.get("home"), "/Users/someone")
+    show_run(state, shown)
+    far = _record("ffff1111", cwd = "/Users/someone/src/github.com/an-org/a-rather-long-repository-name/services/backend", argv = ["/bin/aspect", "test", "//services/backend/..."])
+    state["confirm"] = ("run", far)
+    for cols in (80, 100, 120):
+        row = _visible(confirm_row(state, cols))
+        _eq("at %d columns, the keys kept, and the command as far as it fits" % cols, (text_width(row) <= cols, ("? aspect test //services/backend/... · Enter runs · Esc cancels" if cols > 80 else "? aspect test //services/back") in row, row.endswith(" · Enter runs · Esc cancels"), row.startswith(" Run again in ~/")), (True, True, True, True))
+    _eq("cut in its middle only when it must", "…" in _visible(confirm_row(state, 80)), True)
+    _eq("whole when it fits", _visible(confirm_row(state, 200)).startswith(" Run again in ~/src/github.com/an-org/a-rather-long-repository-name/services/backend? "), True)
+    state["confirm"] = ("run_in_terminal", _record("hhhh1111", cwd = "/ws", argv = ["/bin/aspect", "build", "//..."]))
+    _eq("this workspace says here", _visible(confirm_row(state, 80)).strip(), "Run again in the terminal here? aspect build //... · Enter runs · Esc cancels")
+    _eq("narrow, the question goes before the keys", [_visible(confirm_row(state, c)).strip() for c in (40, 30, 20)], ["Run again? · Enter runs · Esc cancels", "Enter runs · Esc cancels", "Enter runs · Esc c…"])
+    state["home"] = "/Users/someone/"
+    state["confirm"] = ("run", far)
+    _eq("a home with a trailing slash still reads ~", _visible(confirm_row(state, 200)).startswith(" Run again in ~/src/"), True)
+    state.pop("confirm")
+    _eq("Esc leaves, the child done", on_key(state, "esc", 10), True)
+
+    # While a child runs: the list's Esc goes back to it; Ctrl+C there warns
+    # first, naming the run, then stops it, shown; `r` says one at a time.
+    going, going_signals = _fake_child(record)
+    state["child"] = going
+    open_history(state)
+    _eq("Esc goes back to a child still going", (on_key(state, "esc", 10), state["mode"]), (False, "run"))
+    open_history(state)
+    on_key(state, "j", 10)
+    on_key(state, "r", 10)
+    one = _visible(render(state, 140, 20))
+    _eq("r while one runs says one at a time", ("One run at a time · Esc to it, then q stops it" in one, state.get("confirm")), (True, None))
+    state["history_said"] = None
+    _eq("Ctrl+C on the list warns while it runs, naming it", (on_key(state, "ctrl-c", 10), going_signals, "Ctrl+C again stops the running build //..." in _visible(render(state, 140, 20))), (False, [], True))
+    _eq("a second stops it, shown", (on_key(state, "ctrl-c", 10), going_signals, state["mode"]), (False, ["int"], "run"))
+    _eq("on its own screen Ctrl+C stops it harder", (on_key(state, "ctrl-c", 10), going_signals), (False, ["int", "term"]))
+    going["done"] = True
+    state["ended"] = True
+    _eq("with none going, Ctrl+C leaves", on_key(state, "ctrl-c", 10), True)
+
+    # A run started again: its header names what it re-runs; its note
+    # says how to stop it.
+    state["browser"]["history"] = struct(command = lambda id, **kw: ctx.std.process.command("/bin/sh").args(["-c", "exit 0"]))
+    here = _record("hhhh8888", cwd = ctx.std.env.current_dir())
+    started = start_child(state, ctx, here, 0)
+    state["child"]["proc"].wait()
+    shown = dict(state, search = new_search())
+    show_run(shown, started)
+    head = _visible(render(shown, 140, 30))
+    _eq("a re-run's header and its first note", ("aspect build · re-run of hhhh8888" in head.split("\n")[0], "Running again: aspect build //... · q stops it" in head), (True, True))
+
+    # A run whose directory is gone is not started.
+    gone = _record("gggg7777", cwd = "/nowhere/at/all")
+    _eq("its directory gone", start_child(state, ctx, gone, 0), "the directory it ran in is gone")
+    moved_exe = struct(std = struct(fs = ctx.std.fs, env = struct(current_exe = lambda: "/nowhere/aspect-cli")))
+    _eq("nor one whose aspect-cli is gone", "binary is gone" in start_child(state, moved_exe, here, 0), True)
+    state["browser"]["history"] = struct(command = lambda id, **kw: None)
+    _eq("nor one whose command line was not kept as typed", start_child(state, ctx, here, 0), "its command line was not kept as typed")
+    _eq("the ID the screen gave a run is not shown as typed", command(_record("01a218e4-d7f1-4e78-8001-000001e78001", argv = ["/bin/aspect", "hi", "--task:id=01a218e4-d7f1-4e78-8001-000001e78001"])), "aspect hi")
+    feed = {"lines": ["a" * 30, "\x01" * 10, "b" * 200], "colours": ["", "", "c" * 200], "links": [[], [], []], "dropped": 2, "progress": ["p"]}
+    sent = frames(feed, cap = 80)
+    _eq("a burst over the cap as several frames, escapes counted, a line longer than one cut", (
+        [m["lines"] for m in sent],
+        [m["colours"] for m in sent],
+        [m["dropped"] for m in sent],
+        max([len(json.encode(m["lines"])) for m in sent]) < 120,
+    ), (
+        [["a" * 30], ["\x01" * 10], ["b" * 9 + "…"]],
+        [[""], [""], [""]],
+        [0, 0, 2],
+        True,
+    ))
+    linked = {"lines": ["x", "y"], "colours": ["", ""], "links": [[], [[0, 1, "/" + "l" * 25]]], "dropped": 0, "progress": ["p" * 30]}
+    _eq("links and the progress area count too", [m["lines"] for m in frames(linked, cap = 80)], [["x"], ["y"]])
+    ids = [new_task_id(70123, 1795365737634 + n * 1000, n) for n in range(1, 5)]
+    _eq("a run handed the terminal has an ID of its own, a UUID's form", ([len(p) for p in ids[0].split("-")], ids[0][14], ids[0][19]), ([8, 4, 4, 4, 12], "4", "8"))
+    _eq("one after another differ in their short form", len({i[:8]: True for i in ids}), 4)
+    _eq("and not by a step", len({i[0]: True for i in [new_task_id(70123, 1795365737634, n) for n in range(16)]}) > 6, True)
+    _eq("the run's own ID not shown, either form", (
+        command(_record("01a218e4-d7f1-4e78-8001-000001e78001", argv = ["/bin/aspect", "hi", "--task:id", "01a218e4-d7f1-4e78-8001-000001e78001", "//a"])),
+        command(_record("x", argv = ["/bin/aspect", "hi", "--task:id", "other", "//a"])),
+    ), ("aspect hi //a", "aspect hi --task:id other //a"))
+    _eq("an ID the run was given is not shown, as it gets a new one", (
+        shown_command(_record("x", argv = ["/bin/aspect", "hi", "--task:id=01a218e4-d7f1-4e78-8001-000001e78001"]), bridged = False),
+        shown_command(_record("x", argv = ["/bin/aspect", "hi", "--task:id", "01a218e4-d7f1-4e78-8001-000001e78001", "//a"])),
+    ), ("aspect hi", "aspect hi //a"))
+    _eq("shown as it runs again, redacted, without what the screen adds", (shown_command(_record("x", argv = ["/bin/aspect", "build", "--dashboard", "//a", "--bridge:enabled=true", "--dashboard:enabled=false"])), shown_command(_record("x", argv = ["/bin/aspect", "build", "--dashboard", "//a"]), bridged = False)), ("aspect build //a", "aspect build --dashboard //a"))
+
+    # From the live dashboard, no `r`.
+    live = _history_state(ctx, [record])
+    open_history(live)
+    on_key(live, "j", 10)
+    on_key(live, "r", 10)
+    _eq("no r with a live build", live.get("request"), None)
+
+    # A past run shown, the child's run goes on aside.
+    aside = _history_state(ctx, [record, _record("dddd4444")], standalone = True)
+    aside["child"], _ = _fake_child(record, out = [_bridged({"t": "frame", "lines": ["INFO: live"], "dropped": 0, "progress": []})])
+    open_history(aside)
+    on_key(aside, "j", 10)
+    on_key(aside, "j", 10)
+    on_key(aside, "enter", 10)
+    pump_child(aside, 1000)
+    _eq("into the live run aside", (aside["live"]["log"], "INFO: live" in aside["log"]), (["INFO: live"], False))
+    _eq("its header says how the run is going", "live: " in _visible(render(aside, 140, 30)).split("\n")[0], True)
 
 def _impl(ctx: TaskContext) -> int:
     sink = {"aspect_results_url": "https://app.example.com/", "sink_invocation_id": "sink-1"}
@@ -3193,6 +3475,7 @@ def _impl(ctx: TaskContext) -> int:
             if text_width(cut) > width:
                 fail("action_row(%r, %d) is %d cells" % (text[:6], width, text_width(cut)))
     _test_history(ctx)
+    _test_child(ctx)
     _goldens(ctx, view_state, act, ctx.args.update)
     print("dashboard_test.axl: OK")
     return 0

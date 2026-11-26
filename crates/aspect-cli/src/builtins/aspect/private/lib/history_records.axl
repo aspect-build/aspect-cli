@@ -39,10 +39,36 @@ def took(record) -> str:
     sec = s % 60
     return "%dm%s%ds" % (s // 60, "0" if sec < 10 else "", sec)
 
+# What the History screen runs a task again with (`r`): the bridge on, the
+# dashboard off. Left out of a run's command as shown (`command`).
+BRIDGE_ADDED = ["--bridge:enabled=true", "--dashboard:enabled=false"]
+
 def command(record) -> str:
-    """A run's command line, redacted, without the program."""
+    """A run's command line, redacted, without the program, the flags the
+    History screen adds to run it again (`BRIDGE_ADDED`), or a `--task:id`
+    naming the run's own ID (`--task:id=<id>` or `--task:id <id>`): the
+    one the screen gives a run handed the terminal, or one typed, which
+    says nothing the record's ID does not."""
     argv = record.get("argv", [])
-    return " ".join(["aspect"] + argv[1:]) if argv else ""
+    if not argv:
+        return ""
+    args = argv[1:]
+    end = args.index("--") if "--" in args else len(args)
+    added = list(BRIDGE_ADDED) if BRIDGE_ADDED[0] in args[:end] else []
+    own = record.get("task", {}).get("id", "")
+    if own:
+        added.append("--task:id=" + own)
+    kept = []
+    skip = False
+    for i, arg in enumerate(args[:end]):
+        if skip:
+            skip = False
+        elif own and arg == "--task:id" and i + 1 < end and args[i + 1] == own:
+            skip = True
+        elif arg not in added:
+            kept.append(arg)
+    args = kept + args[end:]
+    return " ".join(["aspect"] + args)
 
 def task_name(record) -> str:
     """`<group> <kind>`, as typed."""

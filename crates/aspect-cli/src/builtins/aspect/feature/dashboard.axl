@@ -2902,6 +2902,8 @@ def phase_status(state: dict, bar = False) -> list:
     ended."""
     if state.get("past") != None:
         return [state["phase"]]
+    if state.get("stopped") and state["ended"]:
+        return ["stopped by you"]
     if state.get("building"):
         if bar:
             return bazel_status(state)
@@ -3374,21 +3376,25 @@ def built(state: dict) -> bool:
 def _ended_mark(state: dict) -> str:
     """The header's mark for a task that ended: ✔ or ✗ by its verdict; a
     past run's by its record, ■ for one stopped short (cancelled, abandoned,
-    still running when it was recorded)."""
+    still running when it was recorded); ■ for a run started again here
+    that the user stopped."""
     past = state.get("past")
     if past != None and outcome(past) in ("cancelled", "abandoned", "running"):
+        return "■"
+    if state.get("stopped"):
         return "■"
     return "✔" if state.get("verdict", True) else "✗"
 
 def _header(state: dict, cols: int, bar: bool) -> str:
     """The header: the task, how long it has run, and at its right end the
     first of `phase_status` that fits whole (`bar` whether the bar is
-    drawn, which then has the count). A past run's (`past_header`) in the
+    drawn, which then has the count); a run started again here says
+    `re-run of <id>`. A past run's (`past_header`) in the
     history's colours (`_history_bar`), the mode first so it never passes
     for the live one, and the live build's state on the right, in words."""
     if state.get("past") != None:
         b = state.get("browser") or {}
-        shown = "" if b.get("standalone") else _live_words(state)
+        shown = "" if b.get("standalone") and state.get("child") == None else _live_words(state)
         title = past_header(state, cols - (text_width(shown) + 2 if shown else 0))
         title = fit(title, min(text_width(title), cols)).rstrip(" ")
         if text_width(title) < cols:
@@ -3398,7 +3404,8 @@ def _header(state: dict, cols: int, bar: bool) -> str:
         return _history_bar() + title + " " * max(0, room - text_width(right)) + right + _RESET
     spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else _ended_mark(state)
     took = elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"]))
-    title = " %s aspect %s · %s " % (spin, state["task"], took)
+    again = (" · re-run of " + state["rerun_of"]) if state.get("rerun_of") else ""
+    title = " %s aspect %s%s · %s " % (spin, state["task"], again, took)
 
     # The task and how long it has run whole; the status in what is left,
     # shortened first.
@@ -4764,9 +4771,15 @@ def keys_row(state: dict, cols: int) -> str:
     finishing after its build, when no key is read; the live build being
     cancelled while a past run is shown), else the keys for what has focus,
     the likeliest first, as many as fit before `? keys`."""
-    if state["ended"] and state["cancelling"]:
+    if state["ended"] and state["cancelling"] and state.get("child") == None:
         return fit(" Cancelled", cols)
+    if state.get("confirm") != None:
+        return confirm_row(state, cols)
     live = state.get("live")
+    if child_running(state) and _live_of(state)["cancelling"]:
+        # A run started again here, being stopped: how to stop it harder.
+        asked = state["child"]["asked"]
+        return fit(" killing…" if asked >= 3 else " stopping… · q again: stop harder · q a third time: kill", cols)
     if state["cancelling"] or (live != None and live["cancelling"] and not live["ended"]):
         return fit(" cancelling… (Ctrl+C again to stop now)", cols)
     if not state["ended"] and state["phase"] == _FINISHING:
@@ -4779,10 +4792,12 @@ def keys_row(state: dict, cols: int) -> str:
         return fit(" " + _ctrl_c_note(state), cols)
     if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
         return fit(" " + state["note"], cols)
-    if state.get("past") != None:
-        # A past run's only way on is back to the list.
+    if state.get("past") != None or (state.get("child") != None and state["ended"]):
+        # A past run's only way on is back to the list, or, on `aspect
+        # history browse`'s own screen, to run it again.
         back = ["Esc back"] if state["view"] != None or state.get("tab", "console") != "console" else []
-        return fit(" " + " · ".join(back + ["q history", "? keys"]), cols)
+        again = ["r run again", "R in the terminal"] if _again(state) and not back else []
+        return fit(" " + " · ".join(back + ["q history"] + again + ["? keys"]), cols)
     leave = "history" if state.get("past") != None else "leave"
     if state.get("tab") in ("metrics", "invocation"):
         return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + (leave if state["ended"] else "cancel") + " · ? keys", cols)
@@ -4811,8 +4826,16 @@ def on_key(state: dict, key: str, page: int) -> bool:
     takes the key and applies now; a toggle's entry (`said`) has the keys
     row say, for `_SAID_MS`, the state it left and how to undo it. Any key
     clears what the last one said (`note`). The History screen takes only
-    its own keys."""
+    its own keys. Asked whether to run a run again (`confirm`), Enter runs
+    it and any other key or click cancels, before it could move the choice
+    the question names; the pointer only moving leaves it asked."""
 
+    if state.get("confirm") != None and not key.startswith("mouse-move"):
+        pending = state.pop("confirm")
+        say_note(state, "")
+        if key == "enter":
+            state["request"] = pending
+        return False
     if mouse_key(state, key):
         return False
     say_note(state, "")
@@ -4925,6 +4948,7 @@ def new_ui(mouse = True) -> dict:
 # is the shown run's.
 _UI_KEYS = {k: True for k in list(new_ui().keys()) + [
     "drawn",
+    "home",
     "ticking",
     "io",
     "fs",
@@ -4954,6 +4978,9 @@ _UI_KEYS = {k: True for k in list(new_ui().keys()) + [
     "holding",
     "ctrl_c_ms",
     "history_said",
+    "child",
+    "request",
+    "confirm",
     "leave_on_return",
 ]}
 
@@ -5030,7 +5057,7 @@ def new_browser(history, exclude = "", standalone = False, workspace = "") -> di
         "now_ms": 0,
     }
 
-def _fresh_view(state: dict):
+def fresh_view(state: dict):
     """The UI as a newly shown run starts: its console, following it,
     nothing open; the filter, zoom, wrap and the mouse kept."""
     state.update(
@@ -5080,7 +5107,11 @@ def history_records(state: dict) -> list:
             builds = b["filter"] != "all runs",
             workspace = b["workspace"] if b["here"] and b["workspace"] else None,
         )
-        b["records"] = [r for r in listed if r.get("task", {}).get("id") != b["exclude"]][:_HISTORY_LIMIT]
+
+        # Not the live run, which has a row of its own, nor a run started
+        # again here while it is pinned.
+        pinned = state["child"].get("task_id") if state.get("child") != None else None
+        b["records"] = [r for r in listed if r.get("task", {}).get("id") not in (b["exclude"], pinned)][:_HISTORY_LIMIT]
         ids = [row_id(r) for r in history_rows(state)]
         b["selected"] = ids.index(b["chosen"]) if b["chosen"] in ids else min(b["selected"], max(0, len(ids) - 1))
     rows = history_rows(state)
@@ -5088,10 +5119,42 @@ def history_records(state: dict) -> list:
     return b["records"]
 
 def history_rows(state: dict) -> list:
-    """The History screen's rows: the live build first (None) when there is
-    one to go back to, then the runs listed."""
+    """The History screen's rows: the live run first (None) when there is
+    one to go back to (the task's build, or a run `r` started), then the
+    runs listed."""
     b = state["browser"]
-    return ([None] if not b["standalone"] else []) + (b["records"] or [])
+    return ([None] if not b["standalone"] or state.get("child") != None else []) + (b["records"] or [])
+
+def child_running(state: dict) -> bool:
+    """Whether a run the History screen started again (`r`, a child
+    `aspect-cli`; `private/lib/history_child.axl`) is going."""
+    child = state.get("child")
+    return child != None and not child["done"]
+
+def interrupt_child(state: dict):
+    """Ask the running child to stop: SIGINT to its group, which the child
+    aspect-cli counts as reaching its Bazel, as a terminal's Ctrl+C, by
+    `ASPECT_GROUP_SIGNALLER`; again harder (SIGTERM) when it was asked
+    already, then SIGKILL, so there is always a way out of a child that
+    ignores both. Its run reads as cancelling."""
+    child = state.get("child")
+    if child == None or child["done"]:
+        return
+    asked = child["asked"]
+    if asked == 0:
+        child["proc"].interrupt()
+    elif asked == 1:
+        child["proc"].terminate()
+    else:
+        child["proc"].kill()
+    child["asked"] = asked + 1
+    _live_of(state)["cancelling"] = True
+
+def _again(state) -> bool:
+    """Whether `r` and `R` run something again here: on `aspect history
+    browse`'s own screen (`standalone`), a run shown that has ended."""
+    b = state.get("browser")
+    return b != None and b["standalone"]
 
 def row_id(row) -> str:
     return "live" if row == None else row.get("task", {}).get("id", "")
@@ -5136,7 +5199,9 @@ def history_key(state: dict, key: str, page: int):
     (Esc, `q`, `h`), or None, having moved the choice (↑↓, `k`/`j`, the
     wheel, half a `page` with `u`/`d` and Shift+↑↓, a page with `b`/Space,
     `K`/`J`, Home and End to the newest and oldest), the filter (`f`: builds,
-    failed builds, all runs) or the workspace (`w`: this one, or all)."""
+    failed builds, all runs) or the workspace (`w`: this one, or all);
+    standalone, `run` and `run_in_terminal` (`r` and `R` on a run: its
+    command again, on this screen or with the terminal its own)."""
     b = state["browser"]
     history_records(state)
     n = len(history_rows(state))
@@ -5176,12 +5241,14 @@ def history_key(state: dict, key: str, page: int):
         b["records"] = None
     elif key == "enter" and n:
         return "open"
+    elif key in ("r", "R") and b["standalone"] and n and history_rows(state)[b["selected"]] != None:
+        return "run" if key == "r" else "run_in_terminal"
     elif key in ("esc", "q", "h"):
         return "close"
     return None
 
 # The keys the History screen reads (`history_key`, `m` and `?`).
-_HISTORY_KEYS = ["up", "k", "wheel-up", "down", "j", "wheel-down", "u", "shift-up", "ctrl-u", "d", "shift-down", "ctrl-d", "b", " ", "pageup", "pagedown", "K", "home", "J", "end", "f", "w", "enter", "esc", "q", "h", "m", "?"]
+_HISTORY_KEYS = ["up", "k", "wheel-up", "down", "j", "wheel-down", "u", "shift-up", "ctrl-u", "d", "shift-down", "ctrl-d", "b", " ", "pageup", "pagedown", "K", "home", "J", "end", "f", "w", "enter", "esc", "q", "h", "m", "?", "r", "R"]
 
 def _ctrl_c_note(state) -> str:
     """While a first Ctrl+C on a browsing screen waits for a second, what
@@ -5189,20 +5256,28 @@ def _ctrl_c_note(state) -> str:
     at = state.get("ctrl_c_ms")
     if at == None or int(monotonic() * 1000) - at > _CTRL_C_MS:
         return ""
+    if state["browser"]["standalone"]:
+        child = state.get("child")
+        what = (" " + _command_text(child["record"])) if child != None else " run"
+        return "Ctrl+C again stops the running%s · Esc back to it" % what
     if _live_of(state)["cancelling"]:
         return "cancelling the live build · Ctrl+C again forces it"
     return "Ctrl+C again cancels the live build · Esc back to it"
 
 def _history_row(state) -> list:
-    """The History screen's keys row's labels: the filter and workspace as
-    they are now; with no runs at all, only how to leave."""
+    """The History screen's keys row's labels: the filter as it is now (`w`
+    and the arrows are the overlay's); with no runs at all, only how to
+    leave."""
     b = state["browser"]
-    leave = "q/Esc quit" if b["standalone"] else "Esc live build"
+    if b["standalone"] and state.get("child") == None:
+        leave = "q/Esc quit"
+    else:
+        leave = "Esc live build" if not b["standalone"] else "Esc live run"
     if not b["records"] and not (b["census"] or {}).get("runs"):
-        return ["q quit"] if b["standalone"] else [leave]
-    parts = ["↑↓ choose", "Enter open", "f filter: " + b["filter"]]
-    if b["workspace"]:
-        parts.append("w: " + ("this workspace" if b["here"] else "all workspaces"))
+        return ["q quit"] if b["standalone"] and state.get("child") == None else [leave]
+    parts = ["Enter open", "f filter: " + b["filter"]]
+    if b["standalone"]:
+        parts += ["r again", "R in terminal"]
     return parts + [leave, "? keys"]
 
 def _history_page(rows: int) -> int:
@@ -5210,25 +5285,26 @@ def _history_page(rows: int) -> int:
     return max(1, rows - 4)
 
 def _count_text(state: dict) -> str:
-    """The History screen's count: how many runs it lists of how many the
-    history keeps (`500 newest builds of 7,702 runs`)."""
+    """The History screen's count, in the scope its title names: `500 newest
+    builds (this workspace)`, `14 failed builds of 7,702 runs (all
+    workspaces)`, `11 runs (all workspaces)`."""
     b = state["browser"]
     n = len(b["records"] or [])
+    noun = {"builds": "build", "failed builds": "failed build", "all runs": "run"}[b["filter"]]
+    if n >= _HISTORY_LIMIT:
+        counted = "%s newest %ss" % (_thousands(n), noun)
+    else:
+        counted = "%s %s%s" % (_thousands(n), noun, "" if n == 1 else "s")
+    if b["here"] and b["workspace"]:
+        return counted + " (this workspace)"
 
-    # The runs the list could show: not the live one, which has a row of its
-    # own.
+    # Every workspace's: of how many the history keeps, but the live run,
+    # which has a row of its own.
     total = (b["census"] or {}).get("runs", n) - (1 if b.get("live_record") != None else 0)
     total = max(total, n)
-    noun = {"builds": "build", "failed builds": "failed build", "all runs": "run"}[b["filter"]]
-    of = "of %s run%s" % (_thousands(total), "" if total == 1 else "s")
-    if b["here"] and b["workspace"]:
-        # The total is every workspace's, the list this one's.
-        of += " in all workspaces"
-    if n >= _HISTORY_LIMIT:
-        return "%s newest %ss %s" % (_thousands(n), noun, of)
-    if b["filter"] == "all runs" and n == total and not (b["here"] and b["workspace"]):
-        return "%s run%s" % (_thousands(n), "" if n == 1 else "s")
-    return "%s %s%s %s" % (_thousands(n), noun, "" if n == 1 else "s", of)
+    if b["filter"] == "all runs" and n == total:
+        return counted + " (all workspaces)"
+    return "%s of %s run%s (all workspaces)" % (counted, _thousands(total), "" if total == 1 else "s")
 
 def _live_state(state: dict):
     """How the live build is doing: `(state, detail)`, `running` with its
@@ -5313,9 +5389,12 @@ def ago(stamp: str, now: int) -> str:
         return "%s %d %s" % (_MONTHS[m - 1], d, clock)
     return "%d-%s%d-%s%d" % (y, "0" if m < 10 else "", m, "0" if d < 10 else "", d)
 
-def _status_text(record: dict):
+def _status_text(record: dict, stopped = False):
     """A run's status column and its role: `✔ ok`, `✗ exit 1`, `✗ error`,
-    `■ cancelled`, `◌ running`."""
+    `■ cancelled`, `◌ running`; `■ stopped by you` for one the user stopped
+    on this screen (`stopped`)."""
+    if stopped:
+        return "■ stopped by you", "warning"
     ended = outcome(record)
     if ended == "ok":
         return "✔ ok", "success"
@@ -5329,13 +5408,14 @@ def _command_text(record: dict) -> str:
     """A run's command line without the program, as typed after `aspect`."""
     return command(record).removeprefix("aspect ").removeprefix("aspect")
 
-def _run_row(record: dict, width: int, now: int, chosen: bool):
-    """A run's row as drawn, `width` wide: its status, when it
-    started, how long it took and its command, its ID dimmed at the right
-    end, which goes first when the row is narrow."""
-    status, role = _status_text(record)
+def _run_row(record: dict, width: int, now: int, chosen: bool, stopped = False, status_w = 11):
+    """A run's row as drawn, `width` wide: its status (`status_w` wide;
+    `stopped` one the user stopped here), when it started, how long it took
+    and its command, its ID dimmed at the right end, which goes first when
+    the row is narrow."""
+    status, role = _status_text(record, stopped)
     started = ago(record.get("started", ""), now)
-    head = fit(status, 11) + " " + fit(started, 16) + " " + fit(took(record), 7) + " "
+    head = fit(status, status_w) + " " + fit(started, 16) + " " + fit(took(record), 7) + " "
     id = record.get("task", {}).get("id", "")[:8]
     room = width - text_width(head)
     keep_id = room >= 30
@@ -5343,17 +5423,28 @@ def _run_row(record: dict, width: int, now: int, chosen: bool):
     plain = head + cmd + (fit("  " + id, 10) if keep_id else "")
     if chosen:
         return _c("active") + plain + _RESET
-    return _c(role) + fit(status, 11) + _RESET + head[len(fit(status, 11)):] + cmd + (_c("muted") + fit("  " + id, 10) + _RESET if keep_id else "")
+    return _c(role) + fit(status, status_w) + _RESET + head[len(fit(status, status_w)):] + cmd + (_c("muted") + fit("  " + id, 10) + _RESET if keep_id else "")
 
 def _live_row(state: dict, width: int, chosen: bool):
     """The live build's row as drawn, `width` wide, first in the list: `●
-    now running <command> (live)`, or once it ended how it went; Enter goes
+    now running <command> (live)`, or once it ended how it went (a run
+    started again here, `● ✔ ok · this session · <command>`); Enter goes
     back to it."""
     b = state["browser"]
-    rec = b.get("live_record")
+    rec = state["child"]["record"] if state.get("child") != None else b.get("live_record")
     cmd = _command_text(rec) if rec != None else _live_of(state).get("task", "")
     how, detail = _live_state(state)
-    if how == "done":
+    if how == "done" and state.get("child") != None:
+        # A run started again here that ended: how, first, and no "live".
+        live = _live_of(state)
+        if live.get("stopped"):
+            ended = "■ stopped by you"
+        elif live.get("verdict", True):
+            ended = "✔ ok"
+        else:
+            ended = "✗ " + live["phase"].lower()
+        text = "● %s · this session · %s" % (ended, cmd)
+    elif how == "done":
         text = "● %s (live, %s done)" % (cmd, detail)
     else:
         text = "● now running %s (live)" % cmd
@@ -5387,10 +5478,14 @@ def render_history(state: dict, cols: int, rows: int) -> str:
     title = "Runs · " + b["filter"] + (" · this workspace" if b["here"] and b["workspace"] else "")
     if b["reading"]:
         title += " · reading " + b["reading"] + "…"
+    if b.get("note"):
+        title += " · " + b["note"]
     out.append(_box_top("Keys" if state.get("help") else title, cols))
     census = b["census"] or {}
     w = cols - 4
     body = []
+    stopped = b.get("stopped", {})
+    status_w = 17 if [r for r in rows_shown if r != None and row_id(r) in stopped] else 11
     if state.get("help"):
         body = [fit(l, w) for l in _history_help(state, cols, height)]
     elif not records and not census.get("runs"):
@@ -5405,7 +5500,7 @@ def render_history(state: dict, cols: int, rows: int) -> str:
                 break
             row = rows_shown[at]
             chosen = at == b["selected"]
-            body.append(_live_row(state, w, chosen) if row == None else _run_row(row, w, b["now_ms"], chosen))
+            body.append(_live_row(state, w, chosen) if row == None else _run_row(row, w, b["now_ms"], chosen, row_id(row) in stopped, status_w))
         if not records:
             where = " in this workspace" if b["here"] and b["workspace"] else ""
             body.append(_c("muted") + fit("No %s%s." % (b["filter"].replace("all runs", "runs"), where), w) + _RESET)
@@ -5433,11 +5528,13 @@ def render_history(state: dict, cols: int, rows: int) -> str:
     note = _ctrl_c_note(state) or _history_said(state)
     if state.get("help"):
         keys = " ↑↓ scroll · any other key closes"
+    elif state.get("confirm") != None:
+        keys = None
     elif note:
         keys = " " + note
     else:
         keys = " " + " · ".join(_history_row(state))
-    out.append(_c("muted") + fit(keys, cols) + _RESET)
+    out.append(confirm_row(state, cols) if keys == None else _c("muted") + fit(keys, cols) + _RESET)
 
     # Nothing of the run's screen to click on here.
     state["tab_row"] = None
@@ -5464,6 +5561,7 @@ def use_context(state: dict, ctx):
         ansi = std.re.compile(ANSI),
         controls = std.re.compile(CONTROLS),
         env = std.env,
+        home = std.env.home_dir() or "",
         process = std.process,
         io = std.io,
         fs = std.fs,
@@ -5490,10 +5588,14 @@ def _show_past(state: dict, record: dict):
         state["drawn"] = None
     run = past_run(state, record)
     b["reading"] = ""
-    if state.get("live") == None and state.get("past") == None:
+
+    # The live run kept aside: the task's build, or a run started again
+    # here; standalone with none, nothing to go back to.
+    live = not b["standalone"] or state.get("child") != None
+    if live and state.get("live") == None and state.get("past") == None:
         state["live"] = run_of(state)
     show_run(state, run)
-    _fresh_view(state)
+    fresh_view(state)
     state["mode"] = "run"
     _browsing_interrupts(state)
 
@@ -5502,7 +5604,7 @@ def _show_live(state: dict):
     if state.get("live") != None:
         show_run(state, state["live"])
         state["live"] = None
-        _fresh_view(state)
+        fresh_view(state)
     state["mode"] = "run"
     state["ctrl_c_ms"] = None
     _browsing_interrupts(state)
@@ -5535,17 +5637,104 @@ def _k_history(state, key, page):
     if key in ("f", "w") and (key == "f" or state["browser"]["workspace"]):
         state["history_said"] = (_HISTORY_SAID[key](state), int(monotonic() * 1000) + _SAID_MS)
     b = state["browser"]
+    b["note"] = ""
     if what == "open":
         row = history_rows(state)[b["selected"]]
         if row == None:
             _show_live(state)
         else:
             _show_past(state, row)
+    elif what in ("run", "run_in_terminal"):
+        _ask_again(state, what, history_rows(state)[b["selected"]])
     elif what == "close":
-        if b["standalone"]:
+        if b["standalone"] and state.get("live") == None and not child_running(state):
             return True
         _show_live(state)
     return False
+
+def _k_again(state, key, page):
+    shown = state.get("past") or state["child"]["record"]
+    _ask_again(state, "run" if key == "r" else "run_in_terminal", shown)
+    return False
+
+# What `r` says while a run started again here is going.
+ONE_AT_A_TIME = "One run at a time · Esc to it, then q stops it"
+
+def _ask_again(state: dict, what: str, record: dict):
+    """`r` or `R` on `record`: asked first (`confirm`, which Enter carries
+    out as a `request` that `aspect history browse` runs), or, while a run
+    started again here is going, said that only one runs at a time."""
+    if child_running(state):
+        state["browser"]["note"] = ONE_AT_A_TIME
+        say_note(state, ONE_AT_A_TIME)
+        state["history_said"] = (ONE_AT_A_TIME, int(monotonic() * 1000) + _SAID_MS)
+        return
+    state["confirm"] = (what, record)
+
+def confirm_row(state: dict, cols: int) -> str:
+    """The keys row asking whether to run a run again (`confirm`): `Run
+    again here? <command> · Enter runs · Esc cancels` for this workspace,
+    else `Run again in <dir>? …`, the directory in the accent, the home
+    folder as `~`; `(secrets kept)` when the command shown is redacted, as
+    it runs as typed. In `cols` cells the keys are kept, and the command
+    as far as it can be: the directory is cut in its middle to make room,
+    down to a quarter of what is left, and only past that the command's
+    end; narrower than the keys and the question, the question goes first.
+    "" with nothing to ask."""
+    pending = state.get("confirm")
+    if pending == None:
+        return ""
+    what, record = pending
+    cwd = record.get("cwd", "")
+    here = cwd == (state.get("browser") or {}).get("workspace")
+    cmd = printable(command(record), keep = "\t").replace("\t", "  ")
+    secret = bool(record.get("secret_flags")) or "<REDACTED>" in cmd
+    head = " Run again" + (" in the terminal" if what == "run_in_terminal" else "")
+    keys = (" (secrets kept)" if secret else "") + " · Enter runs · Esc cancels"
+    if here:
+        room = cols - text_width(head + " here? " + keys)
+        if room <= 0:
+            return _narrow_confirm(head + " here?", keys, cols)
+        return _c("muted") + head + " here? " + _end_cut(cmd, room) + keys + _RESET
+    home = (state.get("home") or "").rstrip("/")
+    shown = printable(cwd, keep = "")
+    if home and (shown == home or shown.startswith(home + "/")):
+        shown = "~" + shown[len(home):]
+    room = cols - text_width(head + " in ? " + keys)
+    if room <= 0:
+        return _narrow_confirm(head + "?", keys, cols)
+    path = _path_cut(shown, max(room - text_width(cmd), min(text_width(shown), room // 4)))
+    cmd_room = room - text_width(path)
+    row = (_c("muted") + head + " in " + _RESET + _c("accent") + path + _RESET +
+           _c("muted") + "? " + _end_cut(cmd, cmd_room) + keys + _RESET)
+    return row
+
+def _narrow_confirm(ask: str, keys: str, cols: int) -> str:
+    """The confirm row with no room for the command: `ask` and the `keys`,
+    else less of the question, else the keys alone, so they show last."""
+    for text in (ask + keys, " Run again?" + keys, " Run again?" + keys.removeprefix(" (secrets kept)"), " Enter runs · Esc cancels"):
+        if text_width(text) <= cols:
+            return _c("muted") + text + _RESET
+    return fit(" Enter runs · Esc cancels", cols)
+
+def _path_cut(path: str, width: int) -> str:
+    """`path` in `width` cells: cut in its middle, or narrower than that
+    shows, its end after `…` (after `~/…` for one under the home folder),
+    the folder's own name."""
+    if text_width(path) <= width:
+        return path
+    if width >= 8:
+        return _middle(path, width)
+    lead = "~/…" if path.startswith("~/") and width >= 4 else "…"
+    return lead + _tail(path, width - len(lead))
+
+def _end_cut(text: str, width: int) -> str:
+    """`text` in `width` cells, its end cut (`…`) when longer."""
+    if width <= 0:
+        return ""
+    if text_width(text) <= width:
+        return text
+    return _cell_slice(text, 0, width - 1) + "…"
 
 def _k_open_history(state, key, page):
     open_history(state)
@@ -5556,10 +5745,23 @@ def _k_ctrl_c(state, key, page):
     second does, and a second within `_CTRL_C_MS` interrupts the live build
     as a Ctrl+C on its own screen would (`screen.interrupt()`) and shows it;
     while it is already cancelling, that second one is the repeat that
-    forces it to stop, and shows it too. Once the live task has ended, it goes back to the
-    live screen, where Ctrl+C leaves."""
+    forces it to stop, and shows it too. Once the live task has ended, it
+    goes back to the live screen, where Ctrl+C leaves. Standalone (`aspect
+    history browse`), it leaves, but while a run started again there is
+    going: then it stops that (`interrupt_child`, harder each time), shown,
+    the first press out of sight only warning."""
     if state["browser"]["standalone"]:
-        return True
+        # No live build: Ctrl+C leaves, but for a run started again here,
+        # which it stops, warning first while it is out of sight.
+        if not child_running(state):
+            return True
+        if _browsing(state) and not _ctrl_c_note(state):
+            state["ctrl_c_ms"] = int(monotonic() * 1000)
+            return False
+        state["ctrl_c_ms"] = None
+        _show_live(state)
+        interrupt_child(state)
+        return False
     live = _live_of(state)
     if live["ended"] or state.get("holding"):
         _show_live(state)
@@ -5963,11 +6165,12 @@ def _k_esc(state, key, page):
     return False
 
 def _leave(state):
-    """Whether a leave key leaves the finished screen: from a past run, it
-    goes back to the History list instead."""
+    """Whether a leave key leaves the finished screen: from a past run, or a
+    run the History screen started again, it goes back to the list
+    instead."""
     if not state["ended"]:
         return False
-    if state.get("past") != None:
+    if state.get("past") != None or state.get("child") != None:
         open_history(state, back = True)
         return False
     return True
@@ -6158,7 +6361,11 @@ def _k_leave(state, key, page):
         return False
     if state["ended"]:
         return _leave(state)
-    if key == "q" and not state["cancelling"]:
+    if key == "q" and child_running(state):
+        # A run the History screen started: the child stopped, harder each
+        # time.
+        interrupt_child(state)
+    elif key == "q" and not state["cancelling"]:
         # The run's root token, cancelled once: Bazel gets its own interrupt
         # sequence from it, as for Ctrl+C. A SIGINT to the process group
         # would reach the Bazel client directly too, and count twice.
@@ -6219,14 +6426,17 @@ def _documented(keys, text, group, shown = _always):
 
 KEYS = [
     _key(["ctrl-l"], _always, _k_redraw, help = ("^L", "redraw the screen"), group = "Screen", early = True),
-    _key(["ctrl-c"], lambda s: s.get("browser") != None and _browsing(s), _k_ctrl_c, early = True),
+    _key(["ctrl-c"], lambda s: s.get("browser") != None and (_browsing(s) or child_running(s) or s["browser"]["standalone"]), _k_ctrl_c, early = True),
+    _key(["r", "R"], lambda s: _again(s) and not _history_open(s) and s["ended"] and s["focus"] == "console" and (s.get("past") != None or s.get("child") != None), _k_again, help = ("r  R", "run it again: on this screen, or with the terminal its own"), group = "Leave"),
     _key(_HISTORY_KEYS, lambda s: _history_open(s) and not s.get("help"), _k_history, early = True),
     _documented("↑ ↓  Enter", "choose a run; open it, the live build's row back to it", "History", shown = _history_open),
     _documented("f", "filter: builds, failed builds, all runs", "History", shown = _history_open),
     _documented("w", "this workspace's runs, or every workspace's", "History", shown = lambda s: _history_open(s) and bool(s["browser"]["workspace"])),
-    _documented("q  Esc", "back to the live build (standalone, quit)", "History", shown = _history_open),
+    _documented("q  Esc", "back to the live build", "History", shown = lambda s: _history_open(s) and not s["browser"]["standalone"]),
+    _documented("q  Esc", "back to the run on screen; with none, quit", "History", shown = lambda s: _history_open(s) and s["browser"]["standalone"]),
     _documented("^C", "twice: cancel the live build", "History", shown = lambda s: _history_open(s) and not s["browser"]["standalone"]),
     _documented("m", "the mouse to the terminal and back", "History", shown = _history_open),
+    _documented("r  R", "run it again: on this screen, shown live, or with the terminal its own", "History", shown = lambda s: _history_open(s) and _again(s)),
     _key(["1", "2", "3", "4", "5"], _bar_closed, _k_tab_number, help = ("1-5", "a tab: console, failures, metrics, invocation, tips"), group = "Screen"),
     _key(["tab", "shift-tab"], _bar_closed, _k_tab_cycle, help = ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation, tips (or click one)"), group = "Screen"),
     _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen", said = lambda s: ("build panes open · p folds them" if panes_shown(s) else "build panes folded · p opens them") if built(s) else "no build panes yet: p opens them once a build runs"),

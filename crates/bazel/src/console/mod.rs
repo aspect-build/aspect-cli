@@ -326,7 +326,9 @@ pub struct Config {
     /// How report lines are set apart from bazel's.
     pub style: Style,
     /// Capture through a pseudo-terminal rather than a pipe: for a terminal
-    /// destination that keeps the curses UI, whose size Bazel then follows.
+    /// destination that keeps the curses UI, whose size Bazel then follows,
+    /// and for a hidden console, whose running actions Bazel lists only on
+    /// a terminal.
     pub pty: bool,
     /// What is forwarded; see [`Output`].
     pub output: Output,
