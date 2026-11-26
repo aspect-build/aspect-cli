@@ -256,7 +256,9 @@ pub fn descendants(pid: u32) -> Vec<u32> {
 }
 
 /// What process `pid` and its descendants are doing, for a test that gave
-/// up on one (see [`watch_for_hangs`]); Linux only, empty elsewhere.
+/// up on one: on Linux as [`watch_for_hangs`] has it; elsewhere their `ps`
+/// rows (state, CPU time, elapsed), and `pid`'s stacks from `sample` over a
+/// second where it can attach (macOS), cut off after 10s.
 #[allow(dead_code)]
 pub fn describe(pid: u32) -> String {
     #[cfg(target_os = "linux")]
@@ -265,8 +267,32 @@ pub fn describe(pid: u32) -> String {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = pid;
-        String::new()
+        let mut pids = vec![pid];
+        pids.extend(descendants(pid));
+        let list = pids
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "pid,ppid,stat,%cpu,time,etime,command", "-p", &list])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let (done, stacks) = std::sync::mpsc::channel();
+        let p = pid.to_string();
+        std::thread::spawn(move || {
+            let out = std::process::Command::new("sample")
+                .args([p.as_str(), "1"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let _ = done.send(out);
+        });
+        let sampled = stacks
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_default();
+        format!("ps:\n{ps}\nsample:\n{sampled}")
     }
 }
 

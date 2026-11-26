@@ -17,17 +17,24 @@
 
 mod common;
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use common::{aspect_cli, base_env, basil_bin};
+use common::{aspect_cli, base_env, basil_bin, describe};
+
+/// How long a fixture may take to say it is ready: past a minute under a
+/// whole-repo `bazel test` on a laptop, where every CLI of a binary stalled
+/// at once and then went on.
+const READY_WITHIN: Duration = Duration::from_secs(180);
 
 /// A fixture task running in a scratch workspace.
 struct Run {
     _dir: tempfile::TempDir,
     child: Child,
-    stderr: BufReader<std::process::ChildStderr>,
+    /// Stderr's lines, read on a thread, so a wait for one has a deadline.
+    stderr: Receiver<String>,
     /// What the task printed before the signal, including the `ready` line.
     seen: String,
 }
@@ -84,20 +91,39 @@ impl Run {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn aspect-cli");
-        let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
-        let mut seen = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let mut line = String::new();
-            let n = stderr.read_line(&mut line).expect("reading stderr");
-            seen.push_str(&line);
-            if n == 0 || line.contains("ready") {
-                break;
+        let mut pipe = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let (lines, stderr) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                let mut line = String::new();
+                match pipe.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if lines.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
             }
-            assert!(
-                Instant::now() < deadline,
-                "the fixture never became ready:\n{seen}"
-            );
+        });
+        let mut seen = String::new();
+        let started = Instant::now();
+        loop {
+            let left = READY_WITHIN.saturating_sub(started.elapsed());
+            match stderr.recv_timeout(left) {
+                Ok(line) => {
+                    seen.push_str(&line);
+                    if line.contains("ready") {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    let doing = describe(child.id());
+                    let _ = child.kill();
+                    panic!("the fixture never became ready in {READY_WITHIN:?}:\n{seen}\n{doing}");
+                }
+            }
         }
         assert!(seen.contains("ready"), "the fixture exited early:\n{seen}");
         Self {
@@ -126,10 +152,7 @@ impl Run {
 
     /// Read the rest of stderr and reap the CLI.
     fn finish(mut self) -> (ExitStatus, String) {
-        let mut rest = String::new();
-        self.stderr
-            .read_to_string(&mut rest)
-            .expect("draining stderr");
+        let rest: String = self.stderr.iter().collect();
         let status = self.child.wait().expect("waiting for aspect-cli");
         (status, format!("{}{rest}", self.seen))
     }
