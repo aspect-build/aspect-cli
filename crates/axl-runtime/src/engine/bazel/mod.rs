@@ -1764,9 +1764,6 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// rather than parking in it, so the task's body still reaches its next blocking
     /// call and the signal deadline is still effective.
     ///
-    /// `hook = True` marks the handle `bazel/exec_log.axl` feeds
-    /// `exec_log_event` hooks from; a task's own leaves it unset.
-    ///
     /// ```python
     /// entries = bazel.execution_log.iterator(kinds = ["spawn"])
     /// build = ctx.bazel.build("//...", execution_log = [entries])
@@ -1777,34 +1774,55 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     #[starlark(as_type = iter::ExecLogIter)]
     fn iterator<'v>(
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
-            UnpackList<values::Value>,
+            UnpackList<values::Value<'v>>,
         >,
-        #[starlark(require = named, default = false)] hook: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<iter::ExecLogIter> {
-        let kinds = match kinds {
-            NoneOr::None => None,
-            NoneOr::Other(list) => {
-                if list.items.is_empty() {
-                    anyhow::bail!(
-                        "kinds=[] is not valid; omit `kinds` to receive every entry kind"
-                    );
-                }
-                let mut set = std::collections::HashSet::new();
-                for item in &list.items {
-                    set.insert(iter::execlog::parse_entry_kind(*item)?);
-                }
-                Some(set)
-            }
-        };
-        // The run's signals travel with the handle, so blocking iteration over it
-        // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
-        Ok(iter::ExecLogIter::with_hook(
-            Env::from_eval(eval)?.signals.clone(),
-            kinds,
-            hook,
-        ))
+        exec_log_iterator(kinds, false, eval)
     }
+
+    /// `iterator`, marked as the one `bazel/exec_log.axl` feeds
+    /// `exec_log_event` hooks from: beside the caller's own execution log it
+    /// ends with no entries without the warning a task's own iterator gets.
+    /// Private to the builtins.
+    #[starlark(as_type = iter::ExecLogIter)]
+    fn _hook_iterator<'v>(
+        #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
+            UnpackList<values::Value<'v>>,
+        >,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<iter::ExecLogIter> {
+        exec_log_iterator(kinds, true, eval)
+    }
+}
+
+/// An execution-log handle for `kinds` (every kind when None), `hook` if
+/// the `exec_log_event` hooks' (see `ExecLogIter::is_hook`).
+fn exec_log_iterator<'v>(
+    kinds: NoneOr<UnpackList<values::Value<'v>>>,
+    hook: bool,
+    eval: &mut Evaluator<'v, '_, '_>,
+) -> anyhow::Result<iter::ExecLogIter> {
+    let kinds = match kinds {
+        NoneOr::None => None,
+        NoneOr::Other(list) => {
+            if list.items.is_empty() {
+                anyhow::bail!("kinds=[] is not valid; omit `kinds` to receive every entry kind");
+            }
+            let mut set = std::collections::HashSet::new();
+            for item in &list.items {
+                set.insert(iter::execlog::parse_entry_kind(*item)?);
+            }
+            Some(set)
+        }
+    };
+    // The run's signals travel with the handle, so blocking iteration over it
+    // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
+    Ok(iter::ExecLogIter::with_hook(
+        Env::from_eval(eval)?.signals.clone(),
+        kinds,
+        hook,
+    ))
 }
 
 #[starlark_module]

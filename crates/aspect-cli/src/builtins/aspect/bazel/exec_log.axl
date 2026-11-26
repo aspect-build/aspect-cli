@@ -185,7 +185,7 @@ def _open(bazel_trait: BazelTrait) -> struct:
         return struct(sinks = sinks, entries = None, hooks = [], exact = True)
 
     kinds = _union_kinds(hooks)
-    entries = bazel.execution_log.iterator(hook = True) if kinds == None else bazel.execution_log.iterator(kinds = kinds, hook = True)
+    entries = bazel.execution_log._hook_iterator() if kinds == None else bazel.execution_log._hook_iterator(kinds = kinds)
     return struct(
         sinks = sinks + [entries],
         entries = entries,
