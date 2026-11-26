@@ -225,38 +225,51 @@ _FAILURE = struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))
 
 # Real Bazel 9.3.3 runs on a pty, from their BEP (build_events.binpb in the
 # task history): exit, the last `[done / total]` Bazel drew (None: never),
-# and BuildMetrics' action_summary: actions executed and created,
-# runner_count, action cache hits and misses, action_data's executed.
+# BuildMetrics' action_summary (actions executed and created, runner_count,
+# action cache hits and misses), and how many action_completed events said
+# an action other than a test's failed.
 _REAL = {
     # test //t:all, one sh_test failing: "13 processes: 11 internal, 4 darwin-sandbox".
-    "failing test": ("TESTS_FAILED", (13, 13), 13, 17, [("internal", 11), ("darwin-sandbox", 4)], 0, 13, [("SymlinkTree", 2), ("RepoMappingManifest", 2), ("SourceSymlinkManifest", 2), ("TestRunner", 2), ("ExecutableSymlink", 2), ("RunfilesTree", 2), ("BazelWorkspaceStatusAction", 1), ("Genrule", 0)]),
+    "failing test": ("TESTS_FAILED", (13, 13), 13, 17, [("internal", 11), ("darwin-sandbox", 4)], 0, 13, 0),
     # build --keep_going //:all, three genrules failing.
-    "keep_going": ("BUILD_FAILURE", (45, 45), 45, 45, [("internal", 4), ("darwin-sandbox", 41)], 0, 45, [("Genrule", 44), ("BazelWorkspaceStatusAction", 1)]),
-    # build --nokeep_going //:all after it: the rest already built.
-    "nokeep_going incremental": ("BUILD_FAILURE", (45, 45), 4, 0, [("internal", 4)], 0, 4, [("Genrule", 3), ("BazelWorkspaceStatusAction", 1)]),
+    "keep_going": ("BUILD_FAILURE", (45, 45), 45, 45, [("internal", 4), ("darwin-sandbox", 41)], 0, 45, 3),
+    # build --nokeep_going //:all after it: the rest built before, no action cache hit.
+    "nokeep_going incremental": ("BUILD_FAILURE", (45, 45), 4, 0, [("internal", 4)], 0, 4, 2),
     # build --nokeep_going //big:all: the rest of 2,001 cancelled.
-    "nokeep_going cancelled": ("BUILD_FAILURE", (1831, 2001), 4, 2001, [("internal", 4)], 1827, 4, [("Genrule", 3), ("BazelWorkspaceStatusAction", 1)]),
+    "nokeep_going big": ("BUILD_FAILURE", (1831, 2001), 4, 2001, [("internal", 4)], 1827, 4, 3),
     # build //anal:all //:ok1, an analysis failure.
-    "analysis failure": ("BUILD_FAILURE", (3, 3), 1, 1, [("internal", 1)], 0, 1, [("BazelWorkspaceStatusAction", 1), ("SymlinkTree", 0), ("Genrule", 0)]),
+    "analysis failure": ("BUILD_FAILURE", (3, 3), 1, 1, [("internal", 1)], 0, 1, 0),
     # build --keep_going //infos:all, a BUILD file that does not parse.
-    "loading failure, no count": ("BUILD_FAILURE", None, 1, 0, [("internal", 1)], 0, 1, [("BazelWorkspaceStatusAction", 1)]),
+    "loading failure, no count": ("BUILD_FAILURE", None, 1, 0, [("internal", 1)], 0, 1, 0),
     # test --keep_going //t:all //:all, cached but for a test and a disk hit.
-    "tests and genrules, a disk hit": ("BUILD_FAILURE", (52, 52), 5, 50, [("disk cache hit", 1), ("internal", 4), ("darwin-sandbox", 1)], 47, 5, [("Genrule", 3), ("TestRunner", 1), ("BazelWorkspaceStatusAction", 1)]),
+    "tests and genrules, a disk hit": ("BUILD_FAILURE", (52, 52), 5, 50, [("disk cache hit", 1), ("internal", 4), ("darwin-sandbox", 1)], 47, 5, 3),
     # build //infos:all with a new --action_env.
-    "success": ("SUCCESS", (14, 14), 14, 13, [("internal", 1), ("darwin-sandbox", 13)], 0, 14, [("Genrule", 13), ("BazelWorkspaceStatusAction", 1)]),
+    "success": ("SUCCESS", (14, 14), 14, 13, [("internal", 1), ("darwin-sandbox", 13)], 0, 14, 0),
+    # build --keep_going //cc:all, a cc_library failing to compile:
+    # "16 processes: 12 internal, 4 darwin-sandbox" (CppModuleMap among them).
+    "cc failure": ("BUILD_FAILURE", (17, 17), 16, 23, [("internal", 12), ("darwin-sandbox", 4)], 0, 16, 1),
+    # The same after bazel clean, cold: one done past the summary, no cache.
+    "cold cc failure": ("BUILD_FAILURE", (17, 17), 16, 24, [("internal", 12), ("darwin-sandbox", 4)], 0, 16, 1),
+    # build --keep_going //mn:all //:ok4: 25 mnemonics, action_data's top 20 only, one failing.
+    "25 mnemonics": ("BUILD_FAILURE", (53, 53), 53, 52, [("internal", 2), ("darwin-sandbox", 51)], 0, 53, 1),
+    # build --nokeep_going //:bad //:slow and three more: one failed, the slow one cancelled.
+    "nokeep_going cancelled": ("BUILD_FAILURE", (6, 6), 6, 5, [("internal", 3), ("darwin-sandbox", 3)], 0, 6, 1),
 }
+
+def _failed_records(n):
+    """`n` failed actions as the Failures list has them."""
+    return [{"kind": "action", "label": "//x:f%d" % i, "detail": "Genrule", "files": [], "output": "", "success": False} for i in range(n)]
 
 def _real(ctx, name):
     """A finished build's screen state from `_REAL[name]`."""
-    exit, done_total, executed, created, runners, hits, misses, data = _REAL[name]
-    return _screen(ctx, ["x"], building = False, ended = True, done_total = (done_total[0], done_total[1], False) if done_total else None, inv = {
+    exit, done_total, executed, created, runners, hits, misses, failed = _REAL[name]
+    return _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(failed), done_total = (done_total[0], done_total[1], False) if done_total else None, inv = {
         "build_finished": struct(exit_code = struct(name = exit, code = 0 if exit == "SUCCESS" else 1)),
         "build_metrics": struct(action_summary = struct(
             actions_executed = executed,
             actions_created = created,
             runner_count = [struct(name = "total", count = executed)] + [struct(name = n, count = k) for n, k in runners],
             action_cache_statistics = struct(hits = hits, misses = misses),
-            action_data = [struct(mnemonic = m, actions_executed = k) for m, k in data],
         )),
     })
 
@@ -287,33 +300,37 @@ def _actions_tests(ctx):
     _eq("ran clamped too", [action_split(mid)[k] for k in ("ran", "cached", "rest")], [3730, 100, 0])
 
     # Final: BuildMetrics' exact split, as real builds gave it.
-    big = _screen(ctx, ["x"], building = False, ended = True, done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
+    # r30's big3: 2,000 genrules failed (Failures lists each), 611 action
+    # cache hits.
+    big = _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(2000), done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
     _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, cached = 0, unchanged = 2311, internal = 2390, rest = 0, failed = 2000))
 
-    # Real Bazel 9.3.3 builds (`_REAL`): Bazel counts an action whose spawn
-    # failed or was cancelled among the internal ones, so a failed build's
-    # failed are what the internal mnemonics leave of them; a test that
-    # fails is no failed action; what the done count has past the summary
-    # (from an earlier build) is up to date.
+    # Real Bazel 9.3.3 builds (`_REAL`): failed are the actions the event
+    # stream says failed (a test is none: Tests counts it), taken out of
+    # the internal ones Bazel counts them among; what else is there
+    # (cancelled) stays internal; what the done count has past the summary
+    # is unchanged only where the action cache had hits, else internal.
     for name, want in [
         ("failing test", dict(done = 13, total = 13, ran = 2, cached = 0, unchanged = 0, internal = 11, rest = 0, failed = 0)),
         ("keep_going", dict(done = 45, total = 45, ran = 41, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 3)),
-        ("nokeep_going incremental", dict(done = 45, total = 45, ran = 0, cached = 0, unchanged = 41, internal = 1, rest = 0, failed = 3)),
-        ("nokeep_going cancelled", dict(done = 1831, total = 2001, ran = 0, cached = 0, unchanged = 1827, internal = 1, rest = 0, failed = 3)),
-        ("analysis failure", dict(done = 3, total = 3, ran = 0, cached = 0, unchanged = 2, internal = 1, rest = 0, failed = 0)),
+        ("nokeep_going incremental", dict(done = 45, total = 45, ran = 0, cached = 0, unchanged = 0, internal = 43, rest = 0, failed = 2)),
+        ("nokeep_going big", dict(done = 1831, total = 2001, ran = 0, cached = 0, unchanged = 1827, internal = 1, rest = 0, failed = 3)),
+        ("analysis failure", dict(done = 3, total = 3, ran = 0, cached = 0, unchanged = 0, internal = 3, rest = 0, failed = 0)),
         ("loading failure, no count", dict(done = 1, total = 1, ran = 0, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0)),
         ("tests and genrules, a disk hit", dict(done = 52, total = 52, ran = 1, cached = 0, unchanged = 47, internal = 1, rest = 0, failed = 3)),
         ("success", dict(done = 14, total = 14, ran = 13, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0)),
+        ("cc failure", dict(done = 17, total = 17, ran = 4, cached = 0, unchanged = 0, internal = 12, rest = 0, failed = 1)),
+        ("cold cc failure", dict(done = 17, total = 17, ran = 4, cached = 0, unchanged = 0, internal = 12, rest = 0, failed = 1)),
+        ("25 mnemonics", dict(done = 53, total = 53, ran = 51, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 1)),
+        ("nokeep_going cancelled", dict(done = 6, total = 6, ran = 3, cached = 0, unchanged = 0, internal = 2, rest = 0, failed = 1)),
     ]:
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
 
-    # The execution log's failed spawns stand in only without action_data,
-    # and a test's never count.
-    nodata = _real(ctx, "keep_going")
-    nodata["inv"] = dict(nodata["inv"], build_metrics = struct(action_summary = struct(actions_executed = 45, actions_created = 45, runner_count = [struct(name = "total", count = 45), struct(name = "internal", count = 4), struct(name = "darwin-sandbox", count = 41)], action_cache_statistics = struct(hits = 0, misses = 45))))
-    count_spawn(nodata["counts"], struct(cache_hit = False, runner = "darwin-sandbox", exit_code = 1, mnemonic = "Genrule"))
-    count_spawn(nodata["counts"], struct(cache_hit = False, runner = "darwin-sandbox", exit_code = 1, mnemonic = "TestRunner"))
-    _eq("the log's failed spawns, a test's aside", action_split(nodata)["failed"], 1)
+    # Results' ╳ is the Failures list's failed actions, every time.
+    for name in _REAL:
+        st = _real(ctx, name)
+        _eq("╳ is Failures' actions: " + name, action_split(st)["failed"], len([r for r in st["fails"] if r["kind"] == "action"]))
+    _eq("a cold build reuses nothing", reused(action_split(_real(ctx, "cold cc failure"))), 0)
 
     # A failed build with no action failed never draws a full bar.
     for name in ["failing test", "analysis failure", "loading failure, no count"]:
@@ -334,7 +351,7 @@ def _actions_tests(ctx):
     _eq("dynamic: one ran", [_runners(10, [("remote cache hit", 10), ("linux-sandbox", 10)])[k] for k in ("ran", "cached")], [1, 9])
     _eq("retried test attempts beside cache hits", [_runners(10, [("disk cache hit", 3), ("darwin-sandbox", 12)])[k] for k in ("ran", "cached")], [7, 3])
     _eq("an action cache hit runner without the statistics", _runners(9, [("action cache hit", 7), ("linux-sandbox", 9)], stats = False)["unchanged"], 7)
-    kg = _screen(ctx, ["x"], building = False, done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
+    kg = _screen(ctx, ["x"], building = False, fails = _failed_records(1), done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
     _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, cached = 0, unchanged = 5, internal = 4, rest = 0, failed = 1))
     ok = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
     _eq("a real successful one", _split_of(action_split(ok)), dict(done = 2, total = 2, ran = 1, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0))
@@ -407,7 +424,7 @@ def _actions_tests(ctx):
     _eq("nothing at all", action_results(dict(greg, ran = 0, unchanged = 0, internal = 0, failed = 0), 40), [])
     _eq("the glyph alone coloured", action_results(greg, 33)[0].startswith(_role("accent") + "█" + theme.reset + " 5,612 ran"), True)
     _eq("k", [short_count(n) for n in (526, 1999, 48123, 1250000)], ["526", "1.9k", "48k", "1.2M"])
-    greg_screen = dict(cached, done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
+    greg_screen = dict(cached, fails = _failed_records(4), done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
         actions_executed = 5649,
         runner_count = [struct(name = "total", count = 5649), struct(name = "internal", count = 37), struct(name = "linux-sandbox", count = 5612)],
         action_cache_statistics = struct(hits = 2834, misses = 5649),
@@ -429,7 +446,7 @@ def _actions_tests(ctx):
     # Metrics: the done count and what was reused, each kind with what
     # makes it up, the action cache's misses by reason.
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(big)]
-    for want in ["done 9,301 · 47% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 2,311", "░ internal 2,390", "SourceSymlinkManifest 683", "╳ failed or skipped 2,000", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
+    for want in ["done 9,301 · 47% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 2,311", "░ internal 2,390", "SourceSymlinkManifest 683", "╳ failed 2,000", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
         _eq("Metrics has %r" % want, any([l.startswith(want) for l in lines]), True)
     _eq("Genrule is no internal kind", any(["Genrule" in l for l in lines]), False)
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(cached)]
@@ -458,10 +475,10 @@ def _actions_tests(ctx):
 
     # Results on a short terminal: the tests' cache row, the critical path
     # and then the actions' third row go before the failures' row does.
-    short = dict(greg_screen, critical = "Linking //app:bin 4.1s", counts = dict(greg_screen["counts"], test_runs = 15, test_cached = 9, tests_passed = 1400, tests_failed = 100, tests_flaky = 3), fails = [{"kind": "action", "label": "//x:y", "detail": "Genrule", "files": [], "output": "", "success": False}])
+    short = dict(greg_screen, critical = "Linking //app:bin 4.1s", counts = dict(greg_screen["counts"], test_runs = 15, test_cached = 9, tests_passed = 1400, tests_failed = 100, tests_flaky = 3), fails = _failed_records(4))
     for height in [20, 24, 26, 30]:
         rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(short, 80, height)).split("\n") if "││ " in r]
-        _eq("Failed kept at %d rows" % height, any([r.startswith("Failed") or r.startswith("✗1 ") for r in rows]), True)
+        _eq("Failed kept at %d rows" % height, any([r.startswith("Failed") or r.startswith("✗4 ") for r in rows]), True)
         if height == 30:
             _eq("all there at 30 rows", [any([r.strip().startswith(w) for r in rows]) for w in ("9/15 cached", "Crit", "░ 33 internal")], [True, True, True])
 
@@ -1516,6 +1533,9 @@ def _impl(ctx: TaskContext) -> int:
     _eq("no second copy of the errors", ("Bazel's errors:" in shown, len([l for l in shown if "ERROR: //a:b failed" in l])), (False, 1))
     done["fails"] = done["fails"] * 25
     _eq("failures capped", [l for l in report_lines(done, "t-1", False) if l.startswith("  … ")], ["  … 5 more: aspect history show t-1"])
+    stopped = dict(done, inv = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}, cancelling = False)
+    _eq("an interrupted build's counts say so", [l for l in report_lines(stopped, "t-3", False) if " built, " in l][0].startswith("interrupted · "), True)
+    _eq("a finished one's do not", [l for l in report_lines(dict(done, cancelling = False, inv = {"build_finished": struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))}), "t-4", False) if " built, " in l][0].startswith("interrupted"), False)
 
     # Small terminals: counts whole, the title kept, an action's age kept,
     # the keys row always there.

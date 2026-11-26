@@ -163,7 +163,6 @@ impl Run {
         assert_eq!(rc, 0, "signalling aspect-cli");
     }
 
-    /// Read the rest of stderr and reap the CLI.
     /// Read the rest of stderr and reap the CLI, within [`END_WITHIN`]: past
     /// it, say what the CLI and its children were doing, kill them, and fail.
     fn finish(mut self) -> (ExitStatus, String) {
