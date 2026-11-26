@@ -625,13 +625,16 @@ impl LineProcessor for RecapErrors {
             keep.set_errors(super::processors::KeptErrors {
                 errors: errors
                     .into_iter()
-                    .map(|(header, lines, label)| super::processors::KeptError {
-                        header,
-                        lines: lines
+                    .map(|e| super::processors::KeptError {
+                        header: e.header,
+                        lines: e
+                            .lines
                             .into_iter()
                             .map(|l| String::from_utf8_lossy(&l).into_owned())
                             .collect(),
-                        label,
+                        body: e.body,
+                        log: e.log,
+                        label: e.label,
                     })
                     .collect(),
                 distinct: self.distinct.len(),
@@ -652,8 +655,8 @@ impl LineProcessor for RecapErrors {
             format!("Error recap ({n})")
         };
         self.style.rule(&mut out, &header);
-        for (_, lines, _) in self.rendered() {
-            for (i, l) in lines.into_iter().enumerate() {
+        for e in self.rendered() {
+            for (i, l) in e.lines.into_iter().enumerate() {
                 out.extend_from_slice(if i == 0 { b"  " } else { b"    " });
                 out.extend(l);
                 out.push(b'\n');
@@ -669,7 +672,7 @@ impl RecapErrors {
     /// picked of the body, each count of the rest, and `full <stream>:
     /// <path>` for the output the history kept of the action, its label),
     /// and that action's label when one was matched.
-    fn rendered(&mut self) -> Vec<(String, Vec<Vec<u8>>, Option<String>)> {
+    fn rendered(&mut self) -> Vec<Rendered> {
         let style = self.style.clone();
         let mut linker = self.linker.take();
         let mut line = |text: &str, links: &[Known]| match linker.as_mut() {
@@ -686,12 +689,18 @@ impl RecapErrors {
         for e in &self.errors {
             let mut lines = vec![style.error_label(line(&e.header.0, &e.header.1))];
             let found = kept_for(&e.header.0, &kept, &mut used, self.bases.as_ref());
+            let mut body = vec![];
             for part in e.excerpt() {
                 match part {
-                    Part::Line((b, links)) => lines.push(line(b, links)),
+                    Part::Line((b, links)) => {
+                        lines.push(line(b, links));
+                        body.push(b.clone());
+                    }
                     Part::Gap(n) => {
                         let s = if n == 1 { "" } else { "s" };
-                        lines.push(format!("… {n} more line{s}").into_bytes());
+                        let gap = format!("… {n} more line{s}");
+                        lines.push(gap.clone().into_bytes());
+                        body.push(gap);
                     }
                 }
             }
@@ -707,11 +716,38 @@ impl RecapErrors {
                         .collect(),
                 );
             }
-            out.push((e.header.0.clone(), lines, found.map(|i| kept[i].0.clone())));
+            out.push(Rendered {
+                header: e.header.0.clone(),
+                lines,
+                body,
+                log: found.and_then(|i| {
+                    let streams = &kept[i].1;
+                    streams
+                        .iter()
+                        .find(|(stream, _)| stream == "stderr")
+                        .or(streams.first())
+                        .map(|(_, path)| path.to_string())
+                }),
+                label: found.map(|i| kept[i].0.clone()),
+            });
         }
         self.linker = linker;
         out
     }
+}
+
+/// An error as the recap repeats it ([`RecapErrors::rendered`]).
+struct Rendered {
+    header: String,
+    /// The header styled, the body, and `full <stream>: <path>`.
+    lines: Vec<Vec<u8>>,
+    /// What the recap picked of the body, as quoted, unstyled and unlinked,
+    /// each count of the rest a line.
+    body: Vec<String>,
+    /// The output the history kept of the action: its stderr, else its
+    /// other stream.
+    log: Option<String>,
+    label: Option<String>,
 }
 
 /// Which of `kept` (the history's failed actions, in order) is the action
@@ -1128,6 +1164,12 @@ mod tests {
                 "a.cc:3: error: expected ';'".to_string(),
             ]
         );
+        assert_eq!(
+            kept.errors[0].body,
+            vec!["a.cc:3: error: expected ';'".to_string()],
+            "the body alone"
+        );
+        assert_eq!(kept.errors[0].log, None, "no kept log named");
     }
 
     /// What Bazel and the CLI write after an error is never part of its

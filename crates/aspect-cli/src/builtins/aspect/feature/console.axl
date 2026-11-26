@@ -113,13 +113,15 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
 - paths are made relative;
 - the first warning of each kind is shown and the rest are counted at the end;
 - every failure is listed at the end, under `── Failures (N) ──` (only when
-  something failed): each failed action with Bazel's `ERROR:` line, what the
-  tool said and its kept stderr; each failed test with its attempts and
-  logs; each target that failed analysis or loading, and every other
-  `ERROR:` line (a missing package, a BUILD file that does not parse, a
-  toolchain not found) as Bazel wrote it; the targets each one blocked
-  counted under it. The first `recap_max` (10) are listed, `first 10 of 14`
-  counting the rest. Then, on every build, one line of counts (`193 built, 1
+  something failed), an entry each: failures no target owns (analysis,
+  loading, a toolchain, any other `ERROR:` line) first, then the builds',
+  then the tests'. An entry is a heading (`✗ //pkg:t  Genrule · exit 1 ·
+  pkg/BUILD.bazel:3:8`, Bazel's `ERROR:` line folded into its exit code and
+  location), then, for the first five, an excerpt of what the tool said
+  behind a `│` (at most five lines; a test's from its last failed attempt's
+  `test.log`, a sharded one's first failed shard, each other one a line),
+  its log (`log <path>`) and the targets it blocked; a blank line apart.
+  The first 10 are listed, `first 10 of 14` counting the rest. Then, on every build, one line of counts (`193 built, 1
   failed · 47 tests passed, 2 failed · Bazel's raw log: <path>`) and where the
   rest is (`All of it: aspect history show <id>`). Under the Dashboard the
   summary goes to the scrollback when the screen is left, never into its
@@ -298,7 +300,8 @@ def _console_impl(ctx: FeatureContext):
         state["build"] = build
         state["cancelling"] = task_ctx.cancellation.root.cancelled
         err = task_ctx.std.io.stderr
-        for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked):
+        size = task_ctx.std.term.size() if err.is_tty else None
+        for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100):
             err.write(line + "\n")
         summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env)
 

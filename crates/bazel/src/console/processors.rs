@@ -364,6 +364,11 @@ pub struct KeptErrors {
 pub struct KeptError {
     pub header: String,
     pub lines: Vec<String>,
+    /// What it picked of the body alone, as quoted (no style, no links),
+    /// each count of the rest a line (`… 3 more lines`).
+    pub body: Vec<String>,
+    /// Where the history kept the action's output, when it did.
+    pub log: Option<String>,
     pub label: Option<String>,
 }
 

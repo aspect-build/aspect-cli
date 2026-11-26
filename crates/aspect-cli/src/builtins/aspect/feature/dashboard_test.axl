@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "test_progress", "tests_cached_text", "tests_text", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "test_progress", "quoted_rows", "error_parts", "tests_cached_text", "tests_text", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -36,6 +36,16 @@ def _visible(row):
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _bodied(kept):
+    """Kept errors as `build.output_errors()` gives them, from their recap
+    lines: the body without the header and the kept log's line."""
+    out = []
+    for e in kept["errors"]:
+        lines = e["lines"]
+        log = [l.partition(": ")[2] for l in lines if l.startswith("full stderr: ")]
+        out.append(dict(e, body = [l for l in lines[1:] if not l.startswith("full stderr: ")], log = log[0] if log else None))
+    return dict(kept, errors = out)
 
 def _screen(ctx, log, **kw):
     """A dashboard's whole state, as the feature keeps it, over `log`."""
@@ -1233,12 +1243,14 @@ def _impl(ctx: TaskContext) -> int:
     browse["counts"]["failed_labels"] = {"//t:t": True, "//pkg:lost": True}
     browse["focus"] = "failures"
     rows = failure_rows(browse, 10, 30)
-    _eq("rows: both logs, then the target without one", len(rows), 3)
-    _eq("the chosen one is lit", rows[browse["selected"]].startswith(_role("active")), True)
+    heads = [r for r in rows if "│" not in r]
+    _eq("rows: both logs, then the target without one", len(heads), 3)
+    _eq("the chosen one is lit", heads[browse["selected"]].startswith(_role("active")), True)
+    _eq("its excerpt under it, at most five lines", (0 < len(rows) - 3, len(rows) - 3 <= 5), (True, True))
     for row in rows:
         row = _visible(row)
         _eq("a row fits: %r" % row, len(row) <= 30, True)
-    many = dict(browse, fails = [dict(act, label = "//m:%d" % i) for i in range(10)], counts = new_counts(), logged_index = None)
+    many = dict(browse, fails = [dict(act, label = "//m:%d" % i, files = []) for i in range(10)], counts = new_counts(), logged_index = None, excerpts = {})
     plain_rows = lambda st, room: [_visible(r) for r in failure_rows(st, room, 30)]
     many["selected"] = 0
     _eq("the first chosen: the rest below", plain_rows(many, 4)[-1], "… 7 more")
@@ -1265,7 +1277,7 @@ def _impl(ctx: TaskContext) -> int:
         (mixed_rows[0], mixed_rows[2].startswith("✗ //m:9"), mixed_rows[3], mixed_rows[4], len(mixed_rows)),
         ("… 8 earlier", True, "✗ //x:1  no log", "… 2 more", 5),
     )
-    doubled = dict(mixed, fails = many["fails"] + [dict(act, label = "//m:9")], logged_index = None, selected = 10)
+    doubled = dict(mixed, fails = many["fails"] + [dict(act, label = "//m:9", files = [])], logged_index = None, selected = 10, excerpts = {})
     doubled_rows = plain_rows(doubled, 5)
     _eq("a label failing twice counts once against the unlogged", (len(doubled_rows), doubled_rows[-1]), (5, "… 2 more"))
     grown = dict(mixed, logged_index = None)
@@ -1781,28 +1793,27 @@ def _impl(ctx: TaskContext) -> int:
     add_lines(done, ["ERROR: //a:b failed", "a.cc:1: error: no x", "INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
     done["fails"] = [{"kind": "action", "label": "//a:b", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/a.o", "success": False}]
     done["build"] = struct(kept_action_log = lambda output: {"stderr": "/history/CppCompile-1.stderr"} if output == "bazel-out/a.o" else {})
-    done["kept_errors"] = {"errors": [{"header": "ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "lines": ["ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "a.cc:1: error: no x", "full stderr: /history/CppCompile-1.stderr"], "label": "//a:b"}], "distinct": 1}
+    done["kept_errors"] = {"errors": [{"header": "ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "lines": ["ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "a.cc:1: error: no x", "full stderr: /history/CppCompile-1.stderr"], "body": ["a.cc:1: error: no x"], "log": "/history/CppCompile-1.stderr", "label": "//a:b"}], "distinct": 1}
     report = report_lines(done, "t-1", False)
     _eq("Bazel's closing block", report[:2], ["INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
     _eq("the summary", report[2:], [
         "── Failures (1) ──",
-        "  ✗ //a:b  CppCompile",
-        "    ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)",
-        "    a.cc:1: error: no x",
-        "    full stderr: /history/CppCompile-1.stderr",
+        "✗ //a:b  CppCompile · exit 1 · a/BUILD:1:1",
+        "  │ a.cc:1: error: no x",
+        "  log /history/CppCompile-1.stderr",
         "0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /out/console.log",
         "All of it: aspect history show t-1",
     ])
     _eq("no Failed list of its own", [l for l in report if l.startswith("Failed") or l.startswith("Bazel's errors")], [])
     without = dict(done, kept_errors = None)
-    _eq("without the console's errors: its log", report_lines(without, "t-1", False)[3:5], ["  ✗ //a:b  CppCompile", "    /history/CppCompile-1.stderr"])
+    _eq("without the console's errors: its log", report_lines(without, "t-1", False)[3:5], ["✗ //a:b  CppCompile", "  log /history/CppCompile-1.stderr"])
 
     # Every kind of failure, as real Bazel 9.3.3 runs reported them (w44's
     # workspace: `test --keep_going //:all //anal:all //tc:all //t:all`,
     # `build //syntax:all //:ok`, `//nope:all`, `//:nosuch`): Bazel's errors
     # as the console kept them, the failures as the stream gave them.
     def _kept(*errors):
-        return {"errors": [{"header": e[0], "lines": list(e), "label": None} for e in errors], "distinct": len(errors)}
+        return {"errors": [{"header": e[0], "lines": list(e), "body": list(e[1:]), "log": None, "label": None} for e in errors], "distinct": len(errors)}
 
     kinds = _screen(ctx, [], log_path = "/h/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {}, build = None)
     kinds["fails"] = [
@@ -1813,7 +1824,7 @@ def _impl(ctx: TaskContext) -> int:
     kinds["root_causes"] = {"//:uses_bad": ["//:bad"]}
     kinds["counts"]["failed_labels"] = {"//:uses_bad": True, "//tc:tc": True, "//anal:anal": True}
     kinds["counts"]["failed"] = 4
-    kinds["kept_errors"] = {"errors": [
+    kinds["kept_errors"] = _bodied({"errors": [
         {"header": "ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "lines": ["ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "compile error: x.cc:3: expected ;", "full stderr: /h/bad/Genrule-1.stderr"], "label": "//:bad"},
         {"header": "ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "lines": ["ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "  //tc:toolchain_type", "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'"], "label": None},
         {"header": "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'", "lines": ["ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'"], "label": None},
@@ -1821,28 +1832,45 @@ def _impl(ctx: TaskContext) -> int:
         {"header": "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,", "lines": ["ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"], "label": None},
         {"header": "ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", "lines": ["ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", " - nope"], "label": None},
         {"header": "ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''", "lines": ["ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''"], "label": None},
-    ], "distinct": 7}
+    ], "distinct": 7})
     summary = [_visible(l) for l in failure_summary(kinds, kinds["kept_errors"], "t-9", False, "/h/console.log")]
-    _eq("every kind, once", summary, [
+    _eq("every kind, once: no target's first, then builds', then tests'; excerpts for the first five", summary, [
         "── Failures (7) ──",
-        "  ✗ //:bad  Genrule",
-        "    ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)",
-        "    compile error: x.cc:3: expected ;",
-        "    full stderr: /h/bad/Genrule-1.stderr",
-        "    ○ 1 blocked: //:uses_bad",
-        "  ✗ //t:fails  attempt 1",
-        "  ✗ //tc:tc",
-        "    ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
-        "      //tc:toolchain_type",
-        "    To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
-        "  ✗ //anal:anal",
-        "    ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'",
-        "  ✗ ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
-        "  ✗ ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.",
-        "     - nope",
-        "  ✗ ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''",
+        "✗ //tc:tc  tc/BUILD.bazel:3:9",
+        "  │ While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
+        "  │   //tc:toolchain_type",
+        "  │ To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
+        "",
+        "✗ //anal:anal  anal/BUILD.bazel:1:8",
+        "  │ missing input file '//anal:nonexistent'",
+        "",
+        "✗ error · syntax/BUILD.bazel:2:1",
+        "  │ syntax error at 'newline': expected ,",
+        "",
+        "✗ error",
+        "  │ Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found ",
+        "  │   in any of the following directories.",
+        "  │  - nope",
+        "",
+        "✗ error",
+        "  │ Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''",
+        "",
+        "✗ //:bad  Genrule · exit 1 · BUILD.bazel:1:8",
+        "",
+        "✗ //t:fails  test · failed 1 of 1 attempt",
         "0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log",
         "All of it: aspect history show t-9",
+    ])
+
+    # A build failure among the first five: its excerpt, its kept log, and
+    # what it blocked.
+    first = dict(kinds, kept_errors = dict(kinds["kept_errors"], errors = kinds["kept_errors"]["errors"][:1], distinct = 1), counts = dict(kinds["counts"], failures = ["//:bad", "//:uses_bad"], failed_labels = {"//:uses_bad": True}))
+    _eq("an excerpt, the log, the blocked", [_visible(l) for l in failure_summary(first, first["kept_errors"], "t-9", False)][1:6], [
+        "✗ //:bad  Genrule · exit 1 · BUILD.bazel:1:8",
+        "  │ compile error: x.cc:3: expected ;",
+        "  log /h/bad/Genrule-1.stderr",
+        "  ○ blocked: //:uses_bad",
+        "",
     ])
 
     # Every line through the writer's linker, the raw log a bare path it
@@ -1854,6 +1882,100 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the raw log a bare path", seen[-2].endswith("Bazel's raw log: /h/console.log"), True)
     _eq("through report_lines too", report_lines(dict(tested, log_path = "/h/console.log", closing = [], closing_tail = [], bes_base = "", bazel_uuid = "", update = {}), "t-9", True, linked = lambda l: "L")[-1], "L")
 
+    # Test excerpts, from real Bazel 9.3.3 test.log shapes (w44's //t
+    # package): Bazel's preamble left out, the last attempt of the first
+    # failed shard, the other shards a line each, a timeout's two lines, a
+    # log only in the remote cache said so.
+    preamble = "exec ${PAGER:-/usr/bin/less} \"$0\" || exit 1\nExecuting tests from //t:x\n-----------------------------------------------------------------------------\n"
+    logs = {
+        "/out/t/fails/test.log": preamble + "assertion failed: want 2 got 3\n",
+        "/out/t/s/shard_1_of_3/test.log": preamble + "running shard 0 of 3\ntest_parse (shard 0) ... FAILED\nAssertionError: shard zero\n",
+        "/out/t/s/shard_3_of_3/test.log": preamble + "running shard 2 of 3\nAssertionError: shard two\n",
+        "/out/t/slow/test.log": preamble + "starting the slow suite\nwaiting on the fixture server\n-- Test timed out at 2026-11-26 23:14:08 UTC --\n",
+        "/out/t/r/test.log": preamble + "try 3: boom\n",
+    }
+
+    def _t(label, path, **kw):
+        rec = {"kind": "test", "label": label, "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 412, "files": [("test.log", "file://" + path)]}
+        rec.update(kw)
+        return rec
+
+    tests = dict(kinds, kept_errors = None, read = lambda p, n: (logs[p], 0) if p in logs else None, counts = new_counts(), root_causes = {}, fails = [
+        _t("//t:fails", "/out/t/fails/test.log"),
+        _t("//t:s", "/out/t/s/shard_3_of_3/test.log", shard = 3),
+        _t("//t:s", "/out/t/s/shard_1_of_3/test.log", shard = 1),
+        _t("//t:slow", "/out/t/slow/test.log", status = "timeout", duration_ms = 5000),
+        _t("//t:r", "/out/t/r/test.log", attempt = 1),
+        _t("//t:r", "/out/t/r/test.log", attempt = 2),
+        _t("//t:r", "/out/t/r/test.log", attempt = 3),
+        _t("//t:remote", "/nowhere", files = [("test.log", "bytestream://cache/blobs/abc/12")]),
+    ], test_counts = {("//t:s", ""): (1, 3)}, spread = {})
+    got = [_visible(l) for l in failure_summary(tests, None, "t-7", False, excerpt = ctx.std.excerpt)]
+    _eq("test entries", got[:-2], [
+        "── Failures (5) ──",
+        "✗ //t:fails  test · failed 1 of 1 attempt · 0.4s",
+        "  │ assertion failed: want 2 got 3",
+        "  log /out/t/fails/test.log",
+        "",
+        "✗ //t:s  test · shard 1 of 3 · failed 1 of 1 attempt · 0.4s",
+        "  │ running shard 0 of 3",
+        "  │ test_parse (shard 0) ... FAILED",
+        "  │ AssertionError: shard zero",
+        "  shard 3 of 3 also failed · log /out/t/s/shard_3_of_3/test.log",
+        "  log /out/t/s/shard_1_of_3/test.log",
+        "",
+        "✗ //t:slow  test · timed out after 5.0s",
+        "  │ waiting on the fixture server",
+        "  │ -- Test timed out at 2026-11-26 23:14:08 UTC --",
+        "  │ … 1 more line",
+        "  log /out/t/slow/test.log",
+        "",
+        "✗ //t:r  test · failed 3 of 3 attempts · 0.4s",
+        "  │ try 3: boom",
+        "  log /out/t/r/test.log",
+        "",
+        "✗ //t:remote  test · failed 1 of 1 attempt · 0.4s",
+        "  log is only in the remote cache",
+    ])
+    _eq("a flaky test: no entry", [l for l in failure_summary(dict(tests, counts = dict(tests["counts"], flaky = {"//t:fails": True})), None, "t-7", False) if "//t:fails" in l], [])
+
+    # A line cut at its byte cap or its third row, `…` where; a wrapped one
+    # two cells further in; at most five lines, the rest counted.
+    _eq("three rows at most", quoted_rows("x" * 200, 40), ["x" * 40, "x" * 38, "x" * 37 + "…"])
+    _eq("its byte cap", quoted_rows("y" * 400, 1000), ["y" * 300 + "…"])
+    many_lines = dict(kinds, kept_errors = None, counts = new_counts(), root_causes = {}, fails = [{"kind": "action", "label": "//a:a", "detail": "Genrule", "files": [], "output": "o", "success": False}])
+    long = {"errors": [{"header": "ERROR: a/BUILD:1:1: Executing genrule //a:a failed: (Exit 2)", "lines": [], "body": ["line %d" % i for i in range(8)] + ["… 4 more lines"], "log": "/h/a.stderr", "label": "//a:a"}], "distinct": 1}
+    _eq("five lines, the rest counted", [_visible(l) for l in failure_summary(many_lines, long, "t-7", False)][1:9], [
+        "✗ //a:a  Genrule · exit 2 · a/BUILD:1:1",
+        "  │ line 0",
+        "  │ line 1",
+        "  │ line 2",
+        "  │ line 3",
+        "  │ line 4",
+        "  │ … 7 more lines",
+        "  log /h/a.stderr",
+    ])
+
+    # Past the first five, a heading alone; past ten, counted.
+    twelve = dict(many_lines, fails = [{"kind": "action", "label": "//a:%d" % i, "detail": "Genrule", "files": [], "output": "o%d" % i, "success": False} for i in range(12)])
+    capped = [_visible(l) for l in failure_summary(twelve, {"errors": [{"header": "ERROR: a/BUILD:1:1: Executing genrule //a:%d failed: (Exit 1)" % i, "lines": [], "body": ["why %d" % i], "log": None, "label": "//a:%d" % i} for i in range(12)], "distinct": 12}, "t-7", False)]
+    _eq("excerpts for five", len([l for l in capped if l.startswith("  │ why")]), 5)
+    _eq("then headings", capped[capped.index("✗ //a:5  Genrule · exit 1 · a/BUILD:1:1") + 1], "")
+    _eq("the rest counted", [l for l in capped if l.startswith("… and")], ["… and 2 more failures · aspect history show t-7"])
+    _eq("the heading says how many", capped[0], "── Failures (first 10 of 12) ──")
+    _eq("an error's parts", [error_parts(h) for h in ["ERROR: a/BUILD.bazel:1:8: Executing genrule //:a failed: (Exit 1)", "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:x'", "ERROR: package contains errors: syntax"]], [("a/BUILD.bazel:1:8", "exit 1", ""), ("anal/BUILD.bazel:1:8", "", "missing input file '//anal:x'"), ("", "", "package contains errors: syntax")])
+
+    # The Failures tab: one row each; the chosen one's excerpt under it,
+    # every one's with ^O, back with it again.
+    tab = dict(tests, tab = "failures", focus = "failures", list = "failures", selected = 0, view = None, excerpts = {}, excerpt = ctx.std.excerpt, logged_index = None)
+    rows = [_visible(r).rstrip() for r in failure_rows(tab, 20, 80)]
+    _eq("the chosen row's excerpt", rows[:3], ["✗ //t:fails  attempt 1", "  │ assertion failed: want 2 got 3", "✗ //t:s  shard 3 · attempt 1"])
+    on_key(tab, "ctrl-o", 10)
+    rows = [_visible(r) for r in failure_rows(tab, 30, 80)]
+    _eq("^O: every one's", len([r for r in rows if r.startswith("  │")]) > 3, True)
+    on_key(tab, "ctrl-o", 10)
+    _eq("^O again: the chosen one's", len([r for r in [_visible(r) for r in failure_rows(tab, 30, 80)] if r.startswith("  │")]), 1)
+
     # One target, two of its actions failed: both said.
     def _cc(name):
         header = "ERROR: cc/BUILD.bazel:1:8: Compiling cc/%s failed: (Exit 1)" % name
@@ -1861,12 +1983,12 @@ def _impl(ctx: TaskContext) -> int:
 
     cc = {"kind": "action", "label": "//cc:lib", "detail": "CppCompile", "files": [], "output": "bazel-out/a.o", "success": False}
     two = dict(kinds, counts = dict(kinds["counts"], failures = ["//cc:lib"], failed_labels = {}, failed = 1), root_causes = {}, fails = [cc], kept_errors = {"errors": [_cc("a.cc"), _cc("b.cc")], "distinct": 2})
-    _eq("two actions of one target", [_visible(l) for l in failure_summary(two, two["kept_errors"], "t-9", False)][1:4], ["  ✗ //cc:lib  CppCompile", "    ERROR: cc/BUILD.bazel:1:8: Compiling cc/a.cc failed: (Exit 1)", "    ERROR: cc/BUILD.bazel:1:8: Compiling cc/b.cc failed: (Exit 1)"])
+    _eq("two actions of one target", [_visible(l) for l in failure_summary(two, two["kept_errors"], "t-9", False)][1:3], ["✗ //cc:lib  CppCompile · exit 1 · cc/BUILD.bazel:1:8", "  │ Compiling cc/b.cc failed · exit 1"])
 
     # An analysis failure Bazel reports as its own (an Aborted
     # configured_label): what Bazel gave, when no error names it.
     analysed = dict(kinds, fails = [{"kind": "action", "label": "//anal:broken", "detail": "analysis failed", "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], kept_errors = None, counts = new_counts(), root_causes = {})
-    _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, None, "t-9", False)][:3], ["── Failures (1) ──", "  ✗ //anal:broken  analysis failed", "    in genrule rule //anal:broken: missing srcs"])
+    _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, None, "t-9", False)][:3], ["── Failures (1) ──", "✗ //anal:broken  analysis", "  │ in genrule rule //anal:broken: missing srcs"])
 
     # A passing run: the counts line alone, no rule.
     passing = dict(kinds, fails = [], kept_errors = None, counts = dict(new_counts(), built = 3), root_causes = {})
@@ -2164,7 +2286,7 @@ def _impl(ctx: TaskContext) -> int:
     on_key(blocked, "enter", 10)
     _eq("Enter shows what blocks it", (blocked["selected"], blocked["view"]["record"]["label"]), (0, "//a:broken"))
     report = [_visible(l) for l in report_lines(dict(blocked, read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = ""), "id1", False)]
-    _eq("under its root cause in the summary", [l for l in report if "blocked" in l and "○" in l], ["    ○ 1 blocked: //a:demo"])
+    _eq("under its root cause in the summary", [l for l in report if "blocked" in l and "○" in l], ["  ○ blocked: //a:demo"])
     _eq("not counted as a root cause", [l for l in report if l.startswith("──")], ["── Failures (1) ──"])
     _eq("its summary counts it blocked, not failed", [l for l in report if l.startswith("0 built")], ["0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
     targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
