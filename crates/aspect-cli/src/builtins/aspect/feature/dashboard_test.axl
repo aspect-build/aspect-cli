@@ -1780,10 +1780,11 @@ def _impl(ctx: TaskContext) -> int:
         {"header": "ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "lines": ["ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "compile error: x.cc:3: expected ;", "full stderr: /h/bad/Genrule-1.stderr"], "label": "//:bad"},
         {"header": "ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "lines": ["ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "  //tc:toolchain_type", "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'"], "label": None},
         {"header": "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'", "lines": ["ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'"], "label": None},
+        {"header": "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: 1 input file(s) do not exist", "lines": ["ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: 1 input file(s) do not exist"], "label": None},
         {"header": "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,", "lines": ["ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"], "label": None},
         {"header": "ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", "lines": ["ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", " - nope"], "label": None},
         {"header": "ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''", "lines": ["ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''"], "label": None},
-    ], "distinct": 6}
+    ], "distinct": 7}
     summary = [_visible(l) for l in failure_summary(kinds, kinds["kept_errors"], "t-9", False, "/h/console.log")]
     _eq("every kind, once", summary, [
         "── Failures (7) ──",
@@ -1806,6 +1807,15 @@ def _impl(ctx: TaskContext) -> int:
         "0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log",
         "All of it: aspect history show t-9",
     ])
+
+    # One target, two of its actions failed: both said.
+    def _cc(name):
+        header = "ERROR: cc/BUILD.bazel:1:8: Compiling cc/%s failed: (Exit 1)" % name
+        return {"header": header, "lines": [header], "label": "//cc:lib"}
+
+    cc = {"kind": "action", "label": "//cc:lib", "detail": "CppCompile", "files": [], "output": "bazel-out/a.o", "success": False}
+    two = dict(kinds, counts = dict(kinds["counts"], failures = ["//cc:lib"], failed_labels = {}, failed = 1), root_causes = {}, fails = [cc], kept_errors = {"errors": [_cc("a.cc"), _cc("b.cc")], "distinct": 2})
+    _eq("two actions of one target", [_visible(l) for l in failure_summary(two, two["kept_errors"], "t-9", False)][1:4], ["  ✗ //cc:lib  CppCompile", "    ERROR: cc/BUILD.bazel:1:8: Compiling cc/a.cc failed: (Exit 1)", "    ERROR: cc/BUILD.bazel:1:8: Compiling cc/b.cc failed: (Exit 1)"])
 
     # An analysis failure Bazel reports as its own (an Aborted
     # configured_label): what Bazel gave, when no error names it.

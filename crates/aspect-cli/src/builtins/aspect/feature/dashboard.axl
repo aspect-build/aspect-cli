@@ -5414,6 +5414,14 @@ def summary_counts(state: dict) -> str:
         _counts(", %d skipped", c["tests_skipped"]) if c.get("tests_skipped") else "",
     ))
 
+def _failed_action(header: str) -> str:
+    """What an `ERROR:` header says failed, before why (`anal/BUILD.bazel:1:8:
+    Executing genrule //anal:anal failed`), so a second error about the same
+    action (Bazel's `missing input file` then `1 input file(s) do not
+    exist`) is known as one; empty for an error that names no failure."""
+    at = header.find(" failed: ")
+    return header[:at] if at >= 0 else ""
+
 def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = "") -> list:
     """The end of a build's console, the same with the Dashboard or
     without: a `── Failures (N) ──` rule when anything failed, then each root
@@ -5424,7 +5432,8 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
 
     - a failed action (`failed_actions`), its `ERROR:` lines as the
       console's recap renders them (`kept`, `build.output_errors()`: the
-      body it picks, `full stderr: <path>`, links), else its log's path;
+      body it picks, `full stderr: <path>`, links), only the first of
+      those about the same action (`_failed_action`), else its log's path;
     - a failed test target, each failed attempt under it (or beside it,
       when one) with its `test.log`;
     - a target that failed analysis or loading, or failed without a log,
@@ -5442,11 +5451,16 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
 
     def claim(label):
         lines = []
+        said = []
         for i, e in enumerate(errors):
             if used[i]:
                 continue
             if (e.get("label") or "") == label or _names(e.get("header", ""), label):
                 used[i] = True
+                action = _failed_action(e.get("header", ""))
+                if action and action in said:
+                    continue
+                said.append(action)
                 lines.extend(["    " + l for l in e.get("lines", [])])
         return lines
 
