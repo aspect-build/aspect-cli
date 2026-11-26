@@ -486,6 +486,17 @@ fn on_a_pty(
     on_a_pty_with(task, stdout, &[])
 }
 
+/// Held by each test that asserts how long something took, so those never
+/// run beside one another; the rest, which bound no time, run as they will.
+#[cfg(unix)]
+static TIMED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`TIMED`], whatever a test that held it before did.
+#[cfg(unix)]
+fn timed() -> std::sync::MutexGuard<'static, ()> {
+    TIMED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// How long a run on a loaded machine may take to get to what a test waits
 /// for, from its start: long, as only the times measured from the event a
 /// test is about are its property.
@@ -745,6 +756,7 @@ fn output_log(dir: &std::path::Path) -> String {
 #[cfg(unix)]
 #[test]
 fn a_dump_waits_not_on_a_stalled_stdout() {
+    let _timed = timed();
     use std::time::Duration;
 
     let fifos = tempfile::tempdir().expect("temp dir");
@@ -792,6 +804,7 @@ fn a_dump_waits_not_on_a_stalled_stdout() {
 #[cfg(unix)]
 #[test]
 fn a_stdout_nobody_reads_stalls_no_take_nor_stderr() {
+    let _timed = timed();
     use std::time::Duration;
 
     let fifos = tempfile::tempdir().expect("temp dir");
@@ -1145,6 +1158,7 @@ fn an_inherited_stdout_goes_back_into_the_screen_after_fg() {
 #[cfg(unix)]
 #[test]
 fn ctrl_z_during_a_stalled_release_stops_at_once() {
+    let _timed = timed();
     use std::time::Duration;
     let fifos = tempfile::tempdir().expect("temp dir");
     let (mut reader, writer) = unread_fifo(fifos.path());

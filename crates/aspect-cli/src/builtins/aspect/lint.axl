@@ -123,12 +123,19 @@ def patch_too_large(fs, patch: str):
 # Symlinks followed on one path at most, as the kernel's own limit.
 _LINK_HOPS = 40
 
+def _look(fs, path: str):
+    """`fs.try_metadata(path)` (None where nothing is), and the error that
+    kept it from looking (a directory it may not search), or None."""
+    err, meta = catch(fs.try_metadata, path, types = [std.io.Error])
+    return meta, (str(err) if err != None else None)
+
 def _resolved(fs, path: str):
     """Absolute `path` with every symlink on it followed (`..` taken as the
-    link's target asks), as a list of components from the root; what isn't
-    there yet stays as named. None for a symlink whose target isn't there,
-    a loop, or a component past a file. Looked at from the root down, so a
-    file where a directory should be never raises."""
+    link's target asks), as `(components from the root, None)`; what isn't
+    there yet stays as named. `(None, why)` where it can't be followed: a
+    symlink to what isn't there, a loop, a file where a directory should
+    be, or a directory it may not look in. Looked at from the root down, so
+    a file where a directory should be never raises."""
 
     # Each component still to walk, and whether a link's target named it.
     todo = [(p, False) for p in path.split("/") if p]
@@ -136,7 +143,7 @@ def _resolved(fs, path: str):
     hops = 0
     for _ in range(100000):
         if not todo:
-            return done
+            return done, None
         part, linked = todo.pop(0)
         if part == ".":
             continue
@@ -144,53 +151,74 @@ def _resolved(fs, path: str):
             done = done[:-1]
             continue
         at = "/" + "/".join(done + [part])
-        meta = fs.try_metadata(at)
+        meta, err = _look(fs, at)
+        if err != None:
+            return None, "can't be looked at (%s)" % err
         if meta == None:
             if linked:
-                return None
-            return done + [part] + [p for p, _ in todo if p != "."]
+                return None, "is a symlink to what isn't there"
+            return done + [part] + [p for p, _ in todo if p != "."], None
         if meta.is_symlink:
             hops += 1
             if hops > _LINK_HOPS:
-                return None
+                return None, "has more than %d symlinks on it" % _LINK_HOPS
             target = fs.read_link(at)
             todo = [(p, True) for p in target.split("/") if p] + todo
             if target.startswith("/"):
                 done = []
             continue
         if todo and not meta.is_dir:
-            return None
+            return None, "goes through `%s`, which isn't a directory" % part
         done.append(part)
-    return None
+    return None, "can't be followed"
+
+def _identity(fs, resolved: list):
+    """Which file `resolved` (from `_resolved`) is: `(dev, ino)` where it is
+    there, whatever spelling names it (case, Unicode normalization, a hard
+    link); else its deepest ancestor that is there, by `(dev, ino)`, and the
+    rest as named."""
+    for depth in range(len(resolved), -1, -1):
+        meta, _ = _look(fs, "/" + "/".join(resolved[:depth]))
+        if meta != None:
+            return (meta.dev, meta.ino) + tuple(resolved[depth:])
+    return tuple(resolved)
 
 def _refusal(fs, cwd: str, headers: list):
     """Why a patch with `headers` is refused before anything is copied or
-    patched, or None: a path with a `.` or empty component; a path in more
-    than one header, its symlinks followed and its case folded (a type
-    change, two creations, a rename onto a made file, a case-only rename on
-    a case-insensitive disk); one whose symlinks lead out of the workspace,
-    or to nothing; one there that isn't a regular file; or a parent that
-    isn't a directory. A symlink within the workspace is followed."""
-    root = _resolved(fs, cwd)
+    patched, or None: a path with a `.` or empty component; two named
+    paths that are one file, by the filesystem's own identity of it, its
+    symlinks followed (a type change, two creations, a rename onto a made
+    file, a case-only or normalization-only rename where the disk takes the
+    two as one, a hard link); one whose symlinks lead out of the workspace,
+    or can't be followed; one there that isn't a regular file; or a file
+    removed through a symlink naming it. A symlink within the workspace is
+    followed. Two new names no file has yet are told apart as spelled."""
+    root, why = _resolved(fs, cwd)
+    if root == None:
+        return "the workspace %s" % why
+    removed = [old for old, new in headers if old and not new]
     seen = {}
     for old, new in headers:
         for path in {p: True for p in (old, new) if p}:
             parts = path.split("/")
             if "" in parts or "." in parts:
                 return "%s has a `.` or empty component" % path
-            resolved = _resolved(fs, cwd + "/" + path)
+            resolved, why = _resolved(fs, cwd + "/" + path)
             if resolved == None:
-                return "%s leads to nothing (a symlink to what isn't there, or a file where a directory should be)" % path
-            if root == None or resolved[:len(root)] != root or len(resolved) == len(root):
+                return "%s %s" % (path, why)
+            if resolved[:len(root)] != root or len(resolved) == len(root):
                 return "%s leads out of the workspace" % path
-            key = "/".join(resolved).lower()
+            key = _identity(fs, resolved)
             if key in seen:
                 return "%s is named in more than one header" % path if seen[key] == path else "%s and %s are one file" % (seen[key], path)
             seen[key] = path
-            at = "/" + "/".join(resolved)
-            meta = fs.try_metadata(at)
+            meta, _ = _look(fs, "/" + "/".join(resolved))
             if meta != None and not meta.is_file:
                 return "%s isn't a regular file" % path
+            if path in removed:
+                named, _ = _look(fs, cwd + "/" + path)
+                if named != None and named.is_symlink:
+                    return "%s is a symlink: removing it would keep what it names" % path
     return None
 
 def _same_bytes(fs, a: str, b: str) -> bool:

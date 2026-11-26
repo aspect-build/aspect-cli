@@ -156,7 +156,25 @@ ln -s ../../outside.txt src/dangling.txt
 ln -s ok.txt src/link.txt
 mkdir real && ln -s ../real src/linked
 mkdir ../away && ln -s ../../away src/away
+ln src/ok.txt src/hard
+ln -s f src/lf
+printf 'n\\n' > "$(printf 'src/\\303\\251.txt')"
+mkdir src/locked
 """)
+
+    # Searchable again before the tree goes, however the test ends (defers
+    # run last first).
+    fs.set_permissions(refuse + "/src/locked", 0)
+    ctx.defer(fs.set_permissions, refuse + "/src/locked", 493)
+    nfc, nfd = "src/\u00e9.txt", "src/e\u0301.txt"
+
+    # What this disk takes as one file, probed: case and Unicode
+    # normalization are the filesystem's, not the patch's.
+    fs.write(refuse + "/real/Probe", "")
+    one_case = fs.try_metadata(refuse + "/real/probe") != None
+    fs.remove_file(refuse + "/real/Probe")
+    one_nfd = fs.try_metadata(refuse + "/" + nfd) != None
+    locked_err, _ = catch(fs.try_metadata, refuse + "/src/locked/x", types = [std.io.Error])
     first = "--- a/src/ok.txt\n+++ b/src/ok.txt\n@@ -1 +1 @@\n-a\n+A\n"
     make = lambda path: "--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+made\n" % path
     for reason, body in [
@@ -170,12 +188,19 @@ mkdir ../away && ln -s ../../away src/away
         ("a symlinked parent out of the tree", first + make("src/away/z.txt")),
         ("a `.` component", first + make("src/./n.txt")),
         ("an empty component", first + make("src//n.txt")),
-        ("a case-only rename", first + "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F")),
-    ]:
+        ("a hard link to a file named beside it", first + "--- a/src/hard\n+++ b/src/hard\n@@ -1 +1 @@\n-a\n+H\n"),
+        ("removing a symlink, not what it names", first + "--- a/src/lf\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n"),
+    ] + ([
+        ("a case-only rename where the disk takes them as one", first + "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F")),
+    ] if one_case else []) + ([
+        ("a normalization-only rename where the disk takes them as one", first + "--- a/%s\n+++ /dev/null\n@@ -1 +0,0 @@\n-n\n" % nfc + make(nfd)),
+    ] if one_nfd else []) + ([
+        ("a directory it may not look in", first + make("src/locked/x")),
+    ] if locked_err != None else []):
         fs.write(refuse + "/p.patch", body)
         _eq("refused: " + reason, apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
         _eq("%s: the first file untouched" % reason, fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
-        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", ["away", "d", "dangling.txt", "f", "link.txt", "linked", "ok.txt"], []))
+        _eq("%s: the rest untouched" % reason, (fs.read_to_string(refuse + "/src/f"), _names(fs, refuse + "/src"), _names(fs, refuse + "/real")), ("f\n", sorted(["away", "d", "dangling.txt", "f", "hard", "lf", "link.txt", "linked", "locked", "ok.txt", nfc.partition("/")[2]]), []))
         _eq("%s: nothing outside" % reason, (fs.exists(root + "/outside.txt"), _names(fs, root + "/away")), (False, []))
 
     # A patch past the read cap, its first hunk one patch would apply: the
@@ -186,6 +211,14 @@ mkdir ../away && ln -s ../../away src/away
     _eq("refused", apply_fix_patch(ctx, refuse + "/big.patch", cwd = refuse), None)
     _eq("its first hunk not applied", fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
     fs.remove_file(refuse + "/big.patch")
+
+    fs.set_permissions(refuse + "/src/locked", 493)
+
+    # Where the disk tells case apart, a case-only rename is two files.
+    if not one_case:
+        fs.write(refuse + "/p.patch", "--- a/src/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n" + make("src/F"))
+        _eq("a case-only rename on a case-sensitive disk", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse), None)
+        _eq("applies", (fs.exists(refuse + "/src/f"), fs.read_to_string(refuse + "/src/F")), (False, "made\n"))
 
     # A symlink within the workspace is followed.
     fs.write(refuse + "/real/x.py", "a\n")

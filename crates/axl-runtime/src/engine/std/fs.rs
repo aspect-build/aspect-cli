@@ -96,6 +96,9 @@ starlark_simple_value!(FrozenDirEntry);
 #[display(
     "<fs.Metadata is_dir:{is_dir} is_file:{is_file} is_symlink:{is_symlink} executable:{executable} size:{size}>"
 )]
+/// A file's metadata. `dev` and `ino` (None off Unix) say which file it is:
+/// two paths with the same pair are one file, whatever their spelling (case,
+/// Unicode normalization, a hard link).
 pub struct Metadata<'v> {
     is_dir: values::Value<'v>,
     is_file: values::Value<'v>,
@@ -106,6 +109,8 @@ pub struct Metadata<'v> {
     accessed: values::Value<'v>,
     created: values::Value<'v>,
     readonly: values::Value<'v>,
+    dev: values::Value<'v>,
+    ino: values::Value<'v>,
 }
 
 #[starlark_value(type = "fs.Metadata")]
@@ -121,6 +126,8 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "accessed" => Some(self.accessed),
             "created" => Some(self.created),
             "readonly" => Some(self.readonly),
+            "dev" => Some(self.dev),
+            "ino" => Some(self.ino),
             _ => None,
         }
     }
@@ -135,6 +142,8 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "accessed".into(),
             "created".into(),
             "readonly".into(),
+            "dev".into(),
+            "ino".into(),
         ]
     }
 }
@@ -157,6 +166,8 @@ pub struct FrozenMetadata {
     accessed: values::FrozenValue,
     created: values::FrozenValue,
     readonly: values::FrozenValue,
+    dev: values::FrozenValue,
+    ino: values::FrozenValue,
 }
 
 #[starlark_value(type = "fs.Metadata")]
@@ -177,6 +188,8 @@ impl<'v> values::Freeze for Metadata<'v> {
             accessed: freezer.freeze(self.accessed)?,
             created: freezer.freeze(self.created)?,
             readonly: freezer.freeze(self.readonly)?,
+            dev: freezer.freeze(self.dev)?,
+            ino: freezer.freeze(self.ino)?,
         })
     }
 }
@@ -1109,6 +1122,13 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
     };
     #[cfg(not(unix))]
     let executable = heap.alloc(false);
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (heap.alloc(m.dev()), heap.alloc(m.ino()))
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (heap.alloc(NoneType), heap.alloc(NoneType));
     Metadata {
         is_dir: heap.alloc(file_type.is_dir()),
         is_file: heap.alloc(file_type.is_file()),
@@ -1119,6 +1139,8 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
         accessed,
         created,
         readonly: heap.alloc(permissions.readonly()),
+        dev,
+        ino,
     }
 }
 
@@ -1255,6 +1277,39 @@ def _impl(ctx):
 
 Test = task(implementation = _impl)
 "#,
+        ))
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// `dev` and `ino` name one file under each of its names (a hard link),
+    /// and two files apart.
+    #[cfg(unix)]
+    #[test]
+    fn metadata_names_a_file_by_dev_and_ino() {
+        let dir = tempfile::tempdir().unwrap();
+        let at =
+            |name: &str| serde_json::to_string(dir.path().join(name).to_str().unwrap()).unwrap();
+        fs::write(dir.path().join("a"), "x").unwrap();
+        fs::write(dir.path().join("b"), "x").unwrap();
+        fs::hard_link(dir.path().join("a"), dir.path().join("h")).unwrap();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    fs = ctx.std.fs
+    a, b, h = fs.metadata({a}), fs.metadata({b}), fs.metadata({h})
+    if (a.dev, a.ino) != (h.dev, h.ino):
+        fail("a hard link is another file")
+    if (a.dev, a.ino) == (b.dev, b.ino):
+        fail("two files are one")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            a = at("a"),
+            b = at("b"),
+            h = at("h"),
         ))
         .run_task(0)
         .expect("run_task");
