@@ -29,6 +29,11 @@ fn add(args: &[&str], config: Option<&str>) -> Output {
         .envs(base_env())
         .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
         .env("HOME", dir.path().join("home"))
+        // Keep git from finding a repository above the scratch dir.
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            dir.path().parent().expect("temp dir parent"),
+        )
         .output()
         .unwrap_or_else(|e| panic!("running `aspect worktree add {}`: {e}", args.join(" ")));
     dir.close().expect("removing temp dir");
@@ -38,7 +43,12 @@ fn add(args: &[&str], config: Option<&str>) -> Output {
 /// The `error` code of `out`'s JSON refusal on stdout.
 fn error(out: &Output) -> String {
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code(), Some(1), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     stdout
         .lines()
         .find_map(|l| l.trim().strip_prefix("\"error\": \""))
@@ -81,7 +91,10 @@ fn a_config_axl_value_reaches_the_tasks() {
 def config(ctx):
     ctx.features[WorktreePool].args.abandoned_grace_hours = -1
 "#;
-    assert_refused(add(&[], Some(config)), "--worktree-pool:abandoned-grace-hours");
+    assert_refused(
+        add(&[], Some(config)),
+        "--worktree-pool:abandoned-grace-hours",
+    );
 }
 
 #[test]

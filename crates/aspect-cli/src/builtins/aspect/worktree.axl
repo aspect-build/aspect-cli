@@ -31,8 +31,8 @@ the registry says.
 An agent that dies with its checkout still in place is the harder case, because
 git still knows about that worktree. When a slot is wanted, the lease is taken back if the holder's
 process has verifiably stopped — a holder with no pid recorded never has —
-`--worktree-pool:abandoned-grace-hours` has passed since the slot's last activity, and
-the checkout is clean: nothing uncommitted is lost, and the session stays
+the grace period (`--worktree-pool:abandoned-grace-hours`) has passed since the
+slot's last activity, and the checkout is clean: nothing uncommitted is lost, and the session stays
 resumable — `list` still offers the command to return to it. A dirty checkout,
 or one git cannot read, is never taken automatically.
 

@@ -48,8 +48,9 @@ process exits whenever someone closes a terminal, and the session is resumable
 growing the pool, or when `add` asks for the very branch it holds.
 `abandoned_lease` is what is safe to take back: the holder's process has
 verifiably stopped (a holder with no pid recorded never has), the grace period
-(`--worktree-pool:abandoned-grace-hours`) has passed since the slot's last activity,
-so a session that stopped has time to come back, and the checkout is clean. The
+(`--worktree-pool:abandoned-grace-hours`) has passed since the slot's last
+activity, so a session that stopped has time to come back, and the checkout is
+clean. The
 clean part never bends — there is nothing uncommitted to lose, and the branch
 and its commits survive removing a worktree.
 
