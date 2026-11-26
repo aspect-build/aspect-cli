@@ -248,6 +248,43 @@ def _prompt(ctx):
     return 0
 
 pretake = task(implementation = _pretake, summary = "A line begun before the take, ended under the screen.")
+
+def _pretakeolder(ctx):
+    ctx.std.io.stderr.write("PRETAKE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(1, 5):
+        print("L%d" % i)
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 2, older = "OLDER {n}")
+    return 0
+
+def _pretakeout(ctx):
+    ctx.std.io.stdout.write("PRETAKE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    ctx.std.io.stdout.write("INSCREEN\n")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("END\n")
+    return 0
+
+def _secretcut(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    token = ctx.args.token
+    ctx.std.io.stderr.write("token=" + token[:4])
+    sleep(2500)
+    ctx.std.io.stderr.write(token[4:] + "\n")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    return 0
+
+pretakeolder = task(implementation = _pretakeolder, summary = "A line begun before the take, older lines left out of the dump.")
+pretakeout = task(implementation = _pretakeout, summary = "A stdout line begun before the take, ended under the screen.")
+secretcut = task(implementation = _secretcut, summary = "A secret written in two parts, a Ctrl+Z between.", args = {"token": args.string(secret = True)})
 prompt = task(implementation = _prompt, summary = "A question asked under a screen and answered.")
 splitcli = task(implementation = _splitcli, summary = "A CLI line unended when its screen is released with a dump.")
 
@@ -339,6 +376,28 @@ fn on_a_pty(
     on_a_pty_with(task, stdout, &[])
 }
 
+/// [`on_a_pty`], with `args` after the task's name.
+#[cfg(unix)]
+fn on_a_pty_with_args(
+    task: &str,
+    args: &[&str],
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
+    PTY_ARGS.with(|a| *a.borrow_mut() = args.iter().map(|s| s.to_string()).collect());
+    let got = on_a_pty_with(task, None, &[]);
+    PTY_ARGS.with(|a| a.borrow_mut().clear());
+    got
+}
+
+#[cfg(unix)]
+std::thread_local! {
+    /// Arguments [`on_a_pty_with_args`] adds after the task's name.
+    static PTY_ARGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(vec![]) };
+}
+
 /// [`on_a_pty`], with `env` set for the CLI too.
 #[cfg(unix)]
 fn on_a_pty_with(
@@ -389,6 +448,7 @@ fn on_a_pty_with(
     );
     let mut cmd = Command::new(aspect_cli());
     cmd.arg(task)
+        .args(PTY_ARGS.with(|a| a.borrow().clone()))
         .current_dir(dir.path())
         .env_clear()
         .envs(base_env())
@@ -1454,25 +1514,70 @@ fn a_cli_line_unended_at_release_keeps_its_start() {
     assert!(text.contains("CLIHEAD-CLITAIL"), "the line whole: {text:?}");
 }
 
-/// What the terminal shows of `raw`: escapes left out, and the alternate
-/// screen's text (between entering and leaving it) too.
+/// What the terminal shows of `raw`, as rows: the alternate screen's text
+/// (between entering and leaving it) left out, a carriage return going back
+/// to its row's start and `ESC [ K` erasing the rest of it, other escapes
+/// left out.
 #[cfg(unix)]
 fn main_screen(raw: &str) -> String {
-    let mut out = String::new();
+    let mut main = String::new();
     let mut rest = raw;
     while let Some(at) = rest.find("\x1b[?1049h") {
-        out.push_str(&rest[..at]);
+        main.push_str(&rest[..at]);
         rest = rest[at..]
             .find("\x1b[?1049l")
             .map_or("", |end| &rest[at + end..]);
     }
-    out.push_str(rest);
-    plain(&out).replace('\r', "")
+    main.push_str(rest);
+    let (mut rows, mut row, mut col) = (Vec::<String>::new(), Vec::<char>::new(), 0usize);
+    let mut chars = main.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut last = ' ';
+                    for c in chars.by_ref() {
+                        last = c;
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                    if last == 'K' {
+                        row.truncate(col);
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' || c == '\x1b' && chars.next_if_eq(&'\\').is_some() {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => col = 0,
+            '\n' => {
+                rows.push(row.iter().collect());
+                row.clear();
+                col = 0;
+            }
+            c => {
+                if col < row.len() {
+                    row[col] = c;
+                } else {
+                    row.push(c);
+                }
+                col += 1;
+            }
+        }
+    }
+    rows.push(row.iter().collect());
+    rows.join("\n")
 }
 
 /// A line the task began before taking the screen and ended under it: the
-/// dump leaves out the start the terminal already shows and goes on from it,
-/// so the line shows once, whole.
+/// dump redraws the row the terminal shows its start on, so the line shows
+/// once, whole.
 #[cfg(unix)]
 #[test]
 fn a_line_begun_before_the_take_shows_once_whole() {
@@ -1495,8 +1600,9 @@ fn a_line_begun_before_the_take_shows_once_whole() {
 }
 
 /// A question the task asked under the screen, answered at the prompt the
-/// screen gave the terminal back for: the release's dump leaves out the
-/// question the prompt's dump showed, so it shows once.
+/// screen gave the terminal back for: the answer's row stays as typed, and
+/// the release's dump writes the task's line as the files have it, no row
+/// shown twice.
 #[cfg(unix)]
 #[test]
 fn a_question_answered_at_a_prompt_shows_once() {
@@ -1521,10 +1627,98 @@ fn a_question_answered_at_a_prompt_shows_once() {
     }
     let text = main_screen(&String::from_utf8_lossy(&raw));
     assert!(status.success(), "{status:?}: {text}");
+    // The answer's row as typed, then the task's line as the files have it,
+    // redrawn: no row twice.
     assert_eq!(
-        text.matches("QUESTION? ").count(),
+        text.matches("QUESTION? y").count(),
         1,
-        "the question once: {text:?}"
+        "the answer once: {text:?}"
     );
-    assert!(text.contains("ANSWERED"), "{text:?}");
+    assert_eq!(text.matches("ANSWERED").count(), 1, "{text:?}");
+    let rows: Vec<&str> = text.lines().filter(|r| !r.is_empty()).collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] != w[1]),
+        "a row twice: {rows:?}"
+    );
+}
+
+/// A line begun before the take, and more lines under the screen than the
+/// dump writes: the note for the lines left out is a line of its own.
+#[cfg(unix)]
+#[test]
+fn the_dumps_older_note_is_a_line_of_its_own() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("pretakeolder", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(
+        !text.contains("PRETAKE-OLDER"),
+        "the note glued on: {text:?}"
+    );
+    assert!(text.lines().any(|r| r.starts_with("OLDER ")), "{text:?}");
+}
+
+/// A stdout line begun before the take, std's buffer holding it, ended under
+/// the screen: shown once, whole, and nothing of it after the task's end.
+#[cfg(unix)]
+#[test]
+fn a_buffered_stdout_line_begun_before_the_take_shows_once_whole() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("pretakeout", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    assert_eq!(text.matches("PRETAKE-").count(), 1, "{text:?}");
+    assert!(text.contains("PRETAKE-INSCREEN"), "{text:?}");
+    let after = text.split("Passed").nth(1).unwrap_or("");
+    assert!(!after.contains("PRETAKE"), "after the end: {text:?}");
+}
+
+/// A secret written in two parts, a Ctrl+Z and `fg` between them (a dump's
+/// mark set with its start unended): redacted in output.log, whole lines as
+/// ever.
+#[cfg(unix)]
+#[test]
+fn a_secret_cut_by_a_suspend_is_redacted_in_the_history() {
+    use std::time::Duration;
+    let secret = "SECRET123XYZ";
+    let (mut child, chunks, dir) = on_a_pty_with_args("secretcut", &[&format!("--token={secret}")]);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let pid = child.id() as i32;
+    let stopped = || {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim_start()
+                    .starts_with('T')
+            })
+    };
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(pid, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped() && asked.elapsed() < Duration::from_secs(10) {
+        while chunks.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(status.success(), "{status:?}");
+    let log = output_log(dir.path());
+    assert!(log.contains("token="), "{log:?}");
+    assert!(!log.contains(secret), "unredacted: {log:?}");
 }

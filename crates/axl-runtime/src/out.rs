@@ -240,10 +240,6 @@ struct Stream {
     /// carriage return, an escape or a secret split across writes is
     /// handled whole.
     pending: Vec<u8>,
-    /// How many bytes of `pending` were on the terminal already when a
-    /// dump's mark was set ([`output_ansi_mark`]): a dump leaves them out,
-    /// pending still or written since as the start of their line.
-    shown: usize,
     /// Its colour as its last line left it.
     style: Style,
 }
@@ -303,13 +299,6 @@ struct OutputLog {
     /// The colour `output.ansi` leaves set.
     emitted: Style,
     console_start: Option<ConsoleStart>,
-    /// Ranges of `output.ansi` (from, to) that were on the terminal before
-    /// the dump's mark (a line's start, `Stream::shown`), for the dump to
-    /// leave out.
-    shown_ranges: Vec<(u64, u64)>,
-    /// Whether the terminal was in the middle of one of the task's or the
-    /// console's lines at the dump's mark: a dump then goes on from it.
-    mark_mid_line: bool,
 }
 
 /// Where this process's output is copied: the task's files, or before
@@ -470,76 +459,59 @@ pub fn output_ansi_mark() -> Option<u64> {
     copies.log.as_ref().map(|log| log.ansi.written)
 }
 
-/// [`output_ansi_mark`], for a dump's mark: what the terminal shows of each
-/// stream's unended line now is noted too, for the dump to leave out
-/// (`Stream::shown`), written since or not.
-pub fn mark_dump() -> Option<u64> {
-    let mut copies = OUTPUT.lock().ok()?;
-    let log = copies.log.as_mut()?;
-    log.task.shown = log.task.pending.len();
-    log.console.shown = log.console.pending.len();
-    log.shown_ranges.clear();
-    log.mark_mid_line = log.task.shown > 0 || log.console.shown > 0;
-    Some(log.ansi.written)
+/// [`output_ansi_mark`], for a dump's mark, and whether the task or the
+/// console has an unended line now: the one the terminal is in the middle
+/// of, which the dump then has whole (written since, or still unended), so
+/// it redraws that row from its start rather than go on from it.
+pub fn mark_dump() -> Option<(u64, bool)> {
+    let copies = OUTPUT.lock().ok()?;
+    let log = copies.log.as_ref()?;
+    let partial = !log.task.pending.is_empty() || !log.console.pending.is_empty();
+    Some((log.ansi.written, partial))
 }
 
 /// `output.ansi` from `mark` on, its unended lines (the task's, then the
-/// console's, each on a line of its own) at its end, and the file's path,
-/// without what the terminal showed before the mark ([`mark_dump`]), and
-/// whether it goes on from a line the terminal shows the start of (so a dump
-/// starts no line of its own); None without the task's files or when it
-/// cannot be read.
-pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf, bool)> {
-    use std::io::{Read as _, Seek as _};
+/// console's, each on a line of its own) at its end, and the file's path;
+/// None without the task's files or when it cannot be read.
+pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf)> {
     let copies = OUTPUT.lock().ok()?;
     let log = copies.log.as_ref()?;
-    let mut file = std::fs::File::open(&log.ansi.path).ok()?;
-    let end = log.ansi.written;
-    file.seek(std::io::SeekFrom::Start(mark.min(end))).ok()?;
-    let mut text = vec![];
-    file.take(end.saturating_sub(mark))
-        .read_to_end(&mut text)
-        .ok()?;
-    // What the terminal showed before the mark, left out.
-    for &(from, to) in log.shown_ranges.iter().rev() {
-        if from >= mark && to <= end {
-            let (from, to) = ((from - mark) as usize, (to - mark) as usize);
-            if to <= text.len() {
-                text.drain(from..to);
+    Some((log.ansi_since(mark)?, log.ansi.path.clone()))
+}
+
+impl OutputLog {
+    /// [`output_ansi_since`]'s bytes, for this log.
+    fn ansi_since(&self, mark: u64) -> Option<Vec<u8>> {
+        use std::io::{Read as _, Seek as _};
+        let log = self;
+        let mut file = std::fs::File::open(&log.ansi.path).ok()?;
+        let end = log.ansi.written;
+        file.seek(std::io::SeekFrom::Start(mark.min(end))).ok()?;
+        let mut text = vec![];
+        file.take(end.saturating_sub(mark))
+            .read_to_end(&mut text)
+            .ok()?;
+        let mut emitted = log.emitted;
+        let mut tails = 0;
+        for stream in [&log.task, &log.console] {
+            let mut stream = stream.clone();
+            let (_, ansi) = render(
+                &stream.pending,
+                &mut stream.style,
+                &mut emitted,
+                &log.secrets,
+            );
+            // The task's and the console's unended lines are two lines.
+            if !ansi.is_empty() {
+                if tails > 0 {
+                    text.push(b'\n');
+                }
+                tails += 1;
+                text.extend_from_slice(&ansi);
             }
         }
+        Some(text)
     }
-    let mut emitted = log.emitted;
-    let mut tails = vec![];
-    for stream in [&log.task, &log.console] {
-        let mut stream = stream.clone();
-        let shown = stream.shown.min(stream.pending.len());
-        // Its colour carried over the shown start, which is left out.
-        let _ = render(
-            &stream.pending[..shown],
-            &mut stream.style,
-            &mut emitted,
-            &log.secrets,
-        );
-        let (_, ansi) = render(
-            &stream.pending[shown..],
-            &mut stream.style,
-            &mut emitted,
-            &log.secrets,
-        );
-        if !ansi.is_empty() {
-            tails.push(ansi);
-        }
-    }
-    // Each unended line on a line of its own: the task's and the console's
-    // are two lines, not one.
-    for (i, tail) in tails.into_iter().enumerate() {
-        if i > 0 {
-            text.push(b'\n');
-        }
-        text.extend_from_slice(&tail);
-    }
-    Some((text, log.ansi.path.clone(), log.mark_mid_line))
 }
 
 /// Where `output.ansi` is, for a line naming it when it cannot be dumped.
@@ -612,8 +584,6 @@ impl OutputLog {
             console: Stream::default(),
             emitted: Style::default(),
             console_start: None,
-            shown_ranges: vec![],
-            mark_mid_line: false,
         })
     }
 
@@ -664,28 +634,7 @@ impl OutputLog {
         let Some(lines) = stream.take(&self.secrets, all) else {
             return;
         };
-        // A start the terminal showed before the dump's mark, rendered
-        // apart so the dump can leave it out.
-        let shown = stream.shown.min(lines.len());
-        stream.shown -= shown;
-        if shown > 0 {
-            let (plain, ansi) = render(
-                &lines[..shown],
-                &mut stream.style,
-                &mut self.emitted,
-                &self.secrets,
-            );
-            let from = self.ansi.written;
-            self.plain.write(&plain, self.cap);
-            self.ansi.write(&ansi, self.cap);
-            self.shown_ranges.push((from, self.ansi.written));
-        }
-        let (plain, ansi) = render(
-            &lines[shown..],
-            &mut stream.style,
-            &mut self.emitted,
-            &self.secrets,
-        );
+        let (plain, ansi) = render(&lines, &mut stream.style, &mut self.emitted, &self.secrets);
         self.plain.write(&plain, self.cap);
         self.ansi.write(&ansi, self.cap);
     }
@@ -1590,6 +1539,76 @@ pub fn panicking_print_macros(sources: &include_dir::Dir<'_>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use bazel::console::links::LinkFormat;
+
+    /// `parts` written to a task's files one after the other, as with a
+    /// screen's dump mark set between them: what `output.log` and a dump
+    /// from the start have. Files are rendered from whole lines, whatever
+    /// the marks, so they read as the same bytes written at once.
+    fn written_in_parts(parts: &[(&[u8], bool)], secrets: &[&str]) -> (String, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log =
+            super::OutputLog::open(dir.path(), secrets.iter().map(|s| s.to_string()).collect())
+                .unwrap();
+        for (part, console) in parts {
+            if *console {
+                log.push_console(part);
+            } else {
+                log.push(part);
+            }
+        }
+        let dump = log.ansi_since(0).unwrap();
+        log.flush();
+        let text = std::fs::read_to_string(dir.path().join(super::OUTPUT_LOG)).unwrap();
+        (text, dump)
+    }
+
+    #[test]
+    fn a_secret_cut_by_a_mark_is_redacted_in_the_files() {
+        let (text, _) = written_in_parts(
+            &[(b"token=SECR", false), (b"ET123\n", false)],
+            &["SECRET123"],
+        );
+        assert!(!text.contains("SECRET123"), "redacted: {text:?}");
+        let (whole, _) = written_in_parts(&[(b"token=SECRET123\n", false)], &["SECRET123"]);
+        assert_eq!(text, whole);
+    }
+
+    #[test]
+    fn an_overwrite_across_a_mark_is_one_line() {
+        let (text, _) = written_in_parts(&[(b"10%", false), (b"\r20%\n", false)], &[]);
+        let (whole, _) = written_in_parts(&[(b"10%\r20%\n", false)], &[]);
+        assert_eq!(text, whole);
+        assert!(!text.contains("10%20%"), "{text:?}");
+        let (erased, _) = written_in_parts(
+            &[(b"Downloading 1/3", false), (b"\x1b[2K\rDone\n", false)],
+            &[],
+        );
+        assert!(!erased.contains("Downloading 1/3Done"), "{erased:?}");
+    }
+
+    #[test]
+    fn a_character_split_by_a_mark_is_whole() {
+        let (text, _) = written_in_parts(&[(b"caf\xc3", false), (b"\xa9\n", false)], &[]);
+        assert!(text.contains("café"), "{text:?}");
+    }
+
+    #[test]
+    fn the_task_and_console_unended_lines_are_two_lines() {
+        let (_, dump) = written_in_parts(
+            &[
+                (b"Continue? ", false),
+                (b"INFO: x\n", true),
+                (b"PARTIAL", true),
+            ],
+            &[],
+        );
+        let dump = String::from_utf8_lossy(&dump);
+        assert!(
+            !dump.contains("Continue? INFO"),
+            "the console's line apart: {dump:?}"
+        );
+        assert!(dump.ends_with("Continue? \nPARTIAL"), "{dump:?}");
+    }
 
     #[test]
     fn the_user_editor_is_a_format_auto_or_unset() {

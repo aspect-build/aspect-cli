@@ -746,7 +746,9 @@ impl Destination {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if let Some(gate) = &self.gate {
+        // Only a write that reaches the destination waits its turn behind the
+        // other forwarder: a hidden one is fed and copied, never shown.
+        if let Some(gate) = self.gate.as_ref().filter(|_| !self.hidden) {
             gate.wait();
         }
         let _held = self.hold.map(|hold| hold());
