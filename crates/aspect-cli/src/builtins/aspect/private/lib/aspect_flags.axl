@@ -294,8 +294,11 @@ def publish_all_actions(bazel_trait) -> None:
     `upload_build_logs = "all"`. The runtime takes the request off the command
     line, adds `--build_event_publish_all_actions` and, unless the user's own
     flags or rc ask for every action, keeps the extra events from the BES
-    backends the CLI streams to and its file sinks. Added once however often it
-    is asked; a build option, so it stays out of a task's query."""
+    backends the CLI streams to and its file sinks, a requested
+    `--build_event_binary_file` among them. Files Bazel writes itself
+    (`--build_event_json_file`, `--build_event_text_file`) and a
+    `--bes_backend` it streams to get every action's event. Added once however
+    often it is asked; a build option, so it stays out of a task's query."""
     if _PUBLISH_ALL_ACTIONS_FOR_CLI not in bazel_trait.extra_flags:
         add_task_flags(bazel_trait, [_PUBLISH_ALL_ACTIONS_FOR_CLI])
 
