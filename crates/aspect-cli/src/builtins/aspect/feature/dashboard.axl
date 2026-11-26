@@ -1744,6 +1744,7 @@ def new_counts() -> dict:
         "test_cached": 0,
         "spawns": 0,
         "spawn_hits": 0,
+        "spawn_failed": 0,
         "runners": {},
     }
 
@@ -1754,6 +1755,8 @@ def count_spawn(counts: dict, spawn):
     counts["spawns"] += 1
     if _get(spawn, "cache_hit", False):
         counts["spawn_hits"] += 1
+    if _get(spawn, "exit_code", 0):
+        counts["spawn_failed"] = counts.get("spawn_failed", 0) + 1
     runner = str(_get(spawn, "runner", "") or "") or "unknown"
     counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
 
@@ -2833,12 +2836,14 @@ def bazel_status(state: dict) -> list:
     """Bazel's own status, the most first: its status line without the
     count (`16 actions, 15 running`), after its `Analyzing:` line while it
     analyses too; before it counts, its progress area's first line
-    (`Loading: 3 packages loaded`), else what it is doing (`phase_word`)."""
+    (`Loading: 3 packages loaded`), else nothing (the bar says
+    `phase_word`)."""
     progress = state["progress"]
     at = status_row(progress)
     if at < 0:
+        # Before it counts the bar says what it is doing; this, Bazel's line.
         first = bazel_line(progress[0]).strip() if progress else ""
-        return [t for t in (first, phase_word(state)) if t]
+        return [first] if first else []
     rest = bazel_line(progress[at]).partition("] ")[2].strip()
     if not analysing(progress):
         return [rest] if rest else []
@@ -2859,6 +2864,11 @@ def build_progress(state: dict):
         return (-1, -1, False)
     return (kept[0], kept[1], kept[2] and bool(state.get("building")))
 
+# Mnemonics of Bazel's actions that spawn nothing, for Metrics' internal
+# kinds and a failed build's split (`action_split`): each executed one is
+# internal.
+_INTERNAL_MNEMONICS = ["BazelWorkspaceStatusAction", "ExecutableSymlink", "FileWrite", "Middleman", "RepoMappingManifest", "RunfilesTree", "SolibSymlink", "SourceSymlinkManifest", "Symlink", "SymlinkTree", "TemplateExpand"]
+
 # Runners in `BuildMetrics` that ran nothing of their own: the total, the
 # actions with no spawn, and Bazel's own action cache (counted apart).
 _NOT_RUNNERS = ["total", "internal", "action cache hit"]
@@ -2874,14 +2884,22 @@ def action_split(state: dict) -> dict:
     `done` of `total` (Bazel's status line, `more` while it analyses), and
     of them `ran`, `cached` (a remote or disk cache served the spawn),
     `unchanged` (Bazel's own action cache: nothing to run), `internal` (no
-    spawn: symlinks, manifests, file writes) and `failed` (in no other: a
-    failed build's actions that failed or never ran).
+    spawn: symlinks, manifests, file writes) and `failed` (a failed build's
+    actions that failed, or are in no other).
 
     Once the build has ended with its `BuildMetrics` (`final`), each is
-    exact, from `action_summary`: the actions executed less the internal
-    ones `runner_count` names have spawns, at most the cache runners'
-    count of them cached and the rest ran; `action_cache_statistics.hits`
-    are unchanged. A successful build's done count is their sum.
+    from `action_summary`: the actions executed less `runner_count`'s
+    internal ones have spawns, of them the cache runners' share cached
+    (split in proportion with the runners that ran where both claim more
+    than there are, as dynamic execution does) and the rest ran;
+    `action_cache_statistics.hits` (else an `action cache hit` runner) are
+    unchanged. Bazel 9 counts an action whose spawn failed among the
+    internal ones and not in its done count: on a failed build those are
+    the execution log's failed spawns, else what the internal mnemonics of
+    `action_data` (`_INTERNAL_MNEMONICS`) leave of them, moved to `failed`,
+    the done count raised to match. A successful build's done count is
+    their sum; a failed build's total is at least what it created, so its
+    bar is never full when Bazel never drew a count.
 
     While it runs, `ran` and `cached` are the execution log's spawns, as it
     has them, clamped to the done count, and `rest` what is left of it:
@@ -2897,25 +2915,51 @@ def action_split(state: dict) -> dict:
     executed = _get(summary, "actions_executed")
     split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, ran = 0, cached = 0, unchanged = 0, internal = 0, rest = 0, failed = 0)
     if not state.get("building") and type(executed) == "int":
-        internal, cache = 0, 0
+        internal, cache, ran_spawns, hit_runner = 0, 0, 0, 0
         for runner in _get(summary, "runner_count", None) or []:
             name = str(_get(runner, "name", "") or "")
             n = _get(runner, "count", 0) or 0
             if name == "internal":
                 internal += n
+            elif name == "action cache hit":
+                hit_runner += n
             elif _cache_runner(name):
                 cache += n
+            elif name != "total":
+                ran_spawns += n
         internal = min(internal, executed)
         spawned = executed - internal
         cached = min(cache, spawned)
-        unchanged = _get(_get(summary, "action_cache_statistics"), "hits", 0) or 0
-        whole = spawned + unchanged + internal
-        split.update(counted = True, known = True, final = True, ran = spawned - cached, cached = cached, unchanged = unchanged, internal = internal, more = False)
-        if build_succeeded(inv) or done < whole:
+        if ran_spawns and cache and ran_spawns + cache > spawned:
+            cached = min(spawned - 1, spawned * cache // (ran_spawns + cache)) if spawned else 0
+        stats = _get(summary, "action_cache_statistics")
+        unchanged = (_get(stats, "hits", 0) or 0) if stats != None else hit_runner
+        succeeded = build_succeeded(inv)
+        failed = 0
+        if not succeeded and internal:
+            logged = c.get("spawn_failed", 0)
+            if logged:
+                failed = min(logged, internal)
+            else:
+                kinds, listed = 0, False
+                for data in _get(summary, "action_data", None) or []:
+                    if str(_get(data, "mnemonic", "") or "") in _INTERNAL_MNEMONICS:
+                        kinds += _get(data, "actions_executed", 0) or 0
+                        listed = True
+                if listed:
+                    failed = max(0, internal - kinds)
+        internal -= failed
+        whole = spawned + unchanged + internal + failed
+        split.update(counted = True, known = True, final = True, ran = spawned - cached, cached = cached, unchanged = unchanged, internal = internal, failed = failed, more = False)
+        if succeeded or done < whole:
             split["done"] = whole
         else:
-            split["failed"] = done - whole
-        split["total"] = split["done"] if build_succeeded(inv) else max(split["total"], split["done"])
+            split["failed"] += done - whole
+        if succeeded:
+            split["total"] = split["done"]
+        else:
+            created = _get(summary, "actions_created", 0) or 0
+            split["total"] = max(split["total"], split["done"], created if done < 0 else 0)
         return split
     if done < 0 or own_execution_log(inv):
         return split
@@ -3048,15 +3092,16 @@ def action_results(split: dict, room: int, rows = 3) -> list:
     """`action_parts` there is any of (none of a kind there is none of),
     each in words with the bar's glyph before its count as a coloured key
     (`█ 5.6k ran`), packed into rows of `room` cells, the first of these
-    that fits: two rows with whole counts, then with `short_count` ones,
-    three rows with either, then shorter words (`_SHORT_WORDS`) in two or
-    three. The words are never dropped: what fits none has its last row
-    cut where it is drawn."""
+    that fits: two rows (or `rows`, fewer) with whole counts, then with
+    `short_count` ones, `rows` rows with either, then shorter words
+    (`_SHORT_WORDS`) in two or `rows`. The words are never dropped: what
+    fits none has its last row cut where it is drawn."""
     parts = [p for p in action_parts(split) if p[1]]
     if not parts:
         return []
     packed = []
-    for level, most in [(0, 2), (1, 2), (0, rows), (1, rows), (2, 2), (2, rows)]:
+    two = min(2, rows)
+    for level, most in [(0, two), (1, two), (0, rows), (1, rows), (2, two), (2, rows)]:
         packed = [[]]
         for glyph, n, words, role in parts:
             count = _thousands(n) if level == 0 else short_count(n)
@@ -3270,31 +3315,55 @@ def _top(state: dict, cols: int, rows: int) -> list:
             _counts("Tests   %s✗%d%s %s✓%d%s%s%s", (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (_counts(" %s~%d%s", (_c("warning"), c["tests_flaky"], _RESET))) if c.get("tests_flaky") else "", (_counts(" ⊘%d", c["tests_skipped"])) if c.get("tests_skipped") else "")),
         ]
 
+    # As tall as the most Results rows there can be, for the whole build;
+    # the list scrolls in it (`actions_scroll`, the wheel over it), and
+    # unscrolled counts the rest, Bazel's unlisted ones too, on its last row.
+    pane = max(1, min(limit, rows // 3, results_capacity(wide)))
+
     # Tests' cache hits, from their results: on the Tests row where it has
     # room, else on a row of their own under it.
+    cached_row = None
     if c.get("test_runs"):
         cached = _counts("%d/%d cached", (c["test_cached"], c["test_runs"]))
         if text_width(_plain(summary[-1]) + " · " + cached) <= right_w - 4:
             summary[-1] += " · " + cached
         else:
-            summary.append(" " * (9 if wide else 8) + cached)
+            cached_row = " " * (9 if wide else 8) + cached
 
-    # The build's actions, one unit with the bar's, its glyphs their legend.
+    # The build's actions, one unit with the bar's, its glyphs their keys;
+    # the critical path; the failures, whose row a click takes to them.
     lead = "Actions  " if wide else "Actions "
-    for i, row in enumerate(action_results(action_split(state), right_w - 4 - len(lead))):
-        summary.append((lead if i == 0 else " " * len(lead)) + row)
-    if state.get("critical"):
-        summary.append(("Critical path %s" if wide else "Crit %s") % state["critical"])
+    split = action_split(state)
+    critical = (("Critical path %s" if wide else "Crit %s") % state["critical"]) if state.get("critical") else None
     failed_n, blocked_n = _failure_counts(state)
-    failed_i = -1
+    failed_row = None
     if failed_n or blocked_n:
-        failed_i = len(summary)
-        summary.append(_counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n)))
+        failed_row = _counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n))
 
-    # As tall as the most Results rows there can be, for the whole build;
-    # the list scrolls in it (`actions_scroll`, the wheel over it), and
-    # unscrolled counts the rest, Bazel's unlisted ones too, on its last row.
-    pane = max(1, min(limit, rows // 3, results_capacity(wide)))
+    # Too many for the pane (a short terminal): the tests' cache row goes
+    # first, then the critical path, then the actions fold to fewer rows;
+    # the failures' row stays, last.
+    most = 3
+    for _ in range(6):
+        actions_rows = action_results(split, right_w - 4 - len(lead), most)
+        wanted = len(summary) + len(actions_rows) + len([r for r in (cached_row, critical, failed_row) if r != None])
+        if wanted <= pane:
+            break
+        if cached_row != None:
+            cached_row = None
+        elif critical != None:
+            critical = None
+        elif most > 1:
+            most -= 1
+        else:
+            break
+    rest = ([cached_row] if cached_row != None else []) + [(lead if i == 0 else " " * len(lead)) + row for i, row in enumerate(actions_rows)] + ([critical] if critical != None else [])
+    summary = (summary + rest)[:max(0, pane - (1 if failed_row != None else 0))]
+    failed_i = -1
+    if failed_row != None:
+        failed_i = len(summary)
+        summary.append(failed_row)
+
     listed, edge = scrolled_rows(actions, pane, state.get("actions_scroll", 0), 0 if finished else running)
     state["actions_scroll"] = min(state.get("actions_scroll", 0), max(0, len(actions) - pane))
     actions = listed
@@ -3454,7 +3523,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     if state.get("help"):
         # From the row ↑↓ have scrolled them to, a last row counting the rest
         # when they do not fit; the console's scroll left as it is.
-        log = help_rows(state)
+        log = help_rows(state, body_w)
         top = min(state.get("help_top", 0), max(0, len(log) - log_h))
         state["help_top"] = top
         log = log[top:]
@@ -3800,25 +3869,30 @@ def _row_of(name: str, value) -> str:
 # it writes no compact one for the Dashboard to read.
 _OWN_EXEC_LOGS = ["--execution_log_binary_file", "--execution_log_json_file"]
 
+# The false words Bazel reads (`parse_bool` in the CLI's rc reader).
+_FALSE_WORDS = ["false", "f", "no", "n", "0"]
+
 def own_execution_log(inv: dict):
     """The flag a build was given for an execution log of the caller's own
     (`_OWN_EXEC_LOGS`), which leaves the Dashboard none to read; None without
     one. Its last occurrence counts, as Bazel takes it, from the whole
-    command line Bazel parsed (rc files' flags in it), an empty value being
-    none (the way to clear one an rc file set)."""
+    command line Bazel parsed (rc files' flags in it), read as the CLI's
+    `other_format` reads it: an empty value, a false one and the `--no`
+    form are none (the way to clear one an rc file set; Bazel 9 takes
+    `=false` as a path and refuses `--no`, Bazel 10 reads both as off), the
+    bare flag, a true value or a path one."""
     options = inv.get("options_parsed")
     flags = _get(options, "cmd_line") or _get(options, "explicit_cmd_line") or []
     last = {}
     for flag in flags:
         name, eq, value = str(flag).partition("=")
-        if name in _OWN_EXEC_LOGS:
-            last[name] = value if eq else "true"
+        for own in _OWN_EXEC_LOGS:
+            if name == "--no" + own[2:] and not eq:
+                last[own] = False
+            elif name == own:
+                last[own] = not eq or (value != "" and value.lower() not in _FALSE_WORDS)
     named = [name for name in _OWN_EXEC_LOGS if last.get(name)]
     return named[0] if named else None
-
-# Mnemonics of Bazel's actions that spawn nothing, for Metrics' internal
-# kinds: each executed one is internal.
-_INTERNAL_MNEMONICS = ["BazelWorkspaceStatusAction", "ExecutableSymlink", "FileWrite", "Middleman", "RepoMappingManifest", "RunfilesTree", "SolibSymlink", "SourceSymlinkManifest", "Symlink", "SymlinkTree", "TemplateExpand"]
 
 # Bazel's action cache miss reasons newer than the CLI's protos, which read
 # as their numbers.
@@ -3833,8 +3907,9 @@ def action_lines(state: dict) -> list:
     and what was reused, each kind under its glyph with what makes it up
     (the runners' spawns that ran or were cached, `BuildMetrics`' at the
     end and the execution log's while it runs; the internal actions'
-    mnemonics), Bazel's action cache with why it missed, and the execution
-    log's spawns."""
+    mnemonics, said to be some where they do not sum), each in one column
+    and none of a kind there is none of; Bazel's action cache with why it
+    missed, and the execution log's spawns."""
     c = state["counts"]
     inv = state.get("inv") or {}
     summary = _get(inv.get("build_metrics"), "action_summary")
@@ -3861,18 +3936,31 @@ def action_lines(state: dict) -> list:
         mnemonic = str(_get(data, "mnemonic", "") or "")
         if mnemonic in _INTERNAL_MNEMONICS:
             kinds[mnemonic] = _get(data, "actions_executed", 0) or 0
+    spawns = lambda n: _counts("%d spawn" + ("" if n == 1 else "s"), n)
     under = {
-        "ran": [(name, _counts("%d spawns", n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
-        "cached": [(name, _counts("%d spawns", n)) for name, n in _by_count({k: n for k, n in runners.items() if _cache_runner(k)})],
+        "ran": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
+        "cached": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if _cache_runner(k)})],
         "unchanged": [("", "Bazel's own action cache: nothing to run")],
         "internal": [(name, _thousands(n)) for name, n in _by_count(kinds)],
         "other": [("", "unchanged, internal, or not yet in the execution log")],
     }
-    for glyph, n, words, role in action_parts(split):
-        key = words.partition(" ")[0]
-        out.append("  " + _c(role) + glyph + _RESET + " " + words + " " * max(1, 22 - len(words)) + _thousands(n))
-        for name, value in under.get(key, []) if n else []:
-            out.append(_row_of("    " + name, value) if name else "      " + _c("muted") + value + _RESET)
+
+    # The internal kinds Bazel names are only some of them.
+    listed = 0
+    for n in kinds.values():
+        listed += n
+    if split["final"] and kinds and listed < split["internal"]:
+        under["internal"].append(("", _counts("and %d more of kinds this list does not name", split["internal"] - listed)))
+
+    # Names and counts in columns, however long a mnemonic; a kind there is
+    # none of left out, as in Results.
+    parts = [p for p in action_parts(split) if p[1]]
+    names = [len(words) + 2 for _, _, words, _ in parts] + [len(name) + 2 for _, n, words, _ in parts for name, _ in under.get(words.partition(" ")[0], []) if name]
+    column = max([22] + [w + 1 for w in names])
+    for glyph, n, words, role in parts:
+        out.append("  " + _c(role) + glyph + _RESET + " " + words + " " * (column - len(words)) + _thousands(n))
+        for name, value in under.get(words.partition(" ")[0], []):
+            out.append(("    " + name + " " * (column - len(name)) + value) if name else "      " + _c("muted") + value + _RESET)
 
     # Bazel's own action cache, and why it missed.
     stats = _get(summary, "action_cache_statistics")
@@ -4928,9 +5016,10 @@ _KEY_GROUPS = ["Scroll", "Search", "Failures", "Screen", "Leave"]
 _ROW_FAILURES = ["up", "q", "a"]
 _ROW_CONSOLE = ["esc", "o", "q", "]", "ctrl-f", "n", "e", "pageup", "K", "a", "z", "w"]
 
-def help_rows(state: dict) -> list:
+def help_rows(state: dict, width = 0) -> list:
     """The `?` overlay's rows, grouped (`_KEY_GROUPS`), the keys that do not
-    apply now left out, then what the actions' glyphs are (`_ACTIONS_KEY`)."""
+    apply now left out, then what the actions' glyphs are (`_actions_key`,
+    in rows of `width` cells)."""
     rows = []
     for group in _KEY_GROUPS:
         entries = [k for k in KEYS if k.group == group and k.help != None and k.shown(state)]
@@ -4938,10 +5027,21 @@ def help_rows(state: dict) -> list:
             continue
         rows.append(group)
         rows += ["  " + fit(k.help[0], 20) + " " + k.help[1] for k in entries]
-    return rows + [_ACTIONS_KEY]
+    return rows + _actions_key(width)
 
-# The `?` overlay's last row: what the bar's and Results' glyphs are.
-_ACTIONS_KEY = "Actions: █ ran · ▓ cached · ▒ unchanged (while it runs, other) · ░ internal · ╳ failed or skipped"
+# What the bar's and Results' glyphs are, for the `?` overlay.
+_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged (while it runs, other)", "░ internal", "╳ failed or skipped"]
+
+def _actions_key(width: int) -> list:
+    """The `?` overlay's rows saying what the actions' glyphs are: a heading,
+    then the glyphs as many to a row of `width` cells as fit (all on one
+    without a width)."""
+    rows = [[]]
+    for part in _ACTIONS_KEY:
+        if width and rows[-1] and 2 + text_width(" · ".join(rows[-1] + [part])) > width:
+            rows.append([])
+        rows[-1].append(part)
+    return ["Actions"] + ["  " + " · ".join(row) for row in rows]
 
 def row_labels(state: dict) -> list:
     """The keys row's labels for what has focus (`_ROW_FAILURES`,

@@ -250,7 +250,30 @@ def _actions_tests(ctx):
 
     # Final: BuildMetrics' exact split, as real builds gave it.
     big = _screen(ctx, ["x"], building = False, ended = True, done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
-    _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, cached = 0, unchanged = 611, internal = 4390, rest = 0, failed = 1700))
+    _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, cached = 0, unchanged = 611, internal = 2390, rest = 0, failed = 3700))
+
+    # Bazel 9.3.3 counts an action whose spawn failed among the internal
+    # ones and leaves it out of its done count: taken from the execution
+    # log's failed spawns, else from what the internal mnemonics leave.
+    def _shape(executed, runners, done_total, failed_spawns = 0, data = None, created = 0, hits = None, success = False):
+        st = _screen(ctx, ["x"], building = False, done_total = done_total, inv = {"build_finished": _SUCCESS if success else _FAILURE, "build_metrics": struct(action_summary = struct(
+            actions_executed = executed,
+            runner_count = [struct(name = "total", count = executed)] + [struct(name = n, count = k) for n, k in runners],
+            action_cache_statistics = struct(hits = hits, misses = 0) if hits != None else None,
+            action_data = data,
+            actions_created = created,
+        ))})
+        st["counts"]["spawn_failed"] = failed_spawns
+        return _split_of(action_split(st))
+
+    _eq("keep_going, one failed: ╳, not ░", _shape(2003, [("internal", 2), ("darwin-sandbox", 2001)], (2002, 2002, False), failed_spawns = 1), dict(done = 2003, total = 2003, ran = 2001, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 1))
+    _eq("nokeep_going, 14 failed", _shape(26, [("internal", 26)], (12, 12, False), failed_spawns = 14), dict(done = 26, total = 26, ran = 0, cached = 0, unchanged = 0, internal = 12, rest = 0, failed = 14))
+    _eq("without the log, from the mnemonics", _shape(26, [("internal", 26)], (12, 12, False), data = [struct(mnemonic = "SourceSymlinkManifest", actions_executed = 6), struct(mnemonic = "Symlink", actions_executed = 6), struct(mnemonic = "Genrule", actions_executed = 14)]), dict(done = 26, total = 26, ran = 0, cached = 0, unchanged = 0, internal = 12, rest = 0, failed = 14))
+    fast = _shape(3, [("internal", 3)], None, failed_spawns = 1, created = 50)
+    _eq("fail-fast with no count drawn: never a full bar", (fast["done"], fast["total"], fast["failed"]), (3, 50, 1))
+    _eq("its bar", _visible(action_bar(dict(fast, known = True, counted = True, final = True, more = False), 50)).count("─") > 0, True)
+    _eq("dynamic execution keeps what ran", _shape(10, [("remote cache hit", 8), ("linux-sandbox", 6)], (10, 10, False), success = True), dict(done = 10, total = 10, ran = 5, cached = 5, unchanged = 0, internal = 0, rest = 0, failed = 0))
+    _eq("an action cache hit runner without the statistics", _shape(9, [("action cache hit", 7), ("linux-sandbox", 9)], (16, 16, False), success = True)["unchanged"], 7)
     kg = _screen(ctx, ["x"], building = False, done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
     _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, cached = 0, unchanged = 4, internal = 5, rest = 0, failed = 1))
     ok = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
@@ -345,7 +368,7 @@ def _actions_tests(ctx):
     # Metrics: the done count and what was reused, each kind with what
     # makes it up, the action cache's misses by reason.
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(big)]
-    for want in ["done 9,301 · 19% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 611", "░ internal 4,390", "SourceSymlinkManifest 683", "╳ failed or skipped 1,700", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
+    for want in ["done 9,301 · 19% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 611", "░ internal 2,390", "SourceSymlinkManifest 683", "╳ failed or skipped 3,700", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
         _eq("Metrics has %r" % want, any([l.startswith(want) for l in lines]), True)
     _eq("Genrule is no internal kind", any(["Genrule" in l for l in lines]), False)
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(cached)]
@@ -356,6 +379,41 @@ def _actions_tests(ctx):
     mid["counts"]["runners"] = {"darwin-sandbox": 200, "remote cache hit": 1100}
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(mid)]
     _eq("mid-build Metrics", ["done 3,830 of 8,563" in lines, "darwin-sandbox 200 spawns" in lines, "▒ other 2,530" in lines, "unchanged, internal, or not yet in the execution log" in lines], [True, True, True, True])
+
+    # Metrics: one spawn, long mnemonics in the column, no kind there is
+    # none of, and the internal kinds said to be some where they don't sum.
+    lone = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": struct(action_summary = struct(
+        actions_executed = 2,
+        runner_count = [struct(name = "total", count = 2), struct(name = "internal", count = 1), struct(name = "a-remarkably-long-runner-name-here", count = 1)],
+        action_cache_statistics = struct(misses = 2),
+        action_data = [struct(mnemonic = "Symlink", actions_executed = 0)],
+    ))})
+    lines = [_visible(l) for l in metrics_lines(lone)]
+    _eq("one spawn", any(["a-remarkably-long-runner-name-here 1 spawn" == " ".join(l.split()) for l in lines]), True)
+    counts_at = [l.rfind(" ") for l in lines if l.startswith("  █ ran") or "a-remarkably-long" in l]
+    _eq("in one column", len(counts_at) == 2 and lines[[i for i, l in enumerate(lines) if "a-remarkably-long" in l][0]].index("1 spawn") == [l for l in lines if l.startswith("  █ ran")][0].rindex("1"), True)
+    _eq("no cached or unchanged row", [l for l in lines if l.startswith("  ▓") or l.startswith("  ▒")], [])
+    _eq("internal kinds partial", any(["and 1 more of kinds this list does not name" in l for l in lines]), True)
+
+    # Results on a short terminal: the tests' cache row, the critical path
+    # and then the actions' third row go before the failures' row does.
+    short = dict(greg_screen, critical = "Linking //app:bin 4.1s", counts = dict(greg_screen["counts"], test_runs = 15, test_cached = 9, tests_passed = 1400, tests_failed = 100, tests_flaky = 3), fails = [{"kind": "action", "label": "//x:y", "detail": "Genrule", "files": [], "output": "", "success": False}])
+    for height in [20, 24, 26, 30]:
+        rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(short, 80, height)).split("\n") if "││ " in r]
+        _eq("Failed kept at %d rows" % height, any([r.startswith("Failed") or r.startswith("✗1 ") for r in rows]), True)
+        if height == 30:
+            _eq("all there at 30 rows", [any([r.strip().startswith(w) for r in rows]) for w in ("9/15 cached", "Crit", "░ 33 internal")], [True, True, True])
+
+    # The `?` overlay's key to the glyphs, wrapped to the width.
+    for width in range(36, 101, 4):
+        key = help_rows(greg_screen, width)[-3:]
+        _eq("the glyphs' key at %d" % width, [text_width(r) <= width for r in key if r != "Actions"], [True for r in key if r != "Actions"])
+    _eq("every glyph keyed", all([g in "".join(help_rows(greg_screen, 40)) for g in ["█", "▓", "▒", "░", "╳"]]), True)
+
+    # Before Bazel counts, the bar says what it is doing; the header no
+    # word of its own.
+    early = _visible(render(_screen(ctx, ["x"], progress = []), 100, 30)).split("\n")
+    _eq("starting once", (early[0].count("starting"), early[1].rstrip(" \r").endswith("starting")), (0, True))
 
     # A folded build picked with `<`/`>` has its own bar.
     two = _screen(ctx, ["x"], task = "lint", building = False, ended = True, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
@@ -1731,6 +1789,15 @@ def _impl(ctx: TaskContext) -> int:
         (["--execution_log_binary_file="], None),
         (["--execution_log_binary_file=/tmp/rc.binlog", "--execution_log_binary_file="], None),
         (["--execution_log_json_file=", "--execution_log_json_file=/tmp/x.json"], "--execution_log_json_file"),
+
+        # As the CLI's `other_format` reads them: false words and `--no` are
+        # none, the bare flag and true words one.
+        (["--execution_log_binary_file=false"], None),
+        (["--execution_log_binary_file=/tmp/rc.binlog", "--noexecution_log_binary_file"], None),
+        (["--execution_log_json_file=0"], None),
+        (["--execution_log_binary_file"], "--execution_log_binary_file"),
+        (["--execution_log_binary_file=true"], "--execution_log_binary_file"),
+        (["--noexecution_log_json_file", "--execution_log_json_file=/tmp/x.json"], "--execution_log_json_file"),
     ]:
         _eq("the caller's own log from %r" % flags, own_execution_log({"options_parsed": struct(cmd_line = flags, explicit_cmd_line = [])}), want)
 
