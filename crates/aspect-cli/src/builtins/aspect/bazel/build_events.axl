@@ -12,12 +12,14 @@ once rather than twice. Because that can leave no sink at all — and the Aspect
 Web UI link keys on an id only a sink mints — a task pairs the collect call with
 `bes_streamed_by_bazel`, which redirects the link to Bazel's invocation id.
 
-Every gRPC sink built here takes the BuildEvents feature's retry, buffer and
-timeout options (`grpc_sink`, read through `build_events_settings`), whichever
-way its backend was named: `--bes-backend`, a feature's
-`BazelTrait.bes_backends`, or a Workflows runner's
-`BazelTrait.bes_runner_backends`. The feature refuses a bad option before the
-task runs.
+Every gRPC sink built here takes the BuildEvents feature's retry, buffer,
+timeout and event size options (`grpc_sink`, read through
+`build_events_settings`), whichever way its backend was named: `--bes-backend`,
+a feature's `BazelTrait.bes_backends`, or a Workflows runner's
+`BazelTrait.bes_runner_backends`. The build's events are held to the smallest
+event size among its gRPC sinks, so a task streams within the option by passing
+the sinks in `build_events`, with nothing more to plumb. The feature refuses a
+bad option before the task runs.
 
 The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
 the user has not supplied their own `authorization` header — see
@@ -138,7 +140,7 @@ def _backends_to_stream(bazel_trait, extra_backends: list) -> list:
 
 def grpc_sink(ctx, uri: str, metadata = {}):
     """A gRPC sink streaming to `uri` with `metadata` as headers, under the
-    BuildEvents feature's retry, buffer and timeout options
+    BuildEvents feature's retry, buffer, timeout and event size options
     (`build_events_settings`)."""
     return bazel.build_events.grpc(
         uri = uri,
@@ -147,6 +149,7 @@ def grpc_sink(ctx, uri: str, metadata = {}):
         retry_min_delay = build_events_settings.retry_min_delay(ctx),
         retry_max_buffer_bytes = build_events_settings.retry_max_buffer_bytes(ctx),
         timeout = build_events_settings.timeout(ctx),
+        max_event_bytes = build_events_settings.max_event_bytes(ctx),
     )
 
 def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list:
@@ -159,8 +162,8 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     features already pushed onto `BazelTrait.build_event_sinks` (a `--bep-file`
     dump). The backends named those first three ways stream each endpoint once,
     under the first spelling it was named by; a prebuilt sink is kept as it is.
-    Every gRPC sink built here takes the BuildEvents retry, buffer and timeout
-    options (`grpc_sink`).
+    Every gRPC sink built here takes the BuildEvents retry, buffer, timeout and
+    event size options (`grpc_sink`).
 
     Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
     every group so the invocation is streamed once — see `_drop_bazel_streamed`.

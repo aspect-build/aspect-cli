@@ -217,6 +217,9 @@ enum SinkConfig {
         uri: String,
         metadata: HashMap<String, String>,
         retry: RetryConfig,
+        /// The largest message the backend accepts; None for
+        /// [`bazel::bes::cap::DEFAULT_MAX_MESSAGE_BYTES`].
+        max_message_bytes: Option<usize>,
     },
     File {
         path: String,
@@ -284,11 +287,17 @@ impl std::fmt::Debug for SinkPhase {
 }
 
 impl BuildEventSink {
-    pub fn new_grpc(uri: String, metadata: HashMap<String, String>, retry: RetryConfig) -> Self {
+    pub fn new_grpc(
+        uri: String,
+        metadata: HashMap<String, String>,
+        retry: RetryConfig,
+        max_message_bytes: Option<usize>,
+    ) -> Self {
         Self::new(SinkConfig::Grpc {
             uri,
             metadata,
             retry,
+            max_message_bytes,
         })
     }
 
@@ -311,6 +320,17 @@ impl BuildEventSink {
         }
     }
 
+    /// The largest message a gRPC sink's backend accepts, None for a file
+    /// sink.
+    fn grpc_max_message_bytes(&self) -> Option<usize> {
+        match &*self.config {
+            SinkConfig::Grpc {
+                max_message_bytes, ..
+            } => Some(max_message_bytes.unwrap_or(bazel::bes::cap::DEFAULT_MAX_MESSAGE_BYTES)),
+            _ => None,
+        }
+    }
+
     fn grpc_uri(&self) -> Option<String> {
         match &*self.config {
             SinkConfig::Grpc { uri, .. } => Some(uri.clone()),
@@ -329,6 +349,7 @@ impl BuildEventSink {
             uri,
             metadata,
             retry,
+            ..
         } = &*self.config
         else {
             anyhow::bail!("BUG: bind_grpc called on a non-gRPC sink");
@@ -1168,7 +1189,7 @@ impl Unstarted {
         file: Option<Reservation>,
         gate: Gate,
         file_sinks: Vec<FileSink>,
-        max_event_bytes: Option<usize>,
+        max_message_bytes: Option<usize>,
     ) -> Self {
         Self {
             pending: file.map(|file| {
@@ -1176,7 +1197,7 @@ impl Unstarted {
                 // user learns of a lost copy or upload.
                 bazel::bes::sink::set_warn(crate::diag::warn);
                 let stream = BuildEventStream::new();
-                let stream = match max_event_bytes {
+                let stream = match max_message_bytes {
                     Some(n) => stream.max_message_bytes(n),
                     None => stream,
                 };
@@ -1339,6 +1360,11 @@ impl Build {
     /// pid exists, since its exit is what ends them (see `PidPair`); and the
     /// build event reader starts last, after every subscriber (iterators, gRPC
     /// and tracing sinks) is bound, so none misses the start of the stream.
+    ///
+    /// Every event is held, once for the whole stream, to the smallest
+    /// `max_event_bytes` of the gRPC sinks in `build_events` (each unset one
+    /// counting as 4 MiB), and to 4 MiB with none: iterators, file sinks and
+    /// the history read the same capped stream the backends do.
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
@@ -1361,7 +1387,6 @@ impl Build {
         history: &History,
         keep_logs: bazel::bes::sink::keep::Keep,
         publish_all_actions: bool,
-        max_event_bytes: Option<usize>,
     ) -> Result<Build, std::io::Error> {
         // Logs to keep are read from the stream, which a build keeping some
         // has even with no other consumer; and keeping them makes the history
@@ -1507,6 +1532,10 @@ impl Build {
                 grpc_sinks.push(sink);
             }
         }
+        let max_message_bytes = grpc_sinks
+            .iter()
+            .filter_map(BuildEventSink::grpc_max_message_bytes)
+            .min();
         if build_events && let Some(path) = requested_bep_path {
             tee_requested_bep_file(&mut file_sinks, path, trim_downstream);
         }
@@ -1686,7 +1715,8 @@ impl Build {
             }
             None => (None, None, None, None, None, None, None),
         };
-        let build_event_stream = Unstarted::new(bes_file, pids.gate(), file_sinks, max_event_bytes);
+        let build_event_stream =
+            Unstarted::new(bes_file, pids.gate(), file_sinks, max_message_bytes);
 
         // Everything that can fail once bazel runs. A failure abandons the
         // stream (see `Unstarted`), and releases the handles this spawn bound.

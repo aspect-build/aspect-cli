@@ -418,7 +418,6 @@ fn start<'v>(
     announce: super::build::AnnounceSpawn,
     cancellation: &CancellationToken,
     spawn: Option<SpawnSpec>,
-    max_event_bytes: Option<usize>,
 ) -> anyhow::Result<Started> {
     super::require_claimed_flags(this)?;
     // `rc` is the only build input: the one given, else the active one from
@@ -486,7 +485,6 @@ fn start<'v>(
         &env.history,
         bazel::bes::sink::keep::Keep::default(),
         false,
-        max_event_bytes,
     )?;
 
     let recv = ours
@@ -873,8 +871,8 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     ///   `"null"`, or a writable file stream from `ctx.std.fs.create(...)`.
     /// * `rc` - The `Bazelrc` the build runs under; the active one from
     ///   `use_rc` when omitted.
-    /// * `directory`, `build_events`, `max_event_bytes`, `execution_log`,
-    ///   `announce_version`, `announce_command` - As on `ctx.bazel.build`. The build's own
+    /// * `directory`, `build_events`, `execution_log`, `announce_version`,
+    ///   `announce_command` - As on `ctx.bazel.build`. The build's own
     ///   stdout and stderr are inherited; the stdio knobs here are the
     ///   process's.
     /// * `cancellation` - The token the process and the build are bound to;
@@ -914,7 +912,6 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
         >,
-        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Run> {
         let execution_log = super::partition_execution_log(execution_log)?;
@@ -952,7 +949,6 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             },
             &token,
             Some(spec),
-            super::max_event_bytes_arg(max_event_bytes)?,
         )?;
         let key = started.labels.normalize(&label);
         let runnable = started
@@ -989,8 +985,8 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
     ///   `use_rc` when omitted.
     /// * `stdout`, `stderr`, `stdio` - The build's streams, as on
     ///   `ctx.bazel.build`; nothing is spawned here, so these are Bazel's.
-    /// * `directory`, `build_events`, `max_event_bytes`, `execution_log`,
-    ///   `announce_version`, `announce_command` - As on `ctx.bazel.build`.
+    /// * `directory`, `build_events`, `execution_log`, `announce_version`,
+    ///   `announce_command` - As on `ctx.bazel.build`.
     /// * `cancellation` - The token the build is bound to;
     ///   `ctx.cancellation.root` unless given.
     ///
@@ -1029,7 +1025,6 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] cancellation: NoneOr<
             &'v cancellation::Token,
         >,
-        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Runs> {
         let execution_log = super::partition_execution_log(execution_log)?;
@@ -1050,7 +1045,6 @@ pub(crate) fn run_natives(registry: &mut MethodsBuilder) {
             },
             &token,
             None,
-            super::max_event_bytes_arg(max_event_bytes)?,
         )?;
         Ok(Runs {
             build: started.build,

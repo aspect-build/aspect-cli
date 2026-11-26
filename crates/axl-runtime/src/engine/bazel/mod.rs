@@ -610,6 +610,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   invalid constraint is a hard error.
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
+    ///   Every event is held to the smallest `max_event_bytes` of the gRPC
+    ///   sinks listed (see `bazel.build_events.grpc`), 4 MiB with none.
     /// * `workspace_events` - Enable the workspace event log by passing a list of
     ///   `bazel.workspace_events.iterator()` handles, each of which receives every
     ///   event; `[]` leaves it off, and `True` is refused for naming no consumer.
@@ -667,11 +669,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
     ///   (attempts this build ran, not cached) or `all`. Copied.
-    /// * `max_event_bytes` - The largest message the build's BES backends
-    ///   accept, at least 64 KiB; unset, 4 MiB, gRPC's default. Every build
-    ///   event is held to it, less 4 KiB for the request wrapping the event: a
-    ///   failed action's command line is cut from the end to fit, and any other
-    ///   event over it is passed on unchanged. Either way with a warning.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -739,11 +736,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = "none")] keep_action_logs: &str,
         #[starlark(require = named, default = "none")] keep_test_logs: &str,
         #[starlark(require = named, default = false)] publish_all_actions: bool,
-        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let keep_logs = keep_logs(keep_action_logs, keep_test_logs)?;
-        let max_event_bytes = max_event_bytes_arg(max_event_bytes)?;
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
@@ -796,7 +791,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &env.history,
             keep_logs,
             publish_all_actions,
-            max_event_bytes,
         )?;
         Ok(build)
     }
@@ -831,6 +825,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   invalid constraint is a hard error.
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
+    ///   Every event is held to the smallest `max_event_bytes` of the gRPC
+    ///   sinks listed (see `bazel.build_events.grpc`), 4 MiB with none.
     /// * `workspace_events` - Enable the workspace event log by passing a list of
     ///   `bazel.workspace_events.iterator()` handles, each of which receives every
     ///   event; `[]` leaves it off, and `True` is refused for naming no consumer.
@@ -888,11 +884,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
     ///   (attempts this build ran, not cached) or `all`. Copied.
-    /// * `max_event_bytes` - The largest message the build's BES backends
-    ///   accept, at least 64 KiB; unset, 4 MiB, gRPC's default. Every build
-    ///   event is held to it, less 4 KiB for the request wrapping the event: a
-    ///   failed action's command line is cut from the end to fit, and any other
-    ///   event over it is passed on unchanged. Either way with a warning.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -958,11 +949,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = "none")] keep_action_logs: &str,
         #[starlark(require = named, default = "none")] keep_test_logs: &str,
         #[starlark(require = named, default = false)] publish_all_actions: bool,
-        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let keep_logs = keep_logs(keep_action_logs, keep_test_logs)?;
-        let max_event_bytes = max_event_bytes_arg(max_event_bytes)?;
         require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = partition_execution_log(execution_log)?;
@@ -1015,7 +1004,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &env.history,
             keep_logs,
             publish_all_actions,
-            max_event_bytes,
         )?;
         Ok(test)
     }
@@ -1540,6 +1528,14 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     ///   upload. Unset uses `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` if set,
     ///   otherwise 256 MiB.
     /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
+    /// * `max_event_bytes` - The largest message the backend accepts, at least
+    ///   64 KiB; unset, 4 MiB, gRPC's default. The build's events are held,
+    ///   once for the whole stream, to the smallest of the gRPC sinks it
+    ///   streams to, less 4 KiB for the request wrapping each event: a failed
+    ///   action's command line is cut from the end to fit, and any other event
+    ///   over it is passed on unchanged, either way with a warning. Iterators
+    ///   and file sinks of the same build read the capped stream; a build with
+    ///   no gRPC sink is held to 4 MiB.
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
         #[starlark(require = named)] uri: String,
@@ -1549,7 +1545,9 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "1s")] retry_min_delay: &str,
         #[starlark(require = named, default = NoneOr::None)] retry_max_buffer_bytes: NoneOr<i64>,
         #[starlark(require = named, default = "0s")] timeout: &str,
+        #[starlark(require = named, default = NoneOr::None)] max_event_bytes: NoneOr<i64>,
     ) -> anyhow::Result<build::BuildEventSink> {
+        let max_event_bytes = max_event_bytes_arg(max_event_bytes)?;
         if max_retries < 0 {
             anyhow::bail!("max_retries must be >= 0, got {max_retries}");
         }
@@ -1583,6 +1581,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 timeout,
                 ..Default::default()
             },
+            max_event_bytes,
         ))
     }
 
@@ -1898,8 +1897,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     });
 }
 
-/// The `max_event_bytes` of `ctx.bazel.build`, `test`, `run` and `run_all`:
-/// the largest message the build's BES backends accept, None for the default.
+/// The `max_event_bytes` of `bazel.build_events.grpc`: the largest message
+/// the sink's backend accepts, None for the default.
 /// One under 64 KiB is refused as a `TaskExit`, without a traceback.
 pub(crate) fn max_event_bytes_arg(max_event_bytes: NoneOr<i64>) -> anyhow::Result<Option<usize>> {
     use bazel::bes::cap::MIN_MAX_MESSAGE_BYTES;

@@ -4,7 +4,6 @@ load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_l
 load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "bazel_flags", "bazel_rc", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "exit_code_of")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event", "usable_bb_clientd_root")
-load("./private/lib/build_events_settings.axl", "build_events_settings")
 load("./private/lib/changedetector.axl", "changedetector")
 load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/ibazel_strategy.axl", "ibazel_strategy")
@@ -68,7 +67,6 @@ def _build_once(ctx: TaskContext, ph: struct, target: str, rc, announce_version:
     runs = ctx.bazel.run_all(
         [target],
         build_events = build_events,
-        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         rc = rc,
         announce_version = announce_version,
         announce_command = announce_command,
@@ -371,7 +369,6 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
     runs = ctx.bazel.run_all(
         [target],
         build_events = build_events,
-        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         execution_log = xl.sinks or False,
         rc = rc,
         announce_version = announce_version,

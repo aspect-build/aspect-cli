@@ -6,19 +6,24 @@ itself: a task's `--bes-backend`, the deployment `--remote` wires, and a
 Workflows runner's own. A backend Bazel uploads to through its `--bes_backend`
 is Bazel's, and these leave it alone.
 
-`max_event_bytes` holds every event of the build to what fits in a message of
-that size, for every consumer: BES backends, a `--build_event_binary_file`, the
-task history and AXL event iterators. Bazel writes a failed action's whole
-command line into its event, params file expanded, so a large action makes an
-event past a backend's receive limit, which refuses it and loses the rest of
-the build. That command line is cut from the end to fit; any other event over
-the limit is passed on unchanged. Either way the CLI warns.
+`max_event_bytes` is the largest message those backends accept. Each gRPC sink
+carries it (`bazel.build_events.grpc`'s `max_event_bytes`), and the runtime
+holds every event of a build to the smallest among the build's gRPC sinks, for
+every consumer: BES backends, a `--build_event_binary_file`, the task history
+and AXL event iterators. A build with no gRPC sink is held to the runtime's
+4 MiB. Bazel writes a failed action's whole command line into its event, params
+file expanded, so a large action makes an event past a backend's receive limit,
+which refuses it and loses the rest of the build. That command line is cut from
+the end to fit; any other event over the limit is passed on unchanged. Either
+way the CLI warns.
 
 The options are set on the command line (`--build-events:max-retries`) or in
 `config.axl` (`ctx.features[BuildEvents].args.max_retries`). The feature checks
-them and writes them onto `_BuildEventsSettings`, which the tasks read through
-`build_events_settings`. Only the feature writes that trait, so config has one
-place to set them, and a value the tasks read has been checked. With the
+them and writes them onto `_BuildEventsSettings`, which `grpc_sink`
+(`bazel/build_events.axl`) reads through `build_events_settings` for every gRPC
+sink the CLI builds, so a task streams under them by passing those sinks to the
+build. Only the feature writes that trait, so config has one place to set them,
+and a value the sinks read has been checked. With the
 feature disabled the trait keeps its defaults, the runtime's own.
 
 A negative count, a malformed duration, a `max_event_bytes` under 64 KiB, or a
@@ -105,12 +110,12 @@ BuildEvents = feature(
         ),
         "max_event_bytes": args.int(
             default = _MAX_EVENT_BYTES,
-            description = "The largest message the BES backends accept, at least 64 KiB; 4 MiB (the default) is gRPC's. Every build event is held to it, less 4 KiB for the request wrapping the event: a failed action's command line is cut from the end to fit, and any other event over it is passed on unchanged, with a warning either way.",
+            description = "The largest message the BES backends accept, at least 64 KiB; 4 MiB (the default) is gRPC's. Every event of a build streamed to one is held to it, less 4 KiB for the request wrapping the event: a failed action's command line is cut from the end to fit, and any other event over it is passed on unchanged, with a warning either way.",
         ),
     },
 )
 
-# The tasks' view of the `BuildEvents` options, read through the accessors.
+# The `BuildEvents` options as `grpc_sink` reads them, through the accessors.
 build_events_settings = struct(
     max_retries = lambda ctx: ctx.traits[_BuildEventsSettings].max_retries,
     retry_min_delay = lambda ctx: ctx.traits[_BuildEventsSettings].retry_min_delay,
