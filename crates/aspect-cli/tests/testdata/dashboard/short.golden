@@ -4,7 +4,7 @@
 │ Linking //app:bin; 1s                                           ││          0 built, 0 failed    │
 │                                                                 ││ Tests    0 passed, 0 failed   │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────┘
-┌─ Console  Failures  Metrics  Invocation  Tips  following ────────────────────────────────────────┐
+┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────── following ─┐
 │ Building...                                                                                      ┃
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  q cancel · / find · e filter · PgUp PgDn ⇧↑↓ u d page · K J top/end · z zoom · w cut · ? keys

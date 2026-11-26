@@ -3271,10 +3271,13 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     """The main pane's top border: its tabs, always in the same order, the
     shown one in reverse video (the failures counted, `✗` failed and `○`
     blocked) and named by its crumbs (a log or a file opened in it, the
-    current one bold), then what the shown one says of itself (`status`).
-    Where each tab and crumb is drawn is kept (`tab_spans`, on row `row`)
-    for a click to take it, or go back to it, and the pointer to light it.
-    Too narrow, the other tabs go, then the shown one's middle crumbs."""
+    current one bold); then, at the border's right end, apart from the tabs
+    and in a style none of them has, what the shown one says of itself
+    (`status`: following, lines up, a run replayed). Where each tab and
+    crumb is drawn is kept (`tab_spans`, on row `row`) for a click to take
+    it, or go back to it, and the pointer to light it. Too narrow, the
+    status is cut, then goes, then the other tabs, then the shown one's
+    middle crumbs."""
     failed, blocked = _failure_counts(state)
     shown = state.get("tab", "console")
     names = {}
@@ -3321,9 +3324,12 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
         at += 1
     state["tab_row"] = row
     state["tab_spans"] = spans
+
+    # At least a dash on each side of the status, so it never touches a tab.
     rest = max(0, cols - at - 1)
-    info = fit(" " + status, rest - 1).rstrip(" ") + " " if status and rest > 4 else ""
-    return text + _c("muted") + info + _RESET + _c("border") + "─" * max(0, rest - text_width(info)) + "┐" + _RESET
+    info = (" " + fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
+    lead = rest - text_width(info) - (1 if info else 0)
+    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("accent") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
 
 _SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
 

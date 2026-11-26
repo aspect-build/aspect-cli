@@ -1,5 +1,5 @@
  ✔ aspect build · 0s
-┌─ Console  Failures  Metrics  Invocation  Tips 2  ↑↓ choose · s silence on this machine ──────────┐
+┌─ Console  Failures  Metrics  Invocation  Tips 2 ───────── ↑↓ choose · s silence on this machine ─┐
 │ ▸ TIP[disk-full] warning: the disk is 98% full                                                   │
 │   TIP[remote-miss] suggestion: 41% of actions missed the cache                                   │
 │                                                                                                  │

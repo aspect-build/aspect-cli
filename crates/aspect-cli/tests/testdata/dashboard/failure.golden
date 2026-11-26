@@ -8,7 +8,7 @@
 │                                                                 ││                               │
 │                                                                 ││                               │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────┘
-┌─ Console  Failures ✗1  Metrics  Invocation  Tips  following ─────────────────────────────────────┐
+┌─ Console  Failures ✗1  Metrics  Invocation  Tips ──────────────────────────────────── following ─┐
 │ INFO: Analyzed 3 targets (12 packages loaded).                                                   │
 │ INFO: Found 3 targets...                                                                         │
 │ src/a.cc:3:1: warning: unused variable                                                           │
