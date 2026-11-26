@@ -425,6 +425,43 @@ def _actions_tests(ctx):
     _eq("and on the bar", "╳" in _visible(action_bar(split, 40)), True)
     _eq("not while it runs", action_split(dict(cut, building = True, progress = ["[4 / 4] no actions running"]))["failed"], 0)
 
+    # Every action published (the default), live: r39's run of //dc:all
+    # //two:all with --build_event_publish_all_actions posted 14 executed
+    # actions: the workspace status with no command line (internal), ten
+    # genrules a disk cache served (with one), three that failed. Live, the
+    # events and the execution log's hits tell them apart; what the done
+    # count has past them is unchanged; the split converges on BuildMetrics'.
+    live = _screen(ctx, ["x"], progress = ["[14 / 14] no actions running"])
+
+    def _action(st, i, mnemonic, ok, command):
+        payload = struct(success = ok, type = mnemonic, command_line = ["/bin/bash", "-c", "x"] if command else [], stderr = None, stdout = None, failure_detail = None if ok else struct(message = "x", category = struct(code = "NON_ZERO_EXIT", spawn_exit_code = 1)))
+        event_id = struct(label = "//dc:a%d" % i, primary_output = "bazel-out/a%d" % i, configuration = None)
+        count_event(st["counts"], "action_completed", event_id, payload)
+        note_event(st, "action_completed", event_id, payload, False)
+
+    _action(live, 0, "BazelWorkspaceStatusAction", True, False)
+    for i in range(1, 11):
+        _action(live, i, "Genrule", True, True)
+        count_spawn(live["counts"], struct(cache_hit = True, runner = "disk cache hit"))
+    half = action_split(dict(live, progress = ["[20 / 30] 3 actions running"]))
+    _eq("part told: the rest unchanged so far", [half[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")], [0, 10, 1, 0, 9, 20])
+    for i in range(11, 14):
+        _action(live, i, "Genrule", False, True)
+    mid_split = action_split(live)
+    _eq("live, every action published", [mid_split[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")], [0, 10, 1, 3, 0, 14])
+    _eq("its parts sum to the bar's total", mid_split["ran"] + mid_split["cached"] + mid_split["internal"] + mid_split["failed"] + mid_split["unchanged"], mid_split["total"])
+    _eq("Results name them, no other", [p[2] for p in action_parts(mid_split) if p[1]], ["cached", "internal", "failed"])
+    live.update(building = False, ended = True, done_total = (14, 14, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
+        actions_executed = 14,
+        actions_created = 13,
+        runner_count = [struct(name = "total", count = 14), struct(name = "disk cache hit", count = 10), struct(name = "internal", count = 4)],
+        action_cache_statistics = struct(hits = 0, misses = 14),
+    ))})
+    end = action_split(live)
+    _eq("converges on BuildMetrics' split", [end[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")], [mid_split[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")])
+    _eq("the ? key: unchanged with every action published", any(["▒ unchanged ·" in r or r.endswith("▒ unchanged") for r in help_rows(dict(live, all_actions = True), 100)]), True)
+    _eq("and what other is without", any(["▒ unchanged (while it runs, other: unchanged, internal, or not logged yet)" in r for r in help_rows(dict(live, all_actions = False), 200)]), True)
+
     tested = _real(ctx, "failing test")
     _fail_event(tested, "TestRunner:spawn", 9)
     _eq("a test's failed action is no ╳", action_split(tested)["failed"], 0)

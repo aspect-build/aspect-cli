@@ -13,11 +13,12 @@ It takes the screen when the task starts and shows:
   failures and time, the newest last, `+N earlier` past three), and while a
   build runs, or `p` asks, its panes:
   - a bar of the build's actions (`action_split`, one unit throughout):
-    ran `█`, cached `▓`, unchanged `▒` (while it runs, `other`: unchanged,
-    internal, or not yet in the execution log, which Bazel writes in
-    batches), internal `░`, failed `╳`, then not done `─`, each kind its
-    own glyph so
-    they stay apart without colour; at its right end how far it is
+    ran `█`, cached `▓`, unchanged `▒`, internal `░`, failed `╳`, then not
+    done `─`, each kind its own glyph so they stay apart without colour;
+    while it runs from the actions Bazel reports with every one published
+    (`--dashboard:actions=all`, the default: internal ones have no command
+    line) and the execution log's cache hits, and with only failures
+    published (`failed`), `other` for what is neither ran nor cached; at its right end how far it is
     (`45% · 3,830 of 8,563+`, `+` while Bazel analyses), at the end its
     actions and what was reused; a build `<`/`>` picked, its own;
   - the actions running now, from Bazel's own progress area, oldest first,
@@ -44,7 +45,8 @@ It takes the screen when the task starts and shows:
     dependency blocked; Enter opens one's log in the tab (its stderr and
     stdout, a test's `test.log`, found where Bazel left it, a remote cache's
     `bytestream://` one in the output tree); `a` lists the actions that
-    succeeded and wrote output instead (with `--dashboard:actions=all`);
+    succeeded and wrote output instead (`--dashboard:actions=all`, the
+    default);
   - Metrics: the actions, each kind with what makes it up (the runners'
     spawns, remote and disk cache hits apart, the internal kinds), Bazel's
     action cache with why it missed, the execution log's spawns; tests,
@@ -1832,6 +1834,13 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
     if aborted == None:
         aborted = type(payload) == "aborted"
     label = str(_get(event_id, "label", "") or "")
+    if kind == "action_completed" and not aborted and _get(payload, "success", False):
+        # Every action Bazel executed, with `--build_event_publish_all_actions`:
+        # one that ran no spawn (internal) has no command line.
+        counts["actions_seen"] = counts.get("actions_seen", 0) + 1
+        if not (_get(payload, "command_line", None) or []):
+            counts["actions_internal"] = counts.get("actions_internal", 0) + 1
+        return
     if kind == "build_started":
         # Only a test or coverage run tests what it builds.
         counts["testing"] = str(_get(payload, "command", "") or "") in ("test", "coverage")
@@ -2961,7 +2970,9 @@ def action_split(state: dict) -> dict:
     without its `BuildMetrics` (the event stream cut short) keeps that
     split, but for the actions the stream said failed, `failed`, out of
     the rest. With no execution log to read (`own_execution_log`), only
-    the done count is `known`. `counted` once there is a done count."""
+    the done count is `known`. With every action published
+    (`--dashboard:actions=all`, the default), the live split is the
+    events' (`_published_split`). `counted` once there is a done count."""
     done, total, more = build_progress(state)
     c = state.get("counts") or {}
     inv = state.get("inv") or {}
@@ -3023,6 +3034,8 @@ def action_split(state: dict) -> dict:
         return split
     if done < 0 or own_execution_log(inv):
         return split
+    if c.get("actions_seen") and state.get("building"):
+        return _published_split(state, split, done)
     cached = min(c.get("spawn_hits", 0), done)
     ran = min(max(0, c.get("spawns", 0) - c.get("spawn_hits", 0)), done - cached)
     rest = done - ran - cached
@@ -3034,6 +3047,25 @@ def action_split(state: dict) -> dict:
     rest -= took
     ran = max(0, ran - (failed - took))
     split.update(known = True, ran = ran, cached = cached, rest = rest, failed = failed, done = max(done, ran + cached + rest + failed), failed_build = failed > 0)
+    split["total"] = max(split["total"], split["done"])
+    return split
+
+def _published_split(state: dict, split: dict, done: int) -> dict:
+    """`action_split` while a build runs with every action it executes
+    published (`--build_event_publish_all_actions`, the `actions` arg's
+    default): the events say which ran no spawn (`internal`: no command
+    line) and which spawned, of which the execution log's cache hits are
+    `cached` and the rest `ran`; the actions that failed apart; what the
+    done count has past them is `unchanged`: Bazel's own action cache, which
+    posts no event, and the few the stream has not told yet."""
+    c = state.get("counts") or {}
+    failed = len(failed_actions(state))
+    internal = c.get("actions_internal", 0)
+    spawned = max(0, c.get("actions_seen", 0) - internal)
+    cached = min(c.get("spawn_hits", 0), spawned)
+    ran = spawned - cached
+    seen = ran + cached + internal + failed
+    split.update(known = True, published = True, ran = ran, cached = cached, internal = internal, failed = failed, unchanged = max(0, done - seen), done = max(done, seen))
     split["total"] = max(split["total"], split["done"])
     return split
 
@@ -3150,8 +3182,9 @@ def short_count(n: int) -> str:
 def action_parts(split: dict) -> list:
     """Results' actions, `(glyph, count, words, role)` each, the bar's
     glyphs their legend: ran and cached, then while the build runs what
-    else is done (`other`, as `action_split` has it), and at its end
-    unchanged, internal and failed; with nothing to tell them apart, the
+    else is done (`other`, as `action_split` has it; with every action
+    published, unchanged, internal and failed as at its end), and at its
+    end unchanged, internal and failed; with nothing to tell them apart, the
     done count; while it runs, what is not done yet too, the bar's `─`:
     the actions running now (`running_count`, at most what is not done)
     and the rest pending, so they sum to the bar's total; none before it
@@ -3166,13 +3199,13 @@ def action_parts(split: dict) -> list:
     if not split["known"]:
         return [(_DONE[0], split["done"], "done", _DONE[1])] + remaining
     parts = [("█", split["ran"], "ran", "accent"), ("▓", split["cached"], "cached", "success")]
-    if not split["final"]:
+    if not split["final"] and not split.get("published"):
         parts.append(("▒", split["rest"], "other", "muted"))
         return parts + ([("╳", split["failed"], "failed", "error")] if split["failed"] else []) + remaining
     parts += [("▒", split["unchanged"], "unchanged", "muted"), ("░", split["internal"], "internal", "subtle")]
     if split["failed"]:
         parts.append(("╳", split["failed"], "failed", "error"))
-    return parts
+    return parts + remaining
 
 # Results' shorter words for a kind, where the whole ones do not fit.
 _SHORT_WORDS = {"unchanged": "unch.", "internal": "int.", "running": "run.", "pending": "pend."}
@@ -5155,17 +5188,22 @@ def help_rows(state: dict, width = 0) -> list:
             continue
         rows.append(group)
         rows += ["  " + fit(k.help[0], 20) + " " + k.help[1] for k in entries]
-    return rows + _actions_key(width)
+    return rows + _actions_key(width, state.get("all_actions", True))
 
 # What the bar's and Results' glyphs are, for the `?` overlay.
-_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged (while it runs, other)", "░ internal", "╳ failed", "─ running · pending"]
+_ACTIONS_KEY = ["█ ran", "▓ cached", "▒ unchanged", "░ internal", "╳ failed", "─ running · pending"]
 
-def _actions_key(width: int) -> list:
+# `▒`'s key where a build does not publish every action: while it runs it
+# cannot tell those apart.
+_OTHER_KEY = "▒ unchanged (while it runs, other: unchanged, internal, or not logged yet)"
+
+def _actions_key(width: int, published = True) -> list:
     """The `?` overlay's rows saying what the actions' glyphs are: a heading,
     then the glyphs as many to a row of `width` cells as fit (all on one
-    without a width)."""
+    without a width); without every action `published` (`actions =
+    "failed"`), what `▒ other` is while a build runs."""
     rows = [[]]
-    for part in _ACTIONS_KEY:
+    for part in _ACTIONS_KEY if published else [_OTHER_KEY if p.startswith("▒") else p for p in _ACTIONS_KEY]:
         if width and rows[-1] and 2 + text_width(" · ".join(rows[-1] + [part])) > width:
             rows.append([])
         rows[-1].append(part)
@@ -5409,6 +5447,7 @@ def _dashboard_impl(ctx: FeatureContext):
         "spread": {},
         "logged_index": None,
         "cancelling": False,
+        "all_actions": ctx.args.actions == "all",
         "ended": False,
         "counts": new_counts(),
         "error_count": 0,
@@ -5763,9 +5802,9 @@ Dashboard = feature(
             description = "Have the screen take the mouse (the default): its wheel scrolls the console and never the terminal past the screen, a drag selects and copies, and a click opens a web link or a path in the editor --console:file-hyperlink-format names (any other link is copied). false leaves the mouse to the terminal, which then selects and opens links itself and sends the wheel as the arrow keys where it supports that. `m` switches between the two while the screen is up.",
         ),
         "actions": args.string(
-            default = "failed",
+            default = "all",
             values = ["failed", "all"],
-            description = "Which actions' logs the screen can show: `failed`, or `all` that wrote any (`a` lists them), adding --build_event_publish_all_actions for this task alone (BES backends get the extra events only if your own flags or rc ask).",
+            description = "Which actions Bazel reports to the screen: `all` (the default) adds --build_event_publish_all_actions for this task alone (BES backends get the extra events only if your own flags or rc ask), so Results tells what ran, was cached or was internal while the build runs, and `a` lists the actions that wrote output; `failed` reports only those that failed (the screen then says `other` for the rest until the build's metrics come).",
         ),
     },
 )
