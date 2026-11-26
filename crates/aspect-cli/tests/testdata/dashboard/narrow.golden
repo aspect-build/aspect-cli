@@ -2,7 +2,7 @@
 ┌─ Running (2) ────┐┌─ Results ────────┐
 │ Compilin…a.cc 3s ││ Targets ✗0 ✓0/0  │
 │ Linking …:bin 1s ││ Tests   ✗0 ✓0    │
-│                  ││                  │
+│                  ││ Actions █0 ▓0 ▒3 │
 │                  ││                  │
 └──────────────────┘└──────────────────┘
 ┌─ Console ──────────────── following ─┐

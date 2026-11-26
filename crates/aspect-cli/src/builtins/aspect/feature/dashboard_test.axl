@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_counts", "action_row", "action_rows", "action_seconds", "add_lines", "aged_time", "attempt_state", "bar", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -147,8 +147,17 @@ def _goldens(ctx, view_state, act, update):
             viewed[k] = view_state[k]
     on_key(viewed, "tab", 10)
     on_key(viewed, "enter", 10)
+    analysing = _screen(ctx, log, progress = ["Analyzing: 8000 targets (1 packages loaded, 3879 targets configured)", "[3,830 / 8,563] 16 actions, 15 running", "    Compiling src/a.cc; 3s", "    Linking //app:bin; 1s"], now_ms = 12000)
+    analysing["counts"].update(spawns = 1300, spawn_hits = 1100, configured = 3)
+    finished = _screen(ctx, log + ["INFO: Build completed successfully, 8563 total actions"], ended = True, verdict = True, building = False, critical = "Linking //app:bin 4.1s", done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED})
+    finished["counts"].update(configured = 3, built = 3, test_runs = 15, test_cached = 9, tests_passed = 15)
+    fold_build(finished, 9000)
     states = [
         ("running", _screen(ctx, log, **running), 100, 30),
+        ("analysing-140", analysing, 140, 30),
+        ("analysing-80", analysing, 80, 30),
+        ("final-140", finished, 140, 30),
+        ("final-80", finished, 80, 30),
         ("success", _screen(ctx, log + ["INFO: Build completed successfully, 9 total actions"], ended = True, verdict = True, building = False), 100, 30),
         ("failure", _screen(ctx, log + ["ERROR: Build did NOT complete successfully"], fails = [act], ended = True, verdict = False, building = False), 100, 30),
         ("failures-log", viewed, 100, 30),
@@ -179,6 +188,179 @@ def _goldens(ctx, view_state, act, update):
                 break
     if stale:
         fail("%d golden frame(s) differ: %s" % (len(stale), ", ".join([s[0] for s in stale])))
+
+# BuildMetrics' action summaries of real Bazel 9.3.3 builds, from their BEP:
+# `big` a --keep_going test of 9,301 actions with failures and blocked
+# targets, `kg` a small one with a broken genrule, `ok` a successful one.
+# Bazel 9's DIGEST_MISMATCH (7), newer than the CLI's protos, reads as its
+# number.
+_BIG = struct(action_summary = struct(
+    actions_executed = 6990,
+    runner_count = [struct(name = "total", count = 6990), struct(name = "internal", count = 4390), struct(name = "darwin-sandbox", count = 3200, exec_kind = "Local")],
+    action_cache_statistics = struct(hits = 611, misses = 6990, miss_details = [struct(reason = "DIFFERENT_DEPS"), struct(reason = "NOT_CACHED", count = 4107), struct(reason = "UNCONDITIONAL_EXECUTION", count = 447), struct(reason = "7", count = 2436)]),
+    action_data = [struct(mnemonic = "Genrule", actions_executed = 4000), struct(mnemonic = "SourceSymlinkManifest", actions_executed = 683), struct(mnemonic = "ExecutableSymlink", actions_executed = 620), struct(mnemonic = "RepoMappingManifest", actions_executed = 602), struct(mnemonic = "TestRunner", actions_executed = 600), struct(mnemonic = "RunfilesTree", actions_executed = 484), struct(mnemonic = "BazelWorkspaceStatusAction", actions_executed = 1), struct(mnemonic = "FileWrite", actions_executed = None)],
+    actions_created = 9500,
+))
+_KG = struct(action_summary = struct(
+    actions_executed = 6,
+    runner_count = [struct(name = "total", count = 6), struct(name = "internal", count = 5), struct(name = "darwin-sandbox", count = 2, exec_kind = "Local")],
+    action_cache_statistics = struct(hits = 4, misses = 6),
+))
+_OK = struct(action_summary = struct(
+    actions_executed = 2,
+    runner_count = [struct(name = "total", count = 2), struct(name = "internal", count = 1), struct(name = "darwin-sandbox", count = 1, exec_kind = "Local")],
+    action_cache_statistics = struct(misses = 2),
+))
+
+# A cached build's, as a remote cache leaves one: most of it unchanged.
+_REUSED = struct(action_summary = struct(
+    actions_executed = 1204,
+    runner_count = [struct(name = "total", count = 1204), struct(name = "internal", count = 459), struct(name = "remote cache hit", count = 600), struct(name = "disk cache hit", count = 40), struct(name = "linux-sandbox", count = 105, exec_kind = "Local")],
+    action_cache_statistics = struct(hits = 7359, misses = 1204, miss_details = [struct(reason = "NOT_CACHED", count = 1204)]),
+))
+
+_SUCCESS = struct(exit_code = struct(name = "SUCCESS", code = 0))
+_FAILURE = struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))
+
+def _split_of(split):
+    return {k: split[k] for k in ("done", "total", "ran", "cached", "unchanged", "internal", "rest", "failed")}
+
+def _actions_tests(ctx):
+    """The build's actions in one unit: the bar, Results and Metrics."""
+
+    # Cells shared out in proportion, every part there is any of seen.
+    _eq("shares sum to the width", shares([1, 2, 3, 4], 20), [2, 4, 6, 8])
+    _eq("largest remainders", shares([1, 1, 1], 10), [4, 3, 3])
+    _eq("a part there is any of gets a cell", shares([1, 9998, 1], 10), [1, 8, 1])
+    _eq("nothing", shares([0, 0], 5), [0, 0])
+
+    # Mid-build: ran and cached from the execution log's spawns, the rest of
+    # the done count other (unchanged, internal, or not yet logged);
+    # clamped, as spawns (a test's retried attempts) can outnumber actions.
+    mid = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"])
+    mid["counts"].update(spawns = 1300, spawn_hits = 1100)
+    split = action_split(mid)
+    _eq("mid-build split", _split_of(split), dict(done = 3830, total = 8563, ran = 200, cached = 1100, unchanged = 0, internal = 0, rest = 2530, failed = 0))
+    _eq("mid-build sums to the done count", split["ran"] + split["cached"] + split["rest"], 3830)
+    _eq("no reuse while it runs", reused(split), None)
+    mid["counts"].update(spawns = 5000, spawn_hits = 4000)
+    _eq("clamped to the done count", _split_of(action_split(mid)), dict(done = 3830, total = 8563, ran = 0, cached = 3830, unchanged = 0, internal = 0, rest = 0, failed = 0))
+    mid["counts"].update(spawns = 5000, spawn_hits = 100)
+    _eq("ran clamped too", [action_split(mid)[k] for k in ("ran", "cached", "rest")], [3730, 100, 0])
+
+    # Final: BuildMetrics' exact split, as real builds gave it.
+    big = _screen(ctx, ["x"], building = False, ended = True, done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
+    _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, cached = 0, unchanged = 611, internal = 4390, rest = 0, failed = 1700))
+    kg = _screen(ctx, ["x"], building = False, done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
+    _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, cached = 0, unchanged = 4, internal = 5, rest = 0, failed = 1))
+    ok = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
+    _eq("a real successful one", _split_of(action_split(ok)), dict(done = 2, total = 2, ran = 1, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0))
+    _eq("its done count is the split's sum", _split_of(action_split(dict(ok, done_total = (1, 3, True)))), dict(done = 2, total = 2, ran = 1, cached = 0, unchanged = 0, internal = 1, rest = 0, failed = 0))
+    cached = _screen(ctx, ["x"], building = False, ended = True, done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED})
+    final = action_split(cached)
+
+    # Built something, so the finished screen keeps its panes.
+    for st in (big, cached):
+        st["counts"]["configured"] = 3
+    _eq("a cached build's split", _split_of(final), dict(done = 8563, total = 8563, ran = 105, cached = 640, unchanged = 7359, internal = 459, rest = 0, failed = 0))
+
+    # Reused: cached or unchanged, of what was not internal.
+    _eq("reused", reused(final), (7359 + 640) * 100 // (105 + 640 + 7359))
+    _eq("reused, 98%", reused(final), 98)
+    _eq("nothing to reuse", reused(dict(final, ran = 0, cached = 0, unchanged = 0)), None)
+    _eq("one action", actions_text(dict(final, ran = 0, cached = 0, unchanged = 0, internal = 1, done = 1)), ["1 action", "1"])
+    _eq("the final label", actions_text(final)[0], "8,563 actions · 98% reused")
+
+    # The bar: a segment of each kind, its own glyph, then what is not done.
+    bar = _visible(action_bar(final, 40))
+    _eq("final bar glyphs", [bar.count(g) for g in ("█", "▓", "▒", "░", "─")], [1, 3, 34, 2, 0])
+    _eq("as wide as asked", text_width(bar), 40)
+    mid["counts"].update(spawns = 1300, spawn_hits = 1100)
+    bar = _visible(action_bar(action_split(mid), 50))
+    _eq("mid-build bar", [bar.count(g) for g in ("█", "▓", "▒", "░", "─")], [1, 6, 15, 0, 28])
+    failed_bar = _visible(action_bar(action_split(big), 60))
+    _eq("a failed build's", ("╳" in failed_bar, text_width(failed_bar)), (True, 60))
+
+    # Analysing: Bazel's status line under its `Analyzing:` line, a `+`
+    # after the total; the status line is no running action.
+    both = ["Analyzing: 8000 targets (1 packages loaded, 3879 targets configured)", "[12 / 28] 16 actions, 15 running", "    Executing genrule //x:g0; 0s darwin-sandbox"]
+    _eq("the status line under Analyzing", status_row(both), 1)
+    _eq("still analysing", analysing(both), True)
+    _eq("its running actions", running_actions(both), ["Executing genrule //x:g0; 0s darwin-sandbox"])
+    _eq("its counts", action_counts(both), (15, 16))
+    meld = _screen(ctx, ["x"], progress = both)
+    _eq("analysing: more to come", build_progress(meld), (12, 28, True))
+    rows = _visible(render(meld, 140, 30)).split("\n")
+    _eq("the bar's +", rows[1].rstrip(" \r").endswith("42% · 12 of 28+"), True)
+    _eq("the header has Bazel's status", rows[0].rstrip(" \r").endswith("Analyzing: 8000 targets (1 packages loaded, 3879 targets configured) · 16 actions, 15 running"), True)
+    _eq("narrower, shortened", _visible(render(meld, 100, 30)).split("\n")[0].rstrip(" \r").endswith("analyzing · 16 actions, 15 running"), True)
+    _eq("zoomed, the count's +", _visible(render(dict(meld, zoom = True), 100, 30)).split("\n")[0].rstrip(" \r").endswith("12 of 28+ actions done"), True)
+    note_progress(meld, both)
+    meld.update(building = False, progress = [])
+    _eq("never analysing once it ended", build_progress(meld), (12, 28, False))
+
+    # No execution log to read (the caller's own): only the done count,
+    # nothing called other; at the end BuildMetrics' split.
+    own_inv = {"options_parsed": struct(cmd_line = ["--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])}
+    blind = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"], inv = own_inv)
+    blind["counts"].update(spawns = 0)
+    _eq("no log: the done count alone", action_parts(action_split(blind)), [("━", 3830, "done", "")])
+    shown = _visible(render(blind, 140, 30))
+    _eq("no log: drawn as done", ("Actions  ━ 3,830 done" in shown, "unchanged" in shown, "━" * 10 in shown), (True, False, True))
+    blind.update(building = False, ended = True, inv = dict(own_inv, build_finished = _SUCCESS, build_metrics = _REUSED), done_total = (8563, 8563, False))
+    _eq("no log, at the end: BuildMetrics' split", [p[2] for p in action_parts(action_split(blind))], ["ran", "cached", "unchanged", "internal"])
+
+    # Results: words and whole counts where they fit, `k` counts where not,
+    # glyphs alone narrower still.
+    _eq("wide", [_visible(r) for r in action_results(final, 34)], ["█ 105 ran · ▓ 640 cached", "▒ 7,359 unchanged · ░ 459 internal"])
+    _eq("in thousands", [_visible(r) for r in action_results(final, 33)], ["█ 105 ran · ▓ 640 cached", "▒ 7.3k unchanged · ░ 459 internal"])
+    _eq("narrow", [_visible(r) for r in action_results(final, 15)], ["█105 ▓640 ▒7.3k", "░459"])
+    _eq("k", [short_count(n) for n in (526, 1999, 48123, 1250000)], ["526", "1.9k", "48k", "1.2M"])
+    drawn = _visible(render(cached, 80, 30))
+    _eq("the narrow Results", ("Actions  █105 ▓640 ▒7.3k" in drawn, "░459" in drawn), (True, True))
+    wide_meld = dict(meld, building = True, progress = [both[0], "[3,830 / 8,563] 16 actions, 15 running"])
+    _eq("the bar's label at 140 columns", _visible(render(wide_meld, 140, 30)).split("\n")[1].rstrip(" \r").endswith(" 44% · 3,830 of 8,563+"), True)
+    _eq("and at 80", _visible(render(wide_meld, 80, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830/8,563+"), True)
+
+    # Without colour, the glyphs keep the segments apart.
+    _eq("one glyph a kind", len({g: 1 for g in ("█", "▓", "▒", "░", "╳", "━", "─")}), 7)
+
+    # Metrics: the done count and what was reused, each kind with what
+    # makes it up, the action cache's misses by reason.
+    lines = [" ".join(_visible(l).split()) for l in metrics_lines(big)]
+    for want in ["done 9,301 · 19% reused", "█ ran 2,600", "darwin-sandbox 3,200 spawns", "▒ unchanged 611", "░ internal 4,390", "SourceSymlinkManifest 683", "╳ failed or skipped 1,700", "action cache 611 hits · 6,990 misses", "not cached 4,107", "digest mismatch 2,436", "actions created 9,500"]:
+        _eq("Metrics has %r" % want, any([l.startswith(want) for l in lines]), True)
+    _eq("Genrule is no internal kind", any(["Genrule" in l for l in lines]), False)
+    lines = [" ".join(_visible(l).split()) for l in metrics_lines(cached)]
+    _eq("a newer miss reason by its name", "digest mismatch 2,436" in [" ".join(_visible(l).split()) for l in metrics_lines(big)], True)
+    _eq("no note under a kind there is none of", [l for l in metrics_lines(ok) if "own action cache" in _visible(l)], [])
+    _eq("reused in Metrics", "done 8,563 · 98% reused (cached or unchanged, of those not internal)" in lines, True)
+    _eq("remote and disk hits apart", ["remote cache hit 600 spawns" in lines, "disk cache hit 40 spawns" in lines], [True, True])
+    mid["counts"]["runners"] = {"darwin-sandbox": 200, "remote cache hit": 1100}
+    lines = [" ".join(_visible(l).split()) for l in metrics_lines(mid)]
+    _eq("mid-build Metrics", ["done 3,830 of 8,563" in lines, "darwin-sandbox 200 spawns" in lines, "▒ other 2,530" in lines, "unchanged, internal, or not yet in the execution log" in lines], [True, True, True, True])
+
+    # A folded build picked with `<`/`>` has its own bar.
+    two = _screen(ctx, ["x"], task = "lint", building = False, ended = True, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
+    fold_build(two, 0)
+    two.update(done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED})
+    fold_build(two, 0)
+    two.update(panes = True, tab = "metrics")
+    bar_of = lambda st: [r for r in _visible(render(st, 140, 30)).split("\n") if len(r) > 1 and list(r.elems())[1] in "█▓▒░╳━─"][0].rstrip(" \r")
+    _eq("the newest build's bar", bar_of(two).endswith("8,563 actions · 98% reused"), True)
+    two["picked_build"] = 0
+    _eq("the picked build's", bar_of(two).endswith("2 actions · 0% reused"), True)
+
+    # Every row of the screen as wide as it, at every width, while the build
+    # runs and at its end.
+    for name, st in [("analysing", dict(meld, building = True, progress = both)), ("final", cached), ("failed", big), ("no log", dict(blind, building = True, ended = False, progress = ["[3,830 / 8,563] 16 actions running"]))]:
+        for cols in range(40, 181, 7):
+            frame = render(st, cols, 30)
+            body = frame[frame.find("\x1b[H") + 3:]
+            drawn = [_visible(r) for r in body.split("\r\n")]
+            bad = [(i, text_width(r)) for i, r in enumerate(drawn) if text_width(r) != cols]
+            if bad:
+                fail("%s at %d columns: rows not as wide as the frame: %r\n%s" % (name, cols, bad, "\n".join(drawn)))
 
 def _impl(ctx: TaskContext) -> int:
     sink = {"aspect_results_url": "https://app.example.com/", "sink_invocation_id": "sink-1"}
@@ -223,8 +405,6 @@ def _impl(ctx: TaskContext) -> int:
     _eq("half shown: half the height", len([r for r in scrollbar(20, 10, 5) if r.find("┃") >= 0]), 5)
     _eq("status counts", progress_counts("[5,619 / 13,381] 15 actions running"), (5619, 13381))
     _eq("no status", progress_counts("Analyzing: 3 targets"), None)
-    _eq("bar", bar(1, 4, 8), "██░░░░░░")
-    _eq("bar of nothing", bar(1, 0, 8), "")
     _eq("error", severity("ERROR: x failed"), "error")
     _eq("warning", severity("WARNING: y"), "warning")
     _eq("plain", severity("INFO: z"), "")
@@ -842,21 +1022,29 @@ def _impl(ctx: TaskContext) -> int:
     add_lines(kept, ["INFO: 1,204 processes: 1,000 remote cache hit, 3 disk cache hit, 200 internal, 1 darwin-sandbox."])
     _eq("the cache tally is read", kept["cache"], (1003, 1004))
 
-    # The Results pane's cache figures come from their sources of truth:
-    # spawns' from the execution log (not the progress line's actions, which
-    # count what Bazel's own action cache satisfied and its internal ones),
-    # tests' from their results.
+    # The Results pane counts actions, one unit with the bar's: what ran
+    # and what a cache served from the execution log's spawns while the
+    # build runs, the rest of the done count other; tests'
+    # cache hits from their results.
     count_spawn(kept["counts"], struct(cache_hit = True, runner = "remote cache hit"))
     count_spawn(kept["counts"], struct(cache_hit = False, runner = "darwin-sandbox"))
     count_event(kept["counts"], "test_result", struct(label = "//t:a"), struct(cached_locally = True, execution_info = None))
     count_event(kept["counts"], "test_result", struct(label = "//t:b"), struct(cached_locally = False, execution_info = struct(cached_remotely = False)))
-    drawn = _visible(render(kept, 100, 30))
-    if "Cached   50% of 2 spawns" not in drawn or "1 of 2 test runs" not in drawn:
-        fail("render: the cache figures should be in the Results pane:\n" + drawn)
-    many = _screen(ctx, ["x"])
+    kept["progress"] = ["[5 / 9] 2 actions running"]
+    drawn = _visible(render(kept, 140, 30))
+    for want in ["Actions  █ 1 ran · ▓ 1 cached", "▒ 3 other", "0 failed · 1/2 cached", "55% · 5 of 9"]:
+        if want not in drawn:
+            fail("render: %r should be drawn:\n%s" % (want, drawn))
+    _eq("no spawns row in Results", ("spawns" in drawn, "test runs" in drawn, "Cached " in drawn), (False, False, False))
+    many = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"])
     many["counts"].update(spawns = 1452, spawn_hits = 58, test_runs = 1500, test_cached = 1200, configured = 12345, built = 12000)
-    shown = _visible(render(many, 120, 30))
-    _eq("counts with thousands separators", ["3% of 1,452 spawns" in shown, "1,200 of 1,500 test runs" in shown, "12,345 configured" in shown, "12,000 built" in shown], [True, True, True, True])
+    shown = _visible(render(many, 140, 30))
+    _eq("counts with thousands separators", ["█ 1,394 ran · ▓ 58 cached" in shown, "▒ 2,378 other" in shown, "12,345 configured" in shown, "12,000 built" in shown], [True, True, True, True])
+    many["counts"].update(test_runs = 15, test_cached = 9, tests_passed = 9, tests_failed = 6)
+    _eq("the Tests row's cache hits", "Tests    9 passed, 6 failed · 9/15 cached" in _visible(render(many, 140, 30)), True)
+    _eq("narrow, the same", "Tests   ✗6 ✓9 · 9/15 cached" in _visible(render(many, 100, 30)), True)
+    many["counts"].update(test_runs = 1500, test_cached = 1200)
+    _eq("left out where it does not fit", "cached" in [r for r in _visible(render(many, 140, 30)).split("\n") if "Tests " in r][0], False)
     metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
     if "2 · 1 from a cache (50%) · 1 run" not in metrics or "remote cache hit" not in metrics:
         fail("metrics: actions by the execution log:\n" + metrics)
@@ -1944,7 +2132,7 @@ def _impl(ctx: TaskContext) -> int:
     # and no build panes, the build tabs muted and saying so.
     early = _screen(ctx, [], building = False, task = "lint")
     add_lines(early, ["▸ Running lint task", "", "▸ Setup", "▹ Running setup"], None, None, cli = True)
-    _eq("the phase from the CLI's lines", phase_status(early), "Setup · Running setup")
+    _eq("the phase from the CLI's lines", phase_status(early), ["Setup · Running setup"])
     _eq("nothing built yet", built(early), False)
     rows = _visible(render(early, 100, 24)).split("\n")
     _eq("the header names the phase", "Setup · Running setup" in rows[0], True)
@@ -2099,10 +2287,14 @@ def _impl(ctx: TaskContext) -> int:
     analyzing = _running_row(["Analyzing: 3 targets (2 packages loaded)", "    Compiling a.cc; 1s local"])
     counted = _running_row(["[1 / 14] 1 action running", "    Compiling a.cc; 1s local"])
     _eq("the panes stay put when the counts come", (len(analyzing), analyzing), (1, counted))
-    _eq("right under the header", analyzing, [1])
-    header = lambda progress: _visible(render(_screen(ctx, ["x"], progress = progress), 100, 30)).split("\n")[0]
-    _eq("before it counts, what it is doing", "analyzing" in header(["Analyzing: 3 targets"]), True)
-    _eq("then how far it is", "4 of 14 actions done" in header(["[4 / 14] 1 action running"]), True)
+    _eq("under the bar, right under the header", analyzing, [2])
+
+    # With the bar drawn the count is on it, and the header has Bazel's
+    # status; without it (zoomed), the header has the count.
+    top = lambda progress, **kw: _visible(render(_screen(ctx, ["x"], progress = progress, **kw), 100, 30)).split("\n")[:2]
+    _eq("before it counts, what it is doing", [r.rstrip(" \r").endswith(e) for r, e in zip(top(["Analyzing: 3 targets"]), ["Analyzing: 3 targets", "analyzing"])], [True, True])
+    _eq("then Bazel's status, and the count on the bar", [r.rstrip(" \r").endswith(e) for r, e in zip(top(["[4 / 14] 1 action running"]), ["1 action running", "28% · 4 of 14"])], [True, True])
+    _eq("zoomed, the count in the header", top(["[4 / 14] 1 action running"], zoom = True)[0].rstrip(" \r").endswith("4 of 14 actions done"), True)
 
     # Once a build ends nothing it last counted stays: not in the header,
     # not in its folded row; only what ✔/✗ cannot say, from BuildFinished.
@@ -2116,9 +2308,15 @@ def _impl(ctx: TaskContext) -> int:
     _eq("interrupted, from BuildFinished", "interrupted" in _visible(render(stale, 100, 30)).split("\n")[0], True)
     stale["builds"][-1]["snapshot"]["inv"] = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))}
     _eq("a success says nothing more", _visible(render(stale, 100, 30)).split("\n")[0].rstrip(" \r").endswith("0s"), True)
-    ran = _screen(ctx, ["x"], inv = {"build_metrics": struct(action_summary = struct(actions_executed = 1204))})
+    ran = _screen(ctx, ["x"], inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0)), "build_metrics": struct(action_summary = struct(
+        actions_executed = 1204,
+        runner_count = [struct(name = "total", count = 1204), struct(name = "internal", count = 4), struct(name = "remote cache hit", count = 1000), struct(name = "linux-sandbox", count = 200)],
+        action_cache_statistics = struct(hits = 7000, misses = 1204),
+    ))})
     fold_build(ran, 0)
-    _eq("a folded build: the actions it ran", "1,204 actions run" in _visible(build_row(ran["builds"][0], 100)), True)
+    _eq("a folded build: its actions as the bar says them", "8,204 actions · 97% reused" in _visible(build_row(ran["builds"][0], 100)), True)
+    ran.update(building = False, ended = True, progress = [])
+    _eq("and the finished header", _visible(render(ran, 100, 30)).split("\n")[0].rstrip(" \r").endswith("8,204 actions · 97% reused"), True)
 
     # The finished screen stays, saying how to leave, its verdict first.
     finished = _screen(ctx, ["x"], ended = True, verdict = False)
@@ -2137,7 +2335,9 @@ def _impl(ctx: TaskContext) -> int:
     # A header too narrow for the status leaves it out, never cut to a number.
     narrow = _screen(ctx, ["x"], progress = ["[1,204 / 9,000] 1 action running"])
     head = _visible(render(narrow, 40, 24)).split("\n")[0]
-    _eq("no cut status", ("actions done" in head) or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
+    zoomed = _visible(render(dict(narrow, zoom = True), 40, 24)).split("\n")[0]
+    _eq("no cut count", ("actions done" in zoomed) or not any([c.isdigit() for c in zoomed.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
+    _eq("no cut status", head.rstrip(" \r").endswith("1 action running") or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
 
     # The console's state (following, lines up) at the tab border's right
     # end, a dash apart from the tabs and in a style none of them has, at
@@ -2234,6 +2434,7 @@ def _impl(ctx: TaskContext) -> int:
     shown = [k.help[0] for k in KEYS if k.help != None and k.shown(failed)]
     _eq("no key row twice", len(shown), len({r: 1 for r in shown}))
 
+    _actions_tests(ctx)
     _goldens(ctx, view_state, act, ctx.args.update)
     print("dashboard_test.axl: OK")
     return 0

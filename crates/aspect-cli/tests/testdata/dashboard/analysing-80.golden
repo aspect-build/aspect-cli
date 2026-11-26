@@ -1,0 +1,30 @@
+ ⠋ aspect build · 12s                        analyzing · 16 actions, 15 running
+ ██▓▓▓▓▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒──────────────────────────────────── 3,830/8,563+
+┌─ Running (15 of 16 started) ─────────────────┐┌─ Results ────────────────────┐
+│ Compiling src/a.cc; 3s                       ││ Targets  3 configured        │
+│ Linking //app:bin; 1s                        ││          0 built, 0 failed   │
+│ … and 13 more                                ││ Tests    0 passed, 0 failed  │
+│                                              ││ Actions  █200 ▓1.1k ▒2.5k    │
+│                                              ││                              │
+│                                              ││                              │
+│                                              ││                              │
+└──────────────────────────────────────────────┘└──────────────────────────────┘
+┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────── following ─┐
+│ INFO: Analyzed 3 targets (12 packages loaded).                               │
+│ INFO: Found 3 targets...                                                     │
+│ src/a.cc:3:1: warning: unused variable                                       │
+│ Building...                                                                  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ q cancel · / find · e filter · PgUp PgDn ⇧↑↓ u d page · K J top/end · ? keys

@@ -1,0 +1,30 @@
+ ✔ aspect build · 0s                                                                                             8,563 actions · 98% reused
+ █▓▓▓▓▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░░░░░ 8,563 actions · 98% reused
+┌─ Slowest seen ─────────────────────────────────────────────────────────────────────────────┐┌─ Results ──────────────────────────────────┐
+│                                                                                            ││ Targets  3 configured                      │
+│                                                                                            ││          3 built, 0 failed                 │
+│                                                                                            ││ Tests    15 passed, 0 failed · 9/15 cached │
+│                                                                                            ││ Actions  █ 105 ran · ▓ 640 cached          │
+│                                                                                            ││          ▒ 7.3k unchanged · ░ 459 internal │
+│                                                                                            ││ Critical path Linking //app:bin 4.1s       │
+│                                                                                            ││                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
+┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────────────────────────────────────────────── following ─┐
+│ INFO: Analyzed 3 targets (12 packages loaded).                                                                                           │
+│ INFO: Found 3 targets...                                                                                                                 │
+│ src/a.cc:3:1: warning: unused variable                                                                                                   │
+│ Building...                                                                                                                              │
+│ INFO: Build completed successfully, 8563 total actions                                                                                   │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                                                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Done ✔ · q, Enter or Esc to leave · / find · e filter · PgUp PgDn ⇧↑↓ u d page · K J top/end · z zoom · w cut · ? keys
