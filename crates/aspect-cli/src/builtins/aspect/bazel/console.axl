@@ -13,7 +13,9 @@ task processes its console with:
                       the end counts the rest, and names a file with all of
                       them. A debug message (a `print()`) is not collapsed.
   `recap_errors`      the first `recap_max` errors again at the end, once they
-                      have scrolled away.
+                      have scrolled away; under the `Console` feature, kept
+                      for its failure summary (`── Failures (N) ──`), which
+                      lists every failure with them.
   `collapse_repeats`  a run of identical lines, an action's output included,
                       shown as its first and a count. Never Bazel's progress
                       area or status line, so a stalled build still shows it
@@ -126,7 +128,7 @@ def emit_tips(ctx, build, rules: list, batch: str) -> None:
 # `recap_errors`' `max` unless the caller sets one.
 RECAP_MAX = 10
 
-def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = [], drop: list[str] = [], recap_max = RECAP_MAX, root = None, cwd = None) -> struct:
+def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = [], drop: list[str] = [], recap_max = RECAP_MAX, root = None, cwd = None, summary = False) -> struct:
     """The default console stages for `profile` (`human` or `agent`).
 
     Never fails on what a user configured, since the `Console` feature runs for
@@ -143,6 +145,9 @@ def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = 
         drop:     regexes of messages to hide, with the indented lines under
                   them; nothing by default.
         recap_max: how many errors `recap_errors` repeats.
+        summary:  `recap_errors` keeps them for a failure summary to print
+                  (`build.output_errors()`) rather than repeating them, and
+                  the end of the console leaves naming the raw log to it.
         root:     the workspace directory, for `relativize_paths`, or a
                   function returning it, called only when that stage is on.
         cwd:      the directory paths are made relative to, likewise; None
@@ -190,10 +195,10 @@ def default_stages(profile: str, disable: list[str] = [], collapse: list[str] = 
         stages.append(o.collapse_similar(severities = severities, groups = groups))
     if "recap_errors" not in disable:
         if type(recap_max) == "int" and recap_max > 0:
-            stages.append(o.recap_errors(max = recap_max))
+            stages.append(o.recap_errors(max = recap_max, summary = summary))
         else:
             problems.append("console recap_max %r is not a positive number; using %d" % (recap_max, RECAP_MAX))
-            stages.append(o.recap_errors(max = RECAP_MAX))
+            stages.append(o.recap_errors(max = RECAP_MAX, summary = summary))
     if "collapse_repeats" not in disable:
         stages.append(o.collapse_repeats())
     return struct(stages = stages, display = "lines" if agent else "auto", progress = not agent, problems = problems)

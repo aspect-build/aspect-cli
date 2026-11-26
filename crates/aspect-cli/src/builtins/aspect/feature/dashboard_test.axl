@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1702,28 +1702,88 @@ def _impl(ctx: TaskContext) -> int:
     flood["filter"] = "all"
     _eq("the title says what is gone", "2,007 older not kept" in render(flood, 120, 24), True)
 
-    # What the scrollback keeps: the first errors with their diagnostic,
-    # each failure with the history's copy of its log, Bazel's closing
-    # block as it wrote it, the counts and where the rest is.
+    # What the scrollback keeps: Bazel's closing block as it wrote it, then
+    # the failure summary the plain console prints too: each failure with
+    # Bazel's errors that name it (the console's kept errors) and the
+    # history's copy of its log, the counts, the raw log, where the rest is.
     done = _screen(ctx, [], log_path = "/out/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
     add_lines(done, ["ERROR: //a:b failed", "a.cc:1: error: no x", "INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
     done["fails"] = [{"kind": "action", "label": "//a:b", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/a.o", "success": False}]
     done["build"] = struct(kept_action_log = lambda output: {"stderr": "/history/CppCompile-1.stderr"} if output == "bazel-out/a.o" else {})
+    done["kept_errors"] = {"errors": [{"header": "ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "lines": ["ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "a.cc:1: error: no x", "full stderr: /history/CppCompile-1.stderr"], "label": "//a:b"}], "distinct": 1}
     report = report_lines(done, "t-1", False)
-    _eq("errors, with what was under them", report[:3], ["Bazel's errors:", "  ERROR: //a:b failed", "    a.cc:1: error: no x"])
-    _eq("a failure's kept log", report[4], "  ✗ //a:b  CppCompile  /history/CppCompile-1.stderr")
-    _eq("Bazel's closing block", report[5:7], ["INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
-    _eq("and where the rest is", report[-1], "All of it: aspect history show t-1")
+    _eq("Bazel's closing block", report[:2], ["INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
+    _eq("the summary", report[2:], [
+        "── Failures (1) ──",
+        "  ✗ //a:b  CppCompile",
+        "    ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)",
+        "    a.cc:1: error: no x",
+        "    full stderr: /history/CppCompile-1.stderr",
+        "0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /out/console.log",
+        "All of it: aspect history show t-1",
+    ])
+    _eq("no Failed list of its own", [l for l in report if l.startswith("Failed") or l.startswith("Bazel's errors")], [])
+    without = dict(done, kept_errors = None)
+    _eq("without the console's errors: its log", report_lines(without, "t-1", False)[3:5], ["  ✗ //a:b  CppCompile", "    /history/CppCompile-1.stderr"])
 
-    # The console's own recap under its heading: once, not as Bazel's
-    # errors again nor counted as new ones.
-    recapped = _screen(ctx, [], log_path = "/out/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
-    add_lines(recapped, ["ERROR: //a:b failed", "INFO: Elapsed time: 3.1s", "── Error recap (1) ──", "  ERROR: //a:b failed", "    full stderr: /h/x", "ERROR: Build did NOT complete successfully"])
-    _eq("the recap's errors are not counted again", len(recapped["errors"]), 1)
-    shown = report_lines(recapped, "t-2", False)
-    _eq("no second copy of the errors", ("Bazel's errors:" in shown, len([l for l in shown if "ERROR: //a:b failed" in l])), (False, 1))
-    done["fails"] = done["fails"] * 25
-    _eq("failures capped", [l for l in report_lines(done, "t-1", False) if l.startswith("  … ")], ["  … 5 more: aspect history show t-1"])
+    # Every kind of failure, as real Bazel 9.3.3 runs reported them (w44's
+    # workspace: `test --keep_going //:all //anal:all //tc:all //t:all`,
+    # `build //syntax:all //:ok`, `//nope:all`, `//:nosuch`): Bazel's errors
+    # as the console kept them, the failures as the stream gave them.
+    def _kept(*errors):
+        return {"errors": [{"header": e[0], "lines": list(e), "label": None} for e in errors], "distinct": len(errors)}
+
+    kinds = _screen(ctx, [], log_path = "/h/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {}, build = None)
+    kinds["fails"] = [
+        {"kind": "action", "label": "//:bad", "detail": "Genrule", "files": [], "output": "bazel-out/bad.txt", "success": False},
+        {"kind": "test", "label": "//t:fails", "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 0, "files": []},
+    ]
+    kinds["counts"]["failures"] = ["//:bad", "//:uses_bad", "//tc:tc", "//anal:anal"]
+    kinds["root_causes"] = {"//:uses_bad": ["//:bad"]}
+    kinds["counts"]["failed_labels"] = {"//:uses_bad": True, "//tc:tc": True, "//anal:anal": True}
+    kinds["counts"]["failed"] = 4
+    kinds["kept_errors"] = {"errors": [
+        {"header": "ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "lines": ["ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "compile error: x.cc:3: expected ;", "full stderr: /h/bad/Genrule-1.stderr"], "label": "//:bad"},
+        {"header": "ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "lines": ["ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "  //tc:toolchain_type", "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'"], "label": None},
+        {"header": "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'", "lines": ["ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'"], "label": None},
+        {"header": "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,", "lines": ["ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"], "label": None},
+        {"header": "ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", "lines": ["ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", " - nope"], "label": None},
+        {"header": "ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''", "lines": ["ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''"], "label": None},
+    ], "distinct": 6}
+    summary = [_visible(l) for l in failure_summary(kinds, kinds["kept_errors"], "t-9", False, "/h/console.log")]
+    _eq("every kind, once", summary, [
+        "── Failures (7) ──",
+        "  ✗ //:bad  Genrule",
+        "    ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)",
+        "    compile error: x.cc:3: expected ;",
+        "    full stderr: /h/bad/Genrule-1.stderr",
+        "    ○ 1 blocked: //:uses_bad",
+        "  ✗ //t:fails  attempt 1",
+        "  ✗ //tc:tc",
+        "    ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
+        "      //tc:toolchain_type",
+        "    To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
+        "  ✗ //anal:anal",
+        "    ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'",
+        "  ✗ ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
+        "  ✗ ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.",
+        "     - nope",
+        "  ✗ ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''",
+        "0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log",
+        "All of it: aspect history show t-9",
+    ])
+
+    # An analysis failure Bazel reports as its own (an Aborted
+    # configured_label): what Bazel gave, when no error names it.
+    analysed = dict(kinds, fails = [{"kind": "action", "label": "//anal:broken", "detail": "analysis failed", "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], kept_errors = None, counts = new_counts(), root_causes = {})
+    _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, None, "t-9", False)][:3], ["── Failures (1) ──", "  ✗ //anal:broken  analysis failed", "    in genrule rule //anal:broken: missing srcs"])
+
+    # A passing run: the counts line alone, no rule.
+    passing = dict(kinds, fails = [], kept_errors = None, counts = dict(new_counts(), built = 3), root_causes = {})
+    _eq("a passing run", [_visible(l) for l in failure_summary(passing, {"errors": [], "distinct": 0}, "t-9", False, "/h/console.log")], ["3 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log", "All of it: aspect history show t-9"])
+
+    many = dict(done, fails = [dict(done["fails"][0], label = "//a:b%d" % i) for i in range(14)], kept_errors = None)
+    _eq("capped, counted", [l for l in report_lines(many, "t-1", False) if l.startswith("──")], ["── Failures (first 10 of 14) ──"])
     stopped = dict(done, inv = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}, cancelling = False)
     _eq("an interrupted build's counts say so", [l for l in report_lines(stopped, "t-3", False) if " built, " in l][0].startswith("interrupted · "), True)
     late = dict(done, cancelling = True, inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))})
@@ -2014,7 +2074,8 @@ def _impl(ctx: TaskContext) -> int:
     on_key(blocked, "enter", 10)
     _eq("Enter shows what blocks it", (blocked["selected"], blocked["view"]["record"]["label"]), (0, "//a:broken"))
     report = [_visible(l) for l in report_lines(dict(blocked, read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = ""), "id1", False)]
-    _eq("the scrollback's own group", [l for l in report if "blocked by" in l], ["Not built, blocked by a failed dependency (1):", "  ○ //a:demo  blocked by :broken"])
+    _eq("under its root cause in the summary", [l for l in report if "blocked" in l and "○" in l], ["    ○ 1 blocked: //a:demo"])
+    _eq("not counted as a root cause", [l for l in report if l.startswith("──")], ["── Failures (1) ──"])
     _eq("its summary counts it blocked, not failed", [l for l in report if l.startswith("0 built")], ["0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
     targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
     _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 0 failed · 1 blocked by a dependency", "failures listed 1 (failed actions and test attempts, in Failures)"])

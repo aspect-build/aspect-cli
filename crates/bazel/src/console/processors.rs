@@ -342,9 +342,42 @@ pub struct Observations {
     seen: Mutex<std::collections::HashSet<String>>,
     /// One per aggregate stage, in the order the stages were made.
     tallies: Mutex<Vec<Tally>>,
+    /// Bazel's errors, for the task's failure summary, once the console has
+    /// ended ([`crate::console::report::RecapErrors::keeping`]).
+    errors: Mutex<Option<KeptErrors>>,
+}
+
+/// Bazel's distinct `ERROR:` messages, as the recap would have repeated
+/// them: the first `max`, each rendered (styled, linked) line by line, and
+/// how many there were in all.
+#[derive(Debug, Clone, Default)]
+pub struct KeptErrors {
+    pub errors: Vec<KeptError>,
+    pub distinct: usize,
+}
+
+/// One error: its header as Bazel wrote it (cut after a failed action's exit
+/// code), its lines as the recap renders them (the header, what it picked
+/// of the body, `full stderr: <path>` where the history kept the action's
+/// output), and the label of that kept action, when one was matched.
+#[derive(Debug, Clone, Default)]
+pub struct KeptError {
+    pub header: String,
+    pub lines: Vec<String>,
+    pub label: Option<String>,
 }
 
 impl Observations {
+    /// Keep the console's errors for the failure summary.
+    pub fn set_errors(&self, errors: KeptErrors) {
+        *self.errors.lock().unwrap() = Some(errors);
+    }
+
+    /// The console's errors, once it has ended, when a stage kept them.
+    pub fn errors(&self) -> Option<KeptErrors> {
+        self.errors.lock().unwrap().clone()
+    }
+
     /// Latch `fatal`; the first line wins.
     pub fn set_fatal(&self, line: &str) {
         self.fatal_line

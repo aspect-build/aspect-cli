@@ -292,16 +292,26 @@ fn the_console_feature_makes_the_build_console_easier_to_read() {
         !stderr.contains("[1 / 2] Compiling"),
         "plain lines show no status line before 5s: {stderr}"
     );
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l == "INFO: Aspect hid 2 console lines"),
+        "what was hidden, the raw log named by the failure summary:\n{stderr}"
+    );
     let summary = stderr
         .lines()
-        .find(|l| l.starts_with("INFO: Aspect hid 2 console lines; Bazel's raw log is in "))
+        .find(|l| l.contains(" · Bazel's raw log: "))
         .unwrap_or_else(|| panic!("no summary:\n{stderr}"));
+    assert!(
+        stderr.contains(&format!("{summary}\nAll of it: aspect history show ")),
+        "where the rest is, after it:\n{stderr}"
+    );
     assert!(
         stderr
             .contains("  2 more like: WARNING: errors encountered while analyzing target '//:g0'"),
         "{stderr}"
     );
-    let log = summary.rsplit(" is in ").next().unwrap();
+    let log = summary.rsplit(" · Bazel's raw log: ").next().unwrap();
     let history = std::fs::canonicalize(dir.path().join("history")).expect("the history");
     assert!(
         std::fs::canonicalize(log).unwrap().starts_with(&history)

@@ -73,7 +73,8 @@ A task with its own preset starts from it alone, without `templates`;
 The runtime does the rendering: it reads these args after `config.axl` runs
 and before the header prints. Bazel's own output, warnings and errors, and
 stdout are never templated, and nor is the end of Bazel's console (the
-recap and what was hidden): it prints under every preset. A tip's first
+failure summary and what was hidden): it prints under every preset, `compact`
+and `agent` included. A tip's first
 line is the `tip` slot, `TIP[id] suggestion: title`; `emoji` and `silent`
 add the severity's emoji (`TIP[id] 💡 suggestion: title`), and a template
 that renders blank hides the tip:
@@ -111,7 +112,18 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
 `BazelTrait.output_stages`:
 - paths are made relative;
 - the first warning of each kind is shown and the rest are counted at the end;
-- errors that scrolled away are repeated;
+- every failure is listed at the end, under `── Failures (N) ──` (only when
+  something failed): each failed action with Bazel's `ERROR:` line, what the
+  tool said and its kept stderr; each failed test with its attempts and
+  logs; each target that failed analysis or loading, and every other
+  `ERROR:` line (a missing package, a BUILD file that does not parse, a
+  toolchain not found) as Bazel wrote it; the targets each one blocked
+  counted under it. The first `recap_max` (10) are listed, `first 10 of 14`
+  counting the rest. Then, on every build, one line of counts (`193 built, 1
+  failed · 47 tests passed, 2 failed · Bazel's raw log: <path>`) and where the
+  rest is (`All of it: aspect history show <id>`). Under the Dashboard the
+  summary goes to the scrollback when the screen is left, never into its
+  Console tab;
 - a run of identical lines, an action's output included, shows as its first
   and a count, but never Bazel's progress or status lines;
 - a tip is given for failures we recognize: the tip rules of
@@ -208,6 +220,7 @@ task starts.
 
 load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "console_tip_rules", "default_stages", "emit_tips", "tip_stages")
 load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//feature/dashboard.axl", "count_event", "failure_summary", "note_blocked", "note_event", "summary_state")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/environment.axl", "warn")
@@ -225,6 +238,7 @@ def _console_impl(ctx: FeatureContext):
         recap_max = ctx.args.recap_max,
         root = lambda: ctx.std.env.bazel_root_dir(),
         cwd = lambda: ctx.std.env.current_dir(),
+        summary = True,
     )
     for problem in got.problems:
         warn(ctx.std, "--console: " + problem)
@@ -255,6 +269,44 @@ def _console_impl(ctx: FeatureContext):
         emit_tips(task_ctx, build, console_tip_rules(tips.rules), batch = str(builds[0]))
 
     trait.output_end.append(_emit_tips)
+
+    # The failure summary at the end of each build's console: every failure
+    # once with what Bazel said of it, the counts, Bazel's raw log and where
+    # the rest is. Not under the Dashboard (`output_display` `none`), which
+    # shows failures in its own tab and puts the summary in the scrollback.
+    summary = [summary_state(None)]
+
+    def _collect(task_ctx, event):
+        kind = event.kind
+        if kind == "build_started":
+            summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env)
+        state = summary[0]
+        if state["read"] == None:
+            state["read"] = task_ctx.std.fs.try_read_tail
+            state["env"] = task_ctx.std.env
+        payload = event.payload
+        if kind in ("build_started", "build_finished", "options_parsed"):
+            state["inv"][kind] = payload
+        count_event(state["counts"], kind, event.id, payload)
+        note_event(state, kind, event.id, payload, type(payload) == "aborted")
+        note_blocked(state, event)
+
+    def _summarize(task_ctx, build):
+        if trait.output_display == "none":
+            return
+        state = summary[0]
+        state["build"] = build
+        state["cancelling"] = task_ctx.cancellation.root.cancelled
+        err = task_ctx.std.io.stderr
+        for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or ""):
+            err.write(line + "\n")
+        summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env)
+
+    trait.build_event.append(_collect)
+
+    # Ahead of the tips the build's end emits, so the summary follows
+    # Bazel's own end.
+    trait.output_end.insert(0, _summarize)
     if got.display != "auto" and trait.output_display == "auto":
         trait.output_display = got.display
     if not got.progress:

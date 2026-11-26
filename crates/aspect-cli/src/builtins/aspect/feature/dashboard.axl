@@ -102,10 +102,14 @@ key stops it; with `never` it leaves at once. `build` and `test` keep their
 build's panes open on it, the others their builds folded; a task that
 failed before any build leaves at once, its error last in the scrollback.
 Then the scrollback gets the console as the screen showed it
-(`replay_lines`) and a summary: each failure with its log's path (the
-history's copy, which outlives Bazel's), the targets a failure blocked,
-the flaky tests, the counts, and `aspect history show <id>` for the rest
-(`report_lines`).
+(`replay_lines`), the flaky tests, the results pages, and the failure
+summary the plain console prints too (`failure_summary`: `── Failures
+(N) ──`, each failure once with Bazel's errors about it and its log's path,
+the history's copy, which outlives Bazel's, the targets each blocked, the
+counts, Bazel's raw log and `aspect history show <id>` for the rest;
+`report_lines`). The summary is written only there, never into the
+screen's Console tab nor the task's output it dumps, so a run replayed
+from the history shows it no more than the screen did.
 
 How it is built:
 
@@ -1066,6 +1070,7 @@ def attempt_state(now_ms: int) -> dict:
         exec_log_read = False,
         done_total = None,
         bep_done_total = None,
+        kept_errors = None,
     )
 
 def reset_attempt(state: dict, now_ms: int):
@@ -1087,7 +1092,7 @@ def _clear_build(state: dict):
 
 # What a build has of its own, which the next build (or a retried attempt)
 # starts afresh; the console and what is open in it are the task's.
-_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total"]
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "logged_index", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "kept_errors"]
 
 def new_build(state: dict, now_ms: int):
     """Start the next build (or a retried attempt) in the task's screen: its
@@ -3289,7 +3294,7 @@ def fold_build(state: dict, now_ms: int):
     ))
 
 # What a folded build keeps for its tabs.
-_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "logged_index", "exec_log_read", "done_total", "bep_done_total"]
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "logged_index", "exec_log_read", "done_total", "bep_done_total", "kept_errors"]
 
 def build_row(build: dict, cols: int) -> str:
     """A folded build's row: its verdict, command, its actions as the
@@ -5256,7 +5261,6 @@ def refusal(std):
     return ""
 
 # How many of Bazel's errors and of the failures the scrollback lists.
-_REPORT_ERRORS = 10
 _REPORT_FAILURES = 20
 
 def _log_paths(state: dict, record: dict) -> list:
@@ -5313,77 +5317,67 @@ def replay_lines(state: dict, tty: bool) -> list:
 
 def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list:
     """What the scrollback keeps once the screen is gone, for a person and
-    for an agent reading a cut capture's tail alike: the first of Bazel's
-    errors, each with what was under it (a compiler's diagnostic), unless
-    Bazel's closing block has the console's own recap of them, or the
-    console was `replayed` just above it (`replay_lines`); the
-    failures, each with its log's path (the history's copy first), the
-    first `_REPORT_FAILURES`, and apart from them the flaky tests' failed
-    attempts; Bazel's closing block as it wrote it (its test summary,
-    `Elapsed time`, `Build completed`), its head and its tail, unless
-    `replayed`; the results pages; the counts, after `interrupted · `
-    where the build was cut short or the task cancelled before it returned
-    (between its builds too; `cancelling`, which a key on the finished
-    screen never sets); and how to see the rest (`aspect history show`)."""
+    for an agent reading a cut capture's tail alike: Bazel's closing block
+    as it wrote it (its test summary, `Elapsed time`, `Build completed`),
+    its head and its tail, unless the console was `replayed` just above it
+    (`replay_lines`); the flaky tests' failed attempts; the results pages;
+    and last the failure summary (`failure_summary`, as the console prints
+    it without the Dashboard: each failure once with what Bazel said of
+    it, the counts, Bazel's raw log and `aspect history show`). The summary
+    goes only here, never to the console the screen shows nor to the task's
+    output it dumps, so a run replayed from the history shows it no more
+    than the screen did."""
     out = []
     bold = _c("strong") if tty else ""
     reset = _RESET if tty else ""
-    red = _c("error") if tty else ""
     tail = state.get("closing_tail", [])
     cut = state.get("closing_cut", 0) + max(0, len(tail) - _CLOSING_TAIL)
     closing = state.get("closing", []) + ([_counts("… %d more of Bazel's lines", cut)] if cut else []) + tail[-_CLOSING_TAIL:]
-    recap = [line for line in closing if "Errors Bazel reported" in line or "── Error recap (" in line]
-    blocks = state["errors"]
-    if blocks and not recap and not replayed:
-        shown = blocks[:_REPORT_ERRORS]
-        total = state.get("error_count", len(blocks))
-        out.append(bold + "Bazel's errors" + reset + (" (the first %d of %d)" % (len(shown), total) if total > len(shown) else "") + ":")
-        for block in shown:
-            out.append("  " + red + block[0] + reset)
-            out.extend(["    " + line for line in block[1:]])
-        if total > len(shown) and state.get("log_path"):
-            out.append(_counts("  … %d more in Bazel's console log: %s", (total - len(shown), state["log_path"])))
-    index = logged_index(state)
-    blocked = blocked_targets(state)
-    unlogged = [label for label in index["unlogged"] if label not in index["logged"] and label not in blocked]
-    stopped = [label for label in index["unlogged"] if label not in index["logged"] and label in blocked]
-    fails = [rec for rec in state["fails"] if not _flaky(state, rec)]
+    if not replayed:
+        out.extend(closing)
     flaky = [rec for rec in state["fails"] if _flaky(state, rec)]
-    failures = len(fails) + len(unlogged)
-    if failures:
-        out.append(bold + "Failed" + reset + ":")
-        listed = 0
-        for rec in fails[:_REPORT_FAILURES]:
-            out.append("  %s✗%s %s  %s%s" % (red, reset, rec["label"], failure_detail(state, rec), _paths_text(state, rec)))
-            listed += 1
-        for label in unlogged[:max(0, _REPORT_FAILURES - listed)]:
-            out.append("  %s✗%s %s" % (red, reset, label))
-            listed += 1
-        if failures > listed:
-            out.append(_counts("  … %d more: aspect history show %s", (failures - listed, task_id)))
-    if stopped:
-        out.append(bold + "Not built" + reset + _counts(", blocked by a failed dependency (%d):", len(stopped)))
-        for label in stopped[:_REPORT_FAILURES]:
-            out.append("  ○ %s  %s" % (label, blocked_text(label, blocked[label])))
-        if len(stopped) > _REPORT_FAILURES:
-            out.append(_counts("  … %d more: aspect history show %s", (len(stopped) - _REPORT_FAILURES, task_id)))
     if flaky:
         yellow = _c("warning") if tty else ""
         out.append(bold + "Flaky" + reset + " (passed on a later attempt):")
         for rec in flaky[:_REPORT_FAILURES]:
             path = _log_path(state, rec)
             out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
-    if not replayed:
-        out.extend(closing)
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
         out.append("%s: %s" % (label, link(url, url) if tty else url))
+    return out + failure_summary(state, state.get("kept_errors"), task_id, tty, state.get("log_path", ""))
+
+def summary_state(read, env = None) -> dict:
+    """A fresh state for `failure_summary` to read, collected by the build
+    event hooks the screen uses (`count_event`, `note_event`,
+    `note_blocked`) without a screen: the plain console's. `read` reads a
+    file's tail (`std.fs.try_read_tail`) and `env` is `std.env`, for finding
+    a test's log."""
+    state = dict(attempt_state(0), read = read, env = env, build = None, exec_root = "", output_dirs = {}, search = new_search(), list = "failures", ended = False, cancelling = False, log_path = "", task = "", root_causes = {}, blocked_cache = None, building = True)
+    return state
+
+# The most root causes the failure summary lists, the rest counted.
+_SUMMARY_MAX = 10
+
+def _names(text: str, label: str) -> bool:
+    """Whether `text` names `label`, not a longer label it starts."""
+    if not label:
+        return False
+    for piece in text.split(label)[1:]:
+        after = piece[:1]
+        if not after or not (after.isalnum() or after in "_-./+"):
+            return True
+    return False
+
+def summary_counts(state: dict) -> str:
+    """The failure summary's counts: targets built, failed and blocked,
+    tests passed, failed, flaky and skipped, after `interrupted · ` where
+    the build was cut short or the task cancelled before it returned
+    (between its builds too)."""
     c = state["counts"]
     built_n, targets_failed, targets_blocked = target_counts(state)
-
-    # An interrupted build's counts are of what it got to.
     inv = state.get("inv") or {}
     interrupted = build_outcome(inv) == "interrupted" or bool(state.get("cancelling"))
-    out.append(_counts("%s%d built, %d failed%s · %d %s passed, %d failed%s%s%s", (
+    return _counts("%s%d built, %d failed%s · %d %s passed, %d failed%s%s", (
         "interrupted · " if interrupted else "",
         built_n,
         targets_failed,
@@ -5393,8 +5387,114 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
         c["tests_failed"],
         _counts(", %d flaky", c["tests_flaky"]) if c.get("tests_flaky") else "",
         _counts(", %d skipped", c["tests_skipped"]) if c.get("tests_skipped") else "",
-        (" · Bazel's console: " + state["log_path"]) if state["log_path"] else "",
-    )))
+    ))
+
+def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = "") -> list:
+    """The end of a build's console, the same with the Dashboard or
+    without: a `── Failures (N) ──` rule when anything failed, then each root
+    cause once, the first `_SUMMARY_MAX` (`first 10 of 14`), each with what
+    Bazel said of it, and under each the targets it blocked, counted, not
+    listed; then the counts, Bazel's raw log (`log_path`), and where the
+    rest is (`aspect history show`). A root cause is one of:
+
+    - a failed action (`failed_actions`), its `ERROR:` lines as the
+      console's recap renders them (`kept`, `build.output_errors()`: the
+      body it picks, `full stderr: <path>`, links), else its log's path;
+    - a failed test target, each failed attempt under it (or beside it,
+      when one) with its `test.log`;
+    - a target that failed analysis or loading, or failed without a log,
+      with Bazel's errors that name it, else what Bazel gave;
+    - any other `ERROR:` line (a missing package, a BUILD file that does
+      not parse, a toolchain not found), as Bazel wrote it.
+
+    `kept` is None without the console's errors (`--console=false`): rows
+    then have no `ERROR:` lines but their own."""
+    bold = _c("strong") if tty else ""
+    red = _c("error") if tty else ""
+    reset = _RESET if tty else ""
+    errors = list((kept or {}).get("errors", []) or [])
+    used = [False] * len(errors)
+
+    def claim(label):
+        lines = []
+        for i, e in enumerate(errors):
+            if used[i]:
+                continue
+            if (e.get("label") or "") == label or _names(e.get("header", ""), label):
+                used[i] = True
+                lines.extend(["    " + l for l in e.get("lines", [])])
+        return lines
+
+    blocked = blocked_targets(state)
+    by_root = {}
+    for label, roots in blocked.items():
+        for root in roots[:1]:
+            by_root.setdefault(root, []).append(label)
+
+    def under(label):
+        stopped = by_root.pop(label, [])
+        if not stopped:
+            return []
+        shown = ", ".join(stopped[:3]) + (_counts(", … %d more", len(stopped) - 3) if len(stopped) > 3 else "")
+        return [_counts("    ○ %d blocked: ", len(stopped)) + shown]
+
+    rows = []
+
+    # Failed actions, a test's aside.
+    for rec in failed_actions(state):
+        lines = claim(rec["label"])
+        path = _paths_text(state, rec)
+        rows.append(["  %s✗%s %s  %s" % (red, reset, rec["label"], rec["detail"])] + (lines or ([("    " + path.strip())] if path.strip() else [])) + under(rec["label"]))
+
+    # Failed tests, each failed attempt.
+    tests = {}
+    order = []
+    for rec in state["fails"]:
+        if rec["kind"] != "test" or _flaky(state, rec):
+            continue
+        if rec["label"] not in tests:
+            order.append(rec["label"])
+        tests.setdefault(rec["label"], []).append(rec)
+    for label in order:
+        attempts = ["%s%s" % (failure_detail(state, rec), _paths_text(state, rec)) for rec in tests[label]]
+        head = "  %s✗%s %s" % (red, reset, label)
+        rows.append(([head + "  " + attempts[0]] if len(attempts) == 1 else [head] + ["      " + a for a in attempts]) + claim(label) + under(label))
+
+    # Targets that failed analysis or loading, or with no log.
+    index = logged_index(state)
+    for rec in state["fails"]:
+        if rec["kind"] == "action" and rec.get("detail") == "analysis failed":
+            lines = claim(rec["label"])
+            if not lines:
+                text = rec["files"][0][1][0] if rec["files"] else ""
+                lines = ["    " + l for l in str(text).split("\n")[:5] if l]
+            rows.append(["  %s✗%s %s  analysis failed" % (red, reset, rec["label"])] + lines + under(rec["label"]))
+    for label in index["unlogged"]:
+        if label in index["logged"] or label in blocked:
+            continue
+        rows.append(["  %s✗%s %s" % (red, reset, label)] + claim(label) + under(label))
+
+    # Bazel's other errors, as it wrote them.
+    for i, e in enumerate(errors):
+        if not used[i] and e.get("lines"):
+            rows.append(["  " + red + "✗" + reset + " " + e["lines"][0]] + ["    " + l for l in e["lines"][1:]])
+
+    # Targets blocked by a root cause not listed.
+    for root in sorted(by_root.keys()):
+        rows.append(["  ○ " + root + _counts(" blocked %d: ", len(by_root[root])) + ", ".join(by_root[root][:3]) + (_counts(", … %d more", len(by_root[root]) - 3) if len(by_root[root]) > 3 else "")])
+
+    out = []
+    causes = [r for r in rows if not r[0].startswith("  ○")]
+    if causes:
+        total = len(causes) + max(0, (kept or {}).get("distinct", 0) - len(errors))
+        shown = rows[:_SUMMARY_MAX]
+        n = len([r for r in shown if not r[0].startswith("  ○")])
+        title = ("Failures (first %d of %d)" % (n, total)) if total > n else ("Failures (%d)" % n)
+        out.append(red + bold + "── " + title + " ──" + reset)
+        for r in shown:
+            out.extend(r)
+    raw = (" · Bazel's raw log: " + (link("file://" + log_path, log_path) if tty else log_path)) if log_path else ""
+    out.append(summary_counts(state) + raw)
     out.append("All of it: aspect history show %s" % task_id)
     return out
 
@@ -5637,6 +5737,9 @@ def _dashboard_impl(ctx: FeatureContext):
 
     def _end(task_ctx, build):
         state["log_path"] = build.output_log or ""
+
+        # Bazel's errors for the failure summary the scrollback gets.
+        state["kept_errors"] = build.output_errors()
         screen = state["screen"]
         if screen == None or not screen.held:
             return

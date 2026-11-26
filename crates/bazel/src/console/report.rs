@@ -10,7 +10,10 @@
 //! detail lines under it `muted`, the recap under a `── Error recap (N) ──`
 //! rule in `label.error`; the recap's quoted errors stay as Bazel wrote them
 //! but for each header's `ERROR` label, coloured as the live line's is, with
-//! what they name linked on a terminal ([`super::links`]).
+//! what they name linked on a terminal ([`super::links`]). Kept for the task's
+//! failure summary instead ([`RecapErrors::keeping`]), the recap writes
+//! nothing and the summary leaves the raw log for that summary to name
+//! ([`Summary::log_named_elsewhere`]).
 
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
@@ -360,6 +363,12 @@ static EXIT_TAIL: std::sync::LazyLock<Regex> =
 /// out for a line of the tool's own.
 const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the sandbox";
 
+/// The history's note of where it kept a failed action's output, which the
+/// console writes between Bazel's lines (`bes::sink::keep`): never part of
+/// an error's body, which names the kept output itself.
+static KEPT_NOTE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^INFO: \S+ \S+ std(?:err|out): ").unwrap());
+
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
 /// draws do not count, so curses and plain lines count alike), enough to
@@ -391,6 +400,9 @@ pub struct RecapErrors {
     /// The workspace and the directory the task runs from, which an
     /// error's BUILD file path is under or relative to.
     bases: Option<(PathBuf, PathBuf)>,
+    /// Where the errors go for the task's failure summary instead of a
+    /// recap of their own ([`RecapErrors::keeping`]).
+    keep: Option<std::sync::Arc<super::processors::Observations>>,
 }
 
 /// The links a line went by with, placed in its quoted text.
@@ -491,7 +503,19 @@ impl RecapErrors {
             linker: None,
             kept: None,
             bases: None,
+            keep: None,
         }
+    }
+
+    /// This recap keeping its errors in `observations` for the task's
+    /// failure summary, rendered line by line, instead of writing them:
+    /// every one up to `max`, however soon the console ended after them.
+    pub fn keeping(
+        mut self,
+        observations: std::sync::Arc<super::processors::Observations>,
+    ) -> Self {
+        self.keep = Some(observations);
+        self
     }
 
     /// This recap naming, under each error, where the history kept the
@@ -573,7 +597,10 @@ impl LineProcessor for RecapErrors {
             && !line.drawn
             && !line.fresh
         {
-            if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
+            if line.kind == Kind::Other
+                && !text.starts_with(SANDBOX_HINT)
+                && !KEPT_NOTE.is_match(text)
+            {
                 let quoted = quote(text);
                 let links = self.links(record, &quoted);
                 self.errors[i].body_line(quoted, links);
@@ -593,6 +620,24 @@ impl LineProcessor for RecapErrors {
     }
 
     fn report(&mut self) -> Option<Vec<u8>> {
+        if let Some(keep) = self.keep.clone() {
+            let errors = self.rendered();
+            keep.set_errors(super::processors::KeptErrors {
+                errors: errors
+                    .into_iter()
+                    .map(|(header, lines, label)| super::processors::KeptError {
+                        header,
+                        lines: lines
+                            .into_iter()
+                            .map(|l| String::from_utf8_lossy(&l).into_owned())
+                            .collect(),
+                        label,
+                    })
+                    .collect(),
+                distinct: self.distinct.len(),
+            });
+            return None;
+        }
         if self.errors.is_empty() || self.after_first < self.after {
             return None;
         }
@@ -607,8 +652,27 @@ impl LineProcessor for RecapErrors {
             format!("Error recap ({n})")
         };
         self.style.rule(&mut out, &header);
+        for (_, lines, _) in self.rendered() {
+            for (i, l) in lines.into_iter().enumerate() {
+                out.extend_from_slice(if i == 0 { b"  " } else { b"    " });
+                out.extend(l);
+                out.push(b'\n');
+            }
+        }
+        Some(out)
+    }
+}
+
+impl RecapErrors {
+    /// Each error as the recap repeats it: its header as quoted, its lines
+    /// without their indent (the header styled as an error, then what it
+    /// picked of the body, each count of the rest, and `full <stream>:
+    /// <path>` for the output the history kept of the action, its label),
+    /// and that action's label when one was matched.
+    fn rendered(&mut self) -> Vec<(String, Vec<Vec<u8>>, Option<String>)> {
         let style = self.style.clone();
-        let mut line = |text: &str, links: &[Known]| match self.linker.as_mut() {
+        let mut linker = self.linker.take();
+        let mut line = |text: &str, links: &[Known]| match linker.as_mut() {
             Some(l) if l.files.text => {
                 let linked = l.link_with(text.as_bytes(), links);
                 l.files.write_urls(&linked)
@@ -618,42 +682,35 @@ impl LineProcessor for RecapErrors {
         };
         let kept = self.kept.as_ref().map(|k| k.all()).unwrap_or_default();
         let mut used = vec![false; kept.len()];
+        let mut out = vec![];
         for e in &self.errors {
-            out.extend(
-                b"  "
-                    .iter()
-                    .copied()
-                    .chain(style.error_label(line(&e.header.0, &e.header.1)))
-                    .chain(*b"\n"),
-            );
-            let whole =
-                kept_for(&e.header.0, &kept, &mut used, self.bases.as_ref()).map(|i| &kept[i].1);
+            let mut lines = vec![style.error_label(line(&e.header.0, &e.header.1))];
+            let found = kept_for(&e.header.0, &kept, &mut used, self.bases.as_ref());
             for part in e.excerpt() {
                 match part {
-                    Part::Line((b, links)) => {
-                        out.extend(b"    ".iter().copied().chain(line(b, links)).chain(*b"\n"));
-                    }
+                    Part::Line((b, links)) => lines.push(line(b, links)),
                     Part::Gap(n) => {
                         let s = if n == 1 { "" } else { "s" };
-                        out.extend_from_slice(format!("    … {n} more line{s}\n").as_bytes());
+                        lines.push(format!("… {n} more line{s}").into_bytes());
                     }
                 }
             }
             // The CLI's pointer, not Bazel's: its label muted, the path linked.
-            for (stream, path) in whole.into_iter().flatten() {
+            for (stream, path) in found.map(|i| &kept[i].1).into_iter().flatten() {
                 let label = format!("{}full {stream}:{}", style.open, style.close);
-                out.extend(
-                    b"    "
-                        .iter()
-                        .copied()
-                        .chain(label.into_bytes())
+                lines.push(
+                    label
+                        .into_bytes()
+                        .into_iter()
                         .chain(*b" ")
                         .chain(line(&path.to_string(), &[]))
-                        .chain(*b"\n"),
+                        .collect(),
                 );
             }
+            out.push((e.header.0.clone(), lines, found.map(|i| kept[i].0.clone())));
         }
-        Some(out)
+        self.linker = linker;
+        out
     }
 }
 
@@ -743,6 +800,9 @@ pub struct Summary {
     log: RawLogState,
     style: Style,
     links: Option<FileLinks>,
+    /// Whether the task's failure summary names the raw log
+    /// ([`Summary::log_named_elsewhere`]).
+    elsewhere: bool,
 }
 
 impl Summary {
@@ -757,7 +817,16 @@ impl Summary {
             log,
             style,
             links,
+            elsewhere: false,
         }
+    }
+
+    /// This summary leaving a raw log kept whole to the task's failure
+    /// summary, which names it on its own last line; one it could not keep,
+    /// or kept cut short, it still says so of.
+    pub fn log_named_elsewhere(mut self, elsewhere: bool) -> Self {
+        self.elsewhere = elsewhere;
+        self
     }
 
     /// `path`, linked when files are; `restore` is the style of the text
@@ -785,10 +854,8 @@ impl LineProcessor for Summary {
                     Cut::Failed => INCOMPLETE,
                 };
                 // On the `INFO:` line, whose text is unstyled.
-                Some(format!(
-                    "Bazel's raw log{cut} is in {}",
-                    self.path(path, "")
-                ))
+                (!self.elsewhere || !cut.is_empty())
+                    .then(|| format!("Bazel's raw log{cut} is in {}", self.path(path, "")))
             }
             RawLogState::Failed => Some("Bazel's raw log could not be saved".to_string()),
             RawLogState::Off => None,
@@ -1028,6 +1095,55 @@ mod tests {
              ERROR: /ws/BUILD:1:1: Compiling a.cc failed\n  \
              ERROR: /ws/BUILD:2:1: Compiling b.cc failed\n"
         );
+    }
+
+    /// Kept for the failure summary: every error, however soon the console
+    /// ended after it, each rendered line by line, nothing written; the
+    /// history's note of a kept log left out of a body.
+    #[test]
+    fn errors_kept_for_the_summary_are_not_written() {
+        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
+        let mut p = RecapErrors::new(1, RECAP_AFTER_RECORDS, Style::default())
+            .keeping(observations.clone());
+        let records = [
+            "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1): clang failed: error executing CppCompile command",
+            "a.cc:3: error: expected ';'",
+            "INFO: //:a CppCompile stderr: /h/a.stderr",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+            "ERROR: /ws/BUILD:2:1: Compiling b.cc failed",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ];
+        assert_eq!(feed(&mut p, &records), "", "nothing written");
+        let kept = observations.errors().expect("kept");
+        assert_eq!(kept.distinct, 2, "both counted");
+        assert_eq!(kept.errors.len(), 1, "the first `max` kept");
+        assert_eq!(
+            kept.errors[0].header,
+            "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)"
+        );
+        assert_eq!(
+            kept.errors[0].lines,
+            vec![
+                "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)".to_string(),
+                "a.cc:3: error: expected ';'".to_string(),
+            ]
+        );
+    }
+
+    /// With the failure summary naming the raw log, the end of the console
+    /// leaves it out, but still says what it hid.
+    #[test]
+    fn the_summary_names_the_raw_log_elsewhere() {
+        let log = std::path::PathBuf::from("/h/console.log");
+        let cut = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mut s = Summary::new(
+            std::sync::Arc::new(Stats::default()),
+            RawLogState::Kept(log, cut),
+            Style::default(),
+            None,
+        )
+        .log_named_elsewhere(true);
+        assert_eq!(s.report(), None, "nothing hidden, the log named elsewhere");
     }
 
     /// Themed, the rule and each quoted `ERROR` label are red, and the

@@ -221,6 +221,10 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
+    /// [`report::RecapErrors`] of up to `max` errors, kept for the task's
+    /// failure summary ([`processors::Observations::errors`]) rather than
+    /// written: the summary prints them, and names the raw log itself.
+    ErrorsForSummary { max: usize },
     /// [`processors::CollapseRepeats`].
     CollapseRepeats,
     /// [`filters::CollapseSimilar`].
@@ -280,7 +284,7 @@ impl Stage {
             Stage::Rewrite { .. } => "rewrite",
             Stage::RelativizePaths { .. } => "relativize_paths",
             Stage::Drop(_) => "drop",
-            Stage::RecapErrors { .. } => "recap_errors",
+            Stage::RecapErrors { .. } | Stage::ErrorsForSummary { .. } => "recap_errors",
             Stage::CollapseRepeats => "collapse_repeats",
             Stage::CollapseSimilar { .. } => "collapse_similar",
         }
@@ -292,7 +296,7 @@ impl Stage {
             Stage::Intercept { .. } => Phase::Intercept,
             Stage::Rewrite { .. } | Stage::RelativizePaths { .. } => Phase::Rewrite,
             Stage::Drop(_) => Phase::Drop,
-            Stage::RecapErrors { .. } => Phase::Report,
+            Stage::RecapErrors { .. } | Stage::ErrorsForSummary { .. } => Phase::Report,
             Stage::CollapseSimilar { .. } => Phase::Collapse,
             Stage::CollapseRepeats => Phase::Repeat,
         }
@@ -303,7 +307,11 @@ impl Stage {
     pub fn alters(&self) -> bool {
         !matches!(
             self,
-            Stage::Observe(_) | Stage::Aggregate(_) | Stage::Fatal(_) | Stage::RecapErrors { .. }
+            Stage::Observe(_)
+                | Stage::Aggregate(_)
+                | Stage::Fatal(_)
+                | Stage::RecapErrors { .. }
+                | Stage::ErrorsForSummary { .. }
         )
     }
 
@@ -597,6 +605,12 @@ impl Config {
                         .linking(self.linker(&written))
                         .naming(kept_logs.clone(), self.link_bases()),
                 ),
+                Stage::ErrorsForSummary { max } => Box::new(
+                    RecapErrors::new(max, 0, self.style.clone())
+                        .linking(self.linker(&written))
+                        .naming(kept_logs.clone(), self.link_bases())
+                        .keeping(observations.clone()),
+                ),
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
                         .under_pty(pty)
@@ -621,12 +635,19 @@ impl Config {
             _ => RawLogState::Off,
         };
         if self.stages().iter().any(|s| s.hides()) || !matches!(state, RawLogState::Off) {
-            chain.push(Box::new(Summary::new(
-                stats,
-                state,
-                self.style.clone(),
-                self.linker(&written).map(|_| self.files(&written)),
-            )));
+            let summarized = self
+                .stages()
+                .iter()
+                .any(|s| matches!(s, Stage::ErrorsForSummary { .. }));
+            chain.push(Box::new(
+                Summary::new(
+                    stats,
+                    state,
+                    self.style.clone(),
+                    self.linker(&written).map(|_| self.files(&written)),
+                )
+                .log_named_elsewhere(summarized),
+            ));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
         let mut shape = self.shape();
