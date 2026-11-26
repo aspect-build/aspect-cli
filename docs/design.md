@@ -52,7 +52,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.std.net` — TCP, Unix-domain and TLS client streams and listeners
 - `ctx.http()` — HTTP client (get, post, download with integrity checking)
 - `ctx.template` — template rendering
-- `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)
+- `ctx.traits[TraitType]` - the run's trait instance for any trait type: what configs wrote and features registered, created with its defaults if nothing has
 - `ctx.task` — task metadata (kind, friendly_kind, name, friendly_name, group, id)
 - `ctx.console` - the terminal layout the `Console` feature selected (`template_preset`, `buildkite`, `render(slot, **context)`)
 
@@ -82,7 +82,6 @@ Say hello to someone. Defaults to the world.
     args = {
         "recipient": args.string(default = "world", description = "Who to greet"),
     },
-    traits = [MyConfig],           # opt-in to trait types
 )
 ```
 
@@ -188,7 +187,7 @@ Features are disabled per-task via `ctx.features[ArtifactUpload].enabled = False
 
 ### Trait Definitions
 
-Traits are global configuration objects shared across tasks that opt in. A trait type is defined using `trait()` with typed attributes:
+Traits are global configuration objects. A trait type is defined using `trait()` with typed attributes:
 
 ```python
 MyConfig = trait(
@@ -200,7 +199,7 @@ MyConfig = trait(
 
 **Naming:** traits must be exported as **CamelCase** (`MyConfig`, `BazelTrait`). This is enforced at definition time. Like features, traits are used as type keys (`ctx.traits[MyConfig]`), and CamelCase signals this role — consistent with Bazel's provider convention (`dep[CcInfo]`).
 
-Trait types are defined at evaluation time (pure). Trait instances are populated during config execution (mutable) and then frozen before being passed to task execution (read-only via `ctx.traits[MyConfig]`).
+Trait types are defined at evaluation time (pure). A run has one instance of each trait type, created with its defaults the first time anything indexes `ctx.traits` with it. Configs write it, features register hooks on it, and the task reads and fires them: config, feature and task contexts share one mutable trait map, so a task sees every write that came before it. Tasks do not declare the traits they use; `ctx.traits[T]` works for any trait type, and `T in ctx.traits` is always `True`. Passing `traits` to `task()` fails at load time.
 
 ### Library Files
 

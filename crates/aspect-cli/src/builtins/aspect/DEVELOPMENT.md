@@ -189,26 +189,14 @@ Multiple handlers chain in registration order — handler N sees handler N-1's p
 | **`_ArtifactsTrait`**        | [private/lib/artifacts.axl](private/lib/artifacts.axl)                                    | `append`, `list`                                                                                            | ✅ Clean. Pattern 2: a private trait of callables, reached only through the `artifacts` wrapper. See [Artifact uploads](#artifact-uploads). |
 | **`TipsTrait`**              | [private/lib/tips.axl](private/lib/tips.axl)                                              | `tip_suggestion`, `rules`                                                                                   | ✅ Clean. A hook list and a registration list of `tip_rule(...)` values that config and features append to, like `output_stages`: it registers values rather than setting a knob. Tip state lives on the private `_TipsTrait`, reached through the `tips` wrapper. |
 | **`Worktrees`**              | [private/lib/worktrees_trait.axl](private/lib/worktrees_trait.axl)                        | `score_slot`                                                                                                | ✅ Clean. Hook list only. |
-| **`_WorktreePoolSettings`**  | [private/lib/worktrees_trait.axl](private/lib/worktrees_trait.axl)                        | `max_slots`, `abandoned_grace_hours`                                                                        | ✅ Clean. Private settings written only by the `WorktreePool` feature from its options; the worktree tasks declare `worktree_pool.TRAITS` and read it through `worktree_pool`. |
+| **`_WorktreePoolSettings`**  | [private/lib/worktrees_trait.axl](private/lib/worktrees_trait.axl)                        | `max_slots`, `abandoned_grace_hours`                                                                        | ✅ Clean. Private settings written only by the `WorktreePool` feature from its options; the worktree tasks read it through `worktree_pool`. |
 | **`LintTrait`**              | [lint.axl](lint.axl)                                                      | `lint_start`, `lint_report`, `lint_patch`, `lint_end` | ✅ Clean. Hook lists. The change set reaches `lint_start` as a `LintStartInfo` argument, and `lint_end` hooks return a `LintEndResult` (suggestion records, comment URLs) that the task merges into `data["lint"]`. |
 
 > **Note:** All public traits are re-exported from [`traits.axl`](traits.axl) for user `config.axl` ergonomics (`load("@aspect//:traits.axl", ...)`). Internal modules load from the owning module directly — the facade is a user-facing convenience, not the source of truth.
 
-Tasks declare which traits they *use* in the `traits = [...]` arg of the `task(...)` call:
+A run has one instance of each trait, shared by config, features and the task: `ctx.traits[T]` works for any trait type in any of them, creating the instance with its defaults on first access. Tasks do not declare the traits they use (`task()` rejects a `traits` argument), and `T in ctx.traits` is always `True`. Each trait's definition says which tasks fire its hooks.
 
-```python
-build = task(
-    name = "build",
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
-    implementation = _impl,
-    ...
-)
-```
-
-Features declare which traits they *register on* implicitly by referencing them in the implementation closure:
+Features register on a trait by referencing it in the implementation closure:
 
 ```python
 def _artifact_upload_impl(ctx: FeatureContext):
@@ -289,7 +277,6 @@ tips = struct(
     Tip     = _Tip,
     append  = lambda ctx, tip: ctx.traits[_TipsTrait].append(tip),
     collect = lambda ctx: ctx.traits[_TipsTrait].collect(),
-    TRAITS  = [_TipsTrait],
 )
 
 # Owner feature — co-located so it can bind closures to the module-private trait.
@@ -321,26 +308,19 @@ for t in tips.collect(ctx):
     ...
 ```
 
-Tasks register **only the trait surface** — never the owner feature:
+Tasks load **only the wrapper** - never the owner feature (see "Rules: what tasks must not do" below):
 
 ```python
 # build.axl, lint.axl, etc.
 load("./private/lib/tips.axl", "tips")
 load("./private/lib/artifacts.axl", "artifacts")
-
-def task():
-    return Task(
-        traits = [BazelTrait, Phases, ...] + tips.TRAITS + artifacts.TRAITS,
-        # NO `features = [...]` — see "Rules: what tasks must not do" below.
-        ...
-    )
 ```
 
 **Why this works:**
 
 - **State is real-private.** The closure scope is language-enforced. Other features can't reach `state` directly — they go through `tips.append`/`tips.collect`, which dispatch through the trait callables. The wrapper hides everything.
 - **Null-object defaults give graceful degradation for free.** When the owner feature isn't loaded (user opted out, no CI host, feature disabled), the trait callables stay at their defaults. `tips.append(ctx, t)` becomes a silent no-op; `tips.collect(ctx)` returns `[]`. Consumers don't crash, don't need `if feature_loaded:` checks, don't have error paths to maintain. The disabled state propagates through pure data flow.
-- **`TRAITS = [...]` is the only thing tasks see.** The underscore-prefixed `_TipsTrait` never appears in any task or feature module. If the library later changes its implementation and stops needing trait registration (e.g., switches to Pattern 3), it sets `TRAITS = []` and no task module needs to change.
+- **The wrapper is the only thing tasks see.** The underscore-prefixed `_TipsTrait` never appears in any task or feature module. If the library later changes its implementation (e.g., switches to Pattern 3), no task module needs to change.
 - **Tasks don't reference owner features.** Feature loading happens via a separate channel (user `.aspect/config.axl`, framework defaults, opt-in flags). The decoupling is what makes the null-object property useful end-to-end.
 
 **Co-location is non-negotiable.** Splitting the owner feature into a separate `feature/<name>.axl` file forces you to re-export `_TipsTrait` so the separate file can bind callbacks — which leaks the trait name out into the global namespace and defeats the encapsulation. Keep the trait, the wrapper struct, AND the owner feature in `private/lib/<name>.axl`. Other code only sees the exported `<name>` struct and `<name>_feature` symbol.
@@ -392,13 +372,12 @@ rate_limit = struct(
     record          = _record,
     should_throttle = lambda ctx, bucket, **kw: _should_throttle(ctx, bucket, **kw),
     usage_footer    = lambda ctx, host: _usage_footer(ctx, host),
-    TRAITS          = [],   # no trait registration needed for Pattern 3
 )
 ```
 
 **Why this works:**
 
-- **No trait registration.** Tasks don't list anything in their trait list (`TRAITS = []`); the encapsulation is purely the library-owned path. Underscore-prefixed `_FILE`, `_load`, `_save`, `_State` are module-private.
+- **No trait at all.** The encapsulation is purely the library-owned path. Underscore-prefixed `_FILE`, `_load`, `_save`, `_State` are module-private.
 - **Cross-task IPC falls out for free.** Sibling readers open sibling task tmpdirs by path convention (each task writes to its own tmpdir; aggregators read multiple tmpdirs). No locking — single-writer per file.
 - **Single-threaded AXL evaluator** → no concurrent writes within a task, no races, no locking primitives needed.
 - **The `record` type drives ser/de.** No hand-rolled format, no parse-tolerance code. `json.encode(state)` and `_State(**json.decode(...))` round-trip cleanly.
@@ -422,9 +401,9 @@ rate_limit = struct(
 
 ### Rules: what tasks must NOT do
 
-1. **Tasks must not reference features.** A task module (`build.axl`, `test.axl`, `lint.axl`, `format.axl`, `gazelle.axl`, `delivery.axl`) declares its trait surface and its `_impl(ctx)`. It never imports a feature name, never lists features in its `Task(...)` constructor, never knows which features will attach to its traits at runtime. **Feature loading is a separate channel** — framework default, user `.aspect/config.axl` opt-in, etc. The decoupling is what makes graceful degradation work: a task that lists `+ artifacts.TRAITS` works identically whether or not the artifacts feature is loaded, because the trait callable defaults are null-objects.
+1. **Tasks must not reference features.** A task module (`build.axl`, `test.axl`, `lint.axl`, `format.axl`, `gazelle.axl`, `delivery.axl`) defines its `_impl(ctx)`, which fires its traits' hooks. It never imports a feature name, never lists features in its `task(...)` call, never knows which features will attach to its traits at runtime. **Feature loading is a separate channel** - framework default, user `.aspect/config.axl` opt-in, etc. The decoupling is what makes graceful degradation work: a task that calls `artifacts.append` works identically whether or not the artifacts feature is loaded, because the trait callable defaults are null-objects.
 
-2. **Tasks must iterate every trait hook list they declare.** Declaring `BazelTrait` and then never calling its `build_event` or `build_end` hooks means features that subscribed to those slots silently don't fire — and the failure mode is "things mysteriously don't work," not a loud error. The [canonical anatomy](#anatomy-of-a-task-_impl) shows the full iteration order; follow it.
+2. **A task that fires a trait's hooks must iterate all of them.** Each trait's definition names the tasks that fire its hooks. Driving Bazel and then never calling `BazelTrait`'s `build_event` or `build_end` hooks means features that subscribed to those slots silently don't fire - and the failure mode is "things mysteriously don't work," not a loud error. The [canonical anatomy](#anatomy-of-a-task-_impl) shows the full iteration order; follow it, and add the task to the trait's list of firing tasks.
 
 3. **Tasks must not touch other tasks' state.** Each task instance is hermetic — its closures, its trait instance, its tmpdir are scoped to it alone. If you find yourself wanting one task to read another's state, that's [Pattern 3](#pattern-3-library-owned--tmpdirjson) (cross-task aggregation via sibling-tmpdir reads), not a direct task-to-task communication channel.
 
@@ -832,7 +811,7 @@ artifacts.by_label(ctx)                      # → {label: {filename: url}}, per
 artifacts.browse_url(ctx)                    # → env-derived CI artifacts page URL (no setter — derived live)
 ```
 
-`artifacts.TRAITS` is the registration token the task splats into its trait list (`traits = [...] + artifacts.TRAITS`). The owner feature is `artifacts_upload`, co-located in `private/lib/artifacts.axl`. When the upload feature isn't loaded, the trait defaults make every `artifacts.append(...)` a silent no-op and every read return empty — the format/gazelle hooks call `append` unconditionally and Just Work whether or not the feature is active.
+The owner feature is `artifacts_upload`, co-located in `private/lib/artifacts.axl`. When the upload feature isn't loaded, the trait defaults make every `artifacts.append(...)` a silent no-op and every read return empty - the format/gazelle hooks call `append` unconditionally and Just Work whether or not the feature is active.
 
 `artifacts.browse_url(ctx)` is **not** a stored value — it's a thin re-export of `detect_artifacts_browse_url(ctx)` from `private/lib/ci.axl`, which reconstructs the URL from CI host env vars (the GH Actions run page, the BK build's canvas tab, etc.) on every call. The render-time decision "should I surface this link?" belongs to the consumer: typically gated by `if artifacts.list(ctx):`.
 
@@ -954,8 +933,8 @@ The `lint.axl` impl is the closest to this template; `format.axl` and `gazelle.a
 ## How to add a new task
 
 1. Create `crates/aspect-cli/src/builtins/aspect/<task_name>.axl` and follow the [canonical flow](#anatomy-of-a-task-_impl).
-2. **Declare the trait surface.** If your task drives Bazel, declare `BazelTrait`. If it surfaces data in CI, declare `Phases`. If it should print runner-env / health-check sections on Buildkite, declare `HealthCheckTrait`. For artifact uploads, splat `+ artifacts.TRAITS`. Same for tips: `+ tips.TRAITS`.
-3. **Do NOT list features** in the task constructor. Tasks declare trait surfaces only; feature loading happens through a separate channel (framework default, user `.aspect/config.axl`). See [Rules: what tasks must not do](#rules-what-tasks-must-not-do).
+2. **Fire the trait hooks.** Tasks do not declare traits: `ctx.traits[T]` works for any trait. If your task drives Bazel, iterate `BazelTrait`'s hooks. If it surfaces data in CI, drive a `phases.new` handle (which fires `Phases`); its `setup` runs the `HealthCheckTrait` hooks. Artifact uploads and tips go through the `artifacts` and `tips` wrappers. Add the task to the definition comment of each trait whose hooks it fires.
+3. **Do NOT list features** in the task constructor. Feature loading happens through a separate channel (framework default, user `.aspect/config.axl`). See [Rules: what tasks must not do](#rules-what-tasks-must-not-do).
 4. Decide the `task_update.kind`. If your task's data shape matches an existing renderer (build/test → `bazel_results`, lint → `lint_results`, etc.), reuse it. Otherwise add a new kind — see [How to add a new task kind](#how-to-add-a-new-task-kind-new-renderer).
 5. Wire the task in `MODULE.aspect`'s task registry.
 6. Add a row to [`README.md`](README.md).
@@ -1041,6 +1020,7 @@ When writing a new task, feature, or library, sanity-check:
 - [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` after `ctx.bazel.build` returns, then emit a running `task_update` so the Aspect Workflows link surfaces live.
 - [ ] Call `setup_phase(ctx, lifecycle, subject, kind, data, hc_trait, bazel_trait, ...)` as the FIRST thing in `_impl` — it emits the Setup phase mark (the first `task_update`, which inits the status surfaces and renders their first body from `kind` + `data`), resolves Bazel flags, and runs `health_check` (a failed check concludes the surface and fails the task).
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).
+- [ ] No `traits = [...]` in the `task(...)` call (`task()` rejects it); `ctx.traits[T]` works for any trait. Add the task to the definition comment of each trait whose hooks it fires.
 - [ ] Emit a terminal `task_update` with `final=True` and a terminal `status` (`"passed"` / `"failed"` / `"warning"` / `"aborted"`) on every `return` path, and return the `TaskConclusion` it hands back. There is no separate `task_complete` hook.
 - [ ] If a feature subscribes to `bazel_trait.build_event`, your BES loop must call those hooks per event — otherwise `_on_build_event` callbacks never run.
 - [ ] For tasks that retry the bazel invocation, create a fresh `iterator()` handle per attempt — handles are single-use. The same applies to `bazel_exec_log.open(...)`.
