@@ -2161,12 +2161,15 @@ def link_at(row: str, col: int):
         at += n
     return None
 
-def _cell_slice(text: str, start: int, end: int) -> str:
-    """The characters of plain `text` drawn in cells `start` to `end`."""
+def _cell_slice(text: str, start: int, end: int, overhang = False) -> str:
+    """The characters of plain `text` that start at cell `start` or after
+    and end by cell `end`: never wider than `end - start`, a wide character
+    the end would split left out. With `overhang`, one that starts before
+    `end` is kept whole (a selection's copy, which draws nothing)."""
     out = []
     at = 0
     for c, n in _widths(text):
-        if at >= end:
+        if at >= end or (at + n > end and not overhang):
             break
         if at >= start:
             out.append(chr(c))
@@ -2233,7 +2236,7 @@ def selected_text(state: dict, cols: int) -> str:
     for row, start, end in selection_rows(state, cols):
         if row < len(frame):
             plain = state["ansi"].replace(frame[row], "") if state.get("ansi") != None else frame[row]
-            text = _cell_slice(plain, start, end).rstrip(" ")
+            text = _cell_slice(plain, start, end, overhang = True).rstrip(" ")
             if lines and row in continued:
                 # A wrapped line's next row: the same line.
                 lines[-1] += text

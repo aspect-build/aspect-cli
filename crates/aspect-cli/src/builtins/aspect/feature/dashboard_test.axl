@@ -2459,6 +2459,14 @@ def _impl(ctx: TaskContext) -> int:
     _eq("no key row twice", len(shown), len({r: 1 for r in shown}))
 
     _actions_tests(ctx)
+
+    # A row cut in its middle is never wider than asked, a wide character
+    # (CJK, emoji) the cut would split left out, at every width.
+    for text in ["编译" * 40 + " //pkg:目标; 3s", "🚀 " * 40 + "Compiling a.cc; 3s"]:
+        for width in range(8, 201):
+            cut = action_row(text, width)
+            if text_width(cut) > width:
+                fail("action_row(%r, %d) is %d cells" % (text[:6], width, text_width(cut)))
     _goldens(ctx, view_state, act, ctx.args.update)
     print("dashboard_test.axl: OK")
     return 0
