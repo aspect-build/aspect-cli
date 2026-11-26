@@ -369,6 +369,11 @@ const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the
 static KEPT_NOTE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^INFO: \S+ \S+ std(?:err|out): ").unwrap());
 
+/// Bazel's status row with nothing after its label (`FAILED:`), as curses
+/// draws it: never part of an error's body.
+static BARE_STATUS: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^[A-Z]+:$").unwrap());
+
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
 /// draws do not count, so curses and plain lines count alike), enough to
@@ -600,6 +605,7 @@ impl LineProcessor for RecapErrors {
             if line.kind == Kind::Other
                 && !text.starts_with(SANDBOX_HINT)
                 && !KEPT_NOTE.is_match(text)
+                && !BARE_STATUS.is_match(text)
             {
                 let quoted = quote(text);
                 let links = self.links(record, &quoted);
@@ -627,11 +633,6 @@ impl LineProcessor for RecapErrors {
                     .into_iter()
                     .map(|e| super::processors::KeptError {
                         header: e.header,
-                        lines: e
-                            .lines
-                            .into_iter()
-                            .map(|l| String::from_utf8_lossy(&l).into_owned())
-                            .collect(),
                         body: e.body,
                         log: e.log,
                         label: e.label,
@@ -752,8 +753,9 @@ struct Rendered {
 
 /// Which of `kept` (the history's failed actions, in order) is the action
 /// the error `header` reports, not yet `used`: the one the header names by
-/// its label (a genrule's), else the first from the package of the BUILD
-/// file the header's location is in (`Compiling a.cc failed` names none),
+/// its label (a genrule's); for a header naming no label (`Compiling a.cc
+/// failed`), the first from the package of the BUILD file its location is
+/// in; a header naming another label, none,
 /// that file's path made absolute from the task's directory and taken
 /// relative to the workspace (`bases`); outside it, or without `bases`,
 /// none.
@@ -801,7 +803,14 @@ fn kept_for(
     let in_dir = |label: &str| dir.as_ref().is_some_and(|dir| *dir == package(label));
     let pick =
         |want: &dyn Fn(&str) -> bool| (0..kept.len()).find(|&i| !used[i] && want(&kept[i].0));
-    let found = pick(&|l| names(l)).or_else(|| pick(&|l| in_dir(l)))?;
+    static LABEL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?:^|[\s'\x60(])@{0,2}[\w.-]*//[\w./+-]*:[\w./+=,@~-]+").unwrap()
+    });
+    let found = match pick(&|l| names(l)) {
+        Some(found) => found,
+        None if LABEL.is_match(header) => return None,
+        None => pick(&|l| in_dir(l))?,
+    };
     used[found] = true;
     Some(found)
 }
@@ -858,8 +867,9 @@ impl Summary {
     }
 
     /// This summary leaving a raw log kept whole to the task's failure
-    /// summary, which names it on its own last line; one it could not keep,
-    /// or kept cut short, it still says so of.
+    /// summary, which names it on its counts line (`… · Bazel's raw log:
+    /// <path>`); one it could not keep, or kept cut short, it still says so
+    /// of.
     pub fn log_named_elsewhere(mut self, elsewhere: bool) -> Self {
         self.elsewhere = elsewhere;
         self
@@ -945,7 +955,8 @@ impl LineProcessor for Summary {
 mod tests {
 
     /// An error is matched to the action the history kept: by its label when
-    /// it names one, else by its BUILD file's package, each action once.
+    /// it names one, else, for an error naming no label, by its BUILD file's
+    /// package, each action once.
     #[test]
     fn an_error_is_matched_to_its_kept_action() {
         let kept = vec![
@@ -983,8 +994,29 @@ mod tests {
         let mut fresh = vec![false; kept.len()];
         assert_eq!(
             super::kept_for(prefix, &kept[..1], &mut fresh[..1], b),
+            None,
+            "another label's action, not one whose label is a prefix of it"
+        );
+
+        // ws2/min2 (Bazel 9.3.3): //min2:a_silent exits 4 with no output,
+        // so the history keeps none of it; //min2:b_loud's stderr is kept.
+        // a_silent's error names its label: never b_loud's log.
+        let silent = vec![(
+            "//min2:b_loud".to_string(),
+            vec![("stderr".to_string(), "/h/min2/b_loud.stderr".to_string())],
+        )];
+        let a = "ERROR: min2/BUILD.bazel:1:8: Executing genrule //min2:a_silent failed: (Exit 4)";
+        let loud = "ERROR: min2/BUILD.bazel:2:8: Executing genrule //min2:b_loud failed: (Exit 1)";
+        let mut fresh = vec![false];
+        assert_eq!(
+            super::kept_for(a, &silent, &mut fresh, b),
+            None,
+            "another target's log"
+        );
+        assert_eq!(
+            super::kept_for(loud, &silent, &mut fresh, b),
             Some(0),
-            "by package, not by a label's prefix"
+            "its own"
         );
 
         // Only the package itself: not one ending in its name, and the
@@ -996,7 +1028,7 @@ mod tests {
             "//:gen".to_string(),
             vec![("stderr".to_string(), "/h/gen.stderr".to_string())],
         )];
-        let root = "ERROR: /ws/BUILD.bazel:1:8: Executing genrule //:generate failed: (Exit 1)";
+        let root = "ERROR: /ws/BUILD.bazel:1:8: Compiling gen.cc failed: (Exit 1)";
         assert_eq!(super::kept_for(root, &root_kept, &mut [false], b), Some(0));
         let ends_in_b = (PathBuf::from("/x/b"), PathBuf::from("/x/b"));
         let root_b = "ERROR: /x/b/BUILD.bazel:1:8: Compiling x.cc failed: (Exit 1)";
@@ -1158,13 +1190,6 @@ mod tests {
             "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)"
         );
         assert_eq!(
-            kept.errors[0].lines,
-            vec![
-                "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)".to_string(),
-                "a.cc:3: error: expected ';'".to_string(),
-            ]
-        );
-        assert_eq!(
             kept.errors[0].body,
             vec!["a.cc:3: error: expected ';'".to_string()],
             "the body alone"
@@ -1204,9 +1229,8 @@ mod tests {
             assert_eq!(p.report(), None);
             let kept = observations.errors().expect("kept");
             assert_eq!(
-                kept.errors[0].lines,
+                kept.errors[0].body,
                 vec![
-                    "ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:".to_string(),
                     "  //tc:toolchain_type".to_string(),
                     "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'".to_string(),
                     "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.".to_string(),

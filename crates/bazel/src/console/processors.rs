@@ -348,8 +348,7 @@ pub struct Observations {
 }
 
 /// Bazel's distinct `ERROR:` messages, as the recap would have repeated
-/// them: the first `max`, each rendered (styled, linked) line by line, and
-/// how many there were in all.
+/// them: the first `max`, and how many there were in all.
 #[derive(Debug, Clone, Default)]
 pub struct KeptErrors {
     pub errors: Vec<KeptError>,
@@ -357,17 +356,14 @@ pub struct KeptErrors {
 }
 
 /// One error: its header as Bazel wrote it (cut after a failed action's exit
-/// code), its lines as the recap renders them (the header, what it picked
-/// of the body, `full stderr: <path>` where the history kept the action's
-/// output), and the label of that kept action, when one was matched.
+/// code), what the recap picked of its body as quoted (no style, no links),
+/// each count of the rest a line (`… 3 more lines`), where the history kept
+/// the action's output, and the label of that kept action, when one was
+/// matched.
 #[derive(Debug, Clone, Default)]
 pub struct KeptError {
     pub header: String,
-    pub lines: Vec<String>,
-    /// What it picked of the body alone, as quoted (no style, no links),
-    /// each count of the rest a line (`… 3 more lines`).
     pub body: Vec<String>,
-    /// Where the history kept the action's output, when it did.
     pub log: Option<String>,
     pub label: Option<String>,
 }

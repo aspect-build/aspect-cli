@@ -221,10 +221,10 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
-    /// [`report::RecapErrors`] of up to `max` errors, kept for the task's
+    /// [`report::RecapErrors`] of every error, kept for the task's
     /// failure summary ([`processors::Observations::errors`]) rather than
     /// written: the summary prints them, and names the raw log itself.
-    ErrorsForSummary { max: usize },
+    ErrorsForSummary,
     /// [`processors::CollapseRepeats`].
     CollapseRepeats,
     /// [`filters::CollapseSimilar`].
@@ -284,7 +284,7 @@ impl Stage {
             Stage::Rewrite { .. } => "rewrite",
             Stage::RelativizePaths { .. } => "relativize_paths",
             Stage::Drop(_) => "drop",
-            Stage::RecapErrors { .. } | Stage::ErrorsForSummary { .. } => "recap_errors",
+            Stage::RecapErrors { .. } | Stage::ErrorsForSummary => "recap_errors",
             Stage::CollapseRepeats => "collapse_repeats",
             Stage::CollapseSimilar { .. } => "collapse_similar",
         }
@@ -296,7 +296,7 @@ impl Stage {
             Stage::Intercept { .. } => Phase::Intercept,
             Stage::Rewrite { .. } | Stage::RelativizePaths { .. } => Phase::Rewrite,
             Stage::Drop(_) => Phase::Drop,
-            Stage::RecapErrors { .. } | Stage::ErrorsForSummary { .. } => Phase::Report,
+            Stage::RecapErrors { .. } | Stage::ErrorsForSummary => Phase::Report,
             Stage::CollapseSimilar { .. } => Phase::Collapse,
             Stage::CollapseRepeats => Phase::Repeat,
         }
@@ -311,7 +311,7 @@ impl Stage {
                 | Stage::Aggregate(_)
                 | Stage::Fatal(_)
                 | Stage::RecapErrors { .. }
-                | Stage::ErrorsForSummary { .. }
+                | Stage::ErrorsForSummary
         )
     }
 
@@ -421,20 +421,6 @@ impl Config {
     fn linker(&self, written: &links::WrittenCount) -> Option<links::Linker> {
         let bases = self.links.clone()?;
         Some(links::Linker::new(bases).with_files(self.files(written)))
-    }
-
-    /// The links of the errors kept for the failure summary, which the CLI
-    /// writes on its own stderr whether this console is shown or hidden: as
-    /// a shown one styles them, never with a URL written beside one, which
-    /// the summary's writer adds where the terminal needs it
-    /// (`ctx.std.io.linked`).
-    fn summary_linker(&self, written: &links::WrittenCount) -> Option<links::Linker> {
-        let bases = self.links.clone()?;
-        let files = links::FileLinks::new(self.link_format.clone())
-            .written(false)
-            .styled(self.shown_palette().map(links::LinkStyle::of))
-            .counted(written.clone());
-        Some(links::Linker::new(bases).with_files(files))
     }
 
     /// How this pipeline's links to files are made, the URLs they write out
@@ -619,9 +605,8 @@ impl Config {
                         .linking(self.linker(&written))
                         .naming(kept_logs.clone(), self.link_bases()),
                 ),
-                Stage::ErrorsForSummary { max } => Box::new(
-                    RecapErrors::new(max, 0, self.style.clone())
-                        .linking(self.summary_linker(&written))
+                Stage::ErrorsForSummary => Box::new(
+                    RecapErrors::new(usize::MAX, 0, self.style.clone())
                         .naming(kept_logs.clone(), self.link_bases())
                         .keeping(observations.clone()),
                 ),
@@ -652,7 +637,7 @@ impl Config {
             let summarized = self
                 .stages()
                 .iter()
-                .any(|s| matches!(s, Stage::ErrorsForSummary { .. }));
+                .any(|s| matches!(s, Stage::ErrorsForSummary));
             chain.push(Box::new(
                 Summary::new(
                     stats,
@@ -1600,45 +1585,58 @@ mod tests {
         assert_eq!(pipeline.links_written.get(), 0, "with no URL written out");
     }
 
-    /// The errors kept for the failure summary are linked alike whether the
-    /// console is shown or hidden behind the Dashboard: an OSC 8 link on
-    /// each path, never the URL beside it, which the summary's writer adds
-    /// for the macOS Terminal (`ctx.std.io.linked`) as for every other line
-    /// of it.
+    /// Every error is kept for the summary, past the console recap's 10:
+    /// r44's twelve failing genrules each keep their own (the Failures tab
+    /// reads a row's exit code and location off them).
     #[test]
-    fn errors_kept_for_the_summary_link_alike_shown_or_hidden() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("BUILD.bazel"), "").unwrap();
-        let mut kept = vec![];
-        for hidden in [false, true] {
-            let mut config = Config::new(
-                Mode::Pipe,
-                vec![Stage::ErrorsForSummary { max: 10 }],
-                Style::default(),
-            );
-            config.links = Some(vec![dir.path().to_path_buf()]);
-            config.link_format = links::LinkFormat::parse("cursor").unwrap();
-            config.link_text = true;
-            if hidden {
-                config.output = Output::Hidden;
-            }
-            let (_, pipeline) = run(
-                &config,
-                b"ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)\n[1 / 2] 1 action running\n",
-            );
-            let errors = pipeline.observations.errors().expect("kept");
-            let line = errors.errors[0].lines[0].clone();
-            assert!(
-                line.contains("\x1b]8;;cursor://file"),
-                "hidden {hidden}: linked: {line:?}"
-            );
-            assert!(
-                !line.contains(" <cursor:"),
-                "hidden {hidden}: no URL beside it: {line:?}"
-            );
-            kept.push(ansi::text(line.as_bytes()));
+    fn every_error_is_kept_for_the_summary() {
+        let mut input = Vec::new();
+        for i in 1..=12 {
+            input.extend(format!("\x1b[31m\x1b[1mERROR: \x1b[0mmany/BUILD.bazel:{i}:8: Executing genrule //many:g{i:02} failed: (Exit 1)\nfailure number {i:02}\n\x1b[32m[{i} / 13]\x1b[0m 1 action running\n").as_bytes());
         }
-        assert_eq!(kept[0], kept[1], "the same either way");
+        let config = Config::new(Mode::Pipe, vec![Stage::ErrorsForSummary], Style::default());
+        let (_, pipeline) = run(&config, &input);
+        let errors = pipeline.observations.errors().expect("kept");
+        assert_eq!((errors.errors.len(), errors.distinct), (12, 12));
+        assert_eq!(
+            errors.errors[11].body,
+            vec!["failure number 12".to_string()]
+        );
+    }
+
+    /// Bazel's `FAILED:` status row after an error about the build, not an
+    /// action, is never its body (r44's syntax error under curses, Bazel
+    /// 7.7, 8.9 and 9.3 alike), on the screen's lines or as written.
+    #[test]
+    fn a_status_row_is_no_errors_body() {
+        let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mCouldn't start the build. Unable to run tests\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild Event Protocol files produced successfully.\r\n";
+        for lines in [false, true] {
+            let mut config =
+                Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default());
+            if lines {
+                config.output = Output::Lines { status_every: None };
+            }
+            let mut pipeline = config.pipeline();
+            let sink = SharedSink::default();
+            let mut forwarder = Forwarder::spawn(
+                Box::new(std::io::Cursor::new(input.to_vec())),
+                Box::new(sink.clone()),
+                std::mem::take(&mut pipeline.chain),
+            )
+            .unwrap();
+            forwarder.join().unwrap();
+            let errors = pipeline.observations.errors().expect("kept");
+            let start = errors
+                .errors
+                .iter()
+                .find(|e| e.header.contains("Couldn't start"))
+                .unwrap_or_else(|| panic!("lines {lines}: {:?}", errors.errors));
+            assert_eq!(
+                start.body,
+                Vec::<String>::new(),
+                "lines {lines}: no FAILED: under it"
+            );
+        }
     }
 
     /// A redaction hook dropping every `Fetching` line of a real PTY console

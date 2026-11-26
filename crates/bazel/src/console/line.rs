@@ -156,10 +156,15 @@ fn is_bare_status(text: &str) -> bool {
         .is_some_and(|(_, rest)| rest.trim().is_empty())
 }
 
-/// A header whose body is an action's or a test's output.
+/// A header whose body is an action's or a test's output: `INFO: From …`,
+/// or an `ERROR:` at a BUILD file's location or saying what failed. One with
+/// neither (`ERROR: Couldn't start the build. Unable to run tests`) is about
+/// the build, and what follows it is Bazel's (its `FAILED:` status row).
 static ACTION_OUTPUT: LazyLock<Regex> =
     // A cached test's `INFO: From Testing //:t` has no trailing colon.
-    LazyLock::new(|| Regex::new(r"^(?:INFO: From |ERROR: )").unwrap());
+    LazyLock::new(|| {
+        Regex::new(r"^(?:INFO: From |ERROR: \S+:\d+(?::\d+)?: |ERROR: .* failed: )").unwrap()
+    });
 
 /// `text` (escapes already stripped) without a `--show_timestamps` prefix.
 pub fn message(text: &str) -> &str {

@@ -2222,17 +2222,13 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// Bazel's errors as a `recap_errors(summary = True)` stage kept them,
     /// for a failure summary, once the console has ended: `{"errors": [...],
-    /// "distinct": n}`, each error `{"header", "lines", "body", "log",
-    /// "label"}`: its `ERROR:` line as Bazel wrote it (cut after a failed
-    /// action's exit code), its lines as a recap renders them (styled and,
-    /// on a terminal, linked; the header first, then what the recap picks of
-    /// its body and `full stderr: <path>` where the history kept the
-    /// action's output), that body alone, unstyled and unlinked (each count
-    /// of the rest a `… N more lines` line), the kept output's path (its stderr, else its other
-    /// stream) or None, and that action's label, else None; `distinct`
-    /// counts them all, past
-    /// the stage's `max`. None without such a stage, or before the console
-    /// ends.
+    /// "distinct": n}`, each error `{"header", "body", "log", "label"}`: its
+    /// `ERROR:` line as Bazel wrote it (cut after a failed action's exit
+    /// code), what the recap picks of its body, unstyled and unlinked (each
+    /// count of the rest a `… N more lines` line), the path of the output
+    /// the history kept of the action (its stderr, else its other stream) or
+    /// None, and that action's label, else None; `distinct` counts them all.
+    /// None without such a stage, or before the console ends.
     fn output_errors<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,
@@ -2247,7 +2243,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             .map(|e| {
                 serde_json::json!({
                     "header": e.header,
-                    "lines": e.lines,
                     "body": e.body,
                     "log": e.log,
                     "label": e.label,
