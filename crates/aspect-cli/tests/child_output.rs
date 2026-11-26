@@ -338,6 +338,44 @@ def _latedump(ctx):
     child.wait()
     return 0
 
+def _inherit(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    ctx.std.process.command("sh").args(["-c", "printf 'INHERIT50PCT' >&2"]).stderr("inherit").spawn().wait()
+    sleep(100)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _stdoutcat(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILDOUT50PCT'; sleep 1.5; printf -- '-CHILDDONE\\n'"]).spawn()
+    sleep(500)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _errfile(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+inherit = task(implementation = _inherit, summary = "An inherited child's partial after the CLI's, before a take.")
+stdoutcat = task(implementation = _stdoutcat, summary = "A child's stdout partial through a pipe to the terminal.")
+errfile = task(implementation = _errfile, summary = "The CLI's partial when stderr is a file.")
 childafter = task(implementation = _childafter, summary = "A child's partial after the CLI's, on one row, before a take.")
 childfirst = task(implementation = _childfirst, summary = "The CLI's partial after a child's, on one row, before a take.")
 stdoutpiped = task(implementation = _stdoutpiped, summary = "The CLI's stdout partial and a child's on stderr's row.")
@@ -445,16 +483,47 @@ fn on_a_pty_with_args(
     std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
     tempfile::TempDir,
 ) {
-    PTY_ARGS.with(|a| *a.borrow_mut() = args.iter().map(|s| s.to_string()).collect());
+    on_a_pty_opts(
+        task,
+        PtyOpts {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            ..PtyOpts::default()
+        },
+    )
+}
+
+/// How [`on_a_pty_opts`] runs the CLI beyond [`on_a_pty`]'s defaults.
+#[cfg(unix)]
+#[derive(Default, Clone)]
+struct PtyOpts {
+    /// After the task's name.
+    args: Vec<String>,
+    /// Stdout through `| cat` to the same terminal.
+    cat: bool,
+    /// Stderr to this file instead of the terminal.
+    stderr_file: Option<std::path::PathBuf>,
+}
+
+/// [`on_a_pty`] with `opts`.
+#[cfg(unix)]
+fn on_a_pty_opts(
+    task: &str,
+    opts: PtyOpts,
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
+    PTY_OPTS.with(|o| *o.borrow_mut() = opts);
     let got = on_a_pty_with(task, None, &[]);
-    PTY_ARGS.with(|a| a.borrow_mut().clear());
+    PTY_OPTS.with(|o| *o.borrow_mut() = PtyOpts::default());
     got
 }
 
 #[cfg(unix)]
 std::thread_local! {
-    /// Arguments [`on_a_pty_with_args`] adds after the task's name.
-    static PTY_ARGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(vec![]) };
+    /// What [`on_a_pty_opts`] asks of the next CLI run.
+    static PTY_OPTS: std::cell::RefCell<PtyOpts> = std::cell::RefCell::new(PtyOpts::default());
 }
 
 /// [`on_a_pty`], with `env` set for the CLI too.
@@ -505,10 +574,22 @@ fn on_a_pty_with(
         0,
         "winsize"
     );
-    let mut cmd = Command::new(aspect_cli());
-    cmd.arg(task)
-        .args(PTY_ARGS.with(|a| a.borrow().clone()))
-        .current_dir(dir.path())
+    let opts = PTY_OPTS.with(|o| o.borrow().clone());
+    let mut cmd = if opts.cat {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", "\"$0\" \"$@\" | cat", &aspect_cli(), task])
+            .args(&opts.args);
+        sh
+    } else {
+        let mut cli = Command::new(aspect_cli());
+        cli.arg(task).args(&opts.args);
+        cli
+    };
+    let stderr = match &opts.stderr_file {
+        Some(path) => Stdio::from(std::fs::File::create(path).expect("stderr file")),
+        None => Stdio::from(slave.try_clone().expect("dup")),
+    };
+    cmd.current_dir(dir.path())
         .env_clear()
         .envs(base_env())
         .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
@@ -517,7 +598,7 @@ fn on_a_pty_with(
         .envs(env.iter().copied())
         .stdin(Stdio::from(slave.try_clone().expect("dup")))
         .stdout(stdout.unwrap_or_else(|| Stdio::from(slave.try_clone().expect("dup"))))
-        .stderr(Stdio::from(slave.try_clone().expect("dup")));
+        .stderr(stderr);
     // SAFETY: setsid and ioctl are async-signal-safe.
     unsafe {
         cmd.pre_exec(move || {
@@ -1638,12 +1719,12 @@ fn main_screen(raw: &str) -> String {
     rows.join("\n")
 }
 
-/// A line the task began before taking the screen and ended under it: the
-/// dump redraws the row the terminal shows its start on, so the line shows
-/// once, whole.
+/// A line the task began before taking the screen and ended under it: its
+/// start stays on its row, and the dump, on a line of its own, has the
+/// line whole. Nothing lost, no row erased.
 #[cfg(unix)]
 #[test]
-fn a_line_begun_before_the_take_shows_once_whole() {
+fn a_line_begun_before_the_take_loses_nothing() {
     use std::time::Duration;
     let (mut child, chunks, _dir) = on_a_pty("pretake", None);
     let status = wait_bounded(&mut child, 60, &chunks);
@@ -1651,24 +1732,21 @@ fn a_line_begun_before_the_take_shows_once_whole() {
     let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
     let text = main_screen(&String::from_utf8_lossy(&raw));
     assert!(status.success(), "{status:?}: {text}");
-    assert_eq!(
-        text.matches("PRETAKE-").count(),
-        1,
-        "the start once: {text:?}"
-    );
+    let rows: Vec<&str> = text.lines().collect();
+    assert!(rows.contains(&"PRETAKE-"), "the start on its row: {text:?}");
     assert!(
         text.contains("PRETAKE-INSCREEN\nEND"),
-        "the line whole: {text:?}"
+        "the line whole, then the rest: {text:?}"
     );
 }
 
 /// A question the task asked under the screen, answered at the prompt the
 /// screen gave the terminal back for: the answer's row stays as typed, and
-/// the release's dump writes the task's line as the files have it, no row
-/// shown twice.
+/// the release's dump writes the task's line as the files have it, on a row
+/// of its own. Nothing lost, no row erased.
 #[cfg(unix)]
 #[test]
-fn a_question_answered_at_a_prompt_shows_once() {
+fn a_question_answered_at_a_prompt_loses_nothing() {
     use std::io::Write as _;
     use std::time::Duration;
     let (mut child, chunks, _dir) = on_a_pty("prompt", None);
@@ -1690,8 +1768,7 @@ fn a_question_answered_at_a_prompt_shows_once() {
     }
     let text = main_screen(&String::from_utf8_lossy(&raw));
     assert!(status.success(), "{status:?}: {text}");
-    // The answer's row as typed, then the task's line as the files have it,
-    // redrawn: no row twice.
+    // The answer's row as typed, then the task's line as the files have it.
     assert_eq!(
         text.matches("QUESTION? y").count(),
         1,
@@ -1725,10 +1802,11 @@ fn the_dumps_older_note_is_a_line_of_its_own() {
 }
 
 /// A stdout line begun before the take, std's buffer holding it, ended under
-/// the screen: shown once, whole, and nothing of it after the task's end.
+/// the screen: its start out before the dump, the dump with it whole, and
+/// nothing of it after the task's end.
 #[cfg(unix)]
 #[test]
-fn a_buffered_stdout_line_begun_before_the_take_shows_once_whole() {
+fn a_buffered_stdout_line_begun_before_the_take_comes_out_in_order() {
     use std::time::Duration;
     let (mut child, chunks, _dir) = on_a_pty("pretakeout", None);
     let status = wait_bounded(&mut child, 60, &chunks);
@@ -1736,7 +1814,6 @@ fn a_buffered_stdout_line_begun_before_the_take_shows_once_whole() {
     let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
     let text = main_screen(&String::from_utf8_lossy(&raw));
     assert!(status.success(), "{status:?}: {text}");
-    assert_eq!(text.matches("PRETAKE-").count(), 1, "{text:?}");
     assert!(text.contains("PRETAKE-INSCREEN"), "{text:?}");
     let after = text.split("Passed").nth(1).unwrap_or("");
     assert!(!after.contains("PRETAKE"), "after the end: {text:?}");
@@ -1815,4 +1892,49 @@ fn a_dump_never_erases_a_childs_unended_line() {
             "{task} (stdout piped: {piped}): the child's start erased: {text:?}"
         );
     }
+
+    // A child given the CLI's own stderr, and one's stdout through a pipe
+    // to the same terminal: nothing of either erased.
+    for (task, opts, want) in [
+        ("inherit", PtyOpts::default(), "INHERIT50PCT"),
+        (
+            "stdoutcat",
+            PtyOpts {
+                cat: true,
+                ..PtyOpts::default()
+            },
+            "CHILDOUT50PCT",
+        ),
+    ] {
+        let (mut child, chunks, _dir) = on_a_pty_opts(task, opts);
+        let status = wait_bounded(&mut child, 60, &chunks);
+        std::thread::sleep(Duration::from_millis(200));
+        let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+        let text = main_screen(&String::from_utf8_lossy(&raw));
+        assert!(status.success(), "{task}: {status:?}: {text}");
+        assert!(text.contains(want), "{task}: {want} erased: {text:?}");
+        assert!(text.contains("-CLITAIL"), "{task}: {text:?}");
+    }
+
+    // Stderr a file: the dump writes no escape there, and loses nothing.
+    let files = tempfile::tempdir().expect("temp dir");
+    let err = files.path().join("stderr.txt");
+    let (mut child, chunks, _dir) = on_a_pty_opts(
+        "errfile",
+        PtyOpts {
+            stderr_file: Some(err.clone()),
+            ..PtyOpts::default()
+        },
+    );
+    let status = wait_bounded(&mut child, 60, &chunks);
+    assert!(status.success(), "errfile: {status:?}");
+    let written = std::fs::read_to_string(&err).expect("stderr file");
+    assert!(
+        !written.contains('\x1b'),
+        "an escape in a stderr file: {written:?}"
+    );
+    assert!(
+        written.contains("CLIHEAD-") && written.contains("-CLITAIL"),
+        "{written:?}"
+    );
 }

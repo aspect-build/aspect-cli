@@ -578,7 +578,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 }
                 match inner.lock().write(data) {
                     Ok(n) => {
-                        crate::terminal::wrote_cli(1, &data[..n]);
+                        crate::terminal::wrote(1, &data[..n]);
                         if copy {
                             copy_output(&data[..n]);
                         }
@@ -609,7 +609,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 }
                 match inner.lock().write(data) {
                     Ok(n) => {
-                        crate::terminal::wrote_cli(2, &data[..n]);
+                        crate::terminal::wrote(2, &data[..n]);
                         if copy {
                             copy_output(&data[..n]);
                         }

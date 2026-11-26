@@ -459,17 +459,6 @@ pub fn output_ansi_mark() -> Option<u64> {
     copies.log.as_ref().map(|log| log.ansi.written)
 }
 
-/// [`output_ansi_mark`], for a dump's mark, and whether exactly one of the
-/// task and the console has an unended line now: then the dump has that
-/// line whole (written since, or still unended), and can redraw the row the
-/// terminal shows its start on, if that row is still the CLI's when it dumps.
-pub fn mark_dump() -> Option<(u64, bool)> {
-    let copies = OUTPUT.lock().ok()?;
-    let log = copies.log.as_ref()?;
-    let one = log.task.pending.is_empty() != log.console.pending.is_empty();
-    Some((log.ansi.written, one))
-}
-
 /// `output.ansi` from `mark` on, its unended lines (the task's, then the
 /// console's, each on a line of its own) at its end, and the file's path;
 /// None without the task's files or when it cannot be read.
