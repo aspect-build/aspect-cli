@@ -1,32 +1,29 @@
-//! The BuildEvents feature's options reach `BazelTrait`, and a negative count,
-//! a limit too small to hold a publish request, a malformed duration or a
-//! `config.axl` value too large for the runtime is refused before the task
-//! runs.
+//! The BuildEvents feature's options, set on the command line or in
+//! `config.axl`, reach the tasks through `build_events_settings`, and a
+//! negative count, a limit too small to hold a publish request, a malformed
+//! duration or a `config.axl` value too large for the runtime is refused
+//! before the task runs, naming the option. With the feature disabled the
+//! defaults apply, and `BazelTrait` carries none of these settings.
 //!
-//! A value `config.axl` writes on `BazelTrait` directly is refused when a
-//! task builds a sink from it, naming the option to set instead.
-//!
-//! A scratch workspace's `show` task prints the trait's fields, and its `sink`
-//! task builds a gRPC sink from them without dialing, so nothing here runs
-//! Bazel.
+//! A scratch workspace's `show` task prints the settings, and its `sink` task
+//! builds a gRPC sink from them without dialing, so nothing here runs Bazel.
 
 mod common;
 
 use common::{aspect_cli, base_env};
 use std::process::{Command, Output};
 
-const TASKS: &str = r#"load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//bazel/build_events.axl", "grpc_sink")
+const TASKS: &str = r#"load("@aspect//bazel/build_events.axl", "grpc_sink")
+load("@aspect//private/lib/build_events_settings.axl", s = "build_events_settings")
 
 def _show_impl(ctx: TaskContext) -> int:
-    t = ctx.traits[BazelTrait]
-    print("fields:%s|%s|%s|%s|%s" % (t.bes_max_retries, t.bes_retry_min_delay, t.bes_retry_max_buffer_bytes, t.bes_timeout, t.max_build_event_bytes))
+    print("fields:%s|%s|%s|%s|%s" % (s.max_retries(ctx), s.retry_min_delay(ctx), s.retry_max_buffer_bytes(ctx), s.timeout(ctx), s.max_event_bytes(ctx)))
     return 0
 
 show = task(implementation = _show_impl, args = {})
 
 def _sink_impl(ctx: TaskContext) -> int:
-    grpc_sink(ctx.traits[BazelTrait], "grpc://127.0.0.1:1")
+    grpc_sink(ctx, "grpc://127.0.0.1:1")
     print("sink built")
     return 0
 
@@ -80,7 +77,7 @@ fn fields(output: &Output) -> String {
 }
 
 #[test]
-fn unset_options_leave_the_trait_defaults() {
+fn unset_options_leave_the_defaults() {
     assert_eq!(fields(&show(&[])), "4|1s|None|0s|None");
 }
 
@@ -102,7 +99,7 @@ fn validating_the_options_leaves_the_buffer_env_unread() {
 }
 
 #[test]
-fn set_options_reach_the_trait() {
+fn set_options_reach_the_tasks() {
     let out = show(&[
         "--build-events:max-retries=7",
         "--build-events:retry-min-delay=250ms",
@@ -155,14 +152,18 @@ fn malformed_durations_are_refused_before_the_task_runs() {
     );
 }
 
-/// `aspect show` with `config.axl` setting the BuildEvents `option` to `value`.
-fn show_configured(option: &str, value: &str) -> Output {
-    let config = format!(
+/// A `config.axl` setting the BuildEvents `option` to `value`.
+fn configured(option: &str, value: &str) -> String {
+    format!(
         "load(\"@aspect//feature/build_events.axl\", \"BuildEvents\")\n\n\
          def config(ctx: ConfigContext):\n    \
          ctx.features[BuildEvents].args.{option} = {value}\n"
-    );
-    show_in(&[], &[], Some(&config))
+    )
+}
+
+/// `aspect show` with `config.axl` setting the BuildEvents `option` to `value`.
+fn show_configured(option: &str, value: &str) -> Output {
+    show_in(&[], &[], Some(&configured(option, value)))
 }
 
 /// A `config.axl` value skips the flag parser's range check, so the feature
@@ -186,7 +187,7 @@ fn a_config_value_too_large_for_the_runtime_is_refused_before_the_task_runs() {
 
 /// The largest value the runtime takes is not refused.
 #[test]
-fn a_config_value_at_the_runtime_bound_reaches_the_trait() {
+fn a_config_value_at_the_runtime_bound_reaches_the_tasks() {
     assert_eq!(
         fields(&show_configured("max_retries", "2147483647")),
         "2147483647|1s|None|0s|None"
@@ -204,40 +205,42 @@ fn a_config_value_at_the_runtime_bound_reaches_the_trait() {
     );
 }
 
-/// A value written on `BazelTrait` directly skips the feature's checks, so the
-/// sink built from it refuses it instead: no traceback, the field named, and
-/// the option to set in its place.
 #[test]
-fn a_bad_value_written_on_the_trait_is_refused_when_a_sink_is_built() {
-    let config = |field: &str, value: &str| {
-        format!(
-            "load(\"@aspect//bazel.axl\", \"BazelTrait\")\n\n\
-             def config(ctx: ConfigContext):\n    \
-             ctx.traits[BazelTrait].{field} = {value}\n"
-        )
-    };
-    for (field, value, option) in [
-        ("bes_timeout", "\"later\"", "timeout"),
-        ("bes_max_retries", "-1", "max_retries"),
-        ("max_build_event_bytes", "1000", "max_event_bytes"),
-    ] {
-        let out = run("sink", &[], &[], Some(&config(field, value)));
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{field}: {stderr}");
-        let flag = option.replace('_', "-");
-        let fix =
-            format!("set it with --build-events:{flag} or ctx.features[BuildEvents].args.{option}");
-        assert!(
-            stderr.contains(&format!("ERROR: BazelTrait.{field} ")) && stderr.contains(&fix),
-            "{field}: {stderr}"
-        );
-        assert!(!stderr.contains("sink built"), "{field}: {stderr}");
-        assert!(!stderr.contains("Traceback"), "{field}: {stderr}");
-    }
-    let ok = run("sink", &[], &[], Some(&config("bes_timeout", "\"30s\"")));
-    assert!(
-        String::from_utf8_lossy(&ok.stderr).contains("sink built"),
-        "{}",
-        String::from_utf8_lossy(&ok.stderr)
+fn config_options_reach_the_tasks() {
+    assert_eq!(
+        fields(&show_configured("max_retries", "9")),
+        "9|1s|None|0s|None"
     );
+    assert_eq!(
+        fields(&show_configured("timeout", "\"30s\"")),
+        "4|1s|None|30s|None"
+    );
+    let built = run("sink", &[], &[], Some(&configured("timeout", "\"30s\"")));
+    let stderr = String::from_utf8_lossy(&built.stderr);
+    assert!(stderr.contains("sink built"), "{stderr}");
+}
+
+#[test]
+fn a_disabled_feature_leaves_the_defaults() {
+    let config = "load(\"@aspect//feature/build_events.axl\", \"BuildEvents\")\n\n\
+                  def config(ctx: ConfigContext):\n    \
+                  ctx.features[BuildEvents].enabled = False\n    \
+                  ctx.features[BuildEvents].args.max_retries = 9\n";
+    assert_eq!(
+        fields(&show_in(&[], &[], Some(config))),
+        "4|1s|None|0s|None"
+    );
+}
+
+/// The settings live only on the feature: `BazelTrait` has no field for them.
+#[test]
+fn bazel_trait_has_no_build_events_settings() {
+    let config = "load(\"@aspect//bazel.axl\", \"BazelTrait\")\n\n\
+                  def config(ctx: ConfigContext):\n    \
+                  ctx.traits[BazelTrait].bes_timeout = \"30s\"\n";
+    let out = show_in(&[], &[], Some(config));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("bes_timeout"), "{stderr}");
+    assert!(!stderr.contains("fields:"), "the task ran:\n{stderr}");
 }
