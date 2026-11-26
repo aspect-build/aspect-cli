@@ -3315,11 +3315,15 @@ def fold_build(state: dict, now_ms: int):
 _BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "logged_index", "exec_log_read", "done_total", "bep_done_total"]
 
 def build_row(build: dict, cols: int) -> str:
-    """A folded build's row: its verdict, command, its actions as the
-    finished bar says them (`actions_text`: from its `BuildMetrics`, else
-    the last count Bazel drew), failures and time, muted but for the
-    counts' colours."""
-    mark = (_c("verdict.success") + "✓") if build["ok"] else (_c("verdict.failure") + "✗")
+    """A folded build's row: its verdict (◌ for a past run's build that was
+    still going), command, its actions as the finished bar says them
+    (`actions_text`: from its `BuildMetrics`, else the last count Bazel
+    drew), failures and time, muted but for the counts' colours."""
+    if build.get("running"):
+        # A past run's build still going when its record was read: neither.
+        mark = _c("muted") + "◌"
+    else:
+        mark = (_c("verdict.success") + "✓") if build["ok"] else (_c("verdict.failure") + "✗")
     parts = [build["command"]]
     if build.get("actions"):
         parts.append(build["actions"][0])
@@ -5216,9 +5220,12 @@ def _count_text(state: dict) -> str:
     total = max(total, n)
     noun = {"builds": "build", "failed builds": "failed build", "all runs": "run"}[b["filter"]]
     of = "of %s run%s" % (_thousands(total), "" if total == 1 else "s")
+    if b["here"] and b["workspace"]:
+        # The total is every workspace's, the list this one's.
+        of += " in all workspaces"
     if n >= _HISTORY_LIMIT:
         return "%s newest %ss %s" % (_thousands(n), noun, of)
-    if b["filter"] == "all runs" and n == total:
+    if b["filter"] == "all runs" and n == total and not (b["here"] and b["workspace"]):
         return "%s run%s" % (_thousands(n), "" if n == 1 else "s")
     return "%s %s%s %s" % (_thousands(n), noun, "" if n == 1 else "s", of)
 
@@ -5411,6 +5418,9 @@ def render_history(state: dict, cols: int, rows: int) -> str:
     if census.get("without_record"):
         n = census["without_record"]
         damaged.append("%s folder%s without a record" % (_thousands(n), "" if n == 1 else "s"))
+    if census.get("newer"):
+        n = census["newer"]
+        damaged.append("%s record%s from a newer CLI" % (_thousands(n), "" if n == 1 else "s"))
     if census.get("unreadable"):
         n = census["unreadable"]
         damaged.append("%s record%s unreadable" % (_thousands(n), "" if n == 1 else "s"))
@@ -5702,7 +5712,7 @@ def _replay_build(s: dict, record: dict, build: dict, events):
         "test": s["read"](folder + "/testlogs.json", 0) != None,
     }
     use_kept_logs(s, record.get("dir", ""), build, actions = actions, folder = folder, attempts = attempts, indexed = indexed)
-    if not stream.complete and outcome(record) == "running":
+    if not stream.complete and outcome(record) == "running" and build.get("ended") == None:
         # Still being written: what it has so far.
         s["in_progress"] = True
     elif not stream.complete:
@@ -5718,6 +5728,7 @@ def _replay_build(s: dict, record: dict, build: dict, events):
         s["builds"][-1]["outcome"] = _CUT_STREAM
     elif s.get("in_progress"):
         s["builds"][-1]["outcome"] = "in progress"
+        s["builds"][-1]["running"] = True
 
 def _size_text(n: int) -> str:
     """A size in bytes as `12.3 MiB`, `40 KiB` or `512 bytes`."""

@@ -639,7 +639,7 @@ def _actions_tests(ctx):
             if bad:
                 fail("%s at %d columns: rows not as wide as the frame: %r\n%s" % (name, cols, bad, "\n".join(drawn)))
 
-def _history(records, runs = None, unreadable = 0, without_record = 0):
+def _history(records, runs = None, unreadable = 0, without_record = 0, newer = 0):
     """A `ctx.std.history` over `records`, noting each listing's filters and
     each census; its census `runs` (all of `records` by default),
     `without_record` and `unreadable`."""
@@ -656,7 +656,7 @@ def _history(records, runs = None, unreadable = 0, without_record = 0):
 
     def census():
         censuses.append(True)
-        return {"runs": len(records) if runs == None else runs, "unreadable": unreadable, "without_record": without_record}
+        return {"runs": len(records) if runs == None else runs, "unreadable": unreadable, "without_record": without_record, "newer": newer}
 
     def get(id):
         found = [r for r in records if r["task"]["id"] == id]
@@ -735,7 +735,7 @@ def _test_history(ctx):
     screen = _visible(render(state, 120, 20))
     _eq("the live build pinned first, its progress in the header", ("● now running build //examples:demo (live)" in screen, "live build running 21/35" in screen), (True, True))
     _eq("builds in this workspace, by default", ("aaaa1111" in screen, "bbbb2222" in screen, "hhhh0000" in screen, "oooo0000" in screen), (True, True, False, False))
-    _eq("the count, of the whole history", "aspect history · 2 builds of 7,701 runs" in screen, True)
+    _eq("the count, of the whole history", "aspect history · 2 builds of 7,701 runs in all workspaces" in screen, True)
     _eq("the filter and workspace keys say what is shown", ("f filter: builds" in screen, "w: this workspace" in screen, "Esc live build" in screen, "? keys" in screen), (True, True, True, True))
     _eq("asked for builds here", state["browser"]["history"].asked[-1], (None, True, "/ws"))
     _eq("a row: status, when, time, command, id last", [l for l in screen.split("\n") if "aaaa1111" in l][0].strip("│ ").startswith("✗ exit 1"), True)
@@ -760,7 +760,7 @@ def _test_history(ctx):
     on_key(state, "f", 10)
     failed = _visible(render(state, 120, 20))
     _eq("f: failed builds", ("f filter: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
-    _eq("its count", "1 failed build of 7,701 runs" in failed, True)
+    _eq("its count", "1 failed build of 7,701 runs in all workspaces" in failed, True)
     on_key(state, "f", 10)
     on_key(state, "w", 10)
     every = _visible(render(state, 120, 20))
@@ -851,10 +851,10 @@ def _test_history(ctx):
     full["browser"]["filter"] = "all runs"
     full["browser"]["records"] = None
     _eq("500 listed, not the live one", (len(history_records(full)), [r for r in full["browser"]["records"] if r["task"]["id"] == "live"]), (500, []))
-    _eq("and says they are the newest, of the runs it could list", "500 newest runs of 600 runs" in _visible(render(full, 120, 20)), True)
+    _eq("and says they are the newest, of the runs it could list", "500 newest runs of 600 runs in all workspaces" in _visible(render(full, 120, 20)), True)
     one = _history_state(ctx, [_record("live", "running"), _record("only0000")])
     open_history(one)
-    _eq("one build of one run", "1 build of 1 run " in _visible(render(one, 120, 20)), True)
+    _eq("one build of one run", "1 build of 1 run in all workspaces" in _visible(render(one, 120, 20)), True)
 
     # The chosen run stays chosen as newer runs come above it.
     runs = [_record("aaaa1111"), _record("bbbb2222"), _record("cccc3333")]
@@ -869,11 +869,11 @@ def _test_history(ctx):
     _eq("a run recorded meanwhile leaves the selection on the run chosen", picked, "bbbb2222")
 
     # Standalone (`aspect history browse`): q or Esc quits; Ctrl+C too.
-    alone = _history_state(ctx, records, standalone = True, unreadable = 3, without_record = 749)
+    alone = _history_state(ctx, records, standalone = True, unreadable = 3, without_record = 749, newer = 2)
     open_history(alone)
     listed = _visible(render(alone, 120, 20))
     _eq("q/Esc quit, standalone, no live row", ("q/Esc quit" in listed, "(live)" in listed), (True, False))
-    _eq("damaged entries counted under the list, for what they are", "749 folders without a record · 3 records unreadable" in listed, True)
+    _eq("damaged entries counted under the list, for what they are", "749 folders without a record · 2 records from a newer CLI · 3 records unreadable" in listed, True)
     on_key(alone, "enter", 10)
     _eq("a past run's Esc goes back to the list", (on_key(alone, "esc", 10), alone["mode"]), (False, "history"))
     _eq("whose q leaves", on_key(alone, "q", 10), True)
@@ -957,6 +957,12 @@ def _test_history(ctx):
     evicted = past_run(files, _record("eeee0001", dir = tmp, evicted = "2026-11-20T10:00:00.000Z"))
     running = past_run(files, _record("rrrr0001", "running", dir = tmp, bazel = [{"command": "build", "build_events": tmp + "/bazel/1/build_events.binpb"}]))
     _eq("a run still going is in progress, not cut short", ([b["outcome"] for b in running["builds"]], running.get("stream_cut")), (["in progress"], False))
+    _eq("its build marked neither passed nor failed", "◌" in build_row(running["builds"][0], 80) and "✗" not in build_row(running["builds"][0], 80), True)
+    earlier = past_run(files, _record("rrrr0002", "running", dir = tmp, bazel = [
+        {"command": "build", "ended": "2026-11-21T15:40:00.000Z", "build_events": tmp + "/bazel/1/build_events.binpb", "summary": {"failures": [{"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": []}]}},
+        {"command": "test", "build_events": tmp + "/bazel/1/build_events.binpb"},
+    ]))
+    _eq("an earlier build that ended cut short says so in a run still going", [b["outcome"] for b in earlier["builds"]], ["event stream ended early", "in progress"])
     _eq("a run pruned before the list says when", evicted["log"][0].startswith("This run's files were removed (pruned "), True)
     ctx.std.fs.remove_dir_all(tmp)
     pruned = past_run(files, _record("gggg0000", dir = tmp))

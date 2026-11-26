@@ -399,9 +399,10 @@ The whole vocabulary is eight names: `ctx.cancellation.root`,
 `tok.cancel()`, `tok.cancelled`, `tok.wait(timeout_ms)`, `cancellation =
 tok` on `command(...).spawn()` / `.status()` and `ctx.bazel.build/test`, and
 `ctx.cancellation.exit_code`: the code a task that ends on its own terms
-after the root was cancelled returns to end as the default would, 143 after
-SIGTERM or a hangup and 130 otherwise (Ctrl+C, `root.cancel()`), None while
-the root is not cancelled. Every
+after the root was cancelled returns to end as the default would, by the
+first signal's kind: 143 when that was SIGTERM or a hangup, 130 otherwise
+(Ctrl+C, or `root.cancel()` with no signal), None while the root is not
+cancelled. Every
 `std.process.Child` and `bazel.Build` carries its own token as
 `handle.cancellation`, a `child()` of the one it was spawned under, so
 `handle.cancellation.cancel()` stops that one process the appropriate way.

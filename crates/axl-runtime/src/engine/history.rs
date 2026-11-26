@@ -43,6 +43,12 @@
 //! and `.pruned-records`, whose times are the last prune's and the last
 //! capping's, and `.sizes`, the sizes of invocations that have settled (and,
 //! briefly, its temp file).
+//!
+//! Reading the history back, [`History::scan`] reads every entry's record
+//! once and keeps them, each entry checked again by its record file's
+//! stamp when used, and [`History::records`] answers from that once it is
+//! kept. A run whose task keeps no history ([`History::keep_none`]) makes
+//! no entry and no build's folder, and starts no prune.
 
 use std::collections::HashMap;
 use std::fs;
@@ -161,23 +167,90 @@ pub struct Scan {
     /// The root folder's modification time when it was read: an entry
     /// added or removed since changes it.
     stamp: Option<SystemTime>,
-    /// The entries with a record that reads, newest first, each with its
-    /// record file's modification time and length when it was read.
+    /// Each entry, newest first, with its record file's stamp when it was
+    /// read (None while it has none) and what it held.
+    seen: Vec<(PathBuf, Option<FileStamp>, Held)>,
+    /// The entries with a record that reads, newest first.
     pub records: Vec<(PathBuf, TaskRecord)>,
-    seen: Vec<Option<(SystemTime, u64)>>,
     /// How many entries there are.
     pub entries: usize,
-    /// Entries with no record: folders that never got a `task.json`.
+    /// Entries with no record: folders that never got a `task.json`, or
+    /// have not yet (a run starting).
     pub without_record: usize,
     /// Entries whose `task.json` is there but does not read.
     pub unreadable: usize,
+    /// Entries whose record a newer CLI wrote, of a schema this one skips.
+    pub newer: usize,
 }
 
-/// A record file's modification time and length: what a rewrite in place
-/// (a run's end, an eviction) changes.
-fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+/// What an entry's record file held when it was read.
+#[derive(Debug, Clone)]
+enum Held {
+    Record(Box<TaskRecord>),
+    Missing,
+    Unreadable,
+    Newer,
+}
+
+impl Scan {
+    /// A scan of `seen`, its counts and records taken from it.
+    fn of(stamp: Option<SystemTime>, seen: Vec<(PathBuf, Option<FileStamp>, Held)>) -> Scan {
+        let mut scan = Scan {
+            stamp,
+            entries: seen.len(),
+            ..Scan::default()
+        };
+        for (dir, _, held) in &seen {
+            match held {
+                Held::Record(record) => scan.records.push((dir.clone(), (**record).clone())),
+                Held::Missing => scan.without_record += 1,
+                Held::Unreadable => scan.unreadable += 1,
+                Held::Newer => scan.newer += 1,
+            }
+        }
+        scan.seen = seen;
+        scan
+    }
+}
+
+/// A record file's identity, modification time and length: what a rewrite
+/// in place (a run's end, an eviction) or a replacing rename changes, the
+/// inode too where the clock is coarse and the size the same.
+type FileStamp = (u64, SystemTime, u64);
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
     let meta = fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((ino, meta.modified().ok()?, meta.len()))
+}
+
+/// What the record file at `path` holds.
+fn read_held(path: &Path) -> Held {
+    let Ok(bytes) = fs::read(path) else {
+        return if path.exists() {
+            Held::Unreadable
+        } else {
+            Held::Missing
+        };
+    };
+    if let Ok(record) = serde_json::from_slice::<TaskRecord>(&bytes) {
+        if record.schema <= task_record::SCHEMA {
+            return Held::Record(Box::new(record));
+        }
+        return Held::Newer;
+    }
+    // A record of a newer schema may not parse as this one's at all.
+    let schema = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("schema").and_then(|s| s.as_u64()));
+    if schema.is_some_and(|s| s > task_record::SCHEMA as u64) {
+        Held::Newer
+    } else {
+        Held::Unreadable
+    }
 }
 
 /// What a task's record starts with, beside its command line.
@@ -363,44 +436,32 @@ impl History {
 
     /// Every entry's record, read once and kept for [`records`]
     /// (Self::records): read whole again when entries were added or removed
-    /// (the root's modification time), else each record whose file changed
-    /// since (a run that ended, an eviction, rewrite theirs in place) read
-    /// anew.
+    /// (the root's modification time), else each entry whose record file
+    /// changed since read anew: a run that ended or an eviction rewrote it,
+    /// or a run that was starting has written it.
     pub fn scan(&self) -> Arc<Scan> {
         let stamp = self.stamp();
         let cached = self.scanned.lock().unwrap().clone();
         let scan = match cached {
             Some(old) if old.stamp.is_some() && old.stamp == stamp => {
                 let mut changed = false;
-                let mut scan = Scan {
-                    stamp,
-                    entries: old.entries,
-                    without_record: old.without_record,
-                    unreadable: old.unreadable,
-                    ..Scan::default()
-                };
-                for ((dir, record), seen) in old.records.iter().zip(&old.seen) {
-                    let path = dir.join(task_record::FILE_NAME);
-                    let now = file_stamp(&path);
-                    if now == *seen {
-                        scan.records.push((dir.clone(), record.clone()));
-                        scan.seen.push(now);
-                        continue;
-                    }
-                    changed = true;
-                    match (now, task_record::read(&path)) {
-                        (Some(_), Some(record)) => {
-                            scan.records.push((dir.clone(), record));
-                            scan.seen.push(now);
+                let seen = old
+                    .seen
+                    .iter()
+                    .map(|(dir, was, held)| {
+                        let path = dir.join(task_record::FILE_NAME);
+                        let now = file_stamp(&path);
+                        if now == *was {
+                            return (dir.clone(), now, held.clone());
                         }
-                        (Some(_), None) => scan.unreadable += 1,
-                        (None, _) => scan.without_record += 1,
-                    }
-                }
+                        changed = true;
+                        (dir.clone(), now, read_held(&path))
+                    })
+                    .collect();
                 if !changed {
                     return old;
                 }
-                scan
+                Scan::of(stamp, seen)
             }
             _ => self.scan_whole(stamp),
         };
@@ -411,24 +472,17 @@ impl History {
 
     /// Every entry's record, read.
     fn scan_whole(&self, stamp: Option<SystemTime>) -> Scan {
-        let mut scan = Scan {
-            stamp,
-            ..Scan::default()
-        };
-        for dir in self.entry_dirs() {
-            scan.entries += 1;
-            let path = dir.join(task_record::FILE_NAME);
-            let seen = file_stamp(&path);
-            if seen.is_none() {
-                scan.without_record += 1;
-            } else if let Some(record) = task_record::read(&path) {
-                scan.records.push((dir, record));
-                scan.seen.push(seen);
-            } else {
-                scan.unreadable += 1;
-            }
-        }
-        scan
+        let seen = self
+            .entry_dirs()
+            .into_iter()
+            .map(|dir| {
+                let path = dir.join(task_record::FILE_NAME);
+                let now = file_stamp(&path);
+                let held = read_held(&path);
+                (dir, now, held)
+            })
+            .collect();
+        Scan::of(stamp, seen)
     }
 
     /// Keep nothing of this run in the history: no entry, no builds'
@@ -1256,6 +1310,51 @@ mod tests {
             .unwrap();
         assert_eq!(h.scan().records[0].1.status, "ended");
         assert_eq!(h.records(1, |_, _| true)[0].1.status, "ended");
+    }
+
+    /// A folder counted without a record when it was scanned (a run that
+    /// was starting) is listed once its record is written, and a record a
+    /// newer CLI wrote is counted apart from one that does not read.
+    #[test]
+    fn a_record_written_after_the_scan_is_listed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(name(1));
+        fs::create_dir_all(&dir).unwrap();
+        let newer = root.path().join(name(2));
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(
+            newer.join(task_record::FILE_NAME),
+            format!(r#"{{"schema": {}, "status": 7}}"#, task_record::SCHEMA + 1),
+        )
+        .unwrap();
+        let h = history(root.path(), 1 << 30, 10);
+        let scan = h.scan();
+        assert_eq!(
+            (
+                scan.records.len(),
+                scan.without_record,
+                scan.newer,
+                scan.unreadable
+            ),
+            (0, 1, 1, 0)
+        );
+        let stamp = fs::metadata(root.path()).unwrap().modified().unwrap();
+        let record = TaskRecord {
+            schema: task_record::SCHEMA,
+            status: "running".into(),
+            ..Default::default()
+        };
+        fs::write(
+            dir.join(task_record::FILE_NAME),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        fs::File::open(root.path())
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        let scan = h.scan();
+        assert_eq!((scan.records.len(), scan.without_record), (1, 0));
     }
 
     /// A run that keeps no history makes nothing in it, a build's included.

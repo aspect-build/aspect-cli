@@ -1,6 +1,8 @@
 //! `ctx.std.history`: the task history's records of past runs (each entry's
-//! `task.json`; see `engine::task_record`), newest first, and the current
-//! run's links.
+//! `task.json`; see `engine::task_record`), newest first (`list`, `get`),
+//! how many it keeps (`census`, which reads them all once for `list` to
+//! answer from), a run's kept output read back (`read_output`), and the
+//! current run's links.
 //!
 //! A record is handed out as a dict, its command line redacted, with keys of
 //! the reader's own: `dir`, the entry's folder; `outcome`, how it ended in a
@@ -209,9 +211,10 @@ fn history_methods(registry: &mut MethodsBuilder) {
     }
 
     /// How many runs the history keeps, as a dict: `runs`, those with a
-    /// record that reads, which `list` lists; `without_record`, folders that
-    /// never got a `task.json`; and `unreadable`, those whose record is
-    /// there but does not read. It reads every record once, and `list` and
+    /// record that reads, which `list` lists; `without_record`, folders with
+    /// no `task.json` (yet: a run starting); `newer`, records a newer CLI
+    /// wrote, of a schema this one skips; and `unreadable`, those whose
+    /// record is there but does not read. It reads every record once, and `list` and
     /// later calls answer from that read, a record rewritten since (a run
     /// that ended) read again.
     fn census<'v>(
@@ -222,6 +225,7 @@ fn history_methods(registry: &mut MethodsBuilder) {
         Ok(eval.heap().alloc(serde_json::json!({
             "runs": scan.records.len(),
             "without_record": scan.without_record,
+            "newer": scan.newer,
             "unreadable": scan.unreadable,
         })))
     }

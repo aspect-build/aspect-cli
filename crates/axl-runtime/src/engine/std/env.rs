@@ -301,9 +301,11 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(eval.heap().alloc_str(s))
     }
 
-    /// Whether the current working directory is in a Bazel workspace: a
-    /// marker (`MODULE.bazel`, `WORKSPACE`, ...) found at or above it, where
-    /// `bazel_root_dir()` is otherwise the directory itself.
+    /// Whether the current working directory is in a workspace: a Bazel
+    /// marker (`MODULE.bazel`, `WORKSPACE`, ...) found at or above it, or,
+    /// with none, an Aspect one (`MODULE.aspect`, `.aspect/version.axl`), as
+    /// `bazel_root_dir()` finds its root; without either that is only the
+    /// directory itself.
     fn in_bazel_workspace<'v>(
         #[allow(unused)] this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,

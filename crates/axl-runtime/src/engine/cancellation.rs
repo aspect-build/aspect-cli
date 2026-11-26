@@ -478,9 +478,10 @@ fn cancellation_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The exit code a run whose root was cancelled ends with by default,
-    /// by the shell's convention: 143 when the operating system asked it to
-    /// terminate (SIGTERM, a hangup), else 130 (Ctrl+C, SIGINT, or
-    /// `root.cancel()`); None while the root is not cancelled.
+    /// by the shell's convention and the first signal's kind: 143 when that
+    /// asked it to terminate (SIGTERM, a hangup), else 130 (Ctrl+C, SIGINT,
+    /// or `root.cancel()` with no signal); None while the root is not
+    /// cancelled.
     #[starlark(attribute)]
     fn exit_code<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<i32>> {
         let this = this
