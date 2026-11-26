@@ -454,19 +454,21 @@ def _actions_tests(ctx):
     for i in range(1, 11):
         _action(live, i, "Genrule", True, True)
         count_spawn(live["counts"], struct(cache_hit = True, runner = "disk cache hit"))
-    # Bazel's count leads the events by a frame: a gap is running until it
-    # has outlasted the count it opened at, then unchanged, the sum exact.
+    # Bazel's count leads the events by a frame: a gap is not done until it
+    # has outlasted the count it opened at, then unchanged; running stays
+    # Bazel's, pending takes the rest, the sum exact.
     half = dict(live, done_total = None, settled = 0)
     for row in ["[20 / 30] 3 actions running", "[21 / 30] 3 actions running"]:
         half["progress"] = [row]
         note_progress(half, half["progress"])
         if row.startswith("[20"):
             fresh = action_split(half)
-            _eq("a fresh gap is running", [fresh[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "settling", "done")], [0, 10, 1, 0, 0, 9, 20])
-            _eq("Results: no unchanged yet", [(p[2], p[1]) for p in action_parts(fresh) if p[1]], [("cached", 10), ("internal", 1), ("running", 12), ("pending", 7)])
+            _eq("a fresh gap is not done yet", [fresh[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done", "total")], [0, 10, 1, 0, 0, 11, 30])
+            _eq("Results: Bazel's running, the rest pending", [(p[2], p[1]) for p in action_parts(fresh) if p[1]], [("cached", 10), ("internal", 1), ("running", 3), ("pending", 16)])
             _eq("nor on the bar", "▒" in _visible(action_bar(fresh, 30)), False)
     told = action_split(half)
-    _eq("part told: what outlasted a count unchanged", [told[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "settling", "done")], [0, 10, 1, 0, 9, 1, 21])
+    _eq("part told: what outlasted a count unchanged", [told[k] for k in ("ran", "cached", "internal", "failed", "unchanged", "done")], [0, 10, 1, 0, 9, 20])
+    _eq("running is Bazel's", [p[1] for p in action_parts(told) if p[2] == "running"], [3])
     total = 0
     for p in action_parts(told):
         total += p[1]

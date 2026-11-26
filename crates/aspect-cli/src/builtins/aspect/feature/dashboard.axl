@@ -3075,8 +3075,8 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     of Bazel's count take from `ran`, never from the others. A gap is
     unchanged only as far as it outlasted the count it opened at
     (`settled`, `note_progress`): Bazel's count can lead the events by a
-    frame, and until it has, that part is `settling`, which Results and the
-    bar show as running."""
+    frame, and until it has, that part is not done yet, so the done count
+    lags Bazel's by at most one update and what is pending takes it."""
     c = state.get("counts") or {}
     failed = len(failed_actions(state))
     internal = c.get("actions_internal", 0)
@@ -3090,7 +3090,7 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
         seen -= cut
     gap = max(0, done - seen)
     unchanged = min(gap, state.get("settled", 0))
-    split.update(known = True, published = True, ran = ran, cached = cached, internal = internal, failed = failed, unchanged = unchanged, settling = gap - unchanged, done = max(done, seen))
+    split.update(known = True, published = True, ran = ran, cached = cached, internal = internal, failed = failed, unchanged = unchanged, done = max(done, seen) - (gap - unchanged))
     split["total"] = max(split["total"], split["done"])
     return split
 
@@ -3150,11 +3150,10 @@ _UNDONE = ("─", "border")
 def action_bar(split: dict, width: int) -> str:
     """`width` cells of a build's actions (`action_split`): a segment of
     each kind there is, in `_SEGMENTS` order, then what is not done (at
-    least a cell of it for a failed build none of whose actions failed, and
-    with what is still `settling`); the done count alone (`_DONE`) where
-    nothing tells its kinds apart."""
+    least a cell of it for a failed build none of whose actions failed);
+    the done count alone (`_DONE`) where nothing tells its kinds apart."""
     parts = [(split[key], glyph, role) for key, glyph, role in _SEGMENTS] if split["known"] else [(split["done"], _DONE[0], _DONE[1])]
-    undone = max(0, split["total"] - split["done"]) + split.get("settling", 0)
+    undone = max(0, split["total"] - split["done"])
 
     # A failed build with no action failed (analysis, a test, a cancel):
     # a cell of what it never reached, never a full bar.
@@ -3226,10 +3225,8 @@ def action_parts(split: dict) -> list:
         return []
     remaining = []
     undone = split["total"] - split["done"]
-    settling = split.get("settling", 0)
-    if split.get("running") and undone + settling > 0:
-        now = min(split.get("running_now", 0), undone) + settling
-        undone += settling
+    if split.get("running") and undone > 0:
+        now = min(split.get("running_now", 0), undone)
         remaining = [(_UNDONE[0], now, "running", _UNDONE[1]), ("" if now else _UNDONE[0], undone - now, "pending", "" if now else _UNDONE[1])]
     if not split["known"]:
         return [(_DONE[0], split["done"], "done", _DONE[1])] + remaining
