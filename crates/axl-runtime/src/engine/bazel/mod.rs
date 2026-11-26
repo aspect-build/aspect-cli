@@ -396,6 +396,7 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
 }
 
 pub(crate) use bazel::command::stderr_detail;
+pub(crate) use output::console_trait;
 
 /// The startup flags for an invocation: sourced from the active `Bazelrc`
 /// (set by `use_rc`), or empty when none is active.

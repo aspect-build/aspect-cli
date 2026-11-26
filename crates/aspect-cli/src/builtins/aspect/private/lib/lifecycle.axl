@@ -7,8 +7,8 @@ phase and emit through the handle — `ctx` and the mutable `data` dict are held
 once, so `ph.setup(...)` / `ph.update(...)` / `ph.dispatch(...)` /
 `ph.suggest_fixes(...)` never re-pass them, and `ph` threads through the
 task's own helpers as one value. `ph.reset(fresh)` swaps the held data in
-place (Bazel retries). The `Phases` handler list and the health-check / bazel
-traits are read from `ctx.traits`. See `phases.new`.
+place (Bazel retries). The `Phases` handler list and `HealthCheckTrait` are
+read from `ctx.traits`. See `phases.new`.
 
 The `Phases` trait has two hooks: `task_update` (every structured update
 during a task) and `repro_fix_suggestion` (per surface emit, so a user's
@@ -1045,9 +1045,9 @@ def _new(ctx, data):
     `data` dict. A task opens its `_impl` with `ph = phases.new(ctx, data)` and
     drives every phase/emit through it — `ctx` and `data` are held once, so no
     call re-passes them, and the handle threads through the task's own helpers
-    as a single value in place of the old `(ctx, lifecycle, data)` trio.
+    as a single value.
 
-    The health-check / bazel traits (for `setup`) and the `Phases` handler list
+    `HealthCheckTrait` (for `setup`) and the `Phases` handler list
     (for `update`/`dispatch`/`suggest_fixes`) are read from `ctx.traits`.
 
     The handle registers a post-task hook that closes any surface it opened

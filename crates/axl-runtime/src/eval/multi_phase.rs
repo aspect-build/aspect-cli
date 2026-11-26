@@ -29,7 +29,7 @@ use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
 use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
-use crate::engine::r#trait::{TraitInstance, extract_trait_type_id};
+use crate::engine::r#trait::TraitInstance;
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
 use crate::eval::exit::TaskExit;
@@ -581,8 +581,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Phase 2: evaluate config files against the task and feature values from Phase 1.
     ///
     /// Configs write trait instances into the run's shared `TraitMap`
-    /// (`ctx.traits`), which features and the task read. Config functions mutate `Task`
-    /// and `Feature` values in-place via `set_attr` — the same `Value<'v>` objects
+    /// (`ctx.traits`), which features and the task read. Config functions
+    /// mutate `Task` and `Feature` values in-place via `set_attr`: the same `Value<'v>` objects
     /// discovered in Phase 1 are reused, so subsequent phases see the updated state.
     /// `ctx.tasks.add(...)` may insert additional tasks into `self.tasks`.
     ///
@@ -657,9 +657,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .downcast_ref::<TraitMap>()
             .expect("self.trait_map_value is a TraitMap");
         let mismatches: Vec<String> = trait_map
-            .entries()
+            .instances()
             .into_iter()
-            .filter_map(|(_, _, instance)| instance.downcast_ref::<TraitInstance>())
+            .filter_map(|instance| instance.downcast_ref::<TraitInstance>())
             .flat_map(|instance| instance.type_mismatches())
             .collect();
         if !mismatches.is_empty() {
@@ -808,7 +808,6 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     ) -> Result<(), EvalError> {
         let heap = self.heap();
 
-        let trait_map_value = self.trait_map_value;
         let task_paths = Arc::new(self.task_paths());
 
         for feature in self.features() {
@@ -825,7 +824,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             let attrs_value = heap.alloc(args);
             let fctx = heap.alloc(FeatureContext::new(
                 attrs_value,
-                trait_map_value,
+                self.trait_map_value,
                 self.telemetry_value,
                 self.hooks_value,
                 self.loader.env.signals.clone(),
@@ -948,20 +947,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let (error_style, _) = role_style(&palette, "label.error", color);
         let reset = if color { aspect_theme::RESET } else { "" };
 
-        // The task shares the run's map. Every exported trait type is
-        // registered (not instantiated) so the console finds `BazelTrait`
-        // by its fields even when nothing has read it yet.
-        let trait_map = self
-            .trait_map_value
-            .downcast_ref::<TraitMap>()
-            .expect("self.trait_map_value is a TraitMap");
-        for owned in self.loader.exported_trait_types() {
-            let type_value = heap.access_owned_frozen_value(&owned).to_value();
-            if let Some(id) = extract_trait_type_id(type_value) {
-                trait_map.insert(id, type_value);
-            }
-        }
-        let task_trait_map = self.trait_map_value;
+        let console_trait = crate::engine::bazel::console_trait(self.loader)
+            .map(|owned| heap.access_owned_frozen_value(&owned).to_value());
 
         // Allocate `task_info` on the heap and keep the resulting Value
         // so we can read back timing + phases after `_impl` returns.
@@ -981,7 +968,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         });
         let context = heap.alloc(TaskContext::new(
             task_args_val,
-            task_trait_map,
+            self.trait_map_value,
+            console_trait,
             task_info_val,
             bazel,
             self.hooks_value,

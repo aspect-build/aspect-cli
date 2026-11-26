@@ -22,8 +22,8 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::{
-    self, AllocValue, Heap, NoSerialize, ProvidesStaticType, Trace, UnpackValue, Value, ValueLike,
-    starlark_value,
+    self, AllocValue, Heap, NoSerialize, OwnedFrozenValue, ProvidesStaticType, Trace, UnpackValue,
+    Value, ValueLike, starlark_value,
 };
 
 use starlark::eval::Evaluator;
@@ -304,12 +304,12 @@ fn intercepted_line_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-/// What the running task's `BazelTrait` (the trait with its `output_*`
-/// fields, [`CONSOLE_FIELDS`]) says about the console: the stages a build
-/// with no `output =` and no redirected stdout or stderr is processed with,
-/// and the hooks every build's console calls. Read from the task context the
-/// runtime records ([`crate::engine::module_values::task_context`]); there is
-/// none when no loaded trait type has those fields.
+/// What the run's `BazelTrait` ([`console_trait`]) says about the console:
+/// the stages a build with no `output =` and no redirected stdout or stderr
+/// is processed with, and the hooks every build's console calls. Read from
+/// the task context the runtime records
+/// ([`crate::engine::module_values::task_context`]); there is none when the
+/// run has no console trait.
 pub(crate) struct TraitConsole<'v> {
     pub ctx: Value<'v>,
     pub stages: Vec<Stage>,
@@ -329,8 +329,13 @@ pub(crate) struct TraitConsole<'v> {
     pub frame: Vec<Value<'v>>,
 }
 
-/// The fields that make a trait the console's: `BazelTrait`'s. Others it
-/// reads (`output_progress`) are optional, so a trait need not declare them.
+/// Where the console's trait is defined: `BazelTrait` as
+/// `@aspect//bazel/trait.axl` exports it.
+const CONSOLE_TRAIT: (&str, &str, &str) = ("aspect", "bazel/trait.axl", "BazelTrait");
+
+/// The fields that make a trait the console's when [`CONSOLE_TRAIT`] is not
+/// loaded. Others it reads (`output_progress`) are optional, so a trait need
+/// not declare them.
 const CONSOLE_FIELDS: [&str; 5] = [
     "output_stages",
     "output_display",
@@ -339,16 +344,24 @@ const CONSOLE_FIELDS: [&str; 5] = [
     "output_start",
 ];
 
+/// The trait type whose instance configures the console of the run's
+/// builds: [`CONSOLE_TRAIT`], by identity, so a user trait of the same shape
+/// is never taken for it. When that module is not loaded (a run without the
+/// builtins), the first loaded trait type with every [`CONSOLE_FIELDS`]
+/// field, in module path order.
+pub(crate) fn console_trait(loader: &crate::eval::Loader<'_>) -> Option<OwnedFrozenValue> {
+    let (module, path, name) = CONSOLE_TRAIT;
+    loader.loaded_export(module, path, name).or_else(|| {
+        loader.find_exported_trait(|t| CONSOLE_FIELDS.iter().all(|f| t.fields.contains_key(*f)))
+    })
+}
+
 impl<'v> TraitConsole<'v> {
     pub(crate) fn of(eval: &Evaluator<'v, '_, '_>) -> Option<TraitConsole<'v>> {
         let ctx = crate::engine::module_values::task_context(eval)?;
-        let traits = ctx
-            .downcast_ref::<crate::engine::task_context::TaskContext>()?
-            .traits;
+        let task_ctx = ctx.downcast_ref::<crate::engine::task_context::TaskContext>()?;
         let heap = eval.heap();
-        let instance = traits
-            .downcast_ref::<crate::engine::trait_map::TraitMap>()?
-            .with_fields(&CONSOLE_FIELDS, heap)?;
+        let instance = task_ctx.traits.at(task_ctx.console_trait?, heap).ok()?;
         let field = |name: &str| instance.get_attr(name, heap).ok().flatten();
         let list = |name: &str| -> Vec<Value<'v>> {
             field(name)
@@ -1023,8 +1036,8 @@ mod tests {
         .expect("the task hung")
     }
 
-    /// A trait with the builtin one's console fields: the runtime finds it
-    /// by them.
+    /// A trait with the builtin one's console fields, which the runtime
+    /// finds by them when the builtin module is not loaded.
     const TRAIT: &str = r#"
 BazelTrait = trait(
     output_stages = attr(list, default = []),
@@ -1365,9 +1378,9 @@ BazelTrait = trait(
         assert_eq!(exit, Some(0));
     }
 
-    /// The runtime knows the console's trait by its fields: one that has
-    /// `output_stages` but not the rest is someone else's, and its stages
-    /// process nothing.
+    /// Without the builtin module, the runtime knows the console's trait by
+    /// its fields: one that has `output_stages` but not the rest is someone
+    /// else's, and its stages process nothing.
     #[test]
     fn a_trait_without_every_console_field_is_not_the_consoles() {
         let script = r#"
@@ -1392,9 +1405,10 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
-    /// The console's trait is found even when nothing has read it: its
-    /// default instance is created for the build, so its default
-    /// `output_start` hook adds a stage that processes the console.
+    /// Without the builtin module, the console's trait is found by its
+    /// fields even when nothing has read it: its default instance is created
+    /// for the build, so its default `output_start` hook adds a stage that
+    /// processes the console.
     #[test]
     fn the_consoles_trait_applies_when_nothing_has_read_it() {
         let script = r#"
@@ -1418,6 +1432,64 @@ Test = task(implementation = _impl)
 "#;
         let exit = crate::test::with_timeout(Duration::from_secs(60), move || {
             crate::test::eval(script).with_fake_bazel().run_task(0)
+        })
+        .expect("the task hung")
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// With `@aspect//bazel/trait.axl` loaded, its `BazelTrait` is the
+    /// console's trait by identity: a user trait with every console field,
+    /// read first, does not take its place.
+    #[test]
+    fn a_lookalike_does_not_steal_the_builtin_consoles_trait() {
+        let builtin = r#"
+def _start(ctx):
+    return [bazel.output.rewrite("hunter2", "***")]
+
+BazelTrait = trait(
+    output_stages = attr(list, default = []),
+    output_display = attr(str, default = "auto"),
+    output_intercept = attr(list, default = []),
+    output_end = attr(list, default = []),
+    output_start = attr(list, default = [_start]),
+)
+"#;
+        // In a module whose path sorts first, so shape matching alone would
+        // pick it.
+        let impostor = r#"
+Impostor = trait(
+    output_stages = attr(list, default = []),
+    output_display = attr(str, default = "auto"),
+    output_intercept = attr(list, default = []),
+    output_end = attr(list, default = []),
+    output_start = attr(list, default = []),
+)
+"#;
+        let script = r#"
+load("@acme//impostor.axl", "Impostor")
+load("@aspect//bazel/trait.axl", "BazelTrait")
+
+def _impl(ctx):
+    build = ctx.bazel.build(flags = ["--scenario=stderr_chatter"])
+    if not build.wait().success: return 1
+    if build.output_log == None: return 2
+    return 0
+Test = task(implementation = _impl)
+"#;
+        let config = r#"
+load("@acme//impostor.axl", "Impostor")
+
+def config(ctx):
+    ctx.traits[Impostor].output_display = "auto"
+"#;
+        let exit = crate::test::with_timeout(Duration::from_secs(60), move || {
+            crate::test::eval(script)
+                .with_module("acme", &[("impostor.axl", impostor)])
+                .with_module("aspect", &[("bazel/trait.axl", builtin)])
+                .with_fake_bazel()
+                .with_config(config)
+                .run_task(0)
         })
         .expect("the task hung")
         .expect("run_task");

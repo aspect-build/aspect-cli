@@ -14,6 +14,7 @@ use super::error::EvalError;
 use super::load_path::{LoadPath, join_confined};
 use super::prefetch::{Prefetch, Taken};
 use crate::engine::store::Env;
+use crate::engine::r#trait::FrozenTraitType;
 use crate::module::Mod;
 
 /// State of a path in the loader's module cache.
@@ -100,11 +101,28 @@ impl<'m> AxlLoader<'m> {
         })
     }
 
-    /// Every trait type a loaded module exports, ordered by the module's
-    /// path, so a run's trait map can find a type by its shape before
-    /// anything has read it (`TraitMap::with_fields`). A type re-exported
-    /// under several modules appears once per module.
-    pub(crate) fn exported_trait_types(&self) -> Vec<OwnedFrozenValue> {
+    /// The value `@<module>//<subpath>` exports as `name`, if that file has
+    /// been loaded. Never loads it.
+    pub(crate) fn loaded_export(
+        &self,
+        module: &str,
+        subpath: &str,
+        name: &str,
+    ) -> Option<OwnedFrozenValue> {
+        let dep = self.modules.iter().find(|m| m.name == module)?;
+        let path = join_confined(&dep.root, Path::new(subpath)).ok()?;
+        match self.loaded_modules.borrow().get(&path)? {
+            LoadState::Loaded(m) => m.get(name).ok(),
+            LoadState::Loading => None,
+        }
+    }
+
+    /// The first trait type a loaded module exports for which `pred` holds,
+    /// visiting modules in path order so the pick is deterministic.
+    pub(crate) fn find_exported_trait(
+        &self,
+        pred: impl Fn(&FrozenTraitType) -> bool,
+    ) -> Option<OwnedFrozenValue> {
         let loaded = self.loaded_modules.borrow();
         let mut modules: Vec<(&PathBuf, &FrozenModule)> = loaded
             .iter()
@@ -114,19 +132,15 @@ impl<'m> AxlLoader<'m> {
             })
             .collect();
         modules.sort_by(|a, b| a.0.cmp(b.0));
-        modules
-            .into_iter()
-            .flat_map(|(_, m)| {
-                m.names()
-                    .filter_map(|name| m.get(name.as_str()).ok())
-                    .filter(|v| {
-                        v.value()
-                            .downcast_ref::<crate::engine::r#trait::FrozenTraitType>()
-                            .is_some()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        modules.into_iter().find_map(|(_, m)| {
+            m.names()
+                .filter_map(|name| m.get(name.as_str()).ok())
+                .find(|v| {
+                    v.value()
+                        .downcast_ref::<FrozenTraitType>()
+                        .is_some_and(&pred)
+                })
+        })
     }
 
     /// Evaluate a `.axl` file in the given module's scope. Pushes `scope` onto

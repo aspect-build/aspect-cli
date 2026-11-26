@@ -7,13 +7,11 @@ use allocative::Allocative;
 use starlark::starlark_simple_value;
 use starlark::values::{
     AllocValue, Freeze, FreezeError, Freezer, FrozenValue, Heap, NoSerialize, ProvidesStaticType,
-    StarlarkValue, Trace, Tracer, Value, ValueLike, starlark_value,
+    StarlarkValue, Trace, Tracer, Value, starlark_value,
 };
 use starlark_map::small_map::SmallMap;
 
-use super::r#trait::{
-    FrozenTraitType, TraitType, construct_default_instance, extract_trait_type_id,
-};
+use super::r#trait::{construct_default_instance, extract_trait_type_id};
 
 /// A Starlark value that maps trait type IDs to their instances.
 ///
@@ -24,41 +22,40 @@ use super::r#trait::{
 /// `ctx.traits[TraitType] = TraitType(...)` for writing, for any trait type.
 ///
 /// Instances are created lazily: the first `at` (read) of a type constructs
-/// its default instance and caches it for subsequent calls. `insert` stores a
-/// type without an instance, so [`TraitMap::with_fields`] can find a type
-/// nothing has read yet.
+/// its default instance and caches it for subsequent calls.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct TraitMap<'v> {
-    /// Map from trait type id → (type_value, Option<instance_value>)
-    /// The instance is None until first accessed.
+    /// Map from trait type id to (type_value, instance_value).
     #[allocative(skip)]
-    entries: RefCell<SmallMap<u64, (Value<'v>, Option<Value<'v>>)>>,
+    entries: RefCell<SmallMap<u64, (Value<'v>, Value<'v>)>>,
 }
 
 impl<'v> Display for TraitMap<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TraitMap([")?;
-        let entries = self.entries.borrow();
-        let mut first = true;
-        for (_, (type_val, _)) in entries.iter() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            first = false;
-            write!(f, "{}", type_val)?;
-        }
-        write!(f, "])")
+        write_types(f, self.entries.borrow().values().map(|(tv, _)| *tv))
     }
+}
+
+/// `TraitMap([A, B])`, naming the types a map holds instances of.
+fn write_types<'v>(
+    f: &mut fmt::Formatter<'_>,
+    types: impl Iterator<Item = Value<'v>>,
+) -> fmt::Result {
+    write!(f, "TraitMap([")?;
+    for (i, type_val) in types.enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{}", type_val)?;
+    }
+    write!(f, "])")
 }
 
 unsafe impl<'v> Trace<'v> for TraitMap<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
-        let entries = self.entries.get_mut();
-        for (_, (type_val, instance_val)) in entries.iter_mut() {
+        for (_, (type_val, instance_val)) in self.entries.get_mut().iter_mut() {
             type_val.trace(tracer);
-            if let Some(iv) = instance_val {
-                iv.trace(tracer);
-            }
+            instance_val.trace(tracer);
         }
     }
 }
@@ -76,10 +73,10 @@ impl<'v> Freeze for TraitMap<'v> {
         let entries = self.entries.into_inner();
         let mut frozen_entries = SmallMap::with_capacity(entries.len());
         for (id, (type_val, instance_val)) in entries.into_iter() {
-            // Only freeze entries that were actually instantiated.
-            if let Some(iv) = instance_val {
-                frozen_entries.insert(id, (type_val.freeze(freezer)?, iv.freeze(freezer)?));
-            }
+            frozen_entries.insert(
+                id,
+                (type_val.freeze(freezer)?, instance_val.freeze(freezer)?),
+            );
         }
         Ok(FrozenTraitMap {
             entries: frozen_entries,
@@ -95,57 +92,21 @@ impl<'v> TraitMap<'v> {
         }
     }
 
-    /// Register a trait type without instantiating it. The default instance
-    /// is created on first access; registering is only needed for a type
-    /// [`TraitMap::with_fields`] must be able to find before anything reads it.
-    pub fn insert(&self, type_id: u64, type_value: Value<'v>) {
-        self.entries
-            .borrow_mut()
-            .entry(type_id)
-            .or_insert((type_value, None));
+    /// Every instance created so far, in creation order.
+    pub fn instances(&self) -> Vec<Value<'v>> {
+        self.entries.borrow().values().map(|(_, iv)| *iv).collect()
     }
+}
 
-    /// Get the instance for a type ID if it has already been instantiated.
-    pub fn get_instance(&self, type_id: u64) -> Option<Value<'v>> {
-        self.entries.borrow().get(&type_id).and_then(|(_, v)| *v)
-    }
-
-    /// Get all instantiated entries as (type_id, type_value, instance_value) tuples.
-    pub fn entries(&self) -> Vec<(u64, Value<'v>, Value<'v>)> {
-        self.entries
-            .borrow()
-            .iter()
-            .filter_map(|(id, (tv, iv))| iv.map(|i| (*id, *tv, i)))
-            .collect()
-    }
-
-    /// The instance of a trait type with every field in `fields`, created
-    /// now if it was not yet; None when no type in the map has them all. An
-    /// instantiated match wins over one only registered with `insert`. For
-    /// the runtime, which knows a builtin trait only by its shape: a type's
-    /// name is not always recorded.
-    pub fn with_fields(&self, fields: &[&str], heap: Heap<'v>) -> Option<Value<'v>> {
-        let matches = |tv: &Value<'v>| {
-            fields.iter().all(|f| {
-                tv.downcast_ref::<TraitType>()
-                    .map(|t| t.fields.contains_key(*f))
-                    .or_else(|| {
-                        tv.downcast_ref::<FrozenTraitType>()
-                            .map(|t| t.fields.contains_key(*f))
-                    })
-                    .unwrap_or(false)
-            })
-        };
-        let type_value = {
-            let entries = self.entries.borrow();
-            entries
-                .values()
-                .find(|(tv, iv)| iv.is_some() && matches(tv))
-                .or_else(|| entries.values().find(|(tv, _)| matches(tv)))
-                .map(|(tv, _)| *tv)
-        }?;
-        self.at(type_value, heap).ok()
-    }
+/// The trait type id of a `ctx.traits[...]` key, or the error for a key
+/// that is not a trait type.
+fn key_id(index: Value) -> starlark::Result<u64> {
+    extract_trait_type_id(index).ok_or_else(|| {
+        starlark::Error::new_other(anyhow::anyhow!(
+            "TraitMap key must be a trait type, got '{}'",
+            index.get_type()
+        ))
+    })
 }
 
 #[starlark_value(type = "TraitMap")]
@@ -155,22 +116,12 @@ impl<'v> StarlarkValue<'v> for TraitMap<'v> {
     }
 
     fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        let type_id = extract_trait_type_id(index).ok_or_else(|| {
-            starlark::Error::new_other(anyhow::anyhow!(
-                "TraitMap key must be a trait type, got '{}'",
-                index.get_type()
-            ))
-        })?;
-
-        if let Some((_, Some(instance))) = self.entries.borrow().get(&type_id) {
+        let type_id = key_id(index)?;
+        if let Some((_, instance)) = self.entries.borrow().get(&type_id) {
             return Ok(*instance);
         }
         let instance = construct_default_instance(index, heap)?;
-        self.entries
-            .borrow_mut()
-            .entry(type_id)
-            .or_insert((index, None))
-            .1 = Some(instance);
+        self.entries.borrow_mut().insert(type_id, (index, instance));
         Ok(instance)
     }
 
@@ -182,18 +133,10 @@ impl<'v> StarlarkValue<'v> for TraitMap<'v> {
     }
 
     fn set_at(&self, index: Value<'v>, new_value: Value<'v>) -> starlark::Result<()> {
-        let type_id = extract_trait_type_id(index).ok_or_else(|| {
-            starlark::Error::new_other(anyhow::anyhow!(
-                "TraitMap key must be a trait type, got '{}'",
-                index.get_type()
-            ))
-        })?;
-
+        let type_id = key_id(index)?;
         self.entries
             .borrow_mut()
-            .entry(type_id)
-            .or_insert((index, None))
-            .1 = Some(new_value);
+            .insert(type_id, (index, new_value));
         Ok(())
     }
 }
@@ -212,28 +155,9 @@ pub struct FrozenTraitMap {
     entries: SmallMap<u64, (FrozenValue, FrozenValue)>,
 }
 
-impl FrozenTraitMap {
-    /// Get all entries as (type_id, type_value, instance_value) tuples.
-    pub fn entries(&self) -> Vec<(u64, Value<'_>, Value<'_>)> {
-        self.entries
-            .iter()
-            .map(|(id, (tv, iv))| (*id, tv.to_value(), iv.to_value()))
-            .collect()
-    }
-}
-
 impl Display for FrozenTraitMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TraitMap([")?;
-        let mut first = true;
-        for (_, (type_val, _)) in self.entries.iter() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            first = false;
-            write!(f, "{}", type_val)?;
-        }
-        write!(f, "])")
+        write_types(f, self.entries.values().map(|(tv, _)| tv.to_value()))
     }
 }
 
@@ -254,14 +178,7 @@ impl<'v> StarlarkValue<'v> for FrozenTraitMap {
     }
 
     fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        let type_id = extract_trait_type_id(index).ok_or_else(|| {
-            starlark::Error::new_other(anyhow::anyhow!(
-                "TraitMap key must be a trait type, got '{}'",
-                index.get_type()
-            ))
-        })?;
-
-        match self.entries.get(&type_id) {
+        match self.entries.get(&key_id(index)?) {
             Some((_, instance)) => Ok(instance.to_value()),
             None => construct_default_instance(index, heap),
         }
