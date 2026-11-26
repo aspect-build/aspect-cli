@@ -127,3 +127,38 @@ noop = task(summary = "Test fixture.", implementation = lambda ctx: 0)
         &["noop"],
     ));
 }
+
+/// A CLI a test spawns keeping the whole environment, as this file's do,
+/// records its run in the test process's own history, never the developer's.
+#[test]
+fn a_spawned_clis_history_is_the_test_processs_own() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
+    std::fs::write(
+        dir.path().join(".aspect/tasks.axl"),
+        "def _impl(ctx):\n    return 0\n\nguarded = task(implementation = _impl, summary = \"x\")\n",
+    )
+    .expect("tasks.axl");
+    let status = Command::new(aspect_cli())
+        .arg("guarded")
+        .current_dir(dir.path())
+        .status()
+        .expect("running the CLI");
+    assert!(status.success(), "{status:?}");
+    let history = common::test_history_dir();
+    assert!(history.starts_with(std::env::temp_dir()), "{history:?}");
+    let here = std::fs::canonicalize(dir.path()).expect("canonical");
+    let recorded = std::fs::read_dir(&history)
+        .expect("the test's history")
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .any(|t| {
+            t["cwd"]
+                .as_str()
+                .and_then(|c| std::fs::canonicalize(c).ok())
+                .is_some_and(|c| c == here)
+        });
+    assert!(recorded, "no entry for {here:?} in {history:?}");
+}

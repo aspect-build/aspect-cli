@@ -8,7 +8,12 @@
 /// test's cwd. Under cargo, `CARGO_BIN_EXE_*` points at the binary cargo already
 /// built for this test; `option_env!` because that variable does not exist in a
 /// Bazel build, where `env!` would fail to compile.
+///
+/// The first call also points the task history and the CLI's cache at
+/// folders of this test process's own ([`isolate_writes`]), so every CLI a
+/// test spawns writes there, whether or not it clears its environment.
 pub fn aspect_cli() -> String {
+    isolate_writes();
     match std::env::var("ASPECT_CLI_BIN") {
         Ok(p) => std::fs::canonicalize(&p)
             .unwrap_or_else(|e| panic!("ASPECT_CLI_BIN={p:?} not found: {e}"))
@@ -18,6 +23,33 @@ pub fn aspect_cli() -> String {
             .expect("set ASPECT_CLI_BIN or run under cargo")
             .to_string(),
     }
+}
+
+/// The test process's own task history folder, which every CLI it spawns
+/// writes to unless a test names its own.
+#[allow(dead_code)]
+pub fn test_history_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("aspect-test-history-{}", std::process::id()))
+}
+
+/// Once per test process: `ASPECT_HISTORY_DIR` and `ASPECT_CLI_CACHE` set in
+/// its own environment, which every CLI it spawns inherits, to folders of
+/// its own under the temp dir, so no test writes the developer's task
+/// history or cache, whatever its command keeps of the environment. A test
+/// that names its own still wins. Before then the process may not have
+/// started a thread that reads the environment outside std's lock.
+pub fn isolate_writes() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let cache = std::env::temp_dir().join(format!("aspect-test-cache-{}", std::process::id()));
+        // SAFETY: std's `set_var` and every std read of the environment
+        // (a `Command`'s spawn among them) take its lock; the test harness's
+        // threads read it only through std.
+        unsafe {
+            std::env::set_var("ASPECT_HISTORY_DIR", test_history_dir());
+            std::env::set_var("ASPECT_CLI_CACHE", cache);
+        }
+    });
 }
 
 /// The environment a spawned CLI runs under: the developer's own, minus everything
@@ -32,8 +64,8 @@ pub fn aspect_cli() -> String {
 /// The colour theme gets a known dark background (`COLORFGBG`), 256 colours
 /// (`TERM`), and none of the developer's `COLORTERM`, `NO_COLOR`, or the
 /// variables that say which terminal or session it is (hyperlinks, SSH).
-/// `HOME` and `PATH` stay: the CLI resolves its builtins cache under `HOME`.
-/// The task history goes to a temp folder of the test process's own.
+/// `HOME` and `PATH` stay. The task history and the CLI's cache go to temp
+/// folders of the test process's own ([`isolate_writes`]).
 #[allow(dead_code)]
 pub fn base_env() -> std::collections::HashMap<String, String> {
     watch_for_hangs();
@@ -61,6 +93,7 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
         "GITLAB_",
         "OTEL_",
     ];
+    isolate_writes();
     let mut env: std::collections::HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| {
             !DROP_NAMES.contains(&k.as_str())
@@ -77,11 +110,14 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
     // user's. A test that reads the history names its own after this.
     env.insert(
         "ASPECT_HISTORY_DIR".into(),
-        std::env::temp_dir()
-            .join(format!("aspect-test-history-{}", std::process::id()))
-            .to_string_lossy()
-            .into_owned(),
+        test_history_dir().to_string_lossy().into_owned(),
     );
+    if let Some(cache) = std::env::var_os("ASPECT_CLI_CACHE") {
+        env.insert(
+            "ASPECT_CLI_CACHE".into(),
+            cache.to_string_lossy().into_owned(),
+        );
+    }
     env
 }
 
