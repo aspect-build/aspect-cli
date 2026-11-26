@@ -395,7 +395,7 @@ rate_limit = struct(
 
 3. **No new shared-state primitives.** Don't add a Bag, an accumulator type, a `ctx.std.kv`, a `ctx.std.db`, a per-task slot for arbitrary feature data, or any other ambient surface that lets two features pass data to each other without going through the patterns above. Every such proposal in framework history has been rejected because it relocates the abuse pattern under a different name. The three patterns above are sufficient.
 
-4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, or, for a knob several features must agree on, the owning task's `args` (e.g. `aspect lint --findings-destination`), not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features. When tasks need a setting a feature owns, the feature writes it to a private trait they read, as `WorktreePool` does with `_WorktreePoolSettings` and `BuildEvents` with `_BuildEventsSettings`.
+4. **No user-facing configuration on traits.** Knobs the user sets in `.aspect/config.axl` (templates, formatters, severity overrides, behavior flags) belong on the feature's `args` surface, or, for a knob several features must agree on, the owning task's `args` (e.g. `aspect lint --findings-destination`), not as trait fields. A trait field that exists for users to write to in their config is the same abuse pattern as data sharing between features. When tasks need a setting a feature owns, the feature writes it to a private trait that they, or a helper they call, read: `WorktreePool` writes `_WorktreePoolSettings` for the worktree tasks, and `BuildEvents` writes `_BuildEventsSettings` for `grpc_sink`.
 
 5. **Don't bypass the wrappers.** Even when a trait or library is reachable, callers should always go through `lib.method(ctx, ...)`. Writing `ctx.traits[X].method(...)` directly couples the caller to the trait shape, prevents the library from changing its implementation, and defeats the wrapper's encapsulation. **The trait is implementation; the struct is API.**
 
@@ -849,8 +849,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 2. BES: the task's own iterator plus the sinks the CLI streams to. Both
     #    subscribe before the spawn. The gRPC sinks carry the `BuildEvents`
-    #    options, the event size limit among them. `tick_ms` makes the iterator yield `None`
-    #    when Bazel is quiet, so the drain loop still answers signals.
+    #    options, the event size limit among them. `tick_ms` makes the
+    #    iterator yield `None` when Bazel is quiet, so the drain loop still
+    #    answers signals.
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
     data.update(bes_link_data(bazel_trait, rc, bes_sinks))
     events = bazel.build_events.iterator(tick_ms = BES_DRAIN_TICK_MS)

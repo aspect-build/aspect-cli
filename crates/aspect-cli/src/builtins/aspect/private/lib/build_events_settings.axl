@@ -11,7 +11,7 @@ carries it (`bazel.build_events.grpc`'s `max_event_bytes`), and the runtime
 holds every event of a build to the smallest among the build's gRPC sinks, for
 every consumer: BES backends, a `--build_event_binary_file`, the task history
 and AXL event iterators. A build with no gRPC sink is held to the runtime's
-4 MiB. Bazel writes a failed action's whole command line into its event, params
+4 MiB, whatever the option says. Bazel writes a failed action's whole command line into its event, params
 file expanded, so a large action makes an event past a backend's receive limit,
 which refuses it and loses the rest of the build. That command line is cut from
 the end to fit; any other event over the limit is passed on unchanged. Either
@@ -23,8 +23,8 @@ them and writes them onto `_BuildEventsSettings`, which `grpc_sink`
 (`bazel/build_events.axl`) reads through `build_events_settings` for every gRPC
 sink the CLI builds, so a task streams under them by passing those sinks to the
 build. Only the feature writes that trait, so config has one place to set them,
-and a value the sinks read has been checked. With the
-feature disabled the trait keeps its defaults, the runtime's own.
+and a value the sinks read has been checked. With the feature disabled the
+trait keeps its defaults, the runtime's own.
 
 A negative count, a malformed duration, a `max_event_bytes` under 64 KiB, or a
 value past what the runtime takes (which only `config.axl` can set) is
