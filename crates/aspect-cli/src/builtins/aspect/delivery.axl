@@ -295,6 +295,7 @@ load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/aspect_flags.axl", "apply_output_base_suffix")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", "redact_flags", "usable_bb_clientd_root", bazel_init_data = "init_data")
+load("./private/lib/build_events_settings.axl", "build_events_settings")
 load("./private/lib/ci.axl", "detect_repository", "resolve_build_url")
 load("./private/lib/delivery_api.axl", "delivery_api")
 load("./private/lib/delivery_results.axl", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
@@ -950,7 +951,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         build = ctx.bazel.build(
             flags = phase1_flags,
             build_events = [events] + build_events,
-            max_event_bytes = bazel_trait.max_build_event_bytes,
+            max_event_bytes = build_events_settings.max_event_bytes(ctx),
             execution_log = phase1_execlog_sinks,
             announce_version = announce_version,
             announce_command = announce_command,
@@ -1085,7 +1086,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         rc = rc,
         aspects = [hashsum_aspect],
         build_events = [phase2_events],
-        max_event_bytes = bazel_trait.max_build_event_bytes,
+        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         stdout = None,
         stderr = ctx.std.fs.create(phase2_log_path),
         announce_version = announce_version,
@@ -2123,7 +2124,7 @@ def _delivery_impl(ctx):
             delivery_targets,
             rc = release_rc,
             build_events = [phase3_events],
-            max_event_bytes = bazel_trait.max_build_event_bytes,
+            max_event_bytes = build_events_settings.max_event_bytes(ctx),
             execution_log = phase3_execution_log,
             stdout = None,
             stderr = ctx.std.fs.create(phase3_log_path),

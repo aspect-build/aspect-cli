@@ -86,6 +86,7 @@ load("@aspect//bazel.axl", "BazelTrait", "bazel_announce", "bazel_exec_log", "ba
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event", "usable_bb_clientd_root")
+load("./private/lib/build_events_settings.axl", "build_events_settings")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "detail", "detect_ci", "error", "info", "warn")
 load("./private/lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
@@ -510,7 +511,7 @@ def _run_gazelle(ph, rc, endpoint_auth_flags: list[str], announce_version: bool,
     runs = ctx.bazel.run_all(
         [ctx.args.gazelle_target],
         build_events = build_events,
-        max_event_bytes = bazel_trait.max_build_event_bytes,
+        max_event_bytes = build_events_settings.max_event_bytes(ctx),
         execution_log = xl.sinks or False,
         rc = rc,
         directory = ctx.std.env.bazel_root_dir(),
