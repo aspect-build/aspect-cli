@@ -151,7 +151,7 @@ pub fn basil_bin() -> &'static str {
 /// one second (a busy thread is slow, not stuck), every thread's stack
 /// for the first two `aspect-cli` processes a tool attaches to (`gdb`,
 /// else `eu-stack`, each tried under `sudo -n timeout` too, as Ubuntu lets
-/// no non-ancestor attach; 40s at most a process; none tried again once
+/// no non-ancestor attach; 40s at most a process, 60s in all; none tried again once
 /// all have failed to attach to a live process, not for time), its open
 /// descriptors and its
 /// children printed to stderr, once, under `HANG-DIAG`
@@ -383,16 +383,34 @@ mod hang_diag {
     /// The most one process's stacks take, every tool tried.
     const STACKS_PER_PROCESS: Duration = Duration::from_secs(40);
 
+    /// The most every process's stacks take, in all, from the first capture:
+    /// a tool that hangs attaching never pushes the dump past a CI timeout.
+    const STACKS_IN_ALL: Duration = Duration::from_secs(60);
+
+    /// When the first capture began, for [`STACKS_IN_ALL`].
+    static STACKS_BEGAN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+    /// Whether `pid` is gone: no longer there, or a zombie (`Z` in its
+    /// `stat`), which no tool attaches to.
+    fn gone(pid: u32) -> bool {
+        let stat = read(&format!("/proc/{pid}/stat"));
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_none_or(|state| state == "Z")
+    }
+
     /// Every thread's stack in `pid`: `gdb`, else `eu-stack`, each plain and
     /// under `sudo -n timeout` (only where `timeout` is there). Else
     /// `Err(true)` where none could attach to a process still there, none
-    /// running out of time; `Err(false)` where the process ended, or a tool
-    /// or [`STACKS_PER_PROCESS`] ran out of time, so another may yet work.
+    /// running out of time; `Err(false)` where the process ended (a zombie
+    /// too), or a tool, [`STACKS_PER_PROCESS`] or [`STACKS_IN_ALL`] ran out
+    /// of time, so another may yet work.
     fn stacks(pid: u32) -> Result<String, bool> {
         let p = pid.to_string();
         let gdb = ["-batch", "-nx", "-p", &p, "-ex", "thread apply all bt"];
         let eu = ["-p", &p];
-        let until = std::time::Instant::now() + STACKS_PER_PROCESS;
+        let began = *STACKS_BEGAN.get_or_init(std::time::Instant::now);
+        let until = (std::time::Instant::now() + STACKS_PER_PROCESS).min(began + STACKS_IN_ALL);
         let left = || {
             until
                 .saturating_duration_since(std::time::Instant::now())
@@ -420,8 +438,7 @@ mod hang_diag {
                 Err(late) => timed_out |= late,
             }
         }
-        let gone = !std::path::Path::new(&format!("/proc/{pid}")).exists();
-        Err(!timed_out && !gone)
+        Err(!timed_out && !gone(pid))
     }
 
     fn report(pid: u32, parents: &HashMap<u32, u32>) -> String {

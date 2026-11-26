@@ -1014,7 +1014,8 @@ def new_build(state: dict, now_ms: int):
     fresh = attempt_state(now_ms)
     for key in _PER_BUILD:
         state[key] = fresh[key]
-    state["blocked"] = {}
+    state["root_causes"] = {}
+    state["blocked_cache"] = None
     state["progress"] = []
     state["fresh"] = False
     state["build_failed"] = False
@@ -1071,51 +1072,82 @@ def _test_runner(record: dict) -> bool:
     """Whether `record` is a test's own failed action (`TestRunner`)."""
     return record["kind"] == "action" and record["detail"] == "TestRunner"
 
-def _runner_attempt(record: dict):
-    """The test attempt a `TestRunner` action ran, `(label, run, shard,
-    attempt)` from its output's path (`.../test_attempts/attempt_<a>.log`,
-    `shard_<s>_of_<n>/`, `run_<r>_of_<n>/`), or None where its output names
-    no test log."""
-    out = record.get("output", "")
-    if "testlogs/" not in out:
+def _testlogs_dir(label: str):
+    """`<package>/<name>` under `testlogs/` for a test's label, with an
+    external repository's `external/<repo>/` first; None for a label it
+    can't read."""
+    label = label.lstrip("@")
+    if "//" not in label or ":" not in label.partition("//")[2]:
         return None
-    parts = out.split("/")
+    repo, _, rest = label.partition("//")
+    package, _, name = rest.partition(":")
+    parts = (["external", repo] if repo else []) + [p for p in package.split("/") if p] + [name]
+    return "/".join(parts)
 
-    def number(prefix):
-        for p in parts:
-            if p.startswith(prefix):
-                n = p[len(prefix):].partition("_")[0].removesuffix(".log")
-                if n.isdigit():
-                    return int(n)
+def _runner_place(record: dict):
+    """The run and shard a `TestRunner` action ran, `(run, shard)`, from the
+    one folder its output (always that run's `test.log`) has after
+    `testlogs/<package>/<name>/`: `shard_<s>_of_<n>` and `run_<r>_of_<m>`,
+    either or both (`shard_1_of_2_run_2_of_2`), 1 for one not named; None
+    where its output is no such test log."""
+    own = _testlogs_dir(record["label"])
+    marker = "/testlogs/" + own + "/" if own else None
+    out = "/" + record.get("output", "")
+    if marker == None or marker not in out:
+        return None
+    rest = out.partition(marker)[2].split("/")
+    if rest[-1] != "test.log" or len(rest) > 2:
+        return None
+    words = rest[0].split("_") if len(rest) == 2 else []
+
+    def number(word):
+        for i in range(len(words) - 3):
+            if words[i] == word and words[i + 1].isdigit() and words[i + 2] == "of" and words[i + 3].isdigit():
+                return int(words[i + 1])
         return 1
 
-    return (record["label"], number("run_"), number("shard_"), number("attempt_"))
+    return (number("run"), number("shard"))
+
+def _runner_attempt(state: dict, record: dict):
+    """The attempt a `TestRunner` action ran, `(label, run, shard, attempt)`:
+    its run and shard from its output (`_runner_place`), and, as Bazel
+    sends an attempt's action before its result, the attempt after the
+    last whose result came; None where its output names no test log."""
+    place = _runner_place(record)
+    if place == None:
+        return None
+    run, shard = place
+    seen = [n for key, n in state.get("last_attempts", {}).items() if key[0] == record["label"] and key[2] == run and key[3] == shard]
+    return (record["label"], run, shard, max(seen + [0]) + 1)
 
 def _same_attempt(runner: dict, test: dict) -> bool:
     """Whether a `TestRunner` action failure is `test`'s attempt."""
-    at = _runner_attempt(runner)
+    at = runner.get("attempt_key")
     return at != None and at == (test["label"], test["run"], test["shard"], test["attempt"])
 
 def _add_failure(state: dict, record: dict):
     """List a failure once. A test attempt Bazel posts again (Bazel 9 posts
     attempt 1 failed with its log, then failed to build without one) is one
-    row, the one with a log kept. A failed `TestRunner` action is folded
-    into the attempt it ran, where its output's path says which: left out
-    where that attempt is listed, and dropped once it is. One that names no
-    attempt is kept."""
+    row, the one with a log kept. A failed `TestRunner` action is listed as
+    it comes, with the attempt it ran (`_runner_attempt`), and dropped once
+    that attempt's own record comes with a log; one whose attempt has none
+    (an attempt Bazel cut off, a shard that failed to build) stays, its log
+    the only one, and that record is not listed beside it."""
     fails = state["fails"]
     if _test_runner(record):
-        if not any([r["kind"] == "test" and _same_attempt(record, r) for r in fails]):
-            fails.append(record)
+        record["attempt_key"] = _runner_attempt(state, record)
+        fails.append(record)
         return
     if record["kind"] == "test":
+        if not record["files"] and any([_test_runner(r) and _same_attempt(r, record) for r in fails]):
+            return
         key = _test_key(record)
         for i, r in enumerate(fails):
             if r["kind"] == "test" and _test_key(r) == key:
                 if record["files"] and not r["files"]:
                     fails[i] = record
                 return
-        if any([_test_runner(r) and _same_attempt(r, record) for r in fails]):
+        if record["files"] and any([_test_runner(r) and _same_attempt(r, record) for r in fails]):
             fails = [r for r in fails if not (_test_runner(r) and _same_attempt(r, record))]
             state["fails"] = fails
             state["selected"] = min(state.get("selected", 0), max(0, len(fails)))
@@ -1235,30 +1267,49 @@ def first_unlogged(index: dict, wanted: int) -> list:
     return found
 
 def note_blocked(state: dict, event):
-    """Note a failed target Bazel did not build because a dependency failed:
-    its root causes (`event.children`, which Bazel gives every failed
-    target) are other targets', at least one of which failed in this build
-    (a failed target, or one with a failed action listed), so it is
-    `blocked` by them, rather than failed itself. A root that is a source
-    file (one missing) or a target that never failed is the target's own
-    failure."""
-    if _get(event, "kind") not in ("target_completed", "aborted"):
-        return
+    """Keep a failed target's root causes (`event.children`, which Bazel
+    gives every failed target, in its `target_completed` or, failed in
+    analysis, its Aborted `target_configured`), for `blocked_targets` to
+    decide, from the build's failures as they end up, whatever came
+    first."""
+    kind = _get(event, "kind")
     payload = _get(event, "payload")
-    if _get(event, "kind") == "target_completed" and _get(payload, "success", True):
+    if kind == "target_completed":
+        if _get(payload, "success", True):
+            return
+    elif kind not in ("target_configured", "aborted"):
+        # A configured target's only child is its own completion, left out
+        # below; one Aborted in analysis has its root causes.
         return
     label = str(_get(_get(event, "id"), "label", "") or "")
     roots = []
     for child in _get(event, "children") or []:
         root = str(_get(_get(child, "id"), "label", "") or "")
-        if root and root not in roots:
+        if root and root != label and root not in roots:
             roots.append(root)
+    if label and roots:
+        if state.get("root_causes") == None:
+            state["root_causes"] = {}
+        state["root_causes"][label] = roots
+
+def blocked_targets(state: dict) -> dict:
+    """The targets not built for a failed dependency, by label, each with its
+    root causes: one with a root cause that failed in this build (a failed
+    target, or one with a failed action listed). One whose roots are a
+    source file (one missing) or targets that never failed failed itself.
+    Decided from the failures so far, so a target Bazel reported before its
+    root cause's failure counts once that comes; cached until they or the
+    root causes change."""
+    causes = state.get("root_causes") or {}
     failed = state["counts"]["failed_labels"]
     logged = logged_index(state)["logged"]
-    if label and roots and label not in roots and any([r in failed or r in logged for r in roots]):
-        if not state.get("blocked"):
-            state["blocked"] = {}
-        state["blocked"][label] = roots
+    key = (len(causes), len(failed), len(logged))
+    cached = state.get("blocked_cache")
+    if cached != None and cached[0] == key:
+        return cached[1]
+    blocked = {label: roots for label, roots in causes.items() if any([r in failed or r in logged for r in roots])}
+    state["blocked_cache"] = (key, blocked)
+    return blocked
 
 def blocked_text(label: str, roots: list) -> str:
     """`blocked by :broken`: a root cause in `label`'s package by its name,
@@ -1286,7 +1337,7 @@ def _open_unlogged(state: dict, i: int):
     it (its first root cause's log, chosen in the list); another says why
     there is nothing to show."""
     label = _unlogged_label(state, i)
-    roots = (state.get("blocked") or {}).get(label, [])
+    roots = blocked_targets(state).get(label, [])
     for root in roots:
         for j, rec in enumerate(state["fails"]):
             if rec["label"] == root:
@@ -1319,7 +1370,7 @@ def failure_rows(state: dict, room: int, width: int) -> list:
     wanted = start + shown - len(fails)
     unlogged = first_unlogged(index, wanted) if wanted > 0 else []
 
-    blocked = (state.get("blocked") or {})
+    blocked = blocked_targets(state)
 
     def row(i):
         if i >= len(fails):
@@ -1600,6 +1651,8 @@ def new_counts() -> dict:
         "tests_skipped": 0,
         "flaky": {},
         "failed_attempts": {},
+        "test_targets": {},
+        "test_unbuilt": {},
         "test_runs": 0,
         "test_cached": 0,
         "spawns": 0,
@@ -1631,11 +1684,13 @@ def _list_failure(counts: dict, label: str):
 
 def count_aborted_test(counts: dict, label: str, reason: str, config: str = ""):
     """Tally a test whose summary is Aborted for `reason`. Bazel gives one it
-    skipped (a build without `--keep_going` stopped first) and one that
-    failed to build the same empty reason; only the second had an attempt
-    fail (`failed_attempts`, by label and configuration), so it is failed,
-    as Bazel counts it, and the first skipped. An interrupt is no verdict."""
-    if not label or reason.lower() == "user_interrupted":
+    skipped (a build without `--keep_going` stopped first, a later attempt
+    of a flaky one cut off) and one that failed to build the same empty
+    reason; only the second has a result `FAILED_TO_BUILD`
+    (`failed_attempts`, by label and configuration), so it is failed, as
+    Bazel counts it, and the first skipped. An interrupt is no verdict, and
+    a test counted failed already (`test_unbuilt`) is not counted again."""
+    if not label or reason.lower() == "user_interrupted" or label in counts["test_unbuilt"]:
         return
     if (label, config) in counts["failed_attempts"]:
         counts["tests_failed"] += 1
@@ -1679,6 +1734,8 @@ def count_event(counts: dict, kind: str, event_id, payload):
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):
             counts["configured"] += 1
+            if str(_get(payload, "target_kind", "") or "").endswith("_test rule"):
+                counts["test_targets"][label] = True
     elif kind == "target_completed":
         if _get(event_id, "aspect", ""):
             return
@@ -1686,11 +1743,16 @@ def count_event(counts: dict, kind: str, event_id, payload):
             counts["built"] += 1
         else:
             _fail(counts, label)
+            if label in counts["test_targets"] and label not in counts["test_unbuilt"]:
+                # A test that failed to build (or was blocked): Bazel posts
+                # no summary for it, and counts it as failing to build.
+                counts["test_unbuilt"][label] = True
+                counts["tests_failed"] += 1
     elif kind == "test_result":
         # A test run, and whether a cache (Bazel's own, or a remote one)
         # gave it rather than running it.
         counts["test_runs"] += 1
-        if str(_get(payload, "status", "") or "").lower() in _FAILED_TEST_STATUSES:
+        if str(_get(payload, "status", "") or "").lower() == "failed_to_build":
             counts["failed_attempts"][(label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))] = True
         info = _get(payload, "execution_info")
         if _get(payload, "cached_locally", False) or _get(info, "cached_remotely", False):
@@ -2468,18 +2530,25 @@ def slowest_rows(state: dict) -> list:
         return [_c("muted") + "nothing ran: every action was cached" + _RESET]
     return rows
 
+# Run on every build whatever is cached (`UNCONDITIONAL_EXECUTION`): not a
+# sign that anything of the build's own ran.
+_ALWAYS_RUN = ["BazelWorkspaceStatusAction"]
+
 def _nothing_ran(state: dict) -> bool:
-    """Whether the build finished, successfully, with nothing run: its
-    `BuildMetrics` say no action executed, or Bazel's action cache missed
-    none."""
+    """Whether the build finished, successfully, with nothing of its own
+    run: its `BuildMetrics` say no action executed but those Bazel runs on
+    every build (`_ALWAYS_RUN`, the workspace status)."""
     inv = state.get("inv") or {}
     if state.get("building") or not build_succeeded(inv):
         return False
     summary = _get(inv.get("build_metrics"), "action_summary")
-    if summary == None:
+    executed = _get(summary, "actions_executed", None)
+    if executed == None:
         return False
-    stats = _get(summary, "action_cache_statistics")
-    return (_get(summary, "actions_executed", None) == 0) or (stats != None and (_get(stats, "misses", 0) or 0) == 0)
+    for data in _get(summary, "action_data", None) or []:
+        if str(_get(data, "mnemonic", "") or "") in _ALWAYS_RUN:
+            executed -= _get(data, "actions_executed", 0) or 0
+    return executed <= 0
 
 def slowest_title(state: dict) -> str:
     """The finished pane's title: `Slowest` from the execution log, `Slowest
@@ -2635,11 +2704,11 @@ def fold_build(state: dict, now_ms: int):
         ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and build_succeeded(state.get("inv") or {}),
         outcome = build_outcome(state.get("inv") or {}),
         ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
-        snapshot = {k: state.get(k) for k in _BUILD_KEYS},
+        snapshot = dict({k: state.get(k) for k in _BUILD_KEYS}, building = False, blocked_cache = None),
     ))
 
 # What a folded build keeps for its tabs.
-_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "blocked", "bes_base", "bazel_uuid", "logged_index", "exec_log_read"]
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "logged_index", "exec_log_read"]
 
 def build_row(build: dict, cols: int) -> str:
     """A folded build's row: its verdict, command, the actions it ran (its
@@ -2766,7 +2835,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
         # Narrow: the failures first, as what matters is what failed.
         summary = [
             "Targets %s✗%d%s %s✓%d%s%s/%d" % (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (" ○%d" % targets_blocked) if targets_blocked else "", c["configured"]),
-            "Tests   %s✗%d%s %s✓%d%s%s" % (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (" %s~%d%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else ""),
+            "Tests   %s✗%d%s %s✓%d%s%s%s" % (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, (" %s~%d%s" % (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "", (" ⊘%d" % c["tests_skipped"]) if c.get("tests_skipped") else ""),
         ]
 
     # Cache hits from their sources of truth: actions' from Bazel's
@@ -3118,17 +3187,17 @@ _INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "bui
 
 def target_counts(state: dict):
     """`(built, failed, blocked)` targets: one that failed for a failed
-    dependency (`note_blocked`) is blocked, not failed, here and wherever
+    dependency (`blocked_targets`) is blocked, not failed, here and wherever
     targets are counted."""
     c = state["counts"]
-    blocked = state.get("blocked") or {}
+    blocked = blocked_targets(state)
     counted = len([label for label in blocked if label in c["failed_labels"]])
     return (c["built"], max(0, c["failed"] - counted), len(blocked))
 
 def _failure_counts(state: dict):
     """`(failed, blocked)`: targets and tests that failed themselves, and
     targets not built for a failed dependency."""
-    blocked = len(state.get("blocked") or {})
+    blocked = len(blocked_targets(state))
     index = logged_index(state)
     failed = len(state["fails"]) + len(state["counts"]["failures"]) - index["both"] - blocked
     return (max(0, failed), blocked)
@@ -3777,7 +3846,8 @@ def keys_row(state: dict, cols: int) -> str:
         return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
     if state.get("tab") == "tips" and state["view"] == None:
         tips = shown_tips(state)
-        choose = ("↑↓ choose · s %s · " % ("undo" if all([silenced for _, silenced in tips]) else "silence")) if tips else ""
+        chosen = tips[max(0, min(state.get("tip_selected", 0), len(tips) - 1))] if tips else None
+        choose = ("↑↓ choose · s %s · " % ("undo" if chosen[1] else "silence")) if tips else ""
         return fit(" " + choose + "Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
     done = state["ended"]
     parts = [("Done ✔" if state.get("verdict", True) else "Done ✗")] if done else []
@@ -4337,7 +4407,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
         if total > len(shown) and state.get("log_path"):
             out.append("  … %d more in Bazel's console log: %s" % (total - len(shown), state["log_path"]))
     index = logged_index(state)
-    blocked = (state.get("blocked") or {})
+    blocked = blocked_targets(state)
     unlogged = [label for label in index["unlogged"] if label not in index["logged"] and label not in blocked]
     stopped = [label for label in index["unlogged"] if label not in index["logged"] and label in blocked]
     fails = [rec for rec in state["fails"] if not _flaky(state, rec)]
@@ -4372,7 +4442,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
         out.append("%s: %s" % (label, link(url, url) if tty else url))
     c = state["counts"]
     built_n, targets_failed, targets_blocked = target_counts(state)
-    out.append("%d built, %d failed%s · %d %s passed, %d failed%s%s" % (
+    out.append("%d built, %d failed%s · %d %s passed, %d failed%s%s%s" % (
         built_n,
         targets_failed,
         (", %d blocked" % targets_blocked) if targets_blocked else "",
@@ -4380,6 +4450,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False) -> list
         "test" if c["tests_passed"] == 1 else "tests",
         c["tests_failed"],
         (", %d flaky" % c["tests_flaky"]) if c.get("tests_flaky") else "",
+        (", %d skipped" % c["tests_skipped"]) if c.get("tests_skipped") else "",
         (" · Bazel's console: " + state["log_path"]) if state["log_path"] else "",
     ))
     out.append("All of it: aspect history show %s" % task_id)
