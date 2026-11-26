@@ -230,26 +230,21 @@ impl Redirect {
                 .spawn(move || {
                     // Whole lines, each run of them one unit on the target;
                     // an unended tail waits for its line's end or the pipe's.
-                    // To fd 1 or 2 as it is now: the terminal while the
-                    // screen is given back, a capture again once it is taken
-                    // back, which then copies them; else copied here. Any
-                    // other descriptor (a test's) gets them where it was.
+                    // To fd 1 or 2 as it is now ([`write_std_unit`]): the
+                    // terminal while the screen is given back, a capture again
+                    // once it is taken back, which then copies them; else
+                    // copied here. Any other descriptor (a test's) gets them
+                    // where it was.
                     let mut buf = [0u8; 8192];
                     let mut pending = Vec::new();
                     let std_stream = fd == 1 || fd == 2;
                     let mut put = |bytes: &[u8]| {
-                        let _turn = stream_write_bounded(fd);
                         if !std_stream {
+                            let _turn = stream_write_bounded(fd);
                             write_patiently(&mut out, bytes);
                             return;
                         }
-                        // SAFETY: fd 1 or 2, open for the process's life;
-                        // ManuallyDrop never closes it.
-                        let mut now = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
-                        let captured = crate::out::capture_copies();
-                        write_patiently(&mut now, bytes);
-                        axl_types::terminal::wrote(fd, bytes);
-                        if !captured {
+                        if let Ok(false) = write_std_unit(fd == 2, bytes) {
                             crate::out::copy_only(bytes);
                         }
                     };
@@ -356,7 +351,7 @@ fn size_of(fd: RawFd) -> Option<(i32, i32)> {
 }
 
 /// Whether the pipe `fd` has bytes to read within `timeout`.
-fn pipe_readable(fd: RawFd, timeout: Duration) -> bool {
+pub(crate) fn pipe_readable(fd: RawFd, timeout: Duration) -> bool {
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -395,6 +390,39 @@ fn tty_readable(fd: RawFd, timeout: Duration) -> bool {
 /// given up after [`STALL_LIMIT`]; None for any other descriptor, or given up.
 fn stream_write_bounded(fd: RawFd) -> Option<axl_types::terminal::Turn> {
     axl_types::terminal::turn_within(fd, STALL_LIMIT)
+}
+
+/// Write `bytes` to stdout (or, with `stderr`, stderr) as one unit, for a
+/// child's output passed on: a forwarder's, or what a child still writes into
+/// a stopped capture. Whether it went into a screen's capture, which copies
+/// it, so the caller copies it only when not.
+///
+/// The target is held for the whole, waited on for as long as it takes (a
+/// capture's replay holds it, and gives up on its own after
+/// [`STALL_LIMIT`] without progress): never written alongside another's.
+/// What std's stdout buffers goes first. Then `bytes` go to the stream's
+/// file as it is now, through a descriptor of their own, never inside a
+/// blocking write ([`write_when_writable`]): a screen taken or given back
+/// meanwhile moves fds 1 and 2 without waiting on this write or failing it,
+/// and a `select` cut short by that move backs off and goes on. Whether a
+/// capture copies is read under the target, where no move happens.
+pub(crate) fn write_std_unit(stderr: bool, bytes: &[u8]) -> std::io::Result<bool> {
+    let fd = if stderr { 2 } else { 1 };
+    let _turn = axl_types::terminal::turn(fd);
+    if !stderr {
+        std::io::stdout().lock().flush()?;
+    }
+    let into_capture = crate::out::capture_copies();
+    // SAFETY: F_DUPFD_CLOEXEC on fd 1 or 2 returns a new descriptor this
+    // function owns, closed when `own` drops.
+    let own = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if own < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let own = unsafe { OwnedFd::from_raw_fd(own) };
+    write_when_writable(own.as_raw_fd(), bytes)?;
+    axl_types::terminal::wrote(fd, bytes);
+    Ok(into_capture)
 }
 
 /// Write all of `bytes` to `fd`, waiting as long as it takes, but never
@@ -907,8 +935,9 @@ pub fn release_all() -> bool {
 
 /// Give a held screen of its own back for a while, for something that needs
 /// the real terminal (a prompt reading stdin, an interactive child): the
-/// task's output so far dumped to it ([`dump_output`]), the main screen, its
-/// modes and stdout and stderr back, the capture's copies stopped. Whether
+/// task's output so far dumped to it ([`dump_output`]) and stdout's captured
+/// lines to a stdout that is not the terminal, the main screen, its modes and
+/// stdout and stderr back, the capture's copies stopped. Whether
 /// one was given back, for [`resume`], which each true needs once: a screen
 /// already suspended counts another, and comes back with the last resume.
 /// One not of its own, or none: false.
@@ -939,12 +968,20 @@ pub(crate) fn suspend() -> bool {
         CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
         mark_captured(None);
         // What the capture read before now stays in its feed, for the screen.
-        finishing = [h.stdout.take(), h.stderr.take()];
+        finishing = (h.stdout.take(), h.stderr.take());
         h.suspended = true;
     }
     dump_output(DUMP_LINES, "… {n} older lines: aspect history show");
-    // After the dump: what a child still writes into a capture comes after it.
-    for r in finishing.into_iter().flatten() {
+    // After the dump: what a child still writes into a capture comes after
+    // it. Stdout's lines go to a stdout that is not the terminal, as on a
+    // release: the dump showed them on the terminal only.
+    let (stdout, stderr) = finishing;
+    if let Some(r) = stdout {
+        // SAFETY: isatty on a descriptor the redirect owns.
+        let tty = unsafe { libc::isatty(r.saved.as_raw_fd()) } == 1;
+        r.finish(!tty);
+    }
+    if let Some(r) = stderr {
         r.finish(false);
     }
     true

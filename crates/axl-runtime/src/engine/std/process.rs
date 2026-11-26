@@ -529,7 +529,8 @@ pub fn finish_forwarders() {
 const MAX_FORWARD_LINE: usize = 64 * 1024;
 
 /// Pass what a child writes to `pipe` on to the CLI's stderr (or stdout),
-/// flushed as it comes so a partial line (a progress line) shows at once,
+/// flushed as it comes, a partial line (a progress line) as soon as nothing
+/// more is waiting in the pipe,
 /// and copied to the task's output a whole line at a time (an unended one
 /// held back, up to [`MAX_FORWARD_LINE`], ended at the pipe's end), so it
 /// never lands inside the CLI's own line. While a full screen holds the
@@ -538,42 +539,22 @@ const MAX_FORWARD_LINE: usize = 64 * 1024;
 /// stream that takes no more (a closed pipe, `| head -1`) ends it and closes
 /// `pipe`, so the child's next write fails, as it would have written there
 /// itself.
-fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwarder {
+fn forward(
+    mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static,
+    stderr: bool,
+) -> Forwarder {
     use std::sync::atomic::Ordering::SeqCst;
     let activity = Arc::new(Activity::default());
     let mine = activity.clone();
     let handle = std::thread::spawn(move || {
-        use std::io::Write as _;
         let mut buf = [0u8; 8192];
         // Not yet copied; its first `shown` bytes written out already.
         let mut line = Vec::new();
         let mut shown = 0;
-        // One unit on the stream's target (`axl_types::terminal`), so no
-        // other writer splices it, but never blocked inside a write (see
-        // `write_when_writable`): what std's stdout buffers goes first. It
-        // goes to the stream's file as it is when the unit starts, through a
-        // descriptor of its own: a screen taken meanwhile moves fds 1 and 2
-        // without waiting on this write or failing it, and never captures
-        // (and copies a second time) what this forwarder copies itself.
-        use std::os::fd::FromRawFd as _;
-        let show = |bytes: &[u8]| -> std::io::Result<()> {
-            let fd = if stderr { 2 } else { 1 };
-            let _turn = axl_types::terminal::turn(fd);
-            if !stderr {
-                std::io::stdout().lock().flush()?;
-            }
-            // SAFETY: F_DUPFD_CLOEXEC on fd 1 or 2 returns a new descriptor
-            // this closure owns, closed when `own` drops.
-            let own = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-            if own < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let own = unsafe { std::os::fd::OwnedFd::from_raw_fd(own) };
-            use std::os::fd::AsRawFd as _;
-            crate::engine::std::term::write_when_writable(own.as_raw_fd(), bytes)?;
-            axl_types::terminal::wrote(fd, bytes);
-            Ok(())
-        };
+        // Whether a show of the line being gathered went into a screen's
+        // capture, which copies it: then this forwarder does not.
+        let mut captured = false;
+        let show = |bytes: &[u8]| crate::engine::std::term::write_std_unit(stderr, bytes);
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) => break,
@@ -602,15 +583,29 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
                             shown,
                         )
                     });
-                    let written = if fed {
+                    // An unended tail waits while more is already there to
+                    // read: it is shown once the child goes quiet (a progress
+                    // line), so a flood leaves its stream at a line's end.
+                    let upto = if crate::engine::std::term::pipe_readable(
+                        pipe.as_raw_fd(),
+                        Duration::ZERO,
+                    ) {
+                        whole.unwrap_or(0).max(shown)
+                    } else {
+                        line.len()
+                    };
+                    let written = if fed || upto == shown {
                         Ok(())
                     } else {
-                        let r = show(&line[shown..]);
-                        shown = line.len();
-                        r
+                        let r = show(&line[shown..upto]);
+                        shown = upto;
+                        r.map(|into_capture| captured |= into_capture)
                     };
                     if let Some(end) = whole {
-                        crate::out::copy_only(&line[..end]);
+                        if !captured {
+                            crate::out::copy_only(&line[..end]);
+                        }
+                        captured = false;
                         line.drain(..end);
                         shown = shown.saturating_sub(end);
                     }
@@ -627,10 +622,12 @@ fn forward(mut pipe: impl std::io::Read + Send + 'static, stderr: bool) -> Forwa
             let fed = crate::engine::std::term::forwarding(stderr, || {
                 crate::engine::std::term::feed_screen(stderr, &ended, shown)
             });
-            if !fed {
-                let _ = show(&line[shown..]);
+            if !fed && let Ok(into_capture) = show(&line[shown..]) {
+                captured |= into_capture;
             }
-            crate::out::copy_only(&ended);
+            if !captured {
+                crate::out::copy_only(&ended);
+            }
         }
     });
     Forwarder { handle, activity }
