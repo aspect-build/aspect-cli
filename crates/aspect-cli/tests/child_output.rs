@@ -932,8 +932,10 @@ fn plain(text: &str) -> String {
 #[cfg(unix)]
 const LONG: &str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
 
-/// The lines of `text` (its escapes and the terminal's `^Z` echo left out)
-/// that hold a dump's, a child's or the CLI's test line, but not one whole.
+/// The lines of `text` (its escapes, the terminal's `^Z` echo and the
+/// `FRAME`s a screen drew before them left out, the screen's entry and exit
+/// ending a line) that hold a dump's, a child's or the CLI's test line, but
+/// not one whole.
 #[cfg(unix)]
 fn torn_lines(text: &str) -> Vec<String> {
     let numbered = |line: &str, prefix: &str, tail: &str| {
@@ -942,10 +944,17 @@ fn torn_lines(text: &str) -> Vec<String> {
             .is_some_and(|(n, rest)| n.parse::<u32>().is_ok() && rest == tail)
     };
     let mut torn = vec![];
-    for line in plain(text).replace("^Z", "").split('\n') {
+    // The screen's entry and exit end a line: a frame drawn on it and the
+    // dump after are never one line, however close their bytes.
+    let text = text
+        .replace("\x1b[?1049h", "\n")
+        .replace("\x1b[?1049l", "\n");
+    for line in plain(&text).replace("^Z", "").split('\n') {
         let line = line.trim_end_matches('\r');
-        let line = line.rsplit('\r').next().unwrap_or(line);
-        let line = line.strip_prefix("FRAME").unwrap_or(line);
+        let mut line = line.rsplit('\r').next().unwrap_or(line);
+        while let Some(rest) = line.strip_prefix("FRAME") {
+            line = rest;
+        }
         let whole = numbered(line, "DUMPLINE-", "abcdefghijklmnopqrstuvwxyz0123456789")
             || numbered(line, "CHILDERR", LONG)
             || numbered(line, "CLILINE-", LONG);
@@ -957,6 +966,20 @@ fn torn_lines(text: &str) -> Vec<String> {
         }
     }
     torn
+}
+
+/// A screen's frames drawn and left just before a dump are not part of its
+/// first line: what a loaded run left on the terminal, two screens taken and
+/// given back before the dump, is no torn line.
+#[cfg(unix)]
+#[test]
+fn torn_lines_end_at_the_screen() {
+    let text = "\x1b[?1049h\x1b[2J\x1b[?2026hFRAME\x1b[?2026l\x1b[?1049l\x1b[?1049h\x1b[2J\x1b[?2026hFRAME\x1b[?2026l\x1b[?1049lDUMPLINE-0-abcdefghijklmnopqrstuvwxyz0123456789\r\n";
+    assert_eq!(torn_lines(text), Vec::<String>::new());
+    assert_eq!(
+        torn_lines("DUMPLINE-0-abcdef\r\n"),
+        vec!["DUMPLINE-0-abcdef".to_string()]
+    );
 }
 
 /// Ctrl+Z under a screen gives the terminal back with the task's output

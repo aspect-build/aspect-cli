@@ -279,19 +279,28 @@ pub fn describe(pid: u32) -> String {
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
-        let (done, stacks) = std::sync::mpsc::channel();
-        let p = pid.to_string();
-        std::thread::spawn(move || {
-            let out = std::process::Command::new("sample")
-                .args([p.as_str(), "1"])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
-            let _ = done.send(out);
-        });
-        let sampled = stacks
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap_or_default();
+        // `sample` over a second, killed if it has not ended in ten.
+        let sampled = match std::process::Command::new("sample")
+            .args([pid.to_string().as_str(), "1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut sample) => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while sample.try_wait().ok().flatten().is_none()
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let _ = sample.kill();
+                sample
+                    .wait_with_output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default()
+            }
+            Err(_) => String::new(),
+        };
         format!("ps:\n{ps}\nsample:\n{sampled}")
     }
 }

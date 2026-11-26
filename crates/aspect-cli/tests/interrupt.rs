@@ -27,7 +27,19 @@ use common::{aspect_cli, base_env, basil_bin, describe};
 /// How long a fixture may take to say it is ready: past a minute under a
 /// whole-repo `bazel test` on a laptop, where every CLI of a binary stalled
 /// at once and then went on.
-const READY_WITHIN: Duration = Duration::from_secs(180);
+const READY_WITHIN: Duration = Duration::from_secs(120);
+
+/// How long a fixture may take to end once signalled.
+const END_WITHIN: Duration = Duration::from_secs(60);
+
+/// Kill `pid` and everything under it, the children first, as a test that
+/// gives up on a run leaves nothing behind.
+fn kill_tree(pid: u32) {
+    for p in common::descendants(pid).into_iter().rev() {
+        unsafe { libc::kill(p as libc::pid_t, libc::SIGKILL) };
+    }
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+}
 
 /// A fixture task running in a scratch workspace.
 struct Run {
@@ -120,7 +132,8 @@ impl Run {
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     let doing = describe(child.id());
-                    let _ = child.kill();
+                    kill_tree(child.id());
+                    let _ = child.wait();
                     panic!("the fixture never became ready in {READY_WITHIN:?}:\n{seen}\n{doing}");
                 }
             }
@@ -151,10 +164,40 @@ impl Run {
     }
 
     /// Read the rest of stderr and reap the CLI.
+    /// Read the rest of stderr and reap the CLI, within [`END_WITHIN`]: past
+    /// it, say what the CLI and its children were doing, kill them, and fail.
     fn finish(mut self) -> (ExitStatus, String) {
-        let rest: String = self.stderr.iter().collect();
-        let status = self.child.wait().expect("waiting for aspect-cli");
-        (status, format!("{}{rest}", self.seen))
+        let deadline = Instant::now() + END_WITHIN;
+        let mut rest = String::new();
+        loop {
+            match self
+                .stderr
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => rest.push_str(&line),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => self.give_up(&rest),
+            }
+        }
+        loop {
+            if let Some(status) = self.child.try_wait().expect("waiting for aspect-cli") {
+                return (status, format!("{}{rest}", self.seen));
+            }
+            if Instant::now() >= deadline {
+                self.give_up(&rest);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn give_up(&mut self, rest: &str) -> ! {
+        let doing = describe(self.child.id());
+        kill_tree(self.child.id());
+        let _ = self.child.wait();
+        panic!(
+            "the run did not end in {END_WITHIN:?}:\n{}{rest}\n{doing}",
+            self.seen
+        );
     }
 }
 
