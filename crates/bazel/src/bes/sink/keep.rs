@@ -136,15 +136,16 @@ impl Keep {
         Arc::new(
             move |envelope: &Arc<BuildEventEnvelope>| match envelope.event.payload.as_ref() {
                 Some(Payload::Action(_)) => self.actions != ActionLogs::None,
+                // A retry of the build in one stream starts again with
+                // `Started`, which numbers both kinds' attempts.
+                Some(Payload::Started(_)) => self.any(),
                 // Test logs a remote cache names by `bytestream://` are
-                // found where Bazel left them, from these; a retry of the
-                // build in one stream starts again with `Started`.
+                // found where Bazel left them, from these.
                 Some(
                     Payload::TestResult(_)
                     | Payload::TestSummary(_)
                     | Payload::WorkspaceInfo(_)
-                    | Payload::Configuration(_)
-                    | Payload::Started(_),
+                    | Payload::Configuration(_),
                 ) => self.tests != TestLogs::None,
                 _ => false,
             },
@@ -189,6 +190,10 @@ struct Kept {
     tests: Vec<Value>,
     /// Per `<label>/<mnemonic>`, how many actions have been kept.
     action_counts: HashMap<String, usize>,
+    /// How many times the build started in the stream (a build Bazel
+    /// restarted in place starts again), each action entry's
+    /// `build_attempt`.
+    started: u32,
     /// The action logs and the test logs not kept.
     actions_not_kept: NotKept,
     tests_not_kept: NotKept,
@@ -244,6 +249,7 @@ impl Kept {
             actions: vec![],
             tests: vec![],
             action_counts: HashMap::new(),
+            started: 0,
             actions_not_kept: NotKept::default(),
             tests_not_kept: NotKept::default(),
             remote_test_logs: vec![],
@@ -266,6 +272,7 @@ impl Kept {
             // writes the same local test logs again: find the abandoned
             // attempt's while they are still its, and count afresh.
             Some(Payload::Started(_)) => {
+                self.started += 1;
                 self.find_remote_test_logs();
                 self.test_counts.clear();
                 self.last_attempts.clear();
@@ -299,7 +306,9 @@ impl Kept {
             ActionLogs::Failed => !action.success,
             ActionLogs::All => true,
         };
-        if !wanted || (action.stdout.is_none() && action.stderr.is_none()) {
+        // A failure that wrote nothing still gets its entry, with no stream,
+        // so its build's failures match the index one for one.
+        if !wanted || (action.success && action.stdout.is_none() && action.stderr.is_none()) {
             return;
         }
         // The id's label: the payload's own is deprecated.
@@ -320,6 +329,7 @@ impl Kept {
             "primary_output": id.primary_output,
             "success": action.success,
             "exit_code": action.exit_code,
+            "build_attempt": self.started,
         });
         if let Some(start) = action.start_time.as_ref() {
             entry["start"] = json!(timestamp(start));
@@ -540,7 +550,11 @@ impl Kept {
         if self.keep.actions != ActionLogs::None {
             write_index(
                 &self.dir.join("actions.json"),
-                json!({ "actions": self.actions, "not_kept": self.actions_not_kept.json() }),
+                json!({
+                    "actions": self.actions,
+                    "build_attempts": self.started,
+                    "not_kept": self.actions_not_kept.json(),
+                }),
             );
         }
         if self.keep.tests != TestLogs::None {
@@ -953,6 +967,39 @@ mod tests {
             !dir.join("actions.json").exists(),
             "published before the index"
         );
+    }
+
+    /// A failure that wrote nothing is in the index too, with no stream, so
+    /// the failures after it keep their own logs.
+    #[test]
+    fn a_silent_failure_holds_its_place_in_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr"), "ERROR: loud\n").unwrap();
+        let dir = tmp.path().join("history");
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::Failed,
+                tests: TestLogs::None,
+            },
+            dir.clone(),
+        );
+        kept.event(&action_event("//pkg:a", "CppCompile", false, None, None));
+        kept.event(&action_event(
+            "//pkg:a",
+            "CppCompile",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr"))),
+        ));
+        kept.event(&action_event("//pkg:ok", "CppCompile", true, None, None));
+        kept.finish();
+        let index = read_index(&dir.join("actions.json"));
+        let actions = index["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2, "both failures, no success: {actions:?}");
+        assert!(actions[0].get("stderr").is_none() && actions[0].get("stdout").is_none());
+        assert!(actions[1].get("stderr").is_some());
     }
 
     #[test]
@@ -1450,6 +1497,10 @@ mod tests {
             tests: TestLogs::Failed,
         };
         assert!(pass(actions, Payload::Action(ActionExecuted::default())));
+        assert!(
+            pass(actions, Payload::Started(BuildStarted::default())),
+            "a restart numbers the actions' attempts too"
+        );
         assert!(!pass(actions, Payload::TestResult(TestResult::default())));
         assert!(!pass(
             actions,
