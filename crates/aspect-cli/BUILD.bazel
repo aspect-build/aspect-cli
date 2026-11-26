@@ -101,9 +101,13 @@ rust_test(
     name = "build_events_feature_test",
     srcs = ["tests/build_events_feature.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/build_events_feature.rs",
-    data = [":aspect-cli"],
+    data = [
+        ":aspect-cli",
+        "//crates/basil",
+    ],
     env = {
         "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+        "BASIL_BIN": "$(rootpath //crates/basil)",
     },
     deps = [
         "//crates/axl-runtime",

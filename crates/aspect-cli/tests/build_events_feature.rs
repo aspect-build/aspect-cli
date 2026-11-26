@@ -1,16 +1,20 @@
 //! The BuildEvents feature's options, set on the command line or in
-//! `config.axl`, reach the tasks through `build_events_settings`, and a
+//! `config.axl`, reach the gRPC sinks `grpc_sink` builds through
+//! `build_events_settings`, and a
 //! negative count, a limit too small to hold a publish request, a malformed
 //! duration or a `config.axl` value too large for the runtime is refused
 //! before the task runs, naming the option. With the feature disabled the
 //! defaults apply, and `BazelTrait` carries none of these settings.
 //!
 //! A scratch workspace's `show` task prints the settings, and its `sink` task
-//! builds a gRPC sink from them without dialing, so nothing here runs Bazel.
+//! builds a gRPC sink from them without dialing. Its `kept` task streams a
+//! basil build to a sink no one listens on, as a user's task would, passing no
+//! event size limit of its own, and prints how much of an oversized command
+//! line its iterator saw.
 
 mod common;
 
-use common::{aspect_cli, base_env};
+use common::{aspect_cli, base_env, basil_bin};
 use std::process::{Command, Output};
 
 const TASKS: &str = r#"load("@aspect//bazel/build_events.axl", "grpc_sink")
@@ -28,6 +32,22 @@ def _sink_impl(ctx: TaskContext) -> int:
     return 0
 
 sink = task(implementation = _sink_impl, args = {})
+
+def _kept_impl(ctx: TaskContext) -> int:
+    iter = bazel.build_events.iterator(kinds = ["action_executed"])
+    sink = grpc_sink(ctx, "grpc://127.0.0.1:1")
+    build = ctx.bazel.build(
+        flags = ["--scenario=oversized_command_line"],
+        build_events = [iter, sink],
+        stderr = None,
+    )
+    for event in iter:
+        print("kept:%d" % len(event.payload.command_line))
+    build.wait()
+    sink.wait()
+    return 0
+
+kept = task(implementation = _kept_impl, args = {})
 "#;
 
 /// Run `aspect show <args>` in a scratch workspace under an empty `$HOME`.
@@ -268,4 +288,41 @@ fn bazel_trait_has_no_build_events_settings() {
     assert_ne!(out.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("bes_timeout"), "{stderr}");
     assert!(!stderr.contains("fields:"), "the task ran:\n{stderr}");
+}
+
+/// How many of basil's `oversized_command_line` action's 2000 arguments of 100
+/// bytes the `kept` task's iterator saw, run with `args`. The sink gives up
+/// on its first failed dial.
+fn kept(args: &[&str]) -> usize {
+    let mut args = args.to_vec();
+    args.push("--build-events:max-retries=0");
+    let out = run(
+        "kept",
+        &args,
+        &[
+            ("BAZEL_REAL", basil_bin()),
+            ("ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES", "1048576"),
+        ],
+        None,
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    stderr
+        .lines()
+        .find_map(|l| {
+            l.split_once("kept:")
+                .map(|(_, n)| n.trim().parse().unwrap())
+        })
+        .unwrap_or_else(|| panic!("no kept line in:\n{stderr}"))
+}
+
+/// A task that streams through `grpc_sink` holds the build to the feature's
+/// `max_event_bytes` without passing it anywhere itself, cutting the command
+/// line to what fits in 96 KiB, less 4 KiB for the request, at 102 encoded
+/// bytes an argument. Unset, the 4 MiB default keeps all of it.
+#[test]
+fn a_task_streaming_through_grpc_sink_is_held_to_the_option() {
+    assert_eq!(kept(&[]), 2000);
+    let n = kept(&["--build-events:max-event-bytes=98304"]);
+    let fits = (98304 - 4096) / 102;
+    assert!((fits - 10..=fits).contains(&n), "kept {n}, {fits} fit");
 }

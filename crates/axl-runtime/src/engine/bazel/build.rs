@@ -5837,9 +5837,106 @@ Test = task(implementation = _impl)
     retry_min_delay = "500ms",
     retry_max_buffer_bytes = 1048576,
     timeout = "30s",
+    max_event_bytes = 16777216,
 )"#
         )
         .expect("snippet should validate");
+    }
+
+    #[test]
+    fn grpc_rejects_a_max_event_bytes_under_64_kib() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", max_event_bytes = 1000)"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(
+            err.contains("max_event_bytes must be at least 65536 (64 KiB), got 1000"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The event size limit is the gRPC sink's alone: the build takes none.
+    #[test]
+    fn build_takes_no_max_event_bytes() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.bazel.build(max_event_bytes = 65536)
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect_err("max_event_bytes is not a parameter of ctx.bazel.build");
+        assert!(
+            format!("{err:?}").contains("max_event_bytes"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// How many of basil's `oversized_command_line` action's 2000 arguments
+    /// reach an iterator, with gRPC sinks of the given `max_event_bytes` (a
+    /// Starlark list, None for unset) bound to the same build.
+    fn command_line_kept(max_event_bytes: &str) -> u8 {
+        use std::time::Duration;
+        let code = format!(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator(kinds = ["action_executed"])
+    sinks = [
+        bazel.build_events.grpc(
+            uri = "http://127.0.0.1:1",
+            max_retries = 0,
+            retry_min_delay = "0s",
+            max_event_bytes = n,
+        )
+        for n in {max_event_bytes}
+    ]
+    build = ctx.bazel.build(
+        flags = ["--scenario=oversized_command_line"],
+        build_events = [iter] + sinks,
+        stderr = None,
+    )
+    kept = [len(event.payload.command_line) for event in iter]
+    build.wait()
+    for sink in sinks:
+        sink.wait()
+    if len(kept) != 1:
+        return 255
+    # Hundreds of arguments, so the exit code holds the count.
+    return kept[0] // 10
+
+Test = task(implementation = _impl)
+"#
+        );
+        let result = crate::test::with_timeout(Duration::from_secs(60), move || {
+            crate::test::eval(&code).with_fake_bazel().run_task(0)
+        })
+        .expect("test hung");
+        result.expect("run_task").expect("an exit code")
+    }
+
+    /// Of the event-size limits of a build's gRPC sinks, the smallest holds
+    /// the whole stream, an unset one counting as 4 MiB; with none, 4 MiB.
+    /// Each argument is 102 bytes encoded, and 4 KiB of each limit is left
+    /// for the request wrapping the event.
+    #[test]
+    fn the_smallest_grpc_sink_limit_holds_the_stream() {
+        let tenths = |limit: usize| ((limit - 4096) / 102 / 10) as u8;
+        assert_eq!(command_line_kept("[]"), 200, "no gRPC sink: 4 MiB");
+        assert_eq!(command_line_kept("[None]"), 200, "unset: 4 MiB");
+        let kept = command_line_kept("[131072]");
+        assert!(
+            (tenths(131072) - 1..=tenths(131072)).contains(&kept),
+            "one sink at 128 KiB kept {kept}0"
+        );
+        let kept = command_line_kept("[None, 131072, 98304]");
+        assert!(
+            (tenths(98304) - 1..=tenths(98304)).contains(&kept),
+            "the 96 KiB sink of three kept {kept}0"
+        );
     }
 
     #[test]
