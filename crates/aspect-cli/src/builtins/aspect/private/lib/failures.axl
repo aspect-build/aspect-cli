@@ -168,34 +168,50 @@ def _expand_tabs(line: str) -> str:
         out += " " * (8 - text_width(out) % 8) + piece
     return out
 
-def excerpt_rows(lines: list) -> tuple:
+def _picked(got) -> tuple:
+    """`(lines, gaps)` of what `std.excerpt` picked (`got`): its lines but
+    its `… N more lines` ones, and where each of those stood, `(index, n)`,
+    `n` lines left out before `lines[index]` (`len(lines)`: after the
+    last)."""
+    at = {i: n for i, n in got["gaps"]}
+    lines = []
+    gaps = []
+    for i, line in enumerate(got["lines"]):
+        if i in at:
+            gaps.append((len(lines), at[i]))
+        else:
+            lines.append(line)
+    return (lines, gaps)
+
+def excerpt_rows(lines: list, gaps: list = []) -> tuple:
     """`(rows, more)` of an excerpt's `lines` as the summary and the
     Failures list show them: at most `_EXCERPT_LINES` rows, the lines left
-    out between two shown ones a `_GAP_ROW` among them (counting as one;
-    too many, the lines just before a gap go first, so the output's last
-    lines stay), and `more`, every line left out, the gaps' (`… 3 more
-    lines`, as an excerpt counts them) and those past the last row alike."""
+    out between two shown ones (`gaps`, `_picked`'s) a `_GAP_ROW` among
+    them (counting as one; too many, the lines just before a gap go first,
+    so the output's last lines stay), and `more`, every line left out, the
+    gaps' and those past the last row alike."""
+    left = {}
+    for i, n in gaps:
+        left[i] = left.get(i, 0) + n
     rows = []
     more = 0
-    for line in lines:
-        if not line:
-            continue
-        if _is_gap(line):
-            more += int(line[len("… "):].partition(" ")[0].replace(",", ""))
+    for i in range(len(lines) + 1):
+        if i in left:
+            more += left[i]
             if rows and rows[-1] != _GAP_ROW:
                 rows.append(_GAP_ROW)
-            continue
-        rows.append(line)
+        if i < len(lines) and lines[i]:
+            rows.append(lines[i])
     if rows and rows[-1] == _GAP_ROW:
         rows = rows[:-1]
 
     # Too many with a gap: the lines just before it go, so the gap and the
     # output's last lines stay.
     for _ in range(len(rows)):
-        gaps = [k for k, r in enumerate(rows) if r == _GAP_ROW]
-        if len(rows) <= _EXCERPT_LINES or not gaps or gaps[-1] < 2:
+        at = [k for k, r in enumerate(rows) if r == _GAP_ROW]
+        if len(rows) <= _EXCERPT_LINES or not at or at[-1] < 2:
             break
-        rows = rows[:gaps[-1] - 1] + rows[gaps[-1]:]
+        rows = rows[:at[-1] - 1] + rows[at[-1]:]
         more += 1
     if len(rows) > _EXCERPT_LINES:
         more += len([r for r in rows[_EXCERPT_LINES:] if r != _GAP_ROW])
@@ -205,34 +221,28 @@ def excerpt_rows(lines: list) -> tuple:
     return (rows, more)
 
 def _test_excerpt(text: str, excerpt, timed_out: bool) -> tuple:
-    """`(lines, more)` of a test's log for the summary: what `excerpt`
-    (`std.excerpt`, the console recap's choice) picks once Bazel's preamble
-    is left out, its last lines where nothing reads as an error; at most
-    two of a timed-out test's. Its `… N more lines` between two spans stay
-    in `lines`, for `excerpt_rows` to count with what it cuts; `more`
-    counts the lines before the first span and after the last, so the two
-    counts together are every line left out."""
+    """`(lines, gaps, more)` of a test's log for the summary: what
+    `excerpt` (`std.excerpt`, the console recap's choice) picks once
+    Bazel's preamble is left out (`_picked`), its last lines where nothing
+    reads as an error; at most two of a timed-out test's. `gaps` are the
+    lines left out between two spans, for `excerpt_rows` to count with
+    what it cuts; `more` counts the lines before the first span and after
+    the last, so the two counts together are every line left out."""
     lines = [l for l in text.split("\n") if not any([l.startswith(p) for p in _TEST_LOG_PREAMBLE])]
     for _ in range(len(lines)):
         if lines[-1].strip():
             break
         lines = lines[:-1]
     if not lines:
-        return ([], 0)
+        return ([], [], 0)
     if excerpt == None:
         picked = lines[-_EXCERPT_LINES:]
-        return (picked, len(lines) - len(picked))
-    got = excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1)
-    picked = list(got["lines"])
+        return (picked, [], len(lines) - len(picked))
+    picked, gaps = _picked(excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1))
     between = 0
-    for _, n in got["gaps"]:
+    for _, n in gaps:
         between += n
-    shown = len(picked) - len(got["gaps"])
-    return (picked, max(0, len(lines) - shown - between))
-
-def _is_gap(line: str) -> bool:
-    """Whether `line` is an excerpt's count of lines it left out."""
-    return line.startswith("… ") and line.endswith((" more line", " more lines"))
+    return (picked, gaps, max(0, len(lines) - len(picked) - between))
 
 def _attempts_text(n: int, of = None) -> str:
     """`failed 1 of 2 attempts`: `n` failed of `of` (all of them when
@@ -241,20 +251,21 @@ def _attempts_text(n: int, of = None) -> str:
     return _counts("failed %d of %d attempt", (n, of)) + ("" if of == 1 else "s")
 
 def own_excerpt(state: dict, rec: dict, excerpt) -> tuple:
-    """`(details, lines, log)` of a failed action from its record alone:
-    its exit code (`exit 3`, none for 0), what `excerpt` (`std.excerpt`,
-    the recap's choice) picks of its own log, escapes and CRs left out
-    (`_plain_text`), its last lines without `excerpt`, and that log's path;
-    no location, which only a console tie gives (`console_ties`)."""
+    """`(details, lines, gaps, log)` of a failed action from its record
+    alone: its exit code (`exit 3`, none for 0), what `excerpt`
+    (`std.excerpt`, the recap's choice) picks of its own log (`_picked`),
+    escapes and CRs left out (`_plain_text`), its last lines without
+    `excerpt`, and that log's path; no location, which only a console tie
+    gives (`console_ties`)."""
     details = ["exit %d" % rec["exit_code"]] if rec.get("exit_code") else []
     path = _log_path(state, rec) if state.get("read") != None else ""
     text = _plain_text(state, _tail_text(state, path) or "").rstrip("\n")
-    lines = []
+    lines, gaps = [], []
     if text.strip() and excerpt != None:
-        lines = list(excerpt(text, max_lines = _EXCERPT_LINES, before = 1, after = 2, tail = 1)["lines"])
+        lines, gaps = _picked(excerpt(text, max_lines = _EXCERPT_LINES, before = 1, after = 2, tail = 1))
     elif text.strip():
         lines = text.split("\n")[-_EXCERPT_LINES:]
-    return (details, lines, path)
+    return (details, lines, gaps, path)
 
 def test_group(state: dict, recs: list) -> dict:
     """A failed test's records as the summary and the Failures list tell
@@ -300,15 +311,16 @@ def test_group(state: dict, recs: list) -> dict:
 # What an entry says when Bazel's events give a failed target no reason.
 _NO_REASON = "Bazel's events give no reason; its error is in the console"
 
-def _traceback_lines(state: dict, lines: list) -> list:
-    """`lines` with a Starlark `Traceback` in them cut as the console's recap
-    cuts one (`std.excerpt(traceback = True)`: what comes before it, its
-    first frame at a BUILD file and that frame's code line, and its last
-    `Error in` line, the rest counted); any other text's lines as they are."""
+def _traceback_lines(state: dict, lines: list) -> tuple:
+    """`(lines, gaps)`: `lines` with a Starlark `Traceback` in them cut as
+    the console's recap cuts one (`std.excerpt(traceback = True)`: what
+    comes before it, its first frame at a BUILD file and that frame's code
+    line, and its last `Error in` line, the rest gaps, `_picked`); any
+    other text's lines as they are."""
     excerpt = state.get("excerpt")
     if excerpt == None or not lines:
-        return lines
-    return list(excerpt("\n".join(lines), traceback = True, max_lines = len(lines) + 1)["lines"])
+        return (lines, [])
+    return _picked(excerpt("\n".join(lines), traceback = True, max_lines = len(lines) + 1))
 
 # The targets an entry's blocked line names; the rest are counted.
 _BLOCKED_SHOWN = 3
@@ -391,9 +403,10 @@ def failure_entries(state: dict) -> dict:
     return result
 
 def entry_text(state: dict, e: dict) -> dict:
-    """An entry's heading and excerpt (`kind`, `details`, `lines`, `log`,
-    `extra`, `more`), the same in the failure summary and the Failures
-    list, kept once worked out:
+    """An entry's heading and excerpt (`kind`, `details`, `lines`, `gaps`,
+    `log`, `extra`, `more`: `gaps` where lines are left out between two of
+    `lines`, `excerpt_rows`'), the same in the failure summary and the
+    Failures list, kept once worked out:
 
     - a failed action: its mnemonic and its command's exit code (its
       `failure_detail`'s `spawn_exit_code`), its own log's excerpt (what
@@ -425,20 +438,21 @@ def entry_text(state: dict, e: dict) -> dict:
     ties = console_ties(state) if ended else {"actions": {}, "targets": {}}
     fails = state["fails"]
     rec = fails[e["index"]] if e["index"] != None else None
-    out = {"kind": "", "details": [], "lines": [], "log": "", "extra": [], "more": 0}
+    out = {"kind": "", "details": [], "lines": [], "gaps": [], "log": "", "extra": [], "more": 0}
     if e.get("exited") != None:
         out.update(kind = "Bazel exited %d" % e["exited"], lines = _last_words(state), log = state.get("log_path", ""))
     elif rec == None:
         out["lines"] = [_NO_REASON]
     elif rec["kind"] == "action":
-        details, lines, log = own_excerpt(state, rec, state.get("excerpt"))
+        details, lines, gaps, log = own_excerpt(state, rec, state.get("excerpt"))
         tied = ties["actions"].get(e["index"]) or {"location": "", "status": "", "lines": []}
         if tied["status"]:
             details = [_status_word(tied["status"])]
+        gaps = [(i + len(tied["lines"]), n) for i, n in gaps]
         lines = tied["lines"] + lines
         if not lines and rec.get("failure"):
             lines = [l for l in rec["failure"].split("\n") if l.strip()]
-        out.update(kind = rec["detail"], details = details + ([tied["location"]] if tied["location"] else []), lines = lines, log = log)
+        out.update(kind = rec["detail"], details = details + ([tied["location"]] if tied["location"] else []), lines = lines, gaps = gaps, log = log)
     elif rec["kind"] == "test":
         recs = [r for r in fails if r["kind"] == "test" and r["label"] == rec["label"]]
         group = test_group(state, recs)
@@ -447,7 +461,7 @@ def entry_text(state: dict, e: dict) -> dict:
             path = _log_path(state, group["rec"]) if state.get("read") != None else ""
             text = _tail_text(state, path)
             if text:
-                out["lines"], out["more"] = _test_excerpt(text, state.get("excerpt"), group["timed_out"])
+                out["lines"], out["gaps"], out["more"] = _test_excerpt(text, state.get("excerpt"), group["timed_out"])
             elif any([type(v) == "string" and v.startswith("bytestream://") or (type(v) == "tuple" and str(v[0]).startswith("bytestream://")) for _, v in group["rec"]["files"]]):
                 out["extra"].append("log is only in the remote cache")
             out["log"] = path
@@ -458,13 +472,13 @@ def entry_text(state: dict, e: dict) -> dict:
         text = rec.get("description", "")
         if not text and (state.get("root_causes") or {}).get(rec["label"]) == [rec["label"]]:
             text = "its package has an error"
-        lines = _traceback_lines(state, [l for l in text.split("\n") if l.strip()]) if text else []
+        lines, gaps = _traceback_lines(state, [l for l in text.split("\n") if l.strip()]) if text else ([], [])
         tied = ties["targets"].get(rec["label"]) or {"location": "", "lines": []}
         lines += [l for l in tied["lines"] if l not in lines]
         workspace = _workspace(state)
         if workspace:
             lines = [l.replace(workspace + "/", "") for l in lines]
-        out.update(kind = rec["detail"] if rec["detail"] != "target" else "", details = [tied["location"]] if tied["location"] else [], lines = lines)
+        out.update(kind = rec["detail"] if rec["detail"] != "target" else "", details = [tied["location"]] if tied["location"] else [], lines = lines, gaps = gaps)
     if out["lines"] or ended:
         cache[key] = out
     return out
@@ -548,10 +562,23 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     shown = []
     for e in entries:
         text = entry_text(state, e)
-        rows, gaps = excerpt_rows(text["lines"])
-        shown.append(dict(text, label = e["label"], rows = rows, more = text["more"] + gaps, blocked = e["blocked"]))
+        rows, more = excerpt_rows(text["lines"], text["gaps"])
+        shown.append(dict(text, label = e["label"], rows = rows, more = text["more"] + more, blocked = e["blocked"]))
 
     out = []
+
+    def quote(rows, more):
+        # An excerpt's rows behind the gutter, a gap as `│ …`, then how
+        # many lines it left out.
+        for line in rows:
+            if line == _GAP_ROW:
+                out.append("  " + muted + bar + " …" + reset)
+                continue
+            for j, row in enumerate(quoted_rows(line, max(_MIN_QUOTE, width - _QUOTE_GUTTER))):
+                out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
+        if more:
+            out.append("  " + muted + bar + reset + " " + _more_lines(more))
+
     if shown:
         total = len(shown)
         listed = shown[:max_entries]
@@ -564,14 +591,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
             name = e["label"] or ("error" if not details else "")
             out.append(red + cross + reset + " " + bold + name + reset + (("  " if name else "") + muted + " · ".join(details) + reset if details else ""))
             if i < _EXCERPTED:
-                for line in e["rows"]:
-                    if line == _GAP_ROW:
-                        out.append("  " + muted + bar + " …" + reset)
-                        continue
-                    for j, row in enumerate(quoted_rows(line, max(_MIN_QUOTE, width - _QUOTE_GUTTER))):
-                        out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
-                if e["more"]:
-                    out.append("  " + muted + bar + reset + " " + _more_lines(e["more"]))
+                quote(e["rows"], e["more"])
                 if e["log"]:
                     out.append("  " + muted + "log" + reset + " " + e["log"])
                 for line in e["extra"]:
@@ -590,19 +610,11 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
             out.append("")
         out.append(red + bold + "── Other errors from Bazel ──" + reset)
         for i, block in enumerate(others[:max_entries]):
-            lines = _traceback_lines(state, block["lines"])
+            lines, gaps = _traceback_lines(state, block["lines"])
             for j, row in enumerate(quoted_rows(lines[0], max(_MIN_QUOTE, width - _OTHER_GUTTER))):
                 out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
             if i < _EXCERPTED:
-                rows, more = excerpt_rows(lines[1:])
-                for line in rows:
-                    if line == _GAP_ROW:
-                        out.append("  " + muted + bar + " …" + reset)
-                        continue
-                    for j, row in enumerate(quoted_rows(line, max(_MIN_QUOTE, width - _QUOTE_GUTTER))):
-                        out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
-                if more:
-                    out.append("  " + muted + bar + reset + " " + _more_lines(more))
+                quote(*excerpt_rows(lines[1:], [(max(0, k - 1), n) for k, n in gaps]))
         if len(others) > max_entries:
             out.append(_counts("… and %d more", len(others) - max_entries) + " · aspect history show %s" % task_id)
     not_kept = console_ties(state)["not_kept"]

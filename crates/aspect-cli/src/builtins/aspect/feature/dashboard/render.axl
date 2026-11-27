@@ -197,7 +197,7 @@ def record_excerpt(state: dict, i: int) -> tuple:
             details = ([text["kind"]] if text["kind"] else []) + text["details"]
             if e["flaky"]:
                 details.append(FLAKY_NOTE)
-            return (details, excerpt_rows(text["lines"])[0])
+            return (details, excerpt_rows(text["lines"], text["gaps"])[0])
     return ([], [])
 
 def _list_row(state: dict, text: str, width: int, chosen: bool, drawn: str) -> str:
