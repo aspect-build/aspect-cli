@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -771,7 +771,7 @@ def _actions_tests(ctx):
 
     # The Tests row's running and pending, live: beside its counts where
     # they fit, else on the row under them, never dropped.
-    testing = dict(mid, building = True, counts = dict(mid["counts"], testing = True, tests_passed = 7, tests_cached = 5, test_targets = {"//t:%d" % i: True for i in range(12)}), progress = ["[3,830 / 8,563] 16 actions running", "    Testing //t:0; 1s darwin-sandbox", "    Testing //t:1; 1s darwin-sandbox", "    Testing //t:2; 1s darwin-sandbox"])
+    testing = dict(mid, building = True, counts = dict(mid["counts"], testing = True, tests_passed = 7, tests_cached = 5, test_targets = {"//t:%d" % i: True for i in range(12)}), progress = ["[3,830 / 8,563] 7 / 12 tests; 16 actions running", "    Testing //t:0; 1s darwin-sandbox", "    Testing //t:1; 1s darwin-sandbox", "    Testing //t:2; 1s darwin-sandbox"])
     for cols in [140, 100, 60]:
         drawn = _visible(render(testing, cols, 30))
         _eq("the tests' running and pending at %d" % cols, ("7 passed (5 cached)" in drawn or "✓7 (5 cached)" in drawn, "─ 3 running · 2 pending" in drawn or ("─ 3 running " in drawn and "         2 pending" in drawn)), (True, True))
@@ -1521,11 +1521,23 @@ def _impl(ctx: TaskContext) -> int:
     tagged["counts"].update(testing = True, tests_passed = 1, test_targets = {"//t:ok0": True, "//t:ok1": True, "//t:slow": True})
     _eq("a filtered test is never pending", test_progress(tagged), (1, 0))
 
+    # Bazel's total grows as it finds test targets (r49m_neg, Bazel 9.3.3:
+    # `3 / 4 tests` with 4 finished and 1 running): never a negative or a
+    # zero part; with no total from Bazel (`--curses=no` between its
+    # status lines, `--noshow_progress`), no pending at all.
+    grown = _screen(ctx, ["x"], progress = ["[30 / 41] 3 / 4 tests; 1 action running", "    Testing //t:ok2; 0s darwin-sandbox"])
+    grown["counts"].update(testing = True, tests_passed = 4, test_targets = {"//t:ok%d" % i: True for i in range(6)})
+    _eq("a total smaller than what is done", test_progress(grown), (1, 0))
+    _eq("no `0 pending` drawn", _visible(tests_text(test_progress(grown))), "─ 1 running")
+    for rows in [["Testing //t:ok2; 0s"], ["[30 / 41] 1 action running", "    Testing //t:ok2; 0s darwin-sandbox"], []]:
+        quiet = dict(grown, progress = rows)
+        _eq("no total from Bazel, no pending: %r" % rows, (test_progress(quiet) or (0, None))[1], None)
+
     # Tests running and pending while a `test` build runs: targets in
     # Bazel's running list (a shard, a run, an attempt alike, each target
-    # once), the rest of those configured pending once analysed, the parts
-    # summing to the test targets.
-    t = _screen(ctx, ["x"], progress = ["[40 / 52] 4 actions running", "    Testing //t:s (shard 1 of 3); 2s darwin-sandbox", "    Testing //t:s (shard 2 of 3); 2s darwin-sandbox", "    Testing //t:r (run 2 of 3); 1s darwin-sandbox", "    Testing //t:a; 0s darwin-sandbox", "    Compiling x.cc; 1s darwin-sandbox"])
+    # once), the rest of the tests Bazel's status line says it runs pending
+    # once analysed, the parts summing to that total.
+    t = _screen(ctx, ["x"], progress = ["[40 / 52] 3 / 9 tests; 4 actions running", "    Testing //t:s (shard 1 of 3); 2s darwin-sandbox", "    Testing //t:s (shard 2 of 3); 2s darwin-sandbox", "    Testing //t:r (run 2 of 3); 1s darwin-sandbox", "    Testing //t:a; 0s darwin-sandbox", "    Compiling x.cc; 1s darwin-sandbox"])
     t["counts"].update(testing = True, tests_passed = 2, tests_failed = 1, test_targets = {"//t:%d" % i: True for i in range(9)})
     _eq("running and pending", test_progress(t), (3, 3))
     _eq("in words", _visible(tests_text(test_progress(t))), "─ 3 running · 3 pending")
@@ -1535,9 +1547,9 @@ def _impl(ctx: TaskContext) -> int:
     _eq("while it analyses, no pending", test_progress(dict(t, progress = ["Analyzing: 9 targets (1 packages loaded)", "[40 / 52] 4 actions running", "    Testing //t:a; 0s darwin-sandbox"])), (1, None))
     _eq("not a test build", test_progress(dict(t, counts = dict(t["counts"], testing = False))), None)
     _eq("nothing at the end", test_progress(dict(t, building = False)), None)
-    _eq("never more running than not finished", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 7))), (1, 0))
+    _eq("Bazel's total grows past what it said: running stays Bazel's, none pending", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 7))), (3, 0))
     _eq("a target with its result in is not running", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 3, test_finished = {"//t:a": True}))), (2, 3))
-    _eq("a scheduled one waits", test_progress(dict(t, progress = ["[40 / 52] 4 actions running", "    Testing //t:a; 0s darwin-sandbox", "    [Sched] Testing //t:b; 2s"])), (1, 5))
+    _eq("a scheduled one waits", test_progress(dict(t, progress = ["[40 / 52] 3 / 9 tests; 4 actions running", "    Testing //t:a; 0s darwin-sandbox", "    [Sched] Testing //t:b; 2s"])), (1, 5))
     metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
     if "2 · 1 from a cache (50%) · 1 run" not in metrics or "remote cache hit" not in metrics:
         fail("metrics: actions by the execution log:\n" + metrics)
@@ -1972,6 +1984,13 @@ def _impl(ctx: TaskContext) -> int:
         rec = {"kind": "test", "label": label, "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 412, "files": [("test.log", "file://" + path)]}
         rec.update(kw)
         return rec
+
+    # A flaky test (--flaky_test_attempts=2, r49m_flaky): failed 1 of the
+    # 2 attempts Bazel made, the passed one counted from its results.
+    flaky_rec = _t("//t:flaky", "/out/t/flaky/test.log", attempt = 1)
+    flaky_state = dict(kinds, fails = [flaky_rec], last_attempts = {("//t:flaky", "", 1, 1): 2}, test_counts = {}, spread = {})
+    _eq("failed 1 of 2 attempts", test_group(flaky_state, [flaky_rec])["details"], ["failed 1 of 2 attempts", "0.4s"])
+    _eq("without its results, of those it failed", test_group(dict(flaky_state, last_attempts = {}), [flaky_rec])["details"][0], "failed 1 of 1 attempt")
 
     # Failed counts rows, as the summary has entries: two tests failing 3
     # attempts each are 2, not 6.

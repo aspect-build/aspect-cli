@@ -3225,10 +3225,12 @@ def test_progress(state: dict):
     target once, not one with its result in: Bazel's list can lag it by a
     frame), at most the `--ui_actions_shown` Bazel lists (8 by default;
     the rest count as pending; `[Sched]` ones wait); pending, the tests
-    Bazel's status line says it runs (`3 / 9 tests`), else the test
-    targets configured, less those with a result (passed, failed, flaky, skipped,
-    or failed to build) and those running, None while Bazel analyses and
-    the test count is not known yet."""
+    Bazel's status line says it runs (`3 / 9 tests`, a total that grows
+    as Bazel finds test targets, so at least those finished and running)
+    less those with a result (passed, failed, flaky, skipped, or failed to
+    build) and those running, never below 0; None while Bazel analyses
+    and while its status line has given no test total (`--curses=no`
+    between its lines, `--noshow_progress`)."""
     c = state.get("counts") or {}
     if not state.get("building") or not c.get("testing"):
         return None
@@ -3241,21 +3243,19 @@ def test_progress(state: dict):
             if label not in done and label not in unbuilt:
                 labels[label] = True
     running = len(labels)
-    known = len(c.get("test_targets") or {})
 
-    # Bazel's own count of the tests it runs (`3 / 9 tests`) leaves out
-    # those a filter took out (`--test_tag_filters`), which are configured
-    # all the same.
+    # Only Bazel's own count of the tests it runs (`3 / 9 tests`) says
+    # what is pending: a filter (`--test_tag_filters`) takes out tests
+    # that are configured all the same, and its total grows as Bazel
+    # finds test targets, so never less than what is finished or running.
     progress = state.get("progress") or []
     at = status_row(progress)
     said = _tests_said(progress[at]) if at >= 0 else None
-    if said != None:
-        known = said
-    if build_progress(state)[2] or not known:
+    if build_progress(state)[2] or said == None:
         return (running, None) if running else None
     finished = c.get("tests_passed", 0) + c.get("tests_failed", 0) + c.get("tests_flaky", 0) + c.get("tests_skipped", 0)
-    running = min(running, max(0, known - finished))
-    return (running, known - finished - running)
+    total = max(said, finished + running)
+    return (running, max(0, total - finished - running))
 
 def action_split(state: dict) -> dict:
     """A build's actions by what became of each, for the bar, the Actions
@@ -6145,8 +6145,11 @@ def _is_gap(line: str) -> bool:
     """Whether `line` is an excerpt's count of lines it left out."""
     return line.startswith("… ") and line.endswith((" more line", " more lines"))
 
-def _attempts_text(n: int) -> str:
-    return _counts("failed %d of %d attempt", (n, n)) + ("" if n == 1 else "s")
+def _attempts_text(n: int, of = None) -> str:
+    """`failed 1 of 2 attempts`: `n` failed of `of` (all of them when
+    not known)."""
+    of = max(n, of or n)
+    return _counts("failed %d of %d attempt", (n, of)) + ("" if of == 1 else "s")
 
 def _seconds(ms: int) -> str:
     return "%d.%ds" % (ms // 1000, ms % 1000 // 100)
@@ -6467,14 +6470,19 @@ def test_group(state: dict, recs: list) -> dict:
     order = sorted(order)
     first = parts[order[0]]
     last = first[-1]
-    attempts = max([r.get("attempt", 1) for r in first] + [len(first)])
+    attempts = len(first)
+
+    # Every attempt Bazel made of that shard and run, the passed one of a
+    # flaky test too (`last_attempts`, from its test results).
+    tried = (state.get("last_attempts") or {}).get((label, recs[0].get("config", ""), order[0][1], order[0][0]), 0)
+    tried = max([tried, attempts] + [r.get("attempt", 1) for r in first])
     details = [named(order[0])] if named(order[0]) else []
     timed_out = last.get("status") == "timeout"
     ms = last.get("duration_ms", 0) or 0
     if timed_out:
         details.append("timed out" + (" after " + _seconds(ms) if ms else ""))
     else:
-        details.append(_attempts_text(attempts))
+        details.append(_attempts_text(attempts, tried))
         if ms >= 100:
             details.append(_seconds(ms))
     others = [(named(at), parts[at][-1]) for at in order[1:]]
