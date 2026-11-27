@@ -7,13 +7,16 @@ Run with:
 Each case in crates/aspect-cli/tests/testdata/failures (its README says how
 they are recorded) holds, per Bazel version and variant, the JSON build
 event stream, the console as a pty got it and the logs the events name.
-Every event goes through `collect_event` as the build event hooks see it,
-then `failure_summary` reads the console and the logs as it reads the
-history's copies, and `failure_rows` draws the Failures tab with every
-row's excerpt; the summary, the tab and the counts must agree on the
-failures and on Bazel's other errors, a passing build's too. Placeholders stand for the recording's paths: `${FIXTURE}`
-for the case's folder and `${OUTPUT_BASE}` for the files the events name,
-so the goldens hold no path of this machine. `--update` rewrites the
+Every event, read as the runtime reads a `--build_event_json_file`
+(`bazel.build_events.read(format = "json")`), goes through `collect_event`
+as the build event hooks see it, then `failure_summary` reads the console
+and the logs as it reads the history's copies, and `failure_rows` draws
+the Failures tab with every row's excerpt; the summary, the tab and the
+counts must agree on the failures and on Bazel's other errors, a passing
+build's too, and the actions' parts must add up to Bazel's last `[n / m]`.
+Placeholders stand for the recording's paths: `${FIXTURE}` for the case's
+folder and `${OUTPUT_BASE}` for the files the events name, so the goldens
+hold no path of this machine. `--update` rewrites the
 goldens; review the diff.
 """
 
@@ -33,69 +36,6 @@ action_split = dashboard_actions.action_split
 failure_rows = dashboard_render.failure_rows
 
 _FIXTURES = "crates/aspect-cli/tests/testdata/failures"
-
-# The fields Bazel's JSON gives as an enum's name, which the build event
-# hooks read as the runtime gives them: in lower case.
-_ENUM_FIELDS = ["status", "overall_status", "reason", "code"]
-
-# The suffixes of the int64 fields Bazel's JSON gives as a string of digits
-# (`"testAttemptDurationMillis": "209"`), which the runtime gives as an int.
-_INT64_SUFFIXES = ("_millis", "_ms", "_bytes", "_count", "_executed", "_created", "_size", "_nanos", "seconds", "_hits", "_misses", "_total", "_number")
-
-# The id kinds whose runtime name is not their JSON field's in snake case
-# (axl-proto's `Id::as_str_name`).
-_KINDS = {"started": "build_started", "pattern": "pattern_expanded", "patternSkipped": "pattern_skipped", "namedSet": "named_set_of_files", "workspace": "workspace_config"}
-
-def _snake(name: str) -> str:
-    """`primaryOutput` as the runtime names it: `primary_output`."""
-    out = ""
-    for i in range(len(name)):
-        c = name[i]
-        if c.isupper():
-            out += "_" + c.lower()
-        else:
-            out += c
-    return out
-
-def _value(name: str, value):
-    """A JSON value as the runtime gives a proto field of it."""
-    if type(value) == "dict":
-        return _message(value, name)
-    if type(value) == "list":
-        return [_value(name, v) for v in value]
-    if type(value) == "string" and name in _ENUM_FIELDS:
-        return value.lower()
-    if type(value) == "string" and (name.endswith(_INT64_SUFFIXES) or name == "count") and value.lstrip("-").isdigit():
-        return int(value)
-    return value
-
-def _message(fields: dict, name: str = ""):
-    """A JSON message as the runtime gives it: its fields by their snake
-    case names; a `File`'s `uri` also as its `file` oneof, a
-    `FailureDetail`'s category (`spawn`, `execution`, …) as `category`."""
-    out = {}
-    for k, v in fields.items():
-        out[_snake(k)] = _value(_snake(k), v)
-    if "uri" in out:
-        out["file"] = out["uri"]
-    if name == "failure_detail":
-        out["category"] = ([v for k, v in out.items() if k != "message"] + [None])[0]
-    return struct(**out)
-
-def _event(line: str):
-    """One line of Bazel's JSON build event stream as the build event hooks
-    get it: its id's kind, its id, its payload, its children and, as the
-    runtime tells it by the payload's type, whether that is Aborted."""
-    fields = json.decode(line)
-    kind = list(fields["id"].keys())[0]
-    body = [k for k in fields.keys() if k not in ("id", "children", "lastMessage")]
-    return struct(
-        kind = _KINDS.get(kind) or _snake(kind),
-        id = _message(fields["id"][kind]),
-        payload = _message(fields[body[0]]) if body else None,
-        payload_kind = "aborted" if body and body[0] == "aborted" else (body[0] if body else ""),
-        children = [struct(id = _message(list(c.values())[0])) for c in fields.get("children", [])],
-    )
 
 def _plain(ansi, text: str) -> str:
     """`text` without its escape sequences."""
@@ -121,11 +61,17 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     state = new_state(read = read, ansi = ansi, building = True)
     bep = folder + "/" + prefix + ".bep.json"
     if fs.exists(bep):
-        for line in fs.read_to_string(bep).split("\n"):
-            if line.strip():
-                # A log's URI names the recording's own file, so the runtime
-                # finds it on disk as in a build (`local_path`).
-                collect_event(state, _event(line.replace("file://${OUTPUT_BASE}/", "file://" + files + "/")))
+        # The events as the runtime reads a `--build_event_json_file`, each
+        # log's URI naming the recording's own file, so the runtime finds it
+        # on disk as in a build (`local_path`).
+        copy = "%s/aspect-failure-replay-%s-%s.bep.json" % (ctx.std.env.temp_dir(), case, prefix)
+        fs.write(copy, fs.read_to_string(bep).replace("file://${OUTPUT_BASE}/", "file://" + files + "/"))
+        events = bazel.build_events.read(copy, format = "json")
+        for event in events:
+            collect_event(state, event)
+        fs.remove_file(copy)
+        if events.error != None:
+            fail("%s/%s: %s" % (case, prefix, events.error))
     exit = fs.read_to_string(folder + "/" + prefix + ".exit").strip()
     code = int(exit) if exit.isdigit() else None
     console = "${FIXTURE}/" + prefix + ".console"

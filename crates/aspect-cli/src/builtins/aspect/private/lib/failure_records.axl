@@ -264,7 +264,7 @@ def collect_event(state: dict, event):
     the replay test: the invocation's own events (`_INVOCATION_KINDS`), the
     counts (`count_event`), the failures (`note_event`) and the root
     causes (`note_blocked`). An event is Aborted when its payload is (the
-    replay test's events say so as `payload_kind`)."""
+    fake events of the tests say so as `payload_kind`)."""
     kind = event.kind
     event_id, payload = bes_get(event, "id"), bes_get(event, "payload")
     aborted = (bes_get(event, "payload_kind") or type(payload)) == "aborted"
