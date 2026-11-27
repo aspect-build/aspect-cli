@@ -1165,7 +1165,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
                 "kind": "action",
                 "label": label,
                 "detail": "analysis failed",
-                "files": [("error", (str(_get(payload, "description", "") or "") or "(Bazel gave no description)", False))],
+                "files": [("error", (str(_get(payload, "description", "") or "") or ("its package has an error" if kind == "unconfigured_label" else "(Bazel gave no description)"), False))],
                 "output": "",
                 "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
                 "success": False,
@@ -1438,7 +1438,9 @@ def blocked_targets(state: dict) -> dict:
     the root is the target's whose error says it is missing (`missing
     input file '//a:x.txt'`, each target that says so), so what depends on
     that target is blocked by it; each such target, and one whose roots
-    are targets that never failed, failed itself. Decided from the failures so far, so a target
+    are targets that never failed, failed itself. A target of a package
+    one target's own error put in error is blocked by that target.
+    Decided from the failures so far, so a target
     Bazel reported before its root cause's failure counts once that
     comes; cached until they, the root causes or the kept errors
     change."""
@@ -1470,6 +1472,20 @@ def blocked_targets(state: dict) -> dict:
                 mapped += [o for o in owners if o not in mapped]
         if any([r in failed or r in roots or r in logged for r in mapped]):
             blocked[label] = mapped
+
+    # A package in error for one target's own error (`package contains
+    # errors: at: //at:t: expected value of type 'list(output)'`): its
+    # other failed targets are blocked by that one.
+    for e in errors:
+        header = e.get("header", "")
+        if not header.startswith("ERROR: package contains errors: "):
+            continue
+        pkg, _, said = header[len("ERROR: package contains errors: "):].partition(": ")
+        named = [l for l in header_labels(said) if l.partition("//")[2].partition(":")[0] == pkg]
+        if len(named) == 1 and named[0] in failed:
+            for label in failed:
+                if label != named[0] and label not in blocked and label.partition("//")[2].partition(":")[0] == pkg:
+                    blocked[label] = [named[0]]
     state["blocked_cache"] = (key, blocked)
     return blocked
 
@@ -6371,6 +6387,21 @@ def _makes(rec: dict, e: dict) -> bool:
     output = rec.get("output", "")
     return bool(path) and (output == path or output.endswith("/" + path))
 
+def _names_output(rec: dict, e: dict) -> bool:
+    """Whether what `e` says failed names the record's own output, by its
+    package path (Bazel 9's `Processing ov/d.1 failed` of
+    `bazel-out/…/bin/ov/d.1`) or whole (Bazel 7's), as a word: a progress
+    message that says it tells a target's actions apart where their errors
+    say alike."""
+    output = rec.get("output", "")
+    at = output.find("/bin/")
+    path = output[at + len("/bin/"):] if at >= 0 else ""
+    what = _failed_action(e.get("header", "")).rpartition(": ")[2]
+    for c in ["'", "\"", "(", ")", ","]:
+        what = what.replace(c, " ")
+    words = what.split(" ")
+    return bool(path) and (path in words or output in words)
+
 def _says_name(rec: dict, e: dict) -> bool:
     """Whether an error naming no target says the record's target's name
     as a word of what failed (`Checking d0 failed: …` of `//mc:d0`)."""
@@ -6433,7 +6464,8 @@ def action_errors(state: dict) -> dict:
     and its `(Exit N)` is not another than the record's exit code (a
     record whose command exited 0, or ran none, takes no error with one). A
     record and a candidate pair, rule by rule, when the error says the
-    record's output was not created (`_makes`), else when the lines of the
+    record's output was not created (`_makes`), else when what it says
+    failed names that output (`_names_output`), else when the lines of the
     error's body that no rival error's body has (escapes and CRs left out,
     a line cut with `…` the text before it) are in the record's own kept
     log (`_plain_text`), else when the source it compiled is the record's
@@ -6545,6 +6577,7 @@ def action_errors(state: dict) -> dict:
                     pair(i, j)
 
     by(lambda i, j: _makes(state["fails"][i], errors[j]))
+    by(lambda i, j: _names_output(state["fails"][i], errors[j]))
     by(lambda i, j: bool(text[i]) and any([l in text[i] for l in distinct[j]]))
     by(lambda i, j: _compiles(state["fails"][i], errors[j]))
     by(lambda i, j: bool(own[i]) and errors[j].get("log") == own[i])
@@ -6645,14 +6678,21 @@ def _entry_lines(e: dict) -> list:
     return out
 
 def _folded(entries: list) -> list:
-    """`entries` with each whose every excerpt line is in another's (an
-    error of no target, or of the same target, said again in passing: an
-    attribute default's `no such package`, an aspect's `fail()` beside its
-    target's action) folded into that one, its blocked targets with it."""
+    """`entries` with each that has no failed record of its own (an error
+    no target owns, an analysis repeat) and whose every excerpt line is in
+    another's, of no target or the same one, folded into that one, its
+    blocked targets with it: an attribute default's `no such package` said
+    twice. Two entries each of its own record (a target's two actions that
+    say alike) never fold."""
     lines = [_entry_lines(e) for e in entries]
     gone = {}
     for a in range(len(entries)):
         if not lines[a]:
+            continue
+
+        # An entry of a failed record of its own (an action, a test) is
+        # never folded: two actions of one target may say alike.
+        if entries[a]["group"] != 0:
             continue
         for b in range(len(entries)):
             if a == b or b in gone or (entries[a]["label"] and entries[a]["label"] != entries[b]["label"]):
@@ -6738,7 +6778,12 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
       Bazel's preamble left out, two lines of a timed-out one, each other
       failed shard or run a line; a log only in the remote cache says so;
       a flaky test none;
-    - any other failure: Bazel's error and its body.
+    - a package in error: its own error (one of its targets' heads it,
+      the package's other targets blocked under it);
+    - any other failure: Bazel's error and its body;
+    - none of these though Bazel exited non-zero (`bazel_exit`): `✗ Bazel
+      exited N`, the raw log's last `ERROR:` lines, else, a crashed
+      server's, its last lines but progress.
 
     Past `_SUMMARY_MAX` entries `… and N more failures · aspect history
     show <id>`; then the counts, Bazel's raw log (`log_path`), and where
@@ -6892,6 +6937,22 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             pkg = build.rpartition("/")[0]
             if pkg not in broken and not [r for r in state["fails"] if r["kind"] == "action" and r.get("detail") != "analysis failed" and _unlabelled_in(e, r["label"], workspace)]:
                 broken[pkg] = k
+
+    # Bazel's `package contains errors: <pkg>: …` says so of a package
+    # whose own error names a target of it (`//at:t: expected value of
+    # type 'list(output)'`): that error heads it.
+    for e in errors:
+        header = e.get("header", "")
+        if header.startswith("ERROR: package contains errors: "):
+            pkg = header[len("ERROR: package contains errors: "):].partition(":")[0]
+            if pkg in broken:
+                continue
+            for k, f in enumerate(errors):
+                location = error_parts(f.get("header", ""))[0]
+                build = location.rpartition(":")[0].rpartition(":")[0] if location.count(":") >= 2 else ""
+                if not used[k] and build in (pkg + "/BUILD", pkg + "/BUILD.bazel", "BUILD", "BUILD.bazel") and (pkg or "/" not in build) and not _failed_action(f.get("header", "")):
+                    broken[pkg] = k
+                    break
     groups = {}
     for i, rec in enumerate(state["fails"]):
         pkg = rec["label"].partition("//")[2].partition(":")[0]
@@ -6917,7 +6978,13 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
                 if not again:
                     found.append((j, e))
         details, lines, _ = from_errors(found)
-        entries.append(dict(entry(0, k, "//" + pkg, "analysis", details, lines, ""), blocked = stopped))
+
+        # Headed by an error of one of its targets, the entry is that
+        # target's, the package's other roots blocked under it.
+        named = [l for l in header_labels(errors[k].get("header", "")) if l.partition("//")[2].partition(":")[0] == pkg]
+        title = named[0] if len(named) == 1 else "//" + pkg
+        others = [r["label"] for r in groups.get(pkg, []) if r["label"] != title] if title != "//" + pkg else []
+        entries.append(dict(entry(0, k, title, "analysis", details, lines, ""), blocked = others + [l for l in stopped if l not in others]))
     for i, rec in enumerate(state["fails"]):
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"].partition("//")[2].partition(":")[0] in groups:
             continue
@@ -6982,7 +7049,13 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
     # A failed build always says why: with nothing else to list, Bazel's
     # last `ERROR:` lines in its raw log.
     if not entries and bazel_exit not in (None, 0):
-        said = [l[len("ERROR: "):] for l in _plain_text(state, _tail_text(state, log_path) or "").split("\n") if l.startswith("ERROR: ")]
+        tail = [l for l in _plain_text(state, _tail_text(state, log_path) or "").split("\n") if l.strip()]
+        said = [l[len("ERROR: "):] for l in tail if l.startswith("ERROR: ")]
+
+        # No `ERROR:` (the server crashed): Bazel's last lines but its
+        # progress (`Server terminated abruptly`, `FATAL: …`).
+        if not said:
+            said = [l for l in tail if not l.startswith(("[", "INFO: ", "Loading", "Analyzing", "Computing", "  "))]
         entries.append(entry(0, 0, "", "Bazel exited %d" % bazel_exit, [], said[-_EXCERPT_LINES:], log_path))
 
     out = []

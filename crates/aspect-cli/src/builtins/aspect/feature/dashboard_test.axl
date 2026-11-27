@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -2651,6 +2651,77 @@ def _impl(ctx: TaskContext) -> int:
     ], kept_errors = {"errors": asp_errs, "distinct": 3}, read = None, build = None)
     got = [_visible(l) for l in failure_summary(asp, {"errors": asp_errs, "distinct": 3}, "t-9", False)]
     _eq("an aspect's fail(): one entry", [l for l in got if l.startswith("✗") or l.startswith("──")][:2], ["── Failures (1) ──", "✗ //asp:x  Genrule · asp/BUILD.bazel:1:8"])
+
+    # ws/ov (Bazel 9.3.3): //ov:c's two actions say `error: x` and `error: x
+    # is bad`, //ov:d's two `same line`, g1 and g2 `error: shared`: six
+    # failed actions, six entries, six rows in the tab, `Failed ✗ 6`.
+    ov_errs = []
+    ov_recs = []
+    for name, line, out, code, said in [("g2", 11, "g2.txt", 1, "error: shared"), ("g1", 10, "g1.txt", 1, "error: shared"), ("d", 6, "d.0", 2, "same line"), ("c", 2, "c.0", 1, "error: x"), ("d", 6, "d.1", 2, "same line"), ("c", 2, "c.1", 1, "error: x is bad")]:
+        what = ("Executing genrule //ov:%s" % name) if name.startswith("g") else ("Processing ov/%s" % out)
+        ov_errs.append({"header": "ERROR: ov/BUILD.bazel:%d:%d: %s failed: (Exit %d)" % (line, 8 if name.startswith("g") else 4, what, code), "body": [said], "log": None, "label": None, "target": "//ov:" + name})
+        ov_recs.append(_act("//ov:" + name, "Genrule" if name.startswith("g") else "Proc", "bazel-out/bin/ov/" + out, code))
+    ov_logs = {"/h/ov/%d.stderr" % k: ov_errs[k]["body"][0] + "\n" for k in range(6)}
+    ov_kept = {ov_recs[k]["output"]: {"stderr": "/h/ov/%d.stderr" % k} for k in range(6)}
+    ov_got, ov_tab = _entries(ov_recs, ov_errs, ov_logs, ov_kept)
+    ov = dict(kinds, counts = dict(new_counts(), failures = ["//ov:g2", "//ov:g1", "//ov:d", "//ov:c"], failed_labels = {}, failed = 4), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = ov_recs, kept_errors = {"errors": ov_errs, "distinct": 6}, read = None, build = None, building = False, ended = True)
+
+    # The summary's entries, the Failures tab's rows and the Results'
+    # `Failed ✗ N`: one count.
+    def _agree(name, st, want):
+        errs = st["kept_errors"]
+        summary = [l for l in [_visible(l) for l in failure_summary(dict(st, action_errors_cache = None, listed_cache = None, blocked_cache = None), errs, "t-9", False)] if l.startswith("✗")]
+        tab = [r for r in [_visible(r).rstrip() for r in failure_rows(dict(st, action_errors_cache = None, listed_cache = None, blocked_cache = None, focus = "console", selected = 0, excerpts = {}), 40, 120)] if r.startswith("✗")]
+        said = [l for l in _visible(render(dict(st, action_errors_cache = None, listed_cache = None, blocked_cache = None), 140, 40)).split("\n") if "Failed   ✗" in l]
+        _eq(name + ": summary, tab and Failed agree", (len(summary), len(tab), ("Failed   ✗ %d" % want) in said[0] if said else False), (want, want, True))
+
+    _agree("ov", ov, 6)
+    ov7 = [dict(e, header = e["header"].replace("Processing ov/", "Processing bazel-out/darwin_arm64-fastbuild/bin/ov/")) for e in ov_errs]
+    ov7_recs = [dict(r, output = r["output"].replace("bazel-out/bin/", "bazel-out/darwin_arm64-fastbuild/bin/")) for r in ov_recs]
+    ov7_kept = {r["output"]: ov_kept[o["output"]] for r, o in zip(ov7_recs, ov_recs)}
+    got, _ = _entries(ov7_recs, ov7, ov_logs, ov7_kept)
+    _eq("Bazel 7 names the whole output", len([e for e in got if e[0].endswith("ov/BUILD.bazel:6:4")]), 2)
+    _agree("ms2", dict(ms, building = False, ended = True), 2)
+    pair_errs = []
+    pair_recs = []
+    pair_logs = {}
+    pair_kept = {}
+    for name, one, two in [("plain", "plain one broke", "plain two broke"), ("ansi", "\x1b[31merror:\x1b[0m ansi one broke", "\x1b[31merror:\x1b[0m ansi two broke"), ("crlf", "crlf one broke\r", "crlf two broke\r"), ("same", "identical text", "identical text")]:
+        for k, said, code in [(0, one, 2), (1, two, 3)]:
+            output = "bazel-out/bin/pair/%s.%d" % (name, k)
+            pair_errs.append({"header": "ERROR: pair/BUILD.bazel:2:5: Running %s %d failed: (Exit %d)" % (name, k, code), "body": [said], "log": None, "label": None, "target": "//pair:" + name})
+            pair_recs.append(_act("//pair:" + name, "Pair", output, code))
+            pair_logs["/h/pair/%s/%d.stderr" % (name, k)] = said + "\n"
+            pair_kept[output] = {"stderr": "/h/pair/%s/%d.stderr" % (name, k)}
+    pair_got, _ = _entries(pair_recs, pair_errs, pair_logs, pair_kept)
+    _eq("pair: each action its own entry", len(pair_got), 8)
+    _agree("pair", dict(kinds, counts = dict(new_counts(), failures = ["//pair:plain", "//pair:ansi", "//pair:crlf", "//pair:same"], failed_labels = {}, failed = 4), root_causes = {}, logged_index = None, fails = pair_recs, read = lambda p, n: (pair_logs[p], 0) if p in pair_logs else None, build = struct(kept_action_log = lambda output: pair_kept.get(output, {})), kept_errors = {"errors": pair_errs, "distinct": 8}, excerpts = {}, ansi = ctx.std.re.compile(ANSI), building = False, ended = True), 8)
+    _eq("each its own exit and line", sorted([e[0] for e in ov_got]), sorted(["✗ //ov:%s  %s · exit %d · ov/BUILD.bazel:%d:%d" % (n, "Genrule" if n.startswith("g") else "Proc", c, l, 8 if n.startswith("g") else 4) for n, l, c in [("g2", 11, 1), ("g1", 10, 1), ("d", 6, 2), ("c", 2, 1), ("d", 6, 2), ("c", 2, 1)]]))
+
+    # ws/at (Bazel 9.3.3): //at:t's attribute type error puts its package in
+    # error, so //at:ok fails with it: //at:t's entry, //at:ok blocked.
+    at_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"notalist.txt\" (string)",
+        "ERROR: at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule",
+        "ERROR: package contains errors: at: //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"notalist.txt\" (string)",
+    ]]
+    at = dict(kinds, counts = new_counts(), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": at_errs, "distinct": 3}, read = None, build = None)
+    for label in ("//at:t", "//at:ok"):
+        note_event(at, "unconfigured_label", struct(label = label), struct(), True)
+    got = [_visible(l) for l in failure_summary(at, {"errors": at_errs, "distinct": 3}, "t-9", False)]
+    _eq("its package in error: blocked under the target whose error it is", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked:" in l], ["── Failures (1) ──", "✗ //at:t  analysis · at/BUILD.bazel:1:8", "  ○ blocked: //at:ok"])
+    _eq("alone, it says its package has an error", at["fails"][1]["files"][0][1][0], "its package has an error")
+    at["counts"]["failed_labels"] = {"//at:t": True, "//at:ok": True}
+    at["counts"]["failures"] = ["//at:t", "//at:ok"]
+    at["counts"]["failed"] = 2
+    at["blocked_cache"] = None
+    got = [_visible(l) for l in failure_summary(dict(at, listed_cache = None), {"errors": at_errs, "distinct": 3}, "t-9", False)]
+    _eq("its counts: one failed, one blocked", (summary_counts(at), [l for l in got if "blocked:" in l]), ("0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed", ["  ○ blocked: //at:ok"]))
+
+    # The server crashed (oomws: -Xmx24m): no `ERROR:`, Bazel's last lines.
+    oom = dict(flag, read = lambda p, n: ("INFO: Invocation ID: 4077f502\nAnalyzing: 3000 targets (5 packages loaded, 6 targets configured)\n\nServer terminated abruptly (error code: 14, error message: 'Socket closed', log file: '/h/server/jvm.out')\n", 0) if p == "/h/console.log" else None)
+    got = [_visible(l) for l in failure_summary(oom, None, "t-9", False, "/h/console.log", bazel_exit = 33)]
+    _eq("a crash says Bazel's last words", (got[1], got[2].startswith("  │ Server terminated abruptly (error code: 14")), ("✗ Bazel exited 33", True))
 
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.

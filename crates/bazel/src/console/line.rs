@@ -306,9 +306,11 @@ pub struct Classifier {
     /// bazel holds until it ends with a newline and flushes only after
     /// drawing its progress, before its next event.
     maybe_tail: bool,
-    /// Bazel has written a line in its colours: before one, an `ERROR:`
-    /// without colour is its own (Bazel 7 parses its flags before it
-    /// colours anything: `ERROR: --nosuch_flag :: Unrecognized option`).
+    /// The console's leading run of messages without colour (`ERROR:`,
+    /// `INFO:`) is over: those are bazel's own (Bazel 7 parses its flags
+    /// before it colours anything: `ERROR: --nosuch_flag :: Unrecognized
+    /// option`, then `INFO: Invocation ID: …`); the first other line, or
+    /// one in bazel's colours, ends it.
     coloured_yet: bool,
 }
 
@@ -334,7 +336,11 @@ impl Classifier {
         let inside = self.in_action_output || self.streamed;
         let mut was_tail = false;
         let label = BAZEL_LABEL.is_match(record)
-            || (!self.coloured_yet && !inside && record.starts_with(b"ERROR: "));
+            || (!self.coloured_yet && !inside && !record.contains(&0x1b) && HEADER.is_match(&text));
+        // Only the leading run of them: the first other line ends it.
+        if !label || BAZEL_LABEL.is_match(record) {
+            self.coloured_yet = true;
+        }
         let count = BAZEL_COUNT.is_match(record);
         self.coloured_yet |= BAZEL_LABEL.is_match(record) || count || BAZEL_PHASE.is_match(record);
         let phase = !self.in_action_output && BAZEL_PHASE.is_match(record);
@@ -611,17 +617,25 @@ pub(crate) mod tests {
             kinds(&["INFO: x", "~ERROR: a tool's"]),
             [Kind::Header, Kind::Other]
         );
+        assert_eq!(
+            kinds(&[
+                "~ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here",
+                "~INFO: Invocation ID: 3f2"
+            ]),
+            [Kind::Header, Kind::Header]
+        );
     }
 
     #[test]
     fn without_colour_nothing_is_a_message() {
         assert_eq!(
             kinds(&[
+                "~Starting local Bazel server and connecting to it...",
                 "~WARNING: plain",
                 "~INFO: plain",
                 "~\x1b[0mERROR: a reset is not a colour"
             ]),
-            [Kind::Other, Kind::Other, Kind::Other]
+            [Kind::Other, Kind::Other, Kind::Other, Kind::Other]
         );
     }
 
