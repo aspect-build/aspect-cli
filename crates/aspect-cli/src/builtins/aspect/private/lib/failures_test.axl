@@ -24,7 +24,7 @@ def _ended(ctx, events: list, console: str):
     state = failures.new_state(lambda path, n: None, None, ctx.std.re.compile(term_text.ANSI))
     for e in events:
         failures.collect_event(state, e)
-    state.update(building = False, bazel_errors = bazel.output.bazel_errors(console))
+    state.update(building = False, collected_errors = bazel.output._collected_errors(console))
     return state
 
 def _error(text: str) -> str:

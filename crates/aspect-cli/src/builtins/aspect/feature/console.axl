@@ -303,7 +303,7 @@ def _console_impl(ctx: FeatureContext):
             return
         state = summary[0] or _fresh(task_ctx)
         state["build"] = build
-        state["bazel_errors"] = build.output_bazel_errors()
+        state["collected_errors"] = build.output_collected_errors()
         state["cancelling"] = task_ctx.cancellation.root.cancelled
         err = task_ctx.std.io.stderr
         size = task_ctx.std.term.size() if err.is_tty else None

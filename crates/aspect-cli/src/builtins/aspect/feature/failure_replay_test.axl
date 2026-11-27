@@ -130,14 +130,14 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     # The console as the CLI's stage keeps it: a recording's own pty, its
     # stdout there too for the `merged` variant.
     raw = fs.read_to_string(folder + "/" + prefix + ".console") if fs.exists(folder + "/" + prefix + ".console") else ""
-    state.update(building = False, ended = True, bazel_errors = bazel.output.bazel_errors(raw, stdout = prefix.endswith(".merged")))
+    state.update(building = False, ended = True, collected_errors = bazel.output._collected_errors(raw, stdout = prefix.endswith(".merged")))
 
     # Bazel's last `[n / m]`, as the Dashboard's last frame notes it.
     last = bep_progress(raw)
     if last:
         state["done_total"] = (last[0], last[1], False)
     if ctx.args.blocks:
-        for b in (state["bazel_errors"] or {}).get("blocks") or []:
+        for b in (state["collected_errors"] or {}).get("blocks") or []:
             print("%s/%s %s %r" % (case, prefix, b["kind"], b["text"][:1500]))
     out = ["exit " + exit]
     summary = [_plain(ansi, l) for l in failure_summary(state, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]

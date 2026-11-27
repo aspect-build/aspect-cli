@@ -306,7 +306,7 @@ def _n_of_m(text: str) -> bool:
 def console_ties(state: dict) -> dict:
     """What Bazel's console adds to the failure entries, by exact ties
     alone, once the build has ended: from the blocks a `collect_errors()`
-    stage kept as Bazel wrote them (`bazel_errors`: each of Bazel's
+    stage kept as Bazel wrote them (`collected_errors`: each of Bazel's
     `ERROR:` messages, each action's `INFO: From` header with its body's
     length and last line, each record that may be an output's held last
     line), however long the console was. An action's `INFO: From` output
@@ -323,7 +323,7 @@ def console_ties(state: dict) -> dict:
     index and by label, Bazel's other errors, and the bytes of Bazel's
     errors the stage's caps left out. Nothing before the build ends, or
     without the stage."""
-    kept = state.get("bazel_errors")
+    kept = state.get("collected_errors")
     key = (len(state["fails"]), len((kept or {}).get("blocks") or []), bool(state.get("building")))
     cached = state.get("ties_cache")
     if cached != None and cached[0] == key:

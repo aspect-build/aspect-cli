@@ -481,7 +481,7 @@ def new_state(read = None, bb_root = None, ansi = None) -> dict:
         bb_root = bb_root,
         ansi = ansi,
         build = None,
-        bazel_errors = None,
+        collected_errors = None,
         fails = [],
         outputs = [],
         counts = new_counts(),

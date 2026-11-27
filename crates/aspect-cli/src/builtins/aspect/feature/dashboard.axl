@@ -179,7 +179,7 @@ def fold_build(state: dict, now_ms: int):
     ))
 
 # What a folded build keeps for its tabs.
-_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path", "bazel_errors"]
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path", "collected_errors"]
 
 # How long the finished screen waits for a key while nothing on it moves.
 _IDLE_MS = 1000
@@ -417,7 +417,7 @@ def _end(state: dict, task_ctx, build):
     # Bazel's raw console, and what of it the failure summary and the
     # Failures list tie Bazel's lines from (`console_ties`).
     state["log_path"] = build.output_log or ""
-    state["bazel_errors"] = build.output_bazel_errors()
+    state["collected_errors"] = build.output_collected_errors()
     screen = state["screen"]
     if screen == None or not screen.held:
         return
