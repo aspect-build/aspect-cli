@@ -1960,6 +1960,13 @@ def _impl(ctx: TaskContext) -> int:
         rec.update(kw)
         return rec
 
+    # Failed counts rows, as the summary has entries: two tests failing 3
+    # attempts each are 2, not 6.
+    attempts = [_t("//t:%s" % n, "/out/t/%s/test.log" % n, attempt = k) for n in ("x", "y") for k in (1, 2, 3)]
+    counted = dict(kinds, fails = attempts, counts = dict(new_counts(), failures = ["//t:x", "//t:y"], failed_labels = {"//t:x": True, "//t:y": True}, tests_failed = 2), test_counts = {}, spread = {}, listed_cache = None, logged_index = None, blocked_cache = None, root_causes = {}, building = False, ended = True)
+    drawn = _visible(render(counted, 140, 30))
+    _eq("Failed counts rows, not attempts", ("Failed   ✗ 2" in drawn, "Failures ✗2" in drawn), (True, True))
+
     tests = dict(kinds, kept_errors = None, read = lambda p, n: (logs[p], 0) if p in logs else None, counts = new_counts(), root_causes = {}, fails = [
         _t("//t:fails", "/out/t/fails/test.log"),
         _t("//t:s", "/out/t/s/shard_3_of_3/test.log", shard = 3),
@@ -2327,6 +2334,26 @@ def _impl(ctx: TaskContext) -> int:
         ("✗ //xn:d  Check · xn/BUILD.bazel:5:4", ["output 'xn/d.out' was not created", "not all outputs were created or valid"]),
     ])
     _eq("and the tab alike", tab, [e[0] for e in got])
+
+    # ws/an (Bazel 9.3.3, --keep_going): //an:missing's source is missing,
+    # and //an:dep, which Bazel gives the same root (`//an:nope.txt`), is
+    # blocked by it; //an:badlabel's dependency `//nowhere:x` fails
+    # analysis, said twice, once at the BUILD line: one entry.
+    an_errs = [
+        {"header": "ERROR: an/BUILD.bazel:1:8: Executing genrule //an:missing failed: missing input file '//an:nope.txt'", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: an/BUILD.bazel:1:8: Executing genrule //an:missing failed: 1 input file(s) do not exist", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere"], "log": None, "label": None, "target": None},
+        {"header": "ERROR: an/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere and referenced by '//an:badlabel'"], "log": None, "label": None, "target": None},
+    ]
+    an = dict(kinds, counts = dict(new_counts(), failures = ["//an:missing", "//an:dep"], failed_labels = {"//an:missing": True, "//an:dep": True}, failed = 2, failed_roots = {"//nowhere:x": True}), root_causes = {"//an:missing": ["//an:nope.txt"], "//an:dep": ["//an:nope.txt"], "//an:badlabel": ["//nowhere:x"]}, logged_index = None, blocked_cache = None, fails = [{"kind": "action", "label": "//nowhere:x", "detail": "analysis failed", "files": [("error", ("no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nowhere", False))], "output": "", "success": False}], kept_errors = {"errors": an_errs, "distinct": 4}, read = None, build = None)
+    got = [_visible(l) for l in failure_summary(an, {"errors": an_errs, "distinct": 4}, "t-9", False)]
+    _eq("the missing source's target, its dependent blocked by it; the analysis root once", [l for l in got if l.startswith("✗") or "blocked" in l], [
+        "✗ //an:missing  an/BUILD.bazel:1:8",
+        "  ○ blocked: //an:dep",
+        "✗ //nowhere:x  analysis · an/BUILD.bazel:3:8",
+        "  ○ blocked: //an:badlabel",
+        "0 built, 1 failed, 2 blocked · 0 tests passed, 0 failed",
+    ])
 
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.

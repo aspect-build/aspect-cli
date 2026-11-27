@@ -1432,20 +1432,37 @@ def blocked_targets(state: dict) -> dict:
     """The targets not built for a failed dependency, by label, each with its
     root causes: one with a root cause that failed in this build (a failed
     target, a dependency that failed analysis though not asked for, or one
-    with a failed action listed). One whose roots are a
-    source file (one missing) or targets that never failed failed itself.
-    Decided from the failures so far, so a target Bazel reported before its
-    root cause's failure counts once that comes; cached until they or the
-    root causes change."""
+    with a failed action listed). A missing source file Bazel names as
+    the root is the target's whose error says it is missing (`missing
+    input file '//a:x.txt'`), so what depends on that target is blocked
+    by it; the target itself, and one whose roots are targets that never
+    failed, failed itself. Decided from the failures so far, so a target
+    Bazel reported before its root cause's failure counts once that
+    comes; cached until they, the root causes or the kept errors
+    change."""
     causes = state.get("root_causes") or {}
     failed = state["counts"]["failed_labels"]
     roots = state["counts"].get("failed_roots") or {}
     logged = logged_index(state)["logged"]
-    key = (len(causes), len(failed), len(roots), len(logged))
+    errors = list((state.get("kept_errors") or {}).get("errors", []) or [])
+    key = (len(causes), len(failed), len(roots), len(logged), len(errors))
     cached = state.get("blocked_cache")
     if cached != None and cached[0] == key:
         return cached[1]
-    blocked = {label: rs for label, rs in causes.items() if any([r in failed or r in roots or r in logged for r in rs])}
+    owner = {}
+    for e in errors:
+        header = e.get("header", "")
+        at = header.find("missing input file '")
+        named = [l for l in header_labels(header[:at]) if l] if at >= 0 else []
+        target = e.get("target") or (named[0] if named else "")
+        if at >= 0 and target:
+            owner[header[at + len("missing input file '"):].partition("'")[0]] = target
+    blocked = {}
+    for label, rs in causes.items():
+        mapped = [owner.get(r, r) for r in rs]
+        mapped = [r for r in mapped if r != label]
+        if any([r in failed or r in roots or r in logged for r in mapped]):
+            blocked[label] = mapped
     state["blocked_cache"] = (key, blocked)
     return blocked
 
@@ -4359,11 +4376,16 @@ def target_counts(state: dict):
     return (c["built"], max(0, c["failed"] - counted), len(blocked))
 
 def _failure_counts(state: dict):
-    """`(failed, blocked)`: targets and tests that failed themselves, and
-    targets not built for a failed dependency."""
+    """`(failed, blocked)`: the Failures list's rows of what failed itself
+    (a failed action, a failed test once however many attempts, shards
+    and runs, a flaky one none, a target failed with no log), as the
+    failure summary has its entries, and targets not built for a failed
+    dependency."""
     blocked = len(blocked_targets(state))
     index = logged_index(state)
-    failed = len(state["fails"]) + len(state["counts"]["failures"]) - index["both"] - blocked
+    fails = state["fails"]
+    rows = len([i for i in listed_failures(state) if not _flaky(state, fails[i])])
+    failed = rows + len(state["counts"]["failures"]) - index["both"] - blocked
     return (max(0, failed), blocked)
 
 # A heading in the Metrics and Invocation tabs.
@@ -6541,6 +6563,19 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
     for i, rec in enumerate(state["fails"]):
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed":
             found = claim(rec["label"])
+
+            # The error that says what the analysis did (`no such package
+            # 'nowhere'`, at the BUILD file that referenced it) is this
+            # root cause's, not an entry of its own.
+            said = str(rec["files"][0][1][0] if rec["files"] else "").partition("\n")[0][:60]
+            if not found and said:
+                for k, e in enumerate(errors):
+                    if not used[k] and error_parts(e.get("header", ""))[2].startswith(said):
+                        used[k] = True
+                        found.append((k, e))
+
+                # Its location first, the text once.
+                found = sorted(found, key = lambda f: not error_parts(f[1].get("header", ""))[0])[:1]
             details, lines, log = from_errors(found)
             if not lines:
                 text = rec["files"][0][1][0] if rec["files"] else ""
