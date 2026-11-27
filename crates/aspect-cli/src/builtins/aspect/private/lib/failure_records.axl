@@ -2,7 +2,7 @@
 counts, every failed action, test and target with its logs, and the root
 causes that block other targets."""
 
-load("./bazel_results.axl", "bes_get", "uri_to_path_under_root")
+load("./bazel_results.axl", "bes_get", "testlog_path", "testlogs_dir", "testlogs_rel", "uri_to_path_under_root")
 load("./term_text.axl", "term_text")
 
 _counts = term_text.counts
@@ -152,25 +152,15 @@ def local_test_logs(state: dict, record: dict) -> list:
     run counts) and which attempt was last come from the test's summary,
     sent after its last attempt: before it, no path, rather than a guess
     that could name an older build's log."""
-    root = state["exec_root"]
-    out = state["output_dirs"].get(record["config"], "")
-    label = record["label"].lstrip("@")
     key = (record["label"], record["config"])
-    if not root or not out or key not in state["test_counts"] or "//" not in label or ":" not in label.partition("//")[2]:
+    logs = testlogs_dir(state["exec_root"], state["output_dirs"].get(record["config"], ""), record["label"])
+    if not logs or key not in state["test_counts"]:
         return []
-    repo, _, rest = label.partition("//")
-    package, _, name = rest.partition(":")
-    path = root + "/bazel-out/" + out + "/testlogs" + ("/external/" + repo if repo else "")
-    for part in (package + "/" + name).split("/"):
-        if part:
-            path += "/" + part
     runs, shards = state["test_counts"][key]
     run, shard, attempt = record["run"], record["shard"], record["attempt"]
-    sub = (["shard_%d_of_%d" % (shard, shards)] if shards > 1 else []) + (["run_%d_of_%d" % (run, runs)] if runs > 1 else [])
-    if sub:
-        path += "/" + "_".join(sub)
     last = state["last_attempts"].get((record["label"], record["config"], run, shard), attempt)
-    return [path + ("/test_attempts/attempt_%d.log" % attempt if attempt < last else "/test.log")]
+    path = testlog_path(logs, run, shard, attempt, runs, shards, attempt >= last, "log")
+    return [path] if path else []
 
 def log_paths(state: dict, record: dict, uri) -> list:
     """Where a log named by `uri` may be on disk, likeliest first: a
@@ -292,25 +282,13 @@ def _test_runner(record: dict) -> bool:
     """Whether `record` is a test's own failed action (`TestRunner`)."""
     return record["kind"] == "action" and record["detail"] == "TestRunner"
 
-def _testlogs_dir(label: str):
-    """`<package>/<name>` under `testlogs/` for a test's label, with an
-    external repository's `external/<repo>/` first; None for a label it
-    can't read."""
-    label = label.lstrip("@")
-    if "//" not in label or ":" not in label.partition("//")[2]:
-        return None
-    repo, _, rest = label.partition("//")
-    package, _, name = rest.partition(":")
-    parts = (["external", repo] if repo else []) + [p for p in package.split("/") if p] + [name]
-    return "/".join(parts)
-
 def _runner_place(record: dict):
     """The run and shard a `TestRunner` action ran, `(run, shard)`, from the
     one folder its output (always that run's `test.log`) has after
     `testlogs/<package>/<name>/`: `shard_<s>_of_<n>` and `run_<r>_of_<m>`,
     either or both (`shard_1_of_2_run_2_of_2`), 1 for one not named; None
     where its output is no such test log."""
-    own = _testlogs_dir(record["label"])
+    own = testlogs_rel(record["label"])
     marker = "/testlogs/" + own + "/" if own else None
     out = "/" + record.get("output", "")
     if marker == None or marker not in out:
