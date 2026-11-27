@@ -221,9 +221,8 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
-    /// [`report::RecapErrors`] of every error, kept for the task's
-    /// failure summary ([`processors::Observations::errors`]) rather than
-    /// written: the summary prints them, and names the raw log itself.
+    /// No recap: the task's failure summary tells Bazel's errors, and names
+    /// the raw log itself ([`report::Summary::log_named_elsewhere`]).
     ErrorsForSummary,
     /// [`processors::CollapseRepeats`].
     CollapseRepeats,
@@ -395,15 +394,6 @@ impl Config {
         self
     }
 
-    /// The workspace and the directory the task runs from, as linking has
-    /// them ([`Config::link_from`]), the second the first when they are one.
-    fn link_bases(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-        let bases = self.links.as_ref()?;
-        let workspace = bases.first()?.clone();
-        let cwd = bases.get(1).cloned().unwrap_or_else(|| workspace.clone());
-        Some((workspace, cwd))
-    }
-
     /// This config linking a relative path from `root`, the workspace a
     /// build runs in, before the directory the task runs from (the last of
     /// [`Config::links`]), each directory tried once.
@@ -524,7 +514,6 @@ impl Config {
     /// channel and raw log.
     pub fn pipeline(&self) -> Pipeline {
         let pty = self.shows_curses();
-        let kept_logs = forward::KeptLogs::default();
         let observations = Arc::new(Observations::default());
         let stats = Arc::new(Stats::default());
         let written = links::WrittenCount::default();
@@ -601,15 +590,10 @@ impl Config {
                 ),
                 Stage::Drop(patterns) => Box::new(DropLines::new(patterns, pty, stats.clone())),
                 Stage::RecapErrors { max, after } => Box::new(
-                    RecapErrors::new(max, after, self.style.clone())
-                        .linking(self.linker(&written))
-                        .naming(kept_logs.clone(), self.link_bases()),
+                    RecapErrors::new(max, after, self.style.clone()).linking(self.linker(&written)),
                 ),
-                Stage::ErrorsForSummary => Box::new(
-                    RecapErrors::new(usize::MAX, 0, self.style.clone())
-                        .naming(kept_logs.clone(), self.link_bases())
-                        .keeping(observations.clone()),
-                ),
+                // No recap: the task's failure summary tells the errors.
+                Stage::ErrorsForSummary => continue,
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
                         .under_pty(pty)
@@ -662,7 +646,6 @@ impl Config {
             feed,
             links_written: written,
             notes,
-            kept_logs,
         }
     }
 }
@@ -685,8 +668,6 @@ pub struct Pipeline {
     pub links_written: links::WrittenCount,
     /// Lines for the console from another thread, written between Bazel's.
     pub notes: forward::Notes,
-    /// The failed actions' kept logs, which the recap names.
-    pub kept_logs: forward::KeptLogs,
 }
 
 #[cfg(test)]
@@ -695,6 +676,152 @@ mod tests {
     use crate::console::forward::Forwarder;
     use crate::console::processors::Verdict;
     use crate::testing::SharedSink;
+
+    /// The errors a recap of `input` repeats, as `(header, body)`, read
+    /// from what it wrote (escapes left out), on the screen's lines or as
+    /// written.
+    fn recapped(mode: Mode, lines: bool, input: &[u8]) -> Vec<(String, Vec<String>)> {
+        let mut config = Config::new(
+            mode,
+            vec![Stage::RecapErrors { max: 10, after: 0 }],
+            Style::default(),
+        );
+        if lines {
+            config.output = Output::Lines { status_every: None };
+        }
+        let mut pipeline = config.pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let text =
+            String::from_utf8_lossy(&crate::console::ansi::strip(&sink.bytes())).into_owned();
+        let Some(at) = text.find("── Error recap (") else {
+            return vec![];
+        };
+        let mut out: Vec<(String, Vec<String>)> = vec![];
+        for line in text[at..].lines().skip(1) {
+            if let Some(body) = line.strip_prefix("    ") {
+                out.last_mut()
+                    .expect("a header first")
+                    .1
+                    .push(body.to_string());
+            } else if let Some(header) = line.strip_prefix("  ") {
+                out.push((header.to_string(), vec![]));
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// `test //syntax:all` under curses (Bazel 9.3.3): the syntax error, a
+    /// redraw of the progress area, then Bazel's `ERROR: package contains
+    /// errors`, which a possible tail of the first is not: both repeated.
+    #[test]
+    fn an_error_after_a_redraw_is_recapped() {
+        let input: &[u8] = b"\r\x1b[1A\x1b[K\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpackage contains errors: syntax: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 1 packages loaded\r\n";
+        for lines in [false, true] {
+            let headers: Vec<String> = recapped(Mode::Pty, lines, input)
+                .into_iter()
+                .map(|e| e.0)
+                .collect();
+            assert_eq!(
+                headers,
+                vec![
+                    "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"
+                        .to_string(),
+                    "ERROR: package contains errors: syntax: syntax error at 'newline': expected ,"
+                        .to_string(),
+                ],
+                "lines {lines}"
+            );
+        }
+    }
+
+    /// `build --keep_going //ar2:all` (Bazel 9.3.3): a syntax error in
+    /// le/BUILD.bazel, a redraw, then Bazel's `ERROR: le/BUILD.bazel: no
+    /// such target '//le:x'`, at the file alone, no line: its own error,
+    /// never the syntax error's body.
+    #[test]
+    fn an_error_at_a_build_file_without_a_line_is_its_own() {
+        let input: &[u8] = b"\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n";
+        assert_eq!(
+            recapped(Mode::Pty, false, input),
+            vec![
+                ("ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,".to_string(), vec![]),
+                (
+                    "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel".to_string(),
+                    vec![]
+                ),
+            ]
+        );
+    }
+
+    /// `//tl:inner2` (Bazel 9.3.3): a genrule's last line, written in
+    /// Bazel's `ERROR: ` colours with no newline, which Bazel flushes after
+    /// its next progress line. It is the tool's, not Bazel's, so it stays in
+    /// the genrule's error, under curses and in a pipe alike.
+    #[test]
+    fn a_tools_held_error_line_stays_in_its_body() {
+        let pty: &[u8] = b"\x1b[90m[1 / 3]\x1b[0m 2 actions running\r\r\n    Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\r\r\n\r\r\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\r\r\nrunning inner bazel 2\r\r\n\x1b[90m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mthe inner build failed\r\r\r\n\x1b[1;90mINFO: \x1b[0mFound 2 targets...\r\r\n\x1b[90m[3 / 3]\x1b[0m no actions running\r\r\n";
+        let pipe: &[u8] = b"\x1b[32m[1 / 3]\x1b[0m 2 actions running\n\x1b[31m\x1b[1mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\n\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nrunning inner bazel 2\n\x1b[32m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\n\x1b[31m\x1b[1mERROR: \x1b[0mthe inner build failed\n\x1b[32mINFO: \x1b[0mFound 2 targets...\n\x1b[32m[3 / 3]\x1b[0m no actions running\n";
+        for (mode, input) in [(Mode::Pty, pty), (Mode::Pipe, pipe)] {
+            assert_eq!(
+                recapped(mode, false, input),
+                vec![(
+                    "ERROR: tl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1)"
+                        .to_string(),
+                    vec![
+                        "running inner bazel 2".to_string(),
+                        "ERROR: the inner build failed".to_string()
+                    ],
+                )],
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// Bazel's `FAILED:` status row after an error about the build, not an
+    /// action, is never its body (r44's syntax error under curses, Bazel
+    /// 7.7, 8.9 and 9.3 alike), on the screen's lines or as written.
+    #[test]
+    fn a_status_row_is_no_errors_body() {
+        let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mCouldn't start the build. Unable to run tests\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild Event Protocol files produced successfully.\r\n";
+        for lines in [false, true] {
+            let errors = recapped(Mode::Pty, lines, input);
+            let start = errors
+                .iter()
+                .find(|e| e.0.contains("Couldn't start"))
+                .unwrap_or_else(|| panic!("lines {lines}: {errors:?}"));
+            assert_eq!(
+                start.1,
+                Vec::<String>::new(),
+                "lines {lines}: no FAILED: under it"
+            );
+        }
+    }
+
+    /// For the failure summary, no recap at all: it tells Bazel's errors.
+    #[test]
+    fn errors_for_the_summary_write_no_recap() {
+        let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: boom\r\n";
+        let mut pipeline =
+            Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        assert!(!sink.text().contains("Error recap"), "{}", sink.text());
+    }
 
     /// `input` as bazel writes it, its messages coloured.
     fn coloured(input: &[u8]) -> Vec<u8> {
@@ -1583,184 +1710,6 @@ mod tests {
         config.link_text = false;
         let (_, pipeline) = run(&config, b"ERROR: a.cc:3:1: bad\n");
         assert_eq!(pipeline.links_written.get(), 0, "with no URL written out");
-    }
-
-    /// `test //syntax:all` under curses (Bazel 9.3.3): the syntax error, a
-    /// redraw of the progress area, then Bazel's `ERROR: package contains
-    /// errors`, which a possible tail of the first is not: both kept.
-    #[test]
-    fn an_error_after_a_redraw_is_kept() {
-        let input: &[u8] = b"\r\x1b[1A\x1b[K\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpackage contains errors: syntax: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 1 packages loaded\r\n";
-        for lines in [false, true] {
-            let mut config =
-                Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default());
-            if lines {
-                config.output = Output::Lines { status_every: None };
-            }
-            let mut pipeline = config.pipeline();
-            let sink = SharedSink::default();
-            let mut forwarder = Forwarder::spawn(
-                Box::new(std::io::Cursor::new(input.to_vec())),
-                Box::new(sink.clone()),
-                std::mem::take(&mut pipeline.chain),
-            )
-            .unwrap();
-            forwarder.join().unwrap();
-            let headers: Vec<String> = pipeline
-                .observations
-                .errors()
-                .expect("kept")
-                .errors
-                .into_iter()
-                .map(|e| e.header)
-                .collect();
-            assert_eq!(
-                headers,
-                vec![
-                    "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"
-                        .to_string(),
-                    "ERROR: package contains errors: syntax: syntax error at 'newline': expected ,"
-                        .to_string(),
-                ],
-                "lines {lines}"
-            );
-        }
-    }
-
-    /// `build --keep_going //ar2:all` (Bazel 9.3.3): a syntax error in
-    /// le/BUILD.bazel, a redraw, then Bazel's `ERROR: le/BUILD.bazel: no
-    /// such target '//le:x'`, at the file alone, no line: its own error,
-    /// never the syntax error's body.
-    #[test]
-    fn an_error_at_a_build_file_without_a_line_is_kept() {
-        let input: &[u8] = b"\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n";
-        let mut pipeline =
-            Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
-        let sink = SharedSink::default();
-        let mut forwarder = Forwarder::spawn(
-            Box::new(std::io::Cursor::new(input.to_vec())),
-            Box::new(sink.clone()),
-            std::mem::take(&mut pipeline.chain),
-        )
-        .unwrap();
-        forwarder.join().unwrap();
-        let kept: Vec<(String, Vec<String>)> = pipeline
-            .observations
-            .errors()
-            .expect("kept")
-            .errors
-            .into_iter()
-            .map(|e| (e.header, e.body))
-            .collect();
-        assert_eq!(
-            kept,
-            vec![
-                (
-                    "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,".to_string(),
-                    vec![]
-                ),
-                (
-                    "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel".to_string(),
-                    vec![]
-                ),
-            ]
-        );
-    }
-
-    /// `//tl:inner2` (Bazel 9.3.3): a genrule's last line, written in
-    /// Bazel's `ERROR: ` colours with no newline, which Bazel flushes after
-    /// its next progress line. It is the tool's, not Bazel's, so it stays in
-    /// the genrule's error, under curses and in a pipe alike.
-    #[test]
-    fn a_tools_held_error_line_stays_in_its_body() {
-        let pty: &[u8] = b"\x1b[90m[1 / 3]\x1b[0m 2 actions running\r\r\n    Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\r\r\n\r\r\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\r\r\nrunning inner bazel 2\r\r\n\x1b[90m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mthe inner build failed\r\r\r\n\x1b[1;90mINFO: \x1b[0mFound 2 targets...\r\r\n\x1b[90m[3 / 3]\x1b[0m no actions running\r\r\n";
-        let pipe: &[u8] = b"\x1b[32m[1 / 3]\x1b[0m 2 actions running\n\x1b[31m\x1b[1mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\n\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nrunning inner bazel 2\n\x1b[32m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\n\x1b[31m\x1b[1mERROR: \x1b[0mthe inner build failed\n\x1b[32mINFO: \x1b[0mFound 2 targets...\n\x1b[32m[3 / 3]\x1b[0m no actions running\n";
-        for (mode, input) in [(Mode::Pty, pty), (Mode::Pipe, pipe)] {
-            let mut pipeline =
-                Config::new(mode, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
-            let sink = SharedSink::default();
-            let mut forwarder = Forwarder::spawn(
-                Box::new(std::io::Cursor::new(input.to_vec())),
-                Box::new(sink.clone()),
-                std::mem::take(&mut pipeline.chain),
-            )
-            .unwrap();
-            forwarder.join().unwrap();
-            let kept: Vec<(String, Vec<String>)> = pipeline
-                .observations
-                .errors()
-                .expect("kept")
-                .errors
-                .into_iter()
-                .map(|e| (e.header, e.body))
-                .collect();
-            assert_eq!(
-                kept,
-                vec![(
-                    "ERROR: tl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1)"
-                        .to_string(),
-                    vec![
-                        "running inner bazel 2".to_string(),
-                        "ERROR: the inner build failed".to_string()
-                    ],
-                )],
-                "{mode:?}"
-            );
-        }
-    }
-
-    /// Every error is kept for the summary, past the console recap's 10:
-    /// r44's twelve failing genrules each keep their own (the Failures tab
-    /// reads a row's exit code and location off them).
-    #[test]
-    fn every_error_is_kept_for_the_summary() {
-        let mut input = Vec::new();
-        for i in 1..=12 {
-            input.extend(format!("\x1b[31m\x1b[1mERROR: \x1b[0mmany/BUILD.bazel:{i}:8: Executing genrule //many:g{i:02} failed: (Exit 1)\nfailure number {i:02}\n\x1b[32m[{i} / 13]\x1b[0m 1 action running\n").as_bytes());
-        }
-        let config = Config::new(Mode::Pipe, vec![Stage::ErrorsForSummary], Style::default());
-        let (_, pipeline) = run(&config, &input);
-        let errors = pipeline.observations.errors().expect("kept");
-        assert_eq!((errors.errors.len(), errors.distinct), (12, 12));
-        assert_eq!(
-            errors.errors[11].body,
-            vec!["failure number 12".to_string()]
-        );
-    }
-
-    /// Bazel's `FAILED:` status row after an error about the build, not an
-    /// action, is never its body (r44's syntax error under curses, Bazel
-    /// 7.7, 8.9 and 9.3 alike), on the screen's lines or as written.
-    #[test]
-    fn a_status_row_is_no_errors_body() {
-        let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mCouldn't start the build. Unable to run tests\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild Event Protocol files produced successfully.\r\n";
-        for lines in [false, true] {
-            let mut config =
-                Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default());
-            if lines {
-                config.output = Output::Lines { status_every: None };
-            }
-            let mut pipeline = config.pipeline();
-            let sink = SharedSink::default();
-            let mut forwarder = Forwarder::spawn(
-                Box::new(std::io::Cursor::new(input.to_vec())),
-                Box::new(sink.clone()),
-                std::mem::take(&mut pipeline.chain),
-            )
-            .unwrap();
-            forwarder.join().unwrap();
-            let errors = pipeline.observations.errors().expect("kept");
-            let start = errors
-                .errors
-                .iter()
-                .find(|e| e.header.contains("Couldn't start"))
-                .unwrap_or_else(|| panic!("lines {lines}: {:?}", errors.errors));
-            assert_eq!(
-                start.body,
-                Vec::<String>::new(),
-                "lines {lines}: no FAILED: under it"
-            );
-        }
     }
 
     /// A redaction hook dropping every `Fetching` line of a real PTY console

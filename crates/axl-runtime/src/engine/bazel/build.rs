@@ -858,8 +858,6 @@ struct Console {
     /// Lines the console writes between Bazel's: the history's note of where
     /// it kept each failed action's log.
     notes: bazel::console::forward::Notes,
-    /// The failed actions' kept logs, which the console's recap names.
-    kept_logs: bazel::console::forward::KeptLogs,
     observations: Arc<Observations>,
     events: Option<std::sync::mpsc::Receiver<HeldLine>>,
     log: Option<std::path::PathBuf>,
@@ -950,7 +948,6 @@ impl Console {
         let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
         let feed = pipeline.feed.clone();
         let notes = pipeline.notes.clone();
-        let kept_logs = pipeline.kept_logs.clone();
         let forwarder = Forwarder::spawn_reported(
             Box::new(reader),
             Box::new(axl_types::terminal::Routed::new(std::io::stderr(), 2)),
@@ -1004,7 +1001,6 @@ impl Console {
                 stdout,
                 feed,
                 notes,
-                kept_logs,
                 observations: pipeline.observations,
                 events: pipeline.events,
                 log,
@@ -1781,7 +1777,7 @@ impl Build {
                     console.events,
                     console.log,
                     console.feed,
-                    Some((console.notes, console.kept_logs)),
+                    Some(console.notes),
                 )
             }
             None => (None, None, None, None, None, None, None, None),

@@ -153,22 +153,18 @@ impl Keep {
 
     /// Start keeping logs from `recv` in `dir`, the build's history folder,
     /// each action's as it is kept published to `published`, and for a
-    /// failed one an `INFO:` line naming where to `notes`, and where to
-    /// `kept_logs`, for the recap (the console's both).
+    /// failed one an `INFO:` line naming where to `notes` (the console's).
     pub fn spawn(
         self,
         recv: Subscriber<Arc<BuildEventEnvelope>>,
         dir: PathBuf,
         published: KeptActions,
-        told: Option<(
-            crate::console::forward::Notes,
-            crate::console::forward::KeptLogs,
-        )>,
+        notes: Option<crate::console::forward::Notes>,
     ) -> JoinHandle<SinkOutcome> {
         thread::spawn(move || {
             let mut kept = Kept::new(self, dir);
             kept.published = Some(published);
-            (kept.notes, kept.kept_logs) = told.unzip();
+            kept.notes = notes;
             loop {
                 match recv.recv() {
                     Ok(envelope) => kept.event(&envelope.event),
@@ -189,8 +185,6 @@ struct Kept {
     published: Option<KeptActions>,
     /// Where a failed action's kept logs are told, as `INFO:` lines.
     notes: Option<crate::console::forward::Notes>,
-    /// And listed, for the recap to name under its errors.
-    kept_logs: Option<crate::console::forward::KeptLogs>,
     actions: Vec<Value>,
     tests: Vec<Value>,
     /// Per `<label>/<mnemonic>`, how many actions have been kept.
@@ -247,7 +241,6 @@ impl Kept {
             dir,
             published: None,
             notes: None,
-            kept_logs: None,
             actions: vec![],
             tests: vec![],
             action_counts: HashMap::new(),
@@ -374,9 +367,6 @@ impl Kept {
                 for (stream, path) in &streams {
                     notes.push(format!("INFO: {label} {mnemonic} {stream}: {path}").into_bytes());
                 }
-            }
-            if let (Some(kept_logs), false) = (&self.kept_logs, streams.is_empty()) {
-                kept_logs.push(label.clone(), streams);
             }
         }
         self.actions.push(entry);

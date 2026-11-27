@@ -10,9 +10,9 @@
 //! detail lines under it `muted`, the recap under a `── Error recap (N) ──`
 //! rule in `label.error`; the recap's quoted errors stay as Bazel wrote them
 //! but for each header's `ERROR` label, coloured as the live line's is, with
-//! what they name linked on a terminal ([`super::links`]). Kept for the task's
-//! failure summary instead ([`RecapErrors::keeping`]), the recap writes
-//! nothing and the summary leaves the raw log for that summary to name
+//! what they name linked on a terminal ([`super::links`]). Where the task
+//! prints a failure summary instead (`ErrorsForSummary`), there is no recap
+//! and the summary leaves the raw log for that summary to name
 //! ([`Summary::log_named_elsewhere`]).
 
 use std::collections::{HashSet, VecDeque};
@@ -373,12 +373,6 @@ const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the
 static KEPT_NOTE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^INFO: \S+ \S+ std(?:err|out): ").unwrap());
 
-/// The target a failed action's whole `ERROR:` line names: `(from target
-/// //cc:lib)` (Bazel 7 and 8), `(from cc_library rule target //cc:lib)`
-/// (Bazel 9).
-static RULE_TARGET: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"\(from (?:\S+ rule )?target (\S+?)\)").unwrap());
-
 /// Bazel's status row with nothing after its label (`FAILED:`), as curses
 /// draws it: never part of an error's body.
 static BARE_STATUS: std::sync::LazyLock<Regex> =
@@ -413,15 +407,6 @@ pub struct RecapErrors {
     /// Links what the repeated lines name, for a terminal, with what
     /// `relativize_paths` said of each line's paths.
     linker: Option<Linker>,
-    /// The failed actions' logs the history kept, named under the errors
-    /// they are the output of ([`kept_for`]).
-    kept: Option<super::forward::KeptLogs>,
-    /// The workspace and the directory the task runs from, which an
-    /// error's BUILD file path is under or relative to.
-    bases: Option<(PathBuf, PathBuf)>,
-    /// Where the errors go for the task's failure summary instead of a
-    /// recap of their own ([`RecapErrors::keeping`]).
-    keep: Option<std::sync::Arc<super::processors::Observations>>,
 }
 
 /// The links a line went by with, placed in its quoted text.
@@ -431,9 +416,6 @@ type LineLinks = Vec<Known>;
 /// ([`RECAP_BODY_HELD`]), each line with the links it went by with.
 struct Recapped {
     header: (String, LineLinks),
-    /// The target its whole `ERROR:` line names (`… (from target
-    /// //cc:lib)`, past where the header is cut), when it does.
-    target: Option<String>,
     first: Vec<(String, LineLinks)>,
     last: VecDeque<(String, LineLinks)>,
     /// Lines between `first` and `last`, held by neither.
@@ -448,10 +430,9 @@ enum Part<'a> {
 }
 
 impl Recapped {
-    fn new(header: (String, LineLinks), target: Option<String>) -> Self {
+    fn new(header: (String, LineLinks)) -> Self {
         Recapped {
             header,
-            target,
             first: vec![],
             last: VecDeque::new(),
             dropped: 0,
@@ -576,37 +557,7 @@ impl RecapErrors {
             distinct: HashSet::new(),
             after_first: 0,
             linker: None,
-            kept: None,
-            bases: None,
-            keep: None,
         }
-    }
-
-    /// This recap keeping its errors in `observations` for the task's
-    /// failure summary, rendered line by line, instead of writing them:
-    /// every one up to `max`, however soon the console ended after them.
-    pub fn keeping(
-        mut self,
-        observations: std::sync::Arc<super::processors::Observations>,
-    ) -> Self {
-        self.keep = Some(observations);
-        self
-    }
-
-    /// This recap naming, under each error, where the history kept the
-    /// failed action's whole output (`full stderr: <path>`, its label
-    /// muted), when `kept`
-    /// has it. `bases` (the workspace, then the directory the task runs
-    /// from) place an error's BUILD file in its package; without them only
-    /// an error naming its action's label is matched.
-    pub fn naming(
-        mut self,
-        kept: super::forward::KeptLogs,
-        bases: Option<(PathBuf, PathBuf)>,
-    ) -> Self {
-        self.kept = Some(kept);
-        self.bases = bases;
-        self
     }
 
     /// This recap with the paths and URLs it repeats linked ([`Linker`]),
@@ -665,8 +616,7 @@ impl LineProcessor for RecapErrors {
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
                 let links = self.links(record, &quoted);
-                let target = RULE_TARGET.captures(text).map(|c| c[1].to_string());
-                self.errors.push(Recapped::new((quoted, links), target));
+                self.errors.push(Recapped::new((quoted, links)));
                 self.body = Some(self.errors.len() - 1);
             }
         } else if let Some(i) = body
@@ -713,23 +663,6 @@ impl LineProcessor for RecapErrors {
     }
 
     fn report(&mut self) -> Option<Vec<u8>> {
-        if let Some(keep) = self.keep.clone() {
-            let errors = self.rendered();
-            keep.set_errors(super::processors::KeptErrors {
-                errors: errors
-                    .into_iter()
-                    .map(|e| super::processors::KeptError {
-                        header: e.header,
-                        body: e.body,
-                        log: e.log,
-                        label: e.label,
-                        target: e.target,
-                    })
-                    .collect(),
-                distinct: self.distinct.len(),
-            });
-            return None;
-        }
         if self.errors.is_empty() || self.after_first < self.after {
             return None;
         }
@@ -745,7 +678,7 @@ impl LineProcessor for RecapErrors {
         };
         self.style.rule(&mut out, &header);
         for e in self.rendered() {
-            for (i, l) in e.lines.into_iter().enumerate() {
+            for (i, l) in e.into_iter().enumerate() {
                 out.extend_from_slice(if i == 0 { b"  " } else { b"    " });
                 out.extend(l);
                 out.push(b'\n');
@@ -756,12 +689,10 @@ impl LineProcessor for RecapErrors {
 }
 
 impl RecapErrors {
-    /// Each error as the recap repeats it: its header as quoted, its lines
-    /// without their indent (the header styled as an error, then what it
-    /// picked of the body, each count of the rest, and `full <stream>:
-    /// <path>` for the output the history kept of the action, its label),
-    /// and that action's label when one was matched.
-    fn rendered(&mut self) -> Vec<Rendered> {
+    /// Each error's lines as the recap repeats them, without their indent:
+    /// the header styled as an error, then what it picked of the body and
+    /// each count of the rest.
+    fn rendered(&mut self) -> Vec<Vec<Vec<u8>>> {
         let style = self.style.clone();
         let mut linker = self.linker.take();
         let mut line = |text: &str, links: &[Known]| match linker.as_mut() {
@@ -772,161 +703,23 @@ impl RecapErrors {
             Some(l) => l.link_with(text.as_bytes(), links),
             None => text.as_bytes().to_vec(),
         };
-        let kept = self.kept.as_ref().map(|k| k.all()).unwrap_or_default();
-        let mut used = vec![false; kept.len()];
         let mut out = vec![];
         for e in &self.errors {
             let mut lines = vec![style.error_label(line(&e.header.0, &e.header.1))];
-            let found = kept_for(
-                &e.header.0,
-                e.target.as_deref(),
-                &kept,
-                &mut used,
-                self.bases.as_ref(),
-            );
-            let mut body = vec![];
             for part in e.excerpt() {
                 match part {
-                    Part::Line((b, links)) => {
-                        lines.push(line(b, links));
-                        body.push(b.clone());
-                    }
+                    Part::Line((b, links)) => lines.push(line(b, links)),
                     Part::Gap(n) => {
                         let s = if n == 1 { "" } else { "s" };
-                        let gap = format!("… {n} more line{s}");
-                        lines.push(gap.clone().into_bytes());
-                        body.push(gap);
+                        lines.push(format!("… {n} more line{s}").into_bytes());
                     }
                 }
             }
-            // The CLI's pointer, not Bazel's: its label muted, the path linked.
-            for (stream, path) in found.map(|i| &kept[i].1).into_iter().flatten() {
-                let label = format!("{}full {stream}:{}", style.open, style.close);
-                lines.push(
-                    label
-                        .into_bytes()
-                        .into_iter()
-                        .chain(*b" ")
-                        .chain(line(&path.to_string(), &[]))
-                        .collect(),
-                );
-            }
-            out.push(Rendered {
-                header: e.header.0.clone(),
-                lines,
-                body,
-                log: found.and_then(|i| {
-                    let streams = &kept[i].1;
-                    streams
-                        .iter()
-                        .find(|(stream, _)| stream == "stderr")
-                        .or(streams.first())
-                        .map(|(_, path)| path.to_string())
-                }),
-                label: found.map(|i| kept[i].0.clone()),
-                target: e.target.clone(),
-            });
+            out.push(lines);
         }
         self.linker = linker;
         out
     }
-}
-
-/// An error as the recap repeats it ([`RecapErrors::rendered`]).
-struct Rendered {
-    header: String,
-    /// The header styled, the body, and `full <stream>: <path>`.
-    lines: Vec<Vec<u8>>,
-    /// What the recap picked of the body, as quoted, unstyled and unlinked,
-    /// each count of the rest a line.
-    body: Vec<String>,
-    /// The output the history kept of the action: its stderr, else its
-    /// other stream.
-    log: Option<String>,
-    label: Option<String>,
-    /// The target the whole `ERROR:` line names, when it does.
-    target: Option<String>,
-}
-
-/// Which of `kept` (the history's failed actions, in order) is the action
-/// the error `header` reports, not yet `used`, when only one can be: the one
-/// action of the target its whole line names (`(from target …)`,
-/// `target`), else of the label the header names; for an error naming no label, the one action from the
-/// package of the BUILD file its location is in (that file's path made
-/// absolute from the task's directory and taken relative to the workspace,
-/// `bases`). Two of them (a cc_library's two failed compiles), a label with
-/// none, no `bases`, or an error that says nothing failed (an analysis or
-/// loading root's): none, rather than another action's log.
-fn kept_for(
-    header: &str,
-    target: Option<&str>,
-    kept: &[(String, Vec<(String, String)>)],
-    used: &mut [bool],
-    bases: Option<&(PathBuf, PathBuf)>,
-) -> Option<usize> {
-    let names = |label: &str| {
-        header.match_indices(label).any(|(i, _)| {
-            !header[i + label.len()..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || "_-./+".contains(c))
-        })
-    };
-    let package = |label: &str| {
-        let local = label.split_once("//").map_or(label, |(_, rest)| rest);
-        local
-            .split_once(':')
-            .map_or(local, |(pkg, _)| pkg)
-            .to_string()
-    };
-    static LOCATION: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"^ERROR: (.*?)BUILD(?:\.bazel)?:\d+:\d+: ").unwrap()
-    });
-    let dir = bases.and_then(|(workspace, cwd)| {
-        let found = LOCATION.captures(header)?;
-        let dir = cwd.join(found[1].trim_end_matches('/'));
-        let mut parts: Vec<&std::ffi::OsStr> = vec![];
-        for part in dir.components() {
-            match part {
-                std::path::Component::ParentDir => {
-                    parts.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => parts.push(other.as_os_str()),
-            }
-        }
-        let dir: PathBuf = parts.iter().collect();
-        let pkg = dir.strip_prefix(workspace).ok()?;
-        Some(pkg.to_string_lossy().replace('\\', "/"))
-    });
-    let in_dir = |label: &str| dir.as_ref().is_some_and(|dir| *dir == package(label));
-    let only = |want: &dyn Fn(&str) -> bool| {
-        let mut found = (0..kept.len()).filter(|&i| !used[i] && want(&kept[i].0));
-        let first = found.next();
-        if found.next().is_some() { None } else { first }
-    };
-    static LABEL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?:^|[\s'\x60(])@{0,2}[\w.-]*//[\w./+-]*:[\w./+=,@~-]+").unwrap()
-    });
-    // The whole line's target alone says whose action it is: a progress
-    // message may name any label (`Checking against //x:b`).
-    let named = |l: &str| match target {
-        Some(t) => t == l,
-        None => names(l),
-    };
-    // Only an error that says what failed is an action's: an analysis or
-    // loading root's (`no such package`) has no log of its own.
-    if !header.contains(" failed: ") {
-        return None;
-    }
-    let found = if target.is_some() || LABEL.is_match(header) || kept.iter().any(|(l, _)| names(l))
-    {
-        only(&named)?
-    } else {
-        only(&in_dir)?
-    };
-    used[found] = true;
-    Some(found)
 }
 
 /// Where a collapsed kind's messages are staged, by its slot in the stats,
@@ -1068,232 +861,6 @@ impl LineProcessor for Summary {
 #[cfg(test)]
 mod tests {
 
-    /// An error is matched to the action the history kept: by its label when
-    /// it names one, else, for an error naming no label, by its BUILD file's
-    /// package, each action once, and only where one alone can be it.
-    #[test]
-    fn an_error_is_matched_to_its_kept_action() {
-        let kept = vec![
-            (
-                "//a:gen".to_string(),
-                vec![("stderr".to_string(), "/h/a/gen.stderr".to_string())],
-            ),
-            (
-                "//b:lib".to_string(),
-                vec![("stderr".to_string(), "/h/b/lib.stderr".to_string())],
-            ),
-            (
-                "//b:other".to_string(),
-                vec![("stdout".to_string(), "/h/b/other.stdout".to_string())],
-            ),
-        ];
-        let mut used = vec![false; kept.len()];
-        let bases = (PathBuf::from("/ws"), PathBuf::from("/ws"));
-        let b = Some(&bases);
-        let genrule = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)";
-        assert_eq!(super::kept_for(genrule, None, &kept, &mut used, b), Some(0));
-        let compile = "ERROR: b/BUILD.bazel:3:1: Compiling b/x.cc failed: (Exit 1)";
-        assert_eq!(
-            super::kept_for(compile, None, &kept, &mut used, b),
-            None,
-            "two in the package: neither"
-        );
-        used[2] = true;
-        assert_eq!(
-            super::kept_for(compile, None, &kept, &mut used, b),
-            Some(1),
-            "the one left"
-        );
-        assert_eq!(
-            super::kept_for(compile, None, &kept, &mut used, b),
-            None,
-            "each once"
-        );
-
-        // ws3/cc (rules_cc 0.2.25, Bazel 9.3.3): two failed compiles of one
-        // cc_library, their headers cut before the `(from … target)` that names
-        // it. Neither may take the other's log, in either order.
-        let cc = vec![
-            (
-                "//cc:lib".to_string(),
-                vec![(
-                    "stderr".to_string(),
-                    "/h/cc/lib/CppCompile-1.stderr".to_string(),
-                )],
-            ),
-            (
-                "//cc:lib".to_string(),
-                vec![(
-                    "stderr".to_string(),
-                    "/h/cc/lib/CppCompile-2.stderr".to_string(),
-                )],
-            ),
-        ];
-        let ws = (PathBuf::from("/ws"), PathBuf::from("/ws"));
-        for header in [
-            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1)",
-            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/b.cc failed: (Exit 1)",
-        ] {
-            let mut fresh = vec![false, false];
-            assert_eq!(
-                super::kept_for(header, Some("//cc:lib"), &cc, &mut fresh, Some(&ws)),
-                None,
-                "{header}"
-            );
-            assert_eq!(
-                super::kept_for(header, None, &cc, &mut fresh, Some(&ws)),
-                None,
-                "{header}, no target"
-            );
-        }
-        let mut one = vec![false, true];
-        assert_eq!(
-            super::kept_for(
-                "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1)",
-                Some("//cc:lib"),
-                &cc,
-                &mut one,
-                Some(&ws)
-            ),
-            Some(0),
-            "by its line's target, the one left"
-        );
-        // ws4/xt (Bazel 7.7.3 and 8.9.0): two targets of one package, their
-        // lines naming each by `(from target //xt:b)`; each its own.
-        let xt = vec![
-            (
-                "//xt:a".to_string(),
-                vec![("stderr".to_string(), "/h/xt/a/Proc-1.stderr".to_string())],
-            ),
-            (
-                "//xt:b".to_string(),
-                vec![("stderr".to_string(), "/h/xt/b/Proc-1.stderr".to_string())],
-            ),
-        ];
-        let b_header = "ERROR: xt/BUILD.bazel:3:5: Processing xt/b.out failed: (Exit 4)";
-        let a_header = "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3)";
-        let mut both = vec![false, false];
-        assert_eq!(
-            super::kept_for(b_header, Some("//xt:b"), &xt, &mut both, b),
-            Some(1)
-        );
-        assert_eq!(
-            super::kept_for(a_header, Some("//xt:a"), &xt, &mut both, b),
-            Some(0)
-        );
-        assert_eq!(
-            super::kept_for(b_header, None, &xt, &mut [false, false], b),
-            None,
-            "without the target, neither"
-        );
-        // ws/xn (Bazel 9.3.3): //xn:a's progress message names //xn:b; its
-        // whole line's target is the action's.
-        let xn_header = "ERROR: xn/BUILD.bazel:2:4: Checking against //xn:b failed: (Exit 3)";
-        let xn = vec![
-            (
-                "//xn:a".to_string(),
-                vec![("stderr".to_string(), "/h/xn/a/Check-1.stderr".to_string())],
-            ),
-            (
-                "//xn:b".to_string(),
-                vec![("stderr".to_string(), "/h/xn/b/Check-1.stderr".to_string())],
-            ),
-        ];
-        assert_eq!(
-            super::kept_for(xn_header, Some("//xn:a"), &xn, &mut [false, false], b),
-            Some(0),
-            "the target, not the label the message names"
-        );
-        // ws/ar (Bazel 9.3.3): an analysis root's error at the package of a
-        // failed action has none of that action's log.
-        let ar = vec![(
-            "//ar:boom".to_string(),
-            vec![(
-                "stderr".to_string(),
-                "/h/ar/boom/Genrule-1.stderr".to_string(),
-            )],
-        )];
-        assert_eq!(
-            super::kept_for(
-                "ERROR: ar/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories.",
-                None,
-                &ar,
-                &mut [false],
-                b
-            ),
-            None
-        );
-        let prefix = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:generate failed: (Exit 1)";
-        let mut fresh = vec![false; kept.len()];
-        assert_eq!(
-            super::kept_for(prefix, None, &kept[..1], &mut fresh[..1], b),
-            None,
-            "another label's action, not one whose label is a prefix of it"
-        );
-
-        // ws2/min2 (Bazel 9.3.3): //min2:a_silent exits 4 with no output,
-        // so the history keeps none of it; //min2:b_loud's stderr is kept.
-        // a_silent's error names its label: never b_loud's log.
-        let silent = vec![(
-            "//min2:b_loud".to_string(),
-            vec![("stderr".to_string(), "/h/min2/b_loud.stderr".to_string())],
-        )];
-        let a = "ERROR: min2/BUILD.bazel:1:8: Executing genrule //min2:a_silent failed: (Exit 4)";
-        let loud = "ERROR: min2/BUILD.bazel:2:8: Executing genrule //min2:b_loud failed: (Exit 1)";
-        let mut fresh = vec![false];
-        assert_eq!(
-            super::kept_for(a, None, &silent, &mut fresh, b),
-            None,
-            "another target's log"
-        );
-        assert_eq!(
-            super::kept_for(loud, None, &silent, &mut fresh, b),
-            Some(0),
-            "its own"
-        );
-
-        // Only the package itself: not one ending in its name, and the
-        // root package by its own BUILD file.
-        let mut fresh = vec![false; kept.len()];
-        let nested = "ERROR: /ws/c/b/BUILD.bazel:3:1: Compiling c/b/x.cc failed: (Exit 1)";
-        assert_eq!(super::kept_for(nested, None, &kept, &mut fresh, b), None);
-        let root_kept = vec![(
-            "//:gen".to_string(),
-            vec![("stderr".to_string(), "/h/gen.stderr".to_string())],
-        )];
-        let root = "ERROR: /ws/BUILD.bazel:1:8: Compiling gen.cc failed: (Exit 1)";
-        assert_eq!(
-            super::kept_for(root, None, &root_kept, &mut [false], b),
-            Some(0)
-        );
-        let ends_in_b = (PathBuf::from("/x/b"), PathBuf::from("/x/b"));
-        let root_b = "ERROR: /x/b/BUILD.bazel:1:8: Compiling x.cc failed: (Exit 1)";
-        assert_eq!(
-            super::kept_for(
-                root_b,
-                None,
-                &kept[1..],
-                &mut [false, false],
-                Some(&ends_in_b)
-            ),
-            None,
-            "a workspace ending in a package's name"
-        );
-
-        // Relative to the task's directory, a subdirectory of the workspace.
-        let sub = (PathBuf::from("/ws"), PathBuf::from("/ws/c"));
-        let relative = "ERROR: ../b/BUILD:3:1: Compiling b/x.cc failed: (Exit 1)";
-        assert_eq!(
-            super::kept_for(relative, None, &kept, &mut [false, false, true], Some(&sub)),
-            Some(1)
-        );
-        assert_eq!(
-            super::kept_for(compile, None, &kept, &mut [false; 3], None),
-            None,
-            "without the workspace, by label only"
-        );
-    }
-
     use super::*;
 
     use std::sync::Arc;
@@ -1378,6 +945,136 @@ mod tests {
         String::from_utf8(p.report().unwrap_or_default()).unwrap()
     }
 
+    /// The recap `records` make at once (`after` 0), escapes left out.
+    fn recap_of(records: &[&str]) -> String {
+        let mut p = RecapErrors::new(10, 0, Style::default());
+        let out = feed(&mut p, records);
+        String::from_utf8_lossy(&ansi::strip(out.as_bytes())).into_owned()
+    }
+
+    /// What Bazel and the CLI write after an error is never part of its
+    /// body: the history's note of a kept log, in the CLI's own colours
+    /// (`INFO` then a reset, then the colon), and Bazel's status rows after
+    /// its progress lines (w44's `//tc:tc`, Bazel 9.3.3).
+    #[test]
+    fn notes_and_status_rows_stay_out_of_a_body() {
+        let toolchain = [
+            "\x1b[31m\x1b[1mERROR: \x1b[0mtc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
+            "  //tc:toolchain_type",
+            "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
+            "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.",
+        ];
+        let note = "\x1b[1;90mINFO\x1b[0m: //:bad Genrule stderr: /h/bad.stderr";
+        let analyzed =
+            "\x1b[32mINFO: \x1b[0mAnalyzed 8 targets (2 packages loaded, 53 targets configured).";
+        let cases: [(&str, Vec<&str>); 2] = [
+            (
+                "in a pipe",
+                [&toolchain[..], &[note, "\x1b[32mAnalyzing:\x1b[0m 8 targets (2 packages loaded, 24 targets configured)", "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat(),
+            ),
+            ("the note right after", [&toolchain[..], &[note, "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat()),
+        ];
+        for (name, records) in cases {
+            let out = recap_of(&records);
+            assert!(
+                out.ends_with(
+                    "    //tc:toolchain_type\n    To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'\n    For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.\n"
+                ),
+                "{name}: {out}"
+            );
+            assert!(!out.contains("bad.stderr"), "{name}: {out}");
+        }
+    }
+
+    /// Bazel's closing lines restate the errors before them: none is
+    /// repeated (`command succeeded, but …`, every form Bazel 7 to 9 writes).
+    #[test]
+    fn bazels_closing_lines_are_not_recapped() {
+        assert_eq!(
+            recap_of(&[
+                "ERROR: command succeeded, but there were errors parsing the target pattern",
+                "ERROR: command succeeded, but there were loading phase errors",
+                "ERROR: command succeeded, but not all targets were analyzed",
+                "ERROR: Build did NOT complete successfully",
+            ]),
+            ""
+        );
+    }
+
+    /// A signal-killed action's header is cut after the signal, as after an
+    /// exit code (`//f:killed`, Bazel 7.7.3 and 9.3.3): no command line.
+    #[test]
+    fn a_killed_actions_header_is_cut_after_the_signal() {
+        for (line, want) in [
+            (
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed): bash failed: error executing Genrule command (from genrule rule target //f:killed) /bin/bash -c 'kill -9 $$'",
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)",
+            ),
+            (
+                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault): bash failed: error executing Genrule command (from target //f:segv) /bin/bash -c 'kill -11 $$'",
+                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap): bash failed: error executing Genrule command (from genrule rule target //sig:s5) /bin/bash -c 'kill -5 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1): bash failed: error executing Genrule command (from target //sig:s10) /bin/bash -c 'kill -10 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24): bash failed: error executing Genrule command (from target //sig:s24) /bin/bash -c 'kill -24 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24)",
+            ),
+        ] {
+            let out = recap_of(&[line, "about to die", "\x1b[32m[1 / 9]\x1b[0m running"]);
+            assert!(
+                out.contains(&format!("  {want}\n    about to die\n")),
+                "{out}"
+            );
+        }
+    }
+
+    /// Themed, the rule and each quoted `ERROR` label are red.
+    #[test]
+    fn a_themed_recap_reads_as_errors() {
+        let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::themed(&dark()));
+        let mut records = vec![
+            "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ];
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        assert_eq!(
+            feed(&mut p, &records),
+            "\x1b[1;38;5;203m── Error recap (1) ──\x1b[0m\n  \
+             \x1b[1;38;5;203mERROR\x1b[0m: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)\n"
+        );
+    }
+
+    /// A nested macro's `fail()` (ws/nm, Bazel 9.3.3): the excerpt keeps the
+    /// BUILD frame and its code line, then the `Error in` line, the frames
+    /// between a gap.
+    #[test]
+    fn a_tracebacks_excerpt_is_its_build_frame_and_its_error() {
+        let out = recap_of(&[
+            "ERROR: Traceback (most recent call last):",
+            "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
+            "\t\touter(name = \"m\")",
+            "\tFile \"nm/defs.bzl\", line 4, column 10, in outer",
+            "\t\tinner(name = name + \"_i\")",
+            "\tFile \"nm/defs.bzl\", line 2, column 9, in inner",
+            "\t\tfail(\"inner refuses \" + name)",
+            "Error in fail: inner refuses m_i",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ]);
+        assert!(
+            out.ends_with(
+                "    \tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>\n    \t\touter(name = \"m\")\n    … 4 more lines\n    Error in fail: inner refuses m_i\n"
+            ),
+            "{out}"
+        );
+    }
+
     #[test]
     fn recap_repeats_errors_that_scrolled_away() {
         let mut p = RecapErrors::new(2, RECAP_AFTER_RECORDS, Style::default());
@@ -1407,196 +1104,6 @@ mod tests {
         );
     }
 
-    /// Kept for the failure summary: every error, however soon the console
-    /// ended after it, each rendered line by line, nothing written; the
-    /// history's note of a kept log left out of a body.
-    #[test]
-    fn errors_kept_for_the_summary_are_not_written() {
-        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
-        let mut p = RecapErrors::new(1, RECAP_AFTER_RECORDS, Style::default())
-            .keeping(observations.clone());
-        let records = [
-            "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1): clang failed: error executing CppCompile command",
-            "a.cc:3: error: expected ';'",
-            "INFO: //:a CppCompile stderr: /h/a.stderr",
-            "\x1b[32m[1 / 9]\x1b[0m running",
-            "ERROR: /ws/BUILD:2:1: Compiling b.cc failed",
-            "\x1b[32m[1 / 9]\x1b[0m running",
-        ];
-        assert_eq!(feed(&mut p, &records), "", "nothing written");
-        let kept = observations.errors().expect("kept");
-        assert_eq!(kept.distinct, 2, "both counted");
-        assert_eq!(kept.errors.len(), 1, "the first `max` kept");
-        assert_eq!(
-            kept.errors[0].header,
-            "ERROR: /ws/BUILD:1:1: Compiling a.cc failed: (Exit 1)"
-        );
-        assert_eq!(
-            kept.errors[0].body,
-            vec!["a.cc:3: error: expected ';'".to_string()],
-            "the body alone"
-        );
-        assert_eq!(kept.errors[0].log, None, "no kept log named");
-    }
-
-    /// What Bazel and the CLI write after an error is never part of its
-    /// body: the history's note of a kept log, in the CLI's own colours
-    /// (`INFO` then a reset, then the colon), and Bazel's status rows after
-    /// its progress lines (w44's `//tc:tc`, Bazel 9.3.3).
-    #[test]
-    fn notes_and_status_rows_stay_out_of_a_kept_body() {
-        let toolchain = [
-            "\x1b[31m\x1b[1mERROR: \x1b[0mtc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
-            "  //tc:toolchain_type",
-            "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
-            "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.",
-        ];
-        let note = "\x1b[1;90mINFO\x1b[0m: //:bad Genrule stderr: /h/bad.stderr";
-        let analyzed =
-            "\x1b[32mINFO: \x1b[0mAnalyzed 8 targets (2 packages loaded, 53 targets configured).";
-        let cases: [(&str, Vec<&str>); 2] = [
-            (
-                "in a pipe",
-                [&toolchain[..], &[note, "\x1b[32mAnalyzing:\x1b[0m 8 targets (2 packages loaded, 24 targets configured)", "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat(),
-            ),
-            ("the note right after", [&toolchain[..], &[note, "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat()),
-        ];
-        for (name, records) in cases {
-            let observations =
-                std::sync::Arc::new(super::super::processors::Observations::default());
-            let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
-            for r in &records {
-                p.process(r.as_bytes());
-            }
-            assert_eq!(p.report(), None);
-            let kept = observations.errors().expect("kept");
-            assert_eq!(
-                kept.errors[0].body,
-                vec![
-                    "  //tc:toolchain_type".to_string(),
-                    "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'".to_string(),
-                    "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.".to_string(),
-                ],
-                "{name}"
-            );
-        }
-    }
-
-    /// A failed action's whole `ERROR:` line names its target past where
-    /// the header is cut, as Bazel 7.7.3, 8.9.0 and 9.3.3 each write it
-    /// (`//xt:a`'s Proc, `//cc4:s1`'s compile under rules_cc 0.2.25).
-    #[test]
-    fn a_kept_error_knows_its_lines_target() {
-        let cases = [
-            (
-                "ERROR: xt/BUILD.bazel:2:5: Processing bazel-out/darwin_arm64-fastbuild/bin/xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from target //xt:a) /bin/bash -c 'echo '\\''proc 1.0 starting'\\'' >&2; echo '\\''error: AAA broke in a.dat'\\'' >&2; exit 3'",
-                "//xt:a",
-            ),
-            (
-                "ERROR: cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:s1) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)",
-                "//cc4:s1",
-            ),
-            (
-                "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from target //xt:a) /bin/bash -c 'echo '\\''proc 1.0 starting'\\'' >&2; echo '\\''error: AAA broke in a.dat'\\'' >&2; exit 3'",
-                "//xt:a",
-            ),
-            (
-                "ERROR: cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:s1) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)",
-                "//cc4:s1",
-            ),
-            (
-                "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from proc rule target //xt:a) /bin/bash -c 'echo '\\''proc 1.0 starting'\\'' >&2; echo '\\''error: AAA broke in a.dat'\\'' >&2; exit 3'",
-                "//xt:a",
-            ),
-            (
-                "ERROR: cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): wrapped_clang_pp failed: error executing CppCompile command (from cc_library rule target //cc4:s1) bazel-out/darwin_arm64-opt-exec/bin/external/apple_support+/crosstool/wrapped_clang_pp '-D_FORTIFY_SOURCE=1' -fstack-protector -fcolor-diagnostics -Wall -Wthread-safety -Wself-assign ... (remaining 28 arguments skipped)",
-                "//cc4:s1",
-            ),
-        ];
-        for (line, target) in cases {
-            let observations =
-                std::sync::Arc::new(super::super::processors::Observations::default());
-            let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
-            feed(
-                &mut p,
-                &[line, "error: it broke", "\x1b[32m[1 / 9]\x1b[0m running"],
-            );
-            let kept = observations.errors().expect("kept");
-            assert!(
-                kept.errors[0].header.ends_with("failed: (Exit 3)")
-                    || kept.errors[0].header.ends_with("failed: (Exit 1)"),
-                "{}",
-                kept.errors[0].header
-            );
-            assert_eq!(kept.errors[0].target.as_deref(), Some(target), "{line}");
-        }
-    }
-
-    /// Bazel's closing lines restate the errors before them: none is kept
-    /// (`command succeeded, but …`, every form Bazel 7 to 9 writes).
-    #[test]
-    fn bazels_closing_lines_are_not_kept() {
-        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
-        let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
-        feed(
-            &mut p,
-            &[
-                "ERROR: command succeeded, but there were errors parsing the target pattern",
-                "ERROR: command succeeded, but there were loading phase errors",
-                "ERROR: command succeeded, but not all targets were analyzed",
-                "ERROR: Build did NOT complete successfully",
-            ],
-        );
-        assert_eq!(observations.errors().expect("kept").errors.len(), 0);
-    }
-
-    /// A signal-killed action's header is cut after the signal, as after an
-    /// exit code (`//f:killed`, Bazel 7.7.3 and 9.3.3): no command line.
-    #[test]
-    fn a_killed_actions_header_is_cut_after_the_signal() {
-        for (line, want) in [
-            (
-                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed): bash failed: error executing Genrule command (from genrule rule target //f:killed) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo about to die >&2; kill -9 $$'",
-                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)",
-            ),
-            (
-                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed): bash failed: error executing Genrule command (from target //f:killed) /bin/bash -c 'kill -9 $$'",
-                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)",
-            ),
-            (
-                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault): bash failed: error executing Genrule command (from target //f:segv) /bin/bash -c 'kill -11 $$'",
-                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)",
-            ),
-            (
-                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap): bash failed: error executing Genrule command (from genrule rule target //sig:s5) /bin/bash -c 'kill -5 $$'",
-                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap)",
-            ),
-            (
-                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1): bash failed: error executing Genrule command (from target //sig:s10) /bin/bash -c 'kill -10 $$'",
-                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1)",
-            ),
-            (
-                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24): bash failed: error executing Genrule command (from target //sig:s24) /bin/bash -c 'kill -24 $$'",
-                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24)",
-            ),
-        ] {
-            let observations =
-                std::sync::Arc::new(super::super::processors::Observations::default());
-            let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
-            feed(
-                &mut p,
-                &[line, "about to die", "\x1b[32m[1 / 9]\x1b[0m running"],
-            );
-            let kept = observations.errors().expect("kept");
-            assert_eq!(kept.errors[0].header, want);
-            let target = line
-                .split("target ")
-                .nth(1)
-                .and_then(|t| t.split(')').next());
-            assert_eq!(kept.errors[0].target.as_deref(), target);
-        }
-    }
-
     /// With the failure summary naming the raw log, the end of the console
     /// leaves it out, but still says what it hid.
     #[test]
@@ -1611,30 +1118,6 @@ mod tests {
         )
         .log_named_elsewhere(true);
         assert_eq!(s.report(), None, "nothing hidden, the log named elsewhere");
-    }
-
-    /// Themed, the rule and each quoted `ERROR` label are red, and the
-    /// pointer to a kept log is the CLI's own: its label muted.
-    #[test]
-    fn a_themed_recap_reads_as_errors() {
-        let kept = super::super::forward::KeptLogs::default();
-        kept.push(
-            "//a:gen".into(),
-            vec![("stderr".into(), "/h/a/gen.stderr".into())],
-        );
-        let mut p =
-            RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::themed(&dark())).naming(kept, None);
-        let mut records = vec![
-            "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)",
-            "\x1b[32m[1 / 9]\x1b[0m running",
-        ];
-        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
-        assert_eq!(
-            feed(&mut p, &records),
-            "\x1b[1;38;5;203m── Error recap (1) ──\x1b[0m\n  \
-             \x1b[1;38;5;203mERROR\x1b[0m: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)\n    \
-             \x1b[38;5;247mfull stderr:\x1b[0m /h/a/gen.stderr\n"
-        );
     }
 
     #[test]
@@ -1715,38 +1198,6 @@ mod tests {
         assert_eq!(counted + shown, 1000, "{out}");
         assert!(out.contains("    error: deep\n"), "{out}");
         assert!(out.ends_with("    line 999\n"), "{out}");
-    }
-
-    /// A nested macro's `fail()` (ws/nm, Bazel 9.3.3): the excerpt keeps the
-    /// BUILD frame and its code line, then the `Error in` line, the frames
-    /// between a gap.
-    #[test]
-    fn a_tracebacks_excerpt_is_its_build_frame_and_its_error() {
-        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
-        let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
-        feed(
-            &mut p,
-            &[
-                "ERROR: Traceback (most recent call last):",
-                "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
-                "\t\touter(name = \"m\")",
-                "\tFile \"nm/defs.bzl\", line 4, column 10, in outer",
-                "\t\tinner(name = name + \"_i\")",
-                "\tFile \"nm/defs.bzl\", line 2, column 9, in inner",
-                "\t\tfail(\"inner refuses \" + name)",
-                "Error in fail: inner refuses m_i",
-                "\x1b[32m[1 / 9]\x1b[0m running",
-            ],
-        );
-        assert_eq!(
-            observations.errors().expect("kept").errors[0].body,
-            vec![
-                "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>".to_string(),
-                "\t\touter(name = \"m\")".to_string(),
-                "… 4 more lines".to_string(),
-                "Error in fail: inner refuses m_i".to_string(),
-            ]
-        );
     }
 
     #[test]

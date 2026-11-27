@@ -616,24 +616,6 @@ pub struct Shape {
     pub gate: Option<Arc<Gate>>,
 }
 
-/// The failed actions' logs the history kept, in the order it kept them:
-/// each action's label and, per stream it kept (`stderr`, `stdout`), where.
-/// The recap names them under their errors.
-#[derive(Debug, Clone, Default)]
-pub struct KeptLogs(Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>>);
-
-impl KeptLogs {
-    /// Note `label`'s kept `streams`, as `(stream, path)`.
-    pub fn push(&self, label: String, streams: Vec<(String, String)>) {
-        self.0.lock().unwrap().push((label, streams));
-    }
-
-    /// Each kept action so far.
-    pub fn all(&self) -> Vec<(String, Vec<(String, String)>)> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
 /// Lines for the console from another thread (the history's note of where
 /// it kept a failed action's log). The forwarder writes each, as a line the
 /// stages run on, once Bazel has ended a message and before it draws its
