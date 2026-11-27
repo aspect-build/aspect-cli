@@ -26,9 +26,6 @@ It takes the screen when the task starts and shows:
     `+` while Bazel analyses), at the end its actions and cache hits
     (`8,590 actions · 3,148 cache hits (37%)`); a build `<`/`>` picked,
     its own;
-  - under it the Actions rows: each kind in words, the bar's glyph a
-    coloured key before its count, the cache hits as one group with their
-    total (`action_results`);
   - the actions running now, from Bazel's own progress area, oldest first,
     yellow past a minute and red past five; once the build has finished,
     Bazel's critical path and the slowest actions seen running;
@@ -37,8 +34,13 @@ It takes the screen when the task starts and shows:
     with `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
   - a Results pane: targets, tests with those finished a cache gave whole
     (`7 passed (5 cached)`) and, while a `test` build runs, the test
-    targets running and pending (`test_progress`), the critical path, and
-    the failures counted (a click shows them);
+    targets running and pending (`test_progress`), each kind of action
+    there is any of in words, the bar's glyph a coloured key before its
+    count, the cache hits as one group with their total (`action_results`;
+    while the build runs, ran, internal and failed from the events, disk
+    and remote settling as Bazel writes its execution log; at its end the
+    split from its `BuildMetrics`), the critical path, and the failures
+    counted (a click shows them);
 - the main pane's tabs, always in one order, the shown one named by what is
   open in it (`Failures ✗1 ▹ //pkg:t ▹ attempt 1/2 ▹ a.py:12`):
   - Console: the task's whole output, from its start (what the CLI wrote
@@ -1965,7 +1967,8 @@ def count_spawn(counts: dict, spawn):
     by runner, and by action (`log_kinds`): the spawns of one action share
     its outputs, so its first output's id names it, and an action is a
     disk or remote hit where all its spawns were, `mixed` where they
-    differ. A test's are counted too, as `TestRunner` spawns."""
+    differ; a test's attempt (`TestRunner`) an action each, as Bazel
+    counts them."""
     counts["spawns"] += 1
     hit = bool(_get(spawn, "cache_hit", False))
     if hit:
@@ -1974,7 +1977,9 @@ def count_spawn(counts: dict, spawn):
     counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
     kind = ("remote" if runner.startswith("remote") else "disk") if hit else "ran"
     outputs = _get(spawn, "outputs", None) or []
-    key = _get(outputs[0], "type", None) if outputs else None
+
+    # Bazel counts each test attempt an action, though they share outputs.
+    key = _get(outputs[0], "type", None) if outputs and str(_get(spawn, "mnemonic", "") or "") != "TestRunner" else None
     kinds = counts["log_kinds"]
     if type(key) != "int":
         kinds[kind] += 1
@@ -3154,6 +3159,20 @@ def running_count(state: dict) -> int:
     progress = state.get("progress") or []
     return max(len(running_actions(progress)), action_counts(progress)[0])
 
+def _tests_words(c: dict) -> str:
+    """The Tests row's counts in words, a part there is none of left out
+    (`7 passed (5 cached), 1 failed`), `0 passed` where there is nothing."""
+    parts = []
+    if c["tests_passed"]:
+        parts.append(_counts("%s%d passed%s%s", (_c("success"), c["tests_passed"], _RESET, tests_cached_text(c))))
+    if c["tests_failed"]:
+        parts.append(_counts("%s%d failed%s", (_c("error"), c["tests_failed"], _RESET)))
+    if c.get("tests_flaky"):
+        parts.append(_counts("%s%d flaky%s", (_c("warning"), c["tests_flaky"], _RESET)))
+    if c.get("tests_skipped"):
+        parts.append(_counts("%d skipped", c["tests_skipped"]))
+    return ", ".join(parts) or "0 passed"
+
 def tests_cached_text(counts: dict) -> str:
     """` (5 cached)`, as Bazel says a test's result came from a cache: of
     the test targets finished so far (passed, failed or flaky), those every
@@ -3204,16 +3223,20 @@ def action_split(state: dict) -> dict:
     `remote_on` say which caches the build was given (`cache_kinds`).
 
     Once the build has ended with its `BuildMetrics` (`final`), `local` is
-    `action_cache_statistics.hits` (else an `action cache hit` runner),
+    `action_cache_statistics.hits` (else an `action cache hit` runner) and
+    what the done count has past the parts but where actions failed (what
+    Bazel already knew up to date in memory),
     `internal` `runner_count`'s internal ones, and the rest of
     `actions_executed` had spawns: by action from the execution log the
     Dashboard read (`log_kinds`: an action a cache hit where all its
-    spawns were), else by `runner_count`'s spawns, a spawn more than its
-    action going to `other`. Bazel (7 to 9) counts a failed action among
+    spawns were; each test attempt an action of its own, as Bazel counts
+    them), else by `runner_count`'s spawns, a spawn more than its action
+    going to `other`. Bazel (7 to 9) counts a failed action among
     the internal ones, but one whose outputs were not created under the
     runner its spawn ran in (`counted_internal`): each is taken out of
-    where it was counted. What the done count has past the parts is
-    `blocked` in a build where actions failed, else `other`. A failed build's total is at least what it created, and its
+    where it was counted; in a build where actions failed, what the done
+    count has past the parts is `blocked`. `other` is what has spawns of
+    mixed results, or more spawns than actions. A failed build's total is at least what it created, and its
     bar never full of what did not fail (`action_bar`).
 
     While it runs with every action published (`--dashboard:actions=all`,
@@ -3282,10 +3305,12 @@ def action_split(state: dict) -> dict:
 
         # What Bazel counted done past what it executed or found in its
         # action cache: in a build where actions failed, those that needed
-        # one and so never ran.
-        blocked = max(0, done - whole) if failed and not succeeded else 0
-        other += max(0, done - whole - blocked)
-        whole += blocked + max(0, done - whole - blocked)
+        # one and so never ran; else what it already knew up to date in
+        # memory (a warm server's rerun), the local action cache's too.
+        gap = max(0, done - whole)
+        blocked = gap if failed and not succeeded else 0
+        local += gap - blocked
+        whole += gap
         split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, blocked = blocked, other = other, more = False, failed_build = not succeeded)
         split["done"] = max(done, whole)
         created = _get(summary, "actions_created", 0) or 0
@@ -3581,7 +3606,8 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     is pending (`─ 2 running · 4 pending`, one unit), what follows the
     hits a row after them. Where the hits do not fit beside ran they get
     a row of their own, after ran and failed, as they do where `stack`
-    (a screen under 70 columns). The local action cache is `local`
+    (a screen under 70 columns), and wrap after their label where they
+    are wider than a row, what follows going on with the last of them. The local action cache is `local`
     where `short` (a screen under 100 columns) or nothing else fits; a
     row still too wide has its every count `short_count`, and what fits
     no `rows` has its last row cut where it is drawn."""
@@ -3594,7 +3620,6 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     failed = [("one", [p]) for p in others if p[2] == "failed"]
     tail = [("one", [p]) for p in others if p[2] not in ("ran", "failed", "running", "pending")]
     undone = [p for p in others if p[2] in ("running", "pending") and p[1]]
-    group = [("hits", hits)] if hits else []
     rest = tail + ([("one", undone)] if undone else [])
 
     def text(unit, level):
@@ -3606,46 +3631,52 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
         if unit[0] != "hits":
             return (plain, drawn)
         total = 0
-        for p in unit[1]:
+        for p in hits:
             total += p[1]
-        approx = "~" if [p for p in unit[1] if p[4] == "estimate"] else ""
-        label = "cache hits %s%s: " % (approx, _thousands(total) if level < 2 else short_count(total))
-        return (label + plain, _c("muted") + label + _RESET + drawn)
+        approx = "~" if [p for p in hits if p[4] == "estimate"] else ""
+        label = "cache hits %s%s:" % (approx, _thousands(total) if level < 2 else short_count(total))
+        if not unit[1]:
+            return (label, _c("muted") + label + _RESET)
+        return (label + " " + plain, _c("muted") + label + _RESET + " " + drawn)
 
     def width_of(row, level):
         return text_width(" · ".join([text(u, level)[0] for u in row]))
 
     packed = []
-    for level in ([1] if short else [0, 1]):
-        beside = not group or (not stack and width_of(lead + group, level) <= room)
+    best = None
+    for level, fit in [(0, 0), (1, 1), (1, 2)]:
+        if short and level == 0:
+            continue
+
+        # The hits on as few rows as they fit: their label with as many as
+        # fit after it, the rest after them.
+        group = []
+        if hits:
+            k = len(hits)
+            for _ in range(len(hits)):
+                if k == 0 or width_of([("hits", hits[:k])], fit) <= room:
+                    break
+                k -= 1
+            group = [("hits", hits[:k])] + [("hit", [p]) for p in hits[k:]]
+        beside = not group or (not stack and len(group) == 1 and width_of(lead + group, fit) <= room)
         packed = [[]]
         for unit in (lead + group + failed + rest) if beside else (lead + failed + group + rest):
-            alone = not beside and unit[0] == "hits"
-            if packed[-1] and (alone or packed[-1][-1][0] == "hits" or width_of(packed[-1] + [unit], level) > room):
+            after = packed[-1] and packed[-1][-1][0] == "hits"
+            if packed[-1] and ((not beside and unit[0] == "hits") or (after and unit[0] != "hit") or width_of(packed[-1] + [unit], fit) > room):
                 packed.append([])
             packed[-1].append(unit)
-        if len(packed) <= rows and all([width_of(r, level) <= room for r in packed]):
-            break
+
+        # The fewest rows that fit, the wholest words among them.
+        if len(packed) <= rows and all([width_of(r, fit) <= room for r in packed]) and (best == None or len(packed) < len(best[1])):
+            best = (level, packed)
+    if best != None:
+        level, packed = best
     if len(packed) > rows:
         packed = packed[:rows - 1] + [[u for r in packed[rows - 1:] for u in r]]
     out = []
     for row in packed:
-        level = 1 if short or width_of(row, 0) > room else 0
-        if width_of(row, level) > room:
-            level = 2
-        out.append(" · ".join([text(u, level)[1] for u in row]))
-    return out
-
-def actions_rows(state: dict, cols: int) -> list:
-    """The Actions rows under the bar, as wide as the screen: `Actions`
-    then `action_results`, two rows from 100 columns, three under, the
-    cache hits on a row of their own under 70."""
-    lead = " Actions  "
-    rows = action_results(action_split(state), cols - len(lead) - 1, 2 if cols >= 100 else 3, short = cols < 100, stack = cols < 70)
-    out = []
-    for i, row in enumerate(rows):
-        row = _cut_escaped((lead if i == 0 else " " * len(lead)) + row, cols)
-        out.append(row + " " * max(0, cols - text_width(_plain(row))))
+        drawn = level if width_of(row, level) <= room else 2
+        out.append(" · ".join([text(u, drawn)[1] for u in row]))
     return out
 
 def build_outcome(inv: dict) -> str:
@@ -3811,13 +3842,6 @@ def _top(state: dict, cols: int, rows: int) -> list:
         out.append(bar_row(view, cols))
         out[0] = _header(state, cols, True)
 
-        # The Actions rows under it, as many as the screen's width gives
-        # them for the whole build, so nothing below moves.
-        room = 2 if cols >= 100 else 3
-        if limit - room >= 3:
-            shown = actions_rows(view, cols)
-            limit -= room
-            out += shown + [" " * cols] * (room - len(shown))
     if state["pages"] and (rows >= _SHORT_ROWS or limit >= 6):
         limit -= 1
         out.append(links_row(state["pages"], cols))
@@ -3839,14 +3863,19 @@ def _top(state: dict, cols: int, rows: int) -> list:
     summary = [
         _counts("Targets  %d configured", c["configured"]),
         _counts("         %s%d built%s, %s%d failed%s%s", (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_)),
-        _counts("Tests    %s%d passed%s%s, %s%d failed%s%s%s", (_c("success"), c["tests_passed"], _RESET, tests_cached_text(c), tests_failed, c["tests_failed"], _RESET, (_counts(", %s%d flaky%s", (_c("warning"), c["tests_flaky"], _RESET))) if c.get("tests_flaky") else "", (_counts(", %d skipped", c["tests_skipped"])) if c.get("tests_skipped") else "")),
+        "Tests    " + _tests_words(c),
     ]
     wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
     if not wide:
         # Narrow: the failures first, as what matters is what failed.
         summary = [
             _counts("Targets %s✗%d%s %s✓%d%s%s/%d", (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (_counts(" ○%d", targets_blocked)) if targets_blocked else "", c["configured"])),
-            _counts("Tests   %s✗%d%s %s✓%d%s%s%s%s", (tests_failed, c["tests_failed"], _RESET, _c("success"), c["tests_passed"], _RESET, tests_cached_text(c), (_counts(" %s~%d%s", (_c("warning"), c["tests_flaky"], _RESET))) if c.get("tests_flaky") else "", (_counts(" ⊘%d", c["tests_skipped"])) if c.get("tests_skipped") else "")),
+            "Tests   " + " ".join([p for p in [
+                _counts("%s✗%d%s", (tests_failed, c["tests_failed"], _RESET)) if c["tests_failed"] else "",
+                _counts("%s✓%d%s%s", (_c("success"), c["tests_passed"], _RESET, tests_cached_text(c))) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
+                _counts("%s~%d%s", (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "",
+                _counts("⊘%d", c["tests_skipped"]) if c.get("tests_skipped") else "",
+            ] if p]),
         ]
 
     # As tall as the most Results rows there can be, for the whole build;
@@ -3868,19 +3897,34 @@ def _top(state: dict, cols: int, rows: int) -> list:
             # Too narrow for one row: running on one, pending under it.
             tests_rows = [indent + part for part in tests_now.split(" · ")]
 
-    # The critical path; the failures, whose row a click takes to them.
+    # The build's actions, one unit with the bar's, its glyphs their keys;
+    # the critical path; the failures, whose row a click takes to them.
+    lead = "Actions  " if wide else "Actions "
+    split = action_split(state)
     critical = (("Critical path %s" if wide else "Crit %s") % state["critical"]) if state.get("critical") else None
     failed_n, blocked_n = _failure_counts(state)
     failed_row = None
     if failed_n or blocked_n:
         failed_row = _counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n))
 
-    # Too many for the pane (a short terminal): the critical path goes;
-    # the tests' running row and the failures' row stay.
-    wanted = len(summary) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])
-    if wanted > pane:
-        critical = None
-    rest = tests_rows + ([critical] if critical != None else [])
+    # Too many for the pane (a short terminal): the critical path goes
+    # first, then the actions fold to fewer rows, then the tests' running
+    # rows; the failures' row stays, last.
+    most = 5
+    for _ in range(9):
+        actions_rows = action_results(split, right_w - 4 - len(lead), most, short = cols < 100, stack = cols < 70)
+        wanted = len(summary) + len(actions_rows) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])
+        if wanted <= pane:
+            break
+        if critical != None:
+            critical = None
+        elif most > 1:
+            most -= 1
+        elif tests_rows:
+            tests_rows = []
+        else:
+            break
+    rest = tests_rows + [(lead if i == 0 else " " * len(lead)) + row for i, row in enumerate(actions_rows)] + ([critical] if critical != None else [])
     summary = (summary + rest)[:max(0, pane - (1 if failed_row != None else 0))]
     failed_i = -1
     if failed_row != None:
@@ -3922,8 +3966,9 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
 # The Results rows a build may come to have past its targets and tests: the
 # tests running and pending (one or two where the Tests row has no room for
-# them, the critical path going first), critical path and failures.
-_OPTIONAL_RESULTS = 3
+# them), its actions (up to five: ran, the cache hits on up to three, the
+# rest, what runs and is pending), critical path and failures.
+_OPTIONAL_RESULTS = 8
 
 def results_capacity(wide: bool) -> int:
     """The most rows the Results pane can have: targets (two rows wide) and
@@ -4466,7 +4511,7 @@ def action_lines(state: dict) -> list:
         "ran": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
         "disk": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if k == "disk cache hit"})],
         "remote": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if _cache_runner(k) and k != "disk cache hit"})],
-        "local": [("", "Bazel's action cache said the outputs on disk were still valid" + ("; estimated while it runs" if split.get("estimated") else ""))],
+        "local": [("", "Bazel's local action cache, or what it knew in memory, said the outputs on disk were still valid" + ("; estimated while it runs" if split.get("estimated") else ""))],
         "internal": [(name, _thousands(n)) for name, n in _by_count(kinds)],
         "other": [("", "spawns with mixed results" if split["final"] else "local action cache, internal, or not yet in the execution log")],
     }
@@ -5611,7 +5656,7 @@ def help_rows(state: dict, width = 0) -> list:
 # overlay, a line each.
 _ACTIONS_KEY = [
     "█ ran: executed this build, locally, sandboxed, in a worker or remotely",
-    "▒ local action cache: Bazel's action cache in the output base said the outputs on disk were still valid; nothing ran or downloaded. Live, it's estimated (~)",
+    "▒ local action cache: Bazel's local action cache, or what it already knew in memory, said the outputs on disk were still valid; nothing ran or downloaded. Live, it's estimated (~)",
     "▓ disk / remote: outputs from the --disk_cache directory, or from the remote cache (including a remote executor's cached result)",
     "cache hits: local action cache + disk + remote",
     "╳ failed: executed and failed (tests excluded)",

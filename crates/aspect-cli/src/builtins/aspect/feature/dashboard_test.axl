@@ -382,6 +382,20 @@ def _actions_tests(ctx):
         count_spawn(tally, struct(cache_hit = hit, runner = runner, outputs = [struct(type = out)] if out != None else []))
     _eq("by action", tally["log_kinds"], {"ran": 1, "disk": 1, "remote": 1, "mixed": 1})
     _eq("spawns still counted", (tally["spawns"], tally["spawn_hits"]), (6, 4))
+    retried = new_counts()
+    for hit in [False, False]:
+        count_spawn(retried, struct(cache_hit = hit, runner = "darwin-sandbox", mnemonic = "TestRunner", outputs = [struct(type = 4)]))
+    _eq("a retried test's attempts, an action each, as Bazel counts them", retried["log_kinds"]["ran"], 2)
+
+    # A warm server's rerun after a failed test (Bazel 9.3.3, coverage):
+    # `[50 / 50]` for 3 executed and 4 action cache hits. The other 43
+    # Bazel knew up to date in memory: the local action cache's.
+    rerun = _screen(ctx, ["x"], building = False, ended = True, done_total = (50, 50, False), inv = {"build_finished": struct(exit_code = struct(name = "TESTS_FAILED", code = 3)), "build_metrics": struct(action_summary = struct(
+        actions_executed = 3,
+        runner_count = [struct(name = "total", count = 3), struct(name = "internal", count = 1), struct(name = "darwin-sandbox", count = 4)],
+        action_cache_statistics = struct(hits = 4, misses = 3),
+    ))})
+    _eq("in memory is the local action cache's", _split_of(action_split(rerun)), dict(done = 50, total = 50, ran = 2, local = 47, internal = 1))
 
     # Which caches the build was given, from the options Bazel parsed: the
     # last value counts, an empty one is none.
@@ -404,7 +418,7 @@ def _actions_tests(ctx):
         ("keep_going", dict(done = 45, total = 45, ran = 41, internal = 1, failed = 3)),
         ("nokeep_going incremental", dict(done = 45, total = 45, internal = 2, failed = 2, blocked = 41)),
         ("nokeep_going big", dict(done = 1831, total = 2001, local = 1827, internal = 1, failed = 3)),
-        ("analysis failure", dict(done = 3, total = 3, internal = 1, other = 2)),
+        ("analysis failure", dict(done = 3, total = 3, local = 2, internal = 1)),
         ("loading failure, no count", dict(done = 1, total = 1, internal = 1)),
         ("tests and genrules, a disk hit", dict(done = 52, total = 52, local = 47, disk = 1, internal = 1, failed = 3)),
         ("success", dict(done = 14, total = 14, ran = 13, internal = 1)),
@@ -543,7 +557,7 @@ def _actions_tests(ctx):
     end = action_split(live)
     _eq("converges on BuildMetrics' split", [end[k] for k in ("ran", "disk", "internal", "failed", "local", "done")], [mid_split[k] for k in ("ran", "disk", "internal", "failed", "local", "done")])
     _eq("the final local action cache: shown at 0, no `~`", "▒ 0 local action cache" in _visible(action_results(end, 90)[0]), True)
-    _eq("the ? key: the local action cache", any(["▒ local action cache: Bazel's action cache" in r for r in help_rows(dict(live, all_actions = True), 200)]), True)
+    _eq("the ? key: the local action cache", any(["▒ local action cache: Bazel's local action cache, or what it already knew in memory" in " ".join(help_rows(dict(live, all_actions = True), 300)) for r in help_rows(dict(live, all_actions = True), 200)]), True)
 
     tested = _real(ctx, "failing test")
     _fail_event(tested, "TestRunner:spawn", 9)
@@ -655,10 +669,10 @@ def _actions_tests(ctx):
     greg = dict(final, ran = 5705, local = 2836, disk = 300, remote = 12, internal = 33, failed = 4, other = 0, done = 8890, total = 8890, disk_on = True, remote_on = True)
     _eq("at 100 columns", [_visible(r) for r in action_results(greg, 89, 2)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local action cache · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
     _eq("under 100, local", [_visible(r) for r in action_results(greg, 79, 3, short = True)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
-    _eq("at 60", [_visible(r) for r in action_results(greg, 49, 3, short = True, stack = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local · ▓ 300 disk · 12 remote"][:1] + [_visible(r) for r in action_results(greg, 49, 3, short = True, stack = True)][1:])
-    at60 = [_visible(r) for r in action_results(greg, 49, 3, short = True, stack = True)]
-    _eq("at 60: ran and failed, the hits, internal last", (at60[0], at60[-1]), ("█ 5,705 ran · ╳ 4 failed", "░ 33 internal"))
-    _eq("short counts for the whole row where nothing else fits", [_visible(r) for r in action_results(greg, 40, 3, short = True, stack = True)][1], "cache hits 3.1k: ▒ 2.8k local · ▓ 300 disk · 12 remote")
+    _eq("at 60: ran and failed, the hits, internal last", [_visible(r) for r in action_results(greg, 49, 3, short = True, stack = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
+    _eq("in Results at 100 columns: the hits wrap after their label", [_visible(r) for r in action_results(greg, 26, 4, short = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148:", "▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
+    for room in range(26, 90):
+        _eq("no row wider than %d" % room, [text_width(_visible(r)) <= room for r in action_results(greg, room, 4, short = room < 80)], [True for r in action_results(greg, room, 4, short = room < 80)])
     _eq("a configured cache with no hits, dimmed at the end", _visible(action_results(dict(greg, remote = 0), 89, 2)[0]).endswith("▓ 300 disk · 0 remote"), True)
     _eq("dimmed", (_role("muted") + "0 remote") in action_results(dict(greg, remote = 0), 89, 2)[0], True)
     _eq("an unconfigured one hidden", "remote" in _visible(action_results(dict(greg, remote = 0, remote_on = False), 89, 2)[0]), False)
@@ -673,10 +687,17 @@ def _actions_tests(ctx):
         action_data = [struct(mnemonic = "Genrule", actions_executed = 5616), struct(mnemonic = "SourceSymlinkManifest", actions_executed = 33)],
     ))})
     _eq("the same numbers", _split_of(action_split(greg_screen)), dict(done = 8483, total = 8483, ran = 5612, local = 2834, internal = 33, failed = 4))
-    for cols, want in [(100, [" Actions  █ 5,612 ran · cache hits 2,834: ▒ 2,834 local action cache", "          ╳ 4 failed · ░ 33 internal"]), (60, [" Actions  █ 5,612 ran · ╳ 4 failed", "          cache hits 2,834: ▒ 2,834 local", "          ░ 33 internal"])]:
-        drawn = [r.rstrip(" \r") for r in _visible(render(greg_screen, cols, 30)).split("\n")]
-        _eq("the Actions rows at %d columns" % cols, drawn[2:2 + len(want)], want)
-        _eq("its label at %d columns" % cols, drawn[1].endswith("8,483 actions · 2,834 cache hits (33%)" if cols == 100 else "8,483 · 2,834 hits (33%)"), True)
+    for cols in [140, 100, 60]:
+        drawn = _visible(render(greg_screen, cols, 30)).split("\n")
+        rows = [r.partition("││ ")[2].rstrip(" │\r") for r in drawn if "││ " in r]
+        at = [i for i, r in enumerate(rows) if r.startswith("Actions")][0]
+        want = {
+            140: ["Actions  █ 5,612 ran · ╳ 4 failed", "         cache hits 2,834: ▒ 2,834 local", "         ░ 33 internal"],
+            100: ["Actions  █ 5,612 ran · ╳ 4 failed", "         cache hits 2,834:", "         ▒ 2,834 local action cache", "         ░ 33 internal"],
+            60: ["Actions  █ 5,612 ran", "         ╳ 4 failed", "         cache hits 2,834:"],
+        }[cols]
+        _eq("Results' Actions rows at %d columns" % cols, rows[at:at + len(want)], want)
+        _eq("its label at %d columns" % cols, drawn[1].rstrip(" \r").endswith("8,483 · 2,834 hits (33%)" if cols == 60 else "8,483 actions · 2,834 cache hits (33%)"), True)
     wide_meld = dict(meld, building = True, progress = [both[0], "[3,830 / 8,563] 16 actions, 15 running"])
     _eq("the bar's label at 140 columns", _visible(render(wide_meld, 140, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830 of 8,563+ actions"), True)
     _eq("and at 40", _visible(render(wide_meld, 40, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830/8,563+"), True)
@@ -913,8 +934,7 @@ def _impl(ctx: TaskContext) -> int:
         _eq("action_counts %r" % status, action_counts([status]), want)
     state["progress"] = ["[1,204 / 9,000] 400 actions, 300 running"] + ["    a%d; 1s remote" % i for i in range(8)]
     remote = render(state, 100, 30)
-    if "Running (300 of 400 started)" not in remote or "and 295 more" not in remote:
-        print(_visible(remote))
+    if "Running (300 of 400 started)" not in remote or "and 292 more" not in remote:
         fail("render: a remote build's pane should count all 300, the 400 started, and the 292 it has no room for")
 
     counts = new_counts()
@@ -1438,7 +1458,7 @@ def _impl(ctx: TaskContext) -> int:
         count_event(kept["counts"], "test_summary", struct(label = label), struct(overall_status = "passed"))
     kept["progress"] = ["[5 / 9] 2 actions running"]
     drawn = _visible(render(kept, 140, 30))
-    for want in ["Actions  █ 1 ran · cache hits 1: ▓ 1 remote", "          3 other · ─ 2 running · 2 pending", "2 passed (1 cached), 0 failed", " 5 of 9 actions"]:
+    for want in ["Actions  █ 1 ran", "cache hits 1: ▓ 1 remote", "3 other · ─ 2 running · 2 pending", "Tests    2 passed (1 cached) ", " 5 of 9 actions"]:
         if want not in drawn:
             fail("render: %r should be drawn:\n%s" % (want, drawn))
     _eq("no spawns row in Results", ("spawns" in drawn, "test runs" in drawn, "Cached " in drawn), (False, False, False))
@@ -1447,9 +1467,10 @@ def _impl(ctx: TaskContext) -> int:
     many["counts"]["log_kinds"] = {"ran": 1394, "disk": 58, "remote": 0, "mixed": 0}
     shown = _visible(render(many, 140, 30))
     _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
-    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran · cache hits 58: ▓ 58 disk" in shown, "2,378 other · ─ 16 running · 4,717 pending" in shown], [True, True])
+    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "cache hits 58: ▓ 58 disk" in shown, "2,378 other" in shown and "─ 16 running · 4,717 pending" in shown], [True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cached count", "Tests    9 passed (9 cached), 6 failed" in _visible(render(many, 140, 30)), True)
+    _eq("no part there is none of", ("Tests    9 passed (9 cached)  " in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)), "0 failed" in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)).split("Tests")[1].split("\n")[0]), (True, False))
     _eq("narrow, the same", "Tests   ✗6 ✓9 (9 cached)" in _visible(render(many, 76, 30)), True)
 
     # The finished test targets every run of which a cache gave, counted.
@@ -2898,7 +2919,7 @@ def _impl(ctx: TaskContext) -> int:
     skips = _screen(ctx, ["x"], read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = "")
     skips["counts"]["tests_skipped"] = 3
     _eq("skipped in the summary", [l for l in report_lines(skips, "s1", False) if "3 skipped" in l] != [], True)
-    _eq("skipped in the narrow header", "⊘3" in _visible(render(skips, 64, 30)), True)
+    _eq("skipped in Results at 64 columns", "3 skipped" in _visible(render(skips, 64, 30)) or "⊘3" in _visible(render(skips, 64, 30)), True)
 
     # A build folded at its end keeps that its execution log was read.
     ended = _screen(ctx, ["x"], building = True)
@@ -3307,7 +3328,7 @@ def _impl(ctx: TaskContext) -> int:
         rows = _visible(render(sized, 100, 30)).split("\n")
         heights.append([i for i, r in enumerate(rows) if r.startswith("┌─ Console")][0])
     _eq("one height across running counts", heights, [heights[0]] * 4)
-    _eq("as tall as the most Results rows", results_capacity(True), 6)
+    _eq("as tall as the most Results rows", results_capacity(True), 11)
 
     # The list scrolls in it: unscrolled the rest counted, scrolled a window
     # and a scrollbar.
@@ -3373,7 +3394,7 @@ def _impl(ctx: TaskContext) -> int:
     analyzing = _running_row(["Analyzing: 3 targets (2 packages loaded)", "    Compiling a.cc; 1s local"])
     counted = _running_row(["[1 / 14] 1 action running", "    Compiling a.cc; 1s local"])
     _eq("the panes stay put when the counts come", (len(analyzing), analyzing), (1, counted))
-    _eq("under the bar and its Actions rows, right under the header", analyzing, [4])
+    _eq("under the bar, right under the header", analyzing, [2])
 
     # With the bar drawn the count is on it, and the header has Bazel's
     # status; without it (zoomed), the header has the count.

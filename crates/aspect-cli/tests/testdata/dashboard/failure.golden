@@ -2,8 +2,12 @@
 ┌─ Running (0) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
 │                                                           ││ Targets  0 configured               │
 │                                                           ││          0 built, 0 failed          │
-│                                                           ││ Tests    0 passed, 0 failed         │
+│                                                           ││ Tests    0 passed                   │
 │                                                           ││ Failed   ✗ 1                        │
+│                                                           ││                                     │
+│                                                           ││                                     │
+│                                                           ││                                     │
+│                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │
 └───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
@@ -13,10 +17,6 @@
 │ src/a.cc:3:1: warning: unused variable                                                           │
 │ Building...                                                                                      │
 │ ERROR: Build did NOT complete successfully                                                       │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
