@@ -5,7 +5,6 @@ ERROR: Traceback (most recent call last):
   │                 outer(name = "m")
   │ …
   │ Error in fail: inner refuses m_i
-  │ … 4 more lines
 0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab

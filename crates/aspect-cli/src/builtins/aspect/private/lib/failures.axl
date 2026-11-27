@@ -34,7 +34,8 @@ console_ties = failure_ties.console_ties
 FLAKY_NOTE = "flaky, passed on a later attempt"
 
 def _more_lines(n: int) -> str:
-    """`… 3 more lines`: what an excerpt leaves out, counted."""
+    """`… 3 more lines`: what an excerpt leaves out after its last row,
+    counted."""
     return _counts("… %d more line", n) + ("" if n == 1 else "s")
 
 def failure_detail(state: dict, record: dict, flaky_note: bool = True) -> str:
@@ -190,62 +191,64 @@ def excerpt_rows(lines: list, gaps: list = []) -> tuple:
     """`(rows, more)` of an excerpt's `lines` as the summary and the
     Failures list show them: at most `_EXCERPT_LINES` rows, the lines left
     out between two shown ones (`gaps`, `_picked`'s) a `_GAP_ROW` among
-    them (counting as one; too many, the lines just before a gap go first,
-    so the output's last lines stay), and `more`, every line left out, the
-    gaps' and those past the last row alike."""
+    them, which stands for them (counting as one row; too many rows, the
+    lines just before a gap go into it first, so the output's last lines
+    stay), and `more`, the lines left out after the last row shown: those
+    past the rows' cap, and a gap after the last line. Lines left out
+    before the first are in neither."""
     left = {}
     for i, n in gaps:
         left[i] = left.get(i, 0) + n
-    rows = []
-    more = 0
-    for i in range(len(lines) + 1):
-        if i in left:
-            more += left[i]
-            if rows and rows[-1] != _GAP_ROW:
-                rows.append(_GAP_ROW)
-        if i < len(lines) and lines[i]:
-            rows.append(lines[i])
-    if rows and rows[-1] == _GAP_ROW:
-        rows = rows[:-1]
 
-    # Too many with a gap: the lines just before it go, so the gap and the
-    # output's last lines stay.
+    # Each row with the lines it stands for: a line one, a gap its own.
+    rows = []
+    for i in range(len(lines) + 1):
+        if i in left and rows:
+            if rows[-1][0] == _GAP_ROW:
+                rows[-1] = (_GAP_ROW, rows[-1][1] + left[i])
+            else:
+                rows.append((_GAP_ROW, left[i]))
+        if i < len(lines) and lines[i]:
+            rows.append((lines[i], 1))
+    more = 0
+    if rows and rows[-1][0] == _GAP_ROW:
+        more = rows[-1][1]
+        rows = rows[:-1]
     for _ in range(len(rows)):
-        at = [k for k, r in enumerate(rows) if r == _GAP_ROW]
+        at = [k for k, r in enumerate(rows) if r[0] == _GAP_ROW]
         if len(rows) <= _EXCERPT_LINES or not at or at[-1] < 2:
             break
-        rows = rows[:at[-1] - 1] + rows[at[-1]:]
-        more += 1
-    if len(rows) > _EXCERPT_LINES:
-        more += len([r for r in rows[_EXCERPT_LINES:] if r != _GAP_ROW])
-        rows = rows[:_EXCERPT_LINES]
-        if rows[-1] == _GAP_ROW:
-            rows = rows[:-1]
-    return (rows, more)
+        k = at[-1]
+        gap = (_GAP_ROW, rows[k][1] + 1)
+        before = rows[:k - 1]
+        if before and before[-1][0] == _GAP_ROW:
+            gap = (_GAP_ROW, before[-1][1] + gap[1])
+            before = before[:-1]
+        rows = before + [gap] + rows[k + 1:]
+
+    # Past the cap (every gap among the first two rows): what follows the
+    # last row shown, lines and gaps alike.
+    for _, n in rows[_EXCERPT_LINES:]:
+        more += n
+    return ([text for text, _ in rows[:_EXCERPT_LINES]], more)
 
 def _test_excerpt(text: str, excerpt, timed_out: bool) -> tuple:
-    """`(lines, gaps, more)` of a test's log for the summary: what
-    `excerpt` (`std.excerpt`, the console recap's choice) picks once
-    Bazel's preamble is left out (`_picked`), its last lines where nothing
-    reads as an error; at most two of a timed-out test's. `gaps` are the
-    lines left out between two spans, for `excerpt_rows` to count with
-    what it cuts; `more` counts the lines before the first span and after
-    the last, so the two counts together are every line left out."""
+    """`(lines, gaps)` of a test's log for the summary: what `excerpt`
+    (`std.excerpt`, the console recap's choice) picks once Bazel's
+    preamble is left out (`_picked`), its last lines where nothing reads
+    as an error; at most two of a timed-out test's. Either way it ends at
+    the log's last line (`tail = 1`), so no line follows it; `gaps` are
+    the lines left out between two spans."""
     lines = [l for l in text.split("\n") if not any([l.startswith(p) for p in _TEST_LOG_PREAMBLE])]
     for _ in range(len(lines)):
         if lines[-1].strip():
             break
         lines = lines[:-1]
     if not lines:
-        return ([], [], 0)
+        return ([], [])
     if excerpt == None:
-        picked = lines[-_EXCERPT_LINES:]
-        return (picked, [], len(lines) - len(picked))
-    picked, gaps = _picked(excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1))
-    between = 0
-    for _, n in gaps:
-        between += n
-    return (picked, gaps, max(0, len(lines) - len(picked) - between))
+        return (lines[-_EXCERPT_LINES:], [])
+    return _picked(excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1))
 
 def _attempts_text(n: int, of = None) -> str:
     """`failed 1 of 2 attempts`: `n` failed of `of` (all of them when
@@ -407,7 +410,7 @@ def failure_entries(state: dict) -> dict:
 
 def entry_text(state: dict, e: dict) -> dict:
     """An entry's heading and excerpt (`kind`, `details`, `lines`, `gaps`,
-    `log`, `extra`, `more`: `gaps` where lines are left out between two of
+    `log`, `extra`: `gaps` where lines are left out between two of
     `lines`, `excerpt_rows`'), the same in the failure summary and the
     Failures list, kept once worked out:
 
@@ -444,7 +447,7 @@ def entry_text(state: dict, e: dict) -> dict:
     ties = console_ties(state) if ended else {"actions": {}, "targets": {}}
     fails = state["fails"]
     rec = fails[e["index"]] if e["index"] != None else None
-    out = {"kind": "", "details": [], "lines": [], "gaps": [], "log": "", "extra": [], "more": 0}
+    out = {"kind": "", "details": [], "lines": [], "gaps": [], "log": "", "extra": []}
     if e.get("exited") != None:
         out.update(kind = "Bazel exited %d" % e["exited"], lines = _last_words(state), log = state.get("log_path", ""))
     elif rec == None:
@@ -471,7 +474,7 @@ def entry_text(state: dict, e: dict) -> dict:
             path = _log_path(state, group["rec"]) if state.get("read") != None else ""
             text = _tail_text(state, path)
             if text:
-                out["lines"], out["gaps"], out["more"] = _test_excerpt(text, state.get("excerpt"), group["timed_out"])
+                out["lines"], out["gaps"] = _test_excerpt(text, state.get("excerpt"), group["timed_out"])
             elif any([type(v) == "string" and v.startswith("bytestream://") or (type(v) == "tuple" and str(v[0]).startswith("bytestream://")) for _, v in group["rec"]["files"]]):
                 out["extra"].append("log is only in the remote cache")
             out["log"] = path
@@ -529,7 +532,8 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     an excerpt behind a muted `│`, at most `_EXCERPT_LINES` rows (each line
     cut to `_MAX_QUOTED_BYTES` or `_EXCERPT_ROWS` rows of `width`, then `…`;
     `│ …` where lines between two shown ones are left out; `│ … N more
-    lines` counting every line left out), then a muted `log <path>`, then
+    lines` counting those left out after the last shown), then a muted
+    `log <path>`, then
     what else it has (another failed shard or run, a log only in the remote
     cache); every entry then names three of the targets it blocked (`○
     blocked: //a, //b, //c +4 blocked`), and a root cause with no entry its
@@ -572,7 +576,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     for e in entries:
         text = entry_text(state, e)
         rows, more = excerpt_rows(text["lines"], text["gaps"])
-        shown.append(dict(text, label = e["label"], rows = rows, more = text["more"] + more, blocked = e["blocked"]))
+        shown.append(dict(text, label = e["label"], rows = rows, more = more, blocked = e["blocked"]))
 
     out = []
 

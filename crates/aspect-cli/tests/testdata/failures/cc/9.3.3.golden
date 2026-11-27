@@ -30,7 +30,6 @@ exit 1
   │       |                   ^
   │ …
   │ Error in child process '/usr/bin/xcrun'. 1
-  │ … 2 more lines
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-48
 
 ✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11

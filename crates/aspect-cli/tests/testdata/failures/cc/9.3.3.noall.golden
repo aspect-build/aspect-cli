@@ -22,7 +22,6 @@ exit 1
   │     1 | inline int ah() { return xh; }
   │ …
   │ Error in child process '/usr/bin/xcrun'. 1
-  │ … 5 more lines
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-13
 
 ✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11

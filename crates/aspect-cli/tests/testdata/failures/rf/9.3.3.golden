@@ -5,7 +5,6 @@ exit 1
   │ Traceback (most recent call last):
   │ …
   │ Error in fail: impl refuses x
-  │ … 2 more lines
   ○ blocked: //rf:dep
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay

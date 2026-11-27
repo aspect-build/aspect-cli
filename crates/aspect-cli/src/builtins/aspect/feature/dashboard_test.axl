@@ -1391,7 +1391,6 @@ def _impl(ctx: TaskContext) -> int:
         "✗ //t:slow  test · timed out after 5.0s",
         "  │ waiting on the fixture server",
         "  │ -- Test timed out at 2026-11-26 23:14:08 UTC --",
-        "  │ … 1 more line",
         "  log /out/t/slow/test.log",
         "",
         "✗ //t:r  test · failed 3 of 3 attempts · 0.4s",
@@ -1434,9 +1433,11 @@ def _impl(ctx: TaskContext) -> int:
 
     # Lines left out between two shown: a `│ …` row among them, counted
     # into the one total.
-    _eq("an interior gap", excerpt_rows(["a", "b", "c"], [(1, 4)]), (["a", "\x00gap", "b", "c"], 4))
-    _eq("no gap first or last", excerpt_rows(["a"], [(0, 2), (1, 1)]), (["a"], 3))
-    _eq("five rows, the gap one of them, the end kept", excerpt_rows(["a", "b", "c", "d", "z"], [(4, 9)]), (["a", "b", "c", "\x00gap", "z"], 10))
+    _eq("an interior gap, counted by its row alone", excerpt_rows(["a", "b", "c"], [(1, 4)]), (["a", "\x00gap", "b", "c"], 0))
+    _eq("no gap first or last, the one after the last counted", excerpt_rows(["a"], [(0, 2), (1, 1)]), (["a"], 1))
+    _eq("five rows, the gap one of them, the end kept", excerpt_rows(["a", "b", "c", "d", "z"], [(4, 9)]), (["a", "b", "c", "\x00gap", "z"], 0))
+    _eq("past the cap: the lines after the last row", excerpt_rows(["a", "b", "c", "d", "e", "f", "g"], [(1, 2)]), (["a", "\x00gap", "b", "c", "d"], 3))
+    _eq("a line going into a gap after another: one gap", excerpt_rows(["a", "b", "c", "d", "e", "f"], [(1, 2), (4, 7)]), (["a", "\x00gap", "e", "f"], 0))
     _eq("a line saying it is a gap is a line", excerpt_rows(["a", "… 4 more lines"]), (["a", "… 4 more lines"], 0))
     _eq("its byte cap", quoted_rows("y" * 400, 1000), ["y" * 300 + "…"])
     many_lines = dict(kinds, counts = new_counts(), root_causes = {}, read = lambda p, n: ("x\n", 0), fails = [{"kind": "action", "label": "//a:a", "detail": "Genrule", "files": [("stderr", "file:///h/a.stderr")], "output": "o", "success": False, "exit_code": 2}])
@@ -1453,7 +1454,7 @@ def _impl(ctx: TaskContext) -> int:
     ])
 
     gapped = lambda text, **kw: {"lines": ["first", "… 6 more lines", "last"], "gaps": [[1, 6]]}
-    _eq("drawn as │ …, the total exact", [_visible(l) for l in failure_summary(many_lines, "t-7", False, excerpt = gapped)][2:6], ["  │ first", "  │ …", "  │ last", "  │ … 6 more lines"])
+    _eq("drawn as │ …, which no count after the last line repeats", [_visible(l) for l in failure_summary(many_lines, "t-7", False, excerpt = gapped)][2:6], ["  │ first", "  │ …", "  │ last", "  log /h/a.stderr"])
 
     # Past the first five, a heading alone; past ten, counted.
     twelve = dict(many_lines, fails = [{"kind": "action", "label": "//a:%d" % i, "detail": "Genrule", "files": [("stderr", "file:///h/a%d.stderr" % i)], "output": "o%d" % i, "success": False, "exit_code": 1} for i in range(12)])

@@ -5,7 +5,6 @@ exit 1
   │ Traceback (most recent call last):
   │ …
   │ Error in fail: aspect refuses @@//asp:x
-  │ … 2 more lines
 1 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab

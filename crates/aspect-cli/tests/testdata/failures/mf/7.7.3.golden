@@ -10,7 +10,6 @@ ERROR: Traceback (most recent call last):
   │                 bad_macro(name = "m")
   │ …
   │ Error in fail: bad_macro refuses m
-  │ … 2 more lines
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
