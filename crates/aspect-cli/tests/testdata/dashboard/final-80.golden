@@ -1,14 +1,13 @@
  ✔ aspect build · 0s
- █▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░░ 8,563 · 98% reused
+ █▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░ 8,563 actions · 7,999 cache hits (93%)
+ Actions  █ 105 ran · cache hits 7,999: ▒ 7,359 local · ▓ 40 disk · 600 remote
+          ░ 459 internal
+
 ┌─ Slowest seen ────────────────────────┐┌─ Results ───────────────────────────┐
-│                                       ││ Targets  3 configured               │
-│                                       ││          3 built, 0 failed          │
-│                                       ││ Tests    15 passed, 0 failed        │
-│                                       ││          60% cached                 │
-│                                       ││ Actions  █ 105 ran · ▓ 640 cached   │
-│                                       ││          ▒ 7,359 unchanged          │
-│                                       ││          ░ 459 internal             │
-│                                       ││ Critical path Linking //app:bin 4.… │
+│                                       ││ Targets ✗0 ✓3/3                     │
+│                                       ││ Tests   ✗0 ✓15 (9 cached)           │
+│                                       ││ Crit Linking //app:bin 4.1s         │
+│                                       ││                                     │
 │                                       ││                                     │
 └───────────────────────────────────────┘└─────────────────────────────────────┘
 ┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────── following ─┐
@@ -17,6 +16,7 @@
 │ src/a.cc:3:1: warning: unused variable                                       │
 │ Building...                                                                  │
 │ INFO: Build completed successfully, 8563 total actions                       │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

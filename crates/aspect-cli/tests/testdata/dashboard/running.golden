@@ -1,12 +1,11 @@
  ⠋ aspect build · 12s                                                             2 actions running
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒───────────────────────────────────────────────────────── 33% · 3 of 9
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒─────────────────────────────────────────────────────── 3 of 9 actions
+ Actions  3 other · ─ 2 running · 4 pending
+
 ┌─ Running (2) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
 │ Compiling src/a.cc; 3s                                    ││ Targets  0 configured               │
 │ Linking //app:bin; 1s                                     ││          0 built, 0 failed          │
 │                                                           ││ Tests    0 passed, 0 failed         │
-│                                                           ││ Actions  ▒ 3 other                  │
-│                                                           ││          ─ 2 running · 4 pending    │
-│                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │
@@ -16,6 +15,7 @@
 │ INFO: Found 3 targets...                                                                         │
 │ src/a.cc:3:1: warning: unused variable                                                           │
 │ Building...                                                                                      │
+│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

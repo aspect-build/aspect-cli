@@ -6,9 +6,6 @@
 │                                                           ││ Failed   ✗ 1                        │
 │                                                           ││                                     │
 │                                                           ││                                     │
-│                                                           ││                                     │
-│                                                           ││                                     │
-│                                                           ││                                     │
 └───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
 ┌─ Console  Failures ✗1  Metrics  Invocation  Tips ──────────────────────────────────── following ─┐
 │ INFO: Analyzed 3 targets (12 packages loaded).                                                   │
@@ -16,6 +13,9 @@
 │ src/a.cc:3:1: warning: unused variable                                                           │
 │ Building...                                                                                      │
 │ ERROR: Build did NOT complete successfully                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
