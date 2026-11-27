@@ -953,10 +953,10 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// recaps). Bazel's closing `Build did NOT complete successfully` and
     /// `Build failed. Not running tests` are never repeated.
     ///
-    /// With `summary = True` it writes nothing: it keeps every error, however
-    /// soon the console ended after them (`max` and `after` are not used),
-    /// for a failure summary to print (`build.output_errors()`), and
-    /// the end of the console leaves naming Bazel's raw log to that summary.
+    /// With `summary = True` it writes nothing: a failure summary tells the
+    /// errors instead (the Console feature's reads Bazel's build events and
+    /// raw console), and the end of the console leaves naming Bazel's raw
+    /// log to that summary.
     fn recap_errors(
         #[starlark(require = named, default = bazel::console::report::RECAP_MAX as i32)] max: i32,
         #[starlark(require = named, default = bazel::console::report::RECAP_AFTER_RECORDS as i32)]

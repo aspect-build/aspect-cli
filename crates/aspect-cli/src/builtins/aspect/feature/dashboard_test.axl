@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "repaired", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -36,16 +36,6 @@ def _visible(row):
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
-
-def _bodied(kept):
-    """Kept errors as `build.output_errors()` gives them, from their recap
-    lines: the body without the header and the kept log's line."""
-    out = []
-    for e in kept["errors"]:
-        lines = e["lines"]
-        log = [l.partition(": ")[2] for l in lines if l.startswith("full stderr: ")]
-        out.append(dict(e, body = [l for l in lines[1:] if not l.startswith("full stderr: ")], log = log[0] if log else None))
-    return dict(kept, errors = out)
 
 def _screen(ctx, log, **kw):
     """A dashboard's whole state, as the feature keeps it, over `log`."""
@@ -1246,7 +1236,6 @@ def _impl(ctx: TaskContext) -> int:
     reset_attempt(retried, 42)
     _eq("a retry starts afresh", (retried["fails"], retried["view"], retried["focus"], retried["scroll"], retried["log"], retried["test_counts"], retried["start_ms"], retried["fresh"]), ([], None, "console", 0, [], {}, 42, False))
     _eq("its counts and the rest too", (retried["counts"], retried["errors"], retried["error_count"], retried["last_attempts"], retried["selected"], retried["bazel_uuid"], retried["spread"]), (new_counts(), [], 0, {}, 0, "", {}))
-    _eq("the logged index is cleared", retried["logged_index"], None)
     _eq("but not what is the run's", (retried["exec_root"], retried["output_dirs"], retried["search"]["query"], retried["filter"], retried["read"] != None), ("/x", {"c1": "k8-opt"}, "kept", "errors", True))
     other = log_view(noted, act)
     noted["view"] = other
@@ -1388,25 +1377,6 @@ def _impl(ctx: TaskContext) -> int:
         "unlogged rows follow the logged ones in the window, counted",
         (mixed_rows[0], mixed_rows[2].startswith("✗ //m:9"), mixed_rows[3], mixed_rows[4], len(mixed_rows)),
         ("… 8 earlier", True, "✗ //x:1  no log", "… 2 more", 5),
-    )
-    moved = dict(mixed, logged_index = None, selected = 9)
-    moved["counts"] = new_counts()
-    for i in range(6):
-        moved["counts"]["failed_labels"]["//y:%d" % i] = True
-        moved["counts"]["failures"].append("//y:%d" % i)
-    moved["fails"] = many["fails"]
-    plain_rows(moved, 6)
-    moved["fails"] = moved["fails"] + [dict(act, label = "//y:0")]
-    moved["selected"] = len(moved["fails"]) - 1
-    plain_rows(moved, 6)
-    _eq("the head moved past a lead that gained a log", moved["logged_index"]["head"], 1)
-    moved["fails"] = moved["fails"] + [dict(act, label = "//y:%d" % i) for i in [2, 3, 4]]
-    moved["selected"] = len(moved["fails"]) - 1
-    after = plain_rows(moved, 6)
-    _eq(
-        "a half-full compaction resets the head, the rest still drawn",
-        (moved["logged_index"]["head"], len(moved["logged_index"]["unlogged"]), [r.split("  ")[0] for r in after if r.startswith("✗ //y:") and r.rstrip().endswith("no log")], after[-1]),
-        (0, 2, ["✗ //y:1", "✗ //y:5"], "✗ //y:5  no log"),
     )
     for room in [1, 2, 3]:
         for sel in [0, 5, 9]:
@@ -1882,34 +1852,26 @@ def _impl(ctx: TaskContext) -> int:
 
     # What the scrollback keeps: Bazel's closing block as it wrote it, then
     # the failure summary the plain console prints too: each failure with
-    # Bazel's errors that name it (the console's kept errors) and the
-    # history's copy of its log, the counts, the raw log, where the rest is.
+    # what its own log says and the history's copy of that log, the counts,
+    # the raw log, where the rest is.
     done = _screen(ctx, [], log_path = "/out/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
     add_lines(done, ["ERROR: //a:b failed", "a.cc:1: error: no x", "INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
-    done["fails"] = [{"kind": "action", "label": "//a:b", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/a.o", "success": False}]
+    done["fails"] = [{"kind": "action", "label": "//a:b", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/a.o", "success": False, "exit_code": 1}]
     done["build"] = struct(kept_action_log = lambda output: {"stderr": "/history/CppCompile-1.stderr"} if output == "bazel-out/a.o" else {})
-    done["kept_errors"] = {"errors": [{"header": "ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "lines": ["ERROR: a/BUILD:1:1: Compiling a.cc failed: (Exit 1)", "a.cc:1: error: no x", "full stderr: /history/CppCompile-1.stderr"], "body": ["a.cc:1: error: no x"], "log": "/history/CppCompile-1.stderr", "label": "//a:b"}], "distinct": 1}
+    done["read"] = lambda p, n: ("a.cc:1: error: no x\n", 0) if p == "/history/CppCompile-1.stderr" else None
     report = report_lines(done, "t-1", False)
     _eq("Bazel's closing block", report[:2], ["INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
     _eq("the summary", report[2:], [
         "── Failures (1) ──",
-        "✗ //a:b  CppCompile · exit 1 · a/BUILD:1:1",
+        "✗ //a:b  CppCompile · exit 1",
         "  │ a.cc:1: error: no x",
         "  log /history/CppCompile-1.stderr",
-        "0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /out/console.log",
+        "0 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: /out/console.log",
         "All of it: aspect history show t-1",
     ])
     _eq("no Failed list of its own", [l for l in report if l.startswith("Failed") or l.startswith("Bazel's errors")], [])
-    without = dict(done, kept_errors = None)
-    _eq("without the console's errors: its log", report_lines(without, "t-1", False)[3:5], ["✗ //a:b  CppCompile", "  log /history/CppCompile-1.stderr"])
 
-    # Every kind of failure, as real Bazel 9.3.3 runs reported them (w44's
-    # workspace: `test --keep_going //:all //anal:all //tc:all //t:all`,
-    # `build //syntax:all //:ok`, `//nope:all`, `//:nosuch`): Bazel's errors
-    # as the console kept them, the failures as the stream gave them.
-    def _kept(*errors):
-        return {"errors": [{"header": e[0], "lines": list(e), "body": list(e[1:]), "log": None, "label": None} for e in errors], "distinct": len(errors)}
-
+    # A state of every kind of failure record the hooks keep.
     kinds = _screen(ctx, [], log_path = "/h/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {}, build = None)
     kinds["fails"] = [
         {"kind": "action", "label": "//:bad", "detail": "Genrule", "files": [], "output": "bazel-out/bad.txt", "success": False},
@@ -1919,61 +1881,12 @@ def _impl(ctx: TaskContext) -> int:
     kinds["root_causes"] = {"//:uses_bad": ["//:bad"]}
     kinds["counts"]["failed_labels"] = {"//:uses_bad": True, "//tc:tc": True, "//anal:anal": True}
     kinds["counts"]["failed"] = 4
-    kinds["kept_errors"] = _bodied({"errors": [
-        {"header": "ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "lines": ["ERROR: BUILD.bazel:1:8: Executing genrule //:bad failed: (Exit 1)", "compile error: x.cc:3: expected ;", "full stderr: /h/bad/Genrule-1.stderr"], "label": "//:bad"},
-        {"header": "ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "lines": ["ERROR: tc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:", "  //tc:toolchain_type", "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'"], "label": None},
-        {"header": "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'", "lines": ["ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:nonexistent'"], "label": None},
-        {"header": "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: 1 input file(s) do not exist", "lines": ["ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: 1 input file(s) do not exist"], "label": None},
-        {"header": "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,", "lines": ["ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"], "label": None},
-        {"header": "ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", "lines": ["ERROR: Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found in any of the following directories.", " - nope"], "label": None},
-        {"header": "ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''", "lines": ["ERROR: Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''"], "label": None},
-    ], "distinct": 7})
-    summary = [_visible(l) for l in failure_summary(kinds, kinds["kept_errors"], "t-9", False, "/h/console.log")]
-    _eq("every kind, once: no target's first, then builds', then tests'; excerpts for the first five, what each blocked on every one", summary, [
-        "── Failures (7) ──",
-        "✗ //tc:tc  tc/BUILD.bazel:3:9",
-        "  │ While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
-        "  │   //tc:toolchain_type",
-        "  │ To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
-        "",
-        "✗ //anal:anal  anal/BUILD.bazel:1:8",
-        "  │ missing input file '//anal:nonexistent'",
-        "",
-        "✗ //syntax  analysis · syntax/BUILD.bazel:2:1",
-        "  │ syntax error at 'newline': expected ,",
-        "",
-        "✗ error",
-        "  │ Skipping '//nope:all': while parsing '//nope:all': no such package 'nope': BUILD file not found",
-        "  │   in any of the following directories.",
-        "  │  - nope",
-        "",
-        "✗ error",
-        "  │ Skipping '//:nosuch': no such target '//:nosuch': target 'nosuch' not declared in package ''",
-        "",
-        "✗ //:bad  Genrule · exit 1 · BUILD.bazel:1:8",
-        "  ○ blocked: //:uses_bad",
-        "",
-        "✗ //t:fails  test · failed 1 of 1 attempt",
-        "0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log",
-        "All of it: aspect history show t-9",
-    ])
-
-    # A build failure among the first five: its excerpt, its kept log, and
-    # what it blocked.
-    first = dict(kinds, kept_errors = dict(kinds["kept_errors"], errors = kinds["kept_errors"]["errors"][:1], distinct = 1), counts = dict(kinds["counts"], failures = ["//:bad", "//:uses_bad"], failed_labels = {"//:uses_bad": True}))
-    _eq("an excerpt, the log, the blocked", [_visible(l) for l in failure_summary(first, first["kept_errors"], "t-9", False)][1:6], [
-        "✗ //:bad  Genrule · exit 1 · BUILD.bazel:1:8",
-        "  │ compile error: x.cc:3: expected ;",
-        "  log /h/bad/Genrule-1.stderr",
-        "  ○ blocked: //:uses_bad",
-        "",
-    ])
 
     # Every line through the writer's linker, the raw log a bare path it
     # links as the CLI's own lines are (the console and the Dashboard alike).
     seen = []
     tested = dict(kinds, fails = kinds["fails"] + [{"kind": "test", "label": "//t:log", "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 0, "files": [("test.log", ("file:///out/t/log/test.log", False))]}])
-    linked = failure_summary(tested, tested["kept_errors"], "t-9", True, "/h/console.log", lambda l: seen.append(l) or "<" + l + ">")
+    linked = failure_summary(tested, "t-9", True, "/h/console.log", lambda l: seen.append(l) or "<" + l + ">")
     _eq("each line linked", (len(seen), all([l.startswith("<") and l.endswith(">") for l in linked])), (len(linked), True))
     _eq("the raw log a bare path", seen[-2].endswith("Bazel's raw log: /h/console.log"), True)
     _eq("through report_lines too", report_lines(dict(tested, log_path = "/h/console.log", closing = [], closing_tail = [], bes_base = "", bazel_uuid = "", update = {}), "t-9", True, linked = lambda l: "L")[-1], "L")
@@ -2026,7 +1939,7 @@ def _impl(ctx: TaskContext) -> int:
         _t("//t:r", "/out/t/r/test.log", attempt = 3),
         _t("//t:remote", "/nowhere", files = [("test.log", "bytestream://cache/blobs/abc/12")]),
     ], test_counts = {("//t:s", ""): (1, 3)}, spread = {})
-    got = [_visible(l) for l in failure_summary(tests, None, "t-7", False, excerpt = ctx.std.excerpt)]
+    got = [_visible(l) for l in failure_summary(tests, "t-7", False, excerpt = ctx.std.excerpt)]
     _eq("test entries", got[:-2], [
         "── Failures (5) ──",
         "✗ //t:fails  test · failed 1 of 1 attempt · 0.4s",
@@ -2059,13 +1972,13 @@ def _impl(ctx: TaskContext) -> int:
         _t("//t:sr", "/out/t/fails/test.log", shard = 2, run = 1),
         _t("//t:sr", "/out/t/s/shard_3_of_3/test.log", shard = 2, run = 2),
     ], test_counts = {("//t:sr", ""): (2, 3)})
-    _eq("shard and run", [_visible(l) for l in failure_summary(both, None, "t-7", False, excerpt = ctx.std.excerpt)][1:5], [
+    _eq("shard and run", [_visible(l) for l in failure_summary(both, "t-7", False, excerpt = ctx.std.excerpt)][1:5], [
         "✗ //t:sr  test · shard 2 of 3 · run 1 of 2 · failed 1 of 1 attempt · 0.4s",
         "  │ assertion failed: want 2 got 3",
         "  log /out/t/fails/test.log",
         "  shard 2 of 3 · run 2 of 2 also failed · log /out/t/s/shard_3_of_3/test.log",
     ])
-    _eq("a flaky test: no entry", [l for l in failure_summary(dict(tests, counts = dict(tests["counts"], flaky = {"//t:fails": True})), None, "t-7", False) if "//t:fails" in l], [])
+    _eq("a flaky test: no entry", [l for l in failure_summary(dict(tests, counts = dict(tests["counts"], flaky = {"//t:fails": True})), "t-7", False) if "//t:fails" in l], [])
 
     # A line cut at its byte cap or its third row, `…` where; a wrapped one
     # two cells further in; at most five lines, the rest counted.
@@ -2090,10 +2003,10 @@ def _impl(ctx: TaskContext) -> int:
     _eq("no gap first or last", excerpt_rows(["… 2 more lines", "a", "… 1 more line"]), (["a"], 3))
     _eq("five rows, the gap one of them, the end kept", excerpt_rows(["a", "b", "c", "d", "… 9 more lines", "z"]), (["a", "b", "c", "\x00gap", "z"], 10))
     _eq("its byte cap", quoted_rows("y" * 400, 1000), ["y" * 300 + "…"])
-    many_lines = dict(kinds, kept_errors = None, counts = new_counts(), root_causes = {}, fails = [{"kind": "action", "label": "//a:a", "detail": "Genrule", "files": [], "output": "o", "success": False}])
-    long = {"errors": [{"header": "ERROR: a/BUILD:1:1: Executing genrule //a:a failed: (Exit 2)", "lines": [], "body": ["line %d" % i for i in range(8)] + ["… 4 more lines"], "log": "/h/a.stderr", "label": "//a:a"}], "distinct": 1}
-    _eq("five lines, the rest counted", [_visible(l) for l in failure_summary(many_lines, long, "t-7", False)][1:9], [
-        "✗ //a:a  Genrule · exit 2 · a/BUILD:1:1",
+    many_lines = dict(kinds, counts = new_counts(), root_causes = {}, read = lambda p, n: ("x\n", 0), fails = [{"kind": "action", "label": "//a:a", "detail": "Genrule", "files": [("stderr", "file:///h/a.stderr")], "output": "o", "success": False, "exit_code": 2}])
+    long = lambda text, **kw: {"lines": ["line %d" % i for i in range(8)] + ["… 4 more lines"]}
+    _eq("five lines, the rest counted", [_visible(l) for l in failure_summary(many_lines, "t-7", False, excerpt = long)][1:9], [
+        "✗ //a:a  Genrule · exit 2",
         "  │ line 0",
         "  │ line 1",
         "  │ line 2",
@@ -2103,18 +2016,16 @@ def _impl(ctx: TaskContext) -> int:
         "  log /h/a.stderr",
     ])
 
-    gapped = dict(many_lines)
-    body = {"errors": [{"header": "ERROR: a/BUILD:1:1: Executing genrule //a:a failed: (Exit 2)", "body": ["first", "… 6 more lines", "last"], "log": None, "label": "//a:a"}], "distinct": 1}
-    _eq("drawn as │ …, the total exact", [_visible(l) for l in failure_summary(gapped, body, "t-7", False)][2:6], ["  │ first", "  │ …", "  │ last", "  │ … 6 more lines"])
+    gapped = lambda text, **kw: {"lines": ["first", "… 6 more lines", "last"]}
+    _eq("drawn as │ …, the total exact", [_visible(l) for l in failure_summary(many_lines, "t-7", False, excerpt = gapped)][2:6], ["  │ first", "  │ …", "  │ last", "  │ … 6 more lines"])
 
     # Past the first five, a heading alone; past ten, counted.
-    twelve = dict(many_lines, fails = [{"kind": "action", "label": "//a:%d" % i, "detail": "Genrule", "files": [], "output": "o%d" % i, "success": False} for i in range(12)])
-    capped = [_visible(l) for l in failure_summary(twelve, {"errors": [{"header": "ERROR: a/BUILD:1:1: Executing genrule //a:%d failed: (Exit 1)" % i, "lines": [], "body": ["why %d" % i], "log": None, "label": "//a:%d" % i} for i in range(12)], "distinct": 14}, "t-7", False)]
+    twelve = dict(many_lines, fails = [{"kind": "action", "label": "//a:%d" % i, "detail": "Genrule", "files": [("stderr", "file:///h/a%d.stderr" % i)], "output": "o%d" % i, "success": False, "exit_code": 1} for i in range(12)])
+    capped = [_visible(l) for l in failure_summary(twelve, "t-7", False, excerpt = lambda text, **kw: {"lines": ["why"]})]
     _eq("excerpts for five", len([l for l in capped if l.startswith("  │ why")]), 5)
-    _eq("then headings", capped[capped.index("✗ //a:5  Genrule · exit 1 · a/BUILD:1:1") + 1], "")
+    _eq("then headings", capped[capped.index("✗ //a:5  Genrule · exit 1") + 1], "")
     _eq("the rest counted", [l for l in capped if l.startswith("… and")], ["… and 2 more failures · aspect history show t-7"])
     _eq("the heading says how many", capped[0], "── Failures (first 10 of 12) ──")
-    _eq("an error's parts", [error_parts(h) for h in ["ERROR: a/BUILD.bazel:1:8: Executing genrule //:a failed: (Exit 1)", "ERROR: anal/BUILD.bazel:1:8: Executing genrule //anal:anal failed: missing input file '//anal:x'", "ERROR: package contains errors: syntax"]], [("a/BUILD.bazel:1:8", "exit 1", ""), ("anal/BUILD.bazel:1:8", "", "missing input file '//anal:x'"), ("", "", "package contains errors: syntax")])
 
     # The Failures tab: one row each; the chosen one's excerpt under it,
     # every one's with ^O, back with it again.
@@ -2161,683 +2072,20 @@ def _impl(ctx: TaskContext) -> int:
         order.append((walk["view"]["record"]["shard"], walk["view"]["record"]["run"]))
     _eq("} in shard and run order", order, [(1, 2), (3, 1), (1, 1), (1, 2)])
 
-    # One target, two failed actions (r44's ws2/two, Bazel 9.3.3: Alpha
-    # exits 2, Beta exits 3; the console said Beta's first, the stream
-    # posted Alpha's first). Each record its own error, mnemonic, exit,
-    # location, excerpt and log, in the summary and the tab alike.
-    alpha = {"kind": "action", "label": "//two:two", "detail": "Alpha", "files": [("stderr", "file:///gone")], "output": "bazel-out/two/two.a", "success": False}
-    beta = {"kind": "action", "label": "//two:two", "detail": "Beta", "files": [("stderr", "file:///gone")], "output": "bazel-out/two/two.b", "success": False}
-    two_errors = {"errors": [
-        {"header": "ERROR: two/BUILD.bazel:2:4: Making beta for //two:two failed: (Exit 3)", "body": ["error: beta.c:9: bad beta", "second line"], "log": "/h/two/two/Beta-1.stderr", "label": "//two:two"},
-        {"header": "ERROR: two/BUILD.bazel:2:4: Making alpha for //two:two failed: (Exit 2)", "body": ["first action broke: alpha.c:1: bad alpha"], "log": "/h/two/two/Alpha-1.stderr", "label": "//two:two"},
-    ], "distinct": 2}
-    logs_of = {"bazel-out/two/two.a": {"stderr": "/h/two/two/Alpha-1.stderr"}, "bazel-out/two/two.b": {"stderr": "/h/two/two/Beta-1.stderr"}}
-    two = dict(kinds, counts = dict(kinds["counts"], failures = ["//two:two"], failed_labels = {}, failed = 1), root_causes = {}, fails = [alpha, beta], kept_errors = two_errors, build = struct(kept_action_log = lambda output: logs_of.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None)
-    _eq("two actions of one target: two entries, each its own", [_visible(l) for l in failure_summary(two, two_errors, "t-9", False)][:10], [
-        "── Failures (2) ──",
-        "✗ //two:two  Alpha · exit 2 · two/BUILD.bazel:2:4",
-        "  │ first action broke: alpha.c:1: bad alpha",
-        "  log /h/two/two/Alpha-1.stderr",
-        "",
-        "✗ //two:two  Beta · exit 3 · two/BUILD.bazel:2:4",
-        "  │ error: beta.c:9: bad beta",
-        "  │ second line",
-        "  log /h/two/two/Beta-1.stderr",
-        "0 built, 1 failed · 0 tests passed, 0 failed",
-    ])
-    _eq("and in the tab", [_visible(r).rstrip() for r in failure_rows(dict(two, focus = "console", selected = 0, read = None), 10, 80)][:4], [
-        "✗ //two:two  Alpha · exit 2 · two/BUILD.bazel:2:4",
-        "  │ first action broke: alpha.c:1: bad alpha",
-        "✗ //two:two  Beta · exit 3 · two/BUILD.bazel:2:4",
-    ][:4] + [])
-
-    # ws2/min2 (Bazel 9.3.3): //min2:a_silent exits 4 with no output, so the
-    # history kept none of it; its error is its own, never b_loud's.
-    silent = {"kind": "action", "label": "//min2:a_silent", "detail": "Genrule", "files": [("stderr", "file:///gone")], "output": "bazel-out/min2/a.txt", "success": False}
-    loud = {"kind": "action", "label": "//min2:b_loud", "detail": "Genrule", "files": [("stderr", "file:///gone")], "output": "bazel-out/min2/b.txt", "success": False}
-    min2_errors = {"errors": [
-        {"header": "ERROR: min2/BUILD.bazel:1:8: Executing genrule //min2:a_silent failed: (Exit 4)", "body": [], "log": "/h/min2/b_loud/Genrule-1.stderr", "label": "//min2:b_loud"},
-        {"header": "ERROR: min2/BUILD.bazel:2:8: Executing genrule //min2:b_loud failed: (Exit 1)", "body": ["b_loud: real error text"], "log": None, "label": None},
-    ], "distinct": 2}
-    min2 = dict(two, counts = dict(kinds["counts"], failures = ["//min2:a_silent", "//min2:b_loud"], failed_labels = {}, failed = 2), logged_index = None, fails = [silent, loud], kept_errors = min2_errors, build = struct(kept_action_log = lambda output: {"stderr": "/h/min2/b_loud/Genrule-1.stderr"} if output == "bazel-out/min2/b.txt" else {}), excerpts = {}, listed_cache = None, action_errors_cache = None)
-    got = [_visible(l) for l in failure_summary(min2, min2_errors, "t-9", False)]
-    _eq("a silent action: its own exit, no other's log", got[1:3], ["✗ //min2:a_silent  Genrule · exit 4 · min2/BUILD.bazel:1:8", ""])
-    _eq("the loud one its own", got[3:6], ["✗ //min2:b_loud  Genrule · exit 1 · min2/BUILD.bazel:2:8", "  │ b_loud: real error text", "  log /h/min2/b_loud/Genrule-1.stderr"])
-
-    # ws3/cc (rules_cc 0.2.25, Bazel 9.3.3): two failed compiles of one
-    # cc_library, their cut headers naming no label, the console's kept
-    # logs unmatched; with the whole line's target and without (the kept
-    # list incomplete when the recap matched), in both orders. Each pairs
-    # with its own by what its log says.
-    cc_logs = {
-        "/h/cc/lib/CppCompile-1.stderr": "cc/a.cc:1:18: error: use of undeclared identifier 'x'\n    1 | int a() { return x; }\n1 error generated.\n",
-        "/h/cc/lib/CppCompile-2.stderr": "cc/b.cc:1:19: error: expected ';' after return statement\n    1 | int b() { return 1 }\n1 error generated.\n",
-    }
-    cc_kept = {"bazel-out/_objs/lib/a.o": {"stderr": "/h/cc/lib/CppCompile-1.stderr"}, "bazel-out/_objs/lib/b.o": {"stderr": "/h/cc/lib/CppCompile-2.stderr"}}
-
-    def _cc_error(src, said, target):
-        return {"header": "ERROR: cc/BUILD.bazel:2:11: Compiling cc/%s failed: (Exit 1)" % src, "body": said, "log": None, "label": None, "target": target}
-
-    for target in ["//cc:lib", None]:
-        for flip in [False, True]:
-            records = [
-                {"kind": "action", "label": "//cc:lib", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/_objs/lib/a.o", "success": False},
-                {"kind": "action", "label": "//cc:lib", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/_objs/lib/b.o", "success": False},
-            ]
-            errs = [
-                _cc_error("b.cc", ["cc/b.cc:1:19: error: expected ';' after return statement", "    1 | int b() { return 1 }"], target),
-                _cc_error("a.cc", ["cc/a.cc:1:18: error: use of undeclared identifier 'x'", "    1 | int a() { return x; }"], target),
-            ]
-            if flip:
-                records = records[::-1]
-            cc_state = dict(kinds, counts = dict(kinds["counts"], failures = ["//cc:lib"], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = records, read = lambda p, n: (cc_logs[p], 0) if p in cc_logs else None, build = struct(kept_action_log = lambda output: cc_kept.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None)
-            got = [_visible(l) for l in failure_summary(cc_state, {"errors": errs, "distinct": 2}, "t-9", False)]
-            entries = [got[k:k + 4] for k, l in enumerate(got) if l.startswith("✗")]
-            name = "cc, target %s, flipped %s" % (target, flip)
-            _eq(name + ": two entries", (got[0], len(entries)), ("── Failures (2) ──", 2))
-            for e in entries:
-                src = "a" if "a.cc:" in e[1] else "b"
-                _eq(name + ": " + src + "'s own log", e[0:3] + [e[3] if e[3].startswith("  log") else e[2]], [e[0], e[1], e[2], "  log /h/cc/lib/CppCompile-%d.stderr" % (1 if src == "a" else 2)])
-
-    # Coloured stderr (r46, Bazel 9.3.3): //pair:ansi's two Gen actions write
-    # `\033[31merror:\033[0m …`, and clang colours its own, d.cc and sub/d.cc
-    # in one cc_library (rules_cc numbers their objects 0/d.o and 1/d.o).
-    # The error quotes the text without escapes; each still finds its own
-    # kept log. A CRLF one alike.
-    def _paired(name, records, errs, logs, kept_of):
-        st = dict(kinds, counts = dict(kinds["counts"], failures = [records[0]["label"]], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = records, read = lambda p, n: (logs[p], 0) if p in logs else None, build = struct(kept_action_log = lambda output: kept_of.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None, ansi = ctx.std.re.compile(ANSI))
-        got = [_visible(l) for l in failure_summary(st, {"errors": errs, "distinct": len(errs)}, "t-9", False)]
-        entries = []
-        for k, l in enumerate(got):
-            if l.startswith("✗"):
-                rest = got[k + 1:]
-                end = rest.index("") if "" in rest else len(rest)
-                entries.append((got[k + 1], [r for r in rest[:end] if r.startswith("  log ")]))
-        return entries
-
-    def _gen(out):
-        return {"kind": "action", "label": "//pair:ansi", "detail": "Gen", "files": [("stderr", "file:///gone")], "output": out, "success": False}
-
-    for text, quoted in [("\x1b[31merror:\x1b[0m ansi %s broke\n", "error: ansi %s broke"), ("crlf %s broke\r\n", "crlf %s broke")]:
-        logs = {"/h/pair/ansi/Gen-1.stderr": text % "two", "/h/pair/ansi/Gen-2.stderr": text % "one"}
-        errs = [
-            {"header": "ERROR: pair/BUILD.bazel:3:5: Making two for //pair:ansi failed: (Exit 3)", "body": [quoted % "two"], "log": None, "label": None, "target": None},
-            {"header": "ERROR: pair/BUILD.bazel:3:5: Making one for //pair:ansi failed: (Exit 2)", "body": [quoted % "one"], "log": None, "label": None, "target": None},
-        ]
-        for flip in [False, True]:
-            records = [_gen("bazel-out/pair/ansi.one"), _gen("bazel-out/pair/ansi.two")]
-            got = _paired("ansi", records[::-1] if flip else records, errs, logs, {"bazel-out/pair/ansi.one": {"stderr": "/h/pair/ansi/Gen-2.stderr"}, "bazel-out/pair/ansi.two": {"stderr": "/h/pair/ansi/Gen-1.stderr"}})
-            _eq("%r flipped %s: each its own log" % (quoted, flip), sorted(got), [("  │ " + quoted % "one", ["  log /h/pair/ansi/Gen-2.stderr"]), ("  │ " + quoted % "two", ["  log /h/pair/ansi/Gen-1.stderr"])])
-
-    clang = "\x1b[1mcc2/%s:1:19: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier '%s'\x1b[0m\n    1 | \x1b[0;34mint\x1b[0m d() { \x1b[0;34mreturn\x1b[0m %s; }\x1b[0m\n1 error generated.\n"
-    cc2_logs = {"/h/cc2/stems/CppCompile-1.stderr": clang % ("sub/d.cc", "r", "r"), "/h/cc2/stems/CppCompile-2.stderr": clang % ("d.cc", "q", "q")}
-    cc2_errs = [
-        {"header": "ERROR: cc2/BUILD.bazel:2:11: Compiling cc2/d.cc failed: (Exit 1)", "body": ["cc2/d.cc:1:19: error: use of undeclared identifier 'q'", "    1 | int d() { return q; }"], "log": None, "label": None, "target": "//cc2:stems"},
-        {"header": "ERROR: cc2/BUILD.bazel:2:11: Compiling cc2/sub/d.cc failed: (Exit 1)", "body": ["cc2/sub/d.cc:1:19: error: use of undeclared identifier 'r'", "    1 | int d() { return r; }"], "log": None, "label": None, "target": "//cc2:stems"},
-    ]
-    for flip in [False, True]:
-        records = [
-            {"kind": "action", "label": "//cc2:stems", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/darwin_arm64-fastbuild/bin/cc2/_objs/stems/0/d.o", "success": False},
-            {"kind": "action", "label": "//cc2:stems", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/darwin_arm64-fastbuild/bin/cc2/_objs/stems/1/d.o", "success": False},
-        ]
-        kept_of = {records[0]["output"]: {"stderr": "/h/cc2/stems/CppCompile-2.stderr"}, records[1]["output"]: {"stderr": "/h/cc2/stems/CppCompile-1.stderr"}}
-        got = _paired("cc2", records[::-1] if flip else records, cc2_errs, cc2_logs, kept_of)
-        _eq("d.cc and sub/d.cc flipped %s: each its own log" % flip, sorted(got), [
-            ("  │ cc2/d.cc:1:19: error: use of undeclared identifier 'q'", ["  log /h/cc2/stems/CppCompile-2.stderr"]),
-            ("  │ cc2/sub/d.cc:1:19: error: use of undeclared identifier 'r'", ["  log /h/cc2/stems/CppCompile-1.stderr"]),
-        ])
-
-    # //two:three (r45): Step exits 5 with no output, Step exits 6 with
-    # stderr, Pack exits 7. The silent Step gets no log, never its
-    # sibling's.
-    three_logs = {"/h/two/three/Step-1.stderr": "step two broke\n", "/h/two/three/Pack-1.stderr": "pack broke\n"}
-    three_kept = {"bazel-out/three.b": {"stderr": "/h/two/three/Step-1.stderr"}, "bazel-out/three.c": {"stderr": "/h/two/three/Pack-1.stderr"}}
-    three_recs = [
-        {"kind": "action", "label": "//two:three", "detail": "Step", "files": [("stderr", "file:///gone")], "output": "bazel-out/three.a", "success": False},
-        {"kind": "action", "label": "//two:three", "detail": "Step", "files": [("stderr", "file:///gone")], "output": "bazel-out/three.b", "success": False},
-        {"kind": "action", "label": "//two:three", "detail": "Pack", "files": [("stderr", "file:///gone")], "output": "bazel-out/three.c", "success": False},
-    ]
-    three_errs = {"errors": [
-        {"header": "ERROR: two/BUILD.bazel:7:6: Making step two for //two:three failed: (Exit 6)", "body": ["step two broke"], "log": "/h/two/three/Step-1.stderr", "label": "//two:three", "target": None},
-        {"header": "ERROR: two/BUILD.bazel:7:6: Making step one for //two:three failed: (Exit 5)", "body": [], "log": "/h/two/three/Step-1.stderr", "label": "//two:three", "target": None},
-        {"header": "ERROR: two/BUILD.bazel:7:6: Packing //two:three failed: (Exit 7)", "body": ["pack broke"], "log": "/h/two/three/Pack-1.stderr", "label": "//two:three", "target": None},
-    ], "distinct": 3}
-    three = dict(kinds, counts = dict(kinds["counts"], failures = ["//two:three"], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = three_recs, read = lambda p, n: (three_logs[p], 0) if p in three_logs else None, build = struct(kept_action_log = lambda output: three_kept.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None)
-    got = [_visible(l) for l in failure_summary(three, three_errs, "t-9", False)]
-    _eq("the silent Step: its exit, no log", got[1:3], ["✗ //two:three  Step · exit 5 · two/BUILD.bazel:7:6", ""])
-    _eq("the loud Step its own", got[3:6], ["✗ //two:three  Step · exit 6 · two/BUILD.bazel:7:6", "  │ step two broke", "  log /h/two/three/Step-1.stderr"])
-    _eq("Pack its own", got[7:10], ["✗ //two:three  Pack · exit 7 · two/BUILD.bazel:7:6", "  │ pack broke", "  log /h/two/three/Pack-1.stderr"])
-
-    # The summary's entries as (heading, excerpt rows, log rows), and the
-    # Failures tab's headings, for a state of failed actions and their logs.
-    def _entries(records, errs, logs, kept_of, **kw):
-        st = dict(kinds, counts = dict(kinds["counts"], failures = sorted({r["label"]: True for r in records}.keys()), failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = records, read = lambda p, n: (logs[p], 0) if p in logs else None, build = struct(kept_action_log = lambda output: kept_of.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None, ansi = ctx.std.re.compile(ANSI))
-        st.update(kw)
-        got = [_visible(l) for l in failure_summary(st, {"errors": errs, "distinct": len(errs)}, "t-9", False)]
-        out = []
-        for k, l in enumerate(got):
-            if l.startswith("✗"):
-                rest = got[k + 1:]
-                end = [n for n, r in enumerate(rest) if r == "" or r.startswith("0 built")][0]
-                out.append((l, [r[4:] for r in rest[:end] if r.startswith("  │ ")], [r[6:] for r in rest[:end] if r.startswith("  log ")]))
-        tab = dict(st, kept_errors = {"errors": errs, "distinct": len(errs)}, action_errors_cache = None, focus = "console", selected = 0, excerpts = {})
-        rows = [_visible(r).rstrip() for r in failure_rows(tab, 40, 120)]
-        return (out, [r for r in rows if r.startswith("✗")])
-
-    def _act(label, detail, output, exit_code = None):
-        return {"kind": "action", "label": label, "detail": detail, "files": [("stderr", "file:///gone")], "output": output, "success": False, "exit_code": exit_code}
-
-    # ws4/xt (Bazel 7.7.3 and 8.9.0): //xt:a exits 3 and //xt:b exits 4,
-    # each writing the same banner first; the console said b's error
-    # first. Their lines name each by `(from target //xt:b)`; without that
-    # (the target unknown), their bodies' last lines and the records' exit
-    # codes still tell them apart, and with neither each is told from its
-    # record alone, never from the other's error.
-    xt_logs = {"/h/xt/a/Proc-1.stderr": "proc 1.0 starting\nerror: AAA broke in a.dat\n", "/h/xt/b/Proc-1.stderr": "proc 1.0 starting\nerror: BBB broke in b.dat\n"}
-    xt_kept = {"bazel-out/xt/a.out": {"stderr": "/h/xt/a/Proc-1.stderr"}, "bazel-out/xt/b.out": {"stderr": "/h/xt/b/Proc-1.stderr"}}
-
-    def _xt_errs(target):
-        return [
-            {"header": "ERROR: xt/BUILD.bazel:3:5: Processing xt/b.out failed: (Exit 4)", "body": ["proc 1.0 starting", "error: BBB broke in b.dat"], "log": None, "label": None, "target": "//xt:b" if target else None},
-            {"header": "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3)", "body": ["proc 1.0 starting", "error: AAA broke in a.dat"], "log": None, "label": None, "target": "//xt:a" if target else None},
-        ]
-
-    xt_b = failure_of("action_completed", struct(label = "//xt:b", primary_output = "bazel-out/xt/b.out", configuration = None), struct(success = False, type = "Proc", stderr = None, stdout = None, exit_code = 1, failure_detail = struct(message = "x", category = struct(code = "NON_ZERO_EXIT", spawn_exit_code = 4))))
-    _eq("a failed action's exit code is its spawn's, not the event's 1", xt_b["exit_code"], 4)
-    xt_own = [
-        ("✗ //xt:a  Proc · exit 3 · xt/BUILD.bazel:2:5", ["proc 1.0 starting", "error: AAA broke in a.dat"], ["/h/xt/a/Proc-1.stderr"]),
-        ("✗ //xt:b  Proc · exit 4 · xt/BUILD.bazel:3:5", ["proc 1.0 starting", "error: BBB broke in b.dat"], ["/h/xt/b/Proc-1.stderr"]),
-    ]
-    for target in [True, False]:
-        for codes in [True, False]:
-            for flip in [False, True]:
-                records = [_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3 if codes else None), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 4 if codes else None)]
-                got, tab = _entries(records[::-1] if flip else records, _xt_errs(target), xt_logs, xt_kept)
-                name = "xt target %s codes %s flipped %s" % (target, codes, flip)
-                _eq(name, sorted(got), xt_own)
-                _eq(name + ", the tab", sorted(tab), [e[0] for e in xt_own])
-    got, tab = _entries([_act("//xt:a", "Proc", "bazel-out/xt/a.out"), _act("//xt:b", "Proc", "bazel-out/xt/b.out")], _xt_errs(False), {}, {})
-    _eq("xt with nothing to tell them apart: each from its record, no other's", got, [("✗ //xt:a  Proc", [], []), ("✗ //xt:b  Proc", [], [])])
-    _eq("and the tab alike", tab, ["✗ //xt:a  Proc", "✗ //xt:b  Proc"])
-    got, tab = _entries([_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 3)], [dict(e, header = e["header"].replace("Exit 4", "Exit 3")) for e in _xt_errs(False)], {"/h/xt/a/Proc-1.stderr": "proc 1.0 starting\nsame\n", "/h/xt/b/Proc-1.stderr": "proc 1.0 starting\nsame\n"}, xt_kept)
-    _eq("one exit, one text: each its own log and exit, no location", got, [("✗ //xt:a  Proc · exit 3", ["proc 1.0 starting", "same"], ["/h/xt/a/Proc-1.stderr"]), ("✗ //xt:b  Proc · exit 3", ["proc 1.0 starting", "same"], ["/h/xt/b/Proc-1.stderr"])])
-    _eq("and the tab alike, from the record", tab, ["✗ //xt:a  Proc · exit 3", "✗ //xt:b  Proc · exit 3"])
-
-    # ws/xn (Bazel 9.3.3): progress messages name another target
-    # (`Checking against //xn:b`); the line's `(from … target //xn:a)` is
-    # the owner. //xn:d's command exits 0 without its output: its two
-    # errors at its BUILD line, neither with an exit code, are both its.
-    xn_errs = [
-        {"header": "ERROR: xn/BUILD.bazel:4:4: Checking against //xn:d failed: (Exit 5)", "body": ["error: CCC alone"], "log": None, "label": None, "target": "//xn:c"},
-        {"header": "ERROR: xn/BUILD.bazel:2:4: Checking against //xn:b failed: (Exit 3)", "body": ["error: AAA mismatch in a"], "log": None, "label": None, "target": "//xn:a"},
-        {"header": "ERROR: xn/BUILD.bazel:5:4: output 'xn/d.out' was not created", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: xn/BUILD.bazel:5:4: Checking d failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: xn/BUILD.bazel:3:4: Checking against //xn:a failed: (Exit 3)", "body": ["error: BBB mismatch in b"], "log": None, "label": None, "target": "//xn:b"},
-    ]
-    xn_recs = [_act("//xn:%s" % n, "Check", "bazel-out/xn/%s.out" % n, code) for n, code in [("a", 3), ("b", 3), ("c", 5), ("d", 0)]]
-    got, tab = _entries(xn_recs, xn_errs, {}, {})
-    _eq("each its own error, d both of its", [(e[0], e[1]) for e in got], [
-        ("✗ //xn:a  Check · exit 3 · xn/BUILD.bazel:2:4", ["error: AAA mismatch in a"]),
-        ("✗ //xn:b  Check · exit 3 · xn/BUILD.bazel:3:4", ["error: BBB mismatch in b"]),
-        ("✗ //xn:c  Check · exit 5 · xn/BUILD.bazel:4:4", ["error: CCC alone"]),
-        ("✗ //xn:d  Check · xn/BUILD.bazel:5:4", ["output 'xn/d.out' was not created", "not all outputs were created or valid"]),
-    ])
-    _eq("and the tab alike", tab, [e[0] for e in got])
-
-    # ws/an (Bazel 9.3.3, --keep_going): //an:missing's source is missing,
-    # and //an:dep, which Bazel gives the same root (`//an:nope.txt`), is
-    # blocked by it; //an:badlabel's dependency `//nowhere:x` fails
-    # analysis, said twice, once at the BUILD line: one entry.
-    an_errs = [
-        {"header": "ERROR: an/BUILD.bazel:1:8: Executing genrule //an:missing failed: missing input file '//an:nope.txt'", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: an/BUILD.bazel:1:8: Executing genrule //an:missing failed: 1 input file(s) do not exist", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere"], "log": None, "label": None, "target": None},
-        {"header": "ERROR: an/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere and referenced by '//an:badlabel'"], "log": None, "label": None, "target": None},
-    ]
-    an = dict(kinds, counts = dict(new_counts(), failures = ["//an:missing", "//an:dep"], failed_labels = {"//an:missing": True, "//an:dep": True}, failed = 2, failed_roots = {"//nowhere:x": True}), root_causes = {"//an:missing": ["//an:nope.txt"], "//an:dep": ["//an:nope.txt"], "//an:badlabel": ["//nowhere:x"]}, logged_index = None, blocked_cache = None, fails = [{"kind": "action", "label": "//nowhere:x", "detail": "analysis failed", "files": [("error", ("no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nowhere", False))], "output": "", "success": False}], kept_errors = {"errors": an_errs, "distinct": 4}, read = None, build = None)
-    got = [_visible(l) for l in failure_summary(an, {"errors": an_errs, "distinct": 4}, "t-9", False)]
-    _eq("the missing source's target, its dependent blocked by it; the analysis root once", [l for l in got if l.startswith("✗") or "blocked" in l], [
-        "✗ //an:missing  an/BUILD.bazel:1:8",
-        "  ○ blocked: //an:dep",
-        "✗ //nowhere:x  analysis · an/BUILD.bazel:3:8",
-        "  ○ blocked: //an:badlabel",
-        "0 built, 1 failed, 2 blocked · 0 tests passed, 0 failed",
-    ])
-
-    # ws/mc (Bazel 7.7.3 and 9.3.3, --keep_going): d0 and d1 from one list
-    # comprehension on line 2, e on line 3, none creating its output: each
-    # its own two errors, by the output they name and the name they say;
-    # three entries, none an error of its own.
-    mc_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: mc/BUILD.bazel:3:4: output 'mc/e.out' was not created",
-        "ERROR: mc/BUILD.bazel:2:5: output 'mc/d0.out' was not created",
-        "ERROR: mc/BUILD.bazel:3:4: Checking e failed: not all outputs were created or valid",
-        "ERROR: mc/BUILD.bazel:2:5: Checking d0 failed: not all outputs were created or valid",
-        "ERROR: mc/BUILD.bazel:2:5: output 'mc/d1.out' was not created",
-        "ERROR: mc/BUILD.bazel:2:5: Checking d1 failed: not all outputs were created or valid",
-    ]]
-    for flip in [False, True]:
-        mc_recs = [_act("//mc:%s" % n, "Check", "bazel-out/darwin_arm64-fastbuild/bin/mc/%s.out" % n, 0) for n in ("e", "d0", "d1")]
-        got, tab = _entries(mc_recs[::-1] if flip else mc_recs, mc_errs, {}, {})
-        _eq("mc flipped %s: three entries, each its own" % flip, sorted([(e[0], e[1]) for e in got]), [
-            ("✗ //mc:d0  Check · mc/BUILD.bazel:2:5", ["output 'mc/d0.out' was not created", "not all outputs were created or valid"]),
-            ("✗ //mc:d1  Check · mc/BUILD.bazel:2:5", ["output 'mc/d1.out' was not created", "not all outputs were created or valid"]),
-            ("✗ //mc:e  Check · mc/BUILD.bazel:3:4", ["output 'mc/e.out' was not created", "not all outputs were created or valid"]),
-        ])
-        _eq("mc flipped %s: the tab alike" % flip, sorted(tab), sorted([e[0] for e in got]))
-
-    # ws/ar (Bazel 7.7.3 and 9.3.3): //ar:boom fails in the package whose
-    # //ar:badlabel names `//nowhere:x`: the analysis root keeps its own
-    # error at the BUILD line, the failed action takes none of it.
-    ar_errs = [
-        {"header": "ERROR: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere"], "log": None, "label": None, "target": None},
-        {"header": "ERROR: ar/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere and referenced by '//ar:badlabel'"], "log": None, "label": None, "target": None},
-        {"header": "ERROR: ar/BUILD.bazel:1:8: Executing genrule //ar:boom failed: (Exit 1)", "body": ["boom broke"], "log": None, "label": None, "target": "//ar:boom"},
-    ]
-    ar = dict(kinds, counts = dict(new_counts(), failures = ["//ar:boom"], failed_labels = {"//ar:boom": True}, failed = 1, failed_roots = {"//nowhere:x": True}), root_causes = {"//ar:badlabel": ["//nowhere:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [
-        {"kind": "action", "label": "//nowhere:x", "detail": "analysis failed", "files": [("error", ("no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nowhere", False))], "output": "", "success": False},
-        _act("//ar:boom", "Genrule", "bazel-out/ar/boom.txt", 1),
-    ], kept_errors = {"errors": ar_errs, "distinct": 3}, read = None, build = None)
-    got = [_visible(l) for l in failure_summary(ar, {"errors": ar_errs, "distinct": 3}, "t-9", False)]
-    _eq("the analysis root's located error stays its own", [l for l in got if l.startswith("✗") or "referenced by" in l], ["✗ //nowhere:x  analysis · ar/BUILD.bazel:3:8", "  │ - nowhere and referenced by '//ar:badlabel'", "✗ //ar:boom  Genrule · exit 1 · ar/BUILD.bazel:1:8"])
-
-    # ws/sn (Bazel 9.3.3): `Building docs for api failed` is at docs's
-    # line though it names api too, `Packaging failed` at api's: each goes
-    # with the entry at its line, a reason said once.
-    sn_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: sn/BUILD.bazel:3:4: output 'sn/api.out' was not created",
-        "ERROR: sn/BUILD.bazel:3:4: Packaging failed: not all outputs were created or valid",
-        "ERROR: sn/BUILD.bazel:2:4: output 'sn/docs.out' was not created",
-        "ERROR: sn/BUILD.bazel:2:4: Building docs for api failed: not all outputs were created or valid",
-    ]]
-    got, _ = _entries([_act("//sn:%s" % n, "Check", "bazel-out/bin/sn/%s.out" % n, 0) for n in ("docs", "api")], sn_errs, {}, {})
-    _eq("a further error goes with the entry at its line", sorted([(e[0], e[1]) for e in got]), [
-        ("✗ //sn:api  Check · sn/BUILD.bazel:3:4", ["output 'sn/api.out' was not created", "not all outputs were created or valid"]),
-        ("✗ //sn:docs  Check · sn/BUILD.bazel:2:4", ["output 'sn/docs.out' was not created", "not all outputs were created or valid"]),
-    ])
-
-    # ws/sp (Bazel 9.3.3): api and gen fail with exit codes; docs and after
-    # make no output, their messages naming api and gen in passing. Each
-    # further error is the one at its line's.
-    sp_errs = [
-        {"header": "ERROR: sp/BUILD.bazel:3:4: Packaging failed: (Exit 2)", "body": ["api broke"], "log": None, "label": None, "target": "//sp:api"},
-        {"header": "ERROR: sp/BUILD.bazel:4:8: Executing genrule //sp:gen failed: (Exit 3)", "body": ["gen broke"], "log": None, "label": None, "target": "//sp:gen"},
-        {"header": "ERROR: sp/BUILD.bazel:5:4: output 'sp/after.out' was not created", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: sp/BUILD.bazel:5:4: Checking gen output failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: sp/BUILD.bazel:2:4: output 'sp/docs.out' was not created", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: sp/BUILD.bazel:2:4: Building docs for api failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
-    ]
-    sp_recs = [_act("//sp:api", "Check", "bazel-out/bin/sp/api.out", 2), _act("//sp:gen", "Genrule", "bazel-out/bin/sp/gen.txt", 3), _act("//sp:after", "Check", "bazel-out/bin/sp/after.out", 0), _act("//sp:docs", "Check", "bazel-out/bin/sp/docs.out", 0)]
-    got, _ = _entries(sp_recs, sp_errs, {}, {})
-    _eq("a name in passing takes nothing", sorted([(e[0], e[1]) for e in got]), [
-        ("✗ //sp:after  Check · sp/BUILD.bazel:5:4", ["output 'sp/after.out' was not created", "not all outputs were created or valid"]),
-        ("✗ //sp:api  Check · exit 2 · sp/BUILD.bazel:3:4", ["api broke"]),
-        ("✗ //sp:docs  Check · sp/BUILD.bazel:2:4", ["output 'sp/docs.out' was not created", "not all outputs were created or valid"]),
-        ("✗ //sp:gen  Genrule · exit 3 · sp/BUILD.bazel:4:8", ["gen broke"]),
-    ])
-
-    # ws/ar2 (Bazel 9.3.3): //ar2:uses depends on //le:x, whose package has
-    # a syntax error; Bazel aborts `//le:x`'s unconfigured label. One entry,
-    # the syntax error's, the dependent blocked under it.
-    le_errs = [
-        {"header": "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: ar2/BUILD.bazel:4:8: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//ar2:uses'", "body": [], "log": None, "label": None, "target": None},
-    ]
-    le_state = dict(kinds, counts = dict(new_counts(), failures = ["//le:x", "//ar2:uses"], failed_labels = {"//le:x": True, "//ar2:uses": True}, failed = 2, failed_roots = {"//le:x": True}), root_causes = {"//ar2:uses": ["//le:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": le_errs, "distinct": 3}, read = None, build = None)
-    note_event(le_state, "unconfigured_label", struct(label = "//le:x"), struct(), True)
-    got = [_visible(l) for l in failure_summary(le_state, {"errors": le_errs, "distinct": 3}, "t-9", False)]
-    _eq("a loading root: one entry, its syntax error first, its dependent blocked", [l for l in got if l.startswith("✗") or "blocked" in l or l.startswith("  │ syntax")], ["✗ //le  analysis · le/BUILD.bazel:2:1", "  │ syntax error at 'newline': expected ,", "  ○ blocked: //ar2:uses", "0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
-
-    # ws/p1 and p2 (Bazel 7.7.3 and 9.3.3): one broken package's two roots,
-    # //le:x and //le:y, are one entry headed by its syntax error, every
-    # dependent blocked under it; //mt:gone, missing from a package that
-    # parsed, its own root at its first referencing line in Bazel's order.
-    uc_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
-        "ERROR: le/BUILD.bazel: no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel",
-        "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel",
-        "ERROR: mt/BUILD.bazel: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel",
-        "ERROR: p1/BUILD.bazel:2:8: no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//p1:b'",
-        "ERROR: p1/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//p1:a'",
-        "ERROR: p2/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//p2:a'",
-        "ERROR: p2/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel and referenced by '//p2:e'",
-        "ERROR: p1/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel and referenced by '//p1:c'",
-    ]]
-    roots = {"//p1:a": ["//le:x"], "//p2:a": ["//le:x"], "//p2:d": ["//le:x"], "//p1:b": ["//le:y"], "//p1:c": ["//mt:gone"], "//p2:e": ["//mt:gone"]}
-    uc = dict(kinds, counts = dict(new_counts(), failures = sorted(roots.keys()), failed_labels = {l: True for l in roots}, failed = len(roots)), root_causes = roots, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": uc_errs, "distinct": len(uc_errs)}, read = None, build = None)
-    for label in ("//le:x", "//le:y", "//mt:gone"):
-        note_event(uc, "unconfigured_label", struct(label = label), struct(), True)
-    got = [_visible(l) for l in failure_summary(uc, {"errors": uc_errs, "distinct": len(uc_errs)}, "t-9", False)]
-    _eq("one broken package, one entry; a missing target its own", [l for l in got if l.startswith("✗") or "blocked:" in l or l.startswith("──")], [
-        "── Failures (2) ──",
-        "✗ //le  analysis · le/BUILD.bazel:2:1",
-        "  ○ blocked: //p1:a, //p2:a, //p2:d +1 blocked",
-        "✗ //mt:gone  analysis · p2/BUILD.bazel:3:8",
-        "  ○ blocked: //p1:c, //p2:e",
-    ])
-
-    # The same under --nokeep_going: no Aborted unconfigured labels, the
-    # `no such target` errors under the syntax error, `Analysis of target
-    # … failed; build aborted` the root's that blocked it: 2 entries.
-    nk_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
-        "ERROR: mt/BUILD.bazel: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel",
-        "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel",
-        "ERROR: le/BUILD.bazel: no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel",
-        "ERROR: p2/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel and referenced by '//p2:e'",
-        "ERROR: Analysis of target '//p2:e' failed; build aborted: Analysis failed",
-    ]]
-    nk = dict(uc, counts = dict(new_counts(), failures = ["//p2:e"], failed_labels = {"//p2:e": True}, failed = 1, failed_roots = {"//mt:gone": True}), root_causes = {"//p2:e": ["//mt:gone"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [{"kind": "action", "label": "//mt:gone", "detail": "analysis failed", "files": [("error", ("no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel", False))], "output": "", "success": False}], kept_errors = {"errors": nk_errs, "distinct": len(nk_errs)})
-    got = [_visible(l) for l in failure_summary(nk, {"errors": nk_errs, "distinct": len(nk_errs)}, "t-9", False)]
-    _eq("--nokeep_going: 2 entries", [l for l in got if l.startswith("✗") or l.startswith("──")], ["── Failures (2) ──", "✗ //le  analysis · le/BUILD.bazel:2:1", "✗ //mt:gone  analysis · p2/BUILD.bazel:3:8"])
-    _eq("the build-aborted line with its root", "Analysis of target '//p2:e' failed; build aborted: Analysis failed" in "\n".join(got), True)
-
-    # ws/an again, as Bazel 9.3.3 streams it: the missing source's own
-    # Aborted `unconfigured_label` (`//an:nope.txt`) is no root; the target
-    # that needed it is, its dependent blocked under it.
-    an2 = dict(an, fails = list(an["fails"]), logged_index = None, blocked_cache = None, listed_cache = None, counts = dict(an["counts"]))
-    count_event(an2["counts"], "unconfigured_label", struct(label = "//an:nope.txt"), struct(), True)
-    note_event(an2, "unconfigured_label", struct(label = "//an:nope.txt"), struct(), True)
-    got = [_visible(l) for l in failure_summary(an2, {"errors": an_errs, "distinct": 4}, "t-9", False)]
-    _eq("a missing source is no root", [l for l in got if l.startswith("✗") or "blocked" in l], [
-        "✗ //an:missing  an/BUILD.bazel:1:8",
-        "  ○ blocked: //an:dep",
-        "✗ //nowhere:x  analysis · an/BUILD.bazel:3:8",
-        "  ○ blocked: //an:badlabel",
-        "0 built, 1 failed, 2 blocked · 0 tests passed, 0 failed",
-    ])
-
-    # ws/le2 asked for by pattern (Bazel 9.3.3): its syntax error, Bazel's
-    # `package contains errors` and `command succeeded, but` lines are one
-    # entry though nothing depends on it.
-    le2_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: le2/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
-        "ERROR: package contains errors: le2: syntax error at 'newline': expected ,",
-    ]]
-    le2 = dict(kinds, counts = new_counts(), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": le2_errs, "distinct": 2}, read = None, build = None)
-    got = [_visible(l) for l in failure_summary(le2, {"errors": le2_errs, "distinct": 2}, "t-9", False)]
-    _eq("a broken package asked for: one entry", [l for l in got if l.startswith("✗") or l.startswith("──") or l.startswith("  │")], ["── Failures (1) ──", "✗ //le2  analysis · le2/BUILD.bazel:2:1", "  │ syntax error at 'newline': expected ,"])
-
-    # ws/mf (Bazel 9.3.3): a `fail()` in a macro, `Traceback` its header and
-    # its BUILD line in the first frame: one entry at that line, with the
-    # traceback, the `no such target` errors and the dependent blocked.
-    tb = ["Traceback (most recent call last):"]
-    frames = ["\tFile \"mf/BUILD.bazel\", line 2, column 10, in <toplevel>", "\t\tbad_macro(name = \"m\")", "\tFile \"mf/defs.bzl\", line 2, column 9, in bad_macro", "\t\tfail(\"bad_macro refuses \" + name)", "Error in fail: bad_macro refuses m"]
-    mf_errs = [
-        {"header": "ERROR: Traceback (most recent call last):", "body": frames, "log": None, "label": None, "target": None},
-        {"header": "ERROR: package contains errors: mf: Traceback (most recent call last):", "body": frames, "log": None, "label": None, "target": None},
-        {"header": "ERROR: mf/BUILD.bazel: no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: q/BUILD.bazel:1:8: no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel and referenced by '//q:on_mf'", "body": [], "log": None, "label": None, "target": None},
-    ]
-    mf = dict(kinds, counts = dict(new_counts(), failures = ["//q:on_mf"], failed_labels = {"//q:on_mf": True}, failed = 1), root_causes = {"//q:on_mf": ["//mf:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": mf_errs, "distinct": 4}, read = None, build = None)
-    note_event(mf, "unconfigured_label", struct(label = "//mf:x"), struct(), True)
-    count_event(mf["counts"], "unconfigured_label", struct(label = "//mf:x"), struct(), True)
-    got = [_visible(l) for l in failure_summary(mf, {"errors": mf_errs, "distinct": 4}, "t-9", False)]
-    _eq("a macro's fail(): one entry at its BUILD line", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked" in l], ["── Failures (1) ──", "✗ //mf  analysis · mf/BUILD.bazel:2:10", "  ○ blocked: //q:on_mf", "0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
-
-    # A failed build always says why (Bazel 7.7.3, `--nosuch_flag_here`: no
-    # build event at all, its one `ERROR:` in its raw log).
-    flag = dict(kinds, counts = new_counts(), root_causes = {}, fails = [], logged_index = None, blocked_cache = None, listed_cache = None, read = lambda p, n: ("ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here\n", 0) if p == "/h/console.log" else None, build = None, ansi = ctx.std.re.compile(ANSI))
-    got = [_visible(l) for l in failure_summary(flag, None, "t-9", False, "/h/console.log", bazel_exit = 2)]
-    _eq("Bazel exited, with its errors", got[:4], ["── Failures (1) ──", "✗ Bazel exited 2", "  │ --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here", "  log /h/console.log"])
-    _eq("a build that succeeded has no fallback", [l for l in failure_summary(flag, None, "t-9", False, "/h/console.log", bazel_exit = 0) if l.startswith("──")], [])
-
-    # ws/ad (Bazel 9.3.3): an attribute default's `no such package`, said
-    # alone and again in the error that names its root: one entry.
-    ad_errs = [
-        {"header": "ERROR: no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": [" - nowhere2"], "log": None, "label": None, "target": None},
-        {"header": "ERROR: ad/BUILD.bazel:2:2: every rule of type r implicitly depends upon the target '//nowhere2:tool', but this target could not be found because of: no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": [" - nowhere2"], "log": None, "label": None, "target": None},
-    ]
-    ad = dict(kinds, counts = dict(new_counts(), failures = ["//ad:x"], failed_labels = {"//ad:x": True}, failed = 1, failed_roots = {"//nowhere2:tool": True}), root_causes = {"//ad:x": ["//nowhere2:tool"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [{"kind": "action", "label": "//nowhere2:tool", "detail": "analysis failed", "files": [("error", ("every rule of type r implicitly depends upon the target '//nowhere2:tool', but this target could not be found because of: no such package 'nowhere2': BUILD file not found", False))], "output": "", "success": False}], kept_errors = {"errors": ad_errs, "distinct": 2}, read = None, build = None)
-    got = [_visible(l) for l in failure_summary(ad, {"errors": ad_errs, "distinct": 2}, "t-9", False)]
-    _eq("said twice, one entry", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked:" in l], ["── Failures (1) ──", "✗ //nowhere2:tool  analysis · ad/BUILD.bazel:2:2", "  ○ blocked: //ad:x"])
-
-    # ws/ms2 (Bazel 9.3.3): one missing source two targets need, each its
-    # own failure with its own two lines; neither blocked by the other.
-    ms_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: ms2/BUILD.bazel:2:8: Executing genrule //ms2:b failed: missing input file '//ms2:shared_missing.txt'",
-        "ERROR: ms2/BUILD.bazel:1:8: Executing genrule //ms2:a failed: missing input file '//ms2:shared_missing.txt'",
-        "ERROR: ms2/BUILD.bazel:2:8: Executing genrule //ms2:b failed: 1 input file(s) do not exist",
-        "ERROR: ms2/BUILD.bazel:1:8: Executing genrule //ms2:a failed: 1 input file(s) do not exist",
-    ]]
-    ms = dict(kinds, counts = dict(new_counts(), failures = ["//ms2:b", "//ms2:a"], failed_labels = {"//ms2:a": True, "//ms2:b": True}, failed = 2), root_causes = {"//ms2:a": ["//ms2:shared_missing.txt"], "//ms2:b": ["//ms2:shared_missing.txt"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": ms_errs, "distinct": 4}, read = None, build = None)
-    got = [_visible(l) for l in failure_summary(ms, {"errors": ms_errs, "distinct": 4}, "t-9", False)]
-    _eq("a source two need: two failures", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked" in l], ["── Failures (2) ──", "✗ //ms2:b  ms2/BUILD.bazel:2:8", "✗ //ms2:a  ms2/BUILD.bazel:1:8"])
-
-    # ws/asp (Bazel 9.3.3, --aspects): an aspect's `fail()` aborts //asp:x's
-    # analysis and its genrule's output is not created: one entry, the
-    # label counted once.
-    asp_desc = "in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: \nTraceback (most recent call last):\n\tFile \"/ws/asp/defs.bzl\", line 2, column 9, in _a\n\t\tfail(\"aspect refuses \" + str(target.label))\nError in fail: aspect refuses @@//asp:x"
-    asp_errs = [
-        {"header": "ERROR: asp/BUILD.bazel:1:8: in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: ", "body": ["Traceback (most recent call last):", "… 2 more lines", "Error in fail: aspect refuses @@//asp:x"], "log": None, "label": None, "target": None},
-        {"header": "ERROR: asp/BUILD.bazel:1:8: declared output 'asp/x.txt' was not created by genrule.", "body": [], "log": None, "label": None, "target": None},
-        {"header": "ERROR: asp/BUILD.bazel:1:8: Executing genrule //asp:x failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
-    ]
-    asp = dict(kinds, counts = dict(new_counts(), failures = ["//asp:x"], failed_labels = {"//asp:x": True}, failed = 1), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [
-        {"kind": "action", "label": "//asp:x", "detail": "analysis failed", "files": [("error", (asp_desc, False))], "output": "", "success": False},
-        _act("//asp:x", "Genrule", "bazel-out/bin/asp/x.txt", 0),
-    ], kept_errors = {"errors": asp_errs, "distinct": 3}, read = None, build = None)
-    got = [_visible(l) for l in failure_summary(asp, {"errors": asp_errs, "distinct": 3}, "t-9", False)]
-    _eq("an aspect's fail(): one entry", [l for l in got if l.startswith("✗") or l.startswith("──")][:2], ["── Failures (1) ──", "✗ //asp:x  Genrule · asp/BUILD.bazel:1:8"])
-
-    # ws/ov (Bazel 9.3.3): //ov:c's two actions say `error: x` and `error: x
-    # is bad`, //ov:d's two `same line`, g1 and g2 `error: shared`: six
-    # failed actions, six entries, six rows in the tab, `Failed ✗ 6`.
-    ov_errs = []
-    ov_recs = []
-    for name, line, out, code, said in [("g2", 11, "g2.txt", 1, "error: shared"), ("g1", 10, "g1.txt", 1, "error: shared"), ("d", 6, "d.0", 2, "same line"), ("c", 2, "c.0", 1, "error: x"), ("d", 6, "d.1", 2, "same line"), ("c", 2, "c.1", 1, "error: x is bad")]:
-        what = ("Executing genrule //ov:%s" % name) if name.startswith("g") else ("Processing ov/%s" % out)
-        ov_errs.append({"header": "ERROR: ov/BUILD.bazel:%d:%d: %s failed: (Exit %d)" % (line, 8 if name.startswith("g") else 4, what, code), "body": [said], "log": None, "label": None, "target": "//ov:" + name})
-        ov_recs.append(_act("//ov:" + name, "Genrule" if name.startswith("g") else "Proc", "bazel-out/bin/ov/" + out, code))
-    ov_logs = {"/h/ov/%d.stderr" % k: ov_errs[k]["body"][0] + "\n" for k in range(6)}
-    ov_kept = {ov_recs[k]["output"]: {"stderr": "/h/ov/%d.stderr" % k} for k in range(6)}
-    ov_got, ov_tab = _entries(ov_recs, ov_errs, ov_logs, ov_kept)
-    ov = dict(kinds, counts = dict(new_counts(), failures = ["//ov:g2", "//ov:g1", "//ov:d", "//ov:c"], failed_labels = {}, failed = 4), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = ov_recs, kept_errors = {"errors": ov_errs, "distinct": 6}, read = None, build = None, building = False, ended = True)
-
-    # The summary's entries, the Failures tab's rows and the Results'
-    # `Failed ✗ N`: one count.
-    def _agree(name, st, want):
-        errs = st["kept_errors"]
-        summary = [l for l in [_visible(l) for l in failure_summary(dict(st, action_errors_cache = None, listed_cache = None, blocked_cache = None), errs, "t-9", False)] if l.startswith("✗")]
-        tab = [r for r in [_visible(r).rstrip() for r in failure_rows(dict(st, action_errors_cache = None, listed_cache = None, blocked_cache = None, focus = "console", selected = 0, excerpts = {}), 40, 120)] if r.startswith("✗")]
-        said = [l for l in _visible(render(dict(st, action_errors_cache = None, listed_cache = None, blocked_cache = None), 140, 40)).split("\n") if "Failed   ✗" in l]
-        _eq(name + ": summary, tab and Failed agree", (len(summary), len(tab), ("Failed   ✗ %d" % want) in said[0] if said else False), (want, want, True))
-
-    _agree("ov", ov, 6)
-    ov7 = [dict(e, header = e["header"].replace("Processing ov/", "Processing bazel-out/darwin_arm64-fastbuild/bin/ov/")) for e in ov_errs]
-    ov7_recs = [dict(r, output = r["output"].replace("bazel-out/bin/", "bazel-out/darwin_arm64-fastbuild/bin/")) for r in ov_recs]
-    ov7_kept = {r["output"]: ov_kept[o["output"]] for r, o in zip(ov7_recs, ov_recs)}
-    got, _ = _entries(ov7_recs, ov7, ov_logs, ov7_kept)
-    _eq("Bazel 7 names the whole output", len([e for e in got if e[0].endswith("ov/BUILD.bazel:6:4")]), 2)
-    _agree("ms2", dict(ms, building = False, ended = True), 2)
-    pair_errs = []
-    pair_recs = []
-    pair_logs = {}
-    pair_kept = {}
-    for name, one, two in [("plain", "plain one broke", "plain two broke"), ("ansi", "\x1b[31merror:\x1b[0m ansi one broke", "\x1b[31merror:\x1b[0m ansi two broke"), ("crlf", "crlf one broke\r", "crlf two broke\r"), ("same", "identical text", "identical text")]:
-        for k, said, code in [(0, one, 2), (1, two, 3)]:
-            output = "bazel-out/bin/pair/%s.%d" % (name, k)
-            pair_errs.append({"header": "ERROR: pair/BUILD.bazel:2:5: Running %s %d failed: (Exit %d)" % (name, k, code), "body": [said], "log": None, "label": None, "target": "//pair:" + name})
-            pair_recs.append(_act("//pair:" + name, "Pair", output, code))
-            pair_logs["/h/pair/%s/%d.stderr" % (name, k)] = said + "\n"
-            pair_kept[output] = {"stderr": "/h/pair/%s/%d.stderr" % (name, k)}
-    pair_got, _ = _entries(pair_recs, pair_errs, pair_logs, pair_kept)
-    _eq("pair: each action its own entry", len(pair_got), 8)
-    _agree("pair", dict(kinds, counts = dict(new_counts(), failures = ["//pair:plain", "//pair:ansi", "//pair:crlf", "//pair:same"], failed_labels = {}, failed = 4), root_causes = {}, logged_index = None, fails = pair_recs, read = lambda p, n: (pair_logs[p], 0) if p in pair_logs else None, build = struct(kept_action_log = lambda output: pair_kept.get(output, {})), kept_errors = {"errors": pair_errs, "distinct": 8}, excerpts = {}, ansi = ctx.std.re.compile(ANSI), building = False, ended = True), 8)
-    _eq("each its own exit and line", sorted([e[0] for e in ov_got]), sorted(["✗ //ov:%s  %s · exit %d · ov/BUILD.bazel:%d:%d" % (n, "Genrule" if n.startswith("g") else "Proc", c, l, 8 if n.startswith("g") else 4) for n, l, c in [("g2", 11, 1), ("g1", 10, 1), ("d", 6, 2), ("c", 2, 1), ("d", 6, 2), ("c", 2, 1)]]))
-
-    # ws/no (Bazel 7.7.3 to 9.3.3; x's first, within the excerpts shown): //no:x's Prep makes x.a but its progress
-    # message names x.b, its Fin the other way about: each error goes with
-    # the action whose log says it. //no:p's p.1 and p.10 say the same, told
-    # apart by the output named; //no:n's two say the same and name none:
-    # one each, both located.
-    no_errs = []
-    no_recs = []
-    no_logs = {}
-    no_kept = {}
-    for label, line, what, mnemonic, output, said in [
-        ("x", "3:6", "Preparing no/x.b", "Prep", "x.a", "A side broke"),
-        ("x", "3:6", "Finishing no/x.a", "Fin", "x.b", "B side broke"),
-        ("p", "2:4", "Processing no/p.1", "Proc", "p.1", "same text"),
-        ("n", "4:6", "Working", "W", "n.a", "same"),
-        ("n", "4:6", "Working", "W", "n.b", "same"),
-        ("p", "2:4", "Processing no/p.10", "Proc", "p.10", "same text"),
-    ]:
-        no_errs.append({"header": "ERROR: no/BUILD.bazel:%s: %s failed: (Exit 1)" % (line, what), "body": [said], "log": None, "label": None, "target": "//no:" + label})
-        no_recs.append(_act("//no:" + label, mnemonic, "bazel-out/bin/no/" + output, 1))
-        no_logs["/h/no/" + output] = said + "\n"
-        no_kept["bazel-out/bin/no/" + output] = {"stderr": "/h/no/" + output}
-    got, _ = _entries(no_recs, no_errs, no_logs, no_kept)
-    _eq("each action its own error, whatever its message names", sorted([(e[0], e[1]) for e in got if "//no:x" in e[0]]), [("✗ //no:x  Fin · exit 1 · no/BUILD.bazel:3:6", ["B side broke"]), ("✗ //no:x  Prep · exit 1 · no/BUILD.bazel:3:6", ["A side broke"])])
-    got, _ = _entries(no_recs, [e for k, e in enumerate(no_errs) if k != 4], no_logs, no_kept)
-    _eq("a repeat kept once: both located", [e[0] for e in got if "//no:n" in e[0]], ["✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6", "✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6"])
-    got, _ = _entries(no_recs, no_errs, no_logs, no_kept)
-    _eq("alike errors: one each, located", [e[0] for e in got if "//no:x" not in e[0]], ["✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4", "✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6", "✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6", "✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4"])
-
-    # ws/at2 + q2 (Bazel 9.3.3): //at2:t1's and //at2:t2's own attribute
-    # errors put at2 in error; ok and ok2 fail with it, and //q2:u needs ok.
-    at2_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: at2/BUILD.bazel:1:8: //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"a.txt\" (string)",
-        "ERROR: at2/BUILD.bazel:1:8: //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule",
-        "ERROR: at2/BUILD.bazel:2:8: //at2:t2: expected value of type 'string' for attribute 'cmd' of 'genrule', but got 5 (int)",
-        "ERROR: package contains errors: at2: //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"a.txt\" (string)",
-        "ERROR: q2/BUILD.bazel:1:8: Target '//at2:ok' contains an error and its package is in error and referenced by '//q2:u'",
-    ]]
-    at2 = dict(kinds, counts = dict(new_counts(), failures = ["//at2:t1", "//at2:t2", "//at2:ok", "//at2:ok2", "//q2:u"], failed_labels = {"//at2:t1": True, "//at2:t2": True, "//at2:ok": True, "//at2:ok2": True, "//q2:u": True}, failed = 5), root_causes = {"//q2:u": ["//at2:ok"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": at2_errs, "distinct": 5}, read = None, build = None)
-    for label in ("//at2:t1", "//at2:t2", "//at2:ok", "//at2:ok2"):
-        note_event(at2, "unconfigured_label", struct(label = label), struct(), True)
-    got = [_visible(l) for l in failure_summary(at2, {"errors": at2_errs, "distinct": 5}, "t-9", False)]
-    _eq("a target its own error names is its own failure", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked:" in l], ["── Failures (2) ──", "✗ //at2:t1  analysis · at2/BUILD.bazel:1:8", "  ○ blocked: //at2:ok, //at2:ok2, //q2:u", "✗ //at2:t2  analysis · at2/BUILD.bazel:2:8"])
-    _eq("its counts", summary_counts(at2), "0 built, 2 failed, 3 blocked · 0 tests passed, 0 failed")
-
-    # ws/at (Bazel 9.3.3): //at:t's attribute type error puts its package in
-    # error, so //at:ok fails with it: //at:t's entry, //at:ok blocked.
-    at_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
-        "ERROR: at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"notalist.txt\" (string)",
-        "ERROR: at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule",
-        "ERROR: package contains errors: at: //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"notalist.txt\" (string)",
-    ]]
-    at = dict(kinds, counts = new_counts(), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": at_errs, "distinct": 3}, read = None, build = None)
-    for label in ("//at:t", "//at:ok"):
-        note_event(at, "unconfigured_label", struct(label = label), struct(), True)
-    got = [_visible(l) for l in failure_summary(at, {"errors": at_errs, "distinct": 3}, "t-9", False)]
-    _eq("its package in error: blocked under the target whose error it is", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked:" in l], ["── Failures (1) ──", "✗ //at:t  analysis · at/BUILD.bazel:1:8", "  ○ blocked: //at:ok"])
-    _eq("alone, it says its package has an error", at["fails"][1]["files"][0][1][0], "its package has an error")
-    at["counts"]["failed_labels"] = {"//at:t": True, "//at:ok": True}
-    at["counts"]["failures"] = ["//at:t", "//at:ok"]
-    at["counts"]["failed"] = 2
-    at["blocked_cache"] = None
-    got = [_visible(l) for l in failure_summary(dict(at, listed_cache = None), {"errors": at_errs, "distinct": 3}, "t-9", False)]
-    _eq("its counts: one failed, one blocked", (summary_counts(at), [l for l in got if "blocked:" in l]), ("0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed", ["  ○ blocked: //at:ok"]))
-
-    # The server crashed (oomws: -Xmx24m): no `ERROR:`, Bazel's last lines.
-    oom = dict(flag, read = lambda p, n: ("INFO: Invocation ID: 4077f502\nAnalyzing: 3000 targets (5 packages loaded, 6 targets configured)\n\nServer terminated abruptly (error code: 14, error message: 'Socket closed', log file: '/h/server/jvm.out')\n", 0) if p == "/h/console.log" else None)
-    got = [_visible(l) for l in failure_summary(oom, None, "t-9", False, "/h/console.log", bazel_exit = 33)]
-    _eq("a crash says Bazel's last words", (got[1], got[2].startswith("  │ Server terminated abruptly (error code: 14")), ("✗ Bazel exited 33", True))
-
-    # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
-    # exit code goes, and no command line quoted.
-    killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]
-    got, _ = _entries([_act("//f:killed", "Genrule", "bazel-out/f/killed.txt", 137)], killed, {}, {})
-    _eq("killed", (got[0][0], got[0][1]), ("✗ //f:killed  Genrule · killed · f/BUILD.bazel:3:8", ["about to die"]))
-    _eq("a signal's words, as Bazel names them (ws/sig, Bazel 7.7.3 and 9.3.3)", [error_parts("ERROR: sig/BUILD.bazel:1:9: Executing genrule //sig:s failed: (%s)" % name)[1:] for name in ["Segmentation fault", "Aborted", "Trace/breakpoint trap", "User defined signal 1", "CPU time limit exceeded", "Power failure", "Bad system call", "Signal 24"]], [(n, "") for n in ["segmentation fault", "aborted", "trace/breakpoint trap", "user defined signal 1", "cpu time limit exceeded", "power failure", "bad system call", "signal 24"]])
-
-    # ws4/cc4:ph (rules_cc 0.2.25, Bazel 9.3.3, parse_headers): a.cc
-    # includes a.h, so a.h's error is in a.cc's log too; b.cc fails alone.
-    # Each pairs with its own, by its object or by what it says alone.
-    ph_logs = {
-        "/h/cc4/ph/CppCompile-1.stderr": "In file included from cc4/a.cc:1:\n\x1b[1m./cc4/a.h:1:26: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xh'\x1b[0m\n    1 | \x1b[0;34minline\x1b[0m \x1b[0;34mint\x1b[0m ah() { \x1b[0;34mreturn\x1b[0m xh; }\x1b[0m\n      | \x1b[0;1;32m                         ^~\n\x1b[0m\x1b[1mcc4/a.cc:2:18: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xa'\x1b[0m\n    2 | \x1b[0;34mint\x1b[0m a() { \x1b[0;34mreturn\x1b[0m xa; }\x1b[0m\n      | \x1b[0;1;32m                 ^~\n\x1b[0m2 errors generated.\nError in child process '/usr/bin/xcrun'. 1\n",
-        "/h/cc4/ph/CppCompile-2.stderr": "\x1b[1mcc4/b.cc:1:18: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xb'\x1b[0m\n    1 | \x1b[0;34mint\x1b[0m b() { \x1b[0;34mreturn\x1b[0m xb; }\x1b[0m\n      | \x1b[0;1;32m                 ^~\n\x1b[0m1 error generated.\nError in child process '/usr/bin/xcrun'. 1\n",
-        "/h/cc4/ph/CppCompile-3.stderr": "\x1b[1mcc4/a.h:1:26: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xh'\x1b[0m\n    1 | \x1b[0;34minline\x1b[0m \x1b[0;34mint\x1b[0m ah() { \x1b[0;34mreturn\x1b[0m xh; }\x1b[0m\n      | \x1b[0;1;32m                         ^~\n\x1b[0m1 error generated.\nError in child process '/usr/bin/xcrun'. 1\n",
-    }
-    ph_errs = [
-        {"header": "ERROR: cc4/BUILD.bazel:3:11: Compiling cc4/a.cc failed: (Exit 1)", "body": ["In file included from cc4/a.cc:1:", "./cc4/a.h:1:26: error: use of undeclared identifier 'xh'", "    1 | inline int ah() { return xh; }", "… 5 more lines", "Error in child process '/usr/bin/xcrun'. 1"], "log": None, "label": None, "target": "//cc4:ph"},
-        {"header": "ERROR: cc4/BUILD.bazel:3:11: Compiling cc4/b.cc failed: (Exit 1)", "body": ["cc4/b.cc:1:18: error: use of undeclared identifier 'xb'", "    1 | int b() { return xb; }", "      |                  ^~", "1 error generated.", "Error in child process '/usr/bin/xcrun'. 1"], "log": None, "label": None, "target": "//cc4:ph"},
-        {"header": "ERROR: cc4/BUILD.bazel:3:11: Compiling cc4/a.h failed: (Exit 1)", "body": ["cc4/a.h:1:26: error: use of undeclared identifier 'xh'", "    1 | inline int ah() { return xh; }", "      |                          ^~", "1 error generated.", "Error in child process '/usr/bin/xcrun'. 1"], "log": None, "label": None, "target": "//cc4:ph"},
-    ]
-    for objects in [True, False]:
-        outs = ["bazel-out/darwin_arm64-fastbuild/bin/cc4/_objs/ph/" + o if objects else "bazel-out/ph/%d" % n for n, o in enumerate(["a.o", "b.o", "a.h.processed"])]
-        kept_of = {outs[0]: {"stderr": "/h/cc4/ph/CppCompile-1.stderr"}, outs[1]: {"stderr": "/h/cc4/ph/CppCompile-2.stderr"}, outs[2]: {"stderr": "/h/cc4/ph/CppCompile-3.stderr"}}
-        for flip in [False, True]:
-            records = [_act("//cc4:ph", "CppCompile", o, 1) for o in outs]
-            got, _ = _entries(records[::-1] if flip else records, ph_errs, ph_logs, kept_of)
-            _eq("ph objects %s flipped %s" % (objects, flip), sorted([(e[1][0], e[2]) for e in got]), [
-                ("In file included from cc4/a.cc:1:", ["/h/cc4/ph/CppCompile-1.stderr"]),
-                ("cc4/a.h:1:26: error: use of undeclared identifier 'xh'", ["/h/cc4/ph/CppCompile-3.stderr"]),
-                ("cc4/b.cc:1:18: error: use of undeclared identifier 'xb'", ["/h/cc4/ph/CppCompile-2.stderr"]),
-            ])
-
-    # rules_cc 0.2.25's objects: `sub/z.cc` is `_objs/subz/z.o`; a.cc,
-    # x/a.cc and y/a.cc are `_objs/lib/0/a.o` to `2/a.o`, which tell none
-    # apart, so only what each says does.
-    z_logs = {"/h/cc4/subz/CppCompile-1.stderr": "cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'\n"}
-    got, _ = _entries([_act("//cc4:subz", "CppCompile", "bazel-out/bin/cc4/_objs/subz/z.o", 1), _act("//cc4:subz", "CppCompile", "bazel-out/bin/cc4/_objs/subz/y.o", 1)], [
-        {"header": "ERROR: cc4/BUILD.bazel:7:11: Compiling cc4/sub/z.cc failed: (Exit 1)", "body": ["cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'"], "log": None, "label": None, "target": "//cc4:subz"},
-        {"header": "ERROR: cc4/BUILD.bazel:7:11: Compiling cc4/y.cc failed: (Exit 1)", "body": ["cc4/y.cc:1:18: error: use of undeclared identifier 'xy'"], "log": None, "label": None, "target": "//cc4:subz"},
-    ], {}, {})
-    _eq("sub/z.cc's object is _objs/subz/z.o", [(e[0], e[1][:1]) for e in got], [
-        ("✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11", ["cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'"]),
-        ("✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11", ["cc4/y.cc:1:18: error: use of undeclared identifier 'xy'"]),
-    ])
-    numbered = [_act("//cc3:lib", "CppCompile", "bazel-out/bin/cc3/_objs/lib/%d/a.o" % n, 1) for n in range(2)]
-    got, _ = _entries(numbered, [
-        {"header": "ERROR: cc3/BUILD.bazel:2:11: Compiling cc3/a.cc failed: (Exit 1)", "body": ["cc3/a.cc:1:1: error: one"], "log": None, "label": None, "target": "//cc3:lib"},
-        {"header": "ERROR: cc3/BUILD.bazel:2:11: Compiling cc3/x/a.cc failed: (Exit 1)", "body": ["cc3/x/a.cc:1:1: error: two"], "log": None, "label": None, "target": "//cc3:lib"},
-    ], {}, {})
-    _eq("numbered objects tell neither apart", got, [("✗ //cc3:lib  CppCompile · exit 1", [], []), ("✗ //cc3:lib  CppCompile · exit 1", [], [])])
-
-    # ws4/sh (Bazel 9.3.3): two actions of one target whose first lines are
-    # the same, a long one cut at 300 bytes, and `\r` progress before the
-    # error. What tells them apart is past the first line, or before the
-    # `…`.
-    words = " ".join(["w%d" % n for n in range(120)])
-    long_logs = {"/h/sh/long/Tool-1.stderr": "ONE: " + words + "\n", "/h/sh/long/Tool-2.stderr": "TWO: " + words + "\n"}
-    cr_logs = {"/h/sh/long/Tool-1.stderr": "working 10%\rworking 90%\rerror: cr one broke\n", "/h/sh/long/Tool-2.stderr": "working 10%\rworking 90%\rerror: cr two broke\n"}
-    sh_kept = {"bazel-out/sh/one": {"stderr": "/h/sh/long/Tool-1.stderr"}, "bazel-out/sh/two": {"stderr": "/h/sh/long/Tool-2.stderr"}}
-    for name, logs, ones, twos in [
-        ("long", long_logs, [("ONE: " + words)[:299] + "…"], [("TWO: " + words)[:299] + "…"]),
-        ("cr", cr_logs, ["working 10%", "working 90%", "error: cr one broke"], ["working 10%", "working 90%", "error: cr two broke"]),
-    ]:
-        errs = [
-            {"header": "ERROR: sh/BUILD.bazel:13:6: Two for //sh:t failed: (Exit 2)", "body": twos, "log": None, "label": None, "target": "//sh:t"},
-            {"header": "ERROR: sh/BUILD.bazel:13:6: One for //sh:t failed: (Exit 1)", "body": ones, "log": None, "label": None, "target": "//sh:t"},
-        ]
-        for flip in [False, True]:
-            records = [_act("//sh:t", "Tool", "bazel-out/sh/one"), _act("//sh:t", "Tool", "bazel-out/sh/two")]
-            got, _ = _entries(records[::-1] if flip else records, errs, logs, sh_kept)
-            _eq("sh %s flipped %s" % (name, flip), sorted([(e[0], e[2]) for e in got]), [
-                ("✗ //sh:t  Tool · exit 1 · sh/BUILD.bazel:13:6", ["/h/sh/long/Tool-1.stderr"]),
-                ("✗ //sh:t  Tool · exit 2 · sh/BUILD.bazel:13:6", ["/h/sh/long/Tool-2.stderr"]),
-            ])
-
-    # An error at a/b/BUILD.bazel naming no target is //a/b's, never
-    # //b's; an absolute one only under the workspace.
-    nested = [{"header": "ERROR: a/b/BUILD.bazel:1:8: output 'a/b/x' was not created", "body": [], "log": None, "label": None, "target": None}]
-    got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], nested, {}, {})
-    _eq("a/b/BUILD.bazel is not //b's", [e[0] for e in got], ["✗ error · a/b/BUILD.bazel:1:8", "✗ //b:x  Gen · exit 1"])
-    absolute = [{"header": "ERROR: /ws/b/BUILD.bazel:1:8: Making x failed: (Exit 1)", "body": ["x broke"], "log": None, "label": None, "target": None}]
-    x_log = ({"/h/b/x/Gen-1.stderr": "x broke\n"}, {"bazel-out/b/x": {"stderr": "/h/b/x/Gen-1.stderr"}})
-    got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], absolute, x_log[0], x_log[1], inv = {"build_started": struct(workspace_directory = "/ws")})
-    _eq("an absolute path under the workspace", [e[0] for e in got], ["✗ //b:x  Gen · exit 1 · /ws/b/BUILD.bazel:1:8"])
-    got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], absolute, x_log[0], x_log[1], inv = {"build_started": struct(workspace_directory = "/other/ws")})
-    _eq("outside it: not //b:x's, but it says nothing //b:x's own log doesn't, so it is no entry of its own", [e[0] for e in got], ["✗ //b:x  Gen · exit 1"])
-
-    # A tab in an excerpt: spaces to the next 8-column stop, in the summary
-    # and the tab alike.
-    got, tab_rows = _entries([_act("//t:t", "Gen", "bazel-out/t", 1)], [{"header": "ERROR: t/BUILD.bazel:1:1: Making t failed: (Exit 1)", "body": ["ab\tc"], "log": None, "label": "//t:t", "target": None}], {}, {})
-    _eq("a tab in the summary", got[0][1], ["ab      c"])
-    tabbed = dict(kinds, counts = dict(kinds["counts"], failures = ["//t:t"], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = [_act("//t:t", "Gen", "bazel-out/t", 1)], kept_errors = {"errors": [{"header": "ERROR: t/BUILD.bazel:1:1: Making t failed: (Exit 1)", "body": ["ab\tc"], "log": None, "label": "//t:t", "target": None}], "distinct": 1}, read = None, build = None, excerpts = {}, listed_cache = None, action_errors_cache = None, focus = "console", selected = 0)
-    _eq("and in the tab", [_visible(r).rstrip() for r in failure_rows(tabbed, 10, 80)][1], "  │ ab      c")
-
     # An analysis failure Bazel reports as its own (an Aborted
     # configured_label): what Bazel gave, when no error names it.
-    analysed = dict(kinds, fails = [{"kind": "action", "label": "//anal:broken", "detail": "analysis failed", "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], kept_errors = None, counts = new_counts(), root_causes = {})
-    _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, None, "t-9", False)][:3], ["── Failures (1) ──", "✗ //anal:broken  analysis", "  │ in genrule rule //anal:broken: missing srcs"])
+    analysed = dict(kinds, fails = [{"kind": "target", "label": "//anal:broken", "detail": "analysis", "description": "in genrule rule //anal:broken: missing srcs", "pattern": False, "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], counts = new_counts(), root_causes = {})
+    _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, "t-9", False)][:3], ["── Failures (1) ──", "✗ //anal:broken  analysis", "  │ in genrule rule //anal:broken: missing srcs"])
+
+    # Bazel's events carry UTF-8 as Latin-1: decoded back; other text kept.
+    _eq("decoded", repaired("//ar2:usesl\u00d0\u00b5"), "//ar2:usesl\u0435")
+    _eq("ASCII as it is", repaired("//a:b"), "//a:b")
+    _eq("not UTF-8: as it is", repaired("caf\u00e9"), "caf\u00e9")
+    _eq("real non-Latin-1 text: as it is", repaired("\u0435"), "\u0435")
 
     # A passing run: the counts line alone, no rule.
-    passing = dict(kinds, fails = [], kept_errors = None, counts = dict(new_counts(), built = 3), root_causes = {})
-    _eq("a passing run", [_visible(l) for l in failure_summary(passing, {"errors": [], "distinct": 0}, "t-9", False, "/h/console.log")], ["3 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log", "All of it: aspect history show t-9"])
+    passing = dict(kinds, fails = [], counts = dict(new_counts(), built = 3), root_causes = {})
+    _eq("a passing run", [_visible(l) for l in failure_summary(passing, "t-9", False, "/h/console.log")], ["3 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log", "All of it: aspect history show t-9"])
 
     many = dict(done, fails = [dict(done["fails"][0], label = "//a:b%d" % i) for i in range(14)], kept_errors = None)
     _eq("capped, counted", [l for l in report_lines(many, "t-1", False) if l.startswith("──")], ["── Failures (first 10 of 14) ──"])
@@ -2854,6 +2102,7 @@ def _impl(ctx: TaskContext) -> int:
     # the keys row always there.
     small = _screen(ctx, ["INFO: x"], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, progress = ["[3 / 9] 2 actions running", "    Executing genrule //examples/full_screen:broken; 2s darwin-sandbox"])
     small["counts"] = dict(new_counts(), configured = 3, built = 2, failed = 1)
+    small["fails"] = [{"kind": "action", "label": "//examples/full_screen:broken", "detail": "Genrule", "files": [], "output": "o", "success": False}]
     at80 = _visible(render(small, 80, 24))
     _eq("the counts whole at 80", "2 built, 1 failed" in at80, True)
     _eq("the title kept", "aspect build" in _visible(render(small, 40, 12)).split("\n")[0], True)
@@ -3133,9 +2382,9 @@ def _impl(ctx: TaskContext) -> int:
     report = [_visible(l) for l in report_lines(dict(blocked, read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = ""), "id1", False)]
     _eq("under its root cause in the summary", [l for l in report if "blocked" in l and "○" in l], ["  ○ blocked: //a:demo"])
     _eq("not counted as a root cause", [l for l in report if l.startswith("──")], ["── Failures (1) ──"])
-    _eq("its summary counts it blocked, not failed", [l for l in report if l.startswith("0 built")], ["0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
+    _eq("its summary counts it blocked, its root failed", [l for l in report if l.startswith("0 built")], ["0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
     targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
-    _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 0 failed · 1 blocked by a dependency", "failures listed 1 (failed actions and test attempts, in Failures)"])
+    _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 1 failed · 1 blocked by a dependency", "failures listed 1 (failed actions and test attempts, in Failures)"])
 
     # A test whose summary is Aborted with no reason: failed where one of
     # its attempts failed (it failed to build), skipped where none ran (a
@@ -3275,12 +2524,13 @@ def _impl(ctx: TaskContext) -> int:
     _eq("Metrics keeps no Slowest mid-build", any(["Slowest" in _visible(l) for l in metrics_lines(mid)]), False)
 
     # Blocked only by a dependency that failed; a missing source file (an
-    # unconfigured root) is the target's own failure.
-    def _completed(label, roots):
-        return struct(kind = "target_completed", id = struct(label = label), payload = struct(success = False), children = [struct(id = struct(label = r)) for r in roots])
+    # unconfigured root, its failure_detail saying so) is the target's own
+    # failure.
+    def _completed(label, roots, message = ""):
+        return struct(kind = "target_completed", id = struct(label = label), payload = struct(success = False, failure_detail = struct(message = message)), children = [struct(id = struct(label = r)) for r in roots])
 
     own = _screen(ctx, ["x"])
-    note_blocked(own, _completed("//p:gen", ["//p:missing.txt"]))
+    note_blocked(own, _completed("//p:gen", ["//p:missing.txt"], "missing input file '//p:missing.txt'"))
     dep = _screen(ctx, ["x"])
     dep["counts"]["failed_labels"] = {"//p:broken": True}
     note_blocked(dep, _completed("//p:demo", ["//p:broken"]))
@@ -3315,7 +2565,7 @@ def _impl(ctx: TaskContext) -> int:
     # posting three before it. Blocked whatever came first.
     anal = _screen(ctx, ["x"])
     root = "//examples/r29tmp:zz_broken"
-    configured = lambda label: struct(kind = "target_configured", id = struct(label = label), payload = struct(), children = [struct(id = struct(label = root))])
+    configured = lambda label: struct(kind = "target_configured", id = struct(label = label), payload = struct(), payload_kind = "aborted", children = [struct(id = struct(label = root))])
     for label in ["a0", "a3", "a4", "zz_broken", "a2", "a1"]:
         note_blocked(anal, configured("//examples/r29tmp:" + label))
         count_aborted(anal["counts"], "//examples/r29tmp:" + label, "analysis_failure")
@@ -3335,12 +2585,12 @@ def _impl(ctx: TaskContext) -> int:
         aborted = struct(reason = "ANALYSIS_FAILURE", description = error)
         count_event(mix["counts"], "configured_label", rid, aborted, aborted = True)
         note_event(mix, "configured_label", rid, aborted, True)
-    note_blocked(mix, struct(kind = "target_configured", id = struct(label = "//examples/r30tmp:t_nopkg"), payload = struct(), children = [struct(id = struct(label = root))]))
+    note_blocked(mix, struct(kind = "target_configured", id = struct(label = "//examples/r30tmp:t_nopkg"), payload = struct(), payload_kind = "aborted", children = [struct(id = struct(label = root))]))
     count_aborted(mix["counts"], "//examples/r30tmp:t_nopkg", "analysis_failure")
     _eq("blocked by a dependency that failed analysis, unasked", sorted(blocked_targets(mix)), ["//examples/r30tmp:t_nopkg"])
     _eq("the root counted once", mix["counts"]["failed_labels"].get(root), True)
     rows = [(r["label"], r["detail"]) for r in mix["fails"]]
-    _eq("the root's row", rows, [(root, "analysis failed")])
+    _eq("the root's row", rows, [(root, "analysis")])
     results = _visible(render(mix, 140, 40))
     _eq("Results says it failed", "1 failed, 1 blocked" in results, True)
     on_key(mix, "2", 10)
@@ -3356,7 +2606,7 @@ def _impl(ctx: TaskContext) -> int:
     aborted = struct(reason = "ANALYSIS_FAILURE", description = "in broken rule " + own)
     count_event(solo["counts"], "configured_label", rid, aborted, aborted = True)
     note_event(solo, "configured_label", rid, aborted, True)
-    note_blocked(solo, struct(kind = "target_configured", id = struct(label = own), payload = struct(), children = [struct(id = rid)]))
+    note_blocked(solo, struct(kind = "target_configured", id = struct(label = own), payload = struct(), payload_kind = "aborted", children = [struct(id = rid)]))
     count_event(solo["counts"], "target_configured", struct(label = own), struct(reason = "ANALYSIS_FAILURE"), aborted = True)
     _eq("a target asked for, its own root, failed once", solo["counts"]["failed"], 1)
     _eq("Results says it failed once", "0 built, 1 failed" in _visible(render(solo, 140, 40)), True)

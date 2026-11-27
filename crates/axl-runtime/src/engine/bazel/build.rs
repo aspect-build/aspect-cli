@@ -2233,43 +2233,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc(serde_json::Value::Object(streams)))
     }
 
-    /// Bazel's errors as a `recap_errors(summary = True)` stage kept them,
-    /// for a failure summary, once the console has ended: `{"errors": [...],
-    /// "distinct": n}`, each error `{"header", "body", "log", "label",
-    /// "target"}`: its
-    /// `ERROR:` line as Bazel wrote it (cut after a failed action's exit
-    /// code), what the recap picks of its body, unstyled and unlinked (each
-    /// count of the rest a `… N more lines` line), the path of the output
-    /// the history kept of the action (its stderr, else its other stream) or
-    /// None, and that action's label, else None (both only where one kept
-    /// action alone can be the error's), and the target the whole `ERROR:`
-    /// line names (`(from target //cc:lib)`) or None; `distinct` counts them
-    /// all.
-    /// None without such a stage, or before the console ends.
-    fn output_errors<'v>(
-        this: values::Value<'v>,
-        heap: values::Heap<'v>,
-    ) -> anyhow::Result<values::Value<'v>> {
-        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
-        let Some(kept) = build.console_observations.as_ref().and_then(|o| o.errors()) else {
-            return Ok(values::Value::new_none());
-        };
-        let errors: Vec<serde_json::Value> = kept
-            .errors
-            .into_iter()
-            .map(|e| {
-                serde_json::json!({
-                    "header": e.header,
-                    "body": e.body,
-                    "log": e.log,
-                    "label": e.label,
-                    "target": e.target,
-                })
-            })
-            .collect();
-        Ok(heap.alloc(serde_json::json!({"errors": errors, "distinct": kept.distinct})))
-    }
-
     /// The `(id, line)` hits of the `output` processor's `observe` stages:
     /// those so far during the build, all of them after `wait()`, in the
     /// order they came. Empty without a processor. At most 1024 hits are

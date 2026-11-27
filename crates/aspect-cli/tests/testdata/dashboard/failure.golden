@@ -1,7 +1,7 @@
  ✗ aspect build · 0s
 ┌─ Running (0) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
 │                                                           ││ Targets  0 configured               │
-│                                                           ││          0 built, 0 failed          │
+│                                                           ││          0 built, 1 failed          │
 │                                                           ││ Failed   ✗ 1                        │
 │                                                           ││                                     │
 │                                                           ││                                     │
