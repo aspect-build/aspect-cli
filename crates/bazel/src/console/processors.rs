@@ -342,9 +342,83 @@ pub struct Observations {
     seen: Mutex<std::collections::HashSet<String>>,
     /// One per aggregate stage, in the order the stages were made.
     tallies: Mutex<Vec<Tally>>,
+    /// Bazel's own error blocks and action output blocks, for the task's
+    /// failure summary ([`crate::console::report::CollectErrors`]).
+    blocks: Mutex<Option<BazelBlocks>>,
+    /// Whether the console's stream carried Bazel's stdout too (a terminal
+    /// both share), so an action's stdout is among its output there.
+    stdout_shared: std::sync::atomic::AtomicBool,
+}
+
+/// What [`crate::console::report::CollectErrors`] kept of the console, in
+/// the order Bazel wrote it: each of Bazel's own `ERROR:` messages with
+/// what followed it before Bazel's next message or redraw, each `INFO:
+/// From …:` block of an action's output likewise, and each coloured
+/// `ERROR:` right after an output ([`BlockKind::Tail`]); and how many bytes
+/// of them its caps left out.
+#[derive(Debug, Clone, Default)]
+pub struct BazelBlocks {
+    pub blocks: Vec<Block>,
+    pub not_kept: u64,
+}
+
+/// One kept block: what starts it ([`BlockKind`]), and its text: its
+/// records as Bazel wrote them (escape sequences kept), each with its line
+/// ending (`\n`; a bare `\r` as is; `\r\n` as written, but for a PTY's,
+/// which is its `\n`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub kind: BlockKind,
+    pub text: String,
+}
+
+/// What starts a [`Block`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// One of Bazel's own `ERROR:` messages.
+    Error,
+    /// An action's output, under Bazel's `INFO: From …:`.
+    From,
+    /// An `ERROR:` in Bazel's colours right after an action's output ended:
+    /// Bazel's next message, or the output's last line Bazel held until its
+    /// next redraw, which the bytes cannot tell apart (see
+    /// [`crate::console::line`]); the summary tells them by the action's own
+    /// output.
+    Tail,
+}
+
+impl BlockKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlockKind::Error => "error",
+            BlockKind::From => "from",
+            BlockKind::Tail => "tail",
+        }
+    }
 }
 
 impl Observations {
+    /// Keep the console's blocks for the failure summary.
+    pub fn set_blocks(&self, blocks: BazelBlocks) {
+        *self.blocks.lock().unwrap() = Some(blocks);
+    }
+
+    /// The console's blocks once it has ended, when a stage kept them.
+    pub fn blocks(&self) -> Option<BazelBlocks> {
+        self.blocks.lock().unwrap().clone()
+    }
+
+    /// Note whether the console's stream carries Bazel's stdout too.
+    pub fn set_stdout_shared(&self, shared: bool) {
+        self.stdout_shared
+            .store(shared, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the console's stream carries Bazel's stdout too.
+    pub fn stdout_shared(&self) -> bool {
+        self.stdout_shared.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Latch `fatal`; the first line wins.
     pub fn set_fatal(&self, line: &str) {
         self.fatal_line

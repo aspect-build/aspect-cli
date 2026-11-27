@@ -2435,6 +2435,7 @@ mod tests {
             opens_output: false,
             drawn: true,
             returns: false,
+            crlf: false,
             in_output: false,
             streamed: false,
             tail: false,

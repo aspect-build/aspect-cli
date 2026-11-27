@@ -642,6 +642,26 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
     choice
 }
 
+/// What `observations` kept for the failure summary, as AXL reads it
+/// (`build.output_bazel_errors()`): `{"blocks": [{"kind", "text"}],
+/// "not_kept": n, "stdout": bool}`, None before the console has ended or
+/// without a `recap_errors(summary = True)` stage.
+pub(crate) fn bazel_blocks(
+    observations: &bazel::console::processors::Observations,
+) -> Option<serde_json::Value> {
+    let kept = observations.blocks()?;
+    let blocks: Vec<serde_json::Value> = kept
+        .blocks
+        .iter()
+        .map(|b| serde_json::json!({"kind": b.kind.as_str(), "text": b.text}))
+        .collect();
+    Some(serde_json::json!({
+        "blocks": blocks,
+        "not_kept": kept.not_kept,
+        "stdout": observations.stdout_shared(),
+    }))
+}
+
 #[starlark_module]
 pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     const OutputProcessor: StarlarkValueAsType<OutputProcessor> = StarlarkValueAsType::new();
@@ -955,8 +975,8 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///
     /// With `summary = True` it writes nothing: a failure summary tells the
     /// errors instead (the Console feature's reads Bazel's build events and
-    /// raw console), and the end of the console leaves naming Bazel's raw
-    /// log to that summary.
+    /// `build.output_bazel_errors()`), and the end of the console leaves
+    /// naming Bazel's raw log to that summary.
     fn recap_errors(
         #[starlark(require = named, default = bazel::console::report::RECAP_MAX as i32)] max: i32,
         #[starlark(require = named, default = bazel::console::report::RECAP_AFTER_RECORDS as i32)]
@@ -979,6 +999,30 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
                 }
             },
         })
+    }
+
+    /// What a `recap_errors(summary = True)` stage keeps of a console `text`
+    /// written as Bazel would write it (through a PTY unless `pty = False`),
+    /// as `build.output_bazel_errors()` gives it for a build's: for a test
+    /// that replays a recorded console. `stdout` is what that gives as
+    /// whether the console carried Bazel's stdout too.
+    fn bazel_errors<'v>(
+        #[starlark(require = pos)] text: &str,
+        #[starlark(require = named, default = true)] pty: bool,
+        #[starlark(require = named, default = false)] stdout: bool,
+        heap: starlark::values::Heap<'v>,
+    ) -> anyhow::Result<starlark::values::Value<'v>> {
+        let mode = if pty { Mode::Pty } else { Mode::Pipe };
+        let mut pipeline =
+            Config::new(mode, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
+        let mut forwarder = bazel::console::forward::Forwarder::spawn(
+            Box::new(std::io::Cursor::new(text.as_bytes().to_vec())),
+            Box::new(std::io::sink()),
+            std::mem::take(&mut pipeline.chain),
+        )?;
+        forwarder.join()?;
+        pipeline.observations.set_stdout_shared(stdout);
+        Ok(heap.alloc(bazel_blocks(&pipeline.observations).unwrap_or(serde_json::Value::Null)))
     }
 
     /// Fold each run of identical lines into the first plus a `(last line

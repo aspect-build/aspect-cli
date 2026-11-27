@@ -111,12 +111,19 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
                 collect_event(state, _event(line))
     exit = fs.read_to_string(folder + "/" + prefix + ".exit").strip()
     code = int(exit) if exit.isdigit() else None
-    state.update(building = False, ended = True)
     console = "${FIXTURE}/" + prefix + ".console"
+
+    # The console as the CLI's stage keeps it: a recording's own pty, its
+    # stdout there too for the `merged` variant.
+    raw = fs.read_to_string(folder + "/" + prefix + ".console") if fs.exists(folder + "/" + prefix + ".console") else ""
+    state.update(building = False, ended = True, bazel_errors = bazel.output.bazel_errors(raw, stdout = prefix.endswith(".merged")))
+    if ctx.args.blocks:
+        for b in (state["bazel_errors"] or {}).get("blocks") or []:
+            print("%s/%s %s %r" % (case, prefix, b["kind"], b["text"][:1500]))
     out = ["exit " + exit]
     out += [_plain(ansi, l) for l in failure_summary(state, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
     out.append("--- Failures tab")
-    tab = dict(state, log_path = console, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None)
+    tab = dict(state, log_path = console, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
     out += [_plain(ansi, r).rstrip() for r in failure_rows(tab, 400, 120)]
     return "\n".join(out) + "\n"
 
@@ -170,5 +177,7 @@ failure_replay_tests = task(
     args = {
         "update": args.boolean(default = False),
         "case": args.string(default = ""),
+        # Print each recording's kept console blocks, to see what a tie had.
+        "blocks": args.boolean(default = False),
     },
 )

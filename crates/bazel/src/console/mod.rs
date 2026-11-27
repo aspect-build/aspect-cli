@@ -221,8 +221,9 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
-    /// No recap: the task's failure summary tells Bazel's errors, and names
-    /// the raw log itself ([`report::Summary::log_named_elsewhere`]).
+    /// No recap: the task's failure summary tells Bazel's errors, from the
+    /// blocks [`report::CollectErrors`] keeps ([`processors::Observations::blocks`]),
+    /// and names the raw log itself ([`report::Summary::log_named_elsewhere`]).
     ErrorsForSummary,
     /// [`processors::CollapseRepeats`].
     CollapseRepeats,
@@ -530,6 +531,18 @@ impl Config {
             _ => None,
         };
         let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
+        // Before anything rewrites a record (the theme's colours, paths, a
+        // user's `rewrite`): the summary ties Bazel's lines as it wrote them.
+        if self
+            .stages
+            .iter()
+            .any(|s| matches!(s, Stage::ErrorsForSummary))
+        {
+            chain.push(Box::new(report::CollectErrors::new(
+                self.pty || self.mode == Mode::Pty,
+                observations.clone(),
+            )));
+        }
         // First, so every stage after it, a user's `rewrite` included, sees
         // the theme's colours. Each record is classified from Bazel's own
         // bytes before the chain runs ([`forward`]), so the stages that tell
@@ -592,7 +605,8 @@ impl Config {
                 Stage::RecapErrors { max, after } => Box::new(
                     RecapErrors::new(max, after, self.style.clone()).linking(self.linker(&written)),
                 ),
-                // No recap: the task's failure summary tells the errors.
+                // No recap: the task's failure summary tells the errors,
+                // from what the collector at the chain's front keeps.
                 Stage::ErrorsForSummary => continue,
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()

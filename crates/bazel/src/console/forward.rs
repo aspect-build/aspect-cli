@@ -532,6 +532,7 @@ impl Splitter {
             return true;
         }
         line.returns = boundary == b"\r";
+        line.crlf = boundary == b"\r\n";
         self.chain(record, boundary, line)
     }
 

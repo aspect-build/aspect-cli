@@ -956,6 +956,11 @@ impl Console {
             pipeline.shape,
             Some(activity),
         )?;
+        // Whether Bazel's stdout is in the console's stream, for the
+        // summary's ties to an action's output.
+        pipeline
+            .observations
+            .set_stdout_shared(shared_stdout.is_some());
         let (child_stdout, stdout) = match shared_stdout {
             Some(shared) => (Some(shared), None),
             None if stdout_inherited => {
@@ -2233,6 +2238,27 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         }
         Ok(heap.alloc(serde_json::Value::Object(streams)))
+    }
+
+    /// What a `recap_errors(summary = True)` stage kept of the console for a
+    /// failure summary, once the console has ended: `{"blocks": [{"kind",
+    /// "text"}], "not_kept": n, "stdout": bool}`, each block one of Bazel's
+    /// own `ERROR:` messages (`error`), an action's `INFO: From …:` output
+    /// (`from`) or a coloured `ERROR:` right after an output (`tail`), with
+    /// what followed it before Bazel's next message or redraw, as Bazel wrote
+    /// it; `not_kept` counts the bytes the caps left out; `stdout` whether
+    /// the console's stream carried Bazel's stdout too (a terminal both
+    /// share). None without such a stage, or before the console ends.
+    fn output_bazel_errors<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let kept = build
+            .console_observations
+            .as_ref()
+            .and_then(|o| super::output::bazel_blocks(o));
+        Ok(kept.map_or(values::Value::new_none(), |v| heap.alloc(v)))
     }
 
     /// The `(id, line)` hits of the `output` processor's `observe` stages:

@@ -241,6 +241,9 @@ pub struct Line {
     /// next writes over it (a tool's spinner). Set by the splitter, which
     /// sees the boundary.
     pub returns: bool,
+    /// Whether the record ended in `\r\n`. Set by the splitter, as
+    /// [`Line::returns`] is.
+    pub crlf: bool,
     /// Whether it came while an action's or a test's output was open, or
     /// after streamed test output was announced: a tool's, whatever its
     /// shape.
@@ -421,6 +424,7 @@ impl Classifier {
             opens_output,
             drawn,
             returns: false,
+            crlf: false,
             in_output: inside,
             streamed: self.streamed && !announces,
             tail: was_tail && label && !self.streamed,

@@ -3858,7 +3858,7 @@ def fold_build(state: dict, now_ms: int):
     ))
 
 # What a folded build keeps for its tabs.
-_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path"]
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path", "bazel_errors"]
 
 def build_row(build: dict, cols: int) -> str:
     """A folded build's row: its verdict, command, its actions as the
@@ -6459,9 +6459,6 @@ def entry_text(state: dict, e: dict) -> dict:
         cache[key] = out
     return out
 
-# How much of Bazel's raw console the failure summary reads for its ties.
-_TIE_BYTES = 32 * 1024 * 1024
-
 # Bazel's own lines that say only that the build failed: in no entry and
 # not among the other errors.
 _BOILERPLATE = ("Build did NOT complete successfully", "Build failed. Not running tests", "command succeeded, but ")
@@ -6470,8 +6467,8 @@ _BOILERPLATE = ("Build did NOT complete successfully", "Build failed. Not runnin
 _BAZEL_ERROR = "\x1b[31m\x1b[1mERROR: "
 
 def _bazel_headers(state: dict, text: str) -> list:
-    """Bazel's `ERROR:` lines in its raw console `text` (CRLFs made
-    newlines), in order, each `{start, end, plain, location, said}`: where
+    """Bazel's `ERROR:` lines in `text`, the console's kept blocks in
+    order (`console_ties`), each `{start, end, plain, location, said}`: where
     the line starts and ends, its text without escapes and before the last
     CR (a redraw), its location (`pkg/BUILD.bazel:3:8`, `pkg/BUILD.bazel`,
     made relative to the workspace) and what it says after that. Where
@@ -6506,13 +6503,13 @@ def _bazel_headers(state: dict, text: str) -> list:
         found = [h for h in found if h["coloured"]]
     return found
 
-def _log_texts(state: dict, rec: dict):
-    """An action's stdout then stderr as its logs read now, whole, joined
-    (as Bazel prints them under its `ERROR:` line), or None where one is
-    cut."""
+def _log_texts(state: dict, rec: dict, stdout: bool):
+    """An action's output as Bazel relays it to the console, from its logs
+    as they read now, whole: its stderr, then, where the console carried
+    Bazel's stdout too (`stdout`), its stdout; None where one is cut."""
     out = ""
     paths = dict(_action_logs(state, rec))
-    for name in ("stdout", "stderr"):
+    for name in (("stderr", "stdout") if stdout else ("stderr",)):
         if name in paths:
             got = state["read"](paths[name], _MAX_LOG_BYTES)
             if got == None or got[1] > 0:
@@ -6525,16 +6522,96 @@ def _status_word(status: str) -> str:
     `killed`."""
     return "exit " + status[len("Exit "):] if status.startswith("Exit ") else status.lower()
 
+def _relayed(state: dict, rec: dict, text: str, at: int, message: str, logs) -> int:
+    """Where what Bazel relayed of an action ends in `text`, when what
+    starts at `at` is exactly its `failure_detail` message, a newline, and
+    its output (`logs`), or, for a stderr past Bazel's cap, Bazel's own
+    line saying so for that very file (`stderr (<path>) <n> exceeds maximum
+    size of …; skipping`); -1 when it is not."""
+    if logs != None:
+        needle = message + "\n" + logs
+        return at + len(needle) if text[at:at + len(needle)] == needle else -1
+    start = at + len(message) + 1
+    if text[at:start] != message + "\n":
+        return -1
+    end = text.find("\n", start)
+    end = len(text) if end < 0 else end
+    line = text[start:end]
+    for path in _too_long(state, rec):
+        lead = "stderr (%s) " % path
+        if line.startswith(lead) and " exceeds maximum size of " in line and line.endswith(" bytes; skipping"):
+            return end + 1
+    return -1
+
+def _too_long(state: dict, rec: dict) -> list:
+    """The paths Bazel names an action's stderr by (its event's URI, decoded),
+    where that log is cut as read (past Bazel's own cap, which it then says
+    it skipped)."""
+    paths = dict(_action_logs(state, rec))
+    if "stderr" not in paths:
+        return []
+    got = state["read"](paths["stderr"], _MAX_LOG_BYTES)
+    if got == None or got[1] == 0:
+        return []
+    out = []
+    for name, value in rec["files"]:
+        if name == "stderr" and type(value) == "string":
+            out += [p for p in log_paths(state, rec, value) if p not in out]
+    return out
+
+def _absorb_tails(state: dict, text: str, froms: list, spans: list, stdout: bool):
+    """Extend each action output's span in `spans` (an `INFO: From` block of
+    `text`, `froms`) over the `ERROR:` line Bazel wrote after it, when that
+    line is the output's own held last line: when the block's output and
+    that line are, exactly, the output of one action that succeeded and
+    wrote some (`outputs`, which Bazel reports with
+    `--build_event_publish_all_actions`), and the block's alone are not."""
+    outputs = []
+    for rec in state.get("outputs") or []:
+        got = _log_texts(state, rec, stdout)
+        if got:
+            outputs.append(got)
+    if not outputs:
+        return
+    for start, end in froms:
+        body = text[text.find("\n", start) + 1:end]
+        if end >= len(text):
+            continue
+        tail_end = text.find("\n", end)
+        tail_end = len(text) if tail_end < 0 else tail_end + 1
+        tail = text[end:tail_end]
+        ansi = state.get("ansi")
+        if not (ansi.replace(tail, "") if ansi != None else tail).rpartition("\r")[2].startswith("ERROR: "):
+            continue
+
+        # The tool's bytes, without Bazel's erase of its progress area.
+        for _ in range(len(tail)):
+            lead = [p for p in ("\r", "\x1b[1A", "\x1b[K") if tail.startswith(p)]
+            if not lead:
+                break
+            tail = tail[len(lead[0]):]
+        whole = body + tail
+        if len([o for o in outputs if o == whole]) == 1 and body not in outputs:
+            spans.append((end, tail_end))
+
 def console_ties(state: dict) -> dict:
-    """What Bazel's raw console (`log_path`, read once the build has ended)
-    adds to the failure entries, by exact ties alone, each Bazel `ERROR:`
-    line (`_bazel_headers`) given to at most one entry and never one of
+    """What Bazel's console adds to the failure entries, by exact ties
+    alone, once the build has ended: from the blocks a `recap_errors(summary
+    = True)` stage kept as Bazel wrote them (`bazel_errors`, from
+    `build.output_bazel_errors()`: each of Bazel's `ERROR:` messages, each
+    action's `INFO: From` output, each coloured `ERROR:` right after one),
+    however long the console was. An action's `INFO: From` output is a
+    tool's, never Bazel's, the `ERROR:` line Bazel wrote after it too when
+    that is its held last line (`_absorb_tails`). Each Bazel `ERROR:` line
+    (`_bazel_headers`) is given to at most one entry and never one of
     several that match:
 
     - a sandboxed action: the line's text from `failed: (<status>): ` on,
       and what follows it, are exactly its `failure_detail` message, a
-      newline and its own output (stdout then stderr), at one line only;
-      the line gives its location and status (`killed`);
+      newline and its own output as Bazel relays it (its stderr, then its
+      stdout where the console carried Bazel's stdout too), or, past
+      Bazel's cap, Bazel's line saying it skipped that stderr (`_relayed`),
+      at one line only; the line gives its location and status (`killed`);
     - a local or worker action (its message `local spawn failed for …`):
       the one line naming `target <label>)` with `(Exit <code>)` whose next
       lines are exactly its own output;
@@ -6559,22 +6636,34 @@ def console_ties(state: dict) -> dict:
     '<label>' … failed`), is claimed, with the output an action's tie spans; every
     other one but Bazel's boilerplate (`_BOILERPLATE`) is among `others`,
     `_other_errors`'. `actions` and `targets` hold each tie, by record
-    index and by label. Nothing before the build ends, or without the
-    console."""
-    path = state.get("log_path", "")
-    key = (len(state["fails"]), path, bool(state.get("building")))
+    index and by label; `not_kept` the bytes of Bazel's errors the stage's
+    caps left out. Nothing before the build ends, or without the stage."""
+    kept = state.get("bazel_errors")
+    key = (len(state["fails"]), len((kept or {}).get("blocks") or []), bool(state.get("building")))
     cached = state.get("ties_cache")
     if cached != None and cached[0] == key:
         return cached[1]
-    result = {"actions": {}, "targets": {}, "others": []}
-    got = state["read"](path, _TIE_BYTES) if path and not state.get("building") and state.get("read") != None else None
-    if got == None:
+    result = {"actions": {}, "targets": {}, "others": [], "not_kept": 0}
+    if kept == None or state.get("building"):
         state["ties_cache"] = (key, result)
         return result
-    text = got[0].replace("\r\n", "\n")
-    headers = _bazel_headers(state, text)
-    claimed = {}
+    result["not_kept"] = kept.get("not_kept", 0) or 0
+    stdout = bool(kept.get("stdout"))
+
+    # The blocks in Bazel's order, one text; an action's output under its
+    # `INFO: From` is a tool's, whatever it says.
+    text = ""
     spans = []
+    froms = []
+    for b in kept.get("blocks") or []:
+        start = len(text)
+        text += b["text"]
+        if b["kind"] == "from":
+            froms.append((start, len(text)))
+            spans.append((start, len(text)))
+    _absorb_tails(state, text, froms, spans, stdout)
+    headers = [h for h in _bazel_headers(state, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
+    claimed = {}
 
     # The lines by what each says, so every tie is a lookup.
     by = {"status": {}, "target": {}, "said": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}}
@@ -6611,17 +6700,17 @@ def console_ties(state: dict) -> dict:
             continue
         out = {"location": "", "status": "", "lines": []}
         label = rec["label"]
-        logs = _log_texts(state, rec)
+        logs = _log_texts(state, rec, stdout)
         message = rec.get("failure", "")
         first = message.partition("\n")[0]
-        if message and logs != None:
-            needle = message + "\n" + logs
+        if message and (logs != None or _too_long(state, rec)):
             found = []
             for k in by["status"].get(first, []):
                 h = headers[k]
                 at = text.find(first, h["start"], h["end"] + 1)
-                if at >= 0 and text[at:at + len(needle)] == needle:
-                    found.append((k, at + len(needle)))
+                end = _relayed(state, rec, text, at, message, logs) if at >= 0 else -1
+                if end >= 0:
+                    found.append((k, end))
             got = tie(found)
             if got != None:
                 k, end = got
@@ -6880,6 +6969,9 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                     out.append("  " + muted + bar + reset + " " + _counts("… %d more line", more) + ("" if more == 1 else "s"))
         if len(others) > _SUMMARY_MAX:
             out.append(_counts("… and %d more", len(others) - _SUMMARY_MAX) + " · aspect history show %s" % task_id)
+    not_kept = console_ties(state)["not_kept"]
+    if not_kept:
+        out.append(muted + _counts("(%d bytes of Bazel's errors not kept)", not_kept) + reset)
     raw = (" · Bazel's raw log: " + log_path) if log_path else ""
     out.append(summary_counts(state) + raw)
     out.append("All of it: aspect history show %s" % task_id)
@@ -7119,9 +7211,10 @@ def _dashboard_impl(ctx: FeatureContext):
         state["exec_log_read"] = True
 
     def _end(task_ctx, build):
-        # Bazel's raw console, which the failure summary and the Failures
-        # list tie Bazel's lines from (`console_ties`).
+        # Bazel's raw console, and what of it the failure summary and the
+        # Failures list tie Bazel's lines from (`console_ties`).
         state["log_path"] = build.output_log or ""
+        state["bazel_errors"] = build.output_bazel_errors()
         screen = state["screen"]
         if screen == None or not screen.held:
             return
