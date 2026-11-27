@@ -31,19 +31,28 @@ pub fn aspect_cli() -> String {
     }
 }
 
-/// This test run's own folder, which every CLI a test spawns writes under:
-/// Bazel's `$TEST_TMPDIR` for the test, else one per test process under the
-/// temp dir (`aspect-tests-<binary>-<pid>`), the folders of runs no longer
-/// running removed when it is made, so they never pile up.
+/// Where a test run's scratch folders live: Bazel's `$TEST_TMPDIR` for the
+/// test, which is not under the temp dir in Bazel's sandbox, else the temp
+/// dir.
+pub fn scratch_root() -> std::path::PathBuf {
+    std::env::var_os("TEST_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// This test run's own folder under [`scratch_root`], which every CLI a test
+/// spawns writes under: `aspect-tests` in Bazel's `$TEST_TMPDIR`, else one
+/// per test process (`aspect-tests-<binary>-<pid>`), the folders of runs no
+/// longer running removed when it is made, so they never pile up.
 pub fn run_dir() -> &'static std::path::Path {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let dir = match std::env::var_os("TEST_TMPDIR") {
-            Some(dir) => std::path::PathBuf::from(dir).join("aspect-tests"),
+            Some(_) => scratch_root().join("aspect-tests"),
             None => {
                 let prefix = format!("aspect-tests-{}-", test_binary());
                 prune_runs(&prefix);
-                std::env::temp_dir().join(format!("{prefix}{}", std::process::id()))
+                scratch_root().join(format!("{prefix}{}", std::process::id()))
             }
         };
         std::fs::create_dir_all(&dir)

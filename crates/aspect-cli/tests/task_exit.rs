@@ -147,7 +147,7 @@ fn a_spawned_clis_history_is_the_test_processs_own() {
         .expect("running the CLI");
     assert!(status.success(), "{status:?}");
     let history = common::test_history_dir();
-    assert!(history.starts_with(std::env::temp_dir()), "{history:?}");
+    assert!(history.starts_with(common::scratch_root()), "{history:?}");
     let here = std::fs::canonicalize(dir.path()).expect("canonical");
     let recorded = std::fs::read_dir(&history)
         .expect("the test's history")
