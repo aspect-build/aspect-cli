@@ -1673,6 +1673,9 @@ def record_excerpt(state: dict, i: int) -> tuple:
             location, exit, reason = error_parts(e.get("header", ""))
             details += [d for d in (exit, location) if d]
             lines = ([reason] if reason else []) + list(e.get("body") or [])
+            for also in e.get("also", []):
+                said = error_parts(also.get("header", ""))[2]
+                lines += ([said] if said else []) + list(also.get("body") or [])
         elif rec.get("detail") != "analysis failed":
             more, lines, _ = own_excerpt(state, rec, state.get("excerpt"))
             details += more
@@ -1968,8 +1971,8 @@ def count_spawn(counts: dict, spawn):
     by runner, and by action (`log_kinds`): the spawns of one action share
     its outputs, so its first output's id names it, and an action is a
     disk or remote hit where all its spawns were, `mixed` where they
-    differ; a test's attempt (`TestRunner`) an action each, as Bazel
-    counts them."""
+    differ (a retried test's attempts are one action's spawns). A spawn
+    with no output is an action of its own."""
     counts["spawns"] += 1
     hit = bool(_get(spawn, "cache_hit", False))
     if hit:
@@ -1978,9 +1981,7 @@ def count_spawn(counts: dict, spawn):
     counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
     kind = ("remote" if runner.startswith("remote") else "disk") if hit else "ran"
     outputs = _get(spawn, "outputs", None) or []
-
-    # Bazel counts each test attempt an action, though they share outputs.
-    key = _get(outputs[0], "type", None) if outputs and str(_get(spawn, "mnemonic", "") or "") != "TestRunner" else None
+    key = _get(outputs[0], "type", None) if outputs else None
     kinds = counts["log_kinds"]
     if type(key) != "int":
         kinds[kind] += 1
@@ -3165,18 +3166,19 @@ def _has_tests(c: dict) -> bool:
     return bool(c.get("test_targets") or c["tests_passed"] or c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped"))
 
 def _tests_words(c: dict) -> str:
-    """The Tests row's counts in words, a part there is none of left out
-    (`7 passed (5 cached), 1 failed`), `0 passed` where there is nothing."""
+    """The Tests row's counts in words, a part there is none of left out,
+    then how many of them a cache gave (`2 passed, 1 failed (3 cached)`);
+    `0 passed` before one finished."""
     parts = []
     if c["tests_passed"]:
-        parts.append(_counts("%s%d passed%s%s", (_c("success"), c["tests_passed"], _RESET, tests_cached_text(c))))
+        parts.append(_counts("%s%d passed%s", (_c("success"), c["tests_passed"], _RESET)))
     if c["tests_failed"]:
         parts.append(_counts("%s%d failed%s", (_c("error"), c["tests_failed"], _RESET)))
     if c.get("tests_flaky"):
         parts.append(_counts("%s%d flaky%s", (_c("warning"), c["tests_flaky"], _RESET)))
     if c.get("tests_skipped"):
         parts.append(_counts("%d skipped", c["tests_skipped"]))
-    return ", ".join(parts) or "0 passed"
+    return (", ".join(parts) or "0 passed") + tests_cached_text(c)
 
 def tests_cached_text(counts: dict) -> str:
     """` (5 cached)`, as Bazel says a test's result came from a cache: of
@@ -3229,19 +3231,20 @@ def action_split(state: dict) -> dict:
 
     Once the build has ended with its `BuildMetrics` (`final`), `local` is
     `action_cache_statistics.hits` (else an `action cache hit` runner) and
-    what the done count has past the parts but where actions failed (what
-    Bazel already knew up to date in memory),
+    what the done count has past the parts (what Bazel already knew up to
+    date in memory) but in a build that failed for more than its tests,
     `internal` `runner_count`'s internal ones, and the rest of
     `actions_executed` had spawns: by action from the execution log the
     Dashboard read (`log_kinds`: an action a cache hit where all its
-    spawns were; each test attempt an action of its own, as Bazel counts
-    them), else by `runner_count`'s spawns, a spawn more than its action
-    going to `other`. Bazel (7 to 9) counts a failed action among
+    spawns were, one whose spawns differ `other`), else by
+    `runner_count`'s spawns (which count a retried test's every attempt),
+    clamped to the actions that spawned;
+    what of `actions_executed` the log has no action for is `other` too. Bazel (7 to 9) counts a failed action among
     the internal ones, but one whose outputs were not created under the
     runner its spawn ran in (`counted_internal`): each is taken out of
-    where it was counted; in a build where actions failed, what the done
-    count has past the parts is `blocked`. `other` is what has spawns of
-    mixed results, or more spawns than actions. A failed build's total is at least what it created, and its
+    where it was counted; in a build that failed for more than its tests,
+    what the done count has past the parts is `blocked`, what needed what
+    failed (an action, a missing source). A failed build's total is at least what it created, and its
     bar never full of what did not fail (`action_bar`).
 
     While it runs with every action published (`--dashboard:actions=all`,
@@ -3309,11 +3312,13 @@ def action_split(state: dict) -> dict:
         succeeded = build_succeeded(inv)
 
         # What Bazel counted done past what it executed or found in its
-        # action cache: in a build where actions failed, those that needed
-        # one and so never ran; else what it already knew up to date in
-        # memory (a warm server's rerun), the local action cache's too.
+        # action cache: in a build that failed (but for its tests), those
+        # that needed what failed (an action, a missing source) and so
+        # never ran; else what it already knew up to date in memory (a warm
+        # server's rerun), the local action cache's too.
         gap = max(0, done - whole)
-        blocked = gap if failed and not succeeded else 0
+        outcome = str(_get(_get(inv.get("build_finished"), "exit_code"), "name", "") or "")
+        blocked = gap if not succeeded and outcome != "TESTS_FAILED" else 0
         local += gap - blocked
         whole += gap
         split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, blocked = blocked, other = other, more = False, failed_build = not succeeded)
@@ -3916,10 +3921,10 @@ def _top(state: dict, cols: int, rows: int) -> list:
         ] + ([
             "Tests   " + " ".join([p for p in [
                 _counts("%s✗%d%s", (tests_failed, c["tests_failed"], _RESET)) if c["tests_failed"] else "",
-                _counts("%s✓%d%s%s", (_c("success"), c["tests_passed"], _RESET, tests_cached_text(c))) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
+                _counts("%s✓%d%s", (_c("success"), c["tests_passed"], _RESET)) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
                 _counts("%s~%d%s", (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "",
                 _counts("⊘%d", c["tests_skipped"]) if c.get("tests_skipped") else "",
-            ] if p]),
+            ] if p]) + tests_cached_text(c),
         ] if _has_tests(c) else [])
 
     # As tall as the most Results rows there can be, for the whole build;
@@ -5927,8 +5932,10 @@ def _failed_action(header: str) -> str:
 
 def error_parts(header: str):
     """`(location, exit, reason)` of a Bazel `ERROR:` line: its
-    `path:line:col`, `exit N` for a failed command's `(Exit N)`, and what
-    else it says failed (`missing input file '//a:b'`), each "" for none."""
+    `path:line:col`, `exit N` for a failed command's `(Exit N)` or the
+    signal's word for one a signal ended (`(Killed)` gives `killed`,
+    `(Segmentation fault)` `segmentation fault`), and what else it says
+    failed (`missing input file '//a:b'`), each "" for none."""
     text = header[len("ERROR: "):] if header.startswith("ERROR: ") else header
     location = ""
     head, sep, rest = text.partition(": ")
@@ -5937,14 +5944,14 @@ def error_parts(header: str):
         location = head
         text = rest
     exit = ""
-    at = text.find("(Exit ")
-    if at >= 0:
-        code = text[at + len("(Exit "):].partition(")")[0]
-        exit = "exit " + code
-    reason = ""
     said, failed, why = text.partition(" failed: ")
+    if why.startswith("(Exit "):
+        exit = "exit " + why[len("(Exit "):].partition(")")[0]
+    elif why.startswith("(") and why.partition(")")[0][1:].replace(" ", "").isalpha():
+        exit = why.partition(")")[0][1:].lower()
+    reason = ""
     if failed:
-        reason = "" if why.startswith("(Exit ") else why
+        reason = "" if exit else why
     elif not location or not exit:
         reason = text
     return (location, exit, reason)
@@ -6083,15 +6090,16 @@ def header_labels(header: str) -> list:
     return out
 
 def _error_names(e: dict, label: str) -> bool:
-    """Whether the kept error `e` is about `label`: its `ERROR:` line names
-    it (in the header, or as its whole line's `(from target …)`), or names no
-    label and the console matched it to that label's one kept log; never
-    one naming another label."""
+    """Whether the kept error `e` is about `label`: the target its whole
+    line names (`(from target //x:y)`), which alone says whose action it
+    is, a progress message naming any label it likes (`Checking against
+    //x:b`); else a label its header names; else, naming none, the console
+    matched it to that label's one kept log."""
+    if e.get("target"):
+        return e["target"] == label
     named = header_labels(e.get("header", ""))
     if named:
         return label in named
-    if e.get("target"):
-        return e["target"] == label
     return (e.get("label") or "") == label
 
 def _unlabelled_in(e: dict, label: str, workspace: str = "") -> bool:
@@ -6160,7 +6168,8 @@ def action_errors(state: dict) -> dict:
     has ended and every kept log is known. An error is a candidate for a
     record when it is about the record's label (`_error_names`), or names
     no target and is at its own package's BUILD file (`_unlabelled_in`),
-    and its `(Exit N)` is not another than the record's exit code. A
+    and its `(Exit N)` is not another than the record's exit code (a
+    record whose command exited 0, or ran none, takes no error with one). A
     record and a candidate pair, rule by rule, when the lines of the
     error's body that no rival error's body has (escapes and CRs left out,
     a line cut with `…` the text before it) are in the record's own kept
@@ -6169,7 +6178,9 @@ def action_errors(state: dict) -> dict:
     log, else when it names the record's label and each is the other's
     only one left. Under each rule a record with one pick, or an error
     with one picker, pairs, and the rest are tried again, until none
-    does. A record no rule settles gets no error, and the summary tells it
+    does; a record left whose candidates are all at one BUILD line no other
+    has a candidate at takes them all (`also`). A record no rule settles
+    gets no error, and the summary tells it
     from the record alone; an action's error left over with it is its,
     and shown with no other. A second error about the same action
     (Bazel's `1 input file(s) do not exist` after `missing input file`)
@@ -6204,7 +6215,7 @@ def action_errors(state: dict) -> dict:
             if used[j] or not (_error_names(e, rec["label"]) or _unlabelled_in(e, rec["label"], workspace)):
                 continue
             said = error_parts(e.get("header", ""))[1]
-            if code and said and said != code:
+            if said.startswith("exit ") and (said != code if code else rec.get("exit_code") == 0):
                 continue
             out.append(j)
         return out
@@ -6270,6 +6281,20 @@ def action_errors(state: dict) -> dict:
     by(lambda i, j: _compiles(state["fails"][i], errors[j]))
     by(lambda i, j: bool(own[i]) and errors[j].get("log") == own[i])
     by(lambda i, j: _error_names(errors[j], state["fails"][i]["label"]))
+
+    # A record left whose candidates are all at one BUILD line no other
+    # record left has a candidate at: they are its errors (`output 'x' was
+    # not created`, then `not all outputs were created or valid`).
+    left = [i for i in records if i not in out]
+    for i in left:
+        js = candidates(i)
+        at = {error_parts(errors[j].get("header", ""))[0]: True for j in js}
+        others = [k for k in left if k != i and k not in out and [j for j in candidates(k) if j in js]]
+        if js and len(at) == 1 and "" not in at and not others:
+            pair(i, js[0])
+            out[i] = dict(out[i], also = [errors[j] for j in js[1:] if not used[j]])
+            for j in js[1:]:
+                used[j] = True
     for i in records:
         if i not in out:
             for j in candidates(i):
@@ -6449,7 +6474,7 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             details, lines, log = own_excerpt(state, rec, excerpt)
             entries.append(entry(1, i, rec["label"], rec["detail"], details, lines, log))
             continue
-        details, lines, log = from_errors([(0, e)])
+        details, lines, log = from_errors([(0, e)] + [(0, a) for a in e.get("also", [])])
 
         # Its own log: the history's copy of it, else Bazel's; the console's
         # match only where no other failed action owns that log.

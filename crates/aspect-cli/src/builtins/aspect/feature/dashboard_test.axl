@@ -385,7 +385,7 @@ def _actions_tests(ctx):
     retried = new_counts()
     for hit in [False, False]:
         count_spawn(retried, struct(cache_hit = hit, runner = "darwin-sandbox", mnemonic = "TestRunner", outputs = [struct(type = 4)]))
-    _eq("a retried test's attempts, an action each, as Bazel counts them", retried["log_kinds"]["ran"], 2)
+    _eq("a retried test's attempts, one action's spawns", retried["log_kinds"]["ran"], 1)
 
     # A warm server's rerun after a failed test (Bazel 9.3.3, coverage):
     # `[50 / 50]` for 3 executed and 4 action cache hits. The other 43
@@ -418,7 +418,7 @@ def _actions_tests(ctx):
         ("keep_going", dict(done = 45, total = 45, ran = 41, internal = 1, failed = 3)),
         ("nokeep_going incremental", dict(done = 45, total = 45, internal = 2, failed = 2, blocked = 41)),
         ("nokeep_going big", dict(done = 1831, total = 2001, local = 1827, internal = 1, failed = 3)),
-        ("analysis failure", dict(done = 3, total = 3, local = 2, internal = 1)),
+        ("analysis failure", dict(done = 3, total = 3, internal = 1, blocked = 2)),
         ("loading failure, no count", dict(done = 1, total = 1, internal = 1)),
         ("tests and genrules, a disk hit", dict(done = 52, total = 52, local = 47, disk = 1, internal = 1, failed = 3)),
         ("success", dict(done = 14, total = 14, ran = 13, internal = 1)),
@@ -757,7 +757,7 @@ def _actions_tests(ctx):
         _eq("Failed kept at %d rows" % height, any([r.startswith("Failed") or r.startswith("✗4 ") for r in rows]), True)
     for cols in [140, 100, 60]:
         _eq("no Tests row without test targets at %d" % cols, any([("Tests " in r) for r in _visible(render(greg_screen, cols, 30)).split("\n") if "││" in r or "┃│" in r]), False)
-    _eq("the tests' cached count, Bazel's word", "1,400 (9 cached)" in _visible(render(short, 140, 30)), True)
+    _eq("the tests' cached count, Bazel's word", "(9 cached)" in _visible(render(short, 140, 30)), True)
 
     # The Tests row's running and pending, live: beside its counts where
     # they fit, else on the row under them, never dropped.
@@ -1488,7 +1488,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
     _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "cache hits 58: ▓ 58 disk" in shown, "2,378 other" in shown and "─ 16 running" in shown and "4,717 pending" in shown], [True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 9, tests_failed = 6)
-    _eq("the Tests row's cached count", "Tests    9 passed (9 cached), 6 failed" in _visible(render(many, 140, 30)), True)
+    _eq("the Tests row's cached count", "Tests    9 passed, 6 failed (9 cached)" in _visible(render(many, 140, 30)), True)
     _eq("no part there is none of", ("Tests    9 passed (9 cached)  " in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)), "0 failed" in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)).split("Tests")[1].split("\n")[0]), (True, False))
     _eq("narrow, the same", "Tests   ✗6 ✓9 (9 cached)" in _visible(render(many, 76, 30)), True)
 
@@ -2264,7 +2264,7 @@ def _impl(ctx: TaskContext) -> int:
         rows = [_visible(r).rstrip() for r in failure_rows(tab, 40, 120)]
         return (out, [r for r in rows if r.startswith("✗")])
 
-    def _act(label, detail, output, exit_code = 0):
+    def _act(label, detail, output, exit_code = None):
         return {"kind": "action", "label": label, "detail": detail, "files": [("stderr", "file:///gone")], "output": output, "success": False, "exit_code": exit_code}
 
     # ws4/xt (Bazel 7.7.3 and 8.9.0): //xt:a exits 3 and //xt:b exits 4,
@@ -2291,7 +2291,7 @@ def _impl(ctx: TaskContext) -> int:
     for target in [True, False]:
         for codes in [True, False]:
             for flip in [False, True]:
-                records = [_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3 if codes else 0), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 4 if codes else 0)]
+                records = [_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3 if codes else None), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 4 if codes else None)]
                 got, tab = _entries(records[::-1] if flip else records, _xt_errs(target), xt_logs, xt_kept)
                 name = "xt target %s codes %s flipped %s" % (target, codes, flip)
                 _eq(name, sorted(got), xt_own)
@@ -2302,6 +2302,34 @@ def _impl(ctx: TaskContext) -> int:
     got, tab = _entries([_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 3)], [dict(e, header = e["header"].replace("Exit 4", "Exit 3")) for e in _xt_errs(False)], {"/h/xt/a/Proc-1.stderr": "proc 1.0 starting\nsame\n", "/h/xt/b/Proc-1.stderr": "proc 1.0 starting\nsame\n"}, xt_kept)
     _eq("one exit, one text: each its own log and exit, no location", got, [("✗ //xt:a  Proc · exit 3", ["proc 1.0 starting", "same"], ["/h/xt/a/Proc-1.stderr"]), ("✗ //xt:b  Proc · exit 3", ["proc 1.0 starting", "same"], ["/h/xt/b/Proc-1.stderr"])])
     _eq("and the tab alike, from the record", tab, ["✗ //xt:a  Proc · exit 3", "✗ //xt:b  Proc · exit 3"])
+
+    # ws/xn (Bazel 9.3.3): progress messages name another target
+    # (`Checking against //xn:b`); the line's `(from … target //xn:a)` is
+    # the owner. //xn:d's command exits 0 without its output: its two
+    # errors at its BUILD line, neither with an exit code, are both its.
+    xn_errs = [
+        {"header": "ERROR: xn/BUILD.bazel:4:4: Checking against //xn:d failed: (Exit 5)", "body": ["error: CCC alone"], "log": None, "label": None, "target": "//xn:c"},
+        {"header": "ERROR: xn/BUILD.bazel:2:4: Checking against //xn:b failed: (Exit 3)", "body": ["error: AAA mismatch in a"], "log": None, "label": None, "target": "//xn:a"},
+        {"header": "ERROR: xn/BUILD.bazel:5:4: output 'xn/d.out' was not created", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: xn/BUILD.bazel:5:4: Checking d failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: xn/BUILD.bazel:3:4: Checking against //xn:a failed: (Exit 3)", "body": ["error: BBB mismatch in b"], "log": None, "label": None, "target": "//xn:b"},
+    ]
+    xn_recs = [_act("//xn:%s" % n, "Check", "bazel-out/xn/%s.out" % n, code) for n, code in [("a", 3), ("b", 3), ("c", 5), ("d", 0)]]
+    got, tab = _entries(xn_recs, xn_errs, {}, {})
+    _eq("each its own error, d both of its", [(e[0], e[1]) for e in got], [
+        ("✗ //xn:a  Check · exit 3 · xn/BUILD.bazel:2:4", ["error: AAA mismatch in a"]),
+        ("✗ //xn:b  Check · exit 3 · xn/BUILD.bazel:3:4", ["error: BBB mismatch in b"]),
+        ("✗ //xn:c  Check · exit 5 · xn/BUILD.bazel:4:4", ["error: CCC alone"]),
+        ("✗ //xn:d  Check · xn/BUILD.bazel:5:4", ["output 'xn/d.out' was not created", "not all outputs were created or valid"]),
+    ])
+    _eq("and the tab alike", tab, [e[0] for e in got])
+
+    # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
+    # exit code goes, and no command line quoted.
+    killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]
+    got, _ = _entries([_act("//f:killed", "Genrule", "bazel-out/f/killed.txt", 137)], killed, {}, {})
+    _eq("killed", (got[0][0], got[0][1]), ("✗ //f:killed  Genrule · killed · f/BUILD.bazel:3:8", ["about to die"]))
+    _eq("a signal's words", [error_parts("ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)")[1], error_parts("ERROR: x/BUILD:1:1: Linking x failed: (Aborted)")[1]], ["segmentation fault", "aborted"])
 
     # ws4/cc4:ph (rules_cc 0.2.25, Bazel 9.3.3, parse_headers): a.cc
     # includes a.h, so a.h's error is in a.cc's log too; b.cc fails alone.

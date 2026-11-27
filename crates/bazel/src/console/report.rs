@@ -354,10 +354,12 @@ pub const RECAP_MAX: usize = 10;
 /// half after them.
 const RECAP_BODY_HELD: usize = 400;
 
-/// A failed action's error header up to its exit code: what follows (the
-/// tool that failed, its whole command line) the recap leaves out.
-static EXIT_TAIL: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^(.*? failed: \(Exit [^)]*\)): .+$").unwrap());
+/// A failed action's error header up to its exit code, or the signal that
+/// ended it (`(Killed)`, `(Segmentation fault)`): what follows (the tool
+/// that failed, its whole command line) the recap leaves out.
+static EXIT_TAIL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"^(.*? failed: \((?:Exit [^)]*|[A-Z][a-z]+(?: [a-z]+)*)\)): .+$").unwrap()
+});
 
 /// Bazel's hint under every sandboxed failure, which a recapped body leaves
 /// out for a line of the tool's own.
@@ -795,8 +797,8 @@ struct Rendered {
 
 /// Which of `kept` (the history's failed actions, in order) is the action
 /// the error `header` reports, not yet `used`, when only one can be: the one
-/// action of the label the header (or its whole line's `(from target …)`,
-/// `target`) names; for an error naming no label, the one action from the
+/// action of the target its whole line names (`(from target …)`,
+/// `target`), else of the label the header names; for an error naming no label, the one action from the
 /// package of the BUILD file its location is in (that file's path made
 /// absolute from the task's directory and taken relative to the workspace,
 /// `bases`). Two of them (a cc_library's two failed compiles), a label with
@@ -852,7 +854,12 @@ fn kept_for(
     static LABEL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?:^|[\s'\x60(])@{0,2}[\w.-]*//[\w./+-]*:[\w./+=,@~-]+").unwrap()
     });
-    let named = |l: &str| names(l) || target == Some(l);
+    // The whole line's target alone says whose action it is: a progress
+    // message may name any label (`Checking against //x:b`).
+    let named = |l: &str| match target {
+        Some(t) => t == l,
+        None => names(l),
+    };
     let found = if target.is_some() || LABEL.is_match(header) || kept.iter().any(|(l, _)| names(l))
     {
         only(&named)?
@@ -1119,6 +1126,24 @@ mod tests {
             super::kept_for(b_header, None, &xt, &mut [false, false], b),
             None,
             "without the target, neither"
+        );
+        // ws/xn (Bazel 9.3.3): //xn:a's progress message names //xn:b; its
+        // whole line's target is the action's.
+        let xn_header = "ERROR: xn/BUILD.bazel:2:4: Checking against //xn:b failed: (Exit 3)";
+        let xn = vec![
+            (
+                "//xn:a".to_string(),
+                vec![("stderr".to_string(), "/h/xn/a/Check-1.stderr".to_string())],
+            ),
+            (
+                "//xn:b".to_string(),
+                vec![("stderr".to_string(), "/h/xn/b/Check-1.stderr".to_string())],
+            ),
+        ];
+        assert_eq!(
+            super::kept_for(xn_header, Some("//xn:a"), &xn, &mut [false, false], b),
+            Some(0),
+            "the target, not the label the message names"
         );
         let prefix = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:generate failed: (Exit 1)";
         let mut fresh = vec![false; kept.len()];
@@ -1426,6 +1451,44 @@ mod tests {
                 kept.errors[0].header
             );
             assert_eq!(kept.errors[0].target.as_deref(), Some(target), "{line}");
+        }
+    }
+
+    /// A signal-killed action's header is cut after the signal, as after an
+    /// exit code (`//f:killed`, Bazel 7.7.3 and 9.3.3): no command line.
+    #[test]
+    fn a_killed_actions_header_is_cut_after_the_signal() {
+        for (line, want) in [
+            (
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed): bash failed: error executing Genrule command (from genrule rule target //f:killed) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo about to die >&2; kill -9 $$'",
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)",
+            ),
+            (
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed): bash failed: error executing Genrule command (from target //f:killed) /bin/bash -c 'kill -9 $$'",
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)",
+            ),
+            (
+                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault): bash failed: error executing Genrule command (from target //f:segv) /bin/bash -c 'kill -11 $$'",
+                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)",
+            ),
+        ] {
+            let observations =
+                std::sync::Arc::new(super::super::processors::Observations::default());
+            let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
+            feed(
+                &mut p,
+                &[line, "about to die", "\x1b[32m[1 / 9]\x1b[0m running"],
+            );
+            let kept = observations.errors().expect("kept");
+            assert_eq!(kept.errors[0].header, want);
+            assert_eq!(
+                kept.errors[0].target.as_deref(),
+                Some(if want.contains("segv") {
+                    "//f:segv"
+                } else {
+                    "//f:killed"
+                })
+            );
         }
     }
 
