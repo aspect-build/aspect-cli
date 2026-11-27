@@ -386,19 +386,22 @@ def bazel_status(state: dict) -> list:
 def build_progress(state: dict):
     """`(done, total, analysing)`: how far a build is, from Bazel's status
     line while it runs, else the last count in the event stream's progress
-    (`bep_done_total`: every count Bazel drew, its last whole, where a
-    frame may have caught an early one), else the last a frame drew
-    (`note_progress`); `(-1, -1, False)` before it counts. Once it has
-    ended, never analysing."""
+    (`bep_done_total`: every count Bazel drew, its last whole) or the last
+    a frame drew (`note_progress`), the larger once it has ended, when it
+    is never analysing; `(-1, -1, False)` before it counts."""
     progress = state.get("progress") or []
     at = status_row(progress)
     counts = progress_counts(progress[at]) if state.get("building") and at >= 0 else None
     if counts:
         return (counts[0], counts[1], analysing(progress))
     bep = state.get("bep_done_total")
-    if bep and not state.get("building"):
-        return (bep[0], bep[1], False)
     kept = state.get("done_total")
+    if not state.get("building") and (bep or kept):
+        # A build's counts only grow: the newest is the larger, whichever
+        # wrote it (a last progress event can come before Bazel's last
+        # status line, a frame miss the last redraw).
+        last = max([c for c in (bep, kept) if c], key = lambda c: c[0])
+        return (last[0], last[1], False)
     if not kept:
         return (-1, -1, False)
     return (kept[0], kept[1], kept[2] and bool(state.get("building")))
