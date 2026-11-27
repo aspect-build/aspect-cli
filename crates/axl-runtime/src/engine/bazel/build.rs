@@ -2181,6 +2181,15 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// with `start` and `end` characters of the line: the URLs and the paths
     /// to files the console linked (`--console:file-hyperlink-format` says
     /// what a file's opens), for a screen to draw as links and open;
+    /// `colours`, each line with its colour kept; `kinds`, each line's kind,
+    /// `error`, `warning` or `` (its own: Bazel's `ERROR:`, `FAIL:`,
+    /// `TIMEOUT:` and `WARNING:`, a test summary's `FAILED` and `TIMEOUT`,
+    /// after any `--show_timestamps` prefix or indent; else, for a line that
+    /// starts no line of Bazel's own, the kind of the last that did when it
+    /// was an `ERROR:`, so a compiler's diagnostic under its action's
+    /// `ERROR:` is an error, across calls too); `bazel`, whether each line
+    /// is one of Bazel's own: one starting as Bazel's do (`INFO:`, `ERROR:`,
+    /// `Loading:`, `//`, `[`, …), not coloured as a tool colours `INFO:`;
     /// `dropped`, how many older lines were let go to keep at most 10000
     /// between calls; and `progress`, the rows of Bazel's progress area as it
     /// was before its latest redraw (at most one redraw behind), its status
@@ -2199,6 +2208,8 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             "lines": got.lines,
             "links": got.links,
             "colours": got.colours,
+            "kinds": got.kinds,
+            "bazel": got.bazel,
             "dropped": got.dropped,
             "progress": got.progress,
         })))
