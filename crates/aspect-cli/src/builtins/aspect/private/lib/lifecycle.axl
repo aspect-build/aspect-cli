@@ -471,6 +471,12 @@ def resolve_surface_update(ctx, lifecycle, surface, status, final, style, body) 
 # `ctx.traits[Phases]`. Fired by every task that drives a `phases.new` handle:
 # build, test, run, lint, format, gazelle, ci warming and delivery.
 Phases = trait(
+    # Private Console callback at a real phase boundary, before its heading.
+    _github_group_phase = attr(
+        typing.Callable[[TaskContext, Phase], None],
+        default = lambda _ctx, _phase: None,
+    ),
+
     # Primary hook: `(ctx, update: TaskUpdate) -> None`, called for every
     # structured update. Features close over their own state.
     #
@@ -833,6 +839,7 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
             display_name = phase.display_name,
         )
         if phase.name != prev_phase:
+            ctx.traits[Phases]._github_group_phase(ctx, phase)
             bk_section_emitted = _emit_bk_phase_section(ctx, phase, progress_styles)
             phase_change = True
 

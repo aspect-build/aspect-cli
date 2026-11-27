@@ -211,6 +211,7 @@ load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/environment.axl", "warn")
+load("../private/lib/lifecycle.axl", "Phase", "Phases")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 
 def _console_impl(ctx: FeatureContext):
@@ -259,6 +260,41 @@ def _console_impl(ctx: FeatureContext):
         trait.output_display = got.display
     if not got.progress:
         trait.output_progress = False
+
+    group_entries = ctx.args.configured("github_group_phases") or []
+    if ctx.args.is_explicit("github_group_phases"):
+        group_entries = group_entries + (ctx.args.github_group_phases or [])
+    group_default = False
+    group_overrides = {}
+    if group_entries:
+        for entry in group_entries:
+            if len(entry) < 2 or entry[0] not in ("+", "-"):
+                fail("expected --console:github-group-phase to be +<phase-id> or -<phase-id>, got %r" % entry)
+            phase = entry[1:]
+            if not phase or phase != phase.strip():
+                fail("expected --console:github-group-phase to contain an exact phase id, got %r" % entry)
+            group_overrides[phase] = entry[0] == "+"
+        group_default = group_entries[0][0] == "-"
+    if group_entries and ctx.std.env.var("GITHUB_ACTIONS") == "true":
+        group_state = {"open": False}
+
+        def _phase_group(task_ctx: TaskContext, phase: Phase) -> None:
+            if group_state["open"]:
+                print("::endgroup::")
+                group_state["open"] = False
+            if group_overrides.get(phase.name, group_default):
+                title = phase.display_name or phase.name
+                title = title.replace("%", "%25").replace("\r", " ").replace("\n", " ")
+                print("::group::" + title)
+                group_state["open"] = True
+
+        def _finish_group(task_ctx: TaskContext, outcome: TaskConclusion) -> None:
+            if group_state["open"] and outcome.exit_code == 0:
+                print("::endgroup::")
+                group_state["open"] = False
+
+        ctx.traits[Phases]._github_group_phase = _phase_group
+        ctx.hooks.post_task(_finish_group)
 
 Console = feature(
     display_name = "Console",
@@ -363,6 +399,13 @@ Console = feature(
         ),
         "drop": args.string_list(
             description = "A regex; Bazel messages whose first line it matches are hidden, with the indented lines under them. Never matches action or test output, nor the `INFO: From …` header above it. Repeat for several.",
+        ),
+        "github_group_phases": args.string_list(
+            long = "console:github-group-phase",
+            description = "A signed exact phase id to group in GitHub Actions. Repeat entries; " +
+                          "the first entry sets the default (+ means off, - means on) and the " +
+                          "last entry for a phase wins. Config entries are applied before " +
+                          "command-line entries. An empty list groups no phases.",
         ),
     } | task_template_args("silent", "verdict"),
 )

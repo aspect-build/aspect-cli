@@ -147,6 +147,14 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn github_group_commands(output: &Output) -> Vec<String> {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.starts_with("::group::") || *line == "::endgroup::")
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The task's own output, its `info` line and the lifecycle events, which no
 /// layout touches, and its `detail` line, which only the layouts that show
 /// detail lines print.
@@ -182,6 +190,16 @@ fn without_colour(text: &str) -> String {
     out
 }
 
+fn assert_log_order(log: &str, fragments: &[&str]) {
+    let mut offset = 0;
+    for fragment in fragments {
+        let next = log[offset..]
+            .find(fragment)
+            .unwrap_or_else(|| panic!("{fragment:?} missing after byte {offset} in:\n{log}"));
+        offset += next + fragment.len();
+    }
+}
+
 /// `full`, the default, gives each phase a heading and its updates `▹` lines
 /// under it, with no emoji. A plain log and GitHub Actions, which only adds
 /// colour (and a label from the CI run), read the same.
@@ -206,6 +224,79 @@ fn full_lays_out_headings_and_updates_alike_in_a_plain_log_and_on_github_actions
         assert!(err.contains(" · task conclusion"), "{env:?}: {err}");
         for gone in ["→", "🎬", "❌", "✅", ":aspect:"] {
             assert!(!err.contains(gone), "{env:?}: {gone} in\n{err}");
+        }
+    }
+}
+
+#[test]
+fn github_groups_follow_signed_rules_and_task_conclusions() {
+    let github: &[(&str, &str)] = &[("GITHUB_ACTIONS", "true")];
+    let plain: &[(&str, &str)] = &[];
+    let plus_work = "--console:github-group-phase=+work";
+    let minus_work = "--console:github-group-phase=-work";
+    let plus_wor = "--console:github-group-phase=+wor";
+    let minus_finish = "--console:github-group-phase=-finish";
+    let empty_config = r#"ctx.features[Console].args.github_group_phases = []"#;
+    let config_minus_work = r#"ctx.features[Console].args.github_group_phases = ["-work"]"#;
+    let work_group: &[&str] = &["::group::work", "::endgroup::"];
+    let finish_group: &[&str] = &["::group::finish", "::endgroup::"];
+    let both_groups: &[&str] = &[
+        "::group::work",
+        "::endgroup::",
+        "::group::finish",
+        "::endgroup::",
+    ];
+    let cases: &[(&str, &[&str], bool, i32, &[&str])] = &[
+        ("", &["check"], true, 0, &[]),
+        (empty_config, &["check"], true, 0, &[]),
+        ("", &["check", plus_wor], true, 0, &[]),
+        ("", &["check", plus_work], true, 0, work_group),
+        ("", &["check", minus_work], true, 0, finish_group),
+        ("", &["check", plus_work, minus_work], true, 0, &[]),
+        ("", &["check", minus_work, plus_work], true, 0, both_groups),
+        (
+            config_minus_work,
+            &["check", plus_work],
+            true,
+            0,
+            both_groups,
+        ),
+        ("", &["check", minus_finish], true, 0, work_group),
+        (
+            "",
+            &["check", "--code", "3", minus_work],
+            true,
+            3,
+            &["::group::finish"],
+        ),
+        ("", &["check", plus_work], false, 0, &[]),
+    ];
+
+    for &(config, args, in_github_actions, code, expected) in cases {
+        let env = if in_github_actions { github } else { plain };
+        let output = run_with_env(config, args, false, env);
+        assert_task_behaviour(&output, "full", code);
+        let commands = github_group_commands(&output);
+        let expected_commands = expected
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(commands, expected_commands, "{}", stderr(&output));
+
+        let log = without_colour(&stderr(&output));
+        if expected.contains(&"::group::work") {
+            assert_log_order(
+                &log,
+                &["::group::work", "▸ Work", "::endgroup::", "▸ Finish"],
+            );
+        }
+        if expected.contains(&"::group::finish") {
+            if code == 0 {
+                assert_log_order(&log, &["::group::finish", "▸ Finish", "::endgroup::"]);
+            } else {
+                assert_log_order(&log, &["::group::finish", "▸ Finish"]);
+                assert!(!log.contains("::endgroup::"), "{log}");
+            }
         }
     }
 }
