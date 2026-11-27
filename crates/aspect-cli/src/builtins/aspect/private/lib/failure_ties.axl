@@ -88,10 +88,14 @@ def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool):
         out.append((name, body, named))
     return out
 
+# The most pieces of an erase (`\r`, `ESC[1A`, `ESC[K`) a redraw is read
+# past: more than Bazel's progress area ever has.
+_MAX_REDRAW_PIECES = 64
+
 def _past_redraw(text: str, at: int) -> int:
     """Where `text` goes on past Bazel's erase of its progress area at
     `at` (`\\r`, `ESC[1A`, `ESC[K`)."""
-    for _ in range(64):
+    for _ in range(_MAX_REDRAW_PIECES):
         lead = [p for p in ("\r", "\x1b[1A", "\x1b[K") if text.startswith(p, at)]
         if not lead:
             break
@@ -527,6 +531,9 @@ def console_ties(state: dict) -> dict:
     state["ties_cache"] = (key, result)
     return result
 
+# The most lines one of Bazel's other errors quotes after its own.
+_MAX_OTHER_LINES = 200
+
 def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: list) -> list:
     """Bazel's `ERROR:` blocks no tie claimed (`console_ties`), in its
     order, each once: `{"lines": [...]}`, its line (the workspace's path
@@ -543,7 +550,7 @@ def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: l
             continue
         lines = [h["plain"]]
         at = h["end"] + 1
-        for _ in range(200):
+        for _ in range(_MAX_OTHER_LINES):
             if at >= len(text):
                 break
             end = text.find("\n", at)

@@ -38,6 +38,8 @@ folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it
                             and formatters leave them alone) is dropped, as record.sh does
   cmd                       the bazel arguments, exactly (startup options first, as for `bazel`)
   variants                  extra recordings: noall, nocolor, merged, console_only
+  reset                     optional: a shell script record.sh runs before each recording, to
+                            clear what the case's tests keep between runs
   <ver>.bep.json            --build_event_json_file output (cmd includes --build_event_publish_all_actions)
   <ver>.console             Bazel's stderr, written to a pty, --color=yes --curses=yes
   <ver>.stdout              Bazel's stdout, a file of its own, only when non-empty: Bazel relays an

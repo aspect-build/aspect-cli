@@ -11,9 +11,14 @@
 # Variants listed in fixtures/<case>/variants: noall (rerun without
 # --build_event_publish_all_actions), nocolor (rerun with --color=no --curses=no),
 # merged (rerun with Bazel's stdout on the pty too, as a terminal shares it with stderr),
-# console_only (no BEP; 90s cap, then the server is killed - for the OOM case).
+# console_only (no BEP; capped at CONSOLE_ONLY_CAP_S, then the server is killed - for the OOM
+# case). A case's optional `reset` script runs before each recording, to clear what its tests
+# keep between runs.
 # The server is left running for the next case; `refresh_all.sh` shuts it down per version.
 set -u
+# The longest a recording's Bazel runs, and a console_only one's, before it is ended.
+RUN_TIMEOUT_S=300
+CONSOLE_ONLY_CAP_S=90
 case_=$1
 ver=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -39,27 +44,27 @@ case " $variants " in *" console_only "*) console_only=1 ;; esac
 OB=$("${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP info output_base 2>/dev/null)
 IB=$("${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP info install_base 2>/dev/null)
 one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
-    local prefix=$1 flags=$2 strip=$3 merged=${4:-} args cap=300 bep tostdout
+    local prefix=$1 flags=$2 strip=$3 merged=${4:-} args cap=$RUN_TIMEOUT_S bep tostdout
     tostdout='>"$out/stdout"'
     [ -n "$merged" ] && tostdout=
     args=$(cat "$FX/cmd")
     [ "$strip" = 1 ] && args=${args//--build_event_publish_all_actions/}
     rm -rf "$RAW" "$FX/$prefix".{bep.json,console,stdout,exit,files}
     mkdir -p "$RAW"
-    rm -rf /tmp/bepfx-flaky.marker /tmp/bepfx-rpt.lock
+    [ -f "$FX/reset" ] && sh "$FX/reset"
     bep="--build_event_json_file=$RAW/bep.json"
     if [ $console_only = 1 ]; then
         bep=""
-        cap=90
+        cap=$CONSOLE_ONLY_CAP_S
     else
         # Every recording runs its actions again, the successful ones' output
         # included: Bazel's action cache would replay none of it (an
         # `--action_env` reaches only actions that take the default shell
         # environment). Then a warm-up: module resolution and repo fetches
         # would otherwise show only in the first case.
-        perl -e 'alarm 300; exec @ARGV' "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP clean >/dev/null 2>&1 </dev/null
+        perl -e "alarm $RUN_TIMEOUT_S; exec @ARGV" "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP clean >/dev/null 2>&1 </dev/null
         # shellcheck disable=SC2086
-        perl -e 'alarm 300; exec @ARGV' "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off --nobuild >/dev/null 2>&1 </dev/null
+        perl -e "alarm $RUN_TIMEOUT_S; exec @ARGV" "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off --nobuild >/dev/null 2>&1 </dev/null
     fi
     # Bazel's stdout and exit code to their own files (merged: its stdout on
     # the pty with its stderr), its stderr on the pty.

@@ -29,6 +29,9 @@ _MAX_VIEW = 5000
 # others keep their builds folded to a row each.
 _ONE_BUILD_KINDS = ["build", "test"]
 
+# The views a tab's stack keeps for Esc to go back through.
+_MAX_VIEWS = 32
+
 def log_view(state: dict, record: dict) -> dict:
     """The view of a failure's logs: its title, the lines (the end of each
     log, escape sequences stripped, a divider between an action's stderr and
@@ -146,8 +149,8 @@ def _keep_view(state: dict):
     if view != None:
         back = state.setdefault("views", [])
         back.append((view, state["scroll"]))
-        if len(back) > 32:
-            state["views"] = back[-32:]
+        if len(back) > _MAX_VIEWS:
+            state["views"] = back[-_MAX_VIEWS:]
 
 def _show_failure_view(state: dict, view: dict):
     """`view`, a failure's log, as the Failures tab's: the tab shown, its

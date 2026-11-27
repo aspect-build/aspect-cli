@@ -80,7 +80,7 @@ def target_counts(state: dict):
     found = failure_entries(state)
     failed = {}
     for e in found["entries"]:
-        if e["group"] != 2 and not e["pattern"] and e["label"]:
+        if e["group"] != "test" and not e["pattern"] and e["label"]:
             failed[e["label"]] = True
     return (state["counts"]["built"], len(failed), len(blocked_targets(state)))
 
@@ -325,6 +325,20 @@ def _traceback_lines(lines: list) -> list:
         out.append(_more_lines(len(lines) - at))
     return out
 
+# The targets an entry's blocked line names; the rest are counted.
+_BLOCKED_SHOWN = 3
+
+# The width a quoted line wraps to: the summary's, less its gutter (`  │ `,
+# or `  │ ! ` under Other errors), never under `_MIN_QUOTE`.
+_QUOTE_GUTTER = 4
+_OTHER_GUTTER = 9
+_MIN_QUOTE = 20
+
+# The failure summary's groups of entries, in order: the targets' (roots
+# whose analysis or loading failed, missing sources, Bazel's exit code), the
+# failed actions, the tests.
+_GROUPS = ["target", "action", "test"]
+
 def failure_entries(state: dict) -> dict:
     """The build's failures as the failure summary and the Failures list
     tell them, from Bazel's build events alone, in order (an `entry` each):
@@ -352,31 +366,31 @@ def failure_entries(state: dict) -> dict:
     for i, rec in enumerate(fails):
         if rec["kind"] == "test":
             tests.setdefault(rec["label"], []).append(i)
-    groups = [[], [], []]
+    groups = {group: [] for group in _GROUPS}
     for i, rec in enumerate(fails):
         if rec["kind"] == "target":
             if _target_entry(state, rec, referrers, own):
-                groups[0].append((i, rec))
+                groups["target"].append((i, rec))
         elif rec["kind"] == "action":
-            groups[1].append((i, rec))
+            groups["action"].append((i, rec))
         elif tests.get(rec["label"]) != None:
             at = tests.pop(rec["label"])
             picked = at[test_group(state, [fails[j] for j in at])["index"]]
-            groups[2].append((picked, fails[picked]))
+            groups["test"].append((picked, fails[picked]))
     entries = []
-    for group, found in enumerate(groups):
-        for i, rec in found:
+    for group in _GROUPS:
+        for i, rec in groups[group]:
             entries.append({"index": i, "group": group, "label": rec["label"], "flaky": _flaky(state, rec), "pattern": rec.get("pattern", False), "blocked": []})
     blocked = blocked_targets(state)
     for label in state["counts"]["failures"]:
         if label not in own and label not in blocked:
-            entries.append({"index": None, "group": 0, "label": label, "flaky": False, "pattern": False, "blocked": []})
+            entries.append({"index": None, "group": "target", "label": label, "flaky": False, "pattern": False, "blocked": []})
 
     # A failed build always says why: with nothing else to list, an entry of
     # Bazel's exit code (`entry_text`: its raw log's last lines).
     code = state.get("bazel_exit")
     if not entries and code not in (None, 0) and not state.get("building") and not console_ties(state)["others"]:
-        entries.append({"index": None, "group": 0, "label": "", "exited": code, "flaky": False, "pattern": False, "blocked": []})
+        entries.append({"index": None, "group": "target", "label": "", "exited": code, "flaky": False, "pattern": False, "blocked": []})
     first = {}
     for e in entries:
         if e["label"] not in first:
@@ -537,8 +551,8 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     entries = [e for e in found["entries"] if not e["flaky"]]
 
     def blocked_line(stopped):
-        more = len(stopped) - 3
-        return "  ○ blocked: " + ", ".join(stopped[:3]) + (_counts(" +%d blocked", more) if more > 0 else "")
+        more = len(stopped) - _BLOCKED_SHOWN
+        return "  ○ blocked: " + ", ".join(stopped[:_BLOCKED_SHOWN]) + (_counts(" +%d blocked", more) if more > 0 else "")
 
     shown = []
     for e in entries:
@@ -563,7 +577,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                     if line == _GAP_ROW:
                         out.append("  " + muted + bar + " …" + reset)
                         continue
-                    for j, row in enumerate(quoted_rows(line, max(20, width - 4))):
+                    for j, row in enumerate(quoted_rows(line, max(_MIN_QUOTE, width - _QUOTE_GUTTER))):
                         out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
                 if e["more"]:
                     out.append("  " + muted + bar + reset + " " + _more_lines(e["more"]))
@@ -586,7 +600,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
         out.append(red + bold + "── Other errors from Bazel ──" + reset)
         for i, block in enumerate(others[:max_entries]):
             lines = _traceback_lines(block["lines"])
-            for j, row in enumerate(quoted_rows(lines[0], max(20, width - 9))):
+            for j, row in enumerate(quoted_rows(lines[0], max(_MIN_QUOTE, width - _OTHER_GUTTER))):
                 out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
             if i < _EXCERPTED:
                 rows, more = excerpt_rows(lines[1:])
@@ -594,7 +608,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                     if line == _GAP_ROW:
                         out.append("  " + muted + bar + " …" + reset)
                         continue
-                    for j, row in enumerate(quoted_rows(line, max(20, width - 4))):
+                    for j, row in enumerate(quoted_rows(line, max(_MIN_QUOTE, width - _QUOTE_GUTTER))):
                         out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
                 if more:
                     out.append("  " + muted + bar + reset + " " + _more_lines(more))

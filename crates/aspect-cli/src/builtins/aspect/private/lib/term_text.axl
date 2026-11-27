@@ -265,9 +265,12 @@ def _thousands(n: int) -> str:
         out += d
     return out
 
+# Where a tab's values start, past its names.
+_VALUE_COLUMN = 24
+
 def _row_of(name: str, value) -> str:
     """A `name  value` row of a tab, the names in a column."""
-    return "  " + name + " " * max(1, 24 - len(name)) + str(value)
+    return "  " + name + " " * max(1, _VALUE_COLUMN - len(name)) + str(value)
 
 term_text = namespace(
     ANSI = ANSI,

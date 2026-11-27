@@ -1240,6 +1240,10 @@ def built(state: dict) -> bool:
     c = state.get("counts") or {}
     return bool(state.get("building") or state.get("builds") or state.get("fails") or state.get("outputs") or c.get("configured") or c.get("failures"))
 
+# Where the Metrics tab's action counts start, past their words, unless a
+# longer word pushes them on.
+_COUNT_COLUMN = 22
+
 # The execution logs Bazel writes in a format of the caller's, beside which
 # it writes no compact one for the Dashboard to read.
 _OWN_EXEC_LOGS = ["--execution_log_binary_file", "--execution_log_json_file"]
@@ -1337,7 +1341,7 @@ def action_lines(state: dict) -> list:
     # none of left out, as in Results.
     parts = [p for p in action_parts(split) if p[1]]
     names = [len(words) + 2 for _, _, words, _, _ in parts] + [len(name) + 2 for _, n, words, _, _ in parts for name, _ in under.get(words.partition(" ")[0], []) if name]
-    column = max([22] + [w + 1 for w in names])
+    column = max([_COUNT_COLUMN] + [w + 1 for w in names])
     for glyph, n, words, role, how in parts:
         out.append("  " + ((_c(role) + glyph + _RESET) if role and glyph else (glyph or " ")) + " " + words + " " * (column - len(words)) + ("~" if how == "estimate" else "") + _thousands(n))
         for name, value in under.get(words.partition(" ")[0], []):

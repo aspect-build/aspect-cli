@@ -344,6 +344,11 @@ _BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages",
 # How long the finished screen waits for a key while nothing on it moves.
 _IDLE_MS = 1000
 
+# How often the frames read the task's tips anew, and how long a finished
+# screen waits for a key while it counts down or just redrew.
+_TIPS_EVERY_FRAMES = 10
+_BUSY_MS = 100
+
 # The smallest terminal the screen draws in.
 _MIN_COLS = 40
 
@@ -559,7 +564,7 @@ def _dashboard_impl(ctx: FeatureContext):
             state["phase"] = feed["progress"][0]
             note_progress(state, feed["progress"])
         _add_output(screen)
-        if state["frames"] % 10 == 0:
+        if state["frames"] % _TIPS_EVERY_FRAMES == 0:
             _tips()
         _keys_and_draw(screen)
 
@@ -632,7 +637,7 @@ def _dashboard_impl(ctx: FeatureContext):
             changed = _draw(screen, render(state, cols, rows))
 
             # Idle, a key a second; a frame that moves, or the countdown, ten.
-            key = screen.key(timeout_ms = 100 if changed or deadline != None else _IDLE_MS)
+            key = screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS)
             if key == "ctrl-c":
                 return
             if key != None and deadline != None and key.startswith("mouse-move:"):

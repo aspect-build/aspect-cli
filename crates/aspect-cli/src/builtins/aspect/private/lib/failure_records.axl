@@ -445,11 +445,15 @@ def blocked_text(label: str, roots: list) -> str:
     more = len(roots) - 1
     return "blocked by " + shown + ((_counts(" and %d more", more)) if more else "")
 
+# How much of a log's end an excerpt reads: where its error usually is.
+_EXCERPT_READ_BYTES = 64 * 1024
+
 def _tail_text(state: dict, path: str):
-    """The last 64 KiB of the file at `path` (`state["read"]`), or None."""
+    """The last `_EXCERPT_READ_BYTES` of the file at `path`
+    (`state["read"]`), or None."""
     if not path or state.get("read") == None:
         return None
-    got = state["read"](path, 64 * 1024)
+    got = state["read"](path, _EXCERPT_READ_BYTES)
     return got[0] if got != None else None
 
 def bazel_line(line: str) -> str:
