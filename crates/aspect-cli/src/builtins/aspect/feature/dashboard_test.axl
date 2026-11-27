@@ -684,6 +684,22 @@ def _actions_tests(ctx):
     # done stay, and nothing is cut in half.
     jammed = dict(greg, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, blocked = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
+    # Short terminals (round 50's probe): the drop order, failed last.
+    probe = dict(done = 0, total = 0, more = False, counted = True, known = True, final = True, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, rest = 0, failed = 0, blocked = 0, unreported = 0, failed_build = True, running = False, running_now = 0, disk_on = True, remote_on = False, published = True)
+    zero = dict(probe, done = 32, total = 32, failed = 16, blocked = 15, internal = 1)
+    big9 = dict(probe, done = 9301, total = 9301, ran = 5705, local = 2836, disk = 300, failed = 4, blocked = 411, internal = 33)
+    for split, room, rows, stack, want in [
+        (zero, 13, 2, True, ["╳ 16 failed", "○ 15 blocked"]),
+        (zero, 30, 1, False, ["╳ 16 failed · ○ 15 blocked"]),
+        (zero, 60, 1, False, ["╳ 16 failed · ○ 15 blocked · ░ 1 internal"]),
+        (big9, 13, 2, True, ["╳ 4 failed", "○ 411 blocked"]),
+        (big9, 30, 1, False, ["╳ 4 failed · ○ 411 blocked"]),
+        (big9, 35, 2, False, ["█ 5,705 ran · ▒ 2,836 local", "╳ 4 failed · ○ 411 blocked"]),
+    ]:
+        _eq("drop order at %d cells, %d rows" % (room, rows), [_visible(r) for r in action_results(split, room, rows, short = room < 60, stack = stack)], want)
+    live_short = dict(probe, final = False, running = True, failed_build = False, done = 2411, total = 2420, ran = 210, local = 2200, failed = 2, running_now = 3, estimated = True)
+    _eq("a short terminal keeps failed over a hit", [_visible(r) for r in action_results(live_short, 40, 1)], ["█ 210 ran · ╳ 2 failed · ─ 3 running"])
+
     _eq("`hits N:` before anything goes", got, ["█ 30 ran", "╳ 5 failed", "hits 0: ▒ 0 local", "○ 10 blocked", "░ 1 internal"])
     _eq("then the hit-less caches before internal", [_visible(r) for r in action_results(dict(jammed, disk_on = True, remote_on = True), 17, 5, short = True, stack = True)], ["█ 30 ran", "╳ 5 failed", "hits 0: ▒ 0 local", "○ 10 blocked", "░ 1 internal"])
     _eq("then internal", [_visible(r) for r in action_results(jammed, 17, 4, short = True, stack = True)], ["█ 30 ran", "╳ 5 failed", "hits 0: ▒ 0 local", "○ 10 blocked"])

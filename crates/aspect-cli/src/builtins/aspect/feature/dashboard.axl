@@ -3674,6 +3674,18 @@ def _part_text(part: tuple, level: int) -> tuple:
 
 _HITS = ["local action cache", "disk", "remote"]
 
+# What goes first where the Actions rows have no room for every part: what
+# counts nothing (the end's `0 local` too) and the caches with no hits,
+# then internal, other, pending, the hits (remote, disk, then the local
+# action cache), running, unreported, ran, blocked; failed last of all.
+_DROP_ORDER = ["zero", "internal", "other", "pending", "remote", "disk", "local action cache", "running", "unreported", "ran", "blocked", "failed"]
+
+def _dropped(part: tuple, what: str) -> bool:
+    """Whether `part` is what `_DROP_ORDER`'s `what` drops."""
+    if what == "zero":
+        return part[1] == 0 or part[4] == "dim"
+    return part[2] == what
+
 def action_results(split: dict, room: int, rows = 3, short = False, stack = False) -> list:
     """The Actions rows, `room` cells wide past their `Actions` lead, at
     most `rows`: `█ ran`, then `cache hits N:` and the hits after it
@@ -3686,11 +3698,12 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     last of them; their label is `hits N:` where `cache hits N:` fits no
     `rows`, none where that doesn't either, and none once no hit is left.
     The local action cache is `local` where `short` (a screen under 100
-    columns) or the whole words fit no `rows`. Where nothing fits, parts
-    go by priority: the caches with no hits first, then internal, then
-    every count is `short_count`; then whole parts from the end, never
-    ran, failed, blocked, a hit, unreported, running or pending while
-    another can go. No part is cut in half but one wider than a row alone."""
+    columns) or the whole words fit no `rows`. Where nothing fits, the
+    caches with no hits go, then internal; then the rows are packed tight
+    and parts go in `_DROP_ORDER` (a zero count, internal, other, pending,
+    remote, disk and local hits, running, unreported, ran, blocked, and
+    failed last), counts going to `short_count` before pending does. No
+    part is cut in half but one wider than a row alone."""
     parts = action_parts(split)
     if not parts:
         return []
@@ -3723,7 +3736,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     def width_of(row, level):
         return text_width(" · ".join([text(u, level)[0] for u in row]))
 
-    def pack(parts, level, fit):
+    def pack(parts, level, fit, tight = False):
         # The units of `parts` on rows `fit` measures, or None past `rows`.
         hits = [p for p in parts if p[2] in _HITS]
         others = [p for p in parts if p[2] not in _HITS]
@@ -3747,10 +3760,10 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
             if k == 0 and form[0] < 2:
                 return [[]] * (rows + 1)
             group = [("hits", hits[:k])] + [("hit", [p]) for p in hits[k:]]
-        beside = not group or (not stack and len(group) == 1 and width_of(lead + group, fit) <= room)
+        beside = tight or not group or (not stack and len(group) == 1 and width_of(lead + group, fit) <= room)
         packed = [[]]
         for unit in (lead + group + failed + rest) if beside else (lead + failed + group + rest):
-            after = packed[-1] and packed[-1][-1][0] == "hits"
+            after = packed[-1] and packed[-1][-1][0] == "hits" and not tight
             if packed[-1] and ((not beside and unit[0] == "hits") or (after and unit[0] != "hit") or width_of(packed[-1] + [unit], fit) > room):
                 packed.append([])
             packed[-1].append(unit)
@@ -3780,20 +3793,24 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
         if best != None:
             break
     if best == None:
-        # Whole parts from the end until what is left fits, the ones that
-        # say what happened last to go.
-        keep = ("ran", "failed", "blocked", "unreported", "running", "pending") + tuple(_HITS)
-        kept = no_internal
-        form[0] = 2
-        names = [p[2] for p in kept]
-        order = [n for n in reversed(names) if n not in keep] + [n for n in reversed(names) if n in keep]
-        for name in order:
-            packed = pack(kept, 1, 2)
-            if len(packed) <= rows and all([width_of(r, 2) <= room or len(r) == 1 for r in packed]) or len(kept) == 1:
+        # Parts go in `_DROP_ORDER`, as few as will do, the rows packed
+        # tight; counts go to thousands before what says what happened.
+        for k in range(len(_DROP_ORDER) + 1):
+            kept = [p for p in parts if not [d for d in _DROP_ORDER[:k] if _dropped(p, d)]] or [p for p in parts if p[2] == "failed"][:1]
+            for fit in ([1] if k < 3 else [1, 2]):
+                for f in range(3):
+                    form[0] = f
+                    packed = pack(kept, 1, fit, tight = True)
+                    if len(packed) <= rows and all([width_of(r, fit) <= room or len(r) == 1 for r in packed]):
+                        best = (fit, packed, f)
+                        break
+                if best != None:
+                    break
+            if best != None:
                 break
-            kept = [p for p in kept if p[2] != name]
-        packed = pack(kept, 1, 2)
-        best = (2, packed[:rows], 2)
+        if best == None:
+            form[0] = 2
+            best = (2, pack(kept, 1, 2, tight = True)[:rows], 2)
     fit, packed, f = best
     form[0] = f
     out = []
