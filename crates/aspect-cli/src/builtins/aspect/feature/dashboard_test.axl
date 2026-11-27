@@ -560,7 +560,7 @@ def _actions_tests(ctx):
     for flags, want in [([], (False, False)), (["--disk_cache=/c"], (True, False)), (["--disk_cache=/c", "--disk_cache="], (False, False)), (["--remote_cache=grpc://x"], (False, True)), (["--remote_executor=grpc://x", "--disk_cache=/c"], (True, True))]:
         _eq("caches %r" % flags, cache_kinds({"options_parsed": struct(cmd_line = flags, explicit_cmd_line = [])}), want)
 
-    # Final: BuildMetrics' exact split, as real builds gave it. r30's big3:
+    # Final: BuildMetrics' exact split, as real builds gave it. A large one:
     # 2,000 genrules failed (Failures lists each), 611 action cache hits.
     big = _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(2000), done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
     _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, local = 611, internal = 2390, failed = 2000, not_run = 1700))
@@ -619,7 +619,7 @@ def _actions_tests(ctx):
     _eq("no count in it", bep_progress("Analyzing: 3 targets\n"), None)
 
     # The stream cut short (a remote cache unreachable: "Unable to write
-    # all BEP events", exit 34), no BuildMetrics, as r42's run had it:
+    # all BEP events", exit 34), no BuildMetrics, as a real run had it:
     # "4 processes: 4 internal", three genrules failed, no spawn logged.
     cut = _screen(ctx, ["x"], building = False, ended = True, done_total = (4, 4, False), inv = {"build_finished": struct(exit_code = struct(name = "REMOTE_ERROR", code = 34))})
     for i in range(3):
@@ -640,7 +640,7 @@ def _actions_tests(ctx):
     _eq("drawn as unreported", [_visible(r) for r in action_results(split, 40)], ["? 4 unreported"])
     _eq("its key says what unreported is", any(["hasn't said how" in r for r in help_rows(early, 200)]), True)
 
-    # Every action published (the default), live: r39's run of //dc:all
+    # Every action published (the default), live: a run of //dc:all
     # //two:all posted 14 executed actions: the workspace status with no
     # command line (internal), ten genrules a disk cache served, three
     # that failed. Live, the events and the execution log tell them apart;
@@ -875,7 +875,7 @@ def _actions_tests(ctx):
     jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, not_run = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
 
-    # Short terminals (round 50's probe): the drop order, failed last.
+    # Short terminals: the drop order, failed last.
     probe = dict(done = 0, total = 0, more = False, counted = True, known = True, final = True, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = True, running = False, running_now = 0, disk_on = True, remote_on = False, published = True)
     zero = dict(probe, done = 32, total = 32, failed = 16, not_run = 15, internal = 1)
     big9 = dict(probe, done = 9301, total = 9301, ran = 5705, local = 2836, disk = 300, failed = 4, not_run = 411, internal = 33)
@@ -2074,7 +2074,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the raw log a bare path", seen[-2].endswith("Bazel's raw log: /h/console.log"), True)
     _eq("through report_lines too", report_lines(dict(tested, log_path = "/h/console.log", closing = [], closing_tail = [], bes_base = "", bazel_uuid = "", update = {}), "t-9", True, linked = lambda l: "L")[-1], "L")
 
-    # At 60 columns, r44's 17 failures: every tab, the shown one whole
+    # At 60 columns, 17 failures: every tab, the shown one whole
     # (it lost its first letters to the tabs before it).
     narrow = dict(kinds, tab = "failures", counts = dict(kinds["counts"], failures = ["//f:%d" % i for i in range(17)], failed_labels = {"//f:%d" % i: True for i in range(17)}), fails = [], root_causes = {"//b:b": ["//f:0"]}, logged_index = None, view = None)
     top = [r for r in _visible(render(narrow, 60, 20)).split("\n") if r.startswith("┌─ Console")]
@@ -2170,7 +2170,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("broken at a space", quoted_rows(words, 30), ["E: word0 word1 word2 word3", "word4 word5 word6 word7", "word8 word9 word10 word11"])
     _eq("a word wider than a row fills it, so the end is kept", quoted_rows("short " + "w" * 40, 20), ["short " + "w" * 14, "w" * 18, "w" * 8])
 
-    # //t:long at 100 columns (r45's long100): the message after the long
+    # //t:long at 100 columns: the message after the long
     # name stays.
     long_fail = "FAIL: TestLongName/case_with_a_very_long_name" + "_that_goes_on_and_on" * 9 + ": expected the frobnicator to return 42 but it returned 41"
     _eq("the end of a long line kept", quoted_rows(long_fail, 96)[-1].endswith("it returned 41"), True)
@@ -2224,7 +2224,7 @@ def _impl(ctx: TaskContext) -> int:
     on_key(tab, "ctrl-o", 10)
     _eq("^O again: the chosen one's", len([r for r in [_visible(r) for r in failure_rows(tab, 30, 80)] if r.startswith("  │")]), 1)
 
-    # `test //t:sharded //t:fails --runs_per_test=2` (r45's dsh4): ↑↓ go a
+    # `test //t:sharded //t:fails --runs_per_test=2`: ↑↓ go a
     # row at a time, Enter opens the record the row heads, } { go in
     # shard and run order.
     rows_of = [
@@ -2596,7 +2596,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # One attempt Bazel posts twice is one row, the one with a log; a failed
     # TestRunner action stands for the run and shard its output names
-    # (this order is r29's shard.json, oldshard_flaky, run 1 shard 2 and run
+    # (this order is a recorded sharded build's, oldshard_flaky, run 1 shard 2 and run
     # 1 shard 1, as Bazel 9 sends them), never listed once an attempt of
     # them has come with its log.
     out = "bazel-out/darwin_arm64-fastbuild/testlogs/examples/r29tmp/oldshard_flaky/"
@@ -2634,7 +2634,7 @@ def _impl(ctx: TaskContext) -> int:
     note_event(first, "test_result", _result(1, 2, 1, "FAILED", log)[0], _result(1, 2, 1, "FAILED", log)[1], False)
     _eq("an action folded once its attempt comes with its log", [r["kind"] for r in first["fails"]], ["test"])
 
-    # r29's shard.json, combo: a shard that failed to build, its action (the
+    # A recorded sharded build, combo: a shard that failed to build, its action (the
     # only log) before its result, which has none: one row, the action's.
     combo = _screen(ctx, ["x"])
     combo_out = "bazel-out/darwin_arm64-fastbuild/testlogs/examples/r29tmp/combo/shard_1_of_2_run_1_of_2/test.log"
@@ -2687,7 +2687,7 @@ def _impl(ctx: TaskContext) -> int:
     def _metrics(executed, misses):
         return struct(action_summary = struct(actions_executed = executed, action_cache_statistics = struct(hits = 0, misses = misses)))
 
-    # r29's cached5.json: a fully cached rebuild still runs the workspace
+    # A fully cached rebuild still runs the workspace
     # status action, which Bazel runs on every build.
     cached5 = struct(action_summary = struct(
         actions_executed = 1,
@@ -2732,7 +2732,7 @@ def _impl(ctx: TaskContext) -> int:
     note_blocked(dep, _completed("//p:demo", ["//p:broken"]))
     _eq("blocked by what failed, not a missing source", (blocked_targets(own), blocked_targets(dep)), ({}, {"//p:demo": ["//p:broken"]}))
 
-    # r29's nokg.json, without --keep_going: fastfail failed; a flaky test's
+    # A build without --keep_going: fastfail failed; a flaky test's
     # second attempt was cut off and three never ran, all Aborted with no
     # reason: Bazel's "1 fails locally and 4 were skipped".
     nokg = new_counts()
@@ -2757,7 +2757,7 @@ def _impl(ctx: TaskContext) -> int:
         count_aborted_test(unbuilt, "//examples/r29tmp:needs_bad", "unknown", "c")
         _eq("a test that failed to build, under %s" % command, unbuilt["tests_failed"], want)
 
-    # r29's anal.json: a0 to a4 fail in analysis for zz_broken, Bazel
+    # An analysis failure: a0 to a4 fail in analysis for zz_broken, Bazel
     # posting three before it. Blocked whatever came first.
     anal = _screen(ctx, ["x"])
     root = "//examples/r29tmp:zz_broken"
@@ -2767,7 +2767,7 @@ def _impl(ctx: TaskContext) -> int:
         count_aborted(anal["counts"], "//examples/r29tmp:" + label, "analysis_failure")
     _eq("blocked by a root posted after them", sorted(blocked_targets(anal)), ["//examples/r29tmp:a%d" % i for i in range(5)])
 
-    # r31's load.json: t_nopkg is blocked by a target in a package that is
+    # A loading failure: t_nopkg is blocked by a target in a package that is
     # not there, which it was not asked for and which Bazel reports only as
     # an Aborted configured_label, once per configuration. That root is a
     # failure of its own, once, its log Bazel's error; the build shows it
@@ -2961,7 +2961,7 @@ def _impl(ctx: TaskContext) -> int:
     on_key(tabs, "mouse-release:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
     _eq("a click takes a tab", tabs["tab"], "invocation")
 
-    # Review fixes: a peek open as a test's summary arrives; a status
+    # A peek open as a test's summary arrives; a status
     # value under a secret's name; a pointer moving keeps nothing from
     # opening; huge lines left plain; a file the system would run.
     peeked = _screen(ctx, ["x"])
