@@ -294,6 +294,9 @@ def _console_impl(ctx: FeatureContext):
             state["env"] = task_ctx.std.env
         collect_event(state, event)
 
+    # The summary lists as many failures as the recap would repeat errors.
+    summary_max = ctx.args.recap_max if type(ctx.args.recap_max) == "int" and ctx.args.recap_max > 0 else RECAP_MAX
+
     def _summarize(task_ctx, build):
         if trait.output_display == "none":
             return
@@ -305,7 +308,7 @@ def _console_impl(ctx: FeatureContext):
             state.update(read = task_ctx.std.fs.try_read_tail, env = task_ctx.std.env, ansi = task_ctx.std.re.compile(ANSI))
         err = task_ctx.std.io.stderr
         size = task_ctx.std.term.size() if err.is_tty else None
-        for line in failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code):
+        for line in failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code, max_entries = summary_max):
             err.write(line + "\n")
         summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env, task_ctx.std.re.compile(ANSI))
 
@@ -415,7 +418,7 @@ Console = feature(
         ),
         "recap_max": args.int(
             default = RECAP_MAX,
-            description = "How many of Bazel's errors to repeat at the end of the console, once they have scrolled away.",
+            description = "How many failures the end-of-build summary lists, and of Bazel's other errors; the rest are counted (`aspect history show` has all).",
         ),
         "collapse": args.string_list(
             description = "A regex; Bazel messages whose first line it matches collapse into the first of them, whatever their severity. Never matches action or test output, nor the `INFO: From …` header above it. Repeat for several.",

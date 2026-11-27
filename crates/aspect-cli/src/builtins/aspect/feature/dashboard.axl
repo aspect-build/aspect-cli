@@ -6035,7 +6035,8 @@ def summary_state(read, env = None, ansi = None) -> dict:
     state = dict(attempt_state(0), read = read, env = env, ansi = ansi, build = None, exec_root = "", output_dirs = {}, search = new_search(), list = "failures", ended = False, cancelling = False, log_path = "", task = "", root_causes = {}, blocked_cache = None, building = True)
     return state
 
-# The most root causes the failure summary lists, the rest counted.
+# How many failures, and of Bazel's other errors, the failure summary lists
+# unless told (`failure_summary`'s `max_entries`); the rest are counted.
 _SUMMARY_MAX = 10
 
 def summary_counts(state: dict) -> str:
@@ -7101,7 +7102,7 @@ def _last_words(state: dict) -> list:
         said = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
     return said[-_EXCERPT_LINES:]
 
-def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None) -> list:
+def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None, max_entries = _SUMMARY_MAX) -> list:
     """The end of a build's console, the same with the Dashboard or
     without: a `── Failures (N) ──` rule when anything failed, then an
     entry for each failure Bazel's build events report (`failure_entries`,
@@ -7127,7 +7128,8 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     quoting the raw log's last `ERROR:` lines, else, a crashed server's,
     its last lines but progress.
 
-    Past `_SUMMARY_MAX` entries `… and N more failures · aspect history
+    Past `max_entries` entries (and as many of Bazel's other errors) `… and
+    N more failures · aspect history
     show <id>`; then the counts, Bazel's raw log (`log_path`), and where
     the rest is. Every line goes through `linked` (`ctx.std.io.linked`)
     when given, so its paths are links as the CLI's own lines on that
@@ -7157,7 +7159,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     out = []
     if shown:
         total = len(shown)
-        listed = shown[:_SUMMARY_MAX]
+        listed = shown[:max_entries]
         title = ("Failures (first %d of %d)" % (len(listed), total)) if total > len(listed) else ("Failures (%d)" % len(listed))
         out.append(red + bold + "── " + title + " ──" + reset)
         for i, e in enumerate(listed):
@@ -7192,7 +7194,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
         if out:
             out.append("")
         out.append(red + bold + "── Other errors from Bazel ──" + reset)
-        for i, block in enumerate(others[:_SUMMARY_MAX]):
+        for i, block in enumerate(others[:max_entries]):
             lines = _traceback_lines(block["lines"])
             for j, row in enumerate(quoted_rows(lines[0], max(20, width - 9))):
                 out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
@@ -7206,8 +7208,8 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                         out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
                 if more:
                     out.append("  " + muted + bar + reset + " " + _counts("… %d more line", more) + ("" if more == 1 else "s"))
-        if len(others) > _SUMMARY_MAX:
-            out.append(_counts("… and %d more", len(others) - _SUMMARY_MAX) + " · aspect history show %s" % task_id)
+        if len(others) > max_entries:
+            out.append(_counts("… and %d more", len(others) - max_entries) + " · aspect history show %s" % task_id)
     not_kept = console_ties(state)["not_kept"]
     if not_kept:
         out.append(muted + _counts("(%d bytes of Bazel's error messages not kept)", not_kept) + reset)

@@ -2083,6 +2083,8 @@ def _impl(ctx: TaskContext) -> int:
     _eq("then headings", capped[capped.index("✗ //a:5  Genrule · exit 1") + 1], "")
     _eq("the rest counted", [l for l in capped if l.startswith("… and")], ["… and 2 more failures · aspect history show t-7"])
     _eq("the heading says how many", capped[0], "── Failures (first 10 of 12) ──")
+    fewer = [_visible(l) for l in failure_summary(twelve, "t-7", False, excerpt = lambda text, **kw: {"lines": ["why"]}, max_entries = 3)]
+    _eq("max_entries (--console:recap-max) caps the list", (fewer[0], [l for l in fewer if l.startswith("… and")]), ("── Failures (first 3 of 12) ──", ["… and 9 more failures · aspect history show t-7"]))
 
     # The Failures tab: one row each; the chosen one's excerpt under it,
     # every one's with ^O, back with it again.
