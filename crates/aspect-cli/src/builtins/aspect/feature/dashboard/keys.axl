@@ -498,12 +498,27 @@ def _row_other_list(state):
         return []
     return ["a failures" if state.get("list") == "actions" else "a actions"]
 
-def _key(keys, when, do, help = None, group = None, row = None, shown = None, early = False, note = None):
+# A key binding (`_key`): see `_key` for its fields.
+_Key = record(
+    keys = field(list[str]),
+    when = field(typing.Callable),
+    do = field(typing.Callable | None),
+    help = field(tuple | None, default = None),
+    group = field(str | None, default = None),
+    row = field(typing.Callable | None, default = None),
+    shown = field(typing.Callable),
+    early = field(bool, default = False),
+    note = field(typing.Callable | None, default = None),
+)
+
+def _key(keys: list[str], when, do, help = None, group = None, row = None, shown = None, early = False, note = None) -> _Key:
     """A binding: its `keys`, `when` it applies, what it does (`do`), its
-    overlay row (`help`) and keys-row labels (`row`); `note`, for a toggle,
-    the state it left and how to undo it, which the keys row says a moment
-    after the key (`on_key`)."""
-    return struct(keys = keys, when = when, do = do, help = help, group = group, row = row, shown = shown or when, early = early, note = note)
+    overlay row (`help`, `(keys, text)`) under `group`, and keys-row labels
+    (`row`); `shown`, when the overlay lists it (`when` unless given);
+    `early`, whether it applies before the `?` overlay and the search bar take the
+    key; `note`, for a toggle, the state it left and how to undo it, which
+    the keys row says a moment after the key (`on_key`)."""
+    return _Key(keys = keys, when = when, do = do, help = help, group = group, row = row, shown = shown or when, early = early, note = note)
 
 def _filter_note(state):
     return {
