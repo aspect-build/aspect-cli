@@ -6674,19 +6674,37 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
     its header, its body's length and last line) that are the rest of that
     output: Bazel's line holding an output's last line, which it writes
     after its next redraw (a tail), or, without colour (`plain`), a tool's
-    own `ERROR:` lines.
-    They are when the body and those blocks are, exactly, the output (with
-    a newline added, where it has no final one) of a successful action
-    that wrote some (`outputs`, which Bazel reports with
-    `--build_event_publish_all_actions`) and whose label the header names;
-    one such action is enough, two that wrote alike too. Only those
-    actions' logs are read."""
+    own `ERROR:` lines. They are when the body and those blocks are,
+    exactly, the output (with a newline added, where it has no final one)
+    of a successful action that wrote some (`outputs`, which Bazel reports
+    with `--build_event_publish_all_actions`): one whose label the header
+    names, else, for a header that names none (a rule's own progress
+    message, Starlark's default `<mnemonic> <output>`, `Compiling a.cc`),
+    any. One such action is enough, and which it is does not matter: the
+    lines are a tool's, not Bazel's. Logs are read only where such a block
+    follows."""
     ansi = state.get("ansi")
+    outputs = state.get("outputs") or []
     by_label = {}
-    for rec in state.get("outputs") or []:
-        by_label.setdefault(rec["label"], []).append(rec)
+    for k, rec in enumerate(outputs):
+        by_label.setdefault(rec["label"], []).append(k)
     if not by_label:
         return
+    read = {}
+
+    # A short output is kept for the next header; a long one read again.
+    def output_of(k):
+        if k in read:
+            return read[k]
+        pieces = _relay_pieces(state, outputs[k], stdout, plain)
+        out = None
+        if pieces and not [p for p in pieces if p[1] == None]:
+            out = "".join([p[1] for p in pieces])
+            out = out if out.endswith("\n") else out + "\n"
+        if out == None or len(out) <= 4096:
+            read[k] = out
+        return out
+
     for i, header, body_len, last in froms:
         if i + 1 >= len(blocks) or blocks[i + 1][2] not in (("tail", "error") if plain else ("tail",)):
             continue
@@ -6695,14 +6713,10 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
         for word in said.split(" ")[1:]:
             for label in (word, word[:-1] if word.endswith(":") else None):
                 if label and label in by_label:
-                    named += [r for r in by_label[label] if r not in named]
-        for rec in named:
-            pieces = _relay_pieces(state, rec, stdout, plain)
-            if not pieces or [p for p in pieces if p[1] == None]:
-                continue
-            out = "".join([p[1] for p in pieces])
-            out = out if out.endswith("\n") else out + "\n"
-            if len(out) <= body_len or not out[:body_len].endswith(last):
+                    named += [k for k in by_label[label] if k not in named]
+        for k in named or range(len(outputs)):
+            out = output_of(k)
+            if out == None or len(out) <= body_len or not out[:body_len].endswith(last):
                 continue
             rest = out[body_len:]
             pos = 0
@@ -6734,10 +6748,11 @@ def console_ties(state: dict) -> dict:
     alone, once the build has ended: from the blocks a `recap_errors(summary
     = True)` stage kept as Bazel wrote them (`bazel_errors`, from
     `build.output_bazel_errors()`: each of Bazel's `ERROR:` messages, each
-    action's `INFO: From` output, each coloured `ERROR:` right after one),
-    however long the console was. An action's `INFO: From` output is a
-    tool's, never Bazel's, the `ERROR:` line Bazel wrote after it too when
-    that is its held last line (`_absorb_tails`). Each Bazel `ERROR:` line
+    action's `INFO: From` header with its body's length and last line, each
+    record that may be an output's held last line), however long the
+    console was. An action's `INFO: From` output is a tool's, never
+    Bazel's, the blocks Bazel wrote after it too when they are the rest of
+    a successful action's output (`_absorb_tails`). Each Bazel `ERROR:` line
     (`_bazel_headers`) is given to at most one entry and never one of
     several that match:
 
@@ -7058,7 +7073,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     names three of the targets it blocked (`○ blocked: //a, //b, //c +4
     blocked`), and a root cause with no entry its own line; a blank line
     apart. A flaky test has no entry. Then, under `── Other errors from
-    Bazel ──`, each of Bazel's `ERROR:` blocks no entry claimed
+    Bazel ──`, a passing build's too (with no `Failures` rule), each of Bazel's `ERROR:` blocks no entry claimed
     (`console_ties`: a BUILD file's syntax error, a macro's `Traceback`,
     `package contains errors`): its line and the lines Bazel wrote with it,
     escapes and the workspace's path left out, every row of its line shown,
