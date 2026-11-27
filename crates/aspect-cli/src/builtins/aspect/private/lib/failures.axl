@@ -2,8 +2,8 @@
 entries (`failure_entries`), from the records `failure_records.axl`
 collects and the console text `failure_ties.axl` ties to them."""
 
-load("@std//theme.axl", "theme")
 load("@aspect//bazel/console.axl", "RECAP_MAX")
+load("@std//theme.axl", "theme")
 load("./failure_records.axl", "failure_records")
 load("./failure_ties.axl", "failure_ties")
 load("./term_text.axl", "term_text")
@@ -74,7 +74,7 @@ _TEST_LOG_PREAMBLE = ["exec ${PAGER", "Executing tests from", "-----"]
 # An excerpt's row standing for lines left out between two it shows.
 _GAP_ROW = "\x00gap"
 
-def target_counts(state: dict):
+def target_counts(state: dict) -> tuple:
     """`(built, failed, blocked)` targets, from the failure entries: the
     targets with an entry of their own that is no test's and no pattern's
     are failed (`_own_labels`), each once however many entries it has; one
@@ -86,7 +86,7 @@ def target_counts(state: dict):
             failed[e["label"]] = True
     return (state["counts"]["built"], len(failed), len(blocked_targets(state)))
 
-def _failure_counts(state: dict):
+def _failure_counts(state: dict) -> tuple:
     """`(failed, blocked)`: the failure entries but a flaky test's (as the
     failure summary counts them, and the Failures list has their rows), and
     the targets not built for a failed dependency."""
@@ -344,15 +344,15 @@ def failure_entries(state: dict) -> dict:
     the targets' first (a root cause whose analysis or loading failed, its
     description Bazel's; a target that failed with no action of its own, a
     missing source file's), then the failed actions, then the tests (the
-    attempt `test_group` picks; a flaky one marked `flaky`), each in
-    Bazel's order; then a failed target none of those is about and no root
-    cause blocks (`_NO_REASON`); with none of those nor any of Bazel's other
+    attempt `test_group` picks; a flaky one marked `flaky`), each in Bazel's
+    order; then a failed target none of those is about and no root cause
+    blocks (`_NO_REASON`); with none of those nor any of Bazel's other
     errors (`console_ties`) once a build Bazel failed has ended
-    (`bazel_exit`), its exit code (`exited`). Each blocked target (`blocked_targets`)
-    goes under the first entry of its first root cause (`blocked`); a root
-    with no entry keeps its blocked targets in `unlisted`. An entry's
-    heading and excerpt are `entry_text`'s. Cached until the failures, the
-    root causes or the failed targets change."""
+    (`bazel_exit`), its exit code (`exited`). Each blocked target
+    (`blocked_targets`) goes under the first entry of its first root cause
+    (`blocked`); a root with no entry keeps its blocked targets in
+    `unlisted`. An entry's heading and excerpt are `entry_text`'s. Cached
+    until the failures, the root causes or the failed targets change."""
     fails = state["fails"]
     causes = state.get("root_causes") or {}
     key = (len(fails), len(causes), len(state["counts"]["failed_labels"]), state.get("bazel_exit"), bool(state.get("building")))
@@ -512,31 +512,30 @@ def _last_words(state: dict) -> list:
         words = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
     return words[-_EXCERPT_LINES:]
 
-def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None, max_entries = None) -> list:
-    """The end of a build's console, the same with the Dashboard or
-    without: a `── Failures (N) ──` rule when anything failed, then an
-    entry for each failure Bazel's build events report (`failure_entries`,
-    its heading and excerpt `entry_text`'s): a heading (`✗ //pkg:t  Genrule
-    · exit 1`: the label bold, its kind and details muted), then for the
-    first `_EXCERPTED` an excerpt behind a muted `│`, at most
-    `_EXCERPT_LINES` rows (each line cut to `_MAX_QUOTED_BYTES` or
-    `_EXCERPT_ROWS` rows of `width`, then `…`; `│ …` where lines between
-    two shown ones are left out; `│ … N more lines` counting every line
-    left out), then a muted `log <path>`, then what else it has (another
-    failed shard or run, a log only in the remote cache); every entry then
-    names three of the targets it blocked (`○ blocked: //a, //b, //c +4
-    blocked`), and a root cause with no entry its own line; a blank line
-    apart. A flaky test has no entry. Then, under `── Other errors from
-    Bazel ──`, a passing build's too (with no `Failures` rule), each of Bazel's `ERROR:` blocks no entry claimed
-    (`console_ties`: a BUILD file's syntax error, a macro's `Traceback`,
-    `package contains errors`): its line and the lines Bazel wrote with it,
-    escapes and the workspace's path left out, every row of its line shown,
-    a `Traceback` cut as an entry's is, capped as the entries are, and what
-    the console stage's caps left out counted; `Failures (N)` counts the
-    entries alone. With neither though Bazel exited non-zero
-    (`bazel_exit`), the one entry is `✗ Bazel exited N` (`failure_entries`),
-    quoting the raw log's last `ERROR:` lines, else, a crashed server's,
-    its last lines but progress.
+def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width: int = 100, bazel_exit: int | None = None, max_entries: int | None = None) -> list:
+    """The end of a build's console, the same with the Dashboard or without:
+    a `── Failures (N) ──` rule when anything failed, then an entry for each
+    failure Bazel's build events report (`failure_entries`, its heading and
+    excerpt `entry_text`'s): a heading (`✗ //pkg:t  Genrule · exit 1`: the
+    label bold, its kind and details muted), then for the first `_EXCERPTED`
+    an excerpt behind a muted `│`, at most `_EXCERPT_LINES` rows (each line
+    cut to `_MAX_QUOTED_BYTES` or `_EXCERPT_ROWS` rows of `width`, then `…`;
+    `│ …` where lines between two shown ones are left out; `│ … N more
+    lines` counting every line left out), then a muted `log <path>`, then
+    what else it has (another failed shard or run, a log only in the remote
+    cache); every entry then names three of the targets it blocked (`○
+    blocked: //a, //b, //c +4 blocked`), and a root cause with no entry its
+    own line; a blank line apart. A flaky test has no entry. Then, under `──
+    Other errors from Bazel ──`, a passing build's too (with no `Failures`
+    rule), each of Bazel's `ERROR:` blocks no entry claimed (`console_ties`:
+    a BUILD file's syntax error, a macro's `Traceback`, `package contains
+    errors`): its line and the lines Bazel wrote with it, escapes and the
+    workspace's path left out, every row of its line shown, a `Traceback`
+    cut as an entry's is, capped as the entries are, and what the console
+    stage's caps left out counted; `Failures (N)` counts the entries alone.
+    With neither though Bazel exited non-zero (`bazel_exit`), the one entry
+    is `✗ Bazel exited N` (`failure_entries`), quoting the raw log's last
+    `ERROR:` lines, else, a crashed server's, its last lines but progress.
 
     Past `max_entries` entries (`_SUMMARY_MAX` when None), and as many of
     Bazel's other errors, `… and N more failures · aspect history show

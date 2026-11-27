@@ -197,7 +197,7 @@ def _cut_escaped(text: str, cells: int) -> str:
         prev = n if n else prev
     return "".join(out) + "\x1b[39m"
 
-def _cell_slice(text: str, start: int, end: int, overhang = False) -> str:
+def _cell_slice(text: str, start: int, end: int, overhang: bool = False) -> str:
     """The characters of plain `text` that start at cell `start` or after
     and end by cell `end`: never wider than `end - start`, a wide character
     the end would split left out. With `overhang`, one that starts before

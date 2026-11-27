@@ -578,7 +578,7 @@ _ROW_FAILURES = ["up", "q", "a"]
 
 _ROW_CONSOLE = ["esc", "o", "q", "]", "ctrl-f", "n", "e", "pageup", "K", "a", "z", "w"]
 
-def help_rows(state: dict, width = 0) -> list:
+def help_rows(state: dict, width: int = 0) -> list:
     """The `?` overlay's rows, grouped (`_KEY_GROUPS`), the keys that do not
     apply now left out, then what the actions' glyphs are (`_actions_key`,
     in rows of `width` cells)."""

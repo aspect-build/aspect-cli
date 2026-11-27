@@ -183,7 +183,7 @@ def _find(state: dict, page: int):
         return
     _show_match(state, lines, at, page)
 
-def step_match(state: dict, step: int, page: int):
+def step_match(state: dict, step: int, page: int) -> None:
     """`N` (`step` -1) and `n` (1): the next older or newer match from the
     current one, or from the bottom of the console without one; past the
     newest or the oldest, round to the other end, the keys row saying so."""
@@ -208,8 +208,9 @@ def step_match(state: dict, step: int, page: int):
         _show_match(state, lines, at, page)
 
 def paste_text(key: str) -> str:
-    """A `paste:` key's text for the search bar: on one line, without control
-    characters, which would move the cursor or count as columns they are not."""
+    """A `paste:` key's text for the search bar: on one line, without
+    control characters, which would move the cursor or count as columns they
+    are not."""
     out = []
     for c in key[len("paste:"):].elems():
         if c in "\r\n\t":
@@ -218,7 +219,7 @@ def paste_text(key: str) -> str:
             out.append(c)
     return "".join(out)
 
-def console_lines(state: dict, log: list, kinds = None) -> list:
+def console_lines(state: dict, log: list, kinds: list | None = None) -> list:
     """The console's lines `state` shows: by its `e` filter, by `kinds`
     (each line's, as the feed gives them; for lines of no feed, a log's,
     read as it reads its own, `bazel.output.line_kinds`), then its search
@@ -229,7 +230,7 @@ def console_lines(state: dict, log: list, kinds = None) -> list:
     search = state["search"]
     return search["pattern"].filter(log) if search["pattern"] != None and search["mode"] == "filter" else log
 
-def _console_row(state: dict, pattern, current = False):
+def _console_row(state: dict, pattern, current: bool = False):
     """How a console row is painted, for the piece of a line `at` characters
     into it: the line as written, its colour kept (`colour_of`), cut to the
     cells `fit` kept of it; then its search matches, found in the plain
@@ -266,7 +267,7 @@ def _console_row(state: dict, pattern, current = False):
 
     return paint_for
 
-def _piece_links(links, start: int, length: int):
+def _piece_links(links: list | None, start: int, length: int) -> list | None:
     """`links` (`[start, end, url]` by character of a line) as those of its
     piece of `length` characters from `start`."""
     if not links:
@@ -390,7 +391,7 @@ def _fold_line(state: dict, line: str, own: bool):
     src.append(at)
     head.append(-1)
 
-def refold(state: dict):
+def refold(state: dict) -> None:
     """The console's folded view built again from the lines kept, as a
     trim, a click on a fold or the mouse's toggle leaves it."""
     state["folded"] = []
@@ -495,20 +496,19 @@ def _kinds_of(lines: list, colours, cli: bool) -> tuple:
         own.append(got["bazel"][0])
     return (kinds, own)
 
-def add_lines(state: dict, lines: list, links = None, colours = None, kinds = None, own = None, cli = False):
+def add_lines(state: dict, lines: list, links: list | None = None, colours: list | None = None, kinds: list | None = None, own: list | None = None, cli: bool = False) -> None:
     """Take the console's new `lines`, and with them their `links` (each
-    line's `[start, end, url]`s, as `output_feed()` gives them), `kinds`
-    and `own` (each line's kind, and whether it is one of Bazel's own, the
-    feed's `kinds` and `bazel`; read as the feed reads them where not
-    given, `_kinds_of`): kept (the newest `_MAX_LOG`, with each one's kind,
-    its errors and warnings past that kept for `e`, the rest counted in
-    `dropped`),
-    Bazel's closing block from where it starts (`_CLOSING`), Bazel's cache tally
-    read (`cache_hits`). Scrolled up, the console stays on the lines it
-    shows, counting the new ones and the errors among them (`unseen`,
-    `unseen_errors`); a log being viewed does not move. Counted from the
-    end, the current match and where the bar opened move with them, the
-    latter in lines the `e` filter shows, as a search that jumps lists
+    line's `[start, end, url]`s, as `output_feed()` gives them), `kinds` and
+    `own` (each line's kind, and whether it is one of Bazel's own, the
+    feed's `kinds` and `bazel`; read as the feed reads them where not given,
+    `_kinds_of`): kept (the newest `_MAX_LOG`, with each one's kind, its
+    errors and warnings past that kept for `e`, the rest counted in
+    `dropped`), Bazel's closing block from where it starts (`_CLOSING`),
+    Bazel's cache tally read (`cache_hits`). Scrolled up, the console stays
+    on the lines it shows, counting the new ones and the errors among them
+    (`unseen`, `unseen_errors`); a log being viewed does not move. Counted
+    from the end, the current match and where the bar opened move with them,
+    the latter in lines the `e` filter shows, as a search that jumps lists
     them. `colours` are the lines as written, colour kept (the same text),
     drawn in their place (`colour_of`); `cli` lines are the CLI's own, each
     its own kind (never under an error of Bazel's), not Bazel's closing
@@ -638,7 +638,7 @@ def add_lines(state: dict, lines: list, links = None, colours = None, kinds = No
 # How long the keys row says what a toggle did.
 _NOTE_MS = 2000
 
-def say_note(state: dict, text: str, ms = None):
+def say_note(state: dict, text: str, ms: int | None = None) -> None:
     """Have the keys row say `text` (`""` for nothing), until the next key,
     or for `ms` when given: the one way a note is set, so none keeps an
     older one's deadline."""
@@ -666,7 +666,7 @@ def replay_lines(state: dict, tty: bool) -> list:
         out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
 
-def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked = None, excerpt = None, max_entries = None) -> list:
+def report_lines(state: dict, task_id: str, tty: bool, replayed: bool = False, linked = None, excerpt = None, max_entries: int | None = None) -> list:
     """What the scrollback keeps once the screen is gone, for a person and
     for an agent reading a cut capture's tail alike: Bazel's closing block
     as it wrote it (its test summary, `Elapsed time`, `Build completed`),

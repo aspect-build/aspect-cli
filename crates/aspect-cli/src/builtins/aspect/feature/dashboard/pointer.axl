@@ -31,14 +31,14 @@ _NO_FOREGROUND = "\x1b[39m"
 
 _NO_BACKGROUND = "\x1b[49m"
 
-def _selection_colour(state: dict):
+def _selection_colour(state: dict) -> tuple:
     """How a selection is drawn, `(on, off)`: its background, or where the
     theme draws it otherwise (reverse, at 16 colours or in `mono`), that,
     then a full reset."""
     bg = theme.bg("selection", stream = True)
     return (bg, _NO_BACKGROUND) if bg else (_c("selection"), _RESET)
 
-def _hover_colour(state: dict):
+def _hover_colour(state: dict) -> tuple:
     """How the link under the pointer is drawn, `(on, off)`, as a
     selection's is."""
     fg = theme.fg("link.hover", stream = True)
@@ -86,11 +86,11 @@ def highlightable(lines: list) -> bool:
 
 def open_peek(state: dict, path: str, line: int) -> bool:
     """Show `path` in the console pane around `line` (`_PEEK_LINES` of it),
-    highlighted (unless too large to, `highlightable`), numbered, `line` marked and in the middle; `o` opens it in
-    the editor. Each
-    line is drawable, as a log's: escapes stripped, a carriage return's
-    redraw resolved, other controls dropped, a tab two spaces. Whether it
-    could be read (a directory, a binary file past reading, cannot)."""
+    highlighted (unless too large to, `highlightable`), numbered, `line`
+    marked and in the middle; `o` opens it in the editor. Each line is
+    drawable, as a log's: escapes stripped, a carriage return's redraw
+    resolved, other controls dropped, a tab two spaces. Whether it could be
+    read (a directory, a binary file past reading, cannot)."""
     fs = state.get("fs")
     syntax = state.get("syntax")
     if fs == None:
@@ -162,7 +162,7 @@ def link_spans(row: str, url: str) -> list:
         out.append((start, at))
     return out
 
-def link_at(row: str, col: int):
+def link_at(row: str, col: int) -> str | None:
     """The URL of the OSC 8 link drawn at cell `col` of `row`, or None."""
     at = 0
     esc = 0
@@ -185,7 +185,7 @@ def link_at(row: str, col: int):
         at += n
     return None
 
-def link_marks(text: str, links, room: int) -> list:
+def link_marks(text: str, links: list | None, room: int) -> list:
     """`links` (`[start, end, url]` by character of `text`) as `mark_cells`
     marks in cells, as `fit` draws `text` (a tab as two spaces), clipped to
     `room` cells."""
@@ -309,7 +309,7 @@ def _detached(state: dict, command):
     cancellation = state.get("cancellation")
     return command.spawn(cancellation = cancellation.new()) if cancellation != None else command.spawn()
 
-def _editor(state: dict):
+def _editor(state: dict) -> tuple:
     """The editor `o` opens a file in, `(format, name)`: the one `O` chose
     this session, else the console's (`--console:file-hyperlink-format`)."""
     io = state.get("io")
@@ -324,7 +324,7 @@ def _editor(state: dict):
 
 _KEEP_EDITOR = "to keep it, set ctx.features[Console].args.file_hyperlink_format = \"%s\" in .aspect/config.axl (or ASPECT_FILE_HYPERLINK_FORMAT=%s)"
 
-def open_in_editor(state: dict, path: str, line = 1) -> str:
+def open_in_editor(state: dict, path: str, line: int = 1) -> str:
     """Open `path` at `line` in `_editor`'s editor; what happened, for the
     keys row. An editor's link only: never a `file://` one, which would have
     the system run the file."""
@@ -351,7 +351,7 @@ def next_editor(state: dict) -> str:
     state["editor_choice"] = aliases[i]
     return "o opens in %s now; %s" % (editors[i][1], _KEEP_EDITOR % (aliases[i], aliases[i]))
 
-def _view_file(state: dict):
+def _view_file(state: dict) -> tuple | None:
     """The file `o` opens, `(path, line)`: the peek's, the log shown's, or
     for the console the task's whole output (`output.log` in its history
     folder, beside its builds' `bazel/<n>/`), else Bazel's console log."""
@@ -368,7 +368,7 @@ def _view_file(state: dict):
         return (output, 1)
     return (console, 1)
 
-def open_link(state: dict, url: str, trusted = False) -> str:
+def open_link(state: dict, url: str, trusted: bool = False) -> str:
     """Open `url` as this machine does (`open`, `xdg-open`) when a click
     opens it (`opens`); copy it instead in a remote session, which would
     open it there, and for any other link. The opener is waited on for

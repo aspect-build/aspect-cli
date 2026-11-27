@@ -20,7 +20,7 @@ _FAILED_TEST_STATUSES = ["failed", "timeout", "failed_to_build", "remote_failure
 # interrupt) are skipped.
 _FAILED_ABORTS = ["analysis_failure", "loading_failure"]
 
-def progress_counts(status: str):
+def progress_counts(status: str) -> tuple | None:
     """`(done, total)` from Bazel's status line (`[5,619 / 13,381] …`), or
     None when it has none."""
     status = bazel_line(status)
@@ -150,7 +150,7 @@ def cut_text(text: str) -> str:
     head, newline, rest = text.partition("\n")
     return rest if newline and rest else text[1:].lstrip("\ufffd")
 
-def bounded_log(value, cap = _MAX_LOG_BYTES):
+def bounded_log(value, cap: int = _MAX_LOG_BYTES):
     """A log's BES `File.file`: a URI as it is, or inline contents as
     `(bytes, cut)`, cut to their last `cap` bytes and the one before (to see
     whether the cut falls at a line's start, as `cut_text` reads it), so the
@@ -198,7 +198,7 @@ def log_paths(state: dict, record: dict, uri) -> list:
             out.append(p)
     return out
 
-def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
+def note_event(state: dict, kind: str, event_id, payload, aborted: bool) -> None:
     """Gather from one build event Bazel's last count (a `progress` one's
     stderr, `bep_progress`), and what the Failures list needs: a failure's
     record (`failure_of`), and what finding a test's log in the output tree
@@ -257,7 +257,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     if record != None:
         state["outputs"].append(record)
 
-def collect_event(state: dict, event):
+def collect_event(state: dict, event) -> None:
     """Gather one build event into `state` as the failure summary and the
     Failures list read it, the same in the plain console, the Dashboard and
     the replay test: the invocation's own events (`_INVOCATION_KINDS`), the
@@ -350,7 +350,7 @@ def _add_failure(state: dict, record: dict):
             state["selected"] = min(state.get("selected", 0), max(0, len(fails)))
     fails.append(record)
 
-def note_blocked(state: dict, event):
+def note_blocked(state: dict, event) -> None:
     """Keep a failed target's root causes (`event.children`, which Bazel
     gives every failed target, in its `target_completed` or, failed in
     analysis, its Aborted `target_configured`), itself among them where
@@ -442,7 +442,7 @@ def blocked_text(label: str, roots: list) -> str:
 # How much of a log's end an excerpt reads: where its error usually is.
 _EXCERPT_READ_BYTES = 64 * 1024
 
-def _tail_text(state: dict, path: str):
+def _tail_text(state: dict, path: str) -> str | None:
     """The last `_EXCERPT_READ_BYTES` of the file at `path`
     (`state["read"]`), or None."""
     if not path or state.get("read") == None:
@@ -530,7 +530,7 @@ def new_counts() -> dict:
         "log_kinds": {"ran": 0, "disk": 0, "remote": 0},
     }
 
-def count_spawn(counts: dict, spawn):
+def count_spawn(counts: dict, spawn) -> None:
     """Tally one spawn of the execution log (Bazel's compact one): the
     source of truth for what ran and what a cache (remote or disk) served,
     by runner, and by action (`log_kinds`): the spawns of one action share
@@ -566,7 +566,7 @@ def count_spawn(counts: dict, spawn):
         kinds[was] -= 1
         kinds["ran"] += 1
 
-def note_log_file(counts: dict, id: int, file):
+def note_log_file(counts: dict, id: int, file) -> None:
     """Keep an execution log file's path by its id where it is under a
     test's logs (`testlogs/`), where a test's spawns' first outputs meet
     (`count_spawn`); no other file's."""
@@ -588,7 +588,7 @@ def _list_failure(counts: dict, label: str):
         counts["failed_labels"][label] = True
         counts["failures"].append(label)
 
-def count_aborted_test(counts: dict, label: str, reason: str, config: str = ""):
+def count_aborted_test(counts: dict, label: str, reason: str, config: str = "") -> None:
     """Tally a test whose summary is Aborted for `reason`. Bazel gives one it
     skipped (a build without `--keep_going` stopped first, a later attempt
     of a flaky one cut off) and one that failed to build the same empty
@@ -604,7 +604,7 @@ def count_aborted_test(counts: dict, label: str, reason: str, config: str = ""):
     else:
         counts["tests_skipped"] += 1
 
-def count_aborted(counts: dict, label: str, reason: str):
+def count_aborted(counts: dict, label: str, reason: str) -> None:
     """Tally a target that did not build, its Aborted `reason` given: failed
     when its loading or analysis did (`_FAILED_ABORTS`), else skipped; once
     per label, as Bazel can report one under two ids."""
@@ -616,7 +616,7 @@ def count_aborted(counts: dict, label: str, reason: str):
     else:
         counts["skipped"] += 1
 
-def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
+def count_event(counts: dict, kind: str, event_id, payload, aborted: bool | None = None) -> None:
     """Tally one build event into `counts`. `build_started` says whether the
     command tests (`testing`: `test` or `coverage`), which gates counting a
     test target that failed to build. Each action the events say failed,
@@ -719,7 +719,7 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
             counts["tests_failed"] += 1
             _list_failure(counts, label)
 
-def bep_progress(text: str):
+def bep_progress(text: str) -> tuple | None:
     """The last `(done, total)` Bazel's console wrote in `text` (a build
     event `progress`'s stderr: every status line it drew, coloured), or
     None."""

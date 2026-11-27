@@ -68,7 +68,7 @@ def _count(word: str) -> int:
     digits = word.rstrip(",").replace(",", "")
     return int(digits) if digits.isdigit() else -1
 
-def action_counts(progress: list):
+def action_counts(progress: list) -> tuple:
     """`(running, started)` from Bazel's status line: `[n / m] 300 actions
     running` (300 of each), or `[n / m] 400 actions, 300 running` with some
     started but not yet running (remote execution, a full local pool), each
@@ -171,7 +171,7 @@ _SLOWEST_KEPT = 50
 # slowest; past it the quicker half goes.
 _MAX_SLOW = 200
 
-def note_progress(state: dict, progress: list):
+def note_progress(state: dict, progress: list) -> None:
     """Note how long each action Bazel shows running has run, the most
     seen, for the finished screen's slowest (`slowest_rows`), the last
     `[done / total]` with whether Bazel was still analysing
@@ -240,7 +240,7 @@ def slowest_title(state: dict) -> str:
     seen` from what Bazel's progress area happened to show."""
     return "Slowest" if state.get("spawn_slowest") else "Slowest seen"
 
-def note_spawn_time(state: dict, spawn):
+def note_spawn_time(state: dict, spawn) -> None:
     """Keep `spawn`, from the execution log, among the build's slowest by
     wall time (its execution's, else its whole time), when it ran, locally
     or remotely: a cache hit's time is its fetch, not the work, and one that
@@ -256,12 +256,12 @@ def note_spawn_time(state: dict, spawn):
     if len(timed) > 2 * _SLOWEST_KEPT:
         state["spawn_slowest"] = sorted(timed, key = lambda t: -t[0])[:_SLOWEST_KEPT]
 
-def aged_time(row: str):
+def aged_time(row: str) -> tuple | None:
     """`(time, role)` for a running action's row: its time as Bazel wrote it
-    (`12s`, `1m 30s`), or as `elapsed` does (`1m05s`), and the role it is drawn in by its age, as
-    BuildBuddy's theme colours the seconds in Bazel's progress area:
-    `muted` while young, `warning` once slow, `error` once stuck. None for a
-    row with no time."""
+    (`12s`, `1m 30s`), or as `elapsed` does (`1m05s`), and the role it is
+    drawn in by its age, as BuildBuddy's theme colours the seconds in
+    Bazel's progress area: `muted` while young, `warning` once slow, `error`
+    once stuck. None for a row with no time."""
     words = row.rpartition("; ")[2].split(" ") if "; " in row else []
     kept = []
     for word in words:
@@ -290,7 +290,7 @@ def _aged(row: str):
 
     return colour
 
-def cache_hits(line: str):
+def cache_hits(line: str) -> tuple | None:
     """`(hits, processes)` from Bazel's closing tally (`INFO: 1,204
     processes: 1,000 remote cache hit, 200 internal, 4 darwin-sandbox.`):
     the cache hits of every kind, of the processes not internal to Bazel;
@@ -318,7 +318,7 @@ def cache_hits(line: str):
             internal += int(n)
     return (hits, int(total) - internal)
 
-def note_phase(state: dict, line: str):
+def note_phase(state: dict, line: str) -> None:
     """The task's phase and its latest update from one of the CLI's own
     lines, for the header while no build runs: `▸ Title` starts a phase (not
     the task's own `▸ Running …` line), `▹ text` updates it."""
@@ -329,7 +329,7 @@ def note_phase(state: dict, line: str):
     elif text.startswith("▹ "):
         state["phase_text"] = text[len("▹ "):]
 
-def phase_status(state: dict, bar = False) -> list:
+def phase_status(state: dict, bar: bool = False) -> list:
     """What the header's right end may say, the most first, for it to show
     the first that fits. While a build runs and the bar is not drawn, how
     far it is, `4 of 14 actions done` from Bazel's progress line, `+` after
@@ -384,7 +384,7 @@ def bazel_status(state: dict) -> list:
     first = bazel_line(progress[0]).strip()
     return [first + " · " + rest, "analyzing · " + rest, "analyzing"] if rest else [first, "analyzing"]
 
-def build_progress(state: dict):
+def build_progress(state: dict) -> tuple:
     """`(done, total, analysing)`: how far a build is, from Bazel's status
     line while it runs, else the last count in the event stream's progress
     (`bep_done_total`: every count Bazel drew, its last whole) or the last
@@ -488,7 +488,7 @@ def _status_test_total(row: str):
     total = words[-1].replace(",", "")
     return int(total) if total.isdigit() else None
 
-def test_progress(state: dict):
+def test_progress(state: dict) -> tuple | None:
     """`(running, pending)` test targets while a `test` build runs, None
     otherwise: running, the targets with a test action in Bazel's running
     list (`Testing //t:a (shard 2 of 3)`, a run or an attempt alike, each
@@ -716,7 +716,7 @@ def hit_count(split: dict) -> int:
     disk cache's and the remote one's."""
     return split["local"] + split["disk"] + split["remote"]
 
-def hit_percent(split: dict):
+def hit_percent(split: dict) -> int | None:
     """`hit_count` of the done count, the actions the label counts, a
     whole percent, rounded to the nearest, but 1 for any and 99 for all
     but some, so only none says 0% and only every one 100%; None for no
@@ -802,7 +802,7 @@ _DONE = ("━", "")
 # Not done yet.
 _UNDONE = ("─", "border")
 
-def tests_text(progress) -> str:
+def tests_text(progress: tuple | None) -> str:
     """`test_progress` in words as the Tests row has them, its `─` a
     coloured key: `─ 3 running · 5 pending`, a part there is none of left
     out; empty for none."""
@@ -988,7 +988,7 @@ def _drop(parts: list, k: int) -> list:
             out = [p for p in out if p.key != what]
     return out
 
-def action_results(split: dict, room: int, rows = 3, short = False, memory = None) -> list:
+def action_results(split: dict, room: int, rows: int = 3, short: bool = False, memory: dict | None = None) -> list:
     """The Actions rows, `room` cells wide past their `Actions` lead, at
     most `rows` (`action_parts`): the groups, then the rest, which add up
     to the actions. A group's header says its total (`ran 5,698:`,
@@ -1229,7 +1229,7 @@ _OWN_EXEC_LOGS = ["--execution_log_binary_file", "--execution_log_json_file"]
 # The false words Bazel reads (`parse_bool` in the CLI's rc reader).
 _FALSE_WORDS = ["false", "f", "no", "n", "0"]
 
-def own_execution_log(inv: dict):
+def own_execution_log(inv: dict) -> str | None:
     """The flag a build was given for an execution log of the caller's own
     (`_OWN_EXEC_LOGS`), which leaves the Dashboard none to read; None without
     one. Its last occurrence counts, as Bazel takes it, from the whole

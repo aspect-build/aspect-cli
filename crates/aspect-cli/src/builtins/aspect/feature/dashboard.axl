@@ -7,12 +7,12 @@ A pre-task hook takes the screen; an idle hook draws it until a build does.
 Each `BazelTrait.output_frame` reads Bazel's console (`build.output_feed()`,
 `add_lines`, dashboard/log.axl) and the keys (`on_key`, dashboard/keys.axl)
 and draws one frame (`render`, dashboard/render.axl); `build_event` hooks
-gather the counts and failures (`collect_event`, private/lib/failure_records.axl,
-shared with the plain console); `output_end` folds the build to a row
-(`fold_build`). A post-task hook keeps the finished screen up
-(`--dashboard:stay`), gives the terminal back with the task's output dumped
-to the scrollback, then prints the failure summary (`report_lines`), never
-into the screen's Console tab.
+gather the counts and failures (`collect_event`,
+private/lib/failure_records.axl, shared with the plain console);
+`output_end` folds the build to a row (`fold_build`). A post-task hook keeps
+the finished screen up (`--dashboard:stay`), gives the terminal back with
+the task's output dumped to the scrollback, then prints the failure summary
+(`report_lines`), never into the screen's Console tab.
 
 `KEYS` is the one table of key bindings: `on_key`, the keys row and the `?`
 overlay read it. The screen stays off a terminal, on CI, under a coding
@@ -430,11 +430,11 @@ def _end(state: dict, task_ctx, build):
     _draw(state, screen, render(state, cols, rows))
 
 def _stay(state: dict, task_ctx, screen, countdown_ms):
-    """Keep the finished screen up, scrollable, until a leave key, or
-    until the run is told to stop (a SIGTERM), which no key would end.
-    With a `countdown_ms`, it leaves by itself once that has gone by,
-    unless a key comes first, which only stops it. The screen is the state's meanwhile, for
-    the keys that use it (`m`)."""
+    """Keep the finished screen up, scrollable, until a leave key, or until
+    the run is told to stop (a SIGTERM), which no key would end. With a
+    `countdown_ms`, it leaves by itself once that has gone by, unless a key
+    comes first, which only stops it. The screen is the state's meanwhile,
+    for the keys that use it (`m`)."""
     state["screen"] = screen
 
     # The end's tips, collected before the screen is given back, as the

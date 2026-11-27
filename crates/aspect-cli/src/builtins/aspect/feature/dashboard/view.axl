@@ -35,11 +35,11 @@ _MAX_VIEWS = 32
 def log_view(state: dict, record: dict) -> dict:
     """The view of a failure's logs: its title, the lines (the end of each
     log, escape sequences stripped, a divider between an action's stderr and
-    stdout) and whether any was cut. The logs share `_MAX_VIEW` lines (`fit_logs`).
-    An action's log is read from the history's copy (`kept_action_log()`,
-    kept as it failed) before Bazel's own file, which Bazel replaces as the
-    build goes on: a log gone from both says so, and how to keep one when
-    the history keeps no action logs."""
+    stdout) and whether any was cut. The logs share `_MAX_VIEW` lines
+    (`fit_logs`). An action's log is read from the history's copy
+    (`kept_action_log()`, kept as it failed) before Bazel's own file, which
+    Bazel replaces as the build goes on: a log gone from both says so, and
+    how to keep one when the history keeps no action logs."""
     blocks = []
     cut = False
     build = state.get("build")
@@ -100,7 +100,7 @@ def log_view(state: dict, record: dict) -> dict:
         lines.append("(Bazel reported no log for it)")
     return {"title": record["label"] + " · " + failure_detail(state, record), "lines": lines, "cut": cut, "record": record}
 
-def refresh_test_view(state: dict, event):
+def refresh_test_view(state: dict, event) -> None:
     """A test's summary arriving (not Aborted, as `collect_event` reads it)
     shows the test's open log anew, now findable, from its end."""
     if event.kind != "test_summary" or (bes_get(event, "payload_kind") or type(bes_get(event, "payload"))) == "aborted":
@@ -141,7 +141,7 @@ def _pick(state: dict) -> str:
     list keeps its own."""
     return "picked" if state.get("list") == "actions" else "selected"
 
-def _keep_view(state: dict):
+def _keep_view(state: dict) -> None:
     """Before showing a view deeper in the shown tab's stack (a file opened
     from a log): keep the one shown, and where it was scrolled, for Esc and
     the breadcrumb to go back to."""
@@ -163,7 +163,7 @@ def _show_failure_view(state: dict, view: dict):
     state["search"]["back"] = -1
     state["focus"] = "console"
 
-def _open_failure(state: dict, index: int):
+def _open_failure(state: dict, index: int) -> None:
     """Show the record at `index` of the list shown in the console pane, at
     its end."""
     state[_pick(state)] = index
@@ -174,7 +174,7 @@ def _failure_total(state: dict) -> int:
     no record of their own (`_tab_extras`)."""
     return len(state["fails"]) + len(_tab_extras(state))
 
-def _open_unlogged(state: dict, i: int):
+def _open_unlogged(state: dict, i: int) -> None:
     """Enter on a row of no record of its own (`_tab_extras`): a blocked
     target shows what blocks it (its first root cause's record, chosen in
     the list); another shows what Bazel said of it."""
@@ -250,10 +250,11 @@ def tips_count(state: dict) -> int:
 
 def toggle_silence(state: dict, row):
     """Silence the tip of `row` on this machine, or undo it, through
-    `state["silencer"]` (`silence_tip`/`unsilence_tip`, `~/.aspect/config.json`),
-    then show the task's tips anew (`state["tips_from"]`), which set a
-    silenced tip aside and give an unsilenced one back; a write that fails
-    says why on its row and changes nothing."""
+    `state["silencer"]` (`silence_tip`/`unsilence_tip`,
+    `~/.aspect/config.json`), then show the task's tips anew
+    (`state["tips_from"]`), which set a silenced tip aside and give an
+    unsilenced one back; a write that fails says why on its row and changes
+    nothing."""
     tip, silenced = row
     silencer = state.get("silencer")
     if silencer == None:
@@ -278,7 +279,7 @@ _TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"
 # The tabs about a build, muted before one starts.
 _BUILD_TABS = ["failures", "metrics", "invocation"]
 
-def show_tab(state: dict, tab: str):
+def show_tab(state: dict, tab: str) -> None:
     """Show the main pane's `tab`, as it was left: each tab keeps what it
     shows (a log or a file opened in it, its stack, its scroll). The
     failures' list takes the keys when nothing is open over it."""
@@ -349,7 +350,7 @@ def build_view(state: dict) -> dict:
     view.update(builds[i]["snapshot"])
     return view
 
-def back_to(state: dict, level: int):
+def back_to(state: dict, level: int) -> None:
     """The shown tab back to its `level`th view (0 its own: the list or
     the console), as it was scrolled."""
     views = state.get("views", [])

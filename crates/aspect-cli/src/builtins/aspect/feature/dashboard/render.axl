@@ -280,7 +280,7 @@ def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, 
     left = (_c("marker") + "┃" if mark else _c("border") + "│") + _RESET + " "
     return left + body + (" " + edge if edge != None else _c("border") + " │" + _RESET)
 
-def scrollbar(total: int, height: int, up: int):
+def scrollbar(total: int, height: int, up: int) -> list | None:
     """The right border of a pane `height` rows tall showing the lines
     `up` from the end of `total`: a thumb as tall as the share shown, at the
     bottom when following, at the top at the oldest line; None, the plain
@@ -555,7 +555,7 @@ def results_capacity(wide: bool) -> int:
     that tall for the whole build, so nothing below them moves."""
     return (3 if wide else 2) + _OPTIONAL_RESULTS
 
-def scrolled_rows(rows: list, height: int, scroll: int, total = 0):
+def scrolled_rows(rows: list, height: int, scroll: int, total: int = 0) -> tuple:
     """`(shown, edge)`: `rows` scrolled `scroll` from the top in a pane
     `height` tall, and its scrollbar (None when they fit). Unscrolled with
     more than fit, the last shown row counts the rest, of `total` when that
