@@ -201,13 +201,14 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     _eq("removes the file", fs.exists(tree + "/src/del.txt"), False)
 
 def _test_one_file_per_run(ctx: TaskContext, root: str):
-    """patch is run once per file section, naming the one copy to change,
-    never taking a name from the diff."""
+    """patch is run once per file section with hunks, naming the one copy
+    to change, never taking a name from the diff."""
     fs = ctx.std.fs
     tree = root + "/runs"
     fs.create_dir_all(tree + "/src")
     fs.write(tree + "/src/a.txt", "a\n")
     fs.write(tree + "/src/gone.txt", "bye\n")
+    fs.write(tree + "/src/h.txt", "h\n")
     log = root + "/runs.log"
     shim = _stand_in(fs, root, "recording-patch", """n=0
 for a in "$@"; do
@@ -218,9 +219,9 @@ echo "$n $file" >> '%s'
 case "$file" in ./*..*) exit 3;; ./*) ;; *) exit 3;; esac
 exec patch "$@"
 """ % log)
-    fs.write(root + "/three.patch", "--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1 +1 @@\n-a\n+A\n--- /dev/null\n+++ b/src/new.txt\n@@ -0,0 +1 @@\n+n\n--- a/src/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n--- a/src/missing.txt\n+++ b/src/missing.txt\n@@ -1 +1 @@\n-x\n+y\n")
+    fs.write(root + "/three.patch", "--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1 +1 @@\n-a\n+A\n--- /dev/null\n+++ b/src/new.txt\n@@ -0,0 +1 @@\n+n\n--- a/src/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n--- a/src/missing.txt\n+++ b/src/missing.txt\n@@ -1 +1 @@\n-x\n+y\n--- a/src/h.txt\n+++ b/src/h.txt\n")
     _eq("three sections", apply_fix_patch(ctx, root + "/three.patch", cwd = tree, program = shim, say = lambda label, text: None), None)
-    _eq("each run names one copy, none for a missing file", fs.read_to_string(log).split("\n"), ["1 ./src/a.txt", "1 ./src/new.txt", "1 ./src/gone.txt", ""])
+    _eq("each run names one copy, none for a missing file or a header alone", fs.read_to_string(log).split("\n"), ["1 ./src/a.txt", "1 ./src/new.txt", "1 ./src/gone.txt", ""])
     _eq("all applied", (fs.read_to_string(tree + "/src/a.txt"), fs.read_to_string(tree + "/src/new.txt"), fs.exists(tree + "/src/gone.txt")), ("A\n", "n\n", False))
 
 def _test_environment(ctx: TaskContext, root: str):
@@ -499,13 +500,13 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         fs.write(root + "/secret.patch", fix("src/secret.txt", "s", "S"))
         fs.write(root + "/after.patch", fix("src/ok.txt", "a", "A"))
         _eq("an unreadable file", apply_fix_patch(ctx, root + "/secret.patch", cwd = tree, say = _noted(said)), None)
-        _eq("refuses its patch", [l.partition(": ")[0] for l in said], ["src/secret.txt can't be read"])
+        _eq("refuses its patch, its reason the system's", [l.startswith("src/secret.txt can't be read: ") and "Error(" not in l for l in said], [True])
         _eq("and the run goes on", (apply_fix_patch(ctx, root + "/after.patch", cwd = tree), fs.read_to_string(tree + "/src/ok.txt")), (None, "A\n"))
     if unwritable != None:
         said.clear()
         fs.write(root + "/ro.patch", "--- /dev/null\n+++ b/src/ro/new.txt\n@@ -0,0 +1 @@\n+n\n" + fix("src/ok.txt", "A", "B"))
-        _eq("a file in a directory it can't write", apply_fix_patch(ctx, root + "/ro.patch", cwd = tree, say = lambda label, text: said.append((label, text.partition(": ")[2].partition(": ")[0]))), None)
-        _eq("is named", said, [("WARNING", "src/ro/new.txt was not written")])
+        _eq("a file in a directory it can't write", apply_fix_patch(ctx, root + "/ro.patch", cwd = tree, say = lambda label, text: said.append((label, text.partition(": ")[2]))), None)
+        _eq("is named", [(label, text.startswith("src/ro/new.txt was not written: ") and "Error(" not in text) for label, text in said], [("WARNING", True)])
         _eq("the rest is written", (fs.exists(tree + "/src/ro/new.txt"), fs.read_to_string(tree + "/src/ok.txt")), (False, "B\n"))
 
 def _impl(ctx: TaskContext) -> int:

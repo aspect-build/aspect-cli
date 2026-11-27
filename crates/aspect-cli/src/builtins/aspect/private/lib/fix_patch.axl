@@ -296,7 +296,7 @@ def _creates(f: _File) -> bool:
     """Whether section `f` makes its file: its old side doesn't exist, or
     every hunk adds to nothing (`-0,0`), as patch takes it where the file
     isn't there."""
-    return f.old == None or (f.section.hunks and all([h.old_count == 0 for h in f.section.hunks]))
+    return f.old == None or (len(f.section.hunks) > 0 and all([h.old_count == 0 for h in f.section.hunks]))
 
 def _move_in(fs, src: str, tmp: str, dst: str) -> None:
     """Copy `src` to `tmp` and rename that onto `dst`."""
@@ -321,7 +321,7 @@ def _same_bytes(fs, a: str, b: str) -> bool:
 
 def _inside(path: str) -> bool:
     """Whether a relative `path` stays inside the directory it is taken in."""
-    return path and not path.startswith("/") and ".." not in path.split("/")
+    return path != "" and not path.startswith("/") and ".." not in path.split("/")
 
 def _ignored(said: str) -> bool:
     """Whether patch, applying one file's section, ignored its hunks as
@@ -397,7 +397,7 @@ def apply_fix_patch(
     if not patch.startswith("/"):
         patch = cwd + "/" + patch
 
-    def tell(label, text):
+    def tell(label: str, text: str) -> None:
         if say != None:
             say(label, text)
         elif label == "WARNING":
@@ -405,7 +405,7 @@ def apply_fix_patch(
         else:
             info(ctx.std, text)
 
-    def refuse(why):
+    def refuse(why: str) -> None:
         tell("WARNING", "%s was not applied: %s" % (ascii_escaped(patch), why))
         return None
 
@@ -415,13 +415,13 @@ def apply_fix_patch(
         return refuse("it is larger than %d MiB" % (PATCH_CAP // (1024 * 1024)))
     err, raw = catch(lambda: fs.open(patch).read(), types = [std.io.Error])
     if err != None:
-        return refuse("it can't be read: %s" % err)
+        return refuse("it can't be read: %s" % err.message)
     if seen != None:
         if raw in seen:
             return None
         seen.append(raw)
 
-    # Lossy: a hunk may hold any bytes; only the header paths are read.
+    # Lossy, for the walk and the header names; patch is fed the bytes.
     text = fs.try_read_to_string_capped(patch, PATCH_CAP)
     files, why = _scan(text)
     if why:
@@ -465,7 +465,7 @@ def apply_fix_patch(
             err, _ = catch(fs.copy, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
             had[path] = True
         if err != None:
-            return refuse("%s can't be read: %s" % (ascii_escaped(path), err))
+            return refuse("%s can't be read: %s" % (ascii_escaped(path), err.message))
     collision = _copy_collision(fs, work, keys)
     if collision:
         return refuse(collision)
@@ -473,6 +473,8 @@ def apply_fix_patch(
     starts = _line_starts(raw, text.split("\n"))
     runs = []
     for n, f in enumerate(files):
+        if not f.section.hunks:
+            continue
         target = f.old if f.old in had else f.new if f.new in had else f.new if _creates(f) else None
         if target == None:
             if f.new != None:
@@ -525,13 +527,13 @@ def apply_fix_patch(
             if target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
                 err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
                 if err != None:
-                    tell("WARNING", "%s: %s was not removed: %s" % (ascii_escaped(patch), ascii_escaped(target), err))
+                    tell("WARNING", "%s: %s was not removed: %s" % (ascii_escaped(patch), ascii_escaped(target), err.message))
             continue
         if not _is_file(fs, patched) or (target in had and _same_bytes(fs, patched, mine)):
             continue
         err, _ = catch(_replace, fs, patched, mine, types = [std.io.Error])
         if err != None:
-            tell("WARNING", "%s: %s was not written: %s" % (ascii_escaped(patch), ascii_escaped(target), err))
+            tell("WARNING", "%s: %s was not written: %s" % (ascii_escaped(patch), ascii_escaped(target), err.message))
     if rejects:
         kept = fs.mkdtemp()
         for rej in rejects:
