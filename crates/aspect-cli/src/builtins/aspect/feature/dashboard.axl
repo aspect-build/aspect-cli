@@ -1,180 +1,22 @@
-"""`Dashboard`: a live dashboard of a task and its builds in place of the
-console and Bazel's terminal UI, on the terminal's alternate screen, for
-`build`, `test`, `lint`, `gazelle` and `format` (`_KINDS`). Off by default:
+"""`Dashboard`: build, test, lint, gazelle and format (`_KINDS`) on the
+terminal's alternate screen, in place of the console and Bazel's terminal UI.
+Off by default: `aspect build //... --dashboard`. What it shows and its keys
+are in the builtins' README.md (`Dashboard`).
 
-    aspect build //... --dashboard
+A pre-task hook takes the screen; an idle hook draws it until a build does.
+Each `BazelTrait.output_frame` reads Bazel's console (`build.output_feed()`,
+`add_lines`, dashboard/log.axl) and the keys (`on_key`, dashboard/keys.axl)
+and draws one frame (`render`, dashboard/render.axl); `build_event` hooks
+gather the counts and failures (`collect_event`, private/lib/failure_records.axl,
+shared with the plain console); `output_end` folds the build to a row
+(`fold_build`). A post-task hook keeps the finished screen up
+(`--dashboard:stay`), gives the terminal back with the task's output dumped
+to the scrollback, then prints the failure summary (`report_lines`), never
+into the screen's Console tab.
 
-It takes the screen when the task starts and shows:
-
-- a status bar with the task, how long it has run, and Bazel's status
-  while a build runs, once the task has ended only what its ✔/✗ cannot
-  say, else the task's phase and its latest update;
-- each build that ended folded to a row (its verdict, command, actions,
-  failures and time, the newest last, `+N earlier` past three), and while a
-  build runs, or `p` asks, its panes:
-  - a bar of the build's actions (`action_split`, one unit throughout):
-    ran ok `█`, disk and remote cache hits `▓`, the local action cache
-    `▒`, internal `░`, other `▌`, failed `╳`, not run `○`, done but not
-    reported `┈`, then not done `─`, each kind its own glyph so they stay
-    apart without colour; while it runs from the actions Bazel reports
-    with every one published (`--dashboard:actions=all`, the default:
-    internal ones have no command line), the execution log's cache hits
-    and the done count's gap (the local action cache, estimated, after a
-    failure too), and with only failures published (`failed`, or a build
-    whose events Bazel sends out itself:
-    `publish_all_actions_unless_sent_out`), `unreported` for what is
-    neither ran nor a hit; `other` only at the end, what of Bazel's own
-    counts fits no kind; at its right end how far it is (`3,830 of 8,563+ actions`,
-    `+` while Bazel analyses), at the end its actions and cache hits
-    (`8,590 actions · 3,148 cache hits (37%)`); a build `<`/`>` picked,
-    its own;
-  - the actions running now, from Bazel's own progress area, oldest first,
-    yellow past a minute and red past five; once the build has finished,
-    Bazel's critical path and the slowest actions seen running;
-  - links to the invocation's results pages: the Aspect Build Results page
-    the CLI streams to, and the BES results page Bazel streams to itself
-    with `--bes_results_url`, each when there is one (OSC 8 hyperlinks);
-  - a Results pane: targets, tests with those finished a cache gave whole
-    (`7 passed (5 cached)`) and, while a `test` build runs, the test
-    targets running and pending (`test_progress`), each kind of action
-    there is any of in words, the bar's glyph a coloured key before its
-    count, the cache hits as one group with their total (`action_results`;
-    while the build runs, ran, internal and failed from the events, disk
-    and remote settling as Bazel writes its execution log; at its end the
-    split from its `BuildMetrics`), the critical path, and the failures
-    counted (a click shows them);
-- the main pane's tabs, always in one order, the shown one named by what is
-  open in it (`Failures ✗1 ▹ //pkg:t ▹ attempt 1/2 ▹ a.py:12`):
-  - Console: the task's whole output, from its start (what the CLI wrote
-    before Bazel's console began, then Bazel's, then the CLI's own lines,
-    as written), scrollable, in the colours it was written in (the theme's,
-    Bazel's recoloured by it), the
-    lines under each `INFO: From` folded to a count;
-  - Failures: a row for each of the failure summary's entries, as it heads
-    them (`failure_entries`: every failed action and test, every root cause
-    Bazel's events report; a test's other attempts, shards and runs a `}`
-    `{` away), the chosen one's excerpt under it (`record_excerpt`; every
-    one's with Ctrl+O), then the targets a failed dependency blocked, then,
-    once the build has ended, Bazel's other errors (`console_ties`);
-    Enter opens one's log in the tab (its stderr and
-    stdout, a test's `test.log`, found where Bazel left it, its URI's path
-    decoded and a non-ASCII name either way Bazel spells it on disk, a remote
-    cache's `bytestream://` one in the output tree); `a` lists the actions that
-    succeeded and wrote output instead (`--dashboard:actions=all`, the
-    default);
-  - Metrics: the actions, each kind with what makes it up (the runners'
-    spawns, remote and disk cache hits apart, the internal kinds), Bazel's
-    action cache with why it missed, the execution log's spawns; tests,
-    targets, time and memory, the slowest actions;
-  - Invocation: the command, ids, Bazel's version, the flags given,
-    workspace status and build metadata, what may be a secret redacted;
-  - Tips: the task's tips the screen shows (`SURFACE_DASHBOARD`), the
-    most urgent first, counted in the tab in the most urgent one's colour;
-    the chosen one's body under it, and `s` silences it on this machine
-    (`~/.aspect/config.json`, `silence_tip`) or undoes that, the row left
-    muted saying so; the scrollback names what was silenced and how to undo
-    it;
-  - before any build, Failures, Metrics and Invocation muted, saying `No
-    build yet`; with several builds, Metrics and Invocation show the newest,
-    `<`/`>` another (`Metrics ▹ 1 of 2`), and Failures the newest's;
-- a row of the keys for what has focus, and `?` for those that apply now,
-  grouped (both from `KEYS`, which `on_key` dispatches through), then what
-  the actions' glyphs are.
-
-The keys, as in `less`, lazygit and Claude Code's transcript: `↑`/`↓` or
-`k`/`j` scroll a line and the wheel three; Shift or Option with `↑`/`↓`,
-`u`/`d` and Ctrl+`u`/`d` half a page; Page Up/Down, `b` and Space a page;
-Shift+`K` or Home the top, Shift+`J` or End back to following (a list's
-first and last row), as in Claude Code's transcript. Tab and
-Shift+Tab cycle the tabs (or a click); `]`/`[` step the Failures list's
-rows, showing each one's log (or, for a blocked target, an exit code or one
-of Bazel's other errors, what it says) in Failures, `}`/`{` the next or
-previous attempt, shard or run of the same target; Esc goes back a crumb, then to the tab's own pane,
-then to the console. A click on a path shows the file in place (a peek,
-highlighted by `std.syntax`), `o` opens what is shown in the editor
-`editor` in `~/.aspect/config.json` or `--console:file-hyperlink-format`
-names, and `O` picks another; a click on a web link opens it. The screen
-takes the mouse: a drag selects and copies, a double click a word; `m`
-(or `--dashboard:mouse=false`) gives it back to the terminal. `e` cycles
-every line, errors and warnings, errors only; `w` cuts long lines rather
-than wrap them; Ctrl+O unfolds every fold and folds them all again
-(forgetting what clicks opened), a click on one (its `INFO: From` or its
-count) just that one; `z` gives the main pane the whole screen;
-`q` cancels the build, as Ctrl+C does.
-
-Ctrl+F or `/` opens a search bar for a regular expression (`std.re`),
-smart case unless Ctrl+T (or Alt+C) makes it match case, whole words with
-Ctrl+B (or Alt+W). As you type it jumps to the newest match at or above the
-view; Tab in the bar filters to the matching lines instead. Enter keeps it,
-and `n`/`N` then step to the next and previous match, round to the other
-end past the last; Esc clears it and
-goes back to where the bar opened.
-
-When the task ends the screen stays up, its tabs still browsable, until
-`q`, Enter or Esc with nothing open, or Ctrl+C, whatever the outcome
-(`--dashboard:stay=always`, the default); with `failure` it stays when
-anything failed and otherwise counts down ten seconds and leaves unless a
-key stops it; with `never` it leaves at once. `build` and `test` keep their
-build's panes open on it, the others their builds folded; a task that
-failed before any build leaves at once, its error last in the scrollback.
-Then the scrollback gets the console as the screen showed it
-(`replay_lines`), the flaky tests, the results pages, and the failure
-summary the plain console prints too (`failure_summary`: `── Failures
-(N) ──`, each failure Bazel's build events report once, what Bazel's
-console ties to it exactly, its log's path (the history's copy, which
-outlives Bazel's) and the targets it blocked, then Bazel's other errors,
-the counts, Bazel's raw log and `aspect history show <id>` for the rest;
-`report_lines`). The summary is written only there, never into the
-screen's Console tab nor the task's output it dumps, so a run replayed
-from the history shows it no more than the screen did.
-
-How it is built:
-
-1. `BazelTrait.output_display = "none"`: Bazel's console is still captured
-   and run through every stage, but nothing of it is shown.
-2. A `pre_task` hook takes the terminal (`ctx.std.term.take()`, the mouse
-   taken with `screen.mouse(True)` unless asked not to, the wheel sent as
-   arrows with `screen.wheel_keys(True)` while it is the terminal's), what
-   the task wrote before it first in the console (`screen.earlier()`).
-   Until a build draws, an idle hook (`ctx.hooks.idle`), which the runtime
-   calls about every 100ms while the task waits on a child or sleeps,
-   reads the CLI's lines and the keys and redraws.
-3. A `BazelTrait.output_frame` hook, which the runtime calls about every
-   100ms while a build's console is open, reads what the console would
-   have shown (`build.output_feed()`, through `add_lines`), reads the keys
-   (`screen.key()`, through `on_key`), and redraws the whole screen in one
-   write (`render`) when it changed (Ctrl+L redraws it anyway); its first
-   frame starts the build's own counts (`new_build`), a retry's too. The
-   finished screen, idle, reads a key a second.
-4. `build_event` hooks (`collect_event`, the plain console's too) count
-   targets and tests from the build event stream, gather the failures and
-   their root causes (`note_event`, `note_blocked`) and the actions that
-   wrote output with their logs (`output_of`), and what finding a test's
-   log in the output tree takes (the exec root, each configuration's output
-   folder, each test's run and shard counts and last attempts).
-5. An `output_end` hook folds the build to a row (`fold_build`), keeping
-   what its tabs show for `<`/`>`, and draws.
-6. A `post_task` hook keeps the screen up (or, with `stay=failure`, counts
-   down, the task's exit code 0 and nothing failed), with Ctrl+C read as a
-   key
-   (`screen.interrupts(False)`) since the task has already ended, then gives
-   the terminal back (`screen.release(replay_stderr = False, dump_lines = …)`,
-   the task's output dumped to the scrollback as part of it, or, with no
-   history to dump from, the console as it showed it after,
-   `replay_lines`), then the summary.
-
-A prompt reading stdin on the terminal, and a child marked
-`interactive(True)` (`ctx.std.process.command`), get the terminal back for
-as long as they run: the task's output so far goes to the scrollback, and
-the screen comes back, redrawn, after. An unmarked child gets no terminal
-while the screen is up (stdin from `/dev/null`, no controlling terminal), so
-mark a spawn interactive if it may prompt.
-
-On a terminal only, and never on CI; any other task keeps its console,
-saying so in a line on stderr. Under a coding agent, with `TERM` dumb or
-unset, or on a terminal under 40x12, it stays off even when enabled, saying
-why in a line on stderr (`refusal`): an agent's pty has nobody to press the
-keys the finished screen waits for.
+`KEYS` is the one table of key bindings: `on_key`, the keys row and the `?`
+overlay read it. The screen stays off a terminal, on CI, under a coding
+agent, with `TERM` dumb or unset, and under 40x12 (`refusal`).
 """
 
 load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook")
@@ -225,8 +67,6 @@ on_key = dashboard_keys.on_key
 console_height = dashboard_render.console_height
 render = dashboard_render.render
 
-# The tasks whose screen stays up after their build: the others go on to
-# run something that needs the terminal.
 # The tasks the screen is for, taken from their start; any other keeps the
 # console.
 _KINDS = ["build", "test", "lint", "gazelle", "format"]

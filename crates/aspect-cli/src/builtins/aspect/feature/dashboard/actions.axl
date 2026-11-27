@@ -164,10 +164,11 @@ def action_row(row: str, width: int) -> str:
     head = _middle(head, room)
     return head + " " * (room - text_width(head)) + " " + tail
 
-# The slowest actions the finished screen lists, of the most it keeps.
 # The slowest actions kept for the finished pane, which scrolls through them.
 _SLOWEST_KEPT = 50
 
+# The most running actions whose ages are kept while a build runs, for the
+# slowest; past it the quicker half goes.
 _MAX_SLOW = 200
 
 def note_progress(state: dict, progress: list):

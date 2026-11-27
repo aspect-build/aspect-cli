@@ -277,7 +277,7 @@ def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, 
     body = mark_cells(body, link_marks(text, links, width - 4))
 
     # The current match marked by its row's left edge, as the scrollbar's
-    # thumb marks the view: `▹` begins the CLI's own update lines.
+    # thumb marks the view.
     left = (_c("marker") + "┃" if mark else _c("border") + "│") + _RESET + " "
     return left + body + (" " + edge if edge != None else _c("border") + " │" + _RESET)
 
@@ -951,7 +951,7 @@ def metrics_lines(state: dict) -> list:
     out += ["", _c("heading") + "Targets" + _RESET]
     out.append(_row_of("configured", c["configured"]))
     out.append(_row_of("built", _counts("%d · %d failed · %d blocked by a dependency", (built_n, failed, blocked))))
-    out.append(_row_of("failures listed", _counts("%d (failed actions and test attempts, in Failures)", shown)))
+    out.append(_row_of("failures listed", _counts("%d (as in Failures)", shown)))
     timing = bes_get(bm, "timing_metrics")
     out += ["", _c("heading") + "Time" + _RESET]
 

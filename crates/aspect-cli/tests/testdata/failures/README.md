@@ -88,8 +88,12 @@ A BEP file URI `file://${OUTPUT_BASE}/<p>` resolves to `<ver>.files/<p>` in the 
 
 ## Non-determinism
 
-- Event order and timings vary run to run (parallel actions); assert on sets, not order.
+Event order and timings vary run to run (parallel actions), and a golden records one run's
+order: a re-recording can reorder entries with nothing changed, so review such a diff rather
+than trust it.
+
 - `t`: `//t:flaky` fails attempt 1 and passes attempt 2; exactly one of `//t:rpt`'s three runs
-  fails, but which one varies. Both use marker paths under `/tmp/bepfx-*`, cleared per run.
+  fails, but which one varies. Both use marker paths under `/tmp/bepfx-*`, which the case's
+  `reset` clears before each recording.
 - `oom` is console only: Bazel 9 crashes with `FATAL: bazel ran out of memory`; older versions
-  may instead thrash until the 90s cap.
+  may instead thrash until record.sh's `CONSOLE_ONLY_CAP_S`.

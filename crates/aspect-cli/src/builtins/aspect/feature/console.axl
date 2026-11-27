@@ -112,22 +112,20 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
 `BazelTrait.output_stages`:
 - paths are made relative;
 - the first warning of each kind is shown and the rest are counted at the end;
-- every failure is listed at the end, under `── Failures (N) ──` (only when
-  something failed), an entry each: failures no target owns (analysis,
-  loading, a toolchain, any other `ERROR:` line) first, then the builds',
-  then the tests'. An entry is a heading (`✗ //pkg:t  Genrule · exit 1 ·
-  pkg/BUILD.bazel:3:8`, Bazel's `ERROR:` line folded into its exit code and
-  location; a target with two failed actions has two), then, for the first
-  five, an excerpt of what the tool said behind a `│` (at most five rows,
-  `│ …` where lines between are left out; a test's from its last failed
-  attempt's `test.log`, a sharded or repeated one's first failed shard or
-  run), its log (`log <path>`) and each other failed shard or run a line;
-  every entry names the targets it blocked; a blank line apart.
-  The first 10 are listed, `first 10 of 14` counting the rest. Then, on every build, one line of counts (`193 built, 1
-  failed · 47 tests passed, 2 failed · Bazel's raw log: <path>`) and where the
-  rest is (`All of it: aspect history show <id>`). Under the Dashboard the
-  summary goes to the scrollback when the screen is left, never into its
-  Console tab;
+- every failure Bazel's build events report is listed at the end, under
+  `── Failures (N) ──`, an entry each, in groups: the targets' (a root whose
+  analysis or loading failed, a missing source), the failed actions, the
+  tests. An entry is its heading (`✗ //pkg:t  Genrule · exit 1 ·
+  pkg/BUILD.bazel:3:8`), then, for the first five, an excerpt of what the
+  tool said behind a `│` (a test's from its failed attempt's `test.log`),
+  its log's path and the targets it blocked. Past `--console:recap-max`
+  entries (10) the heading says `first 10 of 14` and the rest are counted.
+  Bazel's `ERROR:` lines that tie to no entry exactly are listed under
+  `── Other errors from Bazel ──`, on a passing build too. Every build
+  then ends with one line of counts (`193 built, 1 failed · 47 tests
+  passed, 2 failed · Bazel's raw log: <path>`) and `All of it: aspect
+  history show <id>`. Under the Dashboard the summary goes to the
+  scrollback only, when the screen is left;
 - a run of identical lines, an action's output included, shows as its first
   and a count, but never Bazel's progress or status lines;
 - a tip is given for failures we recognize: the tip rules of
@@ -142,9 +140,9 @@ terminal), with how many messages were hidden and, for each kind collapsed, a
 file beside the log holding all of them. They are kept and pruned with the
 rest of the history.
 
-On a terminal, the URLs in Bazel's console and the recap, and the paths that
-name a file that exists (`src/a.cc:3:4` links to `src/a.cc` at line 3), are
-links to open it in an editor too, unless a coding agent is reading it, it is a CI
+On a terminal, the URLs in Bazel's console and the failure summary, and the
+paths that name a file that exists (`src/a.cc:3:4` links to `src/a.cc` at
+line 3), are links to open it in an editor too, unless a coding agent is reading it, it is a CI
 job's, or `TERM` is `dumb`. What a path's link opens is `file_hyperlink_format`:
 your own choice is `"editor": "cursor"` in `~/.aspect/config.json` (or
 `ASPECT_FILE_HYPERLINK_FORMAT=cursor` in your shell's profile), which beats a

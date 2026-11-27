@@ -91,11 +91,11 @@ def _failure_counts(state: dict):
     found = failure_entries(state)
     return (len([e for e in found["entries"] if not e["flaky"]]), len(blocked_targets(state)))
 
-# How many of Bazel's errors and of the failures the scrollback lists.
-_REPORT_FAILURES = 20
+# The most flaky tests' failed attempts the scrollback lists.
+_MAX_FLAKY_LISTED = 20
 
-# How many failures, and of Bazel's other errors, the failure summary lists
-# unless told (`failure_summary`'s `max_entries`); the rest are counted.
+# The most entries, and of Bazel's other errors, the failure summary lists;
+# the rest are counted.
 _SUMMARY_MAX = 10
 
 def summary_counts(state: dict) -> str:
@@ -636,7 +636,7 @@ failures = namespace(
     GAP_ROW = _GAP_ROW,
     NO_REASON = _NO_REASON,
     quoted_rows = quoted_rows,
-    REPORT_FAILURES = _REPORT_FAILURES,
+    MAX_FLAKY_LISTED = _MAX_FLAKY_LISTED,
     summary_counts = summary_counts,
     tab_extras = _tab_extras,
     target_counts = target_counts,

@@ -316,6 +316,58 @@ Every feature takes `--<name>:enabled[=true|false]` on every task (`ctx.features
 
 `GithubStatusChecks` and `BuildkiteAnnotations` delegate per-kind rendering through [`lib/check_dispatch.axl`](lib/check_dispatch.axl) so adding a new task kind is a single dispatch-table entry rather than an N×2 update. `GithubStatusComments` aggregates *across* tasks (one PR comment per run); `GithubLintComments` posts at the diagnostic-anchor level inside the PR's Files Changed view.
 
+### Dashboard
+
+`aspect build //... --dashboard` (also `test`, `lint`, `gazelle` and `format`)
+takes the terminal's alternate screen for the task, from its start. It stays
+off on CI, under a coding agent, with `TERM` dumb or unset, off a terminal,
+and under 40x12, saying why on stderr.
+
+What it shows:
+
+- **Header:** the task, how long it has run, and Bazel's status while a build
+  runs (`3,830 of 8,563+ actions`, `+` while Bazel analyses).
+- **Build panes**, while a build runs (`p` folds and opens them; each ended
+  build folds to a row, `<`/`>` picks one):
+  - a bar of the build's actions, one glyph per kind, and at its end
+    `8,590 actions · 3,148 cache hits (37%)`, from Bazel's own count;
+  - the actions running now, yellow past a minute and red past five, then
+    the slowest once the build has ended;
+  - Results: targets, tests (`7 passed (5 cached)`, running and pending),
+    the actions by kind (`ran N: █ ok · ╳ failed`, `cache hits N: ▒ in
+    memory · local · ▓ disk · remote`, `○ skipped`, `░ internal`), the
+    critical path and the failures. `?` explains every glyph.
+- **Tabs**, numbered: Console (the task's whole output, colours kept, each
+  successful action's output folded to a count), Failures (one row per
+  entry of the failure summary, its excerpt under it; Enter opens its log,
+  `]`/`[` steps the rows, `}`/`{` the attempts, shards and runs; `a` lists
+  the actions that wrote output), Metrics, Invocation (secrets redacted),
+  and Tips (`s` silences one in `~/.aspect/config.json`).
+
+Keys (`?` lists those that apply now): `↑`/`↓` or `k`/`j` scroll, the wheel
+three lines, `u`/`d` and Ctrl+`u`/`d` half a page, Page Up/Down, `b` and Space
+a page, Shift+`K`/Home the top and Shift+`J`/End back to following; Tab and
+Shift+Tab cycle the tabs; Esc goes back a step. Ctrl+F or `/` searches with a
+regular expression (smart case unless Ctrl+T, whole words with Ctrl+B; Tab
+filters to the matches; `n`/`N` step). `e` shows every line, errors and
+warnings, or errors only; `w` cuts long lines rather than wrap them; Ctrl+O
+unfolds every fold; `z` gives the console the whole screen. A click on a
+path peeks at the file, `o` opens it in your editor (`editor` in
+`~/.aspect/config.json`, or `--console:file-hyperlink-format`) and `O` picks
+another; a drag selects and copies; `m` gives the mouse back to the terminal
+(`--dashboard:mouse=false`). `q` or Ctrl+C cancels the build.
+
+When the task ends the screen stays up until `q`, Enter or Esc
+(`--dashboard:stay=always`, the default); `failure` counts down ten seconds
+when nothing failed, `never` leaves at once. The scrollback then gets the
+task's output, the flaky tests, the results pages and the failure summary
+(`── Failures (N) ──`, capped by `--console:recap-max`), which is never in the
+screen's Console tab. A prompt, or a child marked `interactive(True)`, gets
+the terminal back while it runs; an unmarked child reads `/dev/null`, so
+mark a spawn interactive if it may prompt. `--dashboard:actions=all` (the
+default) has Bazel report every action, so Results can tell them apart while
+the build runs; `failed` reports only the failures.
+
 ### GitLab lint comments
 
 `GitlabLintComments` is the GitLab counterpart to `GithubLintComments`: it posts `aspect lint` findings as inline GitLab Merge Request diff discussions, rendering a one-click suggestion block on any finding that carries a `rules_lint` fix patch. It fires on `aspect lint` task updates whenever a GitLab MR context is detected — the same detection the other GitLab features use (`CI_MERGE_REQUEST_IID` on GitLab CI, or the `ASPECT_GITLAB_*` overrides for Aspect Workflows runners on other hosts) — and authenticates with the Aspect GitLab App token (requesting the `api` scope) through the same token flow as `GitlabStatusComments`.

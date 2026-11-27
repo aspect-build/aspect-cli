@@ -23,7 +23,7 @@ _flaky = failure_records.flaky
 _log_path = failure_records.log_path
 bazel_line = failure_records.bazel_line
 _HEADERS = failure_ties.HEADERS
-_REPORT_FAILURES = failures.REPORT_FAILURES
+_MAX_FLAKY_LISTED = failures.MAX_FLAKY_LISTED
 failure_detail = failures.failure_detail
 failure_summary = failures.failure_summary
 cache_hits = dashboard_actions.cache_hits
@@ -795,7 +795,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
     if flaky:
         yellow = _c("warning") if tty else ""
         out.append(bold + "Flaky" + reset + " (passed on a later attempt):")
-        for rec in flaky[:_REPORT_FAILURES]:
+        for rec in flaky[:_MAX_FLAKY_LISTED]:
             path = _log_path(state, rec)
             out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):

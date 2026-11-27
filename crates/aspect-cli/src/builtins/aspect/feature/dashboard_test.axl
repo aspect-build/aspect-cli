@@ -2582,7 +2582,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("not counted as a root cause", [l for l in report if l.startswith("──")], ["── Failures (1) ──"])
     _eq("its summary counts it blocked, its root failed", [l for l in report if l.startswith("0 built")], ["0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
     targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
-    _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 1 failed · 1 blocked by a dependency", "failures listed 1 (failed actions and test attempts, in Failures)"])
+    _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 1 failed · 1 blocked by a dependency", "failures listed 1 (as in Failures)"])
 
     # A test whose summary is Aborted with no reason: failed where one of
     # its attempts failed (it failed to build), skipped where none ran (a
