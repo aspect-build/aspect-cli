@@ -61,22 +61,24 @@ def case_sensitive(state: dict) -> bool:
     return search["case"] or (state.get("re") != None and state["re"].has_uppercase(search["query"]))
 
 def _search_update(state: dict):
-    """Recompile the search's pattern from its query and toggles. A query
-    that does not compile (one still being typed) keeps the last pattern that
-    did, its error shown in the bar."""
+    """Recompile the search's pattern from its query and toggles, with
+    whether it matches case (`matches_case`, the bar's `Aa`). A query that
+    does not compile (one still being typed) keeps the last pattern that
+    did, and its case, its error shown in the bar."""
     search = state["search"]
-    search["matches_case"] = case_sensitive(state)
+    case = case_sensitive(state)
     if not search["query"]:
         search["pattern"] = None
+        search["matches_case"] = case
         search["error"] = ""
         return
-    case = search["matches_case"]
     error = state["re"].check(search["query"], case_sensitive = case, whole_word = search["word"])
     if error != None:
         search["error"] = error
         return
     search["error"] = ""
     search["pattern"] = state["re"].compile(search["query"], case_sensitive = case, whole_word = search["word"])
+    search["matches_case"] = case
 
 def _search_key(state: dict, key: str, page: int) -> bool:
     """Apply `key` to an open search bar; False for a key it leaves to the

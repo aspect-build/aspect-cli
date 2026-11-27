@@ -839,6 +839,16 @@ def _impl(ctx: TaskContext) -> int:
     if _role("active") + "Aa" not in render(smart, 100, 30):
         fail("render: the case toggle should be lit while a capital matches case")
 
+    # A query being typed that does not compile keeps the last pattern, and
+    # the case it matches with: `Aa` says what the pattern does.
+    typing = _screen(ctx, ["ERROR: a FAILED", "ERROR: b failed"])
+    on_key(typing, "/", 10)
+    for c in "failed".elems():
+        on_key(typing, c, 10)
+    for c in "(X".elems():
+        on_key(typing, c, 10)
+    _eq("an uncompiled capital lights no Aa", (bool(typing["search"]["error"]), typing["search"]["matches_case"]), (True, False))
+
     # Finding: the newest match at or above where the bar opened, centred;
     # n older, N newer, nothing past either end; Esc goes back.
     lines = ["line %d%s" % (i, " hit" if i in (5, 40, 90) else "") for i in range(100)]
