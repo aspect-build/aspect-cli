@@ -1,36 +1,57 @@
 exit 1
 ── Failures (5) ──
-✗ //at2:t1  loading
+✗ //at2:t1  loading · at2/BUILD.bazel:1:8
   │ its package has an error
+  │ //at2:t1: expected value of type 'list(output)' for attribute 'outs' in 'genrule' rule, but got
+  │   "a.txt" (string)
+  │ //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule
 
-✗ //at2:t2  loading
+✗ //at2:t2  loading · at2/BUILD.bazel:2:8
   │ its package has an error
+  │ //at2:t2: expected value of type 'string' for attribute 'cmd' in 'genrule' rule, but got 5 (int)
   ○ blocked: //q3:u2
 
-✗ //at2:ok  loading
+✗ //at2:ok  loading · q2/BUILD.bazel:1:8
   │ its package has an error
+  │ Target '//at2:ok' contains an error and its package is in error
   ○ blocked: //q2:u, //q3:u1
 
-✗ //at2:ok2  loading
+✗ //at2:ok2  loading · q3/BUILD.bazel:3:8
   │ its package has an error
+  │ Target '//at2:ok2' contains an error and its package is in error
   ○ blocked: //q3:u3
 
-✗ //at:ok  loading
+✗ //at:ok  loading · q/BUILD.bazel:1:8
+  │ Target '//at:ok' contains an error and its package is in error
   ○ blocked: //q:on_at
+
+── Other errors from Bazel ──
+ERROR: package contains errors: at2: //at2:t1: expected value of type 'list(output)' for attribute
+ERROR: at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' in
+ERROR: at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
 0 built, 5 failed, 5 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //at2:t1  loading
+✗ //at2:t1  loading · at2/BUILD.bazel:1:8
   │ its package has an error
-✗ //at2:t2  loading
+  │ //at2:t1: expected value of type 'list(output)' for attribute 'outs' in 'genrule' rule, but got "a.txt" (string)
+  │ //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule
+✗ //at2:t2  loading · at2/BUILD.bazel:2:8
   │ its package has an error
-✗ //at2:ok  loading
+  │ //at2:t2: expected value of type 'string' for attribute 'cmd' in 'genrule' rule, but got 5 (int)
+✗ //at2:ok  loading · q2/BUILD.bazel:1:8
   │ its package has an error
-✗ //at2:ok2  loading
+  │ Target '//at2:ok' contains an error and its package is in error
+✗ //at2:ok2  loading · q3/BUILD.bazel:3:8
   │ its package has an error
-✗ //at:ok  loading
+  │ Target '//at2:ok2' contains an error and its package is in error
+✗ //at:ok  loading · q/BUILD.bazel:1:8
+  │ Target '//at:ok' contains an error and its package is in error
 ○ //q2:u  blocked by //at2:ok
 ○ //q3:u3  blocked by //at2:ok2
 ○ //q3:u1  blocked by //at2:ok
 ○ //q:on_at  blocked by //at:ok
 ○ //q3:u2  blocked by //at2:t2
+! package contains errors: at2: //at2:t1: expected value of type 'list(output)'…'genrule' rule, but got "a.txt" (string)
+! at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribu…e' rule, but got "notalist.txt" (string)
+! at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule

@@ -1,8 +1,6 @@
 exit 33
 ── Failures (1) ──
 ✗ Bazel exited 33
-  │ WARNING: Running Bazel server needs to be killed, because the startup options are different.
-  │ Starting local Bazel server and connecting to it...
   │ FATAL: bazel ran out of memory and crashed. Printing stack trace:
   │ java.lang.OutOfMemoryError: Java heap space
   log ${FIXTURE}/7.7.3.console

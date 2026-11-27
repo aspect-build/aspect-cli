@@ -1,9 +1,17 @@
 exit 1
 ── Failures (1) ──
-✗ //sm:x  loading
+✗ //sm:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//sm:x': target 'x' not declared in package 'sm' defined by sm/BUILD.bazel
   ○ blocked: //q:on_sm
+
+── Other errors from Bazel ──
+ERROR: sm/BUILD.bazel:2:38: syntax error at 'cmd': expected ,
+ERROR: package contains errors: sm: syntax error at 'cmd': expected ,
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //sm:x  loading
+✗ //sm:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//sm:x': target 'x' not declared in package 'sm' defined by sm/BUILD.bazel
 ○ //q:on_sm  blocked by //sm:x
+! sm/BUILD.bazel:2:38: syntax error at 'cmd': expected ,
+! package contains errors: sm: syntax error at 'cmd': expected ,

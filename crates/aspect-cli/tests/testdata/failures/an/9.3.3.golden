@@ -6,10 +6,10 @@ exit 1
   │  - nowhere
   ○ blocked: //an:badlabel
 
-✗ //an:missing
+✗ //an:missing  an/BUILD.bazel:1:8
   │ missing input file '//an:nope.txt'
 
-✗ //an:dep
+✗ //an:dep  an/BUILD.bazel:1:8
   │ missing input file '//an:nope.txt'
 0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay
@@ -17,8 +17,8 @@ All of it: aspect history show t-replay
 ✗ //nowhere:x  analysis
   │ no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a director…
   │  - nowhere
-✗ //an:missing
+✗ //an:missing  an/BUILD.bazel:1:8
   │ missing input file '//an:nope.txt'
-✗ //an:dep
+✗ //an:dep  an/BUILD.bazel:1:8
   │ missing input file '//an:nope.txt'
 ○ //an:badlabel  blocked by //nowhere:x

@@ -1,6 +1,6 @@
 exit 1
 ── Failures (1) ──
-✗ //asp:x  analysis
+✗ //asp:x  analysis · asp/BUILD.bazel:1:8
   │ in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: 
   │ Traceback (most recent call last):
   │ …
@@ -9,7 +9,7 @@ exit 1
 1 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //asp:x  analysis
+✗ //asp:x  analysis · asp/BUILD.bazel:1:8
   │ in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x:
   │ Traceback (most recent call last):
   │ …

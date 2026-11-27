@@ -1,9 +1,6 @@
 exit 37
 ── Failures (1) ──
 ✗ Bazel exited 37
-  │ WARNING: Running Bazel server needs to be killed, because the following startup options are
-  │   different:
-  │ Starting local Bazel server (8.9.0) and connecting to it...
   │ Server terminated abruptly (error code: 14, error message: 'Socket closed', log file:
   │   '${OUTPUT_BASE}/server/jvm.out')
   log ${FIXTURE}/8.9.0.console

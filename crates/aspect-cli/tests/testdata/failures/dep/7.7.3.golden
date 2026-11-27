@@ -1,6 +1,6 @@
 exit 1
 ── Failures (2) ──
-✗ //dep/rf:x  analysis
+✗ //dep/rf:x  analysis · dep/rf/BUILD.bazel:2:2
   │ in r rule //dep/rf:x: 
   │ Traceback (most recent call last):
   │ …
@@ -8,19 +8,19 @@ exit 1
   │ … 2 more lines
   ○ blocked: //dep:top
 
-✗ //dep:bad  Genrule · exit 1
+✗ //dep:bad  Genrule · exit 1 · dep/BUILD.bazel:1:8
   │ bad broke
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
   ○ blocked: //dep:mid
 0 built, 2 failed, 2 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //dep/rf:x  analysis
+✗ //dep/rf:x  analysis · dep/rf/BUILD.bazel:2:2
   │ in r rule //dep/rf:x:
   │ Traceback (most recent call last):
   │ …
   │ Error in fail: impl refuses x
-✗ //dep:bad  Genrule · exit 1
+✗ //dep:bad  Genrule · exit 1 · dep/BUILD.bazel:1:8
   │ bad broke
 ○ //dep:mid  blocked by :bad
 ○ //dep:top  blocked by //dep/rf:x

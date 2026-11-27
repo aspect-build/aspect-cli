@@ -1,6 +1,6 @@
 exit 1
 ── Failures (3) ──
-✗ //vis:vis  analysis
+✗ //vis:vis  analysis · vis/BUILD.bazel:1:8
   │ in genrule rule //vis:vis: Visibility error:
   │ target '//priv:priv' is not visible from
   │ target '//vis:vis'
@@ -13,12 +13,12 @@ exit 1
   │  - nosuchpkg
   ○ blocked: //vis:mp
 
-✗ //vis:mt
+✗ //vis:mt  vis/BUILD.bazel:2:8
   │ missing input file '//vis:nothere'
 0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //vis:vis  analysis
+✗ //vis:vis  analysis · vis/BUILD.bazel:1:8
   │ in genrule rule //vis:vis: Visibility error:
   │ target '//priv:priv' is not visible from
   │ target '//vis:vis'
@@ -26,6 +26,6 @@ All of it: aspect history show t-replay
 ✗ //nosuchpkg:x  analysis
   │ no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a BUILD file to a direct…
   │  - nosuchpkg
-✗ //vis:mt
+✗ //vis:mt  vis/BUILD.bazel:2:8
   │ missing input file '//vis:nothere'
 ○ //vis:mp  blocked by //nosuchpkg:x

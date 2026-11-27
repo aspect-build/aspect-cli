@@ -3,12 +3,17 @@ exit 1
 ✗ //nowhere2:tool  analysis
   │ no such package 'nowhere2': BUILD file not found in any of the following directories. Add a
   │   BUILD file to a directory to mark it as a package.
-  │  - ${WORKSPACE}/nowhere2
+  │  - nowhere2
   ○ blocked: //ad:x
+
+── Other errors from Bazel ──
+ERROR: ad/BUILD.bazel:2:2: every rule of type r implicitly depends upon the target
+  │  - nowhere2
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
 ✗ //nowhere2:tool  analysis
   │ no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directo…
-  │  - ${WORKSPACE}/nowhere2
+  │  - nowhere2
 ○ //ad:x  blocked by //nowhere2:tool
+! ad/BUILD.bazel:2:2: every rule of type r implicitly depends upon the target '… to a directory to mark it as a package.

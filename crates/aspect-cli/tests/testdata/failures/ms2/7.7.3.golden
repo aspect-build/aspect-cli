@@ -1,33 +1,36 @@
 exit 1
 ── Failures (6) ──
-✗ //ms2:a
+✗ //ms2:a  ms2/BUILD.bazel:1:8
   │ missing input file '//ms2:shared_missing.txt'
 
-✗ //ms2:b
+✗ //ms2:b  ms2/BUILD.bazel:2:8
   │ missing input file '//ms2:shared_missing.txt'
 
-✗ //ms2:d
+✗ //ms2:d  ms2/BUILD.bazel:4:8
   │ missing input file '//ms2:mine_missing.txt'
 
-✗ //ms2:f
+✗ //ms2:f  ms2/BUILD.bazel:4:8
   │ missing input file '//ms2:mine_missing.txt'
 
-✗ //other:file.txt  loading
+✗ //other:file.txt  loading · ms2/BUILD.bazel:3:8
+  │ no such target '//other:file.txt': target 'file.txt' not declared in package 'other' defined by
+  │   other/BUILD.bazel (did you mean here.txt?)
   ○ blocked: //ms2:c
 
-✗ //ms2:e  Genrule · exit 3
+✗ //ms2:e  Genrule · exit 3 · ms2/BUILD.bazel:5:8
 0 built, 6 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //ms2:a
+✗ //ms2:a  ms2/BUILD.bazel:1:8
   │ missing input file '//ms2:shared_missing.txt'
-✗ //ms2:b
+✗ //ms2:b  ms2/BUILD.bazel:2:8
   │ missing input file '//ms2:shared_missing.txt'
-✗ //ms2:d
+✗ //ms2:d  ms2/BUILD.bazel:4:8
   │ missing input file '//ms2:mine_missing.txt'
-✗ //ms2:f
+✗ //ms2:f  ms2/BUILD.bazel:4:8
   │ missing input file '//ms2:mine_missing.txt'
-✗ //other:file.txt  loading
-✗ //ms2:e  Genrule · exit 3
+✗ //other:file.txt  loading · ms2/BUILD.bazel:3:8
+  │ no such target '//other:file.txt': target 'file.txt' not declared in package 'other' defined by other/BUILD.bazel (…
+✗ //ms2:e  Genrule · exit 3 · ms2/BUILD.bazel:5:8
   │ e broke
 ○ //ms2:c  blocked by //other:file.txt

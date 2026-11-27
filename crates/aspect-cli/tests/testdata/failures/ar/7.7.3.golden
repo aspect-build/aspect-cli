@@ -3,36 +3,42 @@ exit 1
 ✗ //nowhere:x  analysis
   │ no such package 'nowhere': BUILD file not found in any of the following directories. Add a
   │   BUILD file to a directory to mark it as a package.
-  │  - ${WORKSPACE}/nowhere
+  │  - nowhere
   ○ blocked: //ar:badlabel, //ar2:badlabel
 
-✗ //le:x  loading
+✗ //le:x  loading · ar2/BUILD.bazel:4:8
+  │ no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel
   ○ blocked: //ar2:useslе
 
-✗ //ar2:boom2  Genrule · exit 2
+✗ //ar2:boom2  Genrule · exit 2 · ar2/BUILD.bazel:2:8
   │ boom2 broke
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
 
-✗ //ar:boom  Genrule · exit 1
+✗ //ar:boom  Genrule · exit 1 · ar/BUILD.bazel:1:8
   │ boom broke
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
 
-✗ //ar2:boom1  Genrule · exit 1
+✗ //ar2:boom1  Genrule · exit 1 · ar2/BUILD.bazel:1:8
   │ boom1 broke
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+── Other errors from Bazel ──
+ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
 1 built, 5 failed, 3 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
 ✗ //nowhere:x  analysis
   │ no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a director…
-  │  - ${WORKSPACE}/nowhere
-✗ //le:x  loading
-✗ //ar2:boom2  Genrule · exit 2
+  │  - nowhere
+✗ //le:x  loading · ar2/BUILD.bazel:4:8
+  │ no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel
+✗ //ar2:boom2  Genrule · exit 2 · ar2/BUILD.bazel:2:8
   │ boom2 broke
-✗ //ar:boom  Genrule · exit 1
+✗ //ar:boom  Genrule · exit 1 · ar/BUILD.bazel:1:8
   │ boom broke
-✗ //ar2:boom1  Genrule · exit 1
+✗ //ar2:boom1  Genrule · exit 1 · ar2/BUILD.bazel:1:8
   │ boom1 broke
 ○ //ar2:useslе  blocked by //le:x
 ○ //ar:badlabel  blocked by //nowhere:x
 ○ //ar2:badlabel  blocked by //nowhere:x
+! le/BUILD.bazel:2:1: syntax error at 'newline': expected ,

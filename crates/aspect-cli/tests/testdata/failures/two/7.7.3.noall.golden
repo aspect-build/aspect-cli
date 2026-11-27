@@ -1,62 +1,62 @@
 exit 1
 ── Failures (first 10 of 14) ──
-✗ //two:tabcjk  Genrule · exit 1
+✗ //two:tabcjk  Genrule · exit 1 · two/BUILD.bazel:11:8
   │ 漢字    A       漢      BB      漢字漢字漢字    C
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
 
-✗ //two:nolabel  CcLike · exit 2
+✗ //two:nolabel  CcLike · exit 2 · two/BUILD.bazel:7:8
   │ first anon
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-8
 
-✗ //two:two  Beta · exit 3
+✗ //two:two  Beta · exit 3 · two/BUILD.bazel:2:4
   │ error: beta.c:9: bad beta
   │ second line
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-12
 
-✗ //two:two  Alpha · exit 2
+✗ //two:two  Alpha · exit 2 · two/BUILD.bazel:2:4
   │ first action broke: alpha.c:1: bad alpha
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-11
 
-✗ //two:three  Step · exit 5
+✗ //two:three  Step · exit 5 · two/BUILD.bazel:6:6
 
-✗ //two:empty  Genrule · exit 4
+✗ //two:empty  Genrule · exit 4 · two/BUILD.bazel:4:8
 
-✗ //two:unicode  Genrule · exit 1
+✗ //two:unicode  Genrule · exit 1 · two/BUILD.bazel:5:8
 
-✗ //two:tabs  Genrule · exit 1
+✗ //two:tabs  Genrule · exit 1 · two/BUILD.bazel:8:8
 
-✗ //two:cjkspace  Genrule · exit 1
+✗ //two:cjkspace  Genrule · exit 1 · two/BUILD.bazel:10:8
 
-✗ //two:longline  Genrule · exit 1
+✗ //two:longline  Genrule · exit 1 · two/BUILD.bazel:3:8
 … and 4 more failures · aspect history show t-replay
 0 built, 10 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.noall.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //two:tabcjk  Genrule · exit 1
+✗ //two:tabcjk  Genrule · exit 1 · two/BUILD.bazel:11:8
   │ 漢字    A       漢      BB      漢字漢字漢字    C
-✗ //two:nolabel  CcLike · exit 2
+✗ //two:nolabel  CcLike · exit 2 · two/BUILD.bazel:7:8
   │ first anon
-✗ //two:two  Beta · exit 3
+✗ //two:two  Beta · exit 3 · two/BUILD.bazel:2:4
   │ error: beta.c:9: bad beta
   │ second line
-✗ //two:two  Alpha · exit 2
+✗ //two:two  Alpha · exit 2 · two/BUILD.bazel:2:4
   │ first action broke: alpha.c:1: bad alpha
-✗ //two:three  Step · exit 5
-✗ //two:empty  Genrule · exit 4
-✗ //two:unicode  Genrule · exit 1
+✗ //two:three  Step · exit 5 · two/BUILD.bazel:6:6
+✗ //two:empty  Genrule · exit 4 · two/BUILD.bazel:4:8
+✗ //two:unicode  Genrule · exit 1 · two/BUILD.bazel:5:8
   │ エラー: ファイルが見つかりません
   │ 漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢…
-✗ //two:tabs  Genrule · exit 1
+✗ //two:tabs  Genrule · exit 1 · two/BUILD.bazel:8:8
   │ E:      col1    col2    col3    col4    col5    col6    col7    col8    col9    col10   col11   col12   col13   col…
-✗ //two:cjkspace  Genrule · exit 1
+✗ //two:cjkspace  Genrule · exit 1 · two/BUILD.bazel:10:8
   │ 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢…
-✗ //two:longline  Genrule · exit 1
+✗ //two:longline  Genrule · exit 1 · two/BUILD.bazel:3:8
   │ E: word0 word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 wor…
-✗ //two:nospace  Genrule · exit 1
+✗ //two:nospace  Genrule · exit 1 · two/BUILD.bazel:9:8
   │ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX…
-✗ //two:three  Step · exit 6
+✗ //two:three  Step · exit 6 · two/BUILD.bazel:6:6
   │ step two broke: s2.c:2
-✗ //two:nolabel  CcLike · exit 3
+✗ //two:nolabel  CcLike · exit 3 · two/BUILD.bazel:7:8
   │ second anon
-✗ //two:three  Pack · exit 7
+✗ //two:three  Pack · exit 7 · two/BUILD.bazel:6:6
   │ pack broke: p.c:3

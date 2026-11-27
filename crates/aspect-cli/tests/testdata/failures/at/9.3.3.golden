@@ -3,12 +3,21 @@ exit 1
 ✗ //at:ok  loading
   │ its package has an error
 
-✗ //at:t  loading
+✗ //at:t  loading · at/BUILD.bazel:1:8
   │ its package has an error
+  │ //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got
+  │   "notalist.txt" (string)
+  │ //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
+
+── Other errors from Bazel ──
+ERROR: package contains errors: at: //at:t: expected value of type 'list(output)' for attribute
 0 built, 2 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay
 --- Failures tab
 ✗ //at:ok  loading
   │ its package has an error
-✗ //at:t  loading
+✗ //at:t  loading · at/BUILD.bazel:1:8
   │ its package has an error
+  │ //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got "notalist.txt" (string)
+  │ //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
+! package contains errors: at: //at:t: expected value of type 'list(output)' fo…enrule', but got "notalist.txt" (string)

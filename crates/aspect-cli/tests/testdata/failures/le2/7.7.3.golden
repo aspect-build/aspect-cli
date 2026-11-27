@@ -1,9 +1,17 @@
 exit 1
 ── Failures (1) ──
-✗ //le2:x  loading
+✗ //le2:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//le2:x': target 'x' not declared in package 'le2' defined by le2/BUILD.bazel
   ○ blocked: //q:on_le2
+
+── Other errors from Bazel ──
+ERROR: le2/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+ERROR: package contains errors: le2: syntax error at 'newline': expected ,
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //le2:x  loading
+✗ //le2:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//le2:x': target 'x' not declared in package 'le2' defined by le2/BUILD.bazel
 ○ //q:on_le2  blocked by //le2:x
+! le2/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+! package contains errors: le2: syntax error at 'newline': expected ,

@@ -1,13 +1,19 @@
 exit 1
 ── Failures (3) ──
-✗ //mc:d0  Check
+✗ //mc:d0  Check · mc/BUILD.bazel:2:5
+  │ output 'mc/d0.out' was not created
 
-✗ //mc:d1  Check
+✗ //mc:d1  Check · mc/BUILD.bazel:2:5
+  │ output 'mc/d1.out' was not created
 
-✗ //mc:e  Check
+✗ //mc:e  Check · mc/BUILD.bazel:3:4
+  │ output 'mc/e.out' was not created
 0 built, 3 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //mc:d0  Check
-✗ //mc:d1  Check
-✗ //mc:e  Check
+✗ //mc:d0  Check · mc/BUILD.bazel:2:5
+  │ output 'mc/d0.out' was not created
+✗ //mc:d1  Check · mc/BUILD.bazel:2:5
+  │ output 'mc/d1.out' was not created
+✗ //mc:e  Check · mc/BUILD.bazel:3:4
+  │ output 'mc/e.out' was not created

@@ -1,38 +1,38 @@
 exit 1
 ── Failures (6) ──
-✗ //ov:d  Proc · exit 2
+✗ //ov:d  Proc · exit 2 · ov/BUILD.bazel:6:4
   │ same line
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
 
-✗ //ov:g1  Genrule · exit 1
+✗ //ov:g1  Genrule · exit 1 · ov/BUILD.bazel:10:8
   │ error: shared
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-6
 
-✗ //ov:g2  Genrule · exit 1
+✗ //ov:g2  Genrule · exit 1 · ov/BUILD.bazel:11:8
   │ error: shared
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-7
 
-✗ //ov:c  Proc · exit 1
+✗ //ov:c  Proc · exit 1 · ov/BUILD.bazel:2:4
   │ error: x
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
 
-✗ //ov:d  Proc · exit 2
+✗ //ov:d  Proc · exit 2 · ov/BUILD.bazel:6:4
   │ same line
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
 
-✗ //ov:c  Proc · exit 1
+✗ //ov:c  Proc · exit 1 · ov/BUILD.bazel:2:4
 0 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //ov:d  Proc · exit 2
+✗ //ov:d  Proc · exit 2 · ov/BUILD.bazel:6:4
   │ same line
-✗ //ov:g1  Genrule · exit 1
+✗ //ov:g1  Genrule · exit 1 · ov/BUILD.bazel:10:8
   │ error: shared
-✗ //ov:g2  Genrule · exit 1
+✗ //ov:g2  Genrule · exit 1 · ov/BUILD.bazel:11:8
   │ error: shared
-✗ //ov:c  Proc · exit 1
+✗ //ov:c  Proc · exit 1 · ov/BUILD.bazel:2:4
   │ error: x
-✗ //ov:d  Proc · exit 2
+✗ //ov:d  Proc · exit 2 · ov/BUILD.bazel:6:4
   │ same line
-✗ //ov:c  Proc · exit 1
+✗ //ov:c  Proc · exit 1 · ov/BUILD.bazel:2:4
   │ error: x is bad

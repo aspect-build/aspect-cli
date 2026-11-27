@@ -1,8 +1,7 @@
 exit 2
-── Failures (1) ──
-✗ Bazel exited 2
-  │ --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here
-  log ${FIXTURE}/7.7.3.console
+── Other errors from Bazel ──
+ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here
 0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
+! --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here
