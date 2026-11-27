@@ -6696,8 +6696,9 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
     - The line after the output where it is the output's last line with no
       newline, which Bazel writes after its next redraw (a tail) or, without
       colour, with a newline added: only an output that does not end in a
-      newline has one, so each successful action's last log is read for its
-      last byte alone, once, and only one that ends otherwise is read
+      newline has one, so each successful action's last log is found and
+      read for its last bytes alone (a character), once, and only one
+      that ends otherwise is read
       further, from its end, as far as that line is long. It is the tool's
       where the log's last line is exactly that line.
     - Without colour (`plain`, `--color=no`), where a tool's own `ERROR:`
@@ -6713,13 +6714,16 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
     by_label = {}
     for k, rec in enumerate(outputs):
         by_label.setdefault(rec["label"], []).append(k)
-    last_byte = {}
+    open_logs = {}
 
-    def ends_open(path):
-        if path not in last_byte:
-            got = state["read"](path, 1)
-            last_byte[path] = got != None and got[0] != "" and got[0] != "\n"
-        return last_byte[path]
+    # The log an output ends with, where it ends without a newline: found,
+    # and its last bytes read, once.
+    def open_log(k):
+        if k not in open_logs:
+            path = _last_piece(state, outputs[k], stdout)
+            got = state["read"](path, 4) if path != None else None
+            open_logs[k] = path if got != None and got[0] != "" and not got[0].endswith("\n") else None
+        return open_logs[k]
 
     for i, header, body_len, last in froms:
         if i + 1 >= len(blocks) or blocks[i + 1][2] not in (("tail", "error") if plain else ("tail",)):
@@ -6736,8 +6740,8 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
         held = text[at:stop if stop >= 0 else end]
         found = False
         for k in named or range(len(outputs)):
-            path = _last_piece(state, outputs[k], stdout)
-            if path == None or not ends_open(path):
+            path = open_log(k)
+            if path == None:
                 continue
             got = state["read"](path, 4 * len(held) + 4)
             if got == None:

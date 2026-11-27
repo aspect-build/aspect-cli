@@ -39,9 +39,10 @@ def _eq(label, got, want):
 
 def _held_line_reads(ctx):
     """Telling a held last line reads, of each successful action's output
-    that ends in a newline, its last byte alone, once, however many of
+    that ends in a newline, its last bytes alone (a character's), once, however many of
     Bazel's errors follow an output; of one that does not, its end, as far
-    as the held line is long, once for each line it is checked against."""
+    as the held line is long, once for each line it is checked against; each
+    output's log is found once."""
     files = {}
     outputs = []
     for i in range(200):
@@ -73,9 +74,9 @@ def _held_line_reads(ctx):
     others = [r for r in [ansi.replace(r, "") for r in failure_rows(tab, 400, 120)] if r.startswith("! ")]
     _eq("held: Bazel's own errors listed, the tool's held line not", (len(others), [r for r in others if "held open" in r]), (30, []))
     closed = [r for r in reads if r[0].startswith("/fx/out-")]
-    _eq("held: an output ending in a newline read for its last byte alone", [r for r in closed if r[1] > 1], [])
-    _eq("held: and once", len([r for r in closed if r[1] == 1]), 200)
-    opened = [r[1] for r in reads if r[0] == "/fx/open" and r[1] > 1]
+    _eq("held: an output ending in a newline read for its last bytes alone", [r for r in closed if r[1] > 4], [])
+    _eq("held: and once, found once", (len([r for r in closed if r[1] > 0]), len(closed) <= 2 * 200), (200, True))
+    opened = [r[1] for r in reads if r[0] == "/fx/open" and r[1] > 4]
     _eq("held: the open one read from its end, once for each line, as far as that line is long", (len(opened), [n for n in opened if n > 256]), (31, []))
 
 def _screen(ctx, log, **kw):
