@@ -1292,40 +1292,38 @@ def _runner_place(record: dict):
 
     return (number("run"), number("shard"))
 
-def _runner_attempt(state: dict, record: dict):
-    """The attempt a `TestRunner` action ran, `(label, config, run, shard,
-    attempt)`:
-    its run and shard from its output (`_runner_place`), and, as Bazel
-    sends an attempt's action before its result, the attempt after the
-    last whose result came; None where its output names no test log."""
+def _runner_key(record: dict):
+    """Which run and shard of which test a `TestRunner` action ran,
+    `(label, config, run, shard)`, from its output (`_runner_place`); None
+    where its output names no test log."""
     place = _runner_place(record)
     if place == None:
         return None
     run, shard = place
-    config = record.get("config", "")
-    seen = [n for key, n in state.get("last_attempts", {}).items() if key == (record["label"], config, run, shard)]
-    return (record["label"], config, run, shard, max(seen + [0]) + 1)
+    return (record["label"], record.get("config", ""), run, shard)
 
-def _same_attempt(runner: dict, test: dict) -> bool:
-    """Whether a `TestRunner` action failure is `test`'s attempt."""
+def _same_place(runner: dict, test: dict) -> bool:
+    """Whether a `TestRunner` action failure ran `test`'s run and shard."""
     at = runner.get("attempt_key")
-    return at != None and at == (test["label"], test["config"], test["run"], test["shard"], test["attempt"])
+    return at != None and at == (test["label"], test["config"], test["run"], test["shard"])
 
 def _add_failure(state: dict, record: dict):
     """List a failure once. A test attempt Bazel posts again (Bazel 9 posts
     attempt 1 failed with its log, then failed to build without one) is one
-    row, the one with a log kept. A failed `TestRunner` action is listed as
-    it comes, with the attempt it ran (`_runner_attempt`), and dropped once
-    that attempt's own record comes with a log; one whose attempt has none
-    (an attempt Bazel cut off, a shard that failed to build) stays, its log
-    the only one, and that record is not listed beside it."""
+    row, the one with a log kept. A failed `TestRunner` action stands for
+    its run and shard (`_runner_key`, from its output's path) until an
+    attempt of them comes with a log, which drops it, and is not listed
+    once one has; while it stands, an attempt of them with no log (a shard
+    that failed to build) is not listed beside it, the action's log the
+    only one."""
     fails = state["fails"]
     if _test_runner(record):
-        record["attempt_key"] = _runner_attempt(state, record)
-        fails.append(record)
+        record["attempt_key"] = _runner_key(record)
+        if not any([r["kind"] == "test" and r["files"] and _same_place(record, r) for r in fails]):
+            fails.append(record)
         return
     if record["kind"] == "test":
-        if not record["files"] and any([_test_runner(r) and _same_attempt(r, record) for r in fails]):
+        if not record["files"] and any([_test_runner(r) and _same_place(r, record) for r in fails]):
             return
         key = _test_key(record)
         for i, r in enumerate(fails):
@@ -1333,8 +1331,8 @@ def _add_failure(state: dict, record: dict):
                 if record["files"] and not r["files"]:
                     fails[i] = record
                 return
-        if record["files"] and any([_test_runner(r) and _same_attempt(r, record) for r in fails]):
-            fails = [r for r in fails if not (_test_runner(r) and _same_attempt(r, record))]
+        if record["files"] and any([_test_runner(r) and _same_place(r, record) for r in fails]):
+            fails = [r for r in fails if not (_test_runner(r) and _same_place(r, record))]
             state["fails"] = fails
             state["selected"] = min(state.get("selected", 0), max(0, len(fails)))
     fails.append(record)

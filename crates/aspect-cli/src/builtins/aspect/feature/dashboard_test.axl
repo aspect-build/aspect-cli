@@ -2397,10 +2397,10 @@ def _impl(ctx: TaskContext) -> int:
     _eq("an aborted test summary", (aborted_tests["tests_failed"], aborted_tests["failures"], aborted_tests["tests_skipped"]), (1, ["//t:built_badly"], 1))
 
     # One attempt Bazel posts twice is one row, the one with a log; a failed
-    # TestRunner action is the attempt after the last whose result came, as
-    # Bazel 9 sends them (this order is r29's shard.json, oldshard_flaky, run 1
-    # shard 2 and run 1 shard 1), dropped once that attempt's result comes
-    # with its log, else kept as the only log of an attempt Bazel cut off.
+    # TestRunner action stands for the run and shard its output names
+    # (this order is r29's shard.json, oldshard_flaky, run 1 shard 2 and run
+    # 1 shard 1, as Bazel 9 sends them), never listed once an attempt of
+    # them has come with its log.
     out = "bazel-out/darwin_arm64-fastbuild/testlogs/examples/r29tmp/oldshard_flaky/"
     lab = "//examples/r29tmp:oldshard_flaky"
     log = [struct(name = "test.log", file = struct(uri = "file:///x/test.log"))]
@@ -2426,12 +2426,10 @@ def _impl(ctx: TaskContext) -> int:
     ]:
         note_event(real, kind, eid, payload, False)
     rows = [(r["kind"], r.get("run"), r.get("shard"), r.get("attempt"), r.get("attempt_key")) for r in real["fails"]]
-    _eq("each attempt once; the actions of cut-off attempts kept", rows, [
+    _eq("each attempt once; an action of a run and shard with a log not listed", rows, [
         ("test", 1, 2, 1, None),
         ("test", 1, 1, 1, None),
-        ("action", None, None, None, (lab, "c", 1, 1, 2)),
         ("test", 1, 2, 2, None),
-        ("action", None, None, None, (lab, "c", 1, 2, 3)),
     ])
     first = _screen(ctx, ["x"])
     note_event(first, "action_completed", _runner("shard_2_of_2_run_1_of_2")[0], runner, False)
@@ -2453,8 +2451,8 @@ def _impl(ctx: TaskContext) -> int:
         note_event(st, "action_completed", struct(label = label, primary_output = path), runner, False)
         return st["fails"][0]["attempt_key"]
 
-    _eq("a test named shard_9_x", _place("//p:shard_9_x", "bazel-out/k8/testlogs/p/shard_9_x/test.log"), ("//p:shard_9_x", "", 1, 1, 1))
-    _eq("a package folder run_2", _place("//run_2/p:t", "bazel-out/k8/testlogs/run_2/p/t/shard_2_of_3/test.log"), ("//run_2/p:t", "", 1, 2, 1))
+    _eq("a test named shard_9_x", _place("//p:shard_9_x", "bazel-out/k8/testlogs/p/shard_9_x/test.log"), ("//p:shard_9_x", "", 1, 1))
+    _eq("a package folder run_2", _place("//run_2/p:t", "bazel-out/k8/testlogs/run_2/p/t/shard_2_of_3/test.log"), ("//run_2/p:t", "", 1, 2))
 
     # Metrics' spawns: after the build until its execution log is read, then
     # what it held, none included.
