@@ -27,6 +27,9 @@ def scrub(s):
     for a, b in subs:
         if a: s = s.replace(a, b)
     s = re.sub(r"/var/folders/[^/]+/[^/]+/", "${DARWIN_USER_DIR}/", s)
+    # An output base under the user root that `bazel info` did not name
+    # (Bazel 8's `--failure_detail_out` default): another hash, the same place.
+    s = re.sub(r"\$\{OUTPUT_USER_ROOT\}/[0-9a-f]{32}(?=/)", "${OUTPUT_BASE}", s)
     for k in ("USER", "LOGNAME"):
         s = s.replace(k + "=" + user, k + "=${USER}")
     return s
@@ -45,12 +48,22 @@ def scrub_status(e):
         if it.get("key") == "BUILD_USER": it["value"] = "${USER}"
         if it.get("key") == "BUILD_HOST": it["value"] = "${HOST}"
     return e
+def packages():
+    """The fixture's own package names (each folder of its src/), which may
+    stand as path components whatever the machine is named."""
+    out = set()
+    for root, dirs, _ in os.walk(os.path.join(fx, "src")):
+        out.update(dirs)
+    return out
 def guard(paths):
     """Where this machine's host (short and full), user or home is left in
     `paths`: as a whole word or a path component, never inside another
-    word. A name in FIXTURE_GUARD_ALLOW (comma-separated) may stand as a
-    whole word of text (a host or user named `build`), never in a path."""
+    word, and the user in Bazel's output user root (`_bazel_<user>`). A
+    name in FIXTURE_GUARD_ALLOW (comma-separated) may stand as a whole word
+    of text (a host or user named `build`), and one of the fixture's own
+    packages as a path component (a user named `ci` recording `ci`)."""
     allow = [a for a in os.environ.get("FIXTURE_GUARD_ALLOW", "").split(",") if a]
+    own = packages()
     names = sorted({n for n in (host, host.split(".")[0], user) if n}, key=len, reverse=True)
     found = []
     for p in paths:
@@ -58,11 +71,13 @@ def guard(paths):
         for h in spellings(home):
             if re.search(re.escape(h) + r"(?![\w.-])", text) or (h + "/") in text:
                 found.append((p, h))
+        if user and ("_bazel_" + user) in text:
+            found.append((p, "_bazel_" + user))
         for n in names:
             word = r"(?<![\w.-])" + re.escape(n) + r"(?![\w-])"
             for m in re.finditer(word, text):
                 in_path = (m.start() > 0 and text[m.start() - 1] == "/") or text[m.end():m.end() + 1] == "/"
-                if in_path or n not in allow:
+                if (in_path and n not in own) or (not in_path and n not in allow):
                     found.append((p, n))
                     break
     return found

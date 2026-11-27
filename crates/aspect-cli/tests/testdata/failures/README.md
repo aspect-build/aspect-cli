@@ -74,12 +74,12 @@ Machine-specific strings in `*.bep.json`, `*.console`, `*.stdout` and `*.files/*
 |---|---|
 | `${OUTPUT_BASE}` | `bazel info output_base` |
 | `${INSTALL_BASE}` | `bazel info install_base` |
-| `${OUTPUT_USER_ROOT}` | parent of the output base |
+| `${OUTPUT_USER_ROOT}` | parent of the output base (an output base under it that `bazel info` did not name, Bazel 8's `--failure_detail_out` default, is `${OUTPUT_BASE}` too) |
 | `${WORKSPACE}` | the scratch workspace, in its `/private/tmp`, `/tmp` and realpath spellings |
 | `${RAW}` | the recorder's temporary directory (appears in `--build_event_json_file=`) |
 | `${HOME}` | the throwaway HOME and the real one |
 | `${DARWIN_USER_DIR}` | macOS `/var/folders/<x>/<y>` |
-| `${USER}`, `${HOST}` | the fields that carry them, by name: `BuildStarted.user` and `.host`, `TestResult.executionInfo.hostname`, `BUILD_USER` and `BUILD_HOST`; `USER=`/`LOGNAME=` env values. Never in text or a path; the recorder refuses a recording that still names this machine's host (short or full), user or home as a whole word or path component (`FIXTURE_GUARD_ALLOW=<name>` lets a name that is an ordinary word stand in text) |
+| `${USER}`, `${HOST}` | the fields that carry them, by name: `BuildStarted.user` and `.host`, `TestResult.executionInfo.hostname`, `BUILD_USER` and `BUILD_HOST`; `USER=`/`LOGNAME=` env values. Never in text or a path; the recorder refuses a recording that still names this machine's host (short or full), user or home as a whole word or path component or in Bazel's output user root (`_bazel_<user>`); `FIXTURE_GUARD_ALLOW=<name>` lets a name that is an ordinary word stand in text, and a fixture's own package names stand as path components |
 
 A BEP file URI `file://${OUTPUT_BASE}/<p>` resolves to `<ver>.files/<p>` in the same fixture
 (e.g. `execroot/_main/bazel-out/_tmp/actions/stderr-3`, `.../testlogs/t/fail/test.log`).
