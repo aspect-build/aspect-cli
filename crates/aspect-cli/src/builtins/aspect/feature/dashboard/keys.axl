@@ -8,21 +8,21 @@ load("@aspect//feature/dashboard/view.axl", "dashboard_view")
 load("../../private/lib/failures.axl", "failures")
 load("../../private/lib/term_text.axl", "term_text")
 
-fit = term_text.fit
-text_width = term_text.text_width
+_fit = term_text.fit
+_text_width = term_text.text_width
 _tab_extras = failures.tab_extras
-SKIPPED_KINDS = dashboard_actions.SKIPPED_KINDS
-built = dashboard_actions.built
+_SKIPPED_KINDS = dashboard_actions.SKIPPED_KINDS
+_built = dashboard_actions.built
 _clock = dashboard_log.clock
 _FILTERS = dashboard_log.FILTERS
 _NOTE_MS = dashboard_log.NOTE_MS
 _search_key = dashboard_log.search_key
-folded_to_lines = dashboard_log.folded_to_lines
-folding = dashboard_log.folding
-refold = dashboard_log.refold
-say_note = dashboard_log.say_note
-shown_lines = dashboard_log.shown_lines
-step_match = dashboard_log.step_match
+_folded_to_lines = dashboard_log.folded_to_lines
+_folding = dashboard_log.folding
+_refold = dashboard_log.refold
+_say_note = dashboard_log.say_note
+_shown_lines = dashboard_log.shown_lines
+_step_match = dashboard_log.step_match
 _failure_total = dashboard_view.failure_total
 _items = dashboard_view.items
 _listed_position = dashboard_view.listed_position
@@ -32,19 +32,19 @@ _pick = dashboard_view.pick
 _PICKED_TABS = dashboard_view.PICKED_TABS
 _shown_record = dashboard_view.shown_record
 _TABS = dashboard_view.TABS
-back_to = dashboard_view.back_to
-listed_failures = dashboard_view.listed_failures
-panes_shown = dashboard_view.panes_shown
-picked_build = dashboard_view.picked_build
-show_tab = dashboard_view.show_tab
-shown_tips = dashboard_view.shown_tips
-tips_count = dashboard_view.tips_count
-toggle_silence = dashboard_view.toggle_silence
+_back_to = dashboard_view.back_to
+_listed_failures = dashboard_view.listed_failures
+_panes_shown = dashboard_view.panes_shown
+_picked_build = dashboard_view.picked_build
+_show_tab = dashboard_view.show_tab
+_shown_tips = dashboard_view.shown_tips
+_tips_count = dashboard_view.tips_count
+_toggle_silence = dashboard_view.toggle_silence
 _editor = dashboard_pointer.editor
 _view_file = dashboard_pointer.view_file
-mouse_key = dashboard_pointer.mouse_key
-next_editor = dashboard_pointer.next_editor
-open_in_editor = dashboard_pointer.open_in_editor
+_mouse_key = dashboard_pointer.mouse_key
+_next_editor = dashboard_pointer.next_editor
+_open_in_editor = dashboard_pointer.open_in_editor
 
 # Alt (Option) with an arrow scrolls half a page, not an Esc and the arrow.
 _ALT_SCROLL = ["alt-up", "alt-down"]
@@ -70,33 +70,33 @@ def keys_row(state: dict, cols: int) -> str:
     finishing after its build, when no key is read), else the keys for what
     has focus, the likeliest first, as many as fit before `? keys`."""
     if state["ended"] and state["cancelling"]:
-        return fit(" Cancelled", cols)
+        return _fit(" Cancelled", cols)
     if state["cancelling"]:
-        return fit(" cancelling… (Ctrl+C again to stop now)", cols)
+        return _fit(" cancelling… (Ctrl+C again to stop now)", cols)
     if not state["ended"] and state["phase"] == _FINISHING:
-        return fit(" " + _FINISHING + " · Ctrl+C cancels", cols)
+        return _fit(" " + _FINISHING + " · Ctrl+C cancels", cols)
     if state.get("countdown_ms") != None:
-        return fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
+        return _fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
     if state.get("help"):
-        return fit(" ↑↓ scroll · any other key closes", cols)
+        return _fit(" ↑↓ scroll · any other key closes", cols)
     if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
-        return fit(" " + state["note"], cols)
+        return _fit(" " + state["note"], cols)
     if state.get("tab") in ("metrics", "invocation"):
-        return fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
+        return _fit(" ↑↓ scroll · Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
     if state.get("tab") == "tips" and state["view"] == None:
-        tips = shown_tips(state)
+        tips = _shown_tips(state)
         chosen = tips[max(0, min(state.get("tip_selected", 0), len(tips) - 1))] if tips else None
         choose = ("↑↓ choose · s %s · " % ("undo" if chosen[1] else "silence")) if tips else ""
-        return fit(" " + choose + "Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
+        return _fit(" " + choose + "Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
     done = state["ended"]
     parts = [("Done ✔" if state.get("verdict", True) else "Done ✗")] if done else []
     parts += row_labels(state)
     text = " " + parts[0]
     for part in parts[1:]:
-        if text_width(text) + 3 + text_width(part) + len(" · ? keys") > cols:
+        if _text_width(text) + 3 + _text_width(part) + len(" · ? keys") > cols:
             break
         text += " · " + part
-    return fit(text + " · ? keys", cols)
+    return _fit(text + " · ? keys", cols)
 
 def on_key(state: dict, key: str, page: int) -> bool:
     """Apply a key to the dashboard's state; whether it leaves the finished
@@ -109,9 +109,9 @@ def on_key(state: dict, key: str, page: int) -> bool:
     row say, for `_NOTE_MS`, the state it left and how to undo it. Any key
     clears the last one's note."""
 
-    if mouse_key(state, key):
+    if _mouse_key(state, key):
         return False
-    say_note(state, "")
+    _say_note(state, "")
     for k in KEYS:
         if k.early and key in k.keys and k.when(state):
             return k.do(state, key, page)
@@ -137,7 +137,7 @@ def on_key(state: dict, key: str, page: int) -> bool:
             leaves = k.do(state, key, page)
             if k.note != None:
                 # What the toggle did and how to undo it, for a moment.
-                say_note(state, k.note(state), _NOTE_MS)
+                _say_note(state, k.note(state), _NOTE_MS)
             return leaves
     return False
 
@@ -183,26 +183,26 @@ def _failures_focused(state):
     return state["focus"] == "failures"
 
 def _k_tab_number(state, key, page):
-    show_tab(state, _TABS[int(key) - 1][0])
+    _show_tab(state, _TABS[int(key) - 1][0])
     return False
 
 def _k_tab_cycle(state, key, page):
     names = [tab for tab, _ in _TABS]
     i = names.index(state.get("tab", "console")) if state.get("tab", "console") in names else 0
-    show_tab(state, names[(i + (1 if key == "tab" else -1)) % len(names)])
+    _show_tab(state, names[(i + (1 if key == "tab" else -1)) % len(names)])
     return False
 
 def _k_panes(state, key, page):
-    state["panes"] = not panes_shown(state)
+    state["panes"] = not _panes_shown(state)
     return False
 
 def _k_tips(state, key, page):
-    rows = shown_tips(state)
+    rows = _shown_tips(state)
     if not rows:
         return False
     at = max(0, min(state.get("tip_selected", 0), len(rows) - 1))
     if key == "s":
-        toggle_silence(state, rows[at])
+        _toggle_silence(state, rows[at])
     else:
         at = max(0, min(len(rows) - 1, at + (-1 if key in ("up", "k") else 1)))
     state["tip_selected"] = at
@@ -215,7 +215,7 @@ def _k_actions_wheel(state, key, page):
 
 def _k_pick_build(state, key, page):
     newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
-    state["picked_build"] = max(0, min(newest, picked_build(state) + (1 if key == ">" else -1)))
+    state["picked_build"] = max(0, min(newest, _picked_build(state) + (1 if key == ">" else -1)))
     state["tab_scroll"] = 0
     return False
 
@@ -230,9 +230,9 @@ def _k_tab_scroll(state, key, page):
 def _k_esc(state, key, page):
     if state["view"] != None:
         # Back a crumb: to the view it was opened from, else the tab's own.
-        back_to(state, len(state.get("views", [])))
+        _back_to(state, len(state.get("views", [])))
     elif state.get("tab", "console") != "console":
-        show_tab(state, "console")
+        _show_tab(state, "console")
     else:
         return state["ended"]
     return False
@@ -254,7 +254,7 @@ def _k_list(state, key, page):
         order = list(range(len(items)))
         at = min(chosen, len(order) - 1)
     else:
-        listed = listed_failures(state)
+        listed = _listed_failures(state)
         order = listed + [len(items) + k for k in range(_failure_total(state) - len(items))]
         at = min(_listed_position(state, listed, chosen), len(order) - 1)
     if not order:
@@ -281,12 +281,12 @@ def _k_step_record(state, key, page):
         if not items:
             return False
         chosen = min(state.get(_pick(state), 0), len(items) - 1)
-        show_tab(state, "failures")
+        _show_tab(state, "failures")
         step = 1 if key == "]" else -1
         shown = _shown_record(state) == items[chosen]
         _open_failure(state, (chosen + step) % len(items) if shown else chosen)
         return False
-    listed = listed_failures(state)
+    listed = _listed_failures(state)
     order = listed + [len(items) + k for k in range(len(_tab_extras(state)))]
     if not order:
         return False
@@ -296,7 +296,7 @@ def _k_step_record(state, key, page):
         shown = _shown_record(state) == items[chosen]
     else:
         shown = state.get("stepped") == chosen and state["view"] != None
-    show_tab(state, "failures")
+    _show_tab(state, "failures")
     target = order[(at + (1 if key == "]" else -1)) % len(order)] if shown else chosen
     state["stepped"] = target
     if target >= len(items):
@@ -314,7 +314,7 @@ def _k_step_attempt(state, key, page):
     if not items:
         return False
     chosen = min(state.get(_pick(state), 0), len(items) - 1)
-    show_tab(state, "failures")
+    _show_tab(state, "failures")
     shown = _shown_record(state)
     if shown != None and shown not in items:
         same = [i for i, r in enumerate(items) if r["label"] == shown["label"]]
@@ -335,13 +335,13 @@ def _k_find(state, key, page):
     if search["mode"] == "filter" and search["pattern"] != None:
         search["origin"] = 0
     else:
-        search["origin"] = min(state["scroll"], max(0, len(shown_lines(state)) - page))
+        search["origin"] = min(state["scroll"], max(0, len(_shown_lines(state)) - page))
 
     # Folded, the view's rows; the search reads every line, so the origin
     # is kept in lines too, `origin_rows` to go back to.
     search["origin_rows"] = search["origin"]
-    if folding(state):
-        search["origin"] = folded_to_lines(state, search["origin"])
+    if _folding(state):
+        search["origin"] = _folded_to_lines(state, search["origin"])
     search["anchored"] = search["origin"] > 0 or held
     return False
 
@@ -375,7 +375,7 @@ def _k_scroll(state, key, page):
     return False
 
 def _k_match(state, key, page):
-    step_match(state, 1 if key == "n" else -1, page)
+    _step_match(state, 1 if key == "n" else -1, page)
     return False
 
 def _k_ends(state, key, page):
@@ -404,9 +404,9 @@ def _k_help(state, key, page):
 def _k_open(state, key, page):
     if key == "o":
         path, line = _view_file(state)
-        say_note(state, open_in_editor(state, path, line))
+        _say_note(state, _open_in_editor(state, path, line))
     else:
-        say_note(state, next_editor(state))
+        _say_note(state, _next_editor(state))
     return False
 
 def _k_wrap(state, key, page):
@@ -428,7 +428,7 @@ def _k_unfold(state, key, page):
     state["unfolded"] = not state.get("unfolded", False)
     if state.get("fold_open"):
         state["fold_open"] = {}
-        refold(state)
+        _refold(state)
     state["scroll"] = 0
     state["search"]["anchored_view"] = False
     return False
@@ -443,7 +443,7 @@ def _k_mouse(state, key, page):
         state["screen"].mouse(state["mouse"])
 
         # The folds' rows say whether a click shows them.
-        refold(state)
+        _refold(state)
     return False
 
 def _k_redraw(state, key, page):
@@ -534,8 +534,8 @@ KEYS = [
     _key(["ctrl-l"], _always, _k_redraw, help = ("^L", "redraw the screen"), group = "Screen", early = True),
     _key(["1", "2", "3", "4", "5"], _bar_closed, _k_tab_number, help = ("1-5", "a tab: console, failures, metrics, invocation, tips"), group = "Screen"),
     _key(["tab", "shift-tab"], _bar_closed, _k_tab_cycle, help = ("Tab  ⇧Tab", "the next or previous tab: console, failures, metrics, invocation, tips (or click one)"), group = "Screen"),
-    _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen", note = lambda s: ("build panes open · p folds them" if panes_shown(s) else "build panes folded · p opens them") if built(s) else "no build panes yet: p opens them once a build runs"),
-    _key(["up", "k", "down", "j", "s"], _tips_listed, _k_tips, help = ("s", "in Tips, ↑↓ choose a tip and s silences it on this machine, or undoes it"), group = "Failures", shown = lambda s: s.get("tab") == "tips" or tips_count(s) > 0),
+    _key(["p"], _always, _k_panes, help = ("p", "the build panes open or folded, and back"), group = "Screen", note = lambda s: ("build panes open · p folds them" if _panes_shown(s) else "build panes folded · p opens them") if _built(s) else "no build panes yet: p opens them once a build runs"),
+    _key(["up", "k", "down", "j", "s"], _tips_listed, _k_tips, help = ("s", "in Tips, ↑↓ choose a tip and s silences it on this machine, or undoes it"), group = "Failures", shown = lambda s: s.get("tab") == "tips" or _tips_count(s) > 0),
     _key(["wheel-up", "wheel-down"], _over_actions, _k_actions_wheel),
     _key(["<", ">"], lambda s: s.get("tab") in _PICKED_TABS and s["view"] == None, _k_pick_build, help = ("<  >", "in Metrics and Invocation, the previous or next build"), group = "Screen", shown = lambda s: len(s.get("builds", [])) > 0),
     _key(["K", "home", "J", "end", "up", "k", "wheel-up", "down", "j", "wheel-down", "pageup", "pagedown", "b", " ", "u", "d"], _in_list_tab, _k_tab_scroll),
@@ -588,7 +588,7 @@ def help_rows(state: dict, width: int = 0) -> list:
         if not entries:
             continue
         rows.append(group)
-        rows += ["  " + fit(k.help[0], 20) + " " + k.help[1] for k in entries]
+        rows += ["  " + _fit(k.help[0], 20) + " " + k.help[1] for k in entries]
     return rows + _actions_key(width) + _key_rows("Tests", _TESTS_KEY, width)
 
 # What the bar's and the Actions rows' glyphs and words are, for the `?`
@@ -600,7 +600,7 @@ _ACTIONS_KEY = [
     "  cache hits: local + disk + remote: actions whose results were reused",
     "▒ local: outputs Bazel's action cache on this machine said were still valid. Live, local is estimated (~)",
     "▓ disk / remote: outputs from the --disk_cache directory, or from the remote cache (including a remote executor's cached result)",
-    "○ skipped: Bazel counted these done without running them or checking a cache: " + SKIPPED_KINDS,
+    "○ skipped: Bazel counted these done without running them or checking a cache: " + _SKIPPED_KINDS,
     "░ internal: Bazel bookkeeping with no command (runfiles trees, file writes, workspace status)",
     "▌ other: what Bazel's own counts leave out of every kind, at the end (no execution log to tell them apart); rare",
     "? unreported: Bazel counted these done but hasn't said how; live they settle into a kind, and without every action's events (a remote cache, a --bes_backend, --dashboard:actions=failed) some stay (┈ on the bar)",
@@ -618,7 +618,7 @@ def _actions_key(width: int) -> list:
     for part in _ACTIONS_KEY:
         lines = [""]
         for word in part.split(" "):
-            if width and lines[-1] and text_width(lines[-1] + " " + word) > width - (2 if len(lines) == 1 else 4):
+            if width and lines[-1] and _text_width(lines[-1] + " " + word) > width - (2 if len(lines) == 1 else 4):
                 lines.append("")
             lines[-1] += (" " if lines[-1] else "") + word
         rows += ["  " + lines[0]] + ["    " + l for l in lines[1:]]
@@ -632,7 +632,7 @@ def _key_rows(title: str, parts: list, width: int) -> list:
     on one without a width), indented under it."""
     rows = [[]]
     for part in parts:
-        if width and rows[-1] and 2 + text_width(" · ".join(rows[-1] + [part])) > width:
+        if width and rows[-1] and 2 + _text_width(" · ".join(rows[-1] + [part])) > width:
             rows.append([])
         rows[-1].append(part)
     return [title] + ["  " + " · ".join(row) for row in rows]

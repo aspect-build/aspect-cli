@@ -19,69 +19,69 @@ _plain = term_text.plain
 _RESET = term_text.RESET
 _row_of = term_text.row_of
 _tail = term_text.tail
-elapsed = term_text.elapsed
-fit = term_text.fit
-link = term_text.link
-mark_cells = term_text.mark_cells
-text_width = term_text.text_width
-wrap_line = term_text.wrap_line
-blocked_targets = failure_records.blocked_targets
-blocked_text = failure_records.blocked_text
-FLAKY_NOTE = failures.FLAKY_NOTE
+_elapsed = term_text.elapsed
+_fit = term_text.fit
+_link = term_text.link
+_mark_cells = term_text.mark_cells
+_text_width = term_text.text_width
+_wrap_line = term_text.wrap_line
+_blocked_targets = failure_records.blocked_targets
+_blocked_text = failure_records.blocked_text
+_FLAKY_NOTE = failures.FLAKY_NOTE
 _expand_tabs = failures.expand_tabs
 _failure_counts = failures.failure_counts
 _GAP_ROW = failures.GAP_ROW
 _tab_extras = failures.tab_extras
-entry_text = failures.entry_text
-excerpt_rows = failures.excerpt_rows
-failure_entries = failures.failure_entries
-target_counts = failures.target_counts
+_entry_text = failures.entry_text
+_excerpt_rows = failures.excerpt_rows
+_failure_entries = failures.failure_entries
+_target_counts = failures.target_counts
 _aged = dashboard_actions.aged
 _has_tests = dashboard_actions.has_tests
 _NOTHING_RAN = dashboard_actions.NOTHING_RAN
 _SPINNER = dashboard_actions.SPINNER
 _tests_words = dashboard_actions.tests_words
-action_counts = dashboard_actions.action_counts
-action_lines = dashboard_actions.action_lines
-action_results = dashboard_actions.action_results
-action_row = dashboard_actions.action_row
-action_seconds = dashboard_actions.action_seconds
-action_split = dashboard_actions.action_split
-bar_row = dashboard_actions.bar_row
-built = dashboard_actions.built
-phase_status = dashboard_actions.phase_status
-running_actions = dashboard_actions.running_actions
-slowest_rows = dashboard_actions.slowest_rows
-slowest_title = dashboard_actions.slowest_title
-target_rows = dashboard_actions.target_rows
-test_progress = dashboard_actions.test_progress
-tests_cached_text = dashboard_actions.tests_cached_text
-tests_text = dashboard_actions.tests_text
+_action_counts = dashboard_actions.action_counts
+_action_lines = dashboard_actions.action_lines
+_action_results = dashboard_actions.action_results
+_action_row = dashboard_actions.action_row
+_action_seconds = dashboard_actions.action_seconds
+_action_split = dashboard_actions.action_split
+_bar_row = dashboard_actions.bar_row
+_built = dashboard_actions.built
+_phase_status = dashboard_actions.phase_status
+_running_actions = dashboard_actions.running_actions
+_slowest_rows = dashboard_actions.slowest_rows
+_slowest_title = dashboard_actions.slowest_title
+_target_rows = dashboard_actions.target_rows
+_test_progress = dashboard_actions.test_progress
+_tests_cached_text = dashboard_actions.tests_cached_text
+_tests_text = dashboard_actions.tests_text
 _console_row = dashboard_log.console_row
 _FILTER_TITLES = dashboard_log.FILTER_TITLES
 _piece_links = dashboard_log.piece_links
 _search_bar = dashboard_log.search_bar
-folding = dashboard_log.folding
-shown_lines = dashboard_log.shown_lines
+_folding = dashboard_log.folding
+_shown_lines = dashboard_log.shown_lines
 _BUILD_TABS = dashboard_view.BUILD_TABS
 _listed_position = dashboard_view.listed_position
 _TABS = dashboard_view.TABS
-build_view = dashboard_view.build_view
-crumbs = dashboard_view.crumbs
-listed_failures = dashboard_view.listed_failures
-panes_shown = dashboard_view.panes_shown
-picked_build = dashboard_view.picked_build
-shown_tips = dashboard_view.shown_tips
-tips_count = dashboard_view.tips_count
+_build_view = dashboard_view.build_view
+_crumbs = dashboard_view.crumbs
+_listed_failures = dashboard_view.listed_failures
+_panes_shown = dashboard_view.panes_shown
+_picked_build = dashboard_view.picked_build
+_shown_tips = dashboard_view.shown_tips
+_tips_count = dashboard_view.tips_count
 _hover_colour = dashboard_pointer.hover_colour
 _peek_paint = dashboard_pointer.peek_paint
 _selection_colour = dashboard_pointer.selection_colour
-link_at = dashboard_pointer.link_at
-link_marks = dashboard_pointer.link_marks
-link_spans = dashboard_pointer.link_spans
-selection_rows = dashboard_pointer.selection_rows
-help_rows = dashboard_keys.help_rows
-keys_row = dashboard_keys.keys_row
+_link_at = dashboard_pointer.link_at
+_link_marks = dashboard_pointer.link_marks
+_link_spans = dashboard_pointer.link_spans
+_selection_rows = dashboard_pointer.selection_rows
+_help_rows = dashboard_keys.help_rows
+_keys_row = dashboard_keys.keys_row
 
 # Folded builds shown above the tabs, the older counted on a row.
 _MAX_FOLDED = 3
@@ -99,7 +99,7 @@ def failure_rows(state: dict, room: int, width: int) -> list:
     is hidden above and below is
     counted in rows of the list, an excerpt never cut from its row."""
     fails = state["fails"]
-    listed = listed_failures(state)
+    listed = _listed_failures(state)
     extras = _tab_extras(state)
     total = len(listed) + len(extras)
     if room <= 0 or total == 0:
@@ -119,7 +119,7 @@ def failure_rows(state: dict, room: int, width: int) -> list:
             rows.extend([_excerpt_row(line, width) for line in record_excerpt(state, i)[1]])
         return rows
 
-    blocked = blocked_targets(state)
+    blocked = _blocked_targets(state)
 
     def unlogged_row(pos):
         what, label = extras[pos - len(listed)]
@@ -127,11 +127,11 @@ def failure_rows(state: dict, room: int, width: int) -> list:
             text = _middle("! " + label["lines"][0], width)
             return _list_row(state, text, width, pos == at, _c("warning") + "!" + _RESET + _c("muted") + text[1:] + _RESET)
         if what == "entry":
-            heading = entry_text(state, label)
+            heading = _entry_text(state, label)
             text = _middle("✗ " + " · ".join(([label["label"]] if label["label"] else []) + ([heading["kind"]] if heading["kind"] else []) + heading["details"]) + ("" if label.get("exited") != None else "  no log"), width)
             return _list_row(state, text, width, pos == at, _c("error") + "✗" + _RESET + text[1:])
         roots = blocked.get(label)
-        text = _middle(("○ " + label + "  " + blocked_text(label, roots)) if roots else ("✗ " + label + "  no log"), width)
+        text = _middle(("○ " + label + "  " + _blocked_text(label, roots)) if roots else ("✗ " + label + "  no log"), width)
         return _list_row(state, text, width, pos == at, _c("muted") + text + _RESET if roots else _c("error") + "✗" + _RESET + text[1:])
 
     def row(i, chosen):
@@ -185,26 +185,26 @@ def _excerpt_row(line: str, width: int) -> str:
     """An excerpt's line in the Failures list, behind its `│`; a gap `│ …`."""
     if line == _GAP_ROW:
         return "  " + _c("muted") + "│ …" + _RESET
-    return "  " + _c("muted") + "│" + _RESET + " " + fit(_expand_tabs(line), max(1, width - 4)).rstrip()
+    return "  " + _c("muted") + "│" + _RESET + " " + _fit(_expand_tabs(line), max(1, width - 4)).rstrip()
 
 def record_excerpt(state: dict, i: int) -> tuple:
     """`(details, rows)` of the Failures list's row for record `i`, as the
     failure summary heads and quotes its entry (`entry_text`): `([], [])`
     for a record that is no entry's."""
-    for e in failure_entries(state)["entries"]:
+    for e in _failure_entries(state)["entries"]:
         if e["index"] == i:
-            text = entry_text(state, e)
+            text = _entry_text(state, e)
             details = ([text["kind"]] if text["kind"] else []) + text["details"]
             if e["flaky"]:
-                details.append(FLAKY_NOTE)
-            return (details, excerpt_rows(text["lines"], text["gaps"])[0])
+                details.append(_FLAKY_NOTE)
+            return (details, _excerpt_rows(text["lines"], text["gaps"])[0])
     return ([], [])
 
 def _list_row(state: dict, text: str, width: int, chosen: bool, drawn: str) -> str:
     """A list's row: `text` highlighted whole (`active`) where it is the
     chosen one and the list has the keys, else as `drawn`."""
     if chosen and state["focus"] == "failures":
-        return _c("active") + fit(text, width) + _RESET
+        return _c("active") + _fit(text, width) + _RESET
     return drawn
 
 def _window(total: int, room: int, selected: int):
@@ -241,7 +241,7 @@ def action_rows(state: dict, room: int, width: int) -> list:
     rows = []
     for i in range(start, start + shown):
         rec = outputs[i]
-        text = fit("• " + rec["label"] + "  " + rec["detail"], width).rstrip(" ")
+        text = _fit("• " + rec["label"] + "  " + rec["detail"], width).rstrip(" ")
         rows.append(_list_row(state, text, width, i == picked, _c("accent") + "•" + _RESET + text[1:]))
     return _counted(rows, above, below)
 
@@ -255,25 +255,25 @@ def links_row(pages: list, cols: int) -> str:
     each = room // len(pages)
     parts = []
     for label, url in pages:
-        shown = fit(label + ": " + url, each).rstrip(" ")
-        parts.append(_c("link") + link(url, shown) + _RESET)
+        shown = _fit(label + ": " + url, each).rstrip(" ")
+        parts.append(_c("link") + _link(url, shown) + _RESET)
     return lead + " · ".join(parts)
 
 def _box_top(title: str, width: int) -> str:
-    title = fit(title, width - 5).rstrip(" ")
-    return _c("border") + "┌─ " + _RESET + _c("strong") + title + _RESET + _c("border") + " " + "─" * max(0, width - text_width(title) - 5) + "┐" + _RESET
+    title = _fit(title, width - 5).rstrip(" ")
+    return _c("border") + "┌─ " + _RESET + _c("strong") + title + _RESET + _c("border") + " " + "─" * max(0, width - _text_width(title) - 5) + "┐" + _RESET
 
 def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, links = None) -> str:
     """A row of a box `width` wide, `coloured` (a function of its text) when
     given, `mark`ed in its left margin (the current match), its right border
     `edge` when given (a scrollbar's), `links` (`[start, end, url]` by
     character of `text`) drawn as links."""
-    body = fit(text, width - 4)
+    body = _fit(text, width - 4)
     if coloured != None:
         # Coloured before the padding, so a highlight never lights it.
         shown = body.rstrip(" ")
         body = coloured(shown) + " " * (len(body) - len(shown))
-    body = mark_cells(body, link_marks(text, links, width - 4))
+    body = _mark_cells(body, _link_marks(text, links, width - 4))
 
     # The current match marked by its row's left edge, as the scrollbar's
     # thumb marks the view.
@@ -309,7 +309,7 @@ def build_row(build: dict, cols: int) -> str:
         parts.append(_counts("○%d", build["blocked"]))
     if build.get("outcome"):
         parts.append(build["outcome"])
-    parts.append(elapsed(build["ms"]))
+    parts.append(_elapsed(build["ms"]))
     row = " " + mark + _RESET + " " + _c("muted") + " · ".join(parts)
     return _cut_escaped(row, cols) + _RESET
 
@@ -318,26 +318,26 @@ def _header(state: dict, cols: int, bar: bool) -> str:
     first of `phase_status` that fits whole (`bar` whether the bar is
     drawn, which then has the count)."""
     spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else ("✔" if state.get("verdict", True) else "✗")
-    took = elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"]))
+    took = _elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"]))
     title = " %s aspect %s · %s " % (spin, state["task"], took)
 
     # The task and how long it has run whole; the status in what is left,
     # shortened first.
-    title = fit(title, min(text_width(title), cols)).rstrip(" ")
-    if text_width(title) < cols:
+    title = _fit(title, min(_text_width(title), cols)).rstrip(" ")
+    if _text_width(title) < cols:
         title += " "
-    room = max(0, cols - text_width(title))
+    room = max(0, cols - _text_width(title))
 
     # Whole or not at all: a status cut to a bare number says nothing.
     right = ""
-    for shown in phase_status(state, bar):
-        if shown and text_width(shown) <= room - 2:
+    for shown in _phase_status(state, bar):
+        if shown and _text_width(shown) <= room - 2:
             right = shown + " "
             break
 
     # A status bar: the whole row, the time it has run included, in the
     # theme's `status_bar`.
-    pad = " " * max(0, room - text_width(right))
+    pad = " " * max(0, room - _text_width(right))
     return _c("status_bar") + title + pad + right + _RESET
 
 # The Results pane's widths by the screen's (`_results_width`): `_WIDEST`
@@ -375,12 +375,12 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
     # The builds that ended, a row each, the newest last, the older
     # counted; not the one whose panes are open.
-    open_panes = panes_shown(state)
+    open_panes = _panes_shown(state)
     folded = list(state.get("builds", []))
     if open_panes and not state.get("building") and folded:
         folded = folded[:-1]
     if len(folded) > _MAX_FOLDED:
-        out.append(_c("muted") + fit(_counts(" +%d earlier", (len(folded) - _MAX_FOLDED + 1)), cols) + _RESET)
+        out.append(_c("muted") + _fit(_counts(" +%d earlier", (len(folded) - _MAX_FOLDED + 1)), cols) + _RESET)
         folded = folded[len(folded) - _MAX_FOLDED + 1:]
     state["folded_at"] = len(out)
     for b in folded:
@@ -396,10 +396,10 @@ def _top(state: dict, cols: int, rows: int) -> list:
     limit = rows - len(out) - 2 - 4
     if limit < 2:
         return out
-    view = build_view(state)
-    if rows >= _SHORT_ROWS and limit >= 3 and (state.get("building") or action_split(view)["counted"]):
+    view = _build_view(state)
+    if rows >= _SHORT_ROWS and limit >= 3 and (state.get("building") or _action_split(view)["counted"]):
         limit -= 1
-        out.append(bar_row(view, cols))
+        out.append(_bar_row(view, cols))
         out[0] = _header(state, cols, True)
 
     if state["pages"] and (rows >= _SHORT_ROWS or limit >= 6):
@@ -407,16 +407,16 @@ def _top(state: dict, cols: int, rows: int) -> list:
         out.append(links_row(state["pages"], cols))
 
     # Running actions | targets and tests.
-    actions = sorted(running_actions(state["progress"]), key = lambda r: -action_seconds(r))
-    running, started = action_counts(state["progress"])
+    actions = sorted(_running_actions(state["progress"]), key = lambda r: -_action_seconds(r))
+    running, started = _action_counts(state["progress"])
     running = max(len(actions), running)
     finished = state["ended"] and not actions and (state.get("slowest") or state.get("critical"))
     if finished:
-        actions = slowest_rows(state)
+        actions = _slowest_rows(state)
     right_w = _results_width(cols)
     left_w = cols - right_w
     c = state["counts"]
-    built_n, targets_failed, targets_blocked = target_counts(state)
+    built_n, targets_failed, targets_blocked = _target_counts(state)
     failed = _c("error") if targets_failed else ""
     tests_failed = _c("error") if c["tests_failed"] else ""
     blocked_text_ = (_counts(", %d blocked", targets_blocked)) if targets_blocked else ""
@@ -424,16 +424,16 @@ def _top(state: dict, cols: int, rows: int) -> list:
         _counts("Targets  %d configured", c["configured"]),
         _counts("         %s%d built%s, %s%d failed%s%s", (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_)),
     ] + (["Tests    " + _tests_words(c)] if _has_tests(c) else [])
-    wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
+    wide = max([_text_width(_plain(r)) for r in summary]) <= right_w - 4
     if not wide:
         # Narrow: the failures first, as what matters is what failed.
-        summary = target_rows(failed, targets_failed, built_n, targets_blocked, c["configured"], right_w - 4) + ([
+        summary = _target_rows(failed, targets_failed, built_n, targets_blocked, c["configured"], right_w - 4) + ([
             "Tests   " + " ".join([p for p in [
                 _counts("%s✗%d%s", (tests_failed, c["tests_failed"], _RESET)) if c["tests_failed"] else "",
                 _counts("%s✓%d%s", (_c("success"), c["tests_passed"], _RESET)) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
                 _counts("%s~%d%s", (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "",
                 _counts("⊘%d", c["tests_skipped"]) if c.get("tests_skipped") else "",
-            ] if p]) + tests_cached_text(c),
+            ] if p]) + _tests_cached_text(c),
         ] if _has_tests(c) else [])
 
     # As tall as the most Results rows there can be, for the whole build;
@@ -444,12 +444,12 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # Tests running and pending while a build runs, the actions' `─`
     # words: on the Tests row where it has room, else on a row under it.
     tests_rows = []
-    tests_now = tests_text(test_progress(state))
+    tests_now = _tests_text(_test_progress(state))
     if tests_now:
         indent = " " * (9 if wide else 8)
-        if text_width(_plain(summary[-1]) + " · " + _plain(tests_now)) <= right_w - 4:
+        if _text_width(_plain(summary[-1]) + " · " + _plain(tests_now)) <= right_w - 4:
             summary[-1] += " · " + tests_now
-        elif text_width(indent + _plain(tests_now)) <= right_w - 4:
+        elif _text_width(indent + _plain(tests_now)) <= right_w - 4:
             tests_rows = [indent + tests_now]
         else:
             # Too narrow for one row: running on one, pending under it.
@@ -458,7 +458,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # The build's actions, one unit with the bar's, its glyphs their keys;
     # the critical path; the failures, whose row a click takes to them.
     lead = "Actions  " if wide else "Actions "
-    split = action_split(state)
+    split = _action_split(state)
     critical = (("Critical path %s" if wide else "Crit %s") % state["critical"]) if state.get("critical") else None
     failed_n, blocked_n = _failure_counts(state)
     failed_row = None
@@ -477,7 +477,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     for _ in range(most + 4):
         room_now = right_w - 5 if apart else right_w - 4 - len(lead)
         rows_now = max(1, most - 1) if apart else most
-        actions_rows = action_results(split, room_now, rows_now, short = cols < _SHORT_UNDER_COLS, memory = None if split["final"] else _actions_memory(state, room_now, rows_now, pane))
+        actions_rows = _action_results(split, room_now, rows_now, short = cols < _SHORT_UNDER_COLS, memory = None if split["final"] else _actions_memory(state, room_now, rows_now, pane))
         if apart and actions_rows:
             actions_rows = [""] + actions_rows
         wanted = len(summary) + len(actions_rows) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])
@@ -507,7 +507,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # local pool) are counted beside the running ones, as Bazel's line has.
     head = "Running (%d of %d started)" % (running, started) if started > running else "Running (%d)" % running
     if finished:
-        head = slowest_title(state)
+        head = _slowest_title(state)
     out.append(_box_top(head, left_w) + _box_top(results, right_w))
 
     # Where the failures' count is drawn, for a click to show their tab;
@@ -521,12 +521,12 @@ def _top(state: dict, cols: int, rows: int) -> list:
         s = summary[i] if i < len(summary) else ""
 
         # `summary` rows carry colour: pad them by their visible length.
-        visible = text_width(_plain(s))
+        visible = _text_width(_plain(s))
         s_cell = _c("border") + "│ " + _RESET + s + " " * max(0, right_w - 4 - visible) + _c("border") + " │" + _RESET
         if visible > right_w - 4:
             s_cell = _box_row(_plain(s), right_w)
         colour = (lambda text: _c("muted") + text + _RESET) if a == _NOTHING_RAN else _aged(a)
-        out.append(_box_row(action_row(a, left_w - 4), left_w, colour, edge = edge[i] if edge else None) + s_cell)
+        out.append(_box_row(_action_row(a, left_w - 4), left_w, colour, edge = edge[i] if edge else None) + s_cell)
     out.append(_box_bottom(left_w) + _box_bottom(right_w))
 
     return out
@@ -570,14 +570,14 @@ def scrolled_rows(rows: list, height: int, scroll: int, total: int = 0) -> tuple
 
 def tips_role(state: dict) -> str:
     """The role the tab's count is drawn in: its most urgent tip's."""
-    rows = [t for t, silenced in shown_tips(state) if not silenced]
+    rows = [t for t, silenced in _shown_tips(state) if not silenced]
     return "tip." + rows[0].get("severity", "note") if rows else "muted"
 
 def tips_lines(state: dict, width: int) -> list:
     """The Tips tab: each tip as `TIP[id] severity: title`, the chosen one
     lit with its body under it, a silenced one muted saying so (or why it
     could not be), then how to silence a tip."""
-    rows = shown_tips(state)
+    rows = _shown_tips(state)
     if not rows:
         return [_c("muted") + "No tips" + _RESET]
     at = max(0, min(state.get("tip_selected", 0), len(rows) - 1))
@@ -622,7 +622,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     at_top = False
     view = None if state.get("help") else state["view"]
     search = state["search"]
-    log = shown_lines(state)
+    log = _shown_lines(state)
     log_h = max(1, rows - len(out) - 3)
     pattern = search["pattern"]
     scroll = 0
@@ -631,7 +631,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     if state.get("help"):
         # From the row ↑↓ have scrolled them to, a last row counting the rest
         # when they do not fit; the console's scroll left as it is.
-        log = help_rows(state, body_w)
+        log = _help_rows(state, body_w)
         top = min(state.get("help_top", 0), max(0, len(log) - log_h))
         state["help_top"] = top
         log = log[top:]
@@ -647,7 +647,7 @@ def render(state: dict, cols: int, rows: int) -> str:
         if wrapping:
             filled = 0
             for i, line in enumerate(log):
-                filled += len(wrap_line(line, body_w))
+                filled += len(_wrap_line(line, body_w))
                 if filled >= log_h:
                     top_lines = i + 1
                     break
@@ -679,21 +679,21 @@ def render(state: dict, cols: int, rows: int) -> str:
             # pane does not hide those above it.
             if filled >= log_h and not at_top:
                 break
-            filled += len(wrap_line(log[i], body_w))
+            filled += len(_wrap_line(log[i], body_w))
             start = i
         for i in range(end, len(log)):
             if filled >= log_h:
                 break
-            filled += len(wrap_line(log[i], body_w))
+            filled += len(_wrap_line(log[i], body_w))
             end = i + 1
 
         # A match jumped to, scrolled to in lines, may sit above the rows
         # that fill the pane: centred on it in rows instead.
         if jumped >= 0 and search.get("centre") and (jumped <= start or jumped >= end) and jumped < len(log):
-            filled = len(wrap_line(log[jumped], body_w))
+            filled = len(_wrap_line(log[jumped], body_w))
             start = jumped
             for i in range(jumped - 1, -1, -1):
-                rows_i = len(wrap_line(log[i], body_w))
+                rows_i = len(_wrap_line(log[i], body_w))
                 if filled + rows_i > log_h // 2:
                     break
                 filled += rows_i
@@ -703,7 +703,7 @@ def render(state: dict, cols: int, rows: int) -> str:
             # from `end`, has it in view still.
             end = jumped + 1
             for i in range(jumped + 1, len(log)):
-                rows_i = len(wrap_line(log[i], body_w))
+                rows_i = len(_wrap_line(log[i], body_w))
                 if filled + rows_i > log_h:
                     break
                 filled += rows_i
@@ -765,7 +765,7 @@ def render(state: dict, cols: int, rows: int) -> str:
             continue
         if start + i == jumped:
             first_row = len(drawn)
-        for j, (piece, at) in enumerate(wrap_line(line, body_w)):
+        for j, (piece, at) in enumerate(_wrap_line(line, body_w)):
             paint = colour_current if start + i == current else colour
             drawn.append((piece, paint(line, at), j == 0 and start + i == current, _piece_links(links, at, len(piece)), j > 0))
             drawn_at.append(start + i)
@@ -787,7 +787,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     state["page_h"] = log_h
 
     # Which of the folded view's lines each row is, for a click on a fold.
-    folded_view = view == None and not state.get("help") and folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and bool(state.get("folded"))
+    folded_view = view == None and not state.get("help") and _folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and bool(state.get("folded"))
     first = len(out)
     for i in range(log_h):
         if folded_view and i < len(drawn_at):
@@ -817,7 +817,7 @@ def _shown_parts(parts: list, room: int) -> list:
     if len(parts) > 1:
         tries.append([("…", None), whole[-1]])
     for parts_tried in tries:
-        if 2 + text_width(" ▹ ".join([p for p, _ in parts_tried])) <= room:
+        if 2 + _text_width(" ▹ ".join([p for p, _ in parts_tried])) <= room:
             return parts_tried
     return [(_tail(parts[-1], max(1, room - 2)), len(parts) - 1)]
 
@@ -839,12 +839,12 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     for tab, name in _TABS:
         if tab == "failures" and (failed or blocked):
             name += _counts(" ✗%d", failed) + (_counts(" ○%d", blocked) if blocked else "")
-        if tab == "tips" and tips_count(state):
-            name += " %d" % tips_count(state)
+        if tab == "tips" and _tips_count(state):
+            name += " %d" % _tips_count(state)
         names[tab] = name
-    muted = [] if built(state) else _BUILD_TABS
-    parts = [names[shown]] + crumbs(state)
-    whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " ▹ ".join(parts) + " ")
+    muted = [] if _built(state) else _BUILD_TABS
+    parts = [names[shown]] + _crumbs(state)
+    whole = 3 + _text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + _text_width(" " + " ▹ ".join(parts) + " ")
 
     # Every tab where the shown one keeps the room it is drawn in: `room`
     # below leaves it the row but its own two cells and the others'.
@@ -855,15 +855,15 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     for tab in tabs:
         if tab != shown:
             label = " " + names[tab] + " "
-            spans.append((at, at + text_width(label), tab))
-            at += text_width(label)
+            spans.append((at, at + _text_width(label), tab))
+            at += _text_width(label)
             if tab == "tips":
-                count = tips_count(state)
+                count = _tips_count(state)
                 label = (" Tips " + _c(tips_role(state)) + "%d" % count + _RESET + " ") if count else (_c("muted") + " Tips " + _RESET)
             text += (_c("muted") + label + _RESET) if tab in muted else label
             continue
         after = tabs[tabs.index(shown) + 1:]
-        room = cols - at - 2 - text_width("".join([" " + names[t] + " " for t in after]))
+        room = cols - at - 2 - _text_width("".join([" " + names[t] + " " for t in after]))
         drawn = _shown_parts(parts, room)
         text += _c("active") + " "
         at += 1
@@ -872,7 +872,7 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
                 text += " ▹ "
                 at += 3
             last = k == len(drawn) - 1
-            width = text_width(part)
+            width = _text_width(part)
             if level == 0 and len(parts) == 1:
                 spans.append((at, at + width, shown))
             elif level != None and not last:
@@ -886,8 +886,8 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
 
     # At least a dash on each side of the status, so it never touches a tab.
     rest = max(0, cols - at - 1)
-    info = (" " + fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
-    lead = rest - text_width(info) - (1 if info else 0)
+    info = (" " + _fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
+    lead = rest - _text_width(info) - (1 if info else 0)
     return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("muted") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
 
 def metrics_lines(state: dict) -> list:
@@ -895,12 +895,12 @@ def metrics_lines(state: dict) -> list:
     a cache served from their results), targets, timing and memory."""
     c = state["counts"]
     bm = state.get("inv", {}).get("build_metrics")
-    out = action_lines(state)
+    out = _action_lines(state)
     out += ["", _c("heading") + "Tests" + _RESET]
     runs = c.get("test_runs", 0)
     out.append(_row_of("runs", _counts("%d · %d from a cache%s", (runs, c.get("test_cached", 0), (_counts(" (%d%%)", (c["test_cached"] * 100 // runs))) if runs else ""))))
     out.append(_row_of("results", _counts("%d passed · %d failed · %d flaky · %d skipped", (c["tests_passed"], c["tests_failed"], c.get("tests_flaky", 0), c.get("tests_skipped", 0)))))
-    built_n, failed, blocked = target_counts(state)
+    built_n, failed, blocked = _target_counts(state)
     shown, _ = _failure_counts(state)
     out += ["", _c("heading") + "Targets" + _RESET]
     out.append(_row_of("configured", c["configured"]))
@@ -910,20 +910,20 @@ def metrics_lines(state: dict) -> list:
     out += ["", _c("heading") + "Time" + _RESET]
 
     # A folded build's own time; the running one's since it started.
-    picked = picked_build(state)
+    picked = _picked_build(state)
     builds = state.get("builds", [])
     took = builds[picked]["ms"] if 0 <= picked and picked < len(builds) else state["now_ms"] - state.get("build_start_ms", state["start_ms"])
-    out.append(_row_of("elapsed", elapsed(took)))
+    out.append(_row_of("elapsed", _elapsed(took)))
     if state.get("critical"):
         out.append(_row_of("critical path", state["critical"]))
     for field, name in (("analysis_phase_time_in_ms", "analysis"), ("execution_phase_time_in_ms", "execution"), ("cpu_time_in_ms", "CPU")):
         ms = bes_get(timing, field, 0) or 0
         if ms:
-            out.append(_row_of(name, elapsed(ms)))
+            out.append(_row_of(name, _elapsed(ms)))
     heap = bes_get(bes_get(bm, "memory_metrics"), "peak_post_gc_heap_size", 0) or 0
     if heap:
         out += ["", _c("heading") + "Memory" + _RESET, _row_of("peak heap after GC", "%d MiB" % (heap // (1024 * 1024)))]
-    slow = [] if state.get("building") else slowest_rows(state)
+    slow = [] if state.get("building") else _slowest_rows(state)
     if slow:
         out += ["", _c("heading") + "Slowest" + _RESET] + ["  " + r for r in slow]
     return out
@@ -971,15 +971,15 @@ def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
     width = cols - 4
     if tab == "tips":
         lines = tips_lines(state, width)
-        title = "↑↓ choose · s silence on this machine" if shown_tips(state) else ""
-    elif not built(state):
+        title = "↑↓ choose · s silence on this machine" if _shown_tips(state) else ""
+    elif not _built(state):
         lines = [_c("muted") + "No build yet" + _RESET]
         title = ""
     elif tab == "failures":
         lines = (action_rows if state.get("list") == "actions" else failure_rows)(state, log_h, width)
         title = "Actions with output · ↑↓ choose · Enter show its log" if state.get("list") == "actions" else "↑↓ choose · Enter log · ^O " + ("one" if state.get("expand_failures") else "all")
     else:
-        view = build_view(state)
+        view = _build_view(state)
         lines = metrics_lines(view) if tab == "metrics" else invocation_lines(view)
         top = min(state.get("tab_scroll", 0), max(0, len(lines) - log_h))
         state["tab_scroll"] = top
@@ -989,7 +989,7 @@ def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
     state["pane"] = (len(out), len(out) + log_h - 1)
     for i in range(log_h):
         line = lines[i] if i < len(lines) else ""
-        visible = text_width(_plain(line))
+        visible = _text_width(_plain(line))
         if visible > width:
             out.append(_box_row(_plain(line), cols))
         else:
@@ -1005,8 +1005,8 @@ def keys_line(state: dict, cols: int) -> str:
     version = state.get("cli_version", "")
     tag = (" aspect " + version + " ") if version else ""
     if not tag or cols - len(tag) < 60:
-        return _c("muted") + keys_row(state, cols) + _RESET
-    return _c("muted") + keys_row(state, cols - len(tag)) + _RESET + _c("subtle") + tag + _RESET
+        return _c("muted") + _keys_row(state, cols) + _RESET
+    return _c("muted") + _keys_row(state, cols - len(tag)) + _RESET + _c("subtle") + tag + _RESET
 
 def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
     """The frame of `out`'s rows: the link under the pointer lit, the
@@ -1021,15 +1021,15 @@ def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
     # reversed over it.
     state["frame"] = shown
     state["cols"] = cols
-    selected = {row: (a, b) for row, a, b in selection_rows(state, cols)}
+    selected = {row: (a, b) for row, a, b in _selection_rows(state, cols)}
     hover = state.get("hover")
     if hover != None and hover[1] == state.get("tab_row") and hover[1] < len(shown):
         for a, b, tab in state.get("tab_spans", []):
             if a <= hover[0] and hover[0] < b and tab != state.get("tab", "console"):
                 shown = list(shown)
                 on = _c("hover")
-                shown[hover[1]] = mark_cells(shown[hover[1]], [(a, b, on, _RESET, on)])
-    url = link_at(shown[hover[1]], hover[0]) if hover != None and hover[1] < len(shown) else None
+                shown[hover[1]] = _mark_cells(shown[hover[1]], [(a, b, on, _RESET, on)])
+    url = _link_at(shown[hover[1]], hover[0]) if hover != None and hover[1] < len(shown) else None
     if url != None:
         # The whole link lit: its row, and the rows above and below a wrap
         # carried it onto.
@@ -1038,16 +1038,16 @@ def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
         for step in (-1, 1):
             r = hover[1] + step
             for _ in range(len(shown)):
-                if r < 0 or r >= len(shown) or not link_spans(shown[r], url):
+                if r < 0 or r >= len(shown) or not _link_spans(shown[r], url):
                     break
                 lit.append(r)
                 r += step
         on, off = _hover_colour(state)
         for r in lit:
-            shown[r] = mark_cells(shown[r], [(a, b, on, off, on) for a, b in link_spans(shown[r], url)])
+            shown[r] = _mark_cells(shown[r], [(a, b, on, off, on) for a, b in _link_spans(shown[r], url)])
     if selected:
         on, off = _selection_colour(state)
-        shown = [mark_cells(row, [(selected[i][0], selected[i][1], on, off, on)]) if i in selected else row for i, row in enumerate(shown)]
+        shown = [_mark_cells(row, [(selected[i][0], selected[i][1], on, off, on)]) if i in selected else row for i, row in enumerate(shown)]
     frame = state.get("osc", "") + "\x1b[H" + "\r\n".join(["\x1b[K" + row for row in shown])
     state["osc"] = ""
     if len(shown) < rows:

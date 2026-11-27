@@ -8,8 +8,8 @@ _action_logs = failure_records.action_logs
 _own_labels = failure_records.own_labels
 _referrers = failure_records.referrers
 _workspace = failure_records.workspace
-log_paths = failure_records.log_paths
-repaired = bazel.build_events.repaired
+_log_paths = failure_records.log_paths
+_repaired = bazel.build_events.repaired
 
 # Every string of Bazel's console a tie reads, by what it is. The fixtures
 # (crates/aspect-cli/tests/testdata/failures) pin each one per Bazel version:
@@ -91,7 +91,7 @@ def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool, room: int):
         named = []
         for stream, value in rec["files"]:
             if stream == name and type(value) == "string":
-                named += [p for p in log_paths(state, rec, value) if p not in named]
+                named += [p for p in _log_paths(state, rec, value) if p not in named]
         body = got[0] if got[1] == 0 else None
         ansi = state.get("ansi")
         if body and plain and ansi != None:
@@ -459,7 +459,7 @@ def _tie_actions(state: dict, text: str, headers: list, by: dict, claimed: dict,
 
         # The history keys an action by its output as Bazel's events spell
         # it; Bazel's line says it as meant.
-        made = repaired(rec.get("output", "")).partition("/bin/")[2]
+        made = _repaired(rec.get("output", "")).partition("/bin/")[2]
         if made:
             k = _tie(by["message"].get(_BAZEL.not_created % made, []) + by["declared"].get(made, []))
             if k != None:

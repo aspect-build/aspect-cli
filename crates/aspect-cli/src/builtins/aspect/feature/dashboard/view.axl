@@ -8,19 +8,19 @@ load("../../private/lib/failures.axl", "failures")
 load("../../private/lib/tips.axl", "severity_rank")
 
 _MAX_LOG_BYTES = failure_records.MAX_LOG_BYTES
-blocked_targets = failure_records.blocked_targets
-blocked_text = failure_records.blocked_text
-cut_text = failure_records.cut_text
-log_paths = failure_records.log_paths
+_blocked_targets = failure_records.blocked_targets
+_blocked_text = failure_records.blocked_text
+_cut_text = failure_records.cut_text
+_log_paths = failure_records.log_paths
 _config_id = failure_records.config_id
 _label_of = failure_records.label_of
-test_shape = failure_records.test_shape
+_test_shape = failure_records.test_shape
 _NO_REASON = failures.NO_REASON
 _tab_extras = failures.tab_extras
-entry_text = failures.entry_text
-failure_detail = failures.failure_detail
-failure_entries = failures.failure_entries
-built = dashboard_actions.built
+_entry_text = failures.entry_text
+_failure_detail = failures.failure_detail
+_failure_entries = failures.failure_entries
+_built = dashboard_actions.built
 
 # The lines a record's logs share in its view (`fit_logs`).
 _MAX_VIEW = 5000
@@ -53,8 +53,8 @@ def log_view(state: dict, record: dict) -> dict:
             text = str(contents)
             cut = cut or inline_cut
             if inline_cut:
-                text = cut_text(text)
-        for path in ([copies[name]] if name in copies else []) + log_paths(state, record, value):
+                text = _cut_text(text)
+        for path in ([copies[name]] if name in copies else []) + _log_paths(state, record, value):
             got = state["read"](path, _MAX_LOG_BYTES)
             if got != None:
                 text, skipped = got
@@ -98,7 +98,7 @@ def log_view(state: dict, record: dict) -> dict:
         lines.extend(own[len(own) - keep:])
     if not record["files"]:
         lines.append("(Bazel reported no log for it)")
-    return {"title": record["label"] + " · " + failure_detail(state, record), "lines": lines, "cut": cut, "record": record}
+    return {"title": record["label"] + " · " + _failure_detail(state, record), "lines": lines, "cut": cut, "record": record}
 
 def refresh_test_view(state: dict, event) -> None:
     """A test's summary arriving (not Aborted, as `collect_event` reads it)
@@ -184,20 +184,20 @@ def _open_unlogged(state: dict, i: int) -> None:
         return
     what, item = extras[k]
     if what == "blocked":
-        for root in blocked_targets(state).get(item, []):
+        for root in _blocked_targets(state).get(item, []):
             for j, rec in enumerate(state["fails"]):
                 if rec["label"] == root:
                     _open_failure(state, j)
                     return
     state["selected"] = i
     if what == "blocked":
-        lines = ["(" + blocked_text(item, blocked_targets(state).get(item, [])) + ", which has no log here)"]
+        lines = ["(" + _blocked_text(item, _blocked_targets(state).get(item, [])) + ", which has no log here)"]
         title = item
     elif what == "other":
         lines = item["lines"]
         title = "Other error from Bazel"
     else:
-        text = entry_text(state, item)
+        text = _entry_text(state, item)
         lines = text["lines"] if item.get("exited") != None else ["(" + _NO_REASON + ")"]
         title = item["label"] or text["kind"]
     _show_failure_view(state, {"title": title, "lines": lines, "cut": False, "record": None})
@@ -207,7 +207,7 @@ def listed_failures(state: dict) -> list:
     the failure summary's order (`failure_entries`): every entry's record,
     a flaky test's too (marked, never counted); a test's other attempts,
     shards and runs are reached with `}` `{` from its row."""
-    return [e["index"] for e in failure_entries(state)["entries"] if e["index"] != None]
+    return [e["index"] for e in _failure_entries(state)["entries"] if e["index"] != None]
 
 def _listed_position(state: dict, listed: list, selected: int) -> int:
     """Where the chosen record is in the list: its own row, its test's row
@@ -227,7 +227,7 @@ def panes_shown(state: dict) -> bool:
     """Whether the build panes are open: while a build runs, and on the
     finished screen of a task that ran one build of its own (`build`,
     `test`); else folded to a row a build, unless `p` asked for them."""
-    if not built(state):
+    if not _built(state):
         return False
     if state.get("panes") != None:
         return state["panes"]
@@ -300,7 +300,7 @@ def _crumb(state: dict, view: dict) -> str:
         return view["title"]
     if record["kind"] != "test":
         return record["label"] + (" ▹ " + record["detail"] if record.get("detail") else "")
-    runs, shards = test_shape(state, record["label"], record["config"])
+    runs, shards = _test_shape(state, record["label"], record["config"])
     attempts = state["last_attempts"].get((record["label"], record["config"], record["run"], record["shard"]), 1)
     parts = [record["label"]]
     if shards > 1:

@@ -14,13 +14,13 @@ _RESET = term_text.RESET
 _row_of = term_text.row_of
 _tenths = term_text.tenths
 _thousands = term_text.thousands
-fit = term_text.fit
-short_count = term_text.short_count
-text_width = term_text.text_width
-bazel_line = failure_records.bazel_line
-build_outcome = failure_records.build_outcome
-build_succeeded = failure_records.build_succeeded
-progress_counts = failure_records.progress_counts
+_fit = term_text.fit
+_short_count = term_text.short_count
+_text_width = term_text.text_width
+_bazel_line = failure_records.bazel_line
+_build_outcome = failure_records.build_outcome
+_build_succeeded = failure_records.build_succeeded
+_progress_counts = failure_records.progress_counts
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -34,7 +34,7 @@ def status_row(progress: list) -> int:
     first, or under its `Analyzing:` line while it analyses and runs actions
     at once; -1 for none."""
     for i in range(min(2, len(progress))):
-        if bazel_line(progress[i]).startswith("["):
+        if _bazel_line(progress[i]).startswith("["):
             return i
     return -1
 
@@ -42,7 +42,7 @@ def analysing(progress: list) -> bool:
     """Whether Bazel's progress area says it is still analysing, and so may
     find more actions: its `Analyzing:` line, above the status line once it
     runs actions too."""
-    return any([bazel_line(r).startswith("Analyzing") for r in progress[:2]])
+    return any([_bazel_line(r).startswith("Analyzing") for r in progress[:2]])
 
 def running_actions(progress: list) -> list:
     """The running actions in Bazel's progress area: the rows under its
@@ -53,7 +53,7 @@ def running_actions(progress: list) -> list:
     rows = [r.strip() for r in progress[at + 1:] if r.strip()]
     if rows or not progress:
         return rows
-    status = bazel_line(progress[at])
+    status = _bazel_line(progress[at])
     if not status.startswith("[") or "] " not in status:
         return []
     rest = status.partition("] ")[2].strip()
@@ -78,7 +78,7 @@ def action_counts(progress: list) -> tuple:
     at = status_row(progress)
     if at < 0 or "] " not in progress[at]:
         return (-1, -1)
-    words = [w.rstrip(",;") for w in bazel_line(progress[at]).partition("] ")[2].split()]
+    words = [w.rstrip(",;") for w in _bazel_line(progress[at]).partition("] ")[2].split()]
     running, started = -1, -1
     for i in range(len(words) - 1):
         n = _count(words[i])
@@ -158,11 +158,11 @@ def action_row(row: str, width: int) -> str:
     description cut in the middle to make room, as the part that tells a
     stuck action is its age."""
     head, sep, tail = row.rpartition("; ")
-    if not sep or text_width(row) <= width or text_width(tail) + 4 > width:
+    if not sep or _text_width(row) <= width or _text_width(tail) + 4 > width:
         return _middle(row, width)
-    room = width - text_width(tail) - 1
+    room = width - _text_width(tail) - 1
     head = _middle(head, room)
-    return head + " " * (room - text_width(head)) + " " + tail
+    return head + " " * (room - _text_width(head)) + " " + tail
 
 # The slowest actions kept for the finished pane, which scrolls through them.
 _SLOWEST_KEPT = 50
@@ -179,7 +179,7 @@ def note_progress(state: dict, progress: list) -> None:
     before it no event has come for (`settled`: the local action cache's,
     for `_published_split`)."""
     at = status_row(progress)
-    counts = progress_counts(progress[at]) if at >= 0 else None
+    counts = _progress_counts(progress[at]) if at >= 0 else None
     if counts:
         before = state.get("done_total")
         if before and before[0] != counts[0]:
@@ -224,7 +224,7 @@ def _nothing_ran(state: dict) -> bool:
     run: its `BuildMetrics` say no action executed but those Bazel runs on
     every build (`_ALWAYS_RUN`, the workspace status)."""
     inv = state.get("inv") or {}
-    if state.get("building") or not build_succeeded(inv):
+    if state.get("building") or not _build_succeeded(inv):
         return False
     summary = bes_get(inv.get("build_metrics"), "action_summary")
     executed = bes_get(summary, "actions_executed", None)
@@ -295,7 +295,7 @@ def cache_hits(line: str) -> tuple | None:
     processes: 1,000 remote cache hit, 200 internal, 4 darwin-sandbox.`):
     the cache hits of every kind, of the processes not internal to Bazel;
     None for any other line."""
-    line = bazel_line(line)
+    line = _bazel_line(line)
     if not line.startswith("INFO: "):
         return None
     for sep in (" processes: ", " process: "):
@@ -349,7 +349,7 @@ def phase_status(state: dict, bar: bool = False) -> list:
             return ["%s of %s%s actions done" % (_thousands(done), _thousands(total), "+" if more else "")]
         return [phase_word(state)]
     if state["ended"] and state.get("builds"):
-        outcome = build_outcome(state["builds"][-1]["snapshot"].get("inv") or {})
+        outcome = _build_outcome(state["builds"][-1]["snapshot"].get("inv") or {})
         return [outcome] if outcome else []
     title = state.get("phase_title", "")
     text = state.get("phase_text", "")
@@ -360,7 +360,7 @@ def phase_status(state: dict, bar: bool = False) -> list:
 def phase_word(state: dict) -> str:
     """What a build is doing before it counts actions, from Bazel's
     progress area: `loading`, `analyzing`, else `starting`."""
-    lower = bazel_line(state["progress"][0]).lower() if state["progress"] else ""
+    lower = _bazel_line(state["progress"][0]).lower() if state["progress"] else ""
     for word in ("analyzing", "loading"):
         if word in lower:
             return word
@@ -376,12 +376,12 @@ def bazel_status(state: dict) -> list:
     at = status_row(progress)
     if at < 0:
         # Before it counts the bar says what it is doing; this, Bazel's line.
-        first = bazel_line(progress[0]).strip() if progress else ""
+        first = _bazel_line(progress[0]).strip() if progress else ""
         return [first] if first else []
-    rest = bazel_line(progress[at]).partition("] ")[2].strip()
+    rest = _bazel_line(progress[at]).partition("] ")[2].strip()
     if not analysing(progress):
         return [rest] if rest else []
-    first = bazel_line(progress[0]).strip()
+    first = _bazel_line(progress[0]).strip()
     return [first + " · " + rest, "analyzing · " + rest, "analyzing"] if rest else [first, "analyzing"]
 
 def build_progress(state: dict) -> tuple:
@@ -392,7 +392,7 @@ def build_progress(state: dict) -> tuple:
     is never analysing; `(-1, -1, False)` before it counts."""
     progress = state.get("progress") or []
     at = status_row(progress)
-    counts = progress_counts(progress[at]) if state.get("building") and at >= 0 else None
+    counts = _progress_counts(progress[at]) if state.get("building") and at >= 0 else None
     if counts:
         return (counts[0], counts[1], analysing(progress))
     bep = state.get("bep_done_total")
@@ -434,7 +434,7 @@ def target_rows(failed_role: str, failed: int, built: int, blocked: int, configu
     whole parts only, every count `short_count` where whole ones don't
     fit a row, then the parts wrapped onto a second row under the first."""
     for short in [False, True]:
-        n = short_count if short else _thousands
+        n = _short_count if short else _thousands
         parts = [
             (failed_role + "✗" + n(failed) + _RESET, "✗" + n(failed)),
             (_c("success") + "✓" + n(built) + _RESET, "✓" + n(built)),
@@ -442,7 +442,7 @@ def target_rows(failed_role: str, failed: int, built: int, blocked: int, configu
         parts[-1] = (parts[-1][0] + "/" + n(configured), parts[-1][1] + "/" + n(configured))
         rows = [[]]
         for drawn, plain in parts:
-            if rows[-1] and 8 + text_width(" ".join([p for _, p in rows[-1]] + [plain])) > room:
+            if rows[-1] and 8 + _text_width(" ".join([p for _, p in rows[-1]] + [plain])) > room:
                 rows.append([])
             rows[-1].append((drawn, plain))
         if len(rows) == 1 or short:
@@ -613,7 +613,7 @@ def action_split(state: dict) -> dict:
                     remote -= took
             other = max(0, spawned - from_internal - (in_total - from_internal - left) - ran - disk - remote)
         whole = ran + local + disk + remote + internal + failed + other
-        succeeded = build_succeeded(inv)
+        succeeded = _build_succeeded(inv)
         split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, skipped = max(0, done - whole), other = other, more = False, failed_build = not succeeded)
         split["done"] = done if done >= 0 else whole
         created = bes_get(summary, "actions_created", 0) or 0
@@ -864,7 +864,7 @@ def bar_label(state: dict, split: dict, cols: int) -> str:
     else:
         forms = ["%s of %s actions done" % (done, total), "%s/%s" % (done, total)]
     for form in forms:
-        if text_width(form) <= cols // 2:
+        if _text_width(form) <= cols // 2:
             return form
     return forms[-1]
 
@@ -873,10 +873,10 @@ def bar_row(state: dict, cols: int) -> str:
     wide as the screen, for `state` (a build `build_view` picked)."""
     split = action_split(state)
     label = bar_label(state, split, cols)
-    if text_width(label) > cols - 3:
-        label = fit(label, max(0, cols - 3)).rstrip(" ")
-    width = max(0, cols - 3 - text_width(label))
-    return " " + action_bar(split, width) + " " + label + " " * max(0, cols - 2 - width - text_width(label))
+    if _text_width(label) > cols - 3:
+        label = _fit(label, max(0, cols - 3)).rstrip(" ")
+    width = max(0, cols - 3 - _text_width(label))
+    return " " + action_bar(split, width) + " " + label + " " * max(0, cols - 2 - width - _text_width(label))
 
 def action_parts(split: dict) -> list:
     """The Actions rows' parts (`ActionPart`), the bar's glyphs their
@@ -943,7 +943,7 @@ def _part_text(part: ActionPart, level: int) -> tuple:
         words = words.partition(" ")[0] + (" cache hits" if level < 2 else " hits" if level < 3 else "")
     elif level >= 1 and part.key == "local":
         words = "local"
-    count = ("~" if part.how == "estimate" else "") + (_thousands(part.count) if level < 2 else short_count(part.count))
+    count = ("~" if part.how == "estimate" else "") + (_thousands(part.count) if level < 2 else _short_count(part.count))
     glyph = part.glyph
     plain = (glyph + " " if glyph else "") + count + " " + words
     if part.how:
@@ -1040,7 +1040,7 @@ def action_results(split: dict, room: int, rows: int = 3, short: bool = False, m
 
     def header(name, members, level):
         n = total_of(members)
-        count = _thousands(n) if level < 2 else short_count(n)
+        count = _thousands(n) if level < 2 else _short_count(n)
         if name == "ran":
             return "ran " + count
         approx = "~" if [p for p in members if p.how == "estimate"] else ""
@@ -1049,7 +1049,7 @@ def action_results(split: dict, room: int, rows: int = 3, short: bool = False, m
     def part_width(p, level):
         # What a part has been widest this build counts, so a part kept
         # doesn't go for a digit, and a part gone doesn't come and go.
-        width = text_width(_part_text(p, level)[0])
+        width = _text_width(_part_text(p, level)[0])
         if memory != None:
             width = max(width, memory["widest"].get(p.key, 0))
         return width
@@ -1090,7 +1090,7 @@ def action_results(split: dict, room: int, rows: int = 3, short: bool = False, m
         loose = False
         for name, members in units_of(kept):
             if name != None:
-                head = text_width(header(name, members, level) + ": ")
+                head = _text_width(header(name, members, level) + ": ")
                 if head + joined_width(members, level) <= room:
                     packed.append((0, [(name, members, "inline")]))
                 else:
@@ -1120,9 +1120,9 @@ def action_results(split: dict, room: int, rows: int = 3, short: bool = False, m
         width = indent
         for i, (name, members, mode) in enumerate(units):
             if mode == "head":
-                width += text_width(header(name, members, level) + ":")
+                width += _text_width(header(name, members, level) + ":")
             elif mode == "inline":
-                width += text_width(header(name, members, level) + ": ") + joined_width(members, level)
+                width += _text_width(header(name, members, level) + ": ") + joined_width(members, level)
             else:
                 width += joined_width(members, level) + (3 if i else 0)
         return width
@@ -1187,7 +1187,7 @@ def action_results(split: dict, room: int, rows: int = 3, short: bool = False, m
         for _, units in packed:
             for _, members, _ in units:
                 for p in members:
-                    memory["widest"][p.key] = max(memory["widest"].get(p.key, 0), text_width(_part_text(p, level)[0]))
+                    memory["widest"][p.key] = max(memory["widest"].get(p.key, 0), _text_width(_part_text(p, level)[0]))
                     if p.key not in memory.setdefault("shown", []):
                         memory["shown"].append(p.key)
     out = []
@@ -1206,7 +1206,7 @@ def action_results(split: dict, room: int, rows: int = 3, short: bool = False, m
                 plain, drawn_text = _part_text(p, drawn)
 
                 # A part wider than the row is drawn alone, cut at the box.
-                if line and text_width(_plain(line) + " · " + plain) > room - indent:
+                if line and _text_width(_plain(line) + " · " + plain) > room - indent:
                     break
                 line += (" · " if line else "") + drawn_text
         out.append(" " * indent + line)

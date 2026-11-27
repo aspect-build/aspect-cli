@@ -40,32 +40,32 @@ load("../private/lib/tips.axl", "SURFACE_DASHBOARD", "collect_tips_sorted", "sil
 _c = term_text.c
 _plain = term_text.plain
 _RESET = term_text.RESET
-ANSI = term_text.ANSI
-CONTROLS = term_text.CONTROLS
+_ANSI = term_text.ANSI
+_CONTROLS = term_text.CONTROLS
 _flaky = failure_records.flaky
-build_outcome = failure_records.build_outcome
-build_succeeded = failure_records.build_succeeded
-collect_event = failure_records.collect_event
-count_spawn = failure_records.count_spawn
-note_log_file = failure_records.note_log_file
+_build_outcome = failure_records.build_outcome
+_build_succeeded = failure_records.build_succeeded
+_collect_event = failure_records.collect_event
+_count_spawn = failure_records.count_spawn
+_note_log_file = failure_records.note_log_file
 _failure_counts = failures.failure_counts
-action_split = dashboard_actions.action_split
-actions_text = dashboard_actions.actions_text
-built = dashboard_actions.built
-note_progress = dashboard_actions.note_progress
-note_spawn_time = dashboard_actions.note_spawn_time
+_action_split = dashboard_actions.action_split
+_actions_text = dashboard_actions.actions_text
+_built = dashboard_actions.built
+_note_progress = dashboard_actions.note_progress
+_note_spawn_time = dashboard_actions.note_spawn_time
 _MAX_LOG = dashboard_log.MAX_LOG
-add_lines = dashboard_log.add_lines
-new_search = dashboard_log.new_search
-replay_lines = dashboard_log.replay_lines
-report_lines = dashboard_log.report_lines
-refresh_test_view = dashboard_view.refresh_test_view
-mouse_key = dashboard_pointer.mouse_key
+_add_lines = dashboard_log.add_lines
+_new_search = dashboard_log.new_search
+_replay_lines = dashboard_log.replay_lines
+_report_lines = dashboard_log.report_lines
+_refresh_test_view = dashboard_view.refresh_test_view
+_mouse_key = dashboard_pointer.mouse_key
 _LEAVE_KEYS = dashboard_keys.LEAVE_KEYS
 _MAX_KEYS = dashboard_keys.MAX_KEYS
-on_key = dashboard_keys.on_key
-console_height = dashboard_render.console_height
-render = dashboard_render.render
+_on_key = dashboard_keys.on_key
+_console_height = dashboard_render.console_height
+_render = dashboard_render.render
 
 # The tasks the screen is for, taken from their start; any other keeps the
 # console.
@@ -169,11 +169,11 @@ def fold_build(state: dict, now_ms: int):
     started = state.get("inv", {}).get("build_started")
     state.setdefault("builds", []).append(dict(
         command = str(bes_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
-        actions = actions_text(action_split(dict(state, building = False))),
+        actions = _actions_text(_action_split(dict(state, building = False))),
         failed = failed,
         blocked = blocked,
-        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and build_succeeded(state.get("inv") or {}),
-        outcome = build_outcome(state.get("inv") or {}),
+        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and _build_succeeded(state.get("inv") or {}),
+        outcome = _build_outcome(state.get("inv") or {}),
         ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
         snapshot = dict({k: state.get(k) for k in _BUILD_KEYS}, building = False, blocked_cache = None, entries_cache = None, own_cache = None, ties_cache = None, excerpts = {}),
     ))
@@ -228,7 +228,7 @@ def new_state(**fields) -> dict:
         frames = 0,
         progress = [],
         filter = "all",
-        search = new_search(),
+        search = _new_search(),
         re = None,
         controls = None,
         list = "failures",
@@ -254,20 +254,17 @@ def new_state(**fields) -> dict:
     state.update(fields)
     return state
 
-def _add_lines(state: dict, lines, links = None, colours = None, kinds = None, own = None, cli = False):
-    add_lines(state, lines, links, colours, kinds, own, cli)
-
 def _keys_and_draw(state: dict, screen):
     """Every key waiting, then one frame: a burst of wheel or drag
     reports costs one render, never a backlog."""
     cols, rows = screen.size()
-    page = console_height(state, cols, rows)
+    page = _console_height(state, cols, rows)
     for _ in range(_MAX_KEYS):
         key = screen.key()
         if key == None:
             break
-        on_key(state, key, page)
-    _draw(state, screen, render(state, cols, rows))
+        _on_key(state, key, page)
+    _draw(state, screen, _render(state, cols, rows))
 
 def _draw(state: dict, screen, frame):
     """Write `frame` unless it is the one on the screen; whether it was
@@ -305,8 +302,8 @@ def _take(state: dict, task_ctx):
     state["re"] = task_ctx.std.re
     state["cli_version"] = task_ctx.std.env.aspect_cli_version() or ""
     state["read"] = task_ctx.std.fs.try_read_tail
-    state["ansi"] = task_ctx.std.re.compile(ANSI)
-    state["controls"] = task_ctx.std.re.compile(CONTROLS)
+    state["ansi"] = task_ctx.std.re.compile(_ANSI)
+    state["controls"] = task_ctx.std.re.compile(_CONTROLS)
     state["env"] = task_ctx.std.env
     state["bb_root"] = bb_clientd_root(task_ctx.std.env)
     state["process"] = task_ctx.std.process
@@ -388,7 +385,7 @@ def _frame(state: dict, task_ctx, build):
     if feed["progress"]:
         state["progress"] = feed["progress"]
         state["phase"] = feed["progress"][0]
-        note_progress(state, feed["progress"])
+        _note_progress(state, feed["progress"])
     _add_output(state, screen)
     if state["frames"] % _TIPS_EVERY_FRAMES == 0:
         _tips(state)
@@ -400,8 +397,8 @@ def _event(state: dict, task_ctx, event):
         state["bazel_uuid"] = str(bes_get(event.payload, "uuid", "") or "")
     elif kind == "options_parsed":
         state["bes_base"] = bes_results_url(event) or state["bes_base"]
-    collect_event(state, event)
-    refresh_test_view(state, event)
+    _collect_event(state, event)
+    _refresh_test_view(state, event)
 
 def _update(state: dict, task_ctx, update):
     if update.data:
@@ -427,7 +424,7 @@ def _end(state: dict, task_ctx, build):
     end_build(state, int(monotonic() * 1000))
     state["progress"] = []
     cols, rows = screen.size()
-    _draw(state, screen, render(state, cols, rows))
+    _draw(state, screen, _render(state, cols, rows))
 
 def _stay(state: dict, task_ctx, screen, countdown_ms):
     """Keep the finished screen up, scrollable, until a leave key, or until
@@ -460,7 +457,7 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
                 return
         _add_output(state, screen)
         cols, rows = screen.size()
-        changed = _draw(state, screen, render(state, cols, rows))
+        changed = _draw(state, screen, _render(state, cols, rows))
 
         # Idle, a key a second; a frame that moves, or the countdown, ten.
         key = screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS)
@@ -469,7 +466,7 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
         if key != None and deadline != None and key.startswith("mouse-move:"):
             # The pointer passing over the screen: lit, the countdown
             # left running.
-            mouse_key(state, key)
+            _mouse_key(state, key)
         elif key != None and deadline != None:
             # A leave key leaves now; any other stops the countdown and
             # does nothing else.
@@ -479,9 +476,9 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
             state["countdown_ms"] = None
         elif key != None:
             # This key and every one waiting behind it, then one frame.
-            page = console_height(state, cols, rows)
+            page = _console_height(state, cols, rows)
             for _ in range(_MAX_KEYS):
-                if on_key(state, key, page):
+                if _on_key(state, key, page):
                     return
                 key = screen.key()
                 if key == None or key == "ctrl-c":
@@ -503,7 +500,7 @@ def _post(state: dict, task_ctx, outcome):
 
         # A task that failed before any build has nothing to browse:
         # gone at once, its error last in the scrollback.
-        early = not built(state) and outcome.exit_code != 0
+        early = not _built(state) and outcome.exit_code != 0
         if state["stay"] != "never" and task_ctx.std.io.stdin.is_tty and not state["cancelling"] and not early:
             state["ended"] = True
             state["progress"] = []
@@ -537,9 +534,9 @@ def _report(state: dict, task_ctx):
     # output.ansi; the console as the screen showed it without one. Both
     # are in output.log already: not copied again.
     if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = _older(task_ctx)):
-        for line in replay_lines(state, err.is_tty):
+        for line in _replay_lines(state, err.is_tty):
             err.write(line + "\n", copy = False)
-    for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True, linked = task_ctx.std.io.linked, excerpt = task_ctx.std.excerpt, max_entries = task_ctx.traits[BazelTrait].failure_summary_max):
+    for line in _report_lines(state, task_ctx.task.id, err.is_tty, replayed = True, linked = task_ctx.std.io.linked, excerpt = task_ctx.std.excerpt, max_entries = task_ctx.traits[BazelTrait].failure_summary_max):
         err.write(line + "\n")
     gone = sorted(state.get("silenced_tips", {}).keys())
     if gone:
@@ -549,10 +546,10 @@ def _spawn(state: dict, task_ctx, entry):
     # The entry's kind is its `type`: a `spawn` or a `file`, as asked.
     what = bes_get(entry, "type")
     if type(what) == "file":
-        note_log_file(state["counts"], bes_get(entry, "id", 0), what)
+        _note_log_file(state["counts"], bes_get(entry, "id", 0), what)
     else:
-        count_spawn(state["counts"], what)
-    note_spawn_time(state, bes_get(entry, "type"))
+        _count_spawn(state["counts"], what)
+    _note_spawn_time(state, bes_get(entry, "type"))
 
 def _dashboard_impl(ctx: FeatureContext):
     why = refusal(ctx.std)

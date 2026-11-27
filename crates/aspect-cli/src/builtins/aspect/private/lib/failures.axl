@@ -12,8 +12,8 @@ _c = term_text.c
 _counts = term_text.counts
 _tenths = term_text.tenths
 _RESET = term_text.RESET
-text_width = term_text.text_width
-wrap_line = term_text.wrap_line
+_text_width = term_text.text_width
+_wrap_line = term_text.wrap_line
 _flaky = failure_records.flaky
 _log_path = failure_records.log_path
 _own_labels = failure_records.own_labels
@@ -23,12 +23,12 @@ _tail_text = failure_records.tail_text
 _target_entry = failure_records.target_entry
 _COMMAND_FAILURES = failure_records.COMMAND_FAILURES
 _workspace = failure_records.workspace
-blocked_targets = failure_records.blocked_targets
-build_outcome = failure_records.build_outcome
-test_shape = failure_records.test_shape
+_blocked_targets = failure_records.blocked_targets
+_build_outcome = failure_records.build_outcome
+_test_shape = failure_records.test_shape
 _BAZEL = failure_ties.BAZEL
 _status_word = failure_ties.status_word
-console_ties = failure_ties.console_ties
+_console_ties = failure_ties.console_ties
 
 # What a flaky test's failed attempt says of it.
 FLAKY_NOTE = "flaky, passed on a later attempt"
@@ -52,7 +52,7 @@ def failure_detail(state: dict, record: dict, flaky_note: bool = True) -> str:
         detail += " · timeout" + (" after " + _tenths(ms) if ms else "")
     if flaky_note and state.get("counts", {}).get("flaky", {}).get(record["label"]):
         detail += " · " + FLAKY_NOTE
-    runs, shards = test_shape(state, record["label"], record["config"])
+    runs, shards = _test_shape(state, record["label"], record["config"])
     parts = []
     if shards > 1:
         parts.append("shard %d" % record["shard"])
@@ -86,14 +86,14 @@ def target_counts(state: dict) -> tuple:
     for e in found["entries"]:
         if e["group"] != "test" and not e["pattern"] and e["label"]:
             failed[e["label"]] = True
-    return (state["counts"]["built"], len(failed), len(blocked_targets(state)))
+    return (state["counts"]["built"], len(failed), len(_blocked_targets(state)))
 
 def _failure_counts(state: dict) -> tuple:
     """`(failed, blocked)`: the failure entries but a flaky test's (as the
     failure summary counts them, and the Failures list has their rows), and
     the targets not built for a failed dependency."""
     found = failure_entries(state)
-    return (len([e for e in found["entries"] if not e["flaky"]]), len(blocked_targets(state)))
+    return (len([e for e in found["entries"] if not e["flaky"]]), len(_blocked_targets(state)))
 
 # The most flaky tests' failed attempts the scrollback lists.
 _MAX_FLAKY_LISTED = 20
@@ -111,7 +111,7 @@ def summary_counts(state: dict) -> str:
     c = state["counts"]
     built_n, targets_failed, targets_blocked = target_counts(state)
     inv = state.get("inv") or {}
-    interrupted = build_outcome(inv) == "interrupted" or bool(state.get("cancelling"))
+    interrupted = _build_outcome(inv) == "interrupted" or bool(state.get("cancelling"))
     return _counts("%s%d built, %d failed%s · %d %s passed, %d failed%s%s", (
         "interrupted · " if interrupted else "",
         built_n,
@@ -140,11 +140,11 @@ def quoted_rows(line: str, width: int) -> list:
         if not rest or len(rows) == _EXCERPT_ROWS:
             break
         room = max(1, width if not rows else width - 2)
-        piece = wrap_line(rest, room)[0][0]
+        piece = _wrap_line(rest, room)[0][0]
         if len(piece) < len(rest):
             space = piece.rfind(" ")
             word = rest[space + 1:].partition(" ")[0] if space > 0 else ""
-            if space > 0 and text_width(word) <= max(1, width - 2):
+            if space > 0 and _text_width(word) <= max(1, width - 2):
                 piece = piece[:space + 1]
             rows.append(piece.rstrip())
         else:
@@ -157,7 +157,7 @@ def quoted_rows(line: str, width: int) -> list:
     if cut:
         last = rows[-1].rstrip()
         room = width if len(rows) == 1 else width - 2
-        if text_width(last) + 1 > room:
+        if _text_width(last) + 1 > room:
             last = last[:-1]
         rows[-1] = last + "…"
     return rows
@@ -169,7 +169,7 @@ def _expand_tabs(line: str) -> str:
     pieces = line.split("\t")
     out = pieces[0]
     for piece in pieces[1:]:
-        out += " " * (8 - text_width(out) % 8) + piece
+        out += " " * (8 - _text_width(out) % 8) + piece
     return out
 
 def _picked(got) -> tuple:
@@ -281,7 +281,7 @@ def test_group(state: dict, recs: list) -> dict:
     `others`, each other failed shard or run's last attempt with what names
     it (`shard 3 of 3 · run 2 of 2`), and whether it `timed_out`."""
     label = recs[0]["label"]
-    runs, shards = test_shape(state, label, recs[0].get("config", ""))
+    runs, shards = _test_shape(state, label, recs[0].get("config", ""))
 
     def named(at):
         return " · ".join((["shard %d of %d" % (at[0], shards)] if shards > 1 else []) + (["run %d of %d" % (at[1], runs)] if runs > 1 else []))
@@ -384,7 +384,7 @@ def failure_entries(state: dict) -> dict:
     for group in _GROUPS:
         for i, rec in groups[group]:
             entries.append({"index": i, "group": group, "label": rec["label"], "flaky": _flaky(state, rec), "pattern": rec.get("pattern", False), "blocked": []})
-    blocked = blocked_targets(state)
+    blocked = _blocked_targets(state)
     for label in state["counts"]["failures"]:
         if label not in own and label not in blocked:
             entries.append({"index": None, "group": "target", "label": label, "flaky": False, "pattern": False, "blocked": []})
@@ -392,7 +392,7 @@ def failure_entries(state: dict) -> dict:
     # A failed build always says why: with nothing else to list, an entry of
     # Bazel's exit code (`entry_text`: its raw log's last lines).
     code = state.get("bazel_exit")
-    if not entries and code not in (None, 0) and not state.get("building") and not console_ties(state)["others"]:
+    if not entries and code not in (None, 0) and not state.get("building") and not _console_ties(state)["others"]:
         entries.append({"index": None, "group": "target", "label": "", "exited": code, "flaky": False, "pattern": False, "blocked": []})
     first = {}
     for e in entries:
@@ -444,7 +444,7 @@ def entry_text(state: dict, e: dict) -> dict:
     key = (e["index"], e["label"], ended)
     if key in cache:
         return cache[key]
-    ties = console_ties(state) if ended else {"actions": {}, "targets": {}}
+    ties = _console_ties(state) if ended else {"actions": {}, "targets": {}}
     fails = state["fails"]
     rec = fails[e["index"]] if e["index"] != None else None
     out = {"kind": "", "details": [], "lines": [], "gaps": [], "log": "", "extra": []}
@@ -505,9 +505,9 @@ def _tab_extras(state: dict) -> list:
     (`("other", block)`, `console_ties`)."""
     found = failure_entries(state)
     out = [("entry", e) for e in found["entries"] if e["index"] == None]
-    for label in blocked_targets(state).keys():
+    for label in _blocked_targets(state).keys():
         out.append(("blocked", label))
-    for block in console_ties(state)["others"] if not state.get("building") else []:
+    for block in _console_ties(state)["others"] if not state.get("building") else []:
         out.append(("other", block))
     return out
 
@@ -617,7 +617,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
             out.append("○ " + root + " " + blocked_line(found["unlisted"][root]).strip()[2:])
         if total > len(listed):
             out.append(_counts("… and %d more failure", total - len(listed)) + ("" if total - len(listed) == 1 else "s") + " · aspect history show %s" % task_id)
-    others = console_ties(state)["others"]
+    others = _console_ties(state)["others"]
     if others:
         if out:
             out.append("")
@@ -630,7 +630,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                 quote(*excerpt_rows(lines[1:], [(max(0, k - 1), n) for k, n in gaps]))
         if len(others) > max_entries:
             out.append(_counts("… and %d more", len(others) - max_entries) + " · aspect history show %s" % task_id)
-    not_kept = console_ties(state)["not_kept"]
+    not_kept = _console_ties(state)["not_kept"]
     if not_kept:
         out.append(muted + _counts("(%d bytes of Bazel's error messages not kept)", not_kept) + reset)
     froms_not_kept = (state.get("collected_errors") or {}).get("froms_not_kept", 0) or 0

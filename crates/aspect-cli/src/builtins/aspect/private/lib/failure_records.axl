@@ -36,11 +36,11 @@ def progress_counts(status: str) -> tuple | None:
 
 # `text` from a build event as Bazel meant it: a non-ASCII string's UTF-8
 # bytes come each as a Latin-1 character.
-repaired = bazel.build_events.repaired
+_repaired = bazel.build_events.repaired
 
 def _label_of(event_id) -> str:
     """The label a build event's id names, decoded (`repaired`)."""
-    return repaired(str(bes_get(event_id, "label", "") or ""))
+    return _repaired(str(bes_get(event_id, "label", "") or ""))
 
 def _config_id(event_id) -> str:
     """The id of the configuration a build event's id names, else ""."""
@@ -103,9 +103,9 @@ def _action_record(label: str, payload, event_id = None) -> dict:
             files.append((name, bounded_log(bes_get(f, "file", None))))
     return {
         "kind": "action",
-        "label": repaired(label),
+        "label": _repaired(label),
         "detail": str(bes_get(payload, "type", "") or "") or "Action",
-        "failure": repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or "")),
+        "failure": _repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or "")),
         "files": files,
         "output": str(bes_get(event_id, "primary_output", "") or ""),
         "config": _config_id(event_id),
@@ -237,7 +237,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool) -> None
         reason = str(bes_get(payload, "reason", "") or "").lower()
         pattern = kind == "pattern_expanded"
         label = " ".join([str(p) for p in (bes_get(event_id, "pattern", None) or [])]) if pattern else _label_of(event_id)
-        description = repaired(str(bes_get(payload, "description", "") or ""))
+        description = _repaired(str(bes_get(payload, "description", "") or ""))
         failing = reason in _FAILED_ABORTS
         detail = None
         if kind == "unconfigured_label":
@@ -395,7 +395,7 @@ def note_blocked(state: dict, event) -> None:
         child_id = bes_get(child, "id")
         if bes_get(child_id, "primary_output", ""):
             acted = True
-        root = repaired(str(bes_get(child_id, "label", "") or ""))
+        root = _repaired(str(bes_get(child_id, "label", "") or ""))
         if root and root not in roots and (root != label or not bes_get(child_id, "primary_output", "")):
             roots.append(root)
     roots = [r for r in roots if r != label or len(roots) == 1]
@@ -403,7 +403,7 @@ def note_blocked(state: dict, event) -> None:
         if state.get("root_causes") == None:
             state["root_causes"] = {}
         state["root_causes"][label] = roots
-    message = repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or ""))
+    message = _repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or ""))
     if kind == "target_completed" and label and message and not acted and not _has_target_record(state, label):
         _add_failure(state, _target_record(label, "target", message, False, event_id))
 

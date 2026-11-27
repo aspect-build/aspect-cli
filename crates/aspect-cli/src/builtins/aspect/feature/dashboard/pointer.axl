@@ -16,13 +16,13 @@ _cut_escaped = term_text.cut_escaped
 _escape_state = term_text.escape_state
 _RESET = term_text.RESET
 _widths = term_text.widths
-text_width = term_text.text_width
+_text_width = term_text.text_width
 _log_paths = failure_records.record_logs
-say_note = dashboard_log.say_note
-toggle_fold = dashboard_log.toggle_fold
+_say_note = dashboard_log.say_note
+_toggle_fold = dashboard_log.toggle_fold
 _keep_view = dashboard_view.keep_view
-back_to = dashboard_view.back_to
-show_tab = dashboard_view.show_tab
+_back_to = dashboard_view.back_to
+_show_tab = dashboard_view.show_tab
 
 # The link under the pointer is lit in its text (`link.hover`), a
 # selection in its background (`selection`): each turned off alone, so
@@ -57,7 +57,7 @@ def _peek_paint(highlighted: str):
 
     def paint(shown):
         cut = shown.endswith("…")
-        return _cut_escaped(highlighted, text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
+        return _cut_escaped(highlighted, _text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
 
     return paint
 
@@ -433,7 +433,7 @@ def _select_word(state: dict, col: int, row: int) -> bool:
     word = "".join([c for _, _, c in cells[first:last + 1]])
     cols = state["cols"]
     state["select"] = {"from": (cells[first][0], row), "to": (cells[last][1] - 1, row), "dragged": True, "done": True, "bounds": (0, cols), "rows": (0, 1 << 30)}
-    say_note(state, "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s"))
+    _say_note(state, "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s"))
     return True
 
 def mouse_key(state: dict, key: str) -> bool:
@@ -486,20 +486,20 @@ def mouse_key(state: dict, key: str) -> bool:
     if sel["dragged"]:
         text = selected_text(state, cols)
         if text:
-            say_note(state, "%s %d character%s" % (copy_text(state, text), len(text), "" if len(text) == 1 else "s"))
+            _say_note(state, "%s %d character%s" % (copy_text(state, text), len(text), "" if len(text) == 1 else "s"))
         return True
     state["select"] = None
     if row == state.get("tab_row"):
         for a, b, tab in state.get("tab_spans", []):
             if a <= col and col < b:
                 if type(tab) == "tuple":
-                    back_to(state, tab[1])
+                    _back_to(state, tab[1])
                 else:
-                    show_tab(state, tab)
+                    _show_tab(state, tab)
                 return True
     failed_at = state.get("failed_at")
     if failed_at != None and row == failed_at[0] and col >= failed_at[1]:
-        show_tab(state, "failures")
+        _show_tab(state, "failures")
         return True
     frame = state.get("frame") or []
     url = link_at(frame[row], col) if row < len(frame) else None
@@ -509,11 +509,11 @@ def mouse_key(state: dict, key: str) -> bool:
         io = state.get("io")
         target = io.editor_target(url) if io != None else None
         if target != None and open_peek(state, target[0], target[1]):
-            say_note(state, "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back")
+            _say_note(state, "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back")
         else:
-            say_note(state, open_link(state, url))
+            _say_note(state, open_link(state, url))
         return True
-    toggle_fold(state, row)
+    _toggle_fold(state, row)
     return True
 
 dashboard_pointer = namespace(
