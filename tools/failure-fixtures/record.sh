@@ -48,14 +48,16 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
     mkdir -p "$RAW"
     rm -rf /tmp/bepfx-flaky.marker /tmp/bepfx-rpt.lock
     bep="--build_event_json_file=$RAW/bep.json"
-    # A recording of its own runs its actions again, the successful ones'
-    # output included: Bazel's action cache would replay none of it.
-    flags="$flags --action_env=ASPECT_FIXTURE_RUN=$prefix-$(date +%s)"
     if [ $console_only = 1 ]; then
         bep=""
         cap=90
     else
-        # Warm-up: module resolution and repo fetches would otherwise show only in the first case.
+        # Every recording runs its actions again, the successful ones' output
+        # included: Bazel's action cache would replay none of it (an
+        # `--action_env` reaches only actions that take the default shell
+        # environment). Then a warm-up: module resolution and repo fetches
+        # would otherwise show only in the first case.
+        perl -e 'alarm 300; exec @ARGV' "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP clean >/dev/null 2>&1 </dev/null
         # shellcheck disable=SC2086
         perl -e 'alarm 300; exec @ARGV' "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off --nobuild >/dev/null 2>&1 </dev/null
     fi

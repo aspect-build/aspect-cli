@@ -8,7 +8,7 @@ stdout,exit} and copies every action stderr/stdout and test.log/test.xml the BEP
 events the failure summary never reads (`DROPPED`): progress chunks, the command lines, the
 build tool logs; an Aborted one of those stays.
 """
-import json, os, re, shutil, socket, sys, getpass, urllib.parse
+import json, os, re, shutil, sys, getpass, urllib.parse
 fx, prefix, raw, ob, ib, ws, fakehome = sys.argv[1:8]
 home = os.path.expanduser("~")
 def spellings(p):  # macOS reports /private/var and /private/tmp paths both ways
@@ -21,22 +21,19 @@ for w in sorted({ws, os.path.realpath(ws), ws.replace("/private/tmp/", "/tmp/", 
 subs.append((raw, "${RAW}"))
 subs.append((fakehome, "${HOME}"))
 subs.append((home, "${HOME}"))
-host = socket.gethostname(); user = getpass.getuser()
+user = getpass.getuser()
 def scrub(s):
     for a, b in subs:
         if a: s = s.replace(a, b)
-    # The host inside a path alone (a cache or log folder named for it):
-    # never as a word of free text, where a short name like `build` is in
-    # `build_event` too. The fields that carry it are scrubbed by name.
-    short = host.split(".")[0] if host else ""
-    if short:
-        s = re.sub(r"/[^\s'\"]+", lambda m: m.group(0).replace(short, "${HOST}"), s)
     s = re.sub(r"/var/folders/[^/]+/[^/]+/", "${DARWIN_USER_DIR}/", s)
     for k in ("USER", "LOGNAME"):
         s = s.replace(k + "=" + user, k + "=${USER}")
     return s
 def scrub_status(e):
-    # BuildStarted and workspaceStatus carry the user and host as values.
+    # BuildStarted and workspaceStatus carry the user and host as values:
+    # the host is scrubbed there alone, never in text or a path, where a
+    # short name like `build` is an ordinary word (a path under the host's
+    # name is under one the path scrubs above already cover).
     if "user" in e.get("started", {}): e["started"]["user"] = "${USER}"
     for it in e.get("workspaceStatus", {}).get("item", []):
         if it.get("key") == "BUILD_USER": it["value"] = "${USER}"

@@ -58,9 +58,9 @@ The recorder drops the BEP events the summary never reads, which were most of th
 
 The recorder puts `--nosystem_rc` before `cmd`, with the startup options a `cmd` starts with
 (`oom`'s `--host_jvm_args`), and adds these after it: `--disk_cache=`, `--lockfile_mode=off`,
-the colour flags, `--build_event_json_file` and an `--action_env` of its own, so each
-recording runs its actions again rather than taking them from Bazel's action cache (a
-successful action's `INFO: From` output is in every variant). Bazel runs under
+the colour flags and `--build_event_json_file`, after a `bazel clean`, so each recording
+runs its actions again rather than taking them from Bazel's action cache (a successful
+action's `INFO: From` output is in every variant). Bazel runs under
 `env -i` with an empty HOME, so no user rc file or environment variable reaches the recording.
 Each case is preceded by an unrecorded `--nobuild` run of the same command so module
 resolution and repository fetches do not show in whichever case happens to run first; the
@@ -79,7 +79,7 @@ Machine-specific strings in `*.bep.json`, `*.console`, `*.stdout` and `*.files/*
 | `${RAW}` | the recorder's temporary directory (appears in `--build_event_json_file=`) |
 | `${HOME}` | the throwaway HOME and the real one |
 | `${DARWIN_USER_DIR}` | macOS `/var/folders/<x>/<y>` |
-| `${USER}`, `${HOST}` | `BuildStarted.user`, `BUILD_USER`, `BUILD_HOST`, `USER=`/`LOGNAME=` env values, short hostname |
+| `${USER}`, `${HOST}` | `BuildStarted.user`, `BUILD_USER`, `BUILD_HOST`, `USER=`/`LOGNAME=` env values; the host in `BUILD_HOST` alone, never in text or a path |
 
 A BEP file URI `file://${OUTPUT_BASE}/<p>` resolves to `<ver>.files/<p>` in the same fixture
 (e.g. `execroot/_main/bazel-out/_tmp/actions/stderr-3`, `.../testlogs/t/fail/test.log`).
