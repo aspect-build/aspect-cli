@@ -642,19 +642,20 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
     choice
 }
 
-/// What `observations` kept for the failure summary, as AXL reads it
-/// (`build.output_bazel_errors()`): `{"blocks": [{"kind", "text",
-/// "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
-/// "stdout": bool, "color": bool, "relay_cap": n | None}`, each block whose first line is an `ERROR:` (an `error`, or a
-/// `tail` that is Bazel's next message) with that line's `location`,
-/// `message`, `coloured` and `boilerplate` too ([`ErrorHeader`]); None before the
-/// console has ended or without a `collect_errors()` stage.
+/// The errors `observations` collected for the failure summary, as AXL
+/// reads them (`build.output_collected_errors()`): `{"blocks": [{"kind",
+/// "text", "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
+/// "stdout": bool, "color": bool, "relay_cap": n | None}`, each block whose
+/// first line is an `ERROR:` (an `error`, or a `tail` that is Bazel's next
+/// message) with that line's `location`, `message`, `coloured` and
+/// `boilerplate` too ([`ErrorHeader`]); None before the console has ended
+/// or without a `collect_errors()` stage.
 ///
 /// [`ErrorHeader`]: bazel::console::processors::ErrorHeader
-pub(crate) fn bazel_blocks(
+pub(crate) fn collected_errors(
     observations: &bazel::console::processors::Observations,
 ) -> Option<serde_json::Value> {
-    let kept = observations.blocks()?;
+    let kept = observations.collected_errors()?;
     let blocks: Vec<serde_json::Value> = kept
         .blocks
         .iter()
@@ -992,7 +993,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ///
     /// With `summary = True` it writes nothing: a failure summary tells the
     /// errors instead (the Console feature's reads Bazel's build events and,
-    /// through a `collect_errors()` stage, `build.output_bazel_errors()`),
+    /// through a `collect_errors()` stage, `build.output_collected_errors()`),
     /// and the end of the console leaves naming Bazel's raw log to that
     /// summary.
     fn recap_errors(
@@ -1009,7 +1010,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         }
         Ok(OutputStage {
             stage: if summary {
-                Stage::ErrorsForSummary
+                Stage::RecapInSummary
             } else {
                 Stage::RecapErrors {
                     max: max as usize,
@@ -1022,7 +1023,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// Keep, for the failure summary and the Dashboard, Bazel's own `ERROR:`
     /// messages and what may be an action's held last line, as Bazel wrote
     /// them, and of each action's `INFO: From` output its header, length
-    /// and last line: `build.output_bazel_errors()`. It writes nothing and
+    /// and last line: `build.output_collected_errors()`. It writes nothing and
     /// changes nothing shown; however many are added, one collects.
     fn collect_errors() -> anyhow::Result<OutputStage> {
         Ok(OutputStage {
@@ -1030,12 +1031,13 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         })
     }
 
-    /// What a `collect_errors()` stage keeps of a console `text`
-    /// written as Bazel would write it (through a PTY unless `pty = False`),
-    /// as `build.output_bazel_errors()` gives it for a build's: for a test
-    /// that replays a recorded console. `stdout` is what that gives as
-    /// whether the console carried Bazel's stdout too.
-    fn bazel_errors<'v>(
+    /// The collected errors of a console `text` written as Bazel would
+    /// write it (through a PTY unless `pty = False`), as a
+    /// `collect_errors()` stage keeps them and `build.output_collected_errors()`
+    /// gives them for a build's: for a test that replays a recorded console.
+    /// `stdout` is what they give as whether the console carried Bazel's
+    /// stdout too. Private to the builtins' tests.
+    fn _collected_errors<'v>(
         #[starlark(require = pos)] text: &str,
         #[starlark(require = named, default = true)] pty: bool,
         #[starlark(require = named, default = false)] stdout: bool,
@@ -1051,7 +1053,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         )?;
         forwarder.join()?;
         pipeline.observations.set_stdout_shared(stdout);
-        Ok(heap.alloc(bazel_blocks(&pipeline.observations).unwrap_or(serde_json::Value::Null)))
+        Ok(heap.alloc(collected_errors(&pipeline.observations).unwrap_or(serde_json::Value::Null)))
     }
 
     /// Fold each run of identical lines into the first plus a `(last line
@@ -1405,10 +1407,10 @@ BazelTrait = trait(
     flags = ["--scenario=success", "--experimental_ui_max_stdouterr_bytes=9", "--experimental_ui_max_stdouterr_bytes=5"]
     build = ctx.bazel.build(flags = flags + processor.flags, output = processor)
     if not build.wait().success: return 1
-    if build.output_bazel_errors()["relay_cap"] != 5: return 2
+    if build.output_collected_errors()["relay_cap"] != 5: return 2
     plain = ctx.bazel.build(flags = ["--scenario=success"] + processor.flags, output = processor)
     if not plain.wait().success: return 3
-    if plain.output_bazel_errors()["relay_cap"] != 1024 * 1024: return 4
+    if plain.output_collected_errors()["relay_cap"] != 1024 * 1024: return 4
     return 0"#)
         .expect("run_task");
         assert_eq!(exit, Some(0));
@@ -1944,7 +1946,7 @@ def _twice(ctx, line):
     fn collected_errors_carry_their_headers_and_the_consoles_colour() {
         let got = crate::test::eval(
             r#"
-r = bazel.output.bazel_errors("\x1b[31m\x1b[1mERROR: \x1b[0m/ws/a/BUILD:1:2: bad\n")
+r = bazel.output._collected_errors("\x1b[31m\x1b[1mERROR: \x1b[0m/ws/a/BUILD:1:2: bad\n")
 b = r["blocks"][0]
 (b["kind"], b["location"], b["message"], b["coloured"], b["boilerplate"], r["color"], r["not_kept"], r["froms_not_kept"])
 "#,

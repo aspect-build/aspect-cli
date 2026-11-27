@@ -11,7 +11,7 @@
 //! rule in `label.error`; the recap's quoted errors stay as Bazel wrote them
 //! but for each header's `ERROR` label, coloured as the live line's is, with
 //! what they name linked on a terminal ([`super::links`]). Where the task
-//! prints a failure summary instead (`ErrorsForSummary`), there is no recap
+//! prints a failure summary instead (`RecapInSummary`), there is no recap
 //! and the summary leaves the raw log for that summary to name
 //! ([`Summary::log_named_elsewhere`]).
 
@@ -411,11 +411,11 @@ pub fn relay_cap(flags: &[String], command: &str) -> Option<u64> {
     }
 }
 
-/// What a [`CollectErrors`] block keeps beyond what Bazel relays of an
+/// What a [`ErrorCollector`] block keeps beyond what Bazel relays of an
 /// action's output: room for its message.
 const BLOCK_ROOM: usize = 64 * 1024;
 
-/// The most a [`CollectErrors`] block keeps: what Bazel relays of an
+/// The most a [`ErrorCollector`] block keeps: what Bazel relays of an
 /// action's output ([`relay_cap`], all of it with no limit) and room for
 /// its message.
 fn block_cap(relay: Option<u64>) -> usize {
@@ -426,22 +426,22 @@ fn block_cap(relay: Option<u64>) -> usize {
     })
 }
 
-/// The most a [`CollectErrors`] block keeps by default
+/// The most a [`ErrorCollector`] block keeps by default
 /// ([`BAZEL_UI_MAX_STDOUTERR_BYTES`] relayed).
 pub const MAX_BLOCK_BYTES: usize = BAZEL_UI_MAX_STDOUTERR_BYTES as usize + BLOCK_ROOM;
 
-/// The most every [`CollectErrors`] block together keeps.
+/// The most every [`ErrorCollector`] block together keeps.
 pub const MAX_BLOCKS_BYTES: usize = 64 * 1024 * 1024;
 
 /// The longest last line of an action's `INFO: From` output a
-/// [`CollectErrors`] keeps; a longer one is kept as none, so no tie can use it.
+/// [`ErrorCollector`] keeps; a longer one is kept as none, so no tie can use it.
 pub const MAX_HELD_LINE_BYTES: usize = 64 * 1024;
 
-/// The most every [`CollectErrors`] `INFO: From` block together keeps (its
+/// The most every [`ErrorCollector`] `INFO: From` block together keeps (its
 /// header and last line), apart from Bazel's own blocks' budget; past it a
-/// block is counted ([`BazelBlocks::froms_not_kept`]), not kept.
+/// block is counted ([`CollectedErrors::froms_not_kept`]), not kept.
 ///
-/// [`BazelBlocks::froms_not_kept`]: super::processors::BazelBlocks::froms_not_kept
+/// [`CollectedErrors::froms_not_kept`]: super::processors::CollectedErrors::froms_not_kept
 pub const MAX_FROM_BYTES: usize = 16 * 1024 * 1024;
 
 /// Keeps, for the task's failure summary, each of Bazel's own `ERROR:`
@@ -457,9 +457,9 @@ pub const MAX_FROM_BYTES: usize = 16 * 1024 * 1024;
 /// last line (up to [`MAX_HELD_LINE_BYTES`]), never the body, so a chatty
 /// build costs no more than its errors, within [`MAX_FROM_BYTES`]. One of
 /// Bazel's blocks keeps at most what Bazel relays of an action's output
-/// ([`CollectErrors::relaying`], [`BAZEL_UI_MAX_STDOUTERR_BYTES`] by
+/// ([`ErrorCollector::relaying`], [`BAZEL_UI_MAX_STDOUTERR_BYTES`] by
 /// default) and room for its message, and all of them [`MAX_BLOCKS_BYTES`];
-/// what of Bazel's the caps leave out is counted ([`BazelBlocks::not_kept`]). A tail whose last record ended in a bare
+/// what of Bazel's the caps leave out is counted ([`CollectedErrors::not_kept`]). A tail whose last record ended in a bare
 /// `\r` goes on with the next record when no redraw came between: Bazel
 /// ends a held line only with the newline it adds. It writes
 /// nothing, and reads each record as Bazel wrote it
@@ -468,12 +468,12 @@ pub const MAX_FROM_BYTES: usize = 16 * 1024 * 1024;
 ///
 /// [`Block`]: super::processors::Block
 /// [`BlockKind::Tail`]: super::processors::BlockKind::Tail
-/// [`BazelBlocks::not_kept`]: super::processors::BazelBlocks::not_kept
-pub struct CollectErrors {
+/// [`CollectedErrors::not_kept`]: super::processors::CollectedErrors::not_kept
+pub struct ErrorCollector {
     given: Given,
     pty: bool,
     current: Option<Open>,
-    kept: super::processors::BazelBlocks,
+    kept: super::processors::CollectedErrors,
     bytes: usize,
     from_bytes: usize,
     /// The most one block and all of them keep: [`block_cap`] and
@@ -491,7 +491,7 @@ pub struct CollectErrors {
     observations: std::sync::Arc<super::processors::Observations>,
 }
 
-/// The block a [`CollectErrors`] has open: its text (for an `INFO: From`,
+/// The block a [`ErrorCollector`] has open: its text (for an `INFO: From`,
 /// its header alone), and of its body how many bytes and the last line.
 struct Open {
     kind: super::processors::BlockKind,
@@ -502,7 +502,7 @@ struct Open {
     returns: bool,
 }
 
-impl CollectErrors {
+impl ErrorCollector {
     /// Through a PTY (`pty`) a `\r\n` is the PTY's own line ending, kept as
     /// `\n`; in a pipe it is what Bazel wrote.
     pub fn new(pty: bool, observations: std::sync::Arc<super::processors::Observations>) -> Self {
@@ -576,7 +576,7 @@ impl CollectErrors {
     }
 }
 
-impl LineProcessor for CollectErrors {
+impl LineProcessor for ErrorCollector {
     fn see(&mut self, line: &Line) {
         self.given.see(line);
     }
@@ -669,7 +669,8 @@ impl LineProcessor for CollectErrors {
         self.close();
         self.kept.color = self.coloured;
         self.kept.relay_cap = self.relay_cap;
-        self.observations.set_blocks(std::mem::take(&mut self.kept));
+        self.observations
+            .set_collected_errors(std::mem::take(&mut self.kept));
         None
     }
 
@@ -1236,21 +1237,21 @@ mod tests {
         String::from_utf8(p.report().unwrap_or_default()).unwrap()
     }
 
-    /// What [`CollectErrors`] keeps of `input`, written as a PTY gives it
+    /// What [`ErrorCollector`] keeps of `input`, written as a PTY gives it
     /// (`\r\n` endings), with caps of `block` and `all` bytes.
     fn collected(
         input: &str,
         block: usize,
         all: usize,
-    ) -> Arc<super::super::processors::BazelBlocks> {
+    ) -> Arc<super::super::processors::CollectedErrors> {
         let observations = Arc::new(super::super::processors::Observations::default());
-        let collector = CollectErrors::new(true, observations.clone()).with_caps(block, all);
+        let collector = ErrorCollector::new(true, observations.clone()).with_caps(block, all);
         collect(collector, input.replace('\n', "\r\n").into_bytes());
-        observations.blocks().expect("kept")
+        observations.collected_errors().expect("kept")
     }
 
     /// `bytes` through `collector`, as a console of them streams.
-    fn collect(collector: CollectErrors, bytes: Vec<u8>) {
+    fn collect(collector: ErrorCollector, bytes: Vec<u8>) {
         let chain: Vec<Box<dyn LineProcessor>> = vec![Box::new(collector)];
         let mut forwarder = super::super::forward::Forwarder::spawn(
             Box::new(std::io::Cursor::new(bytes)),
@@ -1262,7 +1263,7 @@ mod tests {
     }
 
     /// The kinds and texts of `kept`'s blocks.
-    fn kinds_and_texts(kept: &super::super::processors::BazelBlocks) -> Vec<(&str, &str)> {
+    fn kinds_and_texts(kept: &super::super::processors::CollectedErrors) -> Vec<(&str, &str)> {
         kept.blocks
             .iter()
             .map(|b| (b.kind.as_str(), b.text.as_str()))
@@ -1276,10 +1277,10 @@ mod tests {
         let observations = Arc::new(super::super::processors::Observations::default());
         let input = "INFO: Reading rc options for 'build'\nComputing main repo mapping: \nERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline'\n";
         collect(
-            CollectErrors::new(false, observations.clone()),
+            ErrorCollector::new(false, observations.clone()),
             input.as_bytes().to_vec(),
         );
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         assert_eq!(
             kinds_and_texts(&kept),
             vec![(
@@ -1340,10 +1341,10 @@ mod tests {
             vec![body.as_str(); 2000].join("\n")
         );
         collect(
-            CollectErrors::new(false, observations.clone()).relaying(Some(0)),
+            ErrorCollector::new(false, observations.clone()).relaying(Some(0)),
             input.into_bytes(),
         );
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         assert_eq!(kept.relay_cap, Some(0));
         assert!(
             kept.blocks[0].text.len() <= BLOCK_ROOM,
@@ -1397,10 +1398,10 @@ mod tests {
 
         let observations = Arc::new(super::super::processors::Observations::default());
         collect(
-            CollectErrors::new(false, observations.clone()),
+            ErrorCollector::new(false, observations.clone()),
             b"(12:00:01) ERROR: in r rule //rf:x: refused\n".to_vec(),
         );
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         assert!(!kept.color, "--color=no");
         assert_eq!(
             kept.blocks[0].error_header(),
@@ -1415,10 +1416,10 @@ mod tests {
         let observations = Arc::new(super::super::processors::Observations::default());
         let input = "ERROR: a/BUILD:1:1: Executing genrule //a:a failed: (Exit 1): bash failed\ncrlf one\r\n";
         collect(
-            CollectErrors::new(false, observations.clone()),
+            ErrorCollector::new(false, observations.clone()),
             input.as_bytes().to_vec(),
         );
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         assert_eq!(kinds_and_texts(&kept), vec![("error", input)]);
     }
 
@@ -1449,7 +1450,7 @@ mod tests {
     fn a_crlf_split_across_reads_ends_the_held_line() {
         let observations = Arc::new(super::super::processors::Observations::default());
         let chain: Vec<Box<dyn LineProcessor>> =
-            vec![Box::new(CollectErrors::new(false, observations.clone()))];
+            vec![Box::new(ErrorCollector::new(false, observations.clone()))];
         let first = b"\x1b[32mINFO: \x1b[0mFrom Holding //a:cr:\n\x1b[32m[1 / 9]\x1b[0m running\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mheld lone cr\r".to_vec();
         let second = b"\n\x1b[32mINFO: \x1b[0mFrom Holding //a:next:\nout\n".to_vec();
         let mut forwarder = super::super::forward::Forwarder::spawn(
@@ -1459,7 +1460,7 @@ mod tests {
         )
         .unwrap();
         forwarder.join().unwrap();
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         assert_eq!(
             kinds_and_texts(&kept)[1..],
             [
@@ -1513,9 +1514,9 @@ mod tests {
         }
         input.push_str("\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:9:8: Executing genrule //a:late failed: (Exit 1): bash failed\n");
         let observations = Arc::new(super::super::processors::Observations::default());
-        let collector = CollectErrors::new(true, observations.clone()).with_from_cap(1000);
+        let collector = ErrorCollector::new(true, observations.clone()).with_from_cap(1000);
         collect(collector, input.replace('\n', "\r\n").into_bytes());
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         let froms = kept
             .blocks
             .iter()
@@ -1568,7 +1569,7 @@ mod tests {
     #[test]
     fn a_note_in_an_actions_output_is_left_out() {
         let observations = Arc::new(super::super::processors::Observations::default());
-        let mut p = CollectErrors::new(true, observations.clone());
+        let mut p = ErrorCollector::new(true, observations.clone());
         let mut c = super::super::line::Classifier::default();
         for (record, note) in [
             (
@@ -1585,7 +1586,7 @@ mod tests {
             p.process(record.as_bytes());
         }
         p.finish();
-        let kept = observations.blocks().expect("kept");
+        let kept = observations.collected_errors().expect("kept");
         assert_eq!(
             kept.blocks
                 .iter()

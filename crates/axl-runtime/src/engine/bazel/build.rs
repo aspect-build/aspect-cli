@@ -2272,7 +2272,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// `--experimental_ui_max_stdouterr_bytes`, else Bazel's default of 1
     /// MiB; None for no limit). None without such a stage, or before the
     /// console ends.
-    fn output_bazel_errors<'v>(
+    fn output_collected_errors<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
@@ -2280,7 +2280,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let kept = build
             .console_observations
             .as_ref()
-            .and_then(|o| super::output::bazel_blocks(o));
+            .and_then(|o| super::output::collected_errors(o));
         Ok(kept.map_or(values::Value::new_none(), |v| heap.alloc(v)))
     }
 

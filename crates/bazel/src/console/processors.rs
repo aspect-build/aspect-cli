@@ -342,15 +342,15 @@ pub struct Observations {
     seen: Mutex<std::collections::HashSet<String>>,
     /// One per aggregate stage, in the order the stages were made.
     tallies: Mutex<Vec<Tally>>,
-    /// Bazel's own error blocks and action output blocks, for the task's
-    /// failure summary ([`crate::console::report::CollectErrors`]).
-    blocks: Mutex<Option<std::sync::Arc<BazelBlocks>>>,
+    /// The errors the console's [`crate::console::report::ErrorCollector`]
+    /// collected, for the task's failure summary.
+    collected: Mutex<Option<std::sync::Arc<CollectedErrors>>>,
     /// Whether the console's stream carried Bazel's stdout too (a terminal
     /// both share), so an action's stdout is among its output there.
     stdout_shared: std::sync::atomic::AtomicBool,
 }
 
-/// What [`crate::console::report::CollectErrors`] kept of the console, in
+/// What [`crate::console::report::ErrorCollector`] kept of the console, in
 /// the order Bazel wrote it: each of Bazel's own `ERROR:` messages with
 /// what followed it before Bazel's next message or redraw, each `INFO:
 /// From …:` header of an action's output with its body's length and last
@@ -358,7 +358,7 @@ pub struct Observations {
 /// ([`BlockKind::Tail`]); how many bytes of Bazel's own its caps left out
 /// (`not_kept`), and how many `INFO: From` blocks (`froms_not_kept`).
 #[derive(Debug, Clone, Default)]
-pub struct BazelBlocks {
+pub struct CollectedErrors {
     pub blocks: Vec<Block>,
     pub not_kept: u64,
     pub froms_not_kept: u64,
@@ -472,15 +472,15 @@ impl BlockKind {
 }
 
 impl Observations {
-    /// Keep the console's blocks for the failure summary.
-    pub fn set_blocks(&self, blocks: BazelBlocks) {
-        *self.blocks.lock().unwrap() = Some(std::sync::Arc::new(blocks));
+    /// Keep the console's collected errors for the failure summary.
+    pub fn set_collected_errors(&self, collected: CollectedErrors) {
+        *self.collected.lock().unwrap() = Some(std::sync::Arc::new(collected));
     }
 
-    /// The console's blocks once it has ended, when a stage kept them:
-    /// shared, never copied.
-    pub fn blocks(&self) -> Option<std::sync::Arc<BazelBlocks>> {
-        self.blocks.lock().unwrap().clone()
+    /// The console's collected errors once it has ended, when a stage kept
+    /// them: shared, never copied.
+    pub fn collected_errors(&self) -> Option<std::sync::Arc<CollectedErrors>> {
+        self.collected.lock().unwrap().clone()
     }
 
     /// Note whether the console's stream carries Bazel's stdout too.

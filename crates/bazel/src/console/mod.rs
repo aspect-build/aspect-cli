@@ -221,12 +221,12 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
-    /// No recap: the task's failure summary tells Bazel's errors, from the
-    /// blocks a [`Stage::CollectErrors`] keeps, and names the raw log itself
-    /// ([`report::Summary::log_named_elsewhere`]).
-    ErrorsForSummary,
-    /// [`report::CollectErrors`], at the chain's front, for the failure
-    /// summary and the Dashboard ([`processors::Observations::blocks`]): one
+    /// `recap_errors(summary = True)`: no recap, the task's failure summary
+    /// telling Bazel's errors from those a [`Stage::CollectErrors`] collects,
+    /// and naming the raw log itself ([`report::Summary::log_named_elsewhere`]).
+    RecapInSummary,
+    /// [`report::ErrorCollector`], at the chain's front, for the failure
+    /// summary and the Dashboard ([`processors::Observations::collected_errors`]): one
     /// however many stages ask for it.
     CollectErrors,
     /// [`processors::CollapseRepeats`].
@@ -288,7 +288,7 @@ impl Stage {
             Stage::Rewrite { .. } => "rewrite",
             Stage::RelativizePaths { .. } => "relativize_paths",
             Stage::Drop(_) => "drop",
-            Stage::RecapErrors { .. } | Stage::ErrorsForSummary => "recap_errors",
+            Stage::RecapErrors { .. } | Stage::RecapInSummary => "recap_errors",
             Stage::CollectErrors => "collect_errors",
             Stage::CollapseRepeats => "collapse_repeats",
             Stage::CollapseSimilar { .. } => "collapse_similar",
@@ -303,7 +303,7 @@ impl Stage {
             Stage::Intercept { .. } => Phase::Intercept,
             Stage::Rewrite { .. } | Stage::RelativizePaths { .. } => Phase::Rewrite,
             Stage::Drop(_) => Phase::Drop,
-            Stage::RecapErrors { .. } | Stage::ErrorsForSummary => Phase::Report,
+            Stage::RecapErrors { .. } | Stage::RecapInSummary => Phase::Report,
             Stage::CollapseSimilar { .. } => Phase::Collapse,
             Stage::CollapseRepeats => Phase::Repeat,
         }
@@ -318,7 +318,7 @@ impl Stage {
                 | Stage::Aggregate(_)
                 | Stage::Fatal(_)
                 | Stage::RecapErrors { .. }
-                | Stage::ErrorsForSummary
+                | Stage::RecapInSummary
                 | Stage::CollectErrors
         )
     }
@@ -553,7 +553,8 @@ impl Config {
             .any(|s| matches!(s, Stage::CollectErrors))
         {
             chain.push(Box::new(
-                report::CollectErrors::new(self.pty, observations.clone()).relaying(self.relay_cap),
+                report::ErrorCollector::new(self.pty, observations.clone())
+                    .relaying(self.relay_cap),
             ));
         }
         // First, so every stage after it, a user's `rewrite` included, sees
@@ -620,7 +621,7 @@ impl Config {
                 ),
                 // No recap: the task's failure summary tells the errors,
                 // from what the collector at the chain's front keeps.
-                Stage::ErrorsForSummary | Stage::CollectErrors => continue,
+                Stage::RecapInSummary | Stage::CollectErrors => continue,
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
                         .under_pty(pty)
@@ -648,7 +649,7 @@ impl Config {
             let summarized = self
                 .stages()
                 .iter()
-                .any(|s| matches!(s, Stage::ErrorsForSummary));
+                .any(|s| matches!(s, Stage::RecapInSummary));
             chain.push(Box::new(
                 Summary::new(
                     stats,
@@ -841,7 +842,7 @@ mod tests {
         let mut pipeline = Config::new(
             Mode::Pty,
             vec![
-                Stage::ErrorsForSummary,
+                Stage::RecapInSummary,
                 Stage::CollectErrors,
                 Stage::CollectErrors,
             ],
@@ -857,7 +858,7 @@ mod tests {
         .unwrap();
         forwarder.join().unwrap();
         assert!(!sink.text().contains("Error recap"), "{}", sink.text());
-        let kept = pipeline.observations.blocks().expect("collected");
+        let kept = pipeline.observations.collected_errors().expect("collected");
         assert_eq!(kept.blocks.len(), 1, "one collector however many asked");
     }
 
