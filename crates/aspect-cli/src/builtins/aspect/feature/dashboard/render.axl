@@ -6,6 +6,7 @@ load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
 load("@aspect//feature/dashboard/log.axl", "dashboard_log")
 load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
 load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("../../private/lib/bazel_results.axl", "bes_get")
 load("../../private/lib/failure_records.axl", "failure_records")
 load("../../private/lib/failures.axl", "failures")
 load("../../private/lib/term_text.axl", "term_text")
@@ -24,7 +25,6 @@ link = term_text.link
 mark_cells = term_text.mark_cells
 text_width = term_text.text_width
 wrap_line = term_text.wrap_line
-_get = failure_records.get
 blocked_targets = failure_records.blocked_targets
 blocked_text = failure_records.blocked_text
 _expand_tabs = failures.expand_tabs
@@ -942,7 +942,7 @@ def metrics_lines(state: dict) -> list:
     out.append(_row_of("configured", c["configured"]))
     out.append(_row_of("built", _counts("%d · %d failed · %d blocked by a dependency", (built_n, failed, blocked))))
     out.append(_row_of("failures listed", _counts("%d (failed actions and test attempts, in Failures)", shown)))
-    timing = _get(bm, "timing_metrics")
+    timing = bes_get(bm, "timing_metrics")
     out += ["", _c("heading") + "Time" + _RESET]
 
     # A folded build's own time; the running one's since it started.
@@ -953,10 +953,10 @@ def metrics_lines(state: dict) -> list:
     if state.get("critical"):
         out.append(_row_of("critical path", state["critical"]))
     for field, name in (("analysis_phase_time_in_ms", "analysis"), ("execution_phase_time_in_ms", "execution"), ("cpu_time_in_ms", "CPU")):
-        ms = _get(timing, field, 0) or 0
+        ms = bes_get(timing, field, 0) or 0
         if ms:
             out.append(_row_of(name, elapsed(ms)))
-    heap = _get(_get(bm, "memory_metrics"), "peak_post_gc_heap_size", 0) or 0
+    heap = bes_get(bes_get(bm, "memory_metrics"), "peak_post_gc_heap_size", 0) or 0
     if heap:
         out += ["", _c("heading") + "Memory" + _RESET, _row_of("peak heap after GC", "%d MiB" % (heap // (1024 * 1024)))]
     slow = [] if state.get("building") else slowest_rows(state)
@@ -970,28 +970,28 @@ def invocation_lines(state: dict) -> list:
     inv = state.get("inv", {})
     started = inv.get("build_started")
     out = [_c("heading") + "Invocation" + _RESET]
-    out.append(_row_of("command", str(_get(started, "command", "") or state["task"])))
-    out.append(_row_of("invocation id", str(_get(started, "uuid", "") or state.get("bazel_uuid", "") or "")))
-    out.append(_row_of("Bazel", str(_get(started, "build_tool_version", "") or "")))
-    out.append(_row_of("workspace", str(_get(started, "workspace_directory", "") or "")))
+    out.append(_row_of("command", str(bes_get(started, "command", "") or state["task"])))
+    out.append(_row_of("invocation id", str(bes_get(started, "uuid", "") or state.get("bazel_uuid", "") or "")))
+    out.append(_row_of("Bazel", str(bes_get(started, "build_tool_version", "") or "")))
+    out.append(_row_of("workspace", str(bes_get(started, "workspace_directory", "") or "")))
     finished = inv.get("build_finished")
     if finished != None:
-        code = _get(finished, "exit_code")
-        out.append(_row_of("exit", "%s (%d)" % (str(_get(code, "name", "") or ""), _get(code, "code", 0) or 0)))
+        code = bes_get(finished, "exit_code")
+        out.append(_row_of("exit", "%s (%d)" % (str(bes_get(code, "name", "") or ""), bes_get(code, "code", 0) or 0)))
     for label, url in state.get("pages", []):
         out.append(_row_of(label, url))
     options = inv.get("options_parsed")
-    explicit = _redacted_args([str(f) for f in (_get(options, "explicit_cmd_line") or [])])
+    explicit = _redacted_args([str(f) for f in (bes_get(options, "explicit_cmd_line") or [])])
     if explicit:
         out += ["", _c("heading") + "Flags given" + _RESET] + ["  " + f for f in explicit]
-    startup = _redacted_args([str(f) for f in (_get(options, "explicit_startup_options") or [])])
+    startup = _redacted_args([str(f) for f in (bes_get(options, "explicit_startup_options") or [])])
     if startup:
         out += ["", _c("heading") + "Startup options given" + _RESET] + ["  " + f for f in startup]
-    status = _get(inv.get("workspace_status"), "item") or []
+    status = bes_get(inv.get("workspace_status"), "item") or []
     if status:
         out += ["", _c("heading") + "Workspace status" + _RESET]
-        out += [_row_of(str(_get(i, "key", "")), _redacted(str(_get(i, "key", "")) + "=" + str(_get(i, "value", ""))).partition("=")[2]) for i in status]
-    metadata = _get(inv.get("build_metadata"), "metadata")
+        out += [_row_of(str(bes_get(i, "key", "")), _redacted(str(bes_get(i, "key", "")) + "=" + str(bes_get(i, "value", ""))).partition("=")[2]) for i in status]
+    metadata = bes_get(inv.get("build_metadata"), "metadata")
     if metadata:
         out += ["", _c("heading") + "Build metadata" + _RESET]
         out += [_row_of(str(k), _redacted(str(k) + "=" + str(metadata[k])).partition("=")[2]) for k in sorted(metadata)]

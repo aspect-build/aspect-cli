@@ -188,7 +188,7 @@ load("@aspect//traits.axl", "Phases")
 load("@std//time.axl", "monotonic")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/aspect_flags.axl", "publish_all_actions_unless_sent_out")
-load("../private/lib/bazel_results.axl", "bb_clientd_root")
+load("../private/lib/bazel_results.axl", "bb_clientd_root", "bes_get")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/results_pages.axl", "bes_results_url", "results_pages")
@@ -201,7 +201,6 @@ _RESET = term_text.RESET
 ANSI = term_text.ANSI
 CONTROLS = term_text.CONTROLS
 _flaky = failure_records.flaky
-_get = failure_records.get
 build_outcome = failure_records.build_outcome
 build_succeeded = failure_records.build_succeeded
 collect_event = failure_records.collect_event
@@ -329,7 +328,7 @@ def fold_build(state: dict, now_ms: int):
     failed, blocked = _failure_counts(state)
     started = state.get("inv", {}).get("build_started")
     state.setdefault("builds", []).append(dict(
-        command = str(_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
+        command = str(bes_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
         actions = actions_text(action_split(dict(state, building = False))),
         failed = failed,
         blocked = blocked,
@@ -572,7 +571,7 @@ def _dashboard_impl(ctx: FeatureContext):
     def _event(task_ctx, event):
         kind = event.kind
         if kind == "build_started":
-            state["bazel_uuid"] = str(_get(event.payload, "uuid", "") or "")
+            state["bazel_uuid"] = str(bes_get(event.payload, "uuid", "") or "")
         elif kind == "options_parsed":
             state["bes_base"] = bes_results_url(event) or state["bes_base"]
         collect_event(state, event)
@@ -735,12 +734,12 @@ def _dashboard_impl(ctx: FeatureContext):
 
     def _spawn(task_ctx, entry):
         # The entry's kind is its `type`: a `spawn` or a `file`, as asked.
-        what = _get(entry, "type")
+        what = bes_get(entry, "type")
         if type(what) == "file":
-            note_log_file(state["counts"], _get(entry, "id", 0), what)
+            note_log_file(state["counts"], bes_get(entry, "id", 0), what)
         else:
             count_spawn(state["counts"], what)
-        note_spawn_time(state, _get(entry, "type"))
+        note_spawn_time(state, bes_get(entry, "type"))
 
     t.exec_log_event.append(ExecLogHook(on_entry = _spawn, kinds = ["spawn", "file"], file_paths = ["/testlogs/"]))
     t.bazel_attempt_end.append(_attempt_end)

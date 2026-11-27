@@ -2,11 +2,11 @@
 a peek), the lists' chosen rows and the tips."""
 
 load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("../../private/lib/bazel_results.axl", "bes_get")
 load("../../private/lib/failure_records.axl", "failure_records")
 load("../../private/lib/failures.axl", "failures")
 load("../../private/lib/tips.axl", "severity_rank")
 
-_get = failure_records.get
 _MAX_LOG_BYTES = failure_records.MAX_LOG_BYTES
 blocked_targets = failure_records.blocked_targets
 blocked_text = failure_records.blocked_text
@@ -98,10 +98,10 @@ def log_view(state: dict, record: dict) -> dict:
 def refresh_test_view(state: dict, event):
     """A test's summary arriving (not Aborted, as `collect_event` reads it)
     shows the test's open log anew, now findable, from its end."""
-    if event.kind != "test_summary" or (_get(event, "payload_kind") or type(_get(event, "payload"))) == "aborted":
+    if event.kind != "test_summary" or (bes_get(event, "payload_kind") or type(bes_get(event, "payload"))) == "aborted":
         return
-    event_id = _get(event, "id")
-    key = (repaired(str(_get(event_id, "label", "") or "")), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+    event_id = bes_get(event, "id")
+    key = (repaired(str(bes_get(event_id, "label", "") or "")), str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""))
     view = state["view"]
     if view != None and view.get("record") != None and view["record"]["kind"] == "test" and (view["record"]["label"], view["record"]["config"]) == key:
         state["view"] = log_view(state, view["record"])

@@ -2,6 +2,7 @@
 what a cache gave (`action_split`), the running and slowest actions, and
 the Metrics tab's actions."""
 
+load("../../private/lib/bazel_results.axl", "bes_get")
 load("../../private/lib/failure_records.axl", "failure_records")
 load("../../private/lib/term_text.axl", "term_text")
 
@@ -16,7 +17,6 @@ _thousands = term_text.thousands
 fit = term_text.fit
 short_count = term_text.short_count
 text_width = term_text.text_width
-_get = failure_records.get
 bazel_line = failure_records.bazel_line
 build_outcome = failure_records.build_outcome
 build_succeeded = failure_records.build_succeeded
@@ -225,13 +225,13 @@ def _nothing_ran(state: dict) -> bool:
     inv = state.get("inv") or {}
     if state.get("building") or not build_succeeded(inv):
         return False
-    summary = _get(inv.get("build_metrics"), "action_summary")
-    executed = _get(summary, "actions_executed", None)
+    summary = bes_get(inv.get("build_metrics"), "action_summary")
+    executed = bes_get(summary, "actions_executed", None)
     if executed == None:
         return False
-    for data in _get(summary, "action_data", None) or []:
-        if str(_get(data, "mnemonic", "") or "") in _ALWAYS_RUN:
-            executed -= _get(data, "actions_executed", 0) or 0
+    for data in bes_get(summary, "action_data", None) or []:
+        if str(bes_get(data, "mnemonic", "") or "") in _ALWAYS_RUN:
+            executed -= bes_get(data, "actions_executed", 0) or 0
     return executed <= 0
 
 def slowest_title(state: dict) -> str:
@@ -244,14 +244,14 @@ def note_spawn_time(state: dict, spawn):
     wall time (its execution's, else its whole time), when it ran, locally
     or remotely: a cache hit's time is its fetch, not the work, and one that
     did not execute has none. The `_SLOWEST_KEPT` longest are kept."""
-    if _get(spawn, "cache_hit", False) or "cache hit" in str(_get(spawn, "runner", "") or ""):
+    if bes_get(spawn, "cache_hit", False) or "cache hit" in str(bes_get(spawn, "runner", "") or ""):
         return
-    metrics = _get(spawn, "metrics")
-    ms = _get(metrics, "execution_wall_time_ms") or _get(metrics, "total_time_ms") or 0
+    metrics = bes_get(spawn, "metrics")
+    ms = bes_get(metrics, "execution_wall_time_ms") or bes_get(metrics, "total_time_ms") or 0
     if ms <= 0:
         return
     timed = state.setdefault("spawn_slowest", [])
-    timed.append((ms, str(_get(spawn, "mnemonic", "") or "action"), str(_get(spawn, "target_label", "") or "")))
+    timed.append((ms, str(bes_get(spawn, "mnemonic", "") or "action"), str(bes_get(spawn, "target_label", "") or "")))
     if len(timed) > 2 * _SLOWEST_KEPT:
         state["spawn_slowest"] = sorted(timed, key = lambda t: -t[0])[:_SLOWEST_KEPT]
 
@@ -574,17 +574,17 @@ def action_split(state: dict) -> dict:
     done, total, more = build_progress(state)
     c = state.get("counts") or {}
     inv = state.get("inv") or {}
-    summary = _get(inv.get("build_metrics"), "action_summary")
-    executed = _get(summary, "actions_executed")
+    summary = bes_get(inv.get("build_metrics"), "action_summary")
+    executed = bes_get(summary, "actions_executed")
     caches = cache_kinds(inv)
     split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, memory = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
     kinds = c.get("log_kinds") or {}
     logged = state.get("exec_log_read") and not own_execution_log(inv) and (kinds.get("ran", 0) + kinds.get("disk", 0) + kinds.get("remote", 0)) > 0
     if not state.get("building") and type(executed) == "int":
         internal, disk, remote, ran, hit_runner = 0, 0, 0, 0, 0
-        for runner in _get(summary, "runner_count", None) or []:
-            name = str(_get(runner, "name", "") or "")
-            n = _get(runner, "count", 0) or 0
+        for runner in bes_get(summary, "runner_count", None) or []:
+            name = str(bes_get(runner, "name", "") or "")
+            n = bes_get(runner, "count", 0) or 0
             if name == "internal":
                 internal += n
             elif name == "action cache hit":
@@ -608,9 +608,9 @@ def action_split(state: dict) -> dict:
             disk = min(disk, spawned)
             remote = min(remote, spawned - disk)
             ran = min(ran, spawned - disk - remote)
-        stats = _get(summary, "action_cache_statistics")
-        local = (_get(stats, "hits", 0) or 0) if stats != None else hit_runner
-        graph = _get(inv.get("build_metrics"), "build_graph_metrics")
+        stats = bes_get(summary, "action_cache_statistics")
+        local = (bes_get(stats, "hits", 0) or 0) if stats != None else hit_runner
+        graph = bes_get(inv.get("build_metrics"), "build_graph_metrics")
         memory = _graph_count(graph, "cleaned_values") or 0
 
         # Failed actions inside `actions_executed`: those of every action's
@@ -649,7 +649,7 @@ def action_split(state: dict) -> dict:
         not_run = max(0, done - whole)
         split.update(counted = True, known = True, final = True, ran = ran, local = local, memory = memory, disk = disk, remote = remote, internal = internal, failed = failed, not_run = not_run, other = other, more = False, failed_build = not succeeded)
         split["done"] = done if done >= 0 else whole
-        created = _get(summary, "actions_created", 0) or 0
+        created = bes_get(summary, "actions_created", 0) or 0
         if succeeded:
             split["total"] = split["done"]
         else:
@@ -693,13 +693,13 @@ def _logged_kinds(counts: dict, failures: list) -> dict:
 def _graph_count(graph, field: str):
     """`BuildGraphMetrics`' `field` (`built_values`, `cleaned_values`) count
     of `ACTION_EXECUTION` keys, None where Bazel gave none of that field."""
-    stats = _get(graph, field, None)
+    stats = bes_get(graph, field, None)
     if stats == None or graph == None:
         return None
     n = 0
     for stat in stats or []:
-        if str(_get(stat, "skyfunction_name", "") or "") == "ACTION_EXECUTION":
-            n += _get(stat, "count", 0) or 0
+        if str(bes_get(stat, "skyfunction_name", "") or "") == "ACTION_EXECUTION":
+            n += bes_get(stat, "count", 0) or 0
     return n
 
 def _published_split(state: dict, split: dict, done: int) -> dict:
@@ -743,7 +743,7 @@ def cache_kinds(inv: dict) -> tuple:
     command line Bazel parsed (rc files' flags in it); an empty value is
     none."""
     options = inv.get("options_parsed")
-    flags = _get(options, "cmd_line") or _get(options, "explicit_cmd_line") or []
+    flags = bes_get(options, "cmd_line") or bes_get(options, "explicit_cmd_line") or []
     last = {}
     for flag in flags:
         name, eq, value = str(flag).partition("=")
@@ -1262,7 +1262,7 @@ def own_execution_log(inv: dict):
     `=false` as a path and refuses `--no`, Bazel 10 reads both as off), the
     bare flag, a true value or a path one."""
     options = inv.get("options_parsed")
-    flags = _get(options, "cmd_line") or _get(options, "explicit_cmd_line") or []
+    flags = bes_get(options, "cmd_line") or bes_get(options, "explicit_cmd_line") or []
     last = {}
     for flag in flags:
         name, eq, value = str(flag).partition("=")
@@ -1292,7 +1292,7 @@ def action_lines(state: dict) -> list:
     missed, and the execution log's spawns."""
     c = state["counts"]
     inv = state.get("inv") or {}
-    summary = _get(inv.get("build_metrics"), "action_summary")
+    summary = bes_get(inv.get("build_metrics"), "action_summary")
     split = action_split(state)
     out = [_c("heading") + "Actions" + _RESET]
     if split["counted"]:
@@ -1304,17 +1304,17 @@ def action_lines(state: dict) -> list:
     # Each runner's spawns, BuildMetrics' once the build has them.
     runners = {}
     if split["final"]:
-        for runner in _get(summary, "runner_count", None) or []:
-            name = str(_get(runner, "name", "") or "")
+        for runner in bes_get(summary, "runner_count", None) or []:
+            name = str(bes_get(runner, "name", "") or "")
             if name not in _NOT_RUNNERS:
-                runners[name] = runners.get(name, 0) + (_get(runner, "count", 0) or 0)
+                runners[name] = runners.get(name, 0) + (bes_get(runner, "count", 0) or 0)
     else:
         runners = dict(c.get("runners") or {})
     kinds = {}
-    for data in _get(summary, "action_data", None) or []:
-        mnemonic = str(_get(data, "mnemonic", "") or "")
+    for data in bes_get(summary, "action_data", None) or []:
+        mnemonic = str(bes_get(data, "mnemonic", "") or "")
         if mnemonic in _INTERNAL_MNEMONICS:
-            kinds[mnemonic] = _get(data, "actions_executed", 0) or 0
+            kinds[mnemonic] = bes_get(data, "actions_executed", 0) or 0
     spawns = lambda n: _counts("%d spawn" + ("" if n == 1 else "s"), n)
     under = {
         "ok": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
@@ -1343,14 +1343,14 @@ def action_lines(state: dict) -> list:
             out.append(("    " + name + " " * (column - len(name)) + value) if name else "      " + _c("muted") + value + _RESET)
 
     # Bazel's own action cache, and why it missed.
-    stats = _get(summary, "action_cache_statistics")
+    stats = bes_get(summary, "action_cache_statistics")
     if stats != None:
-        out.append("  action cache" + " " * (column + 2 - len("action cache")) + _counts("%d hits · %d misses", (_get(stats, "hits", 0) or 0, _get(stats, "misses", 0) or 0)))
+        out.append("  action cache" + " " * (column + 2 - len("action cache")) + _counts("%d hits · %d misses", (bes_get(stats, "hits", 0) or 0, bes_get(stats, "misses", 0) or 0)))
         reasons = {}
-        for miss in _get(stats, "miss_details", None) or []:
-            n = _get(miss, "count", 0) or 0
+        for miss in bes_get(stats, "miss_details", None) or []:
+            n = bes_get(miss, "count", 0) or 0
             if n:
-                reasons[str(_get(miss, "reason", "") or "")] = n
+                reasons[str(bes_get(miss, "reason", "") or "")] = n
 
         # A reason newer than the CLI's protos reads as its number.
         for reason, n in _by_count(reasons):
@@ -1367,7 +1367,7 @@ def action_lines(state: dict) -> list:
     else:
         out.append(_row_of("spawns", "after the build, from its execution log"))
     if summary != None:
-        out.append(_row_of("actions created", _thousands(_get(summary, "actions_created", 0) or 0)))
+        out.append(_row_of("actions created", _thousands(bes_get(summary, "actions_created", 0) or 0)))
     return out
 
 dashboard_actions = namespace(

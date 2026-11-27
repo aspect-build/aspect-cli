@@ -2,7 +2,7 @@
 counts, every failed action, test and target with its logs, and the root
 causes that block other targets."""
 
-load("./bazel_results.axl", "uri_to_path_under_root")
+load("./bazel_results.axl", "bes_get", "uri_to_path_under_root")
 load("./term_text.axl", "term_text")
 
 _counts = term_text.counts
@@ -40,36 +40,36 @@ def failure_of(kind: str, event_id, payload):
     stderr and stdout, or a test attempt that did not pass (`test_result`;
     flaky ones did not) with its `test.log`. Each log is a BES `File.file`: a
     URI, or the contents inline."""
-    label = repaired(str(_get(event_id, "label", "") or ""))
+    label = repaired(str(bes_get(event_id, "label", "") or ""))
     if kind == "action_completed":
-        if _get(payload, "success", False):
+        if bes_get(payload, "success", False):
             return None
         return _action_record(label, payload, event_id)
     if kind == "test_result":
-        if str(_get(payload, "status", "") or "").lower() not in _FAILED_TEST_STATUSES:
+        if str(bes_get(payload, "status", "") or "").lower() not in _FAILED_TEST_STATUSES:
             return None
-        attempt = _get(event_id, "attempt", 1) or 1
+        attempt = bes_get(event_id, "attempt", 1) or 1
         return {
             "kind": "test",
             "label": label,
             "detail": "attempt %d" % attempt,
-            "run": _get(event_id, "run", 1) or 1,
-            "shard": _get(event_id, "shard", 1) or 1,
+            "run": bes_get(event_id, "run", 1) or 1,
+            "shard": bes_get(event_id, "shard", 1) or 1,
             "attempt": attempt,
-            "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
-            "status": str(_get(payload, "status", "") or "").lower(),
+            "config": str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""),
+            "status": str(bes_get(payload, "status", "") or "").lower(),
             "duration_ms": _attempt_ms(payload),
-            "files": [("test.log", bounded_log(_get(f, "file", None))) for f in (_get(payload, "test_action_output", None) or []) if str(_get(f, "name", "") or "") == "test.log"],
+            "files": [("test.log", bounded_log(bes_get(f, "file", None))) for f in (bes_get(payload, "test_action_output", None) or []) if str(bes_get(f, "name", "") or "") == "test.log"],
         }
     return None
 
 def _attempt_ms(payload) -> int:
     """How long a test attempt ran, in milliseconds."""
-    ms = _get(payload, "test_attempt_duration_millis", 0) or 0
+    ms = bes_get(payload, "test_attempt_duration_millis", 0) or 0
     if ms:
         return ms
-    d = _get(payload, "test_attempt_duration", None)
-    return (_get(d, "seconds", 0) or 0) * 1000 + (_get(d, "nanos", 0) or 0) // 1000000 if d != None else 0
+    d = bes_get(payload, "test_attempt_duration", None)
+    return (bes_get(d, "seconds", 0) or 0) * 1000 + (bes_get(d, "nanos", 0) or 0) // 1000000 if d != None else 0
 
 def _action_record(label: str, payload, event_id = None) -> dict:
     """An action's record for a list: its label, mnemonic, logs, primary
@@ -78,18 +78,18 @@ def _action_record(label: str, payload, event_id = None) -> dict:
     `failure_detail` says of it (`failure`, decoded, `repaired`)."""
     files = []
     for name in ("stderr", "stdout"):
-        f = _get(payload, name, None)
+        f = bes_get(payload, name, None)
         if f != None:
-            files.append((name, bounded_log(_get(f, "file", None))))
+            files.append((name, bounded_log(bes_get(f, "file", None))))
     return {
         "kind": "action",
         "label": repaired(label),
-        "detail": str(_get(payload, "type", "") or "") or "Action",
-        "failure": repaired(str(_get(_get(payload, "failure_detail", None), "message", "") or "")),
+        "detail": str(bes_get(payload, "type", "") or "") or "Action",
+        "failure": repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or "")),
         "files": files,
-        "output": str(_get(event_id, "primary_output", "") or ""),
-        "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
-        "success": bool(_get(payload, "success", False)),
+        "output": str(bes_get(event_id, "primary_output", "") or ""),
+        "config": str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""),
+        "success": bool(bes_get(payload, "success", False)),
         "exit_code": spawn_exit_code(payload),
         "counted_internal": counted_internal(payload),
     }
@@ -98,8 +98,8 @@ def spawn_exit_code(payload) -> int:
     """What a failed action's command exited with (its `failure_detail`'s
     `spawn_exit_code`, as `(Exit 3)` says), else 0. The event's own
     `exit_code` is 1 for every failed spawn."""
-    category = _get(_get(payload, "failure_detail", None), "category", None)
-    return _get(category, "spawn_exit_code", 0) or 0
+    category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
+    return bes_get(category, "spawn_exit_code", 0) or 0
 
 def counted_internal(payload):
     """Whether Bazel counts a failed action among `runner_count`'s internal
@@ -108,18 +108,18 @@ def counted_internal(payload):
     `ACTION_FINALIZATION_FAILURE`), which it counts under the runner its
     spawn ran in; None when it said nothing. Only where not every action's
     events say it (`action_split`)."""
-    category = _get(_get(payload, "failure_detail", None), "category", None)
+    category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
     if category == None:
         return None
-    return str(_get(category, "code", "") or "").upper() not in ("ACTION_OUTPUTS_NOT_CREATED", "ACTION_FINALIZATION_FAILURE")
+    return str(bes_get(category, "code", "") or "").upper() not in ("ACTION_OUTPUTS_NOT_CREATED", "ACTION_FINALIZATION_FAILURE")
 
 def output_of(kind: str, event_id, payload):
     """A record for the actions list from a build event, or None: an action
     that succeeded and wrote a stdout or stderr, which Bazel reports only
     with `--build_event_publish_all_actions` (`actions = "all"`)."""
-    if kind != "action_completed" or not _get(payload, "success", False):
+    if kind != "action_completed" or not bes_get(payload, "success", False):
         return None
-    record = _action_record(str(_get(event_id, "label", "") or ""), payload, event_id)
+    record = _action_record(str(bes_get(event_id, "label", "") or ""), payload, event_id)
     return record if record["files"] else None
 
 def cut_text(text: str) -> str:
@@ -213,14 +213,14 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     `configured_label`, or a target's own with a description) or loading
     (an `unconfigured_label`, a pattern with a description)."""
     if kind == "progress":
-        counts = bep_progress(str(_get(payload, "stderr", "") or ""))
+        counts = bep_progress(str(bes_get(payload, "stderr", "") or ""))
         if counts:
             state["bep_done_total"] = counts
     if aborted:
-        reason = str(_get(payload, "reason", "") or "").lower()
+        reason = str(bes_get(payload, "reason", "") or "").lower()
         pattern = kind == "pattern_expanded"
-        label = " ".join([str(p) for p in (_get(event_id, "pattern", None) or [])]) if pattern else repaired(str(_get(event_id, "label", "") or ""))
-        description = repaired(str(_get(payload, "description", "") or ""))
+        label = " ".join([str(p) for p in (bes_get(event_id, "pattern", None) or [])]) if pattern else repaired(str(bes_get(event_id, "label", "") or ""))
+        description = repaired(str(bes_get(payload, "description", "") or ""))
         failing = reason in _FAILED_ABORTS
         detail = None
         if kind == "unconfigured_label":
@@ -229,7 +229,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
             detail = "analysis"
         elif pattern and failing and description:
             detail = "loading"
-        elif kind in ("target_configured", "target_completed") and failing and description and not _get(event_id, "aspect", ""):
+        elif kind in ("target_configured", "target_completed") and failing and description and not bes_get(event_id, "aspect", ""):
             detail = "analysis"
         if detail != None and label and not any([r["kind"] == "target" and r["label"] == label for r in state["fails"]]):
             _add_failure(state, {
@@ -240,25 +240,25 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
                 "pattern": pattern,
                 "files": [("error", (description, False))] if description else [],
                 "output": "",
-                "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
+                "config": str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""),
                 "success": False,
             })
         return
     if kind == "workspace_config":
-        state["exec_root"] = str(_get(payload, "local_exec_root", "") or "")
+        state["exec_root"] = str(bes_get(payload, "local_exec_root", "") or "")
     elif kind == "configuration":
-        state["output_dirs"][str(_get(event_id, "id", "") or "")] = str(_get(payload, "mnemonic", "") or "")
+        state["output_dirs"][str(bes_get(event_id, "id", "") or "")] = str(bes_get(payload, "mnemonic", "") or "")
     elif kind == "test_summary":
-        key = (repaired(str(_get(event_id, "label", "") or "")), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
-        state["test_counts"][key] = (_get(payload, "run_count", 0) or 0, _get(payload, "shard_count", 0) or 0)
+        key = (repaired(str(bes_get(event_id, "label", "") or "")), str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""))
+        state["test_counts"][key] = (bes_get(payload, "run_count", 0) or 0, bes_get(payload, "shard_count", 0) or 0)
     elif kind == "test_result":
         key = (
-            repaired(str(_get(event_id, "label", "") or "")),
-            str(_get(_get(event_id, "configuration", None), "id", "") or ""),
-            _get(event_id, "run", 1) or 1,
-            _get(event_id, "shard", 1) or 1,
+            repaired(str(bes_get(event_id, "label", "") or "")),
+            str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""),
+            bes_get(event_id, "run", 1) or 1,
+            bes_get(event_id, "shard", 1) or 1,
         )
-        state["last_attempts"][key] = max(state["last_attempts"].get(key, 0), _get(event_id, "attempt", 1) or 1)
+        state["last_attempts"][key] = max(state["last_attempts"].get(key, 0), bes_get(event_id, "attempt", 1) or 1)
         runs, shards = state["spread"].get(key[:2], (1, 1))
         state["spread"][key[:2]] = (max(runs, key[2]), max(shards, key[3]))
     record = failure_of(kind, event_id, payload)
@@ -276,8 +276,8 @@ def collect_event(state: dict, event):
     causes (`note_blocked`). An event is Aborted when its payload is (the
     replay test's events say so as `payload_kind`)."""
     kind = event.kind
-    event_id, payload = _get(event, "id"), _get(event, "payload")
-    aborted = (_get(event, "payload_kind") or type(payload)) == "aborted"
+    event_id, payload = bes_get(event, "id"), bes_get(event, "payload")
+    aborted = (bes_get(event, "payload_kind") or type(payload)) == "aborted"
     if kind in _INVOCATION_KINDS:
         state["inv"][kind] = payload
     count_event(state["counts"], kind, event_id, payload, aborted)
@@ -383,32 +383,32 @@ def note_blocked(state: dict, event):
     failed with no failed action among its causes (a missing source file)
     is a failure record of its own (`kind` `target`, `detail` `target`),
     its `failure_detail`'s message its description."""
-    kind = _get(event, "kind")
-    payload = _get(event, "payload")
-    event_id = _get(event, "id")
+    kind = bes_get(event, "kind")
+    payload = bes_get(event, "payload")
+    event_id = bes_get(event, "id")
     if kind == "target_completed":
-        if _get(payload, "success", False) or _get(event_id, "aspect", ""):
+        if bes_get(payload, "success", False) or bes_get(event_id, "aspect", ""):
             return
-    elif kind != "target_configured" or (_get(event, "payload_kind") or type(payload)) != "aborted":
+    elif kind != "target_configured" or (bes_get(event, "payload_kind") or type(payload)) != "aborted":
         # A configured target's only child is its own completion; one
         # Aborted in analysis has its root causes.
         return
-    label = repaired(str(_get(event_id, "label", "") or ""))
+    label = repaired(str(bes_get(event_id, "label", "") or ""))
     roots = []
     acted = False
-    for child in _get(event, "children") or []:
-        child_id = _get(child, "id")
-        if _get(child_id, "primary_output", ""):
+    for child in bes_get(event, "children") or []:
+        child_id = bes_get(child, "id")
+        if bes_get(child_id, "primary_output", ""):
             acted = True
-        root = repaired(str(_get(child_id, "label", "") or ""))
-        if root and root not in roots and (root != label or not _get(child_id, "primary_output", "")):
+        root = repaired(str(bes_get(child_id, "label", "") or ""))
+        if root and root not in roots and (root != label or not bes_get(child_id, "primary_output", "")):
             roots.append(root)
     roots = [r for r in roots if r != label or len(roots) == 1]
     if label and roots:
         if state.get("root_causes") == None:
             state["root_causes"] = {}
         state["root_causes"][label] = roots
-    message = repaired(str(_get(_get(payload, "failure_detail", None), "message", "") or ""))
+    message = repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or ""))
     if kind == "target_completed" and label and message and not acted and not any([r["kind"] == "target" and r["label"] == label for r in state["fails"]]):
         _add_failure(state, {
             "kind": "target",
@@ -418,7 +418,7 @@ def note_blocked(state: dict, event):
             "pattern": False,
             "files": [("error", (message, False))],
             "output": "",
-            "config": str(_get(_get(event_id, "configuration", None), "id", "") or ""),
+            "config": str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""),
             "success": False,
         })
 
@@ -471,10 +471,6 @@ def bazel_line(line: str) -> str:
         if c not in "0123456789:.":
             return line
     return line[close + 2:]
-
-def _get(obj, name: str, default = None):
-    """`obj.name`, or `default` when `obj` is None or has no such field."""
-    return getattr(obj, name, default) if obj != None else default
 
 def new_state(read = None, bb_root = None, ansi = None) -> dict:
     """A fresh state for the build event hooks to collect into
@@ -555,14 +551,14 @@ def count_spawn(counts: dict, spawn):
     was a hit (the first one's cache, where they differ). A spawn with no
     output is an action of its own."""
     counts["spawns"] += 1
-    hit = bool(_get(spawn, "cache_hit", False))
+    hit = bool(bes_get(spawn, "cache_hit", False))
     if hit:
         counts["spawn_hits"] += 1
-    runner = str(_get(spawn, "runner", "") or "") or "unknown"
+    runner = str(bes_get(spawn, "runner", "") or "") or "unknown"
     counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
     kind = ("remote" if runner.startswith("remote") else "disk") if hit else "ran"
-    outputs = _get(spawn, "outputs", None) or []
-    key = _get(outputs[0], "type", None) if outputs else None
+    outputs = bes_get(spawn, "outputs", None) or []
+    key = bes_get(outputs[0], "type", None) if outputs else None
     kinds = counts["log_kinds"]
     if type(key) == "int":
         key = counts.get("log_files", {}).get(key, key)
@@ -582,7 +578,7 @@ def note_log_file(counts: dict, id: int, file):
     """Keep an execution log file's path by its id where it is under a
     test's logs (`testlogs/`), where a test's spawns' first outputs meet
     (`count_spawn`); no other file's."""
-    path = str(_get(file, "path", "") or "")
+    path = str(bes_get(file, "path", "") or "")
     if "/testlogs/" in path:
         counts.setdefault("log_files", {})[id] = path
 
@@ -644,28 +640,28 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
     says whether `payload` is an Aborted one, its type by default."""
     if aborted == None:
         aborted = type(payload) == "aborted"
-    label = repaired(str(_get(event_id, "label", "") or ""))
-    if kind == "action_completed" and not aborted and _get(payload, "success", False):
+    label = repaired(str(bes_get(event_id, "label", "") or ""))
+    if kind == "action_completed" and not aborted and bes_get(payload, "success", False):
         # Every action Bazel executed, with `--build_event_publish_all_actions`:
         # one that ran no spawn (internal) has no command line.
         counts["actions_seen"] = counts.get("actions_seen", 0) + 1
-        if not (_get(payload, "command_line", None) or []):
+        if not (bes_get(payload, "command_line", None) or []):
             counts["actions_internal"] = counts.get("actions_internal", 0) + 1
         return
     if kind == "build_started":
         # Only a test or coverage run tests what it builds.
-        counts["testing"] = str(_get(payload, "command", "") or "") in ("test", "coverage")
+        counts["testing"] = str(bes_get(payload, "command", "") or "") in ("test", "coverage")
         return
 
     # A target's own Aborted payload, under its `target_configured` or
     # `target_completed` id; under `configured_label` or `unconfigured_label`
     # it names a root cause (a dependency), not a target asked for.
     if aborted:
-        reason = str(_get(payload, "reason", "") or "")
-        if kind in ("target_configured", "target_completed") and not _get(event_id, "aspect", ""):
+        reason = str(bes_get(payload, "reason", "") or "")
+        if kind in ("target_configured", "target_completed") and not bes_get(event_id, "aspect", ""):
             count_aborted(counts, label, reason)
         elif kind == "test_summary":
-            count_aborted_test(counts, label, reason, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+            count_aborted_test(counts, label, reason, str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""))
         elif kind == "configured_label" and label and reason.lower() in _FAILED_ABORTS and label not in counts["failed_roots"]:
             # A root cause that failed analysis, not asked for itself: what
             # a target it blocks failed for (`blocked_targets`), and a
@@ -679,14 +675,14 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
             counts["failed_roots"][label] = True
         return
     if kind == "target_configured":
-        if not _get(event_id, "aspect", ""):
+        if not bes_get(event_id, "aspect", ""):
             counts["configured"] += 1
-            if str(_get(payload, "target_kind", "") or "").endswith("_test rule"):
+            if str(bes_get(payload, "target_kind", "") or "").endswith("_test rule"):
                 counts["test_targets"][label] = True
     elif kind == "target_completed":
-        if _get(event_id, "aspect", ""):
+        if bes_get(event_id, "aspect", ""):
             return
-        if _get(payload, "success", False):
+        if bes_get(payload, "success", False):
             counts["built"] += 1
         else:
             _fail(counts, label)
@@ -699,22 +695,22 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
         # A test run, and whether a cache (Bazel's own, or a remote one)
         # gave it rather than running it.
         counts["test_runs"] += 1
-        if str(_get(payload, "status", "") or "").lower() == "failed_to_build":
-            counts["failed_attempts"][(label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))] = True
-        info = _get(payload, "execution_info")
-        key = (label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        if str(bes_get(payload, "status", "") or "").lower() == "failed_to_build":
+            counts["failed_attempts"][(label, str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""))] = True
+        info = bes_get(payload, "execution_info")
+        key = (label, str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""))
         counts["test_resulted"][key] = True
-        if _get(payload, "cached_locally", False) or _get(info, "cached_remotely", False):
+        if bes_get(payload, "cached_locally", False) or bes_get(info, "cached_remotely", False):
             counts["test_cached"] += 1
         else:
             counts["test_uncached"][key] = True
     elif kind == "test_summary":
         counts["test_finished"][label] = True
-        key = (label, str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        key = (label, str(bes_get(bes_get(event_id, "configuration", None), "id", "") or ""))
         if key in counts["test_resulted"] and key not in counts["test_uncached"]:
             # Every run of the target a cache gave.
             counts["tests_cached"] += 1
-        status = str(_get(payload, "overall_status", "") or "")
+        status = str(bes_get(payload, "overall_status", "") or "")
         if status == "passed":
             counts["tests_passed"] += 1
         elif status == "flaky":
@@ -744,14 +740,14 @@ def build_outcome(inv: dict) -> str:
     finished = inv.get("build_finished")
     if finished == None:
         return "ended without a result"
-    name = str(_get(_get(finished, "exit_code"), "name", "") or "")
+    name = str(bes_get(bes_get(finished, "exit_code"), "name", "") or "")
     return "interrupted" if name == "INTERRUPTED" else ""
 
 def build_succeeded(inv: dict) -> bool:
     """Whether a build's `BuildFinished` says it succeeded: one that crashed
     or was cut off without it, or was interrupted, did not."""
     finished = inv.get("build_finished")
-    return finished != None and str(_get(_get(finished, "exit_code"), "name", "") or "") == "SUCCESS"
+    return finished != None and str(bes_get(bes_get(finished, "exit_code"), "name", "") or "") == "SUCCESS"
 
 # The build events the Invocation and Metrics tabs read.
 _INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "build_metadata", "build_finished", "build_metrics"]
@@ -797,7 +793,7 @@ def _plain_text(state: dict, text: str) -> str:
 def _workspace(state: dict) -> str:
     """The workspace directory Bazel's `build_started` names, else ""."""
     started = (state.get("inv") or {}).get("build_started")
-    return str(_get(started, "workspace_directory", "") or "")
+    return str(bes_get(started, "workspace_directory", "") or "")
 
 def _utf8(codes: list):
     """The text UTF-8 bytes `codes` decode to, or None where they are no
@@ -936,7 +932,6 @@ failure_records = namespace(
     cut_text = cut_text,
     failure_of = failure_of,
     flaky = _flaky,
-    get = _get,
     local_test_logs = local_test_logs,
     log_path = _log_path,
     log_paths = log_paths,
