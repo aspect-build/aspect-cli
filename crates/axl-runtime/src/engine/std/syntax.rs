@@ -40,7 +40,8 @@ static LOADED: std::sync::LazyLock<(SyntaxSet, Theme)> = std::sync::LazyLock::ne
 #[starlark_module]
 fn syntax_methods(registry: &mut MethodsBuilder) {
     /// `lines` of the file at `path` coloured by the grammar its name picks
-    /// (`.rs`, `.py`, `BUILD.bazel`'s Python, ...), as escape sequences: in
+    /// (`.rs`, `.py`, ...; a Starlark file's, `BUILD.bazel`, `MODULE.bazel`,
+    /// `.bzl`, `.axl`, `.star` and the like, as Python), as escape sequences: in
     /// 24-bit colour with `truecolor`, else the nearest of the 256 colours.
     /// Lines a grammar does not know, or that are not text, come back as
     /// they are. Highlighting reads the lines in order, so passing a few
@@ -56,20 +57,37 @@ fn syntax_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// The file names of Starlark files, which the grammars, having none for
+/// Starlark, colour as Python, a near enough superset.
+const STARLARK_NAMES: &[&str] = &[
+    "BUILD",
+    "BUILD.bazel",
+    "WORKSPACE",
+    "WORKSPACE.bazel",
+    "MODULE.bazel",
+    "REPO.bazel",
+];
+
+/// The extensions of Starlark files ([`STARLARK_NAMES`]): Bazel's `.bzl`,
+/// AXL's `.axl`, and Starlark's own `.star`.
+const STARLARK_EXTENSIONS: &[&str] = &["bzl", "axl", "star"];
+
 /// [`highlight`](syntax_methods)'s lines.
 pub(crate) fn highlight_lines(lines: &[String], path: &str, truecolor: bool) -> Vec<String> {
     let (syntaxes, theme) = &*LOADED;
-    let name = std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let syntax = match name.as_str() {
-        "BUILD" | "BUILD.bazel" | "WORKSPACE" | "MODULE.bazel" => {
-            syntaxes.find_syntax_by_extension("py")
-        }
-        _ => std::path::Path::new(&name)
-            .extension()
-            .and_then(|e| syntaxes.find_syntax_by_extension(&e.to_string_lossy())),
+    let path = std::path::Path::new(path);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let extension = path.extension().map(|e| e.to_string_lossy().into_owned());
+    let starlark = name.as_deref().is_some_and(|n| STARLARK_NAMES.contains(&n))
+        || extension
+            .as_deref()
+            .is_some_and(|e| STARLARK_EXTENSIONS.contains(&e));
+    let syntax = if starlark {
+        syntaxes.find_syntax_by_extension("py")
+    } else {
+        extension
+            .as_deref()
+            .and_then(|e| syntaxes.find_syntax_by_extension(e))
     };
     let Some(syntax) = syntax else {
         return lines.to_vec();
@@ -150,6 +168,26 @@ mod tests {
         assert!(build[0].contains("\x1b[38;2;"), "{build:?}");
         let plain = highlight_lines(&["whatever".into()], "notes.unknownext", false);
         assert_eq!(plain, vec!["whatever".to_string()]);
+    }
+
+    /// Every Starlark file is coloured, by its name or its extension.
+    #[test]
+    fn starlark_files_are_coloured_as_python() {
+        let line = vec!["def f(x):".to_string()];
+        let python = highlight_lines(&line, "a.py", false);
+        for path in [
+            "BUILD",
+            "pkg/BUILD.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            "MODULE.bazel",
+            "REPO.bazel",
+            "defs.bzl",
+            ".aspect/config.axl",
+            "x.star",
+        ] {
+            assert_eq!(highlight_lines(&line, path, false), python, "{path}");
+        }
     }
 
     #[test]
