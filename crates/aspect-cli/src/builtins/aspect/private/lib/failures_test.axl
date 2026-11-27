@@ -44,6 +44,11 @@ def _error(text: str) -> str:
     """One of Bazel's own `ERROR:` lines, coloured as on a terminal."""
     return "\x1b[31m\x1b[1mERROR: \x1b[0m" + text + "\n"
 
+def _redrawn(text: str) -> str:
+    """`text` after Bazel's redraw of its progress area, which ends an
+    action's output before its next message."""
+    return "\r\x1b[1A\x1b[K" + text
+
 def _test_shard_tie(ctx):
     # A test shard's header names its label before `(shard 2 of 3)`.
     tid = struct(label = "//tp:shards", run = 1, shard = 2, attempt = 1, configuration = struct(id = "c1"))
@@ -160,6 +165,67 @@ def _test_bad_pattern(ctx):
     state = _ended(ctx, [_event("pattern_expanded", struct(pattern = ["//pair:a:b"]), struct(reason = "loading_failure", description = description), aborted = True)], _error("Skipping '//pair:a:b': " + description) + _error("Failed to parse target pattern even though it was previously parsed successfully: " + description))
     _eq("a bad pattern listed once", ([e["label"] for e in failures.failure_entries(state)["entries"]], failure_ties.console_ties(state)["others"]), (["//pair:a:b"], []))
 
+def _test_sandboxed_relay(ctx):
+    # A sandboxed action's line, from `failed: (Exit 1): ` on, is its
+    # `failure_detail` message, then its stderr as Bazel relays it: its
+    # location and status; output that differs ties nothing.
+    message = "bash failed: error executing Genrule command\n\nUse --sandbox_debug to see verbose messages"
+    header = _error("/ws/a/BUILD:3:8: Executing genrule //a:g failed: (Exit 1): " + message)
+    action = _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", message, stderr = "/out/e")
+    state = _ended(ctx, [action], header + "boom\n", logs = {"/out/e": "boom\n"})
+    _eq("sandboxed: located, its status", failure_ties.console_ties(state)["actions"][0], {"location": "/ws/a/BUILD:3:8", "status": "Exit 1", "lines": []})
+    state = _ended(ctx, [action], header + "boom\n", logs = {"/out/e": "bang\n"})
+    _eq("sandboxed: another output, no tie", failure_ties.console_ties(state)["actions"][0]["status"], "")
+    other = _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", "bash failed: error executing Genrule command\n\nUse --sandbox_debug to see verbose MESSAGES", stderr = "/out/e")
+    state = _ended(ctx, [other], header + "boom\n", logs = {"/out/e": "boom\n"})
+    _eq("sandboxed: a message that goes on otherwise, no tie", failure_ties.console_ties(state)["actions"][0]["status"], "")
+
+def _test_local_exit(ctx):
+    # A local action's message says nothing Bazel's line has: the one line
+    # naming `target <label>)` with `(Exit <code>)` whose next lines are
+    # exactly its output.
+    line = _error("/ws/a/BUILD:3:8: Executing genrule //a:g failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //a:g) /bin/bash -c 'x'")
+    action = _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", "local spawn failed for Genrule", exit_code = 2, stderr = "/out/e")
+    state = _ended(ctx, [action], line + "boom\n", logs = {"/out/e": "boom\n"})
+    _eq("local: located, its exit", failure_ties.console_ties(state)["actions"][0], {"location": "/ws/a/BUILD:3:8", "status": "Exit 2", "lines": []})
+    state = _ended(ctx, [_failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", "local spawn failed for Genrule", exit_code = 3, stderr = "/out/e")], line + "boom\n", logs = {"/out/e": "boom\n"})
+    _eq("local: another exit code, no status", failure_ties.console_ties(state)["actions"][0]["status"], "")
+
+def _test_target_location(ctx):
+    # An action with nothing relayed: the location every line naming
+    # `target <label>)` gives, when they agree.
+    line = "Executing genrule //a:g failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //a:g) /bin/bash -c 'x'"
+    action = _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", "bash failed")
+    state = _ended(ctx, [action], _error("/ws/a/BUILD:3:8: " + line))
+    _eq("target <label>): located", failure_ties.console_ties(state)["actions"][0]["location"], "/ws/a/BUILD:3:8")
+    state = _ended(ctx, [action], _error("/ws/a/BUILD:3:8: " + line) + _redrawn(_error("/ws/a/BUILD:9:1: " + line)))
+    _eq("target <label>): lines that disagree, no location", failure_ties.console_ties(state)["actions"][0]["location"], "")
+
+def _test_ambiguous_tie(ctx):
+    # Two actions failing alike, each line's message and output fitting
+    # either: neither is guessed, so neither gets a location or status
+    # (each line, naming its own action as what failed, is no other error).
+    message = "bash failed"
+    console = _error("/ws/a/BUILD:1:8: Executing genrule //a:g failed: (Exit 1): " + message) + "boom\n" + _redrawn(_error("/ws/b/BUILD:1:8: Executing genrule //b:g failed: (Exit 1): " + message)) + "boom\n"
+    state = _ended(ctx, [
+        _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", message, stderr = "/out/a"),
+        _failed_action("//b:g", "bazel-out/k8-fastbuild/bin/b/g.out", message, stderr = "/out/b"),
+    ], console, logs = {"/out/a": "boom\n", "/out/b": "boom\n"})
+    ties = failure_ties.console_ties(state)
+    _eq("ambiguous: no location nor status", [(ties["actions"][i]["location"], ties["actions"][i]["status"]) for i in (0, 1)], [("", ""), ("", "")])
+    _eq("ambiguous: no other error", ties["others"], [])
+
+def _test_referenced_by(ctx):
+    # A root cause no line ties: the one line ending `and referenced by
+    # '<target>'` of the target it alone blocks, quoted without that end.
+    state = _ended(ctx, [
+        _event("unconfigured_label", struct(label = "//b:x"), struct(), aborted = True),
+        _event("target_completed", struct(label = "//a:uses", configuration = _CFG), struct(success = False), children = [struct(id = struct(label = "//b:x"))]),
+    ], _error("/ws/a/BUILD:2:8: no such target '//b:x': target 'x' not declared in package 'b' and referenced by '//a:uses'"))
+    ties = failure_ties.console_ties(state)
+    _eq("referenced by: quoted, located", ties["targets"]["//b:x"], {"location": "/ws/a/BUILD:2:8", "lines": ["no such target '//b:x': target 'x' not declared in package 'b'"]})
+    _eq("referenced by: nothing else", ties["others"], [])
+
 def _test_target_counts(ctx):
     # Built from the events; failed, the targets with an entry of their own;
     # blocked, those a failed root cause stopped.
@@ -194,6 +260,11 @@ def _impl(ctx: TaskContext) -> int:
     _test_relay_cap(ctx)
     _test_failure_message_quoted(ctx)
     _test_bad_pattern(ctx)
+    _test_sandboxed_relay(ctx)
+    _test_local_exit(ctx)
+    _test_target_location(ctx)
+    _test_ambiguous_tie(ctx)
+    _test_referenced_by(ctx)
     _test_target_counts(ctx)
     _test_last_words(ctx)
     print("failures_test.axl: OK")

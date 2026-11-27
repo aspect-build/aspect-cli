@@ -337,6 +337,13 @@ def _actions_tests(ctx):
     _eq("the stream's last count", build_progress(late), (13, 13, False))
     _eq("its split", _split_of(action_split(late)), dict(done = 13, total = 13, ran = 1, internal = 9, failed = 1, not_run = 2))
     _eq("a frame's while the build runs", build_progress(dict(late, building = True, progress = ["[3 / 9] 1 action running"])), (3, 9, False))
+
+    # Ended, the newest count is the larger, whichever wrote it: the last
+    # progress event can come before Bazel's last status line, a frame
+    # miss the last redraw.
+    newest = _screen(ctx, ["x"], building = False, bep_done_total = (34, 44), done_total = (44, 44, False))
+    _eq("the last frame's count newer than the stream's", build_progress(newest), (44, 44, False))
+    _eq("the stream's newer than the last frame's", build_progress(dict(newest, bep_done_total = (44, 44), done_total = (34, 44, False))), (44, 44, False))
     _eq("no count in it", bep_progress("Analyzing: 3 targets\n"), None)
 
     # The stream cut short (a remote cache unreachable: "Unable to write
