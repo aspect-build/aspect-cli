@@ -6670,10 +6670,11 @@ def _relayed(text: str, at: int, lead: str, pieces: list, tails: dict) -> int:
 
 def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool):
     """Extend `spans` over the blocks after an action's `INFO: From` output
-    (`froms`: each one's index in `blocks`, `(start, end)` in `text`, its
-    header, its body's length and last line) that are the rest of that
+    (`froms`: each one's index in `blocks`, `(start, end, kind)` in `text`,
+    its header, its body's length and last line) that are the rest of that
     output: Bazel's line holding an output's last line, which it writes
-    after its next redraw, or, without colour, a tool's own `ERROR:` lines.
+    after its next redraw (a tail), or, without colour (`plain`), a tool's
+    own `ERROR:` lines.
     They are when the body and those blocks are, exactly, the output (with
     a newline added, where it has no final one) of a successful action
     that wrote some (`outputs`, which Bazel reports with
@@ -6681,14 +6682,21 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
     one such action is enough, two that wrote alike too. Only those
     actions' logs are read."""
     ansi = state.get("ansi")
+    by_label = {}
+    for rec in state.get("outputs") or []:
+        by_label.setdefault(rec["label"], []).append(rec)
+    if not by_label:
+        return
     for i, header, body_len, last in froms:
-        if i + 1 >= len(blocks):
+        if i + 1 >= len(blocks) or blocks[i + 1][2] not in (("tail", "error") if plain else ("tail",)):
             continue
         said = (ansi.replace(header, "") if ansi != None else header).rpartition("\r")[2].rstrip("\n")
-        for rec in state.get("outputs") or []:
-            label = rec["label"]
-            if (" %s:" % label) not in said and not said.endswith(" " + label) and (" %s " % label) not in said:
-                continue
+        named = []
+        for word in said.split(" ")[1:]:
+            for label in (word, word[:-1] if word.endswith(":") else None):
+                if label and label in by_label:
+                    named += [r for r in by_label[label] if r not in named]
+        for rec in named:
             pieces = _relay_pieces(state, rec, stdout, plain)
             if not pieces or [p for p in pieces if p[1] == None]:
                 continue
@@ -6699,7 +6707,7 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
             rest = out[body_len:]
             pos = 0
             got = []
-            for start, end in blocks[i + 1:]:
+            for start, end, _ in blocks[i + 1:]:
                 at = _past_redraw(text, start)
                 seg = text[at:end]
                 if rest.startswith(seg, pos):
@@ -6792,7 +6800,7 @@ def console_ties(state: dict) -> dict:
         parts.append(b["text"])
         if b["kind"] == "tail":
             tails[at] = True
-        bounds.append((at, at + len(b["text"])))
+        bounds.append((at, at + len(b["text"]), b["kind"]))
         at += len(b["text"])
         if b["kind"] == "from":
             froms.append((k, b["text"], b.get("body_len", 0) or 0, b.get("last_line", "") or ""))
@@ -6874,6 +6882,7 @@ def console_ties(state: dict) -> dict:
                 spans.append((headers[k]["end"], end))
                 out["location"] = headers[k]["location"]
                 out["status"] = "Exit %d" % rec.get("exit_code", 0)
+
         # The history keys an action by its output as Bazel's events spell
         # it; Bazel's line says it as meant.
         made = repaired(rec.get("output", "")).partition("/bin/")[2]
