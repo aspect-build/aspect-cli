@@ -46,7 +46,8 @@ const LINE_END_WAIT: Duration = Duration::from_millis(200);
 /// std's stdout into it: one stopped (Ctrl+S) is not flushed into.
 const FLUSH_WAIT: Duration = Duration::from_millis(200);
 
-/// The most lines a dump writes, the older counted on a line before them.
+/// The most lines a dump writes, the older counted on a line before them;
+/// `std.term.dump_lines` to AXL.
 pub(crate) const DUMP_LINES: usize = 20000;
 
 /// Whether a dump would write anything: a mark, and the task's files.

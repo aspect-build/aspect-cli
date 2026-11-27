@@ -228,7 +228,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("process", register_process_types);
     globals.namespace("net", net::register_net_types);
     globals.namespace("re", register_re_types);
-    globals.namespace("term", register_term_types);
+    globals.namespace("term", |g| {
+        register_term_types(g);
+        term::register_globals(g);
+    });
     globals.namespace("io", |g| {
         register_io_types(g);
         g.set("Error", IoError::native_type().error_type());

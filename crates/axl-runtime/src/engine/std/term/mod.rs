@@ -46,7 +46,7 @@ use bazel::console::feed::{Drained, Feed, Source};
 use derive_more::Display;
 use nix::sys::termios::{self, InputFlags, LocalFlags, SetArg, SpecialCharacterIndices, Termios};
 use starlark::StarlarkResultExt;
-use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
+use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::none::{NoneOr, NoneType};
@@ -681,6 +681,18 @@ fn generation_of(this: values::Value) -> anyhow::Result<u64> {
         .generation)
 }
 
+/// The `std.term` namespace's values beside its types, which AXL reads
+/// anywhere, a module's top level among them; the terminal itself is
+/// `ctx.std.term` ([`Term`]).
+#[starlark_module]
+pub(crate) fn register_globals(globals: &mut GlobalsBuilder) {
+    /// The most lines a screen's dump writes when the runtime writes it (a
+    /// suspend, a release at exit) and `dump_output`'s default: a screen
+    /// that keeps its own log keeps as many, so the dump and the screen
+    /// show the same lines.
+    const dump_lines: i32 = DUMP_LINES as i32;
+}
+
 /// `ctx.std.term`.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Term>")]
@@ -1084,6 +1096,16 @@ mod tests {
             Ok(n) => panic!("read {n} bytes from a closed terminal"),
             Err(e) => assert!(hung_up(&e), "{e}"),
         }
+    }
+
+    /// `std.term.dump_lines` is the dump's size, read where AXL has no
+    /// `ctx`: a module's top level.
+    #[test]
+    fn the_dump_size_is_read_at_the_top_level() {
+        assert_eq!(
+            crate::axl_eval!("x = std.term.dump_lines\nx").unwrap(),
+            DUMP_LINES.to_string()
+        );
     }
 
     #[test]
