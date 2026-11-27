@@ -46,6 +46,7 @@ load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/errors_test.axl", "errors_tests")
 load("@aspect//private/lib/execlog_test.axl", "execlog_tests")
+load("@aspect//private/lib/fix_patch_test.axl", "fix_patch_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_default_preset_snapshot_tests", "gazelle_template_snapshot_tests")
@@ -727,6 +728,11 @@ def config(ctx: ConfigContext):
     # zero-aspect safeguard keys off so unrelated outputs can't bypass the check.
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
+
+    # Auto-fix patches: what patch may and may not write, and what each
+    # refused patch leaves untouched.
+    # Run with: aspect dev test-fix-patch
+    ctx.tasks.add(fix_patch_tests)
 
     # Run with: aspect dev test-lint-comments
     ctx.tasks.add(lint_comments_tests)

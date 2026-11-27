@@ -1,0 +1,489 @@
+"""Apply a lint auto-fix patch to the workspace without trusting it.
+
+`apply_fix_patch` runs `patch -p1` (BSD or GNU) on copies of the files a
+patch names, in a directory of its own, then writes back by their bytes only
+the files patch changed, made or removed there. Nothing else patch leaves
+reaches the workspace: not its `.rej` and `.orig` files, not a symlink, not
+a file under a name the copy-back doesn't name.
+
+A patch is refused whole, in a warning saying why, with nothing in the
+workspace touched, where it:
+
+- isn't there, isn't a file, or is larger than `_PATCH_CAP`;
+- has a hunk range that isn't numbers, a binary patch, a git mode, rename or
+  copy line, or a file mode other than a regular file's;
+- names a file patch would read otherwise than the copy-back does (with
+  whitespace and no tab after it, git-quoted, or not UTF-8);
+- names a path outside the workspace (absolute, through `..`, or through a
+  symlink leading out), with a `.` or empty component, or through a symlink
+  that can't be followed;
+- names one file twice by the filesystem's identity of it (`dev`, `ino`): a
+  hard link, an in-tree symlink, a case-only or normalization-only rename
+  where the disk takes the two names as one;
+- names a path that isn't a regular file, one that another named path is
+  with `.rej`, `.orig` or `.~N~` after it, or removes a file through a
+  symlink;
+- has two files that are one in the copies' directory, once copied or once
+  patched (a disk that folds names the workspace tells apart);
+- makes patch exit with trouble (2 or more, or a signal), or leaves a named
+  path in the copies that isn't a regular file or is gone unasked.
+"""
+
+load("./environment.axl", "info", "warn")
+load("./text.axl", "escaped_char")
+
+def _header_name(line: str):
+    """`(path, why)`: the path a `--- `/`+++ ` header names as `patch -p1`
+    opens it, its prefix gone (None for `/dev/null`), and why it can't be
+    known, or None. BSD and GNU patch end a name at a tab, else at the first
+    whitespace, so a name with whitespace and no tab after it (`diff --label`
+    gives that) would open another file than it names; GNU patch alone
+    unquotes a git-quoted one (`"a/x"`); and a name that isn't UTF-8 reads
+    here with its bad bytes replaced, a name the copy-back can't open."""
+    rest = line[4:].removesuffix("\r").lstrip(" ")
+    if rest.startswith("\""):
+        return None, "a quoted (git) name, which BSD and GNU patch read apart"
+    if "\t" in rest:
+        name = rest.partition("\t")[0]
+    else:
+        name = rest.rstrip(" ")
+        if any([c in name for c in (" ", "\f", "\v")]):
+            return None, "a name with a space and no tab after it, which patch ends at the space"
+    if "\ufffd" in name:
+        return None, "a name that isn't UTF-8, which the copy-back can't name"
+    if name == "/dev/null":
+        return None, None
+    return (name.partition("/")[2] if "/" in name else name), None
+
+def _header_path(line: str):
+    """`_header_name`'s path alone."""
+    return _header_name(line)[0]
+
+# Git extended header lines patch acts on that the copy-back by bytes would
+# not carry: a mode change, a rename or copy.
+_GIT_HEADERS = ("old mode ", "new mode ", "rename from ", "rename to ", "copy from ", "copy to ")
+
+def _hunk_count(spec: str):
+    """The line count of a hunk range, `-a,b` or `+c,d` (1 when `,b` is left
+    out), or None when it isn't numbers."""
+    start, _, count = spec[1:].partition(",")
+    count = count or "1"
+    if not (start.isdigit() and count.isdigit()):
+        return None
+    return int(count)
+
+def _scan(text: str):
+    """`(headers, why)`: each file the diff `text` touches, as `(old, new)`
+    paths (`_header_path`), and why the patch is not applied, or None: a hunk
+    range that isn't numbers, a header name patch would read otherwise
+    (`_header_name`), a binary patch, a git header in `_GIT_HEADERS`, or a
+    file mode other than a regular file's (`new file mode 120000`, a symlink
+    patch would make). Headers and git lines count only outside a hunk's
+    body, where a removed `-- x` line reads as `--- x`."""
+    out = []
+    why = None
+    lines = text.split("\n")
+    old_left = 0
+    new_left = 0
+    for i, line in enumerate(lines):
+        if old_left > 0 or new_left > 0:
+            if line.startswith("\\"):
+                continue
+            if line.startswith("-"):
+                old_left -= 1
+            elif line.startswith("+"):
+                new_left -= 1
+            else:
+                old_left -= 1
+                new_left -= 1
+            continue
+        if line.startswith("@@ "):
+            ranges = line.split(" ")
+            if len(ranges) > 2 and ranges[1].startswith("-") and ranges[2].startswith("+"):
+                old_left = _hunk_count(ranges[1])
+                new_left = _hunk_count(ranges[2])
+                if old_left == None or new_left == None:
+                    return out, "a hunk's line range isn't numbers"
+        elif line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            (old, old_why), (new, new_why) = _header_name(line), _header_name(lines[i + 1])
+            why = why or old_why or new_why
+            out.append((old, new))
+        elif line.startswith("GIT binary patch") or line.startswith("Binary files "):
+            why = why or "a binary patch, which patch can't apply"
+        elif any([line.startswith(h) for h in _GIT_HEADERS]):
+            keyword = [h for h in _GIT_HEADERS if line.startswith(h)][0].strip()
+            why = why or "a git `%s` line, which the copy-back would not carry" % keyword
+        elif line.startswith("new file mode ") or line.startswith("deleted file mode ") or line.startswith("index "):
+            mode = line.rpartition(" ")[2].strip()
+            if mode.isdigit() and len(mode) == 6 and not mode.startswith("100"):
+                why = why or "a file of mode %s (a symlink or submodule), not a regular file" % mode
+    return out, why
+
+def _files_of(headers: list) -> list:
+    """The paths `headers` (from `_scan`) name, each side of each, once each
+    and in order, `/dev/null` left out."""
+    out = []
+    for old, new in headers:
+        for path in (old, new):
+            if path and path not in out:
+                out.append(path)
+    return out
+
+def _is_file(fs, path: str) -> bool:
+    """Whether `path` is a file; false where nothing is."""
+    return fs.exists(path) and fs.metadata(path).is_file
+
+# The most of a patch read: one larger is refused, as headers past it would
+# be missed.
+_PATCH_CAP = 64 * 1024 * 1024
+
+# Symlinks followed on one path at most, as Linux's own limit.
+_LINK_HOPS = 40
+
+def _look(fs, path: str):
+    """`fs.try_metadata(path)` (None where nothing is), and the error that
+    kept it from looking (a directory it may not search), or None."""
+    err, meta = catch(fs.try_metadata, path, types = [std.io.Error])
+    return meta, (str(err) if err != None else None)
+
+def _resolved(fs, path: str):
+    """Absolute `path` with every symlink on it followed (`..` taken as the
+    link's target asks), as `(components from the root, None)`; what isn't
+    there yet stays as named. `(None, why)` where it can't be followed: a
+    symlink to what isn't there, a loop, a file where a directory should
+    be, or a directory it may not look in. Looked at from the root down, so
+    a file where a directory should be never raises."""
+
+    # Each component still to walk, and whether a link's target named it.
+    todo = [(p, False) for p in path.split("/") if p]
+    done = []
+    hops = 0
+    for _ in range(100000):
+        if not todo:
+            return done, None
+        part, linked = todo.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            done = done[:-1]
+            continue
+        at = "/" + "/".join(done + [part])
+        meta, err = _look(fs, at)
+        if err != None:
+            return None, "can't be looked at (%s)" % err
+        if meta == None:
+            if linked:
+                return None, "is a symlink to what isn't there"
+            return done + [part] + [p for p, _ in todo if p != "."], None
+        if meta.is_symlink:
+            hops += 1
+            if hops > _LINK_HOPS:
+                return None, "has more than %d symlinks on it" % _LINK_HOPS
+            target = fs.read_link(at)
+            todo = [(p, True) for p in target.split("/") if p] + todo
+            if target.startswith("/"):
+                done = []
+            continue
+        if todo and not meta.is_dir:
+            return None, "goes through `%s`, which isn't a directory" % _escaped(part)
+        done.append(part)
+    return None, "can't be followed"
+
+def _identity(fs, resolved: list):
+    """Which file `resolved` (from `_resolved`) is: `(dev, ino)` where it is
+    there, whatever spelling names it (case, Unicode normalization, a hard
+    link); else its deepest ancestor that is there, by `(dev, ino)`, and the
+    rest as named. Where the filesystem gives no identity (off Unix), the
+    spelling followed to it."""
+    for depth in range(len(resolved), -1, -1):
+        meta, _ = _look(fs, "/" + "/".join(resolved[:depth]))
+        if meta != None:
+            if meta.dev == None:
+                return tuple(resolved)
+            return (meta.dev, meta.ino) + tuple(resolved[depth:])
+    return tuple(resolved)
+
+def _escaped(path: str) -> str:
+    """`path` as a line can show it: `\\` doubled, and a control character
+    and each one past ASCII as its `escaped_char` code, so two spellings that
+    look alike (NFC and NFD) read apart and none ends or rewrites the line."""
+    out = []
+    for c in path.elems():
+        n = ord(c)
+        if c == "\\":
+            out.append("\\\\")
+        elif n >= 0x20 and n < 0x7f:
+            out.append(c)
+        else:
+            out.append(escaped_char(c))
+    return "".join(out)
+
+def _copy_collision(fs, work: str, keys: dict):
+    """Why two named paths that are two files in the workspace (`keys`, from
+    `_refusal`) are one in the copies' directory `work`, or None: patch would
+    put both their hunks on one copy, and copying it back would write one
+    result over both. A disk that folds case or Unicode where the workspace
+    doesn't does that, as does one folding two new names into one."""
+    seen = {}
+    for path, key in keys.items():
+        resolved, _ = _resolved(fs, work + "/" + path)
+        at = _identity(fs, resolved) if resolved != None else (work, path)
+        other = seen.get(at)
+        if other != None and keys[other] != key:
+            return "%s and %s are one file where the patch is applied" % (_escaped(other), _escaped(path))
+        seen[at] = path
+    return None
+
+def _refusal(fs, cwd: str, headers: list):
+    """Why a patch with `headers` is refused before anything is copied or
+    patched, or None: a path with a `.` or empty component; two named
+    paths that are one file, by the filesystem's own identity of it, its
+    symlinks followed (a type change, two creations, a rename onto a made
+    file, a case-only or normalization-only rename where the disk takes the
+    two as one, a hard link); one whose symlinks lead out of the workspace,
+    or can't be followed; one there that isn't a regular file; or a file
+    removed through a symlink naming it. A symlink within the workspace is
+    followed. Two new names no file has yet are told apart as spelled here;
+    `_copy_collision` catches them where the copies' directory folds them.
+    Returns `(why, keys)`: the reason (paths shown `_escaped`) and `{}`, or
+    None and each named path's identity in the workspace."""
+    root, why = _resolved(fs, cwd)
+    if root == None:
+        return "the workspace %s" % why, {}
+    removed = [old for old, new in headers if old and not new]
+    seen = {}
+    for old, new in headers:
+        for path in {p: True for p in (old, new) if p}:
+            parts = path.split("/")
+            shown = _escaped(path)
+            if "" in parts or "." in parts:
+                return "%s has a `.` or empty component" % shown, {}
+            resolved, why = _resolved(fs, cwd + "/" + path)
+            if resolved == None:
+                return "%s %s" % (shown, why), {}
+            if resolved[:len(root)] != root or len(resolved) == len(root):
+                return "%s leads out of the workspace" % shown, {}
+            key = _identity(fs, resolved)
+            if key in seen:
+                return ("%s is named in more than one header" % shown if seen[key] == path else "%s and %s are one file" % (_escaped(seen[key]), shown)), {}
+            seen[key] = path
+            meta, _ = _look(fs, "/" + "/".join(resolved))
+            if meta != None and not meta.is_file:
+                return "%s isn't a regular file" % shown, {}
+            if path in removed:
+                named, _ = _look(fs, cwd + "/" + path)
+                if named != None and named.is_symlink:
+                    return "%s is a symlink: removing it would keep what it names" % shown, {}
+    return None, {path: key for key, path in seen.items()}
+
+def _same_bytes(fs, a: str, b: str) -> bool:
+    """Whether files `a` and `b` hold the same bytes, whatever their text."""
+    return fs.open(a).read() == fs.open(b).read()
+
+def _inside(path: str) -> bool:
+    """Whether a relative `path` stays inside the directory it is taken in."""
+    return path and not path.startswith("/") and ".." not in path.split("/")
+
+def _ignored_rejects(said: str) -> list:
+    """The reject files patch's output says hold only hunks it ignored as
+    previously applied (BSD `N out of M hunks ignored--saving rejects to
+    'x.rej'`, GNU `... ignored -- saving rejects to file x.rej`, after its
+    `Ignoring previously applied` or `Reversed (or previously applied)` line
+    for that file), not hunks that failed nor ones for a file that isn't
+    there (`No file to patch`, also "ignored")."""
+    out = []
+    applied = False
+    for line in said.split("\n"):
+        if line.startswith("patching file") or "No file to patch" in line:
+            applied = False
+        if "previously applied" in line:
+            applied = True
+        if applied and " ignored" in line and "saving rejects to " in line:
+            name = line.partition("saving rejects to ")[2].strip()
+            name = name.removeprefix("file ").strip("'\"`")
+            out.append(name)
+    return out
+
+def _creation_diff(text: str, path: str) -> str:
+    """The part of a diff that makes `path` (its header's old side
+    `/dev/null`): the header and its hunks, as a reject file holds them."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if not (line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ ")):
+            continue
+        if _header_path(line) != None or _header_path(lines[i + 1]) != path:
+            continue
+        out = lines[i:i + 2]
+        for body in lines[i + 2:]:
+            if not (body.startswith("+") or body.startswith("\\") or body.startswith("@@ ")):
+                break
+            out.append(body)
+        return "\n".join(out) + "\n"
+    return ""
+
+def apply_fix_patch(ctx: TaskContext, patch: str, cwd = None, seen = None, program = "patch", say = None, mkdtemp = None):
+    """Apply one auto-fix patch to the workspace `cwd` (the task's directory
+    unless given), as the module docstring says. Returns the directory its
+    rejected hunks are kept in, or None.
+
+    `patch -p1 --forward --batch` asks nothing and skips a hunk that looks
+    applied already rather than reversing it; its environment is cleared of
+    what would change its backups, its file lookups, its quoting or its
+    language, and what it says goes to the task's output. A relative `patch`
+    (a lint output path) is taken in `cwd`. `seen`, when given, is a list of
+    the bytes of patches applied already in this run: a patch identical to
+    one of them is skipped (one source in two lint targets gives two), and
+    this one's bytes are added.
+
+    A file is removed only where its header's new side is `/dev/null` and
+    patch removed or emptied its copy (GNU patch removes it, BSD empties it);
+    one a fix merely empties stays, empty, and one that is gone already
+    counts as removed. A file the patch makes (its header's old side
+    `/dev/null`, no other header changing it) that is there already, not
+    empty, is never written over: the same bytes count as applied already,
+    other bytes keep the hunks as a reject. A fix to a file that isn't there
+    (nor made under its header's new name) is named in an INFO line; BSD
+    patch writes its hunks out as rejects, GNU patch writes none. Rejects for
+    hunks that failed, not ones patch ignored as applied already, are kept in
+    a directory of their own, which an INFO line names. The copies go when
+    the task ends, however it ends.
+
+    For a test to stand in for them: `program` is the `patch` run, `say`
+    prints each WARNING and INFO line as `say(label, text)` (`warn` and
+    `info` unless given), and `mkdtemp` makes the copies' directory
+    (`fs.mkdtemp` unless given)."""
+    cwd = cwd or ctx.std.env.current_dir()
+    fs = ctx.std.fs
+    if not patch.startswith("/"):
+        patch = cwd + "/" + patch
+
+    def tell(label, text):
+        if say != None:
+            say(label, text)
+        elif label == "WARNING":
+            warn(ctx.std, text)
+        else:
+            info(ctx.std, text)
+
+    def refuse(why):
+        tell("WARNING", "%s was not applied: %s" % (_escaped(patch), why))
+        return None
+
+    if not _is_file(fs, patch):
+        return refuse("it isn't a file" if fs.exists(patch) else "it isn't there")
+    if fs.metadata(patch).size > _PATCH_CAP:
+        return refuse("it is larger than %d MiB" % (_PATCH_CAP // (1024 * 1024)))
+    if seen != None:
+        content = fs.open(patch).read()
+        if content in seen:
+            return None
+        seen.append(content)
+
+    # Lossy: a hunk may hold any bytes; only the header paths are read.
+    text = fs.try_read_to_string_capped(patch, _PATCH_CAP)
+    headers, why = _scan(text)
+    if why:
+        return refuse(why)
+    paths = _files_of(headers)
+    outside = [p for p in paths if not _inside(p)]
+    if outside:
+        return refuse("it names %s, outside the workspace" % ", ".join([_escaped(p) for p in outside]))
+
+    # patch writes `x.rej` and `x.orig` (or `x.~N~`) beside `x` in the
+    # copies: one the patch names too would be overwritten by them.
+    for path in paths:
+        for other in paths:
+            tail = other.removeprefix(path)
+            numbered = tail.startswith(".~") and tail.endswith("~") and tail[2:-1].isdigit()
+            if other != path and other.startswith(path) and (tail in (".rej", ".orig") or numbered):
+                return refuse("it names %s and %s, which patch writes its own output to" % (_escaped(path), _escaped(other)))
+    refused, keys = _refusal(fs, cwd, headers)
+    if refused:
+        return refuse(refused)
+    removed = [old for old, new in headers if old and not new]
+    changed = [old for old, new in headers if old]
+    made = [new for old, new in headers if not old and new and new not in changed]
+
+    work = (mkdtemp or fs.mkdtemp)()
+    ctx.defer(fs.remove_dir_all, work)
+    scratch = fs.mkdtemp()
+    ctx.defer(fs.remove_dir_all, scratch)
+    had = {}
+    for path in paths:
+        parent = path.rpartition("/")[0]
+        if parent:
+            fs.create_dir_all(work + "/" + parent)
+        if _is_file(fs, cwd + "/" + path) and path not in made:
+            had[path] = True
+            fs.copy(cwd + "/" + path, work + "/" + path)
+    collision = _copy_collision(fs, work, keys)
+    if collision:
+        return refuse(collision)
+
+    # Backups as patch makes them by default, files only from the copies (no
+    # version control checkout), names quoted its default way and messages
+    # in English, which `_ignored_rejects` reads.
+    out = ctx.std.process.command(program).args(["-p1", "--forward", "--batch", "--input=" + patch]) \
+        .current_dir(work).env("TMPDIR", scratch).env("LC_ALL", "C").env("LANGUAGE", None) \
+        .env("VERSION_CONTROL", None).env("PATCH_VERSION_CONTROL", None).env("SIMPLE_BACKUP_SUFFIX", None) \
+        .env("PATCH_GET", None).env("POSIXLY_CORRECT", None).env("QUOTING_STYLE", None) \
+        .stdin("null").stdout("piped").stderr("piped").spawn().wait_with_output()
+    said = out.stdout + out.stderr
+    if said:
+        ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
+    code = out.status.code
+    if code not in (0, 1):
+        return refuse("patch exited with %d" % code if code != None else "patch was ended by a signal")
+    collision = _copy_collision(fs, work, keys)
+    if collision:
+        return refuse(collision)
+
+    # Nothing but regular files copied back: a symlink patch made (git's
+    # `120000`) would be followed, and a file it took away unasked lost.
+    for path in paths:
+        meta, err = _look(fs, work + "/" + path)
+        if err != None or (meta != None and not meta.is_file) or (meta == None and path in had and path not in removed):
+            return refuse("%s %s after patch ran" % (_escaped(path), "is gone" if meta == None and err == None else "isn't a regular file"))
+    ignored = _ignored_rejects(said)
+    rejects = []
+    for path in paths:
+        patched = work + "/" + path
+        mine = cwd + "/" + path
+        if path in made and _is_file(fs, mine) and fs.metadata(mine).size > 0:
+            if not (_is_file(fs, patched) and _same_bytes(fs, patched, mine)):
+                fs.write(patched + ".rej", _creation_diff(text, path))
+                rejects.append(path + ".rej")
+            continue
+        if _is_file(fs, patched + ".rej") and path + ".rej" not in ignored:
+            if path in removed and path not in had:
+                continue
+            rejects.append(path + ".rej")
+        if path in removed:
+            if path in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
+                fs.remove_file(mine)
+            continue
+        if not _is_file(fs, patched):
+            continue
+        if path in had and _same_bytes(fs, patched, mine):
+            continue
+        parent = path.rpartition("/")[0]
+        if parent:
+            fs.create_dir_all(cwd + "/" + parent)
+        fs.copy(patched, mine)
+    for old, new in headers:
+        renamed = new and new != old and _is_file(fs, work + "/" + new)
+        if old and new and old not in had and not renamed and not _is_file(fs, work + "/" + old):
+            tell("INFO", "%s changes %s, which isn't there: its hunks for it were not applied" % (_escaped(patch), _escaped(old)))
+    if rejects:
+        kept = fs.mkdtemp()
+        for rej in rejects:
+            parent = rej.rpartition("/")[0]
+            if parent:
+                fs.create_dir_all(kept + "/" + parent)
+            fs.copy(work + "/" + rej, kept + "/" + rej)
+        tell("INFO", "%s did not apply in full; its rejected hunks are in %s" % (_escaped(patch), _escaped(kept)))
+        return kept
+    return None
+
+testonly_scan = _scan
+testonly_ignored_rejects = _ignored_rejects

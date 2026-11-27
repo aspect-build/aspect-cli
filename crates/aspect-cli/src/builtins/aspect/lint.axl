@@ -33,6 +33,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "local_output_path", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "detect_ci", "error", "warn")
+load("./private/lib/fix_patch.axl", "apply_fix_patch")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
@@ -745,7 +746,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_file
     if file.name.endswith(".patch"):
         # Readability gate (content discarded): requeues until the blob is
         # whole, since lint_patch hooks buffer the path and re-read it later
-        # with a plain read_to_string that has no completeness check.
+        # with no completeness check.
         if _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len) == None:
             return None
         patches.append({"path": filepath, "name": file.name})
@@ -1154,9 +1155,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data = data,
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
+        applied = []
         for patch in scoped_patches:
-            ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
-                .current_dir(ctx.std.env.current_dir()).spawn().wait()
+            apply_fix_patch(ctx, patch, seen = applied)
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
     # Skip the `filter` phase emit when the build failed or no aspect ran:

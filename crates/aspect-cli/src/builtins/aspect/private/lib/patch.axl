@@ -6,7 +6,7 @@ running with `--format=diff`). Those patches are unified diffs in the
 same shape `git diff` / `diff -u` emit. This module parses them into
 structured hunks so consumers can:
 
-  - apply them to the working tree (existing behavior, via `patch -p1`)
+  - apply them to the working tree (`fix_patch.axl`, via `patch -p1`)
   - generate per-edit-block PR review comments with a GitHub
     `suggestion` block, so reviewers can click "Commit suggestion" to
     accept the linter's proposed fix without leaving the PR
