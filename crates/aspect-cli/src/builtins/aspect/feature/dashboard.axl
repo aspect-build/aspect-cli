@@ -3179,6 +3179,26 @@ def running_count(state: dict) -> int:
     progress = state.get("progress") or []
     return max(len(running_actions(progress)), action_counts(progress)[0])
 
+def target_rows(failed_role: str, failed: int, built: int, blocked: int, configured: int, room: int) -> list:
+    """The narrow Targets rows in `room` cells: `Targets ✗5 ✓6 ○10/21`,
+    whole parts only, every count `short_count` where whole ones don't
+    fit a row, then the parts wrapped onto a second row under the first."""
+    for short in [False, True]:
+        n = short_count if short else _thousands
+        parts = [
+            (failed_role + "✗" + n(failed) + _RESET, "✗" + n(failed)),
+            (_c("success") + "✓" + n(built) + _RESET, "✓" + n(built)),
+        ] + ([("○" + n(blocked), "○" + n(blocked))] if blocked else [])
+        parts[-1] = (parts[-1][0] + "/" + n(configured), parts[-1][1] + "/" + n(configured))
+        rows = [[]]
+        for drawn, plain in parts:
+            if rows[-1] and 8 + text_width(" ".join([p for _, p in rows[-1]] + [plain])) > room:
+                rows.append([])
+            rows[-1].append((drawn, plain))
+        if len(rows) == 1 or short:
+            return [("Targets " if i == 0 else " " * 8) + " ".join([d for d, _ in row]) for i, row in enumerate(rows)]
+    return []
+
 def _has_tests(c: dict) -> bool:
     """Whether the build has test targets (configured, or with a result)."""
     return bool(c.get("test_targets") or c["tests_passed"] or c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped"))
@@ -3978,9 +3998,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
     if not wide:
         # Narrow: the failures first, as what matters is what failed.
-        summary = [
-            _counts("Targets %s✗%d%s %s✓%d%s%s/%d", (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (_counts(" ○%d", targets_blocked)) if targets_blocked else "", c["configured"])),
-        ] + ([
+        summary = target_rows(failed, targets_failed, built_n, targets_blocked, c["configured"], right_w - 4) + ([
             "Tests   " + " ".join([p for p in [
                 _counts("%s✗%d%s", (tests_failed, c["tests_failed"], _RESET)) if c["tests_failed"] else "",
                 _counts("%s✓%d%s", (_c("success"), c["tests_passed"], _RESET)) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
