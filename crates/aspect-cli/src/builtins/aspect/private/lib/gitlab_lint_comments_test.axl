@@ -5,7 +5,7 @@ Run with:
   aspect dev test-gitlab-lint-comments
 """
 
-load("@aspect//feature/gitlab_lint_comments.axl", "build_diff_line_map", "build_position", "compute_cleanup", "dedup_discussions_by_marker")
+load("@aspect//feature/gitlab_lint_comments.axl", "build_diff_line_map", "build_position", "compute_cleanup", "dedup_discussions_by_marker", "testonly_build_suggestion_comments")
 load("./lint_comments.axl", "build_marker", "suggestion_block")
 
 def _eq(label, got, want):
@@ -132,6 +132,15 @@ def _test_impl(ctx):
     # Clean pass must not re-resolve an already-resolved thread.
     ds_resolved = [{"id": "done", "notes": [{"id": 9, "body": mk_keep, "resolved": True}]}]
     _eq("clean skips already-resolved", compute_cleanup(ds_resolved, desired = {}, run_id = "gl-2", task_key = "lint", genuinely_clean = True)["resolve"], [])
+
+    # A buffered fix patch becomes one suggestion per edit block it can
+    # commit as is: none for bytes that aren't UTF-8.
+    dir = ctx.std.fs.mkdtemp()
+    ctx.defer(ctx.std.fs.remove_dir_all, dir)
+    ctx.std.process.command("sh").args(["-c", "printf -- '--- a/s.sh\\n+++ b/s.sh\\n@@ -1,3 +1,3 @@\\n-a\\n+A\\n ok\\n-c\\n+caf\\351\\n' > fix.patch"]).current_dir(dir).spawn().wait()
+    got = testonly_build_suggestion_comments(ctx, "gl-3", "lint", [], [{"path": dir + "/fix.patch", "name": "s.AspectRulesLintShellCheck.patch"}])
+    _eq("one suggestion", [(c["path"], c["line"]) for c in got], [("s.sh", 1)])
+    _eq("its fence", "```suggestion:-0+0\nA\n```" in got[0]["body"], True)
 
     print("gitlab_lint_comments.axl: OK")
     return 0

@@ -1,0 +1,67 @@
+"""Unit tests for lib/patch.axl: the diff walk `scan` and `parse` on it.
+
+Run with:
+  aspect dev test-patch
+"""
+
+load("./patch.axl", "parse", "scan", "section_ranges")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_scan():
+    lines = [
+        "diff --git a/x b/x",
+        "--- a/x",
+        "+++ b/x",
+        "@@ -1 +1 @@",
+        "--- not a header",
+        "+++ nor this",
+        "\\ No newline at end of file",
+        "garbage",
+        "@@ -5 +5 @@",
+        "-a",
+        "+b",
+        "--- /dev/null",
+        "+++ b/y",
+        "@@ -0,0 +1 @@",
+        "+y",
+        "",
+    ]
+    diff = scan(lines)
+    _eq("no problem", diff.problem, None)
+    _eq("two sections", [(s.old, s.new) for s in diff.sections], [("a/x", "b/x"), ("/dev/null", "b/y")])
+    x, y = diff.sections
+    _eq("a hunk body's `---`/`+++` lines and its `\\` line stay in it", [(h.first, h.end) for h in x.hunks], [(3, 7)])
+    _eq("x ends at its hunk", x.end, 7)
+    _eq("a hunk after a stray line is stray too", diff.stray, [(0, "diff --git a/x b/x"), (7, "garbage"), (8, "@@ -5 +5 @@"), (9, "-a"), (10, "+b")])
+    _eq("y's lines alone", section_ranges(y), [(11, 13), (13, 15)])
+    _eq("a range that isn't numbers", scan(["--- a/x", "+++ b/x", "@@ -1,y +1 @@"]).problem, "a hunk's line range isn't numbers")
+    _eq("a body cut short", scan(["--- a/x", "+++ b/x", "@@ -1,2 +1,2 @@", " a"]).problem, "a hunk ends before its line count")
+    _eq("a hunk with no header is stray", scan(["@@ -1 +1 @@", "-a", "+b"]).sections, [])
+
+def _test_parse():
+    files = parse("--- a/s.sh\t2026-01-01 00:00:00\n+++ b/s.sh\t2026-01-02 00:00:00\n@@ -1,3 +1,3 @@\n a\n-b\n++ x\n\n")
+    _eq("one file, timestamp and prefix gone", [f["file"] for f in files], ["s.sh"])
+    _eq(
+        "an added `++ x` line is an add, an empty line context",
+        files[0]["hunks"][0]["ops"],
+        [{"kind": "context", "text": "a"}, {"kind": "remove", "text": "b"}, {"kind": "add", "text": "+ x"}, {"kind": "context", "text": ""}],
+    )
+    _eq("no `b/` prefix kept as is", [f["file"] for f in parse("--- s.sh\n+++ s.sh\n@@ -1 +1 @@\n-a\n+b\n")], ["s.sh"])
+    _eq("empty", parse(""), [])
+
+def _impl(ctx: TaskContext) -> int:
+    _test_scan()
+    _test_parse()
+    print("patch_test.axl: OK")
+    return 0
+
+patch_tests = task(
+    summary = "Run the unified-diff walk (lib/patch.axl) unit tests.",
+    kind = "test-patch",
+    group = ["dev"],
+    implementation = _impl,
+    args = {},
+)

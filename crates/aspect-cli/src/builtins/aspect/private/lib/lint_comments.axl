@@ -1,8 +1,8 @@
 """VCS-agnostic helpers shared by the GitHub and GitLab lint-comment
 features.
 
-Three pieces are genuinely pure (data in, data out) and worth sharing
-so both features stay byte-identical and a single test covers them:
+These pieces are shared so both features stay byte-identical and a
+single test covers them:
 
   * Marker build/parse — the hidden HTML comment that uniquely
     identifies an Aspect lint comment so later runs dedupe + clean up.
@@ -11,10 +11,14 @@ so both features stay byte-identical and a single test covers them:
     (replaces `current-X` through `current+Y`).
   * Diff-window lookup (`DiffWindow`) — whether a review comment's
     anchor range falls where the host can display it.
+  * Patch suggestions (`patch_suggestions`) — the edits a fix patch
+    suggests that are safe to commit as they are.
 
 The orchestration (discovery, dedup state machine, API calls) stays in
 each feature file — it's API-coupled and not shareable as-is.
 """
+
+load("./patch.axl", "PATCH_CAP", "hunk_edit_blocks", "parse")
 
 _MARKER_PREFIX = "<!-- aspect-lint:"
 _MARKER_SUFFIX = " -->"
@@ -181,3 +185,21 @@ def can_attempt_comment(window: DiffWindow, path: str, line: int, start_line = N
         if (current_line - 1) not in lines:
             return False
     return True
+
+def patch_suggestions(fs, path: str) -> list:
+    """Each edit the fix patch at `path` suggests, as `(file, block)` with
+    `block` from `hunk_edit_blocks`. None for a patch larger than
+    `PATCH_CAP` (its last hunk would be cut short) or one that can't be
+    read, and no block that changes nothing or whose replacement holds
+    U+FFFD: the patch's bytes there aren't UTF-8, and committing the
+    suggestion would write U+FFFD in their place."""
+    err, meta = catch(fs.metadata, path, types = [std.io.Error])
+    if err != None or not meta.is_file or meta.size > PATCH_CAP:
+        return []
+    out = []
+    for f in parse(fs.try_read_to_string_capped(path, PATCH_CAP)):
+        for hunk in f["hunks"]:
+            for block in hunk_edit_blocks(hunk):
+                if (block["adds"] or block["removes"]) and "\ufffd" not in block["replacement"]:
+                    out.append((f["file"], block))
+    return out
