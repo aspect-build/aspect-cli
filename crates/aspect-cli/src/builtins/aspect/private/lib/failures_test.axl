@@ -153,6 +153,13 @@ def _test_failure_message_quoted(ctx):
     _eq("the message quoted", failures.entry_text(state, entries[0])["lines"], [message])
     _eq("its line no other error", failure_ties.console_ties(state)["others"], [])
 
+def _test_bad_pattern(ctx):
+    # A pattern Bazel cannot parse: its `Skipping` line and its repeat after
+    # `Failed to parse target pattern even though …` are its entry's.
+    description = "invalid target name 'a:b': target names may not contain ':'"
+    state = _ended(ctx, [_event("pattern_expanded", struct(pattern = ["//pair:a:b"]), struct(reason = "loading_failure", description = description), aborted = True)], _error("Skipping '//pair:a:b': " + description) + _error("Failed to parse target pattern even though it was previously parsed successfully: " + description))
+    _eq("a bad pattern listed once", ([e["label"] for e in failures.failure_entries(state)["entries"]], failure_ties.console_ties(state)["others"]), (["//pair:a:b"], []))
+
 def _test_target_counts(ctx):
     # Built from the events; failed, the targets with an entry of their own;
     # blocked, those a failed root cause stopped.
@@ -186,6 +193,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_timestamps(ctx)
     _test_relay_cap(ctx)
     _test_failure_message_quoted(ctx)
+    _test_bad_pattern(ctx)
     _test_target_counts(ctx)
     _test_last_words(ctx)
     print("failures_test.axl: OK")

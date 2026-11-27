@@ -30,6 +30,7 @@ _BAZEL = struct(
     too_big = " exceeds maximum size of ",
     skipping_bytes = " bytes; skipping",
     skipping = "Skipping '%s': %s",
+    reparsed = "Failed to parse target pattern even though it was previously parsed successfully: %s",
     traceback = "Traceback (most recent call last):",
     error_in = "Error in ",
     fatal = "FATAL: ",
@@ -486,7 +487,9 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
 
     - an analysis or loading root: the one line with a location whose
       text after it is its description's first line (every line saying
-      just that, a pattern's after `Skipping '<pattern>': ` too, claimed);
+      just that, a pattern's after `Skipping '<pattern>': ` and after
+      Bazel's `Failed to parse target pattern even though …: ` too,
+      claimed);
     - a target named by its own error (`<label>: …`, an attribute error):
       those lines, quoted, and their location when they all give one;
     - a target that failed with no action of its own: the one line ending
@@ -508,7 +511,10 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
         out = {"location": "", "lines": []}
         first = rec.get("description", "").partition("\n")[0]
         if first and rec["detail"] != "target":
-            found = by["message"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get(_BAZEL.skipping % (label, first), []) if headers[k]["message"] != first]
+            said = [first] + ([_BAZEL.skipping % (label, first), _BAZEL.reparsed % first] if rec["pattern"] else [])
+            found = by["message"].get(first, [])
+            for line in said:
+                found += [k for k in by["plain"].get(line, []) if headers[k]["message"] != first]
             for k in found:
                 claimed[k] = True
             k = _tie([k for k in found if headers[k]["location"]])
