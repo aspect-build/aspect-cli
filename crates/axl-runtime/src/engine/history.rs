@@ -857,6 +857,13 @@ fn stamp(time: SystemTime) -> String {
 
 /// An invocation directory's name: a [`stamp`], `-`, and a task ID, which is a
 /// UUID. Nothing else under the root is the history's to prune.
+/// The task ID a history entry's folder is named for (`<stamp>-<id>`), as
+/// `aspect history show` takes it; None for a folder that is not one.
+pub fn entry_task_id(dir: &Path) -> Option<String> {
+    let name = dir.file_name()?;
+    is_invocation_name(name).then(|| name.to_str().unwrap_or("")[STAMP_LEN + 1..].to_string())
+}
+
 fn is_invocation_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -1386,6 +1393,12 @@ mod tests {
         );
         assert!(!is_invocation_name("logs".as_ref()));
         assert!(!is_invocation_name("é".as_ref()));
+    }
+
+    #[test]
+    fn an_entrys_folder_names_its_task_id() {
+        assert_eq!(entry_task_id(&Path::new("/h").join(name(1))), Some(id(1)));
+        assert_eq!(entry_task_id(Path::new("/h/logs")), None);
     }
 
     #[cfg(unix)]

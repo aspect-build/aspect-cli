@@ -1024,7 +1024,7 @@ pub(crate) fn suspend() -> bool {
         h.suspended = true;
     }
     let held = moving.holds(2);
-    if dump_output_turned(DUMP_LINES, "… {n} older lines: aspect history show", held) {
+    if dump_output_turned(DUMP_LINES, &older_lines_note(), held) {
         DUMPED.store(true, Ordering::SeqCst);
     }
     drop(moving);
@@ -1301,13 +1301,27 @@ pub(crate) fn resume() {
 fn release_dumping(held: Option<Held>, order: &mut Order) -> bool {
     let was = held.is_some();
     let dumping = was && dump_ready();
+    let older = older_lines_note();
     let _ = release(
         held,
         !dumping,
-        dumping.then_some((DUMP_LINES, "… {n} older lines: aspect history show")),
+        dumping.then_some((DUMP_LINES, older.as_str())),
         order,
     );
     was
+}
+
+/// The dump's line for the older lines it leaves out (`{n}` their count),
+/// naming the task to show them, as the Dashboard's own release does.
+fn older_lines_note() -> String {
+    let id = crate::out::output_ansi_path()
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .and_then(crate::engine::history::entry_task_id);
+    match id {
+        Some(id) => format!("… {{n}} older lines: aspect history show {id}"),
+        None => "… {n} older lines: aspect history show".to_string(),
+    }
 }
 
 /// Where `output.ansi` stood when the screen was taken (or came back from a
