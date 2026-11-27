@@ -158,9 +158,6 @@ def _always(state):
 def _bar_closed(state):
     return not state["search"]["open"]
 
-def _no_view(state):
-    return state["view"] == None
-
 def _in_list_tab(state):
     return state.get("tab") in ("metrics", "invocation") and state["view"] == None
 
@@ -183,9 +180,6 @@ def _tips_listed(state):
 
 def _failures_focused(state):
     return state["focus"] == "failures"
-
-def _console_keys(state):
-    return state["focus"] != "failures"
 
 def _k_tab_number(state, key, page):
     show_tab(state, _TABS[int(key) - 1][0])

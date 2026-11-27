@@ -21,7 +21,6 @@ text_width = term_text.text_width
 wrap_line = term_text.wrap_line
 _flaky = failure_records.flaky
 _log_path = failure_records.log_path
-_MAX_LOG_SIZE = failure_records.MAX_LOG_SIZE
 bazel_line = failure_records.bazel_line
 _HEADERS = failure_ties.HEADERS
 _REPORT_FAILURES = failures.REPORT_FAILURES
@@ -34,10 +33,10 @@ note_phase = dashboard_actions.note_phase
 # pane's title, and Bazel's console log has them all.
 _MAX_LOG = 20000
 
+# The console's text kept, in characters, whatever its lines' length (a
+# minified bundle's), and the most of one line: the rest is on disk.
+_MAX_LOG_SIZE = 16 * 1024 * 1024
 _MAX_LINE = 8 * 1024
-
-# Errors repeated in the scrollback once the screen goes.
-_MAX_ERRORS = 20
 
 # What `e` cycles the console through, in order.
 _FILTERS = ["all", "warnings", "errors"]
@@ -377,11 +376,6 @@ def _search_bar(search: dict, matches: int, cols: int) -> str:
         (_c("error") + found + _RESET if search["error"] else found) + _c("muted") + hints + _RESET
     )
 
-def shown_by(filter: str, line: str) -> bool:
-    """Whether the console's `filter` (one of `_FILTERS`) shows `line`, by
-    itself (`severity`)."""
-    return _shows(filter, severity(line))
-
 def severity(line: str) -> str:
     """`error`, `warning` or `` for a console line by itself: Bazel's
     `ERROR:`, `FAIL:` and `TIMEOUT:` (indented too, as the console's recap
@@ -437,14 +431,11 @@ def keep_links(state: dict, line: str, links):
 # scrollback wants after the screen is gone (`report_lines`), its first
 # `_CLOSING_HEAD` and last `_CLOSING_TAIL` (where `Executed N out of M
 # tests` is) of them.
-_CLOSING = ["INFO: Elapsed time:", "INFO: Build completed", "ERROR: Build did NOT complete", "INFO: Errors Bazel reported", "── Error recap (", "Executed "]
+_CLOSING = ["INFO: Elapsed time:", "INFO: Build completed", "ERROR: Build did NOT complete", "Executed "]
 
 _CLOSING_HEAD = 5
 
 _CLOSING_TAIL = 40
-
-# The most lines of an error block kept for the scrollback.
-_MAX_BLOCK = 20
 
 # Errors and warnings kept past `_MAX_LOG`, so `e` finds them all.
 _MAX_EARLY = 5000
@@ -614,9 +605,8 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
     """Take the console's new `lines`, and with them their `links` (each
     line's `[start, end, url]`s, as `output_feed()` gives them): kept (the
     newest `_MAX_LOG`, with each one's kind, `classify`'s, its errors and
-    warnings past that kept for `e`, the rest counted in `dropped`), the
-    first `_MAX_ERRORS` error blocks noted for the scrollback, Bazel's
-    closing block from where it starts (`_CLOSING`), Bazel's cache tally
+    warnings past that kept for `e`, the rest counted in `dropped`),
+    Bazel's closing block from where it starts (`_CLOSING`), Bazel's cache tally
     read (`cache_hits`). Scrolled up, the console stays on the lines it
     shows, counting the new ones and the errors among them (`unseen`,
     `unseen_errors`); a log being viewed does not move. Counted from the
@@ -654,14 +644,6 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
         _fold_line(state, line)
         if links != None and i < len(links):
             keep_links(state, line, links[i])
-
-        # Errors after Bazel's closing block began are its recap's.
-        if kind == "error" and severity(line) == "error" and not _closing(line) and not closing:
-            state["error_count"] += 1
-            if len(state["errors"]) < _MAX_ERRORS:
-                state["errors"].append([line])
-        elif kind == "error" and severity(line) != "error" and state["errors"] and len(state["errors"][-1]) < _MAX_BLOCK and state["error_count"] <= _MAX_ERRORS:
-            state["errors"][-1].append(line)
         if (closing or _closing(line)) and not cli:
             # Bazel's, not the CLI's own lines, which the scrollback
             # gets as they were printed: the head, and a tail kept short.
@@ -841,7 +823,7 @@ dashboard_log = namespace(
     search_bar = _search_bar,
     search_key = _search_key,
     severity = severity,
-    shown_by = shown_by,
+    shows = _shows,
     shown_lines = shown_lines,
     step_match = step_match,
     toggle_fold = toggle_fold,

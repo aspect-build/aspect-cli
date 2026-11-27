@@ -254,8 +254,6 @@ def attempt_state(now_ms: int) -> dict:
         spread = {},
         test_counts = {},
         counts = new_counts(),
-        errors = [],
-        error_count = 0,
         log = [],
         log_size = 0,
         views = [],
@@ -407,7 +405,6 @@ def _dashboard_impl(ctx: FeatureContext):
         "frames": 0,
         "progress": [],
         "log": [],
-        "errors": [],
         "scroll": 0,
         "filter": "all",
         "search": new_search(),
@@ -448,7 +445,6 @@ def _dashboard_impl(ctx: FeatureContext):
         "all_actions": ctx.args.actions == "all",
         "ended": False,
         "counts": new_counts(),
-        "error_count": 0,
         "fresh": False,
         "log_path": "",
         "pages": [],
@@ -641,11 +637,6 @@ def _dashboard_impl(ctx: FeatureContext):
         cols, rows = screen.size()
         _draw(screen, render(state, cols, rows))
 
-    def _stay_tips():
-        # The end's tips, collected before the screen is given back, as the
-        # Tips feature prints them only after.
-        _tips()
-
     def _stay(task_ctx, screen, countdown_ms):
         """Keep the finished screen up, scrollable, until a leave key, or
         until the run is told to stop (a SIGTERM), which no key would end.
@@ -653,7 +644,10 @@ def _dashboard_impl(ctx: FeatureContext):
         unless a key comes first, which only stops it. The screen is the state's meanwhile, for
         the keys that use it (`m`)."""
         state["screen"] = screen
-        _stay_tips()
+
+        # The end's tips, collected before the screen is given back, as the
+        # Tips feature prints them only after.
+        _tips()
         _hold(task_ctx, screen, countdown_ms)
         state["screen"] = None
 

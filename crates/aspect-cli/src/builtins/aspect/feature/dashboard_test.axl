@@ -94,8 +94,8 @@ paste_text = dashboard_log.paste_text
 replay_lines = dashboard_log.replay_lines
 report_lines = dashboard_log.report_lines
 say_note = dashboard_log.say_note
+_shows = dashboard_log.shows
 severity = dashboard_log.severity
-shown_by = dashboard_log.shown_by
 shown_lines = dashboard_log.shown_lines
 step_match = dashboard_log.step_match
 crumbs = dashboard_view.crumbs
@@ -111,7 +111,6 @@ copy_text = dashboard_pointer.copy_text
 highlightable = dashboard_pointer.highlightable
 link_at = dashboard_pointer.link_at
 link_marks = dashboard_pointer.link_marks
-link_span_at = dashboard_pointer.link_span_at
 link_spans = dashboard_pointer.link_spans
 open_in_editor = dashboard_pointer.open_in_editor
 open_link = dashboard_pointer.open_link
@@ -232,8 +231,6 @@ def _screen(ctx, log, **kw):
         "frames": 0,
         "progress": [],
         "log": log,
-        "errors": [],
-        "error_count": 0,
         "scroll": 0,
         "filter": "all",
         "search": new_search(),
@@ -1111,7 +1108,6 @@ def _impl(ctx: TaskContext) -> int:
         "frames": 1,
         "progress": ["[1 / 2] 1 action running", "    Compiling a.cc; 1s"],
         "log": ["INFO: one", "ERROR: two"],
-        "errors": [],
         "scroll": 0,
         "filter": "all",
         "search": new_search(),
@@ -1137,7 +1133,7 @@ def _impl(ctx: TaskContext) -> int:
     if "INFO: one" in render(state, 100, 30) or "errors only" not in render(state, 100, 30):
         fail("render: errors only still shows INFO, or its title is missing")
     for filter, want in [("all", [True, True, True]), ("warnings", [False, True, True]), ("errors", [False, False, True])]:
-        _eq("shown_by " + filter, [shown_by(filter, l) for l in ["INFO: x", "WARNING: y", "ERROR: z"]], want)
+        _eq("shown by " + filter, [_shows(filter, severity(l)) for l in ["INFO: x", "WARNING: y", "ERROR: z"]], want)
     aspect_url = "https://app.example.com/i/sink-1"
     bes_url = "https://bes.example.com/invocation/uuid-1"
     state["pages"] = [(ASPECT_PAGE, aspect_url), (BES_PAGE, bes_url)]
@@ -1592,7 +1588,7 @@ def _impl(ctx: TaskContext) -> int:
     many["selected"] = 5
     middle = plain_rows(many, 4)
     _eq("in the middle: both", (middle[0], middle[-1], len(middle)), ("… 4 earlier", "… 4 more", 4))
-    browse.update(task = "test", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [], errors = [])
+    browse.update(task = "test", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [])
     _open_view = on_key(browse, "enter", 10)
     drawn = render(browse, 100, 30)
     for want in ["▹ //t:t ", "Esc back", "FAIL: boom"]:
@@ -2040,7 +2036,6 @@ def _impl(ctx: TaskContext) -> int:
     diag = _screen(ctx, [], filter = "errors")
     add_lines(diag, ["INFO: x", "ERROR: a.cc failed", "a.cc:1: error: no x", "INFO: done"])
     _eq("e shows the diagnostic", console_lines(diag, diag["log"], diag["kinds"]), ["ERROR: a.cc failed", "a.cc:1: error: no x"])
-    _eq("an error block kept for the scrollback", diag["errors"], [["ERROR: a.cc failed", "a.cc:1: error: no x"]])
 
     # The newest `_MAX_LOG` kept, the rest counted, errors kept for `e`.
     flood = _screen(ctx, [])
@@ -2858,8 +2853,6 @@ def _impl(ctx: TaskContext) -> int:
     _eq("a page, then half", paged["scroll"], 30)
 
     # The link under the pointer.
-    _eq("a link's cells", link_span_at("see " + link("https://x.test", "here") + " now", 5), (4, 8))
-    _eq("none off it", link_span_at("see " + link("https://x.test", "here") + " now", 9), None)
 
     # A line too long is cut, its rest on disk; long lines keep the
     # console's text under its budget, the oldest going first.
@@ -3287,11 +3280,27 @@ def _impl(ctx: TaskContext) -> int:
 
     # The Tips tab: its count in the tab, the most urgent first, `s`
     # silencing on this machine and back, a failed save said on its row.
+    # The fake store sets a silenced tip aside and gives it back once undone,
+    # as the Tips feature does.
     calls = []
-    tipped = _screen(ctx, ["x"], tips = [
+    store = [
         {"id": "remote-miss", "severity": "suggestion", "title": "41% missed", "body": "Use a cache."},
         {"id": "disk-full", "severity": "warning", "title": "98% full", "body": ""},
-    ], silencer = lambda id, on: (calls.append((id, on)), None)[1])
+    ]
+    aside = {}
+
+    def _silencer(id, on):
+        calls.append((id, on))
+        if on:
+            aside[id] = [t for t in store if t["id"] == id]
+            kept = [t for t in store if t["id"] != id]
+            store.clear()
+            store.extend(kept)
+        else:
+            store.extend(aside.pop(id, []))
+        return None
+
+    tipped = _screen(ctx, ["x"], tips = list(store), silencer = _silencer, tips_from = lambda: list(store))
     _eq("counted", tips_count(tipped), 2)
     _eq("in the most urgent's colour", tips_role(tipped), "tip.warning")
     _eq("the most urgent first", [t["id"] for t, _ in shown_tips(tipped)], ["disk-full", "remote-miss"])
@@ -3303,10 +3312,7 @@ def _impl(ctx: TaskContext) -> int:
     tipped["tip_selected"] = [i for i, (t, _) in enumerate(shown_tips(tipped)) if t["id"] == "disk-full"][0]
     on_key(tipped, "s", 10)
     _eq("s again undoes it", (calls[-1], tips_count(tipped)), (("disk-full", False), 2))
-
-    # The Tips feature dropped the silenced tip: undone, it stays shown.
-    tipped["tips"] = [t for t in tipped["tips"] if t["id"] != "disk-full"]
-    _eq("undone, it stays though no longer stored", [t["id"] for t, _ in shown_tips(tipped)], ["disk-full", "remote-miss"])
+    _eq("undone, it is shown from the store again", ([t["id"] for t in tipped["tips"]], [t["id"] for t, _ in shown_tips(tipped)]), (["remote-miss", "disk-full"], ["disk-full", "remote-miss"]))
     tipped["silencer"] = lambda id, on: "read-only file"
     on_key(tipped, "s", 10)
     _eq("a failed save says why and changes nothing", ("couldn't save to ~/.aspect/config.json: read-only file" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), tips_count(tipped)), (True, 2))

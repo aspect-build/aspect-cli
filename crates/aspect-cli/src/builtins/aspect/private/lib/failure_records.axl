@@ -8,10 +8,6 @@ load("./term_text.axl", "term_text")
 _counts = term_text.counts
 _plain = term_text.plain
 
-# The console's text kept, in characters, whatever its lines' length (a
-# minified bundle's), and the most of one line: the rest is on disk.
-_MAX_LOG_SIZE = 16 * 1024 * 1024
-
 # The most of a failure's log read into its view: the end, where the failure
 # usually is.
 _MAX_LOG_BYTES = 1024 * 1024
@@ -738,14 +734,6 @@ def _log_paths(state: dict, record: dict) -> list:
             out.append((name, path))
     return out
 
-def _paths_text(state: dict, record: dict) -> str:
-    """A failure's logs for the report: the one path, or each by its
-    stream."""
-    paths = _log_paths(state, record)
-    if len(paths) == 1:
-        return "  " + paths[0][1]
-    return "".join(["  %s: %s" % (name, path) for name, path in paths])
-
 def _log_path(state: dict, record: dict) -> str:
     """Where a failure's log reads now: the history's copy of an action's
     (`kept_action_log`), which outlives Bazel's own, before Bazel's; "" for
@@ -921,7 +909,6 @@ failure_records = namespace(
     log_path = _log_path,
     log_paths = log_paths,
     MAX_LOG_BYTES = _MAX_LOG_BYTES,
-    MAX_LOG_SIZE = _MAX_LOG_SIZE,
     new_counts = new_counts,
     note_blocked = note_blocked,
     note_event = note_event,

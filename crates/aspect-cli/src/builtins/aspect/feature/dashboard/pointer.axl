@@ -162,33 +162,6 @@ def link_spans(row: str, url: str) -> list:
         out.append((start, at))
     return out
 
-def link_span_at(row: str, col: int):
-    """The cells `(start, end)` of the OSC 8 link drawn at cell `col` of
-    `row`, or None."""
-    at = 0
-    esc = 0
-    seq = []
-    url = ""
-    start = -1
-    for c in row.codepoints():
-        if esc != 0 or c == 0x1b:
-            seq.append(chr(c))
-            esc = _escape_state(esc, c)
-            if esc == 0:
-                text = "".join(seq)
-                seq = []
-                if text.startswith("\x1b]8;"):
-                    body = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\")
-                    if url and start <= col and col < at:
-                        return (start, at)
-                    url = body.partition(";")[2]
-                    start = at
-            continue
-        at += 1 if c < 0x0300 else _cells(c)
-    if url and start <= col and col < at:
-        return (start, at)
-    return None
-
 def link_at(row: str, col: int):
     """The URL of the OSC 8 link drawn at cell `col` of `row`, or None."""
     at = 0
@@ -550,7 +523,6 @@ dashboard_pointer = namespace(
     hover_colour = _hover_colour,
     link_at = link_at,
     link_marks = link_marks,
-    link_span_at = link_span_at,
     link_spans = link_spans,
     mouse_key = mouse_key,
     next_editor = next_editor,

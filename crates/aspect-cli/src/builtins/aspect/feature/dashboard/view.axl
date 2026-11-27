@@ -235,13 +235,7 @@ def shown_tips(state: dict) -> list:
     shows (`SURFACE_DASHBOARD`), and in its place each silenced this run,
     as `(tip, silenced)`."""
     silenced = state.get("silenced_tips", {})
-    stored = state.get("tips", [])
-    ids = [t["id"] for t in stored]
-
-    # A tip silenced and then undone here: the Tips feature dropped it on
-    # silencing, so it is shown from what was kept until it is stored again.
-    restored = [t for id, t in state.get("restored_tips", {}).items() if id not in ids and id not in silenced]
-    rows = [(t, False) for t in stored + restored if t["id"] not in silenced]
+    rows = [(t, False) for t in state.get("tips", []) if t["id"] not in silenced]
     rows += [(t, True) for t in silenced.values()]
     return sorted(rows, key = lambda r: severity_rank(r[0].get("severity")))
 
@@ -251,8 +245,10 @@ def tips_count(state: dict) -> int:
 
 def toggle_silence(state: dict, row):
     """Silence the tip of `row` on this machine, or undo it, through
-    `state["silencer"]` (`silence_tip`/`unsilence_tip`, `~/.aspect/config.json`);
-    a write that fails says why on its row and changes nothing."""
+    `state["silencer"]` (`silence_tip`/`unsilence_tip`, `~/.aspect/config.json`),
+    then show the task's tips anew (`state["tips_from"]`), which set a
+    silenced tip aside and give an unsilenced one back; a write that fails
+    says why on its row and changes nothing."""
     tip, silenced = row
     silencer = state.get("silencer")
     if silencer == None:
@@ -264,13 +260,12 @@ def toggle_silence(state: dict, row):
         return
     errors.pop(tip["id"], None)
     gone = state.setdefault("silenced_tips", {})
-    restored = state.setdefault("restored_tips", {})
     if silenced:
         gone.pop(tip["id"], None)
-        restored[tip["id"]] = tip
     else:
         gone[tip["id"]] = tip
-        restored.pop(tip["id"], None)
+    if state.get("tips_from") != None:
+        state["tips"] = state["tips_from"]()
 
 # The main pane's tabs, by the number key that shows each.
 _TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"), ("invocation", "Invocation"), ("tips", "Tips")]
