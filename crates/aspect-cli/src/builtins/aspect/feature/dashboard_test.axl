@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "repaired", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "summary_state", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "repaired", "replay_lines", "report_lines", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "summary_state", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1288,16 +1288,13 @@ def _impl(ctx: TaskContext) -> int:
     _eq("from its end, no current match", (noted["scroll"], noted["search"]["back"]), (0, -1))
     note_event(noted, "test_result", struct(label = "//t:t", run = 3, shard = 2, attempt = 1, configuration = cfg), struct(status = "passed"), False)
     _eq("note_event keeps the most runs and shards seen", noted["spread"][("//t:t", "c1")], (3, 2))
-    retried = dict(noted, fresh = True, scroll = 7, focus = "failures", log = ["x"], errors = ["y"], error_count = 1, search = new_search())
-    reset_attempt(retried, 42)
-    retried["selected"] = 3
-    retried["bazel_uuid"] = "old"
-    retried["search"] = dict(new_search(), query = "kept")
-    retried["filter"] = "errors"
-    reset_attempt(retried, 42)
-    _eq("a retry starts afresh", (retried["fails"], retried["view"], retried["focus"], retried["scroll"], retried["log"], retried["test_counts"], retried["start_ms"], retried["fresh"]), ([], None, "console", 0, [], {}, 42, False))
-    _eq("its counts and the rest too", (retried["counts"], retried["errors"], retried["error_count"], retried["last_attempts"], retried["selected"], retried["bazel_uuid"], retried["spread"]), (new_counts(), [], 0, {}, 0, "", {}))
-    _eq("but not what is the run's", (retried["exec_root"], retried["output_dirs"], retried["search"]["query"], retried["filter"], retried["read"] != None), ("/x", {"c1": "k8-opt"}, "kept", "errors", True))
+    # A retried attempt, as the build's frame hook starts one (`new_build`).
+    retried = dict(noted, fresh = True, scroll = 7, focus = "failures", log = ["x"], selected = 3, bazel_uuid = "old", filter = "errors", search = dict(new_search(), query = "kept", back = 0, origin = 1, anchored = True))
+    new_build(retried, 42)
+    _eq("a retry starts its own build", (retried["fails"], retried["focus"], retried["test_counts"], retried["build_start_ms"], retried["fresh"]), ([], "console", {}, 42, False))
+    _eq("its counts and the rest too", (retried["counts"], retried["last_attempts"], retried["selected"], retried["bazel_uuid"], retried["spread"]), (new_counts(), {}, 0, "", {}))
+    _eq("the console and its search are the task's, kept", (retried["log"], retried["scroll"], retried["search"]["query"], retried["search"]["back"], retried["search"]["origin"], retried["search"]["anchored"], retried["filter"]), (["x"], 7, "kept", 0, 1, True, "errors"))
+    _eq("and what is the run's", (retried["exec_root"], retried["output_dirs"], retried["read"] != None), ("/x", {"c1": "k8-opt"}, True))
     other = log_view(noted, act)
     noted["view"] = other
     note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
@@ -1804,14 +1801,13 @@ def _impl(ctx: TaskContext) -> int:
     counting["search"]["open"] = True
     if "leaving in 2s" not in render(counting, 100, 30):
         fail("render: the countdown should show over an open bar")
-    opened = _screen(ctx, [], fresh = True, last_attempts = {})
-    opened["search"].update(origin = 200, anchored = True)
-    reset_attempt(opened, 0)
-    _eq("a retry forgets where the bar opened", opened["search"]["origin"], 0)
-    opened.update(view = None, errors = [], error_count = 0)
-    opened["search"].update(open = True)
+    opened = _screen(ctx, ["old"] * 300, fresh = True, last_attempts = {})
+    opened["search"].update(open = True, origin = 200, anchored = True)
+    new_build(opened, 0)
+    _eq("a retry keeps where the bar opened: the console is the task's", (opened["search"]["origin"], opened["search"]["anchored"]), (200, True))
+    opened.update(view = None)
     add_lines(opened, ["new"] * 4)
-    _eq("and follows after it", (opened["search"]["origin"], opened["scroll"]), (0, 0))
+    _eq("and follows after it", opened["scroll"], 0)
 
     # Links and selection: marks wrap cells, not escapes, and survive a
     # colour reset inside them.

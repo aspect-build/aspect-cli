@@ -1120,20 +1120,10 @@ def attempt_state(now_ms: int) -> dict:
         excerpts = {},
     )
 
-def reset_attempt(state: dict, now_ms: int):
-    """Start a retried attempt afresh: its own counts, console, failures and
-    actions, no log open nor the list focused, timed from `now_ms`. The
-    search (but its current match and where it opened), the `e` filter, the
-    list shown, zoom and the mouse are the user's, kept."""
-    state["search"]["back"] = -1
-    state["search"]["origin"] = 0
-    state["search"]["anchored"] = False
-    state.update(attempt_state(now_ms))
-    _clear_build(state)
-
 def _clear_build(state: dict):
     """What a build keeps beside `attempt_state`'s, which the next build and a
-    retried attempt alike start without: the root causes it noted."""
+    retried attempt alike start without: the root causes it noted, and what
+    was worked out from them."""
     state["root_causes"] = {}
     for key in ("blocked_cache", "entries_cache", "own_cache", "ties_cache"):
         state[key] = None
@@ -1144,9 +1134,11 @@ _PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts"
 
 def new_build(state: dict, now_ms: int):
     """Start the next build (or a retried attempt) in the task's screen: its
-    own counts, failures and invocation, timed from `now_ms`; the console,
-    the search and what is open in it kept. The Failures list, if focused,
-    goes back to the console, as its rows are the old build's."""
+    own counts, failures and invocation, timed from `now_ms`. The console is
+    the task's, so it, the search over it (its current match, where the bar
+    opened, whether it is anchored there) and what is open in it are kept.
+    The Failures list, if focused, goes back to the console, as its rows are
+    the old build's."""
     fresh = attempt_state(now_ms)
     for key in _PER_BUILD:
         state[key] = fresh[key]
