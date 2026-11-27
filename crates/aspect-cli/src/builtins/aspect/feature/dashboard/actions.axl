@@ -528,43 +528,41 @@ def test_progress(state: dict):
 
 def action_split(state: dict) -> dict:
     """A build's actions by what became of each, for the bar, the Actions
-    rows and Metrics, in one unit, Bazel's actions, summing to its done
-    count: `done` of `total` (Bazel's `[n / m]`, `more` while it analyses),
-    and of them `ran`, `local` (Bazel's action cache in the output base
-    said the outputs were still valid), `memory` (up to date in Bazel's
-    memory: its graph's cleaned action keys), `disk` and `remote` (a cache
-    served every spawn of the action), `internal` (no spawn: symlinks,
-    manifests, file writes), `failed` (the actions the event stream says
-    failed, `failed_actions`), `not_run` (what Bazel counted done that no
-    other part has: in a build that succeeded, or failed only its tests,
-    an action whose outputs another target's identical action produced;
-    in a build where an action failed, that, or one skipped as an input
-    failed), `unreported` (done, its kind not reported: no event or
-    execution log says it) and, at the end, `other` (what of
-    `actions_executed` neither the execution log nor `runner_count` gives
-    a kind, rare); `disk_on` and `remote_on` say which caches the build was
-    given (`cache_kinds`).
+    rows and Metrics, in one unit, Bazel's actions: `done` of `total`
+    (Bazel's `[n / m]`, `more` while it analyses), and of them `ran`,
+    `local` (Bazel's action cache in the output base said the outputs were
+    still valid), `memory` (up to date in Bazel's memory: its graph's
+    cleaned action keys), `disk` and `remote` (a cache served every spawn
+    of the action), `internal` (no spawn: symlinks, manifests, file
+    writes), `failed` (the actions the event stream says failed,
+    `failed_actions`), `not_run` (what Bazel counted done without running
+    it or checking its action cache: an identical action of another target
+    made its outputs, or an input failed), `unreported` (done, its kind
+    not reported: no event or execution log says it) and, at the end,
+    `other` (what of `actions_executed` neither the execution log nor
+    `runner_count` gives a kind, rare); `disk_on` and `remote_on` say
+    which caches the build was given (`cache_kinds`).
 
     Once the build has ended with its `BuildMetrics` (`final`), the done
-    count is exact, `build_graph_metrics`' `ACTION_EXECUTION` keys built
-    and cleaned (every one Bazel evaluated: ran, hit a cache, failed, or up
-    to date), else the last `[n / m]`; `local` is
+    count is Bazel's own last `[n / m]` (`build_progress`); `local` is
     `action_cache_statistics.hits` (else an `action cache hit` runner),
-    `memory` the cleaned keys, `internal` `runner_count`'s internal ones
-    (actions, where its other runners count spawns), and the rest of
-    `actions_executed` had spawns: by action from the execution log the
-    Dashboard read (`log_kinds`: a cache hit only where every spawn was,
-    else ran), else by `runner_count`'s spawns, as many as spawned at
-    most. A failed action is inside `actions_executed` where it executed:
-    with every action's events, those not among the successful ones, in
+    `memory` `build_graph_metrics`' cleaned `ACTION_EXECUTION` keys,
+    `internal` `runner_count`'s internal ones (actions, where its other
+    runners count spawns), and the rest of `actions_executed` had spawns:
+    by action from the execution log the Dashboard read (`log_kinds`: a
+    cache hit only where every spawn was, else ran, the failed actions'
+    spawns left out, `_logged_kinds`), else by `runner_count`'s spawns, as
+    many as spawned at most. A failed action is inside `actions_executed`
+    where it executed: with every action's events, those not among the successful ones, in
     `internal` (Bazel posts a failed action's result with no runner) as far
     as the successful spawnless ones leave it, under a runner the rest;
     without them, by what failed it (`counted_internal`). Each is taken out
     of where it was counted; a failed action outside `actions_executed`
     (an input it could not discover) from nothing. What the done count has
-    past the parts is `not_run`. A failed build's total is at least what
-    it created, and its bar never full of what did not fail
-    (`action_bar`).
+    past the parts is `not_run` (without build graph metrics, as from
+    Bazel 7, the actions up to date in memory too); parts past it are a
+    counting error, shown as counted, never cut to fit. A failed build's total is at least what it created, and
+    its bar never full of what did not fail (`action_bar`).
 
     While it runs with every action published (`--dashboard:actions=all`,
     the default), the live split is the events' and the execution log's
@@ -598,8 +596,11 @@ def action_split(state: dict) -> dict:
             elif name != "total":
                 ran += n
         spawned = max(0, executed - internal)
+        failures = failed_actions(state)
+        failed = len(failures)
         if logged:
-            # The log's actions, by action: never more than executed.
+            # The log's actions, by action, the failed ones counted apart.
+            kinds = _logged_kinds(c, failures)
             ran, disk, remote = kinds.get("ran", 0), kinds.get("disk", 0), kinds.get("remote", 0)
         else:
             # `runner_count`'s spawns, which are not actions: as many as
@@ -610,7 +611,6 @@ def action_split(state: dict) -> dict:
         stats = _get(summary, "action_cache_statistics")
         local = (_get(stats, "hits", 0) or 0) if stats != None else hit_runner
         graph = _get(inv.get("build_metrics"), "build_graph_metrics")
-        built = _graph_count(graph, "built_values")
         memory = _graph_count(graph, "cleaned_values") or 0
 
         # Failed actions inside `actions_executed`: those of every action's
@@ -618,8 +618,6 @@ def action_split(state: dict) -> dict:
         # as far as the successful spawnless ones leave it, under a runner
         # the rest; without every event, each by what failed it
         # (`counted_internal`). Any other failed action is outside it.
-        failures = failed_actions(state)
-        failed = len(failures)
         if c.get("actions_seen") and state.get("all_actions", True):
             in_total = max(0, min(failed, executed - c.get("actions_seen", 0)))
             from_internal = max(0, min(in_total, internal - c.get("actions_internal", 0)))
@@ -628,28 +626,29 @@ def action_split(state: dict) -> dict:
             from_internal = min(internal, len([r for r in failures if r.get("counted_internal") != False]))
         internal -= from_internal
         left = in_total - from_internal
-        for key in ("ran", "disk", "remote"):
-            have = {"ran": ran, "disk": disk, "remote": remote}[key]
-            took = min(left, have)
-            left -= took
-            if key == "ran":
-                ran -= took
-            elif key == "disk":
-                disk -= took
-            else:
-                remote -= took
-        other = max(0, spawned - from_internal - (in_total - from_internal - left) - ran - disk - remote) if not logged else 0
+        other = 0
+        if not logged:
+            # The failed actions under a runner come out of its spawns.
+            for key in ("ran", "disk", "remote"):
+                have = {"ran": ran, "disk": disk, "remote": remote}[key]
+                took = min(left, have)
+                left -= took
+                if key == "ran":
+                    ran -= took
+                elif key == "disk":
+                    disk -= took
+                else:
+                    remote -= took
+            other = max(0, spawned - from_internal - (in_total - from_internal - left) - ran - disk - remote)
         whole = ran + local + memory + disk + remote + internal + failed + other
         succeeded = build_succeeded(inv)
 
-        # Bazel's done count, exact: every action key it evaluated (ran,
-        # hit a cache, failed, or was up to date in memory), else its last
-        # `[n / m]`; what the parts leave of it is `not_run`.
-        if built != None:
-            done = built + memory
+        # The done count is Bazel's own last `[n / m]`; what it has past the
+        # parts is `not_run`. Parts past it are a counting error, shown as
+        # they are.
         not_run = max(0, done - whole)
         split.update(counted = True, known = True, final = True, ran = ran, local = local, memory = memory, disk = disk, remote = remote, internal = internal, failed = failed, not_run = not_run, other = other, more = False, failed_build = not succeeded)
-        split["done"] = max(done, whole)
+        split["done"] = done if done >= 0 else whole
         created = _get(summary, "actions_created", 0) or 0
         if succeeded:
             split["total"] = split["done"]
@@ -660,21 +659,36 @@ def action_split(state: dict) -> dict:
         return split
     if c.get("actions_seen") and state.get("building"):
         return _published_split(state, split, done)
+
+    # Ended without its BuildMetrics (the stream cut short), the actions it
+    # said failed apart; while it runs, the log can lead Bazel's count by a
+    # redraw. The rest, which nothing reported the kind of, is `unreported`.
+    failures = [] if state.get("building") else failed_actions(state)
+    kinds = _logged_kinds(c, failures)
+    failed = len(failures)
     disk = min(kinds.get("disk", 0), done)
     remote = min(kinds.get("remote", 0), done - disk)
     ran = min(kinds.get("ran", 0), done - disk - remote)
-    rest = done - ran - disk - remote
-
-    # Ended without its BuildMetrics (the stream cut short): the actions
-    # it said failed, out of the rest, then what ran. The rest, which
-    # nothing reported the kind of, is `unreported`.
-    failed = 0 if state.get("building") else len(failed_actions(state))
-    took = min(failed, rest)
-    rest -= took
-    ran = max(0, ran - (failed - took))
-    split.update(known = True, ran = ran, disk = disk, remote = remote, unreported = rest, failed = failed, done = max(done, ran + disk + remote + rest + failed), failed_build = failed > 0)
+    rest = max(0, done - ran - disk - remote - failed)
+    split.update(known = True, ran = ran, disk = disk, remote = remote, unreported = rest, failed = failed, failed_build = failed > 0)
     split["total"] = max(split["total"], split["done"])
     return split
+
+def _logged_kinds(counts: dict, failures: list) -> dict:
+    """The execution log's actions by kind (`log_kinds`) without the
+    actions the event stream says failed: their spawns are in the log
+    too, by their primary output's path (`count_spawn`), but they count as
+    failed. A failed action whose spawn created its first output is keyed
+    by that file's id and stays."""
+    kinds = dict(counts.get("log_kinds") or {})
+    actions = counts.get("log_actions") or {}
+    seen = {}
+    for r in failures:
+        kind = actions.get(r.get("output"))
+        if kind and r["output"] not in seen:
+            seen[r["output"]] = True
+            kinds[kind] -= 1
+    return kinds
 
 def _graph_count(graph, field: str):
     """`BuildGraphMetrics`' `field` (`built_values`, `cleaned_values`) count

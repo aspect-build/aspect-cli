@@ -232,7 +232,6 @@ load("../private/lib/failures.axl", "failures")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 load("../private/lib/term_text.axl", "term_text")
 
-
 def _console_impl(ctx: FeatureContext):
     profile = ctx.args.profile
     if profile == "auto":

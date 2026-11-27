@@ -433,9 +433,16 @@ _REAL = {
     "test build failure, early frame": ("BUILD_FAILURE", (2, 2), 11, 19, [("internal", 10), ("darwin-sandbox", 2)], 0, 11, [("RepoMappingManifest", 2), ("SymlinkTree", 2), ("SourceSymlinkManifest", 2), ("ExecutableSymlink", 1), ("Genrule", 1), ("TestRunner", 1), ("BazelWorkspaceStatusAction", 1), ("RunfilesTree", 1)], ["Genrule:spawn"]),
 }
 
+# The last `progress` event's stderr of a `_REAL` build whose last frame
+# caught an early count.
+_REAL_PROGRESS = {
+    "test build failure, early frame": "\r\x1b[1A\x1b[K\x1b[32m[13 / 13]\x1b[0m no actions running\n",
+}
+
 def _real(ctx, name):
     """A finished build's screen state from `_REAL[name]`, its failed
-    actions taken in from their events as the feature takes them."""
+    actions and its last progress event (`_REAL_PROGRESS`) taken in from
+    their events as the feature takes them."""
     exit, done_total, executed, created, runners, hits, misses, data, failed = _REAL[name]
     st = _screen(ctx, ["x"], building = False, ended = True, done_total = (done_total[0], done_total[1], False) if done_total else None, inv = {
         "build_finished": struct(exit_code = struct(name = exit, code = 0 if exit == "SUCCESS" else 1)),
@@ -449,6 +456,8 @@ def _real(ctx, name):
     })
     for i, kind in enumerate(failed):
         _fail_event(st, kind, i)
+    if name in _REAL_PROGRESS:
+        _progress_event(st, _REAL_PROGRESS[name])
     return st
 
 def _progress_event(st, stderr):
@@ -743,7 +752,25 @@ def _actions_tests(ctx):
     _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, local = 4, internal = 4, failed = 1, not_run = 1))
     ok = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
     _eq("a real successful one", _split_of(action_split(ok)), dict(done = 2, total = 2, ran = 1, internal = 1))
-    _eq("its done count is the split's sum", _split_of(action_split(dict(ok, done_total = (1, 3, True)))), dict(done = 2, total = 2, ran = 1, internal = 1))
+
+    # A failed action's spawn is in the execution log too, by its output
+    # not created (Bazel 9.3.3, //mix:pass //mix:bad //mix:afterbad):
+    # `[14 / 14]` for 9 ran, a failed genrule filed under `internal`, 2
+    # action cache hits, 1 internal and the blocked target's action skipped.
+    mix = _screen(ctx, ["x"], building = False, ended = True, exec_log_read = True, done_total = (14, 14, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
+        actions_executed = 11,
+        actions_created = 13,
+        runner_count = [struct(name = "total", count = 11), struct(name = "internal", count = 2), struct(name = "darwin-sandbox", count = 9)],
+        action_cache_statistics = struct(hits = 2, misses = 10),
+    ), build_graph_metrics = struct(built_values = [struct(skyfunction_name = "ACTION_EXECUTION", count = 14)]))})
+    for i in range(9):
+        count_spawn(mix["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = 100 + i)]))
+    _fail_event(mix, "Genrule:spawn", 0)
+    count_spawn(mix["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = "bazel-out/f0")]))
+    _eq("a failed action's logged spawn is failed, not ran too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, not_run = 1))
+    mix["all_actions"] = False
+    _eq("with only failures published too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, not_run = 1))
+    _eq("parts past Bazel's count are shown as counted, the count Bazel's", _split_of(action_split(dict(ok, done_total = (1, 3, True)))), dict(done = 1, total = 1, ran = 1, internal = 1))
     cached = _screen(ctx, ["x"], building = False, ended = True, done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED, "options_parsed": struct(cmd_line = ["--disk_cache=/c", "--remote_cache=grpc://c"], explicit_cmd_line = [])})
     final = action_split(cached)
 
