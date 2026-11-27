@@ -1,11 +1,9 @@
 exit 1
 ── Failures (1) ──
-✗ //mf:x  analysis
-  │ its package has an error
+✗ //mf:x  loading
   ○ blocked: //q:on_mf
-0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //mf:x  analysis failed
-  │ its package has an error
+✗ //mf:x  loading
 ○ //q:on_mf  blocked by //mf:x

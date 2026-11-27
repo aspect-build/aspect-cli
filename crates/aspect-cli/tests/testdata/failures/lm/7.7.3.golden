@@ -1,11 +1,16 @@
 exit 1
-── Failures (1) ──
+── Failures (2) ──
+✗ //lm:all  loading
+  │ while parsing '//lm:all': error loading package 'lm': cannot load '//lm:nope.bzl': no such file
+
 ✗ //lm:x  analysis
   │ error loading package 'lm': cannot load '//lm:nope.bzl': no such file
   ○ blocked: //q:on_lm
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //lm:x  analysis failed
+✗ //lm:all  loading
+  │ while parsing '//lm:all': error loading package 'lm': cannot load '//lm:nope.bzl': no such file
+✗ //lm:x  analysis
   │ error loading package 'lm': cannot load '//lm:nope.bzl': no such file
 ○ //q:on_lm  blocked by //lm:x

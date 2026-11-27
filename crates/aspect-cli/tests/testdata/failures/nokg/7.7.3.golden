@@ -1,11 +1,9 @@
 exit 1
 ── Failures (1) ──
-✗ //nk:nope.txt  analysis
-  │ its package has an error
-  ○ blocked: //nk:missing
-0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+✗ //nk:missing
+  │ missing input file '//nk:nope.txt'
+0 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //nk:nope.txt  analysis failed
-  │ its package has an error
-○ //nk:missing  blocked by :nope.txt
+✗ //nk:missing
+  │ missing input file '//nk:nope.txt'

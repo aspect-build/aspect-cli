@@ -8,7 +8,7 @@ exit 1
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //nowhere2:tool  analysis failed
+✗ //nowhere2:tool  analysis
   │ no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directo…
   │  - nowhere2
 ○ //ad:x  blocked by //nowhere2:tool

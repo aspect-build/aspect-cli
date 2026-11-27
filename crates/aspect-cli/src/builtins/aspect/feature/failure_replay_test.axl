@@ -110,7 +110,7 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     state.update(building = False, ended = True)
     console = "${FIXTURE}/" + prefix + ".console"
     out = ["exit " + exit]
-    out += [_plain(ansi, l) for l in failure_summary(state, None, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
+    out += [_plain(ansi, l) for l in failure_summary(state, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
     out.append("--- Failures tab")
     tab = dict(state, focus = "console", selected = 0, expand_failures = True, excerpts = {}, listed_cache = None)
     out += [_plain(ansi, r).rstrip() for r in failure_rows(tab, 400, 120)]

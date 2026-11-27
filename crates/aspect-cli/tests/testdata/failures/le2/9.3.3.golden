@@ -1,11 +1,9 @@
 exit 1
 ── Failures (1) ──
-✗ //le2:x  analysis
-  │ its package has an error
+✗ //le2:x  loading
   ○ blocked: //q:on_le2
-0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //le2:x  analysis failed
-  │ its package has an error
+✗ //le2:x  loading
 ○ //q:on_le2  blocked by //le2:x

@@ -1,25 +1,19 @@
 exit 1
 ── Failures (3) ──
-✗ //le:x  analysis
-  │ its package has an error
+✗ //le:x  loading
   ○ blocked: //p2:a, //p2:d, //p1:a
 
-✗ //mt:gone  analysis
-  │ its package has an error
+✗ //mt:gone  loading
   ○ blocked: //p2:e, //p1:c
 
-✗ //le:y  analysis
-  │ its package has an error
+✗ //le:y  loading
   ○ blocked: //p1:b
-0 built, 0 failed, 6 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+0 built, 3 failed, 6 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //le:x  analysis failed
-  │ its package has an error
-✗ //mt:gone  analysis failed
-  │ its package has an error
-✗ //le:y  analysis failed
-  │ its package has an error
+✗ //le:x  loading
+✗ //mt:gone  loading
+✗ //le:y  loading
 ○ //p2:e  blocked by //mt:gone
 ○ //p2:a  blocked by //le:x
 ○ //p1:b  blocked by //le:y

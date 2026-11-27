@@ -300,7 +300,7 @@ def _console_impl(ctx: FeatureContext):
             state.update(read = task_ctx.std.fs.try_read_tail, env = task_ctx.std.env, ansi = task_ctx.std.re.compile(ANSI))
         err = task_ctx.std.io.stderr
         size = task_ctx.std.term.size() if err.is_tty else None
-        for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code):
+        for line in failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code):
             err.write(line + "\n")
         summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env, task_ctx.std.re.compile(ANSI))
 

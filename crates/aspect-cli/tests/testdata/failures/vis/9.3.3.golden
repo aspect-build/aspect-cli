@@ -13,21 +13,19 @@ exit 1
   │ Recommendation: modify the visibility declaration if you think the dependency is legitimate.
   │   For more info see https://bazel.build/concepts/visibility
 
-✗ //vis:nothere  analysis
-  │ its package has an error
-  ○ blocked: //vis:mt
-0 built, 2 failed, 2 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+✗ //vis:mt
+  │ missing input file '//vis:nothere'
+0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
 All of it: aspect history show t-replay
 --- Failures tab
-✗ //nosuchpkg:x  analysis failed
+✗ //nosuchpkg:x  analysis
   │ no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a BUILD file to a direct…
   │  - nosuchpkg
-✗ //vis:vis  analysis failed
+✗ //vis:vis  analysis
   │ in genrule rule //vis:vis: Visibility error:
   │ target '//priv:priv' is not visible from
   │ target '//vis:vis'
   │ Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see http…
-✗ //vis:nothere  analysis failed
-  │ its package has an error
+✗ //vis:mt
+  │ missing input file '//vis:nothere'
 ○ //vis:mp  blocked by //nosuchpkg:x
-○ //vis:mt  blocked by :nothere
