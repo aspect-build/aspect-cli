@@ -1436,9 +1436,9 @@ def blocked_targets(state: dict) -> dict:
     target, a dependency that failed analysis though not asked for, or one
     with a failed action listed). A missing source file Bazel names as
     the root is the target's whose error says it is missing (`missing
-    input file '//a:x.txt'`), so what depends on that target is blocked
-    by it; the target itself, and one whose roots are targets that never
-    failed, failed itself. Decided from the failures so far, so a target
+    input file '//a:x.txt'`, each target that says so), so what depends on
+    that target is blocked by it; each such target, and one whose roots
+    are targets that never failed, failed itself. Decided from the failures so far, so a target
     Bazel reported before its root cause's failure counts once that
     comes; cached until they, the root causes or the kept errors
     change."""
@@ -1458,11 +1458,16 @@ def blocked_targets(state: dict) -> dict:
         named = [l for l in header_labels(header[:at]) if l] if at >= 0 else []
         target = e.get("target") or (named[0] if named else "")
         if at >= 0 and target:
-            owner[header[at + len("missing input file '"):].partition("'")[0]] = target
+            owner.setdefault(header[at + len("missing input file '"):].partition("'")[0], []).append(target)
     blocked = {}
     for label, rs in causes.items():
-        mapped = [owner.get(r, r) for r in rs]
-        mapped = [r for r in mapped if r != label]
+        # A missing source a target itself needs is its own failure, though
+        # another target needed it too (`//ms2:a` and `//ms2:b`).
+        mapped = []
+        for r in rs:
+            owners = owner.get(r, [r])
+            if label not in owners:
+                mapped += [o for o in owners if o not in mapped]
         if any([r in failed or r in roots or r in logged for r in mapped]):
             blocked[label] = mapped
     state["blocked_cache"] = (key, blocked)
@@ -2030,9 +2035,11 @@ def count_spawn(counts: dict, spawn):
         kinds["mixed"] += 1
 
 def _fail(counts: dict, label: str):
-    """Count a failure, listing its target once however many there are (one
-    per configuration, say)."""
-    counts["failed"] += 1
+    """Count a failed target once, however often Bazel says so (one per
+    configuration, its analysis aborted by an aspect and its action failed
+    too), and list it."""
+    if label not in counts["failed_labels"]:
+        counts["failed"] += 1
     _list_failure(counts, label)
 
 def _list_failure(counts: dict, label: str):
@@ -6079,7 +6086,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
             out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
         out.append("%s: %s" % (label, link(url, url) if tty else url))
-    return out + failure_summary(state, state.get("kept_errors"), task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100)
+    return out + failure_summary(state, state.get("kept_errors"), task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100, state.get("bazel_exit"))
 
 def summary_state(read, env = None, ansi = None) -> dict:
     """A fresh state for `failure_summary` to read, collected by the build
@@ -6329,8 +6336,9 @@ def _unlabelled_in(e: dict, label: str, workspace: str = "") -> bool:
     return build.rpartition("/")[0] == package
 
 def _traceback_located(e: dict):
-    """`e` as a located error where it is a `Traceback` whose first frame
-    is a BUILD file's line (`File "mf/BUILD.bazel", line 2, column 10`):
+    """`e` as a located error where it is a `Traceback` with a frame at a
+    BUILD file's line, its first (`File "mf/BUILD.bazel", line 2, column
+    10`, a nested macro's too):
     `ERROR: mf/BUILD.bazel:2:10: Traceback (most recent call last):`, its
     body kept; else None."""
     header = e.get("header", "")
@@ -6342,7 +6350,7 @@ def _traceback_located(e: dict):
             continue
         path, _, rest = line[len("File \""):].partition("\"")
         if path.rpartition("/")[2] not in ("BUILD", "BUILD.bazel"):
-            return None
+            continue
         words = rest.replace(",", " ").split(" ")
         at = [words[i + 1] for i in range(len(words) - 1) if words[i] in ("line", "column") and words[i + 1].isdigit()]
         if not at:
@@ -6612,6 +6620,43 @@ def own_excerpt(state: dict, rec: dict, excerpt) -> tuple:
         lines = text.split("\n")[-_EXCERPT_LINES:]
     return (details, lines, path)
 
+def _entry_lines(e: dict) -> list:
+    """An entry's excerpt as `_folded` compares it: its rows without gaps,
+    a leading location (`p/BUILD.bazel:3:8: `, `p/BUILD.bazel: `) left out,
+    trimmed."""
+    out = []
+    for row in e["rows"]:
+        if row == _GAP_ROW or _is_gap(row):
+            continue
+        row = row.strip()
+        head, sep, rest = row.partition(": ")
+        if sep and " " not in head and ("BUILD" in head or head.count(":") >= 1):
+            row = rest
+        if row:
+            out.append(row)
+    return out
+
+def _folded(entries: list) -> list:
+    """`entries` with each whose every excerpt line is in another's (an
+    error of no target, or of the same target, said again in passing: an
+    attribute default's `no such package`, an aspect's `fail()` beside its
+    target's action) folded into that one, its blocked targets with it."""
+    lines = [_entry_lines(e) for e in entries]
+    gone = {}
+    for a in range(len(entries)):
+        if not lines[a]:
+            continue
+        for b in range(len(entries)):
+            if a == b or b in gone or (entries[a]["label"] and entries[a]["label"] != entries[b]["label"]):
+                continue
+            if lines[a] == lines[b] and b > a:
+                continue
+            if all([[l for l in lines[b] if line in l] for line in lines[a]]):
+                gone[a] = True
+                entries[b]["blocked"] = entries[b]["blocked"] + [l for l in entries[a]["blocked"] if l not in entries[b]["blocked"]]
+                break
+    return [e for i, e in enumerate(entries) if i not in gone]
+
 def test_group(state: dict, recs: list) -> dict:
     """A failed test's records as the summary and the Failures list tell
     it: `rec`, the last attempt of its first failed shard or run (`index`
@@ -6656,7 +6701,7 @@ def test_group(state: dict, recs: list) -> dict:
     others = [(named(at), parts[at][-1]) for at in order[1:]]
     return {"rec": last, "index": [i for i, r in enumerate(recs) if r == last][-1], "details": details, "others": others, "timed_out": timed_out}
 
-def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100) -> list:
+def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None) -> list:
     """The end of a build's console, the same with the Dashboard or
     without: a `── Failures (N) ──` rule when anything failed, then each
     root cause once, an entry each: failures no target owns (analysis,
@@ -6918,6 +6963,14 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             used[i] = True
             location, exit, reason = error_parts(e["header"])
             entries.append(entry(0, i, "", "error", [d for d in (exit, location) if d], [reason] + list(e.get("body") or []), e.get("log") or ""))
+
+    entries = _folded(entries)
+
+    # A failed build always says why: with nothing else to list, Bazel's
+    # last `ERROR:` lines in its raw log.
+    if not entries and bazel_exit not in (None, 0):
+        said = [l[len("ERROR: "):] for l in _plain_text(state, _tail_text(state, log_path) or "").split("\n") if l.startswith("ERROR: ")]
+        entries.append(entry(0, 0, "", "Bazel exited %d" % bazel_exit, [], said[-_EXCERPT_LINES:], log_path))
 
     out = []
     if entries:
@@ -7193,6 +7246,7 @@ def _dashboard_impl(ctx: FeatureContext):
 
     def _attempt_end(task_ctx, exit_code):
         # The execution log is read to its end before an attempt ends.
+        state["bazel_exit"] = exit_code
         state["fresh"] = True
         state["exec_log_read"] = True
 

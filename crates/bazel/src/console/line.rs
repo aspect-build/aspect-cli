@@ -306,6 +306,10 @@ pub struct Classifier {
     /// bazel holds until it ends with a newline and flushes only after
     /// drawing its progress, before its next event.
     maybe_tail: bool,
+    /// Bazel has written a line in its colours: before one, an `ERROR:`
+    /// without colour is its own (Bazel 7 parses its flags before it
+    /// colours anything: `ERROR: --nosuch_flag :: Unrecognized option`).
+    coloured_yet: bool,
 }
 
 impl Classifier {
@@ -329,8 +333,10 @@ impl Classifier {
         let text = message_of(record);
         let inside = self.in_action_output || self.streamed;
         let mut was_tail = false;
-        let label = BAZEL_LABEL.is_match(record);
+        let label = BAZEL_LABEL.is_match(record)
+            || (!self.coloured_yet && !inside && record.starts_with(b"ERROR: "));
         let count = BAZEL_COUNT.is_match(record);
+        self.coloured_yet |= BAZEL_LABEL.is_match(record) || count || BAZEL_PHASE.is_match(record);
         let phase = !self.in_action_output && BAZEL_PHASE.is_match(record);
         let indented = text.starts_with([' ', '\t']);
         let wrapped = std::mem::take(&mut self.wrapped);
@@ -589,6 +595,21 @@ pub(crate) mod tests {
         assert_eq!(
             kinds(&["(12:00:00) DEBUG: x", "(12:00:01) [4 / 5] Compiling a.cc"]),
             [Kind::Header, Kind::Progress]
+        );
+    }
+
+    /// Bazel 7.7.3 refuses an unknown flag before it colours anything: that
+    /// `ERROR:` is its own; one without colour after Bazel's first coloured
+    /// line is a tool's.
+    #[test]
+    fn an_error_before_bazels_first_colour_is_its_own() {
+        assert_eq!(
+            kinds(&["~ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here"]),
+            [Kind::Header]
+        );
+        assert_eq!(
+            kinds(&["INFO: x", "~ERROR: a tool's"]),
+            [Kind::Header, Kind::Other]
         );
     }
 

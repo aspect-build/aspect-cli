@@ -475,6 +475,9 @@ impl Recapped {
     fn excerpt(&self) -> Vec<Part<'_>> {
         let held: Vec<&(String, LineLinks)> = self.first.iter().chain(&self.last).collect();
         let texts: Vec<&str> = held.iter().map(|(t, _)| t.as_str()).collect();
+        if let Some(parts) = self.traceback(&held) {
+            return parts;
+        }
         // Where the lines not held were, between `first` and `last`.
         let join = self.first.len();
         let unheld = |from: usize, to: usize| {
@@ -509,6 +512,54 @@ impl Recapped {
             parts.push(Part::Gap(gap));
         }
         parts
+    }
+}
+
+impl Recapped {
+    /// A Starlark `Traceback`'s excerpt: the first frame at a BUILD file
+    /// (`File "nm/BUILD.bazel", line 2`) and its code line, then the last
+    /// `Error in …:` line, what is between a gap; None for another body.
+    fn traceback<'a>(&self, held: &[&'a (String, LineLinks)]) -> Option<Vec<Part<'a>>> {
+        let traceback = self.header.0.contains("Traceback (most recent call last):")
+            || held
+                .first()
+                .is_some_and(|(t, _)| t.trim() == "Traceback (most recent call last):");
+        let error = held
+            .iter()
+            .rposition(|(t, _)| t.trim_start().starts_with("Error in "))?;
+        if !traceback || self.dropped > 0 {
+            return None;
+        }
+        let build = held[..error].iter().position(|(t, _)| {
+            let t = t.trim_start();
+            t.starts_with("File \"")
+                && (t.contains("/BUILD\"")
+                    || t.contains("/BUILD.bazel\"")
+                    || t.starts_with("File \"BUILD"))
+        });
+        let mut parts = vec![];
+        let mut at = 0;
+        let keep = |i: usize, parts: &mut Vec<Part<'a>>, at: &mut usize| {
+            if i > *at {
+                parts.push(Part::Gap(i - *at));
+            }
+            parts.push(Part::Line(held[i]));
+            *at = i + 1;
+        };
+        if held[0].0.trim() == "Traceback (most recent call last):" {
+            keep(0, &mut parts, &mut at);
+        }
+        if let Some(b) = build {
+            keep(b, &mut parts, &mut at);
+            if b + 1 < error {
+                keep(b + 1, &mut parts, &mut at);
+            }
+        }
+        keep(error, &mut parts, &mut at);
+        if at < held.len() {
+            parts.push(Part::Gap(held.len() - at));
+        }
+        Some(parts)
     }
 }
 
@@ -1666,6 +1717,38 @@ mod tests {
         assert!(out.ends_with("    line 999\n"), "{out}");
     }
 
+    /// A nested macro's `fail()` (ws/nm, Bazel 9.3.3): the excerpt keeps the
+    /// BUILD frame and its code line, then the `Error in` line, the frames
+    /// between a gap.
+    #[test]
+    fn a_tracebacks_excerpt_is_its_build_frame_and_its_error() {
+        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
+        let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
+        feed(
+            &mut p,
+            &[
+                "ERROR: Traceback (most recent call last):",
+                "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
+                "\t\touter(name = \"m\")",
+                "\tFile \"nm/defs.bzl\", line 4, column 10, in outer",
+                "\t\tinner(name = name + \"_i\")",
+                "\tFile \"nm/defs.bzl\", line 2, column 9, in inner",
+                "\t\tfail(\"inner refuses \" + name)",
+                "Error in fail: inner refuses m_i",
+                "\x1b[32m[1 / 9]\x1b[0m running",
+            ],
+        );
+        assert_eq!(
+            observations.errors().expect("kept").errors[0].body,
+            vec![
+                "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>".to_string(),
+                "\t\touter(name = \"m\")".to_string(),
+                "… 4 more lines".to_string(),
+                "Error in fail: inner refuses m_i".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn a_recapped_body_ends_at_bazels_redraw_and_keeps_its_last_line() {
         let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::default());
@@ -1686,9 +1769,7 @@ mod tests {
             feed(&mut p, &records),
             "── Error recap (1) ──\n  \
              ERROR: Traceback (most recent call last):\n    \
-             … 1 more line\n    \tFile \"/ws/b.bzl\", line 2\n    \
-             \tFile \"/ws/c.bzl\", line 3\n    \tFile \"/ws/d.bzl\", line 4\n    \
-             \tFile \"/ws/e.bzl\", line 5\n    Error in fail: the real reason\n"
+             … 5 more lines\n    Error in fail: the real reason\n"
         );
     }
 

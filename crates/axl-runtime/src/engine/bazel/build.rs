@@ -1106,6 +1106,11 @@ pub struct Build {
     #[allocative(skip)]
     console_ended: std::cell::Cell<bool>,
 
+    /// The client's exit code once `wait()` has reaped it, for the
+    /// `output_end` hooks (`exit_code`); None before, or for a signal.
+    #[allocative(skip)]
+    exited: std::cell::Cell<Option<i32>>,
+
     /// What is shown, for `output_feed()`, when the console shows nothing
     /// itself (`display = "none"`).
     #[allocative(skip)]
@@ -2000,6 +2005,7 @@ impl Build {
             console_events: RefCell::new(console_events),
             hook_error: RefCell::new(None),
             console_ended: std::cell::Cell::new(false),
+            exited: std::cell::Cell::new(None),
             console_feed,
             last_frame: std::cell::Cell::new(None),
             has_frames: std::cell::Cell::new(None),
@@ -2077,6 +2083,12 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 Some(path) => heap.alloc_str(&path.to_string_lossy()).to_value(),
                 None => Value::new_none(),
             }),
+            // The client's exit code once `wait()` has it (the `output_end`
+            // hooks run after), None before or for a signal.
+            "exit_code" => Some(match self.exited.get() {
+                Some(code) => heap.alloc(code),
+                None => Value::new_none(),
+            }),
             _ => None,
         }
     }
@@ -2089,6 +2101,7 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 | "output_fatal_line"
                 | "output_idle_ms"
                 | "output_log"
+                | "exit_code"
         )
     }
 }
@@ -2379,6 +2392,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let status = build.wait_status().inspect_err(|_| {
             build.release_frames_screen();
         })?;
+        build.exited.set(status.code);
         if let Some(console) = &console
             && build.console_observations.is_some()
             && !build.console_ended.replace(true)

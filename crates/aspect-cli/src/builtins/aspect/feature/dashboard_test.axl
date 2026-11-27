@@ -2607,6 +2607,35 @@ def _impl(ctx: TaskContext) -> int:
     got = [_visible(l) for l in failure_summary(mf, {"errors": mf_errs, "distinct": 4}, "t-9", False)]
     _eq("a macro's fail(): one entry at its BUILD line", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked" in l], ["── Failures (1) ──", "✗ //mf  analysis · mf/BUILD.bazel:2:10", "  ○ blocked: //q:on_mf", "0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
 
+    # A failed build always says why (Bazel 7.7.3, `--nosuch_flag_here`: no
+    # build event at all, its one `ERROR:` in its raw log).
+    flag = dict(kinds, counts = new_counts(), root_causes = {}, fails = [], logged_index = None, blocked_cache = None, listed_cache = None, read = lambda p, n: ("ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here\n", 0) if p == "/h/console.log" else None, build = None, ansi = ctx.std.re.compile(ANSI))
+    got = [_visible(l) for l in failure_summary(flag, None, "t-9", False, "/h/console.log", bazel_exit = 2)]
+    _eq("Bazel exited, with its errors", got[:4], ["── Failures (1) ──", "✗ Bazel exited 2", "  │ --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here", "  log /h/console.log"])
+    _eq("a build that succeeded has no fallback", [l for l in failure_summary(flag, None, "t-9", False, "/h/console.log", bazel_exit = 0) if l.startswith("──")], [])
+
+    # ws/ad (Bazel 9.3.3): an attribute default's `no such package`, said
+    # alone and again in the error that names its root: one entry.
+    ad_errs = [
+        {"header": "ERROR: no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": [" - nowhere2"], "log": None, "label": None, "target": None},
+        {"header": "ERROR: ad/BUILD.bazel:2:2: every rule of type r implicitly depends upon the target '//nowhere2:tool', but this target could not be found because of: no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": [" - nowhere2"], "log": None, "label": None, "target": None},
+    ]
+    ad = dict(kinds, counts = dict(new_counts(), failures = ["//ad:x"], failed_labels = {"//ad:x": True}, failed = 1, failed_roots = {"//nowhere2:tool": True}), root_causes = {"//ad:x": ["//nowhere2:tool"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [{"kind": "action", "label": "//nowhere2:tool", "detail": "analysis failed", "files": [("error", ("every rule of type r implicitly depends upon the target '//nowhere2:tool', but this target could not be found because of: no such package 'nowhere2': BUILD file not found", False))], "output": "", "success": False}], kept_errors = {"errors": ad_errs, "distinct": 2}, read = None, build = None)
+    got = [_visible(l) for l in failure_summary(ad, {"errors": ad_errs, "distinct": 2}, "t-9", False)]
+    _eq("said twice, one entry", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked:" in l], ["── Failures (1) ──", "✗ //nowhere2:tool  analysis · ad/BUILD.bazel:2:2", "  ○ blocked: //ad:x"])
+
+    # ws/ms2 (Bazel 9.3.3): one missing source two targets need, each its
+    # own failure with its own two lines; neither blocked by the other.
+    ms_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: ms2/BUILD.bazel:2:8: Executing genrule //ms2:b failed: missing input file '//ms2:shared_missing.txt'",
+        "ERROR: ms2/BUILD.bazel:1:8: Executing genrule //ms2:a failed: missing input file '//ms2:shared_missing.txt'",
+        "ERROR: ms2/BUILD.bazel:2:8: Executing genrule //ms2:b failed: 1 input file(s) do not exist",
+        "ERROR: ms2/BUILD.bazel:1:8: Executing genrule //ms2:a failed: 1 input file(s) do not exist",
+    ]]
+    ms = dict(kinds, counts = dict(new_counts(), failures = ["//ms2:b", "//ms2:a"], failed_labels = {"//ms2:a": True, "//ms2:b": True}, failed = 2), root_causes = {"//ms2:a": ["//ms2:shared_missing.txt"], "//ms2:b": ["//ms2:shared_missing.txt"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": ms_errs, "distinct": 4}, read = None, build = None)
+    got = [_visible(l) for l in failure_summary(ms, {"errors": ms_errs, "distinct": 4}, "t-9", False)]
+    _eq("a source two need: two failures", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked" in l], ["── Failures (2) ──", "✗ //ms2:b  ms2/BUILD.bazel:2:8", "✗ //ms2:a  ms2/BUILD.bazel:1:8"])
+
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.
     killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]
@@ -2692,7 +2721,7 @@ def _impl(ctx: TaskContext) -> int:
     got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], absolute, x_log[0], x_log[1], inv = {"build_started": struct(workspace_directory = "/ws")})
     _eq("an absolute path under the workspace", [e[0] for e in got], ["✗ //b:x  Gen · exit 1 · /ws/b/BUILD.bazel:1:8"])
     got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], absolute, x_log[0], x_log[1], inv = {"build_started": struct(workspace_directory = "/other/ws")})
-    _eq("outside it", [e[0] for e in got], ["✗ error · exit 1 · /ws/b/BUILD.bazel:1:8", "✗ //b:x  Gen · exit 1"])
+    _eq("outside it: not //b:x's, but it says nothing //b:x's own log doesn't, so it is no entry of its own", [e[0] for e in got], ["✗ //b:x  Gen · exit 1"])
 
     # A tab in an excerpt: spaces to the next 8-column stop, in the summary
     # and the tab alike.
