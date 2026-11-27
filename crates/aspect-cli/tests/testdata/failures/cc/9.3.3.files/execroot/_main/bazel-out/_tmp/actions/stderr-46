@@ -1,0 +1,5 @@
+[1mcc2/g.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'y'[0m
+    1 | [0;34mint[0m g() { [0;34mreturn[0m y; }[0m
+      | [0;1;32m                 ^
+[0m1 error generated.
+Error in child process '/usr/bin/xcrun'. 1

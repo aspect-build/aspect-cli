@@ -1,0 +1,3 @@
+# The recorded logs sit under Bazel's own bazel-out paths, which the
+# repository ignores everywhere else.
+!bazel-*
