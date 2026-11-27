@@ -123,7 +123,7 @@ def attempt_state(now_ms: int) -> dict:
         settled = 0,
     )
 
-def _clear_build(state: dict):
+def _clear_build(state: dict) -> None:
     """What a build keeps beside `attempt_state`'s, which the next build and a
     retried attempt alike start without: the root causes it noted, and what
     was worked out from them."""
@@ -135,7 +135,7 @@ def _clear_build(state: dict):
 # starts afresh; the console and what is open in it are the task's.
 _PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "settled", "excerpts"]
 
-def new_build(state: dict, now_ms: int):
+def new_build(state: dict, now_ms: int) -> None:
     """Start the next build (or a retried attempt) in the task's screen: its
     own counts, failures and invocation, timed from `now_ms`. The console is
     the task's, so it, the search over it (its current match, where the bar
@@ -154,7 +154,7 @@ def new_build(state: dict, now_ms: int):
     if state.get("focus") == "failures":
         state["focus"] = "console"
 
-def end_build(state: dict, now_ms: int):
+def end_build(state: dict, now_ms: int) -> None:
     """A build's end, inside `wait()`: its execution log was read to its end
     before then, so the build folded to a row (`fold_build`; the task goes
     on, and its finished screen shows its builds) keeps that it was."""
@@ -162,7 +162,7 @@ def end_build(state: dict, now_ms: int):
     fold_build(state, now_ms)
     state["building"] = False
 
-def fold_build(state: dict, now_ms: int):
+def fold_build(state: dict, now_ms: int) -> None:
     """Keep the build that just ended as a folded row (`build_row`) and what
     its tabs show, for `<`/`>` to pick it again."""
     failed, blocked = _failure_counts(state)
@@ -326,7 +326,7 @@ def _pre(state: dict, task_ctx):
     _take(state, task_ctx)
     _tick(state, state["screen"])
 
-def _tips(state: dict):
+def _tips(state: dict) -> None:
     # The task's tips as they stand, for the Tips tab.
     if state.get("tips_from") != None:
         state["tips"] = state["tips_from"]()

@@ -141,7 +141,7 @@ def mark_cells(row: str, marks: list) -> str:
         out.append(inside[3])
     return "".join(out)
 
-def _drawn_cell(c: int, prev: int):
+def _drawn_cell(c: int, prev: int) -> tuple:
     """How a code point of a coloured line is drawn, `(cells, text)`, as
     `fit` and `_widths` draw the plain line: a tab as two spaces, U+FE0F
     widening the narrow character before it."""

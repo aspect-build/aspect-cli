@@ -123,7 +123,7 @@ def shares(counts: list, width: int) -> list:
                 cells[i] = 1
     return cells
 
-def _word_seconds(word: str):
+def _word_seconds(word: str) -> int | None:
     """The seconds a time word says, or None for a word that is no time:
     Bazel's (`12s`, `2.5s`, `1m`, `1h`) and `elapsed`'s (`1m05s`)."""
     total = 0
@@ -274,7 +274,7 @@ def aged_time(row: str) -> tuple | None:
     seconds = action_seconds(row)
     return (" ".join(kept), "error" if seconds >= _STUCK_S else ("warning" if seconds >= _SLOW_S else "muted"))
 
-def _aged(row: str):
+def _aged(row: str) -> typing.Callable | None:
     """How a running action's row is coloured: its time alone, in the role
     `aged_time` gives it; the rest as it is. None for a row with no time."""
     aged = aged_time(row)
@@ -282,7 +282,7 @@ def _aged(row: str):
         return None
     took, role = aged
 
-    def colour(text):
+    def colour(text: str) -> str:
         at = text.rfind(took)
         if at < 0:
             return text
@@ -476,7 +476,7 @@ def tests_cached_text(counts: dict) -> str:
     cached = min(counts.get("tests_cached", 0), finished)
     return _counts(" (%d cached)", cached) if cached else ""
 
-def _status_test_total(row: str):
+def _status_test_total(row: str) -> int | None:
     """The tests Bazel's status line says it runs (`[10 / 52] 3 / 9 tests;
     …` gives 9), else None."""
     at = row.find(" tests")

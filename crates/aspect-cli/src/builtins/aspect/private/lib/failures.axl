@@ -172,7 +172,7 @@ def _expand_tabs(line: str) -> str:
         out += " " * (8 - _text_width(out) % 8) + piece
     return out
 
-def _picked(got) -> tuple:
+def _picked(got: dict) -> tuple:
     """`(lines, gaps)` of what `std.excerpt` picked (`got`): its lines but
     its `… N more lines` ones, and where each of those stood, `(index, n)`,
     `n` lines left out before `lines[index]` (`len(lines)`: after the
@@ -250,7 +250,7 @@ def _test_excerpt(text: str, excerpt, timed_out: bool) -> tuple:
         return (lines[-_EXCERPT_LINES:], [])
     return _picked(excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1))
 
-def _attempts_text(n: int, of = None) -> str:
+def _attempts_text(n: int, of: int | None = None) -> str:
     """`failed 1 of 2 attempts`: `n` failed of `of` (all of them when
     not known)."""
     of = max(n, of or n)
@@ -283,7 +283,7 @@ def test_group(state: dict, recs: list) -> dict:
     label = recs[0]["label"]
     runs, shards = _test_shape(state, label, recs[0].get("config", ""))
 
-    def named(at):
+    def named(at: tuple) -> str:
         return " · ".join((["shard %d of %d" % (at[0], shards)] if shards > 1 else []) + (["run %d of %d" % (at[1], runs)] if runs > 1 else []))
 
     parts = {}
@@ -568,7 +568,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     found = failure_entries(state)
     entries = [e for e in found["entries"] if not e["flaky"]]
 
-    def blocked_line(stopped):
+    def blocked_line(stopped: list) -> str:
         more = len(stopped) - _BLOCKED_SHOWN
         return "  ○ blocked: " + ", ".join(stopped[:_BLOCKED_SHOWN]) + (_counts(" +%d blocked", more) if more > 0 else "")
 
@@ -580,7 +580,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
 
     out = []
 
-    def quote(rows, more):
+    def quote(rows: list, more: int) -> None:
         # An excerpt's rows behind the gutter, a gap as `│ …`, then how
         # many lines it left out.
         for line in rows:

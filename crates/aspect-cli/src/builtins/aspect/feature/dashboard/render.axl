@@ -207,7 +207,7 @@ def _list_row(state: dict, text: str, width: int, chosen: bool, drawn: str) -> s
         return _c("active") + _fit(text, width) + _RESET
     return drawn
 
-def _window(total: int, room: int, selected: int):
+def _window(total: int, room: int, selected: int) -> tuple:
     """Which of a list's `total` rows `room` lines show: `(start, shown,
     above, below)`, a window around the `selected` row, a line on each side
     counting what is hidden there (`above`, `below`); one with nothing to

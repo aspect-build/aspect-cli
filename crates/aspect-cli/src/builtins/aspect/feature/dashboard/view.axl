@@ -152,7 +152,7 @@ def _keep_view(state: dict) -> None:
         if len(back) > _MAX_VIEWS:
             state["views"] = back[-_MAX_VIEWS:]
 
-def _show_failure_view(state: dict, view: dict):
+def _show_failure_view(state: dict, view: dict) -> None:
     """`view`, a failure's log, as the Failures tab's: the tab shown, its
     stack only this log (stepping is sideways, so a peek from the last one
     goes)."""
@@ -311,7 +311,7 @@ def _crumb(state: dict, view: dict) -> str:
         parts.append("attempt %d/%d" % (record["attempt"], attempts))
     return " ▹ ".join(parts)
 
-def _shown_record(state: dict):
+def _shown_record(state: dict) -> dict | None:
     """The failure whose log the shown tab has open, under any file
     peeked from it; None for none."""
     first = state.get("views", [])

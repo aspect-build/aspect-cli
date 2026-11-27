@@ -58,7 +58,7 @@ def case_sensitive(state: dict) -> bool:
     search = state["search"]
     return search["case"] or (state.get("re") != None and state["re"].has_uppercase(search["query"]))
 
-def _search_update(state: dict):
+def _search_update(state: dict) -> None:
     """Recompile the search's pattern from its query and toggles, with
     whether it matches case (`matches_case`, the bar's `Aa`). A query that
     does not compile (one still being typed) keeps the last pattern that
@@ -148,7 +148,7 @@ def _match_from(pattern, lines: list, start: int, step: int) -> int:
         i += step
     return -1
 
-def _show_match(state: dict, lines: list, i: int, page: int):
+def _show_match(state: dict, lines: list, i: int, page: int) -> None:
     """Make line `i` of `lines` the current match, scrolled to the middle of
     a console `page` lines high."""
     state["search"]["back"] = len(lines) - 1 - i
@@ -163,7 +163,7 @@ def _origin_scroll(state: dict) -> int:
     search = state["search"]
     return search.get("origin_rows", search["origin"]) if folding(state) else search["origin"]
 
-def _find(state: dict, page: int):
+def _find(state: dict, page: int) -> None:
     """Jump to the newest match at or above the bottom of the console as the
     bar found it (its `origin`), else the newest of all; with none, or no
     query, back to that `origin`. A query that does not compile moves
@@ -350,7 +350,7 @@ def _folded_line(state: dict, n: int) -> str:
     how = "click or Ctrl+O shows them" if state.get("mouse") else "Ctrl+O shows them"
     return "  … +%d line%s (%s)" % (n, "" if n == 1 else "s", how)
 
-def _fold_line(state: dict, line: str, own: bool):
+def _fold_line(state: dict, line: str, own: bool) -> None:
     """Take `line` into the console's folded view (`folded`): the lines
     under an `INFO: From` (a successful action's output) counted on one
     row after it rather than shown, up to the next line of Bazel's own

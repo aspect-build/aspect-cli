@@ -51,11 +51,11 @@ _UNDERLINE = "\x1b[4m"
 
 _NO_UNDERLINE = "\x1b[24m"
 
-def _peek_paint(highlighted: str):
+def _peek_paint(highlighted: str) -> typing.Callable:
     """A colour for `_box_row` drawing a peek's row: its highlighted line,
     as wide as the text `fit` kept of it (its `…` too)."""
 
-    def paint(shown):
+    def paint(shown: str) -> str:
         cut = shown.endswith("…")
         return _cut_escaped(highlighted, _text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
 

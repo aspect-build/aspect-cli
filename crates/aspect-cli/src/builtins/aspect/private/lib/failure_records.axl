@@ -53,7 +53,7 @@ def test_shape(state: dict, label: str, config: str) -> tuple:
     seen_runs, seen_shards = state["spread"].get((label, config), (1, 1))
     return (max(runs, seen_runs), max(shards, seen_shards))
 
-def failure_of(kind: str, event_id, payload):
+def failure_of(kind: str, event_id, payload) -> dict | None:
     """A record for the Failures list from a build event, or None: a failed
     action (`action_completed`, which Bazel sends for every failure) with its
     stderr and stdout, or a test attempt that did not pass (`test_result`;
@@ -158,7 +158,7 @@ def counted_internal(payload) -> bool | None:
         return None
     return str(bes_get(category, "code", "") or "").upper() not in ("ACTION_OUTPUTS_NOT_CREATED", "ACTION_FINALIZATION_FAILURE")
 
-def output_of(kind: str, event_id, payload):
+def output_of(kind: str, event_id, payload) -> dict | None:
     """A record for the actions list from a build event, or None: an action
     that succeeded and wrote a stdout or stderr, which Bazel reports only
     with `--build_event_publish_all_actions` (`actions = "all"`)."""
@@ -300,7 +300,7 @@ def collect_event(state: dict, event) -> None:
     note_event(state, kind, event_id, payload, aborted)
     note_blocked(state, event)
 
-def _test_key(record: dict):
+def _test_key(record: dict) -> tuple:
     """Which attempt of which test a record is: one Bazel posts twice is one."""
     return (record["label"], record["config"], record["run"], record["shard"], record["attempt"])
 
@@ -308,7 +308,7 @@ def _test_runner(record: dict) -> bool:
     """Whether `record` is a test's own failed action (`TestRunner`)."""
     return record["kind"] == "action" and record["detail"] == "TestRunner"
 
-def _runner_place(record: dict):
+def _runner_place(record: dict) -> tuple | None:
     """The run and shard a `TestRunner` action ran, `(run, shard)`, from the
     one folder its output (always that run's `test.log`) has after
     `testlogs/<package>/<name>/`: `shard_<s>_of_<n>` and `run_<r>_of_<m>`,
@@ -324,7 +324,7 @@ def _runner_place(record: dict):
         return None
     words = rest[0].split("_") if len(rest) == 2 else []
 
-    def number(word):
+    def number(word: str) -> int:
         for i in range(len(words) - 3):
             if words[i] == word and words[i + 1].isdigit() and words[i + 2] == "of" and words[i + 3].isdigit():
                 return int(words[i + 1])
@@ -332,7 +332,7 @@ def _runner_place(record: dict):
 
     return (number("run"), number("shard"))
 
-def _runner_key(record: dict):
+def _runner_key(record: dict) -> tuple | None:
     """Which run and shard of which test a `TestRunner` action ran,
     `(label, config, run, shard)`, from its output (`_runner_place`); None
     where its output names no test log."""
@@ -347,7 +347,7 @@ def _same_place(runner: dict, test: dict) -> bool:
     at = runner.get("attempt_key")
     return at != None and at == (test["label"], test["config"], test["run"], test["shard"])
 
-def _add_failure(state: dict, record: dict):
+def _add_failure(state: dict, record: dict) -> None:
     """List a failure once. A test attempt Bazel posts again (Bazel 9 posts
     attempt 1 failed with its log, then failed to build without one) is one
     row, the one with a log kept. A failed `TestRunner` action stands for
@@ -602,7 +602,7 @@ def note_log_file(counts: dict, id: int, file) -> None:
     if "/testlogs/" in path:
         counts.setdefault("log_files", {})[id] = path
 
-def _fail(counts: dict, label: str):
+def _fail(counts: dict, label: str) -> None:
     """Count a failed target once, however often Bazel says so (one per
     configuration, its analysis aborted by an aspect and its action failed
     too), and list it."""
@@ -610,7 +610,7 @@ def _fail(counts: dict, label: str):
         counts["failed"] += 1
     _list_failure(counts, label)
 
-def _list_failure(counts: dict, label: str):
+def _list_failure(counts: dict, label: str) -> None:
     """List `label` as failed, once: a dict beside the list keeps it O(1)."""
     if label not in counts["failed_labels"]:
         counts["failed_labels"][label] = True

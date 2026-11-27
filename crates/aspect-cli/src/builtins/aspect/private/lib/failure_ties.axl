@@ -69,7 +69,7 @@ def _bazel_headers(state: dict, blocks: list, bounds: list, text: str) -> list:
         found = [h for h in found if h["coloured"]]
     return found
 
-def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool, room: int):
+def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool, room: int) -> list | None:
     """An action's output as Bazel relays it to the console, from its logs
     as they read now: its stderr, then, where the console carried Bazel's
     stdout too (`stdout`), its stdout, each `(stream, text, paths)`, `text`
@@ -160,7 +160,7 @@ def _relayed_logs(state: dict, rec: dict, stdout: bool) -> list:
     paths = dict(_action_logs(state, rec))
     return [paths[name] for name in (("stderr", "stdout") if stdout else ("stderr",)) if name in paths]
 
-def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool):
+def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool) -> None:
     """Extend `spans` over the blocks after an action's `INFO: From` output
     (`froms`: each one's index in `blocks`, `(start, end, kind)` in `text`,
     its header, its body's length and last line) that are the rest of a
@@ -196,7 +196,7 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
 
     # An output's relayed logs that end without a newline: found, and their
     # last bytes read, once.
-    def open_logs_of(k):
+    def open_logs_of(k: int) -> list:
         if k not in open_logs:
             found = []
             for path in _relayed_logs(state, outputs[k], stdout):
@@ -388,7 +388,7 @@ def _index_headers(headers: list) -> dict:
             by["declared"].setdefault(message[len(_BAZEL.declared_output):].partition(_BAZEL.not_created_by_genrule)[0], []).append(k)
     return by
 
-def _tie(found: list):
+def _tie(found: list) -> int | tuple | None:
     """The one of `found`, or None for none or several."""
     return found[0] if len(found) == 1 else None
 
@@ -545,7 +545,7 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
         targets[label] = out
     return targets
 
-def _claim_restated(state: dict, targets: dict, headers: list, claimed: dict):
+def _claim_restated(state: dict, targets: dict, headers: list, claimed: dict) -> None:
     """Claim Bazel's `package contains errors: <pkg>: <text>` where an entry
     of that package quotes `<text>` (`targets`, the targets' ties), or, with
     no text, where one says its package has an error."""
@@ -570,7 +570,7 @@ def _claim_restated(state: dict, targets: dict, headers: list, claimed: dict):
             if rest in quoted.get(pkg, {}):
                 claimed[k] = True
 
-def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict):
+def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict) -> None:
     """Claim each line naming a listed target as what failed: `Executing
     genrule //an:missing failed: 1 input file(s) do not exist`, `Analysis
     of target '//vis:vis' (config: 2d89340) failed`."""
@@ -592,7 +592,7 @@ def _has_run(lines: list, run: list) -> bool:
             return True
     return False
 
-def _claim_restated_tracebacks(state: dict, headers: list, claimed: dict, spans: list):
+def _claim_restated_tracebacks(state: dict, headers: list, claimed: dict, spans: list) -> None:
     """Claim Bazel's `package contains errors: <pkg>: <text>` where
     `<text>` is the first line of a `Traceback` block listed already (an
     `ERROR: Traceback` no tie claimed, the same lines after it) or quoted

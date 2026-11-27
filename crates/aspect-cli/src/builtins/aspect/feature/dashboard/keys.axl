@@ -153,50 +153,50 @@ def on_key(state: dict, key: str, page: int) -> bool:
 # keys before the console's), and an `early` one goes before the overlay
 # and the search bar take the keys.
 
-def _always(state):
+def _always(state: dict) -> bool:
     return True
 
-def _bar_closed(state):
+def _bar_closed(state: dict) -> bool:
     return not state["search"]["open"]
 
-def _in_list_tab(state):
+def _in_list_tab(state: dict) -> bool:
     return state.get("tab") in ("metrics", "invocation") and state["view"] == None
 
-def _over_actions(state):
+def _over_actions(state: dict) -> bool:
     at = state.get("actions_at")
     hover = state.get("hover")
     return at != None and hover != None and at[0] <= hover[1] and hover[1] <= at[1] and hover[0] < at[2]
 
-def _has_items(state):
+def _has_items(state: dict) -> bool:
     return bool(_items(state))
 
-def _has_rows(state):
+def _has_rows(state: dict) -> bool:
     return bool(_items(state)) or (state.get("list") != "actions" and _failure_total(state) > 0)
 
-def _has_other_list(state):
+def _has_other_list(state: dict) -> bool:
     return bool(state.get("outputs")) or state.get("list") == "actions"
 
-def _tips_listed(state):
+def _tips_listed(state: dict) -> bool:
     return state.get("tab") == "tips" and state["view"] == None
 
-def _failures_focused(state):
+def _failures_focused(state: dict) -> bool:
     return state["focus"] == "failures"
 
-def _k_tab_number(state, key, page):
+def _k_tab_number(state: dict, key: str, page: int) -> bool:
     _show_tab(state, _TABS[int(key) - 1][0])
     return False
 
-def _k_tab_cycle(state, key, page):
+def _k_tab_cycle(state: dict, key: str, page: int) -> bool:
     names = [tab for tab, _ in _TABS]
     i = names.index(state.get("tab", "console")) if state.get("tab", "console") in names else 0
     _show_tab(state, names[(i + (1 if key == "tab" else -1)) % len(names)])
     return False
 
-def _k_panes(state, key, page):
+def _k_panes(state: dict, key: str, page: int) -> bool:
     state["panes"] = not _panes_shown(state)
     return False
 
-def _k_tips(state, key, page):
+def _k_tips(state: dict, key: str, page: int) -> bool:
     rows = _shown_tips(state)
     if not rows:
         return False
@@ -208,18 +208,18 @@ def _k_tips(state, key, page):
     state["tip_selected"] = at
     return False
 
-def _k_actions_wheel(state, key, page):
+def _k_actions_wheel(state: dict, key: str, page: int) -> bool:
     # The wheel over the running actions scrolls them, not the console.
     state["actions_scroll"] = max(0, state.get("actions_scroll", 0) + (_WHEEL if key == "wheel-down" else -_WHEEL))
     return False
 
-def _k_pick_build(state, key, page):
+def _k_pick_build(state: dict, key: str, page: int) -> bool:
     newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
     state["picked_build"] = max(0, min(newest, _picked_build(state) + (1 if key == ">" else -1)))
     state["tab_scroll"] = 0
     return False
 
-def _k_tab_scroll(state, key, page):
+def _k_tab_scroll(state: dict, key: str, page: int) -> bool:
     if key in ("K", "home", "J", "end"):
         state["tab_scroll"] = 0 if key in ("K", "home") else 1 << 30
         return False
@@ -227,7 +227,7 @@ def _k_tab_scroll(state, key, page):
     state["tab_scroll"] = max(0, state.get("tab_scroll", 0) + step[key])
     return False
 
-def _k_esc(state, key, page):
+def _k_esc(state: dict, key: str, page: int) -> bool:
     if state["view"] != None:
         # Back a crumb: to the view it was opened from, else the tab's own.
         _back_to(state, len(state.get("views", [])))
@@ -237,13 +237,13 @@ def _k_esc(state, key, page):
         return state["ended"]
     return False
 
-def _k_other_list(state, key, page):
+def _k_other_list(state: dict, key: str, page: int) -> bool:
     state["list"] = "failures" if state.get("list") == "actions" else "actions"
     if not _items(state) and state.get("tab") != "failures":
         state["focus"] = "console"
     return False
 
-def _k_list(state, key, page):
+def _k_list(state: dict, key: str, page: int) -> bool:
     # The Failures list's rows (`listed_failures`, then the failed targets
     # without a log of their own: a blocked one opens what blocks it); a
     # row's record is the one its heading and excerpt tell.
@@ -271,7 +271,7 @@ def _k_list(state, key, page):
         _open_failure(state, order[at])
     return False
 
-def _k_step_record(state, key, page):
+def _k_step_record(state: dict, key: str, page: int) -> bool:
     # The chosen record's log first (or the chosen row's), unless the
     # Failures tab shows it already: then a step. Over the failures, the Failures list's rows in its order
     # (`listed_failures`, then `_tab_extras`: a blocked target, Bazel's
@@ -305,7 +305,7 @@ def _k_step_record(state, key, page):
         _open_failure(state, target)
     return False
 
-def _k_step_attempt(state, key, page):
+def _k_step_attempt(state: dict, key: str, page: int) -> bool:
     # Another attempt, shard or run of the target shown, stepped from the
     # one shown (else the chosen one). One shown from a list it is no
     # longer in (another list, a newer build's) opens its target's first
@@ -325,7 +325,7 @@ def _k_step_attempt(state, key, page):
     _open_failure(state, same[(same.index(at) + (1 if key == "}" else -1)) % len(same)])
     return False
 
-def _k_find(state, key, page):
+def _k_find(state: dict, key: str, page: int) -> bool:
     # Where the bar opened, in the lines a search that jumps lists (a kept
     # filter's scroll counts only its matches, so the newest), no higher
     # than the top page, as `render` draws it.
@@ -369,16 +369,16 @@ def _scroll_by(page: int) -> dict:
         "pagedown": -page,
     }
 
-def _k_scroll(state, key, page):
+def _k_scroll(state: dict, key: str, page: int) -> bool:
     state["scroll"] = max(0, state["scroll"] + _scroll_by(page)[key])
     state["search"]["anchored_view"] = False
     return False
 
-def _k_match(state, key, page):
+def _k_match(state: dict, key: str, page: int) -> bool:
     _step_match(state, 1 if key == "n" else -1, page)
     return False
 
-def _k_ends(state, key, page):
+def _k_ends(state: dict, key: str, page: int) -> bool:
     if key in ("K", "home"):
         # The top, as far as `render` lets it (the oldest lines that fill
         # the pane, wrapped).
@@ -389,19 +389,19 @@ def _k_ends(state, key, page):
     state["search"]["anchored_view"] = False
     return False
 
-def _k_filter(state, key, page):
+def _k_filter(state: dict, key: str, page: int) -> bool:
     state["filter"] = _FILTERS[(_FILTERS.index(state["filter"]) + 1) % len(_FILTERS)]
     state["scroll"] = 0
     state["search"]["back"] = -1
     state["search"]["anchored_view"] = False
     return False
 
-def _k_help(state, key, page):
+def _k_help(state: dict, key: str, page: int) -> bool:
     state["help"] = True
     state["help_top"] = 0
     return False
 
-def _k_open(state, key, page):
+def _k_open(state: dict, key: str, page: int) -> bool:
     if key == "o":
         path, line = _view_file(state)
         _say_note(state, _open_in_editor(state, path, line))
@@ -409,19 +409,19 @@ def _k_open(state, key, page):
         _say_note(state, _next_editor(state))
     return False
 
-def _k_wrap(state, key, page):
+def _k_wrap(state: dict, key: str, page: int) -> bool:
     state["wrap"] = not state.get("wrap", True)
     state["search"]["anchored_view"] = False
     return False
 
-def _failures_listed(state):
+def _failures_listed(state: dict) -> bool:
     return state.get("tab") == "failures" and state.get("list") != "actions" and state["view"] == None
 
-def _k_expand_failures(state, key, page):
+def _k_expand_failures(state: dict, key: str, page: int) -> bool:
     state["expand_failures"] = not state.get("expand_failures", False)
     return False
 
-def _k_unfold(state, key, page):
+def _k_unfold(state: dict, key: str, page: int) -> bool:
     # The lines folded under each `INFO: From`, shown or folded again, from
     # the newest line, as the rows change under the view; what clicks
     # opened forgotten, so folding again folds every one.
@@ -433,11 +433,11 @@ def _k_unfold(state, key, page):
     state["search"]["anchored_view"] = False
     return False
 
-def _k_zoom(state, key, page):
+def _k_zoom(state: dict, key: str, page: int) -> bool:
     state["zoom"] = not state.get("zoom", False)
     return False
 
-def _k_mouse(state, key, page):
+def _k_mouse(state: dict, key: str, page: int) -> bool:
     if state.get("screen") != None:
         state["mouse"] = not state.get("mouse", False)
         state["screen"].mouse(state["mouse"])
@@ -446,13 +446,13 @@ def _k_mouse(state, key, page):
         _refold(state)
     return False
 
-def _k_redraw(state, key, page):
+def _k_redraw(state: dict, key: str, page: int) -> bool:
     # The next frame is written though unchanged: the terminal was cleared
     # behind it.
     state["drawn"] = None
     return False
 
-def _k_leave(state, key, page):
+def _k_leave(state: dict, key: str, page: int) -> bool:
     if key == "enter" and state["view"] != None:
         return False
     if state["ended"]:
@@ -468,31 +468,31 @@ def _k_leave(state, key, page):
             state["screen"].interrupt()
     return False
 
-def _row_page(state):
+def _row_page(state: dict) -> list:
     # The macOS Terminal sends Shift+↑↓ as plain arrows, unless its
     # profile's keyboard settings say otherwise.
     apple = state.get("env") != None and state["env"].var("TERM_PROGRAM") == "Apple_Terminal"
     return ["Fn+↑↓ ⌥↑↓ u d page" if apple else "PgUp PgDn ⇧↑↓ u d page"]
 
-def _row_leave(state):
+def _row_leave(state: dict) -> list:
     if not state["ended"]:
         return ["q cancel"]
     if state["focus"] == "failures" or state["view"] != None:
         return ["q leave"]
     return ["q, Enter or Esc to leave"]
 
-def _row_step(state):
+def _row_step(state: dict) -> list:
     if not _has_rows(state):
         return []
     if state["view"] == None:
         return ["Tab next tab"]
     return ["] [ next/prev action" if state.get("list") == "actions" else "] [ next/prev failure"]
 
-def _row_open(state):
+def _row_open(state: dict) -> list:
     name = _editor(state)[1]
     return ["o open in " + name] if name else []
 
-def _row_other_list(state):
+def _row_other_list(state: dict) -> list:
     if not _has_other_list(state):
         return []
     return ["a failures" if state.get("list") == "actions" else "a actions"]
@@ -510,7 +510,7 @@ _Key = record(
     note = field(typing.Callable | None, default = None),
 )
 
-def _key(keys: list[str], when, do, help = None, group = None, row = None, shown = None, early = False, note = None) -> _Key:
+def _key(keys: list[str], when, do, help: tuple | None = None, group: str | None = None, row = None, shown = None, early: bool = False, note = None) -> _Key:
     """A binding: its `keys`, `when` it applies, what it does (`do`), its
     overlay row (`help`, `(keys, text)`) under `group`, and keys-row labels
     (`row`); `shown`, when the overlay lists it (`when` unless given);
@@ -519,14 +519,14 @@ def _key(keys: list[str], when, do, help = None, group = None, row = None, shown
     it, which the keys row says a moment after the key (`on_key`)."""
     return _Key(keys = keys, when = when, do = do, help = help, group = group, row = row, shown = shown or when, early = early, note = note)
 
-def _filter_note(state):
+def _filter_note(state: dict) -> str:
     return {
         "all": "every line · e errors and warnings only",
         "warnings": "errors and warnings only · e errors only",
         "errors": "errors only · e every line",
     }[state["filter"]]
 
-def _documented(keys, text, group, shown = _always):
+def _documented(keys: str, text: str, group: str, shown = _always) -> _Key:
     """An overlay row for keys another layer reads (the mouse, the bar)."""
     return _key([], shown, None, help = (keys, text), group = group, shown = shown)
 
@@ -605,7 +605,7 @@ _ACTIONS_KEY = [
     "▌ other: what Bazel's own counts leave out of every kind, at the end (no execution log to tell them apart); rare",
     "? unreported: Bazel counted these done but hasn't said how; live they settle into a kind, and without every action's events (a remote cache, a --bes_backend, --dashboard:actions=failed) some stay (┈ on the bar)",
     "─ not done: running or pending",
-    "actions: what Bazel checked this build. Targets whose inputs didn't change are skipped before this count, so it isn't the whole graph",
+    "actions: what Bazel checked this build. Targets whose inputs didn't change are left out of this count, so it isn't the whole graph",
     "%: cache hits ÷ actions; skipped ones are no hits, so a warm and a fresh server aren't comparable",
     "The groups and parts don't overlap: they add up to the total actions.",
 ]
