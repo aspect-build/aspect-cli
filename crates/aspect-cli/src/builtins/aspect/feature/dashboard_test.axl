@@ -2200,6 +2200,148 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the loud Step its own", got[3:6], ["✗ //two:three  Step · exit 6 · two/BUILD.bazel:7:6", "  │ step two broke", "  log /h/two/three/Step-1.stderr"])
     _eq("Pack its own", got[7:10], ["✗ //two:three  Pack · exit 7 · two/BUILD.bazel:7:6", "  │ pack broke", "  log /h/two/three/Pack-1.stderr"])
 
+    # The summary's entries as (heading, excerpt rows, log rows), and the
+    # Failures tab's headings, for a state of failed actions and their logs.
+    def _entries(records, errs, logs, kept_of, **kw):
+        st = dict(kinds, counts = dict(kinds["counts"], failures = sorted({r["label"]: True for r in records}.keys()), failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = records, read = lambda p, n: (logs[p], 0) if p in logs else None, build = struct(kept_action_log = lambda output: kept_of.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None, ansi = ctx.std.re.compile(ANSI))
+        st.update(kw)
+        got = [_visible(l) for l in failure_summary(st, {"errors": errs, "distinct": len(errs)}, "t-9", False)]
+        out = []
+        for k, l in enumerate(got):
+            if l.startswith("✗"):
+                rest = got[k + 1:]
+                end = [n for n, r in enumerate(rest) if r == "" or r.startswith("0 built")][0]
+                out.append((l, [r[4:] for r in rest[:end] if r.startswith("  │ ")], [r[6:] for r in rest[:end] if r.startswith("  log ")]))
+        tab = dict(st, kept_errors = {"errors": errs, "distinct": len(errs)}, action_errors_cache = None, focus = "console", selected = 0, excerpts = {})
+        rows = [_visible(r).rstrip() for r in failure_rows(tab, 40, 120)]
+        return (out, [r for r in rows if r.startswith("✗")])
+
+    def _act(label, detail, output, exit_code = 0):
+        return {"kind": "action", "label": label, "detail": detail, "files": [("stderr", "file:///gone")], "output": output, "success": False, "exit_code": exit_code}
+
+    # ws4/xt (Bazel 7.7.3 and 8.9.0): //xt:a exits 3 and //xt:b exits 4,
+    # each writing the same banner first; the console said b's error
+    # first. Their lines name each by `(from target //xt:b)`; without that
+    # (the target unknown), their bodies' last lines and the records' exit
+    # codes still tell them apart, and with neither each is told from its
+    # record alone, never from the other's error.
+    xt_logs = {"/h/xt/a/Proc-1.stderr": "proc 1.0 starting\nerror: AAA broke in a.dat\n", "/h/xt/b/Proc-1.stderr": "proc 1.0 starting\nerror: BBB broke in b.dat\n"}
+    xt_kept = {"bazel-out/xt/a.out": {"stderr": "/h/xt/a/Proc-1.stderr"}, "bazel-out/xt/b.out": {"stderr": "/h/xt/b/Proc-1.stderr"}}
+
+    def _xt_errs(target):
+        return [
+            {"header": "ERROR: xt/BUILD.bazel:3:5: Processing xt/b.out failed: (Exit 4)", "body": ["proc 1.0 starting", "error: BBB broke in b.dat"], "log": None, "label": None, "target": "//xt:b" if target else None},
+            {"header": "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3)", "body": ["proc 1.0 starting", "error: AAA broke in a.dat"], "log": None, "label": None, "target": "//xt:a" if target else None},
+        ]
+
+    xt_b = failure_of("action_completed", struct(label = "//xt:b", primary_output = "bazel-out/xt/b.out", configuration = None), struct(success = False, type = "Proc", stderr = None, stdout = None, exit_code = 1, failure_detail = struct(message = "x", category = struct(code = "NON_ZERO_EXIT", spawn_exit_code = 4))))
+    _eq("a failed action's exit code is its spawn's, not the event's 1", xt_b["exit_code"], 4)
+    xt_own = [
+        ("✗ //xt:a  Proc · exit 3 · xt/BUILD.bazel:2:5", ["proc 1.0 starting", "error: AAA broke in a.dat"], ["/h/xt/a/Proc-1.stderr"]),
+        ("✗ //xt:b  Proc · exit 4 · xt/BUILD.bazel:3:5", ["proc 1.0 starting", "error: BBB broke in b.dat"], ["/h/xt/b/Proc-1.stderr"]),
+    ]
+    for target in [True, False]:
+        for codes in [True, False]:
+            for flip in [False, True]:
+                records = [_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3 if codes else 0), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 4 if codes else 0)]
+                got, tab = _entries(records[::-1] if flip else records, _xt_errs(target), xt_logs, xt_kept)
+                name = "xt target %s codes %s flipped %s" % (target, codes, flip)
+                _eq(name, sorted(got), xt_own)
+                _eq(name + ", the tab", sorted(tab), [e[0] for e in xt_own])
+    got, tab = _entries([_act("//xt:a", "Proc", "bazel-out/xt/a.out"), _act("//xt:b", "Proc", "bazel-out/xt/b.out")], _xt_errs(False), {}, {})
+    _eq("xt with nothing to tell them apart: each from its record, no other's", got, [("✗ //xt:a  Proc", [], []), ("✗ //xt:b  Proc", [], [])])
+    _eq("and the tab alike", tab, ["✗ //xt:a  Proc", "✗ //xt:b  Proc"])
+    got, tab = _entries([_act("//xt:a", "Proc", "bazel-out/xt/a.out", 3), _act("//xt:b", "Proc", "bazel-out/xt/b.out", 3)], [dict(e, header = e["header"].replace("Exit 4", "Exit 3")) for e in _xt_errs(False)], {"/h/xt/a/Proc-1.stderr": "proc 1.0 starting\nsame\n", "/h/xt/b/Proc-1.stderr": "proc 1.0 starting\nsame\n"}, xt_kept)
+    _eq("one exit, one text: each its own log and exit, no location", got, [("✗ //xt:a  Proc · exit 3", ["proc 1.0 starting", "same"], ["/h/xt/a/Proc-1.stderr"]), ("✗ //xt:b  Proc · exit 3", ["proc 1.0 starting", "same"], ["/h/xt/b/Proc-1.stderr"])])
+    _eq("and the tab alike, from the record", tab, ["✗ //xt:a  Proc · exit 3", "✗ //xt:b  Proc · exit 3"])
+
+    # ws4/cc4:ph (rules_cc 0.2.25, Bazel 9.3.3, parse_headers): a.cc
+    # includes a.h, so a.h's error is in a.cc's log too; b.cc fails alone.
+    # Each pairs with its own, by its object or by what it says alone.
+    ph_logs = {
+        "/h/cc4/ph/CppCompile-1.stderr": "In file included from cc4/a.cc:1:\n\x1b[1m./cc4/a.h:1:26: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xh'\x1b[0m\n    1 | \x1b[0;34minline\x1b[0m \x1b[0;34mint\x1b[0m ah() { \x1b[0;34mreturn\x1b[0m xh; }\x1b[0m\n      | \x1b[0;1;32m                         ^~\n\x1b[0m\x1b[1mcc4/a.cc:2:18: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xa'\x1b[0m\n    2 | \x1b[0;34mint\x1b[0m a() { \x1b[0;34mreturn\x1b[0m xa; }\x1b[0m\n      | \x1b[0;1;32m                 ^~\n\x1b[0m2 errors generated.\nError in child process '/usr/bin/xcrun'. 1\n",
+        "/h/cc4/ph/CppCompile-2.stderr": "\x1b[1mcc4/b.cc:1:18: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xb'\x1b[0m\n    1 | \x1b[0;34mint\x1b[0m b() { \x1b[0;34mreturn\x1b[0m xb; }\x1b[0m\n      | \x1b[0;1;32m                 ^~\n\x1b[0m1 error generated.\nError in child process '/usr/bin/xcrun'. 1\n",
+        "/h/cc4/ph/CppCompile-3.stderr": "\x1b[1mcc4/a.h:1:26: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier 'xh'\x1b[0m\n    1 | \x1b[0;34minline\x1b[0m \x1b[0;34mint\x1b[0m ah() { \x1b[0;34mreturn\x1b[0m xh; }\x1b[0m\n      | \x1b[0;1;32m                         ^~\n\x1b[0m1 error generated.\nError in child process '/usr/bin/xcrun'. 1\n",
+    }
+    ph_errs = [
+        {"header": "ERROR: cc4/BUILD.bazel:3:11: Compiling cc4/a.cc failed: (Exit 1)", "body": ["In file included from cc4/a.cc:1:", "./cc4/a.h:1:26: error: use of undeclared identifier 'xh'", "    1 | inline int ah() { return xh; }", "… 5 more lines", "Error in child process '/usr/bin/xcrun'. 1"], "log": None, "label": None, "target": "//cc4:ph"},
+        {"header": "ERROR: cc4/BUILD.bazel:3:11: Compiling cc4/b.cc failed: (Exit 1)", "body": ["cc4/b.cc:1:18: error: use of undeclared identifier 'xb'", "    1 | int b() { return xb; }", "      |                  ^~", "1 error generated.", "Error in child process '/usr/bin/xcrun'. 1"], "log": None, "label": None, "target": "//cc4:ph"},
+        {"header": "ERROR: cc4/BUILD.bazel:3:11: Compiling cc4/a.h failed: (Exit 1)", "body": ["cc4/a.h:1:26: error: use of undeclared identifier 'xh'", "    1 | inline int ah() { return xh; }", "      |                          ^~", "1 error generated.", "Error in child process '/usr/bin/xcrun'. 1"], "log": None, "label": None, "target": "//cc4:ph"},
+    ]
+    for objects in [True, False]:
+        outs = ["bazel-out/darwin_arm64-fastbuild/bin/cc4/_objs/ph/" + o if objects else "bazel-out/ph/%d" % n for n, o in enumerate(["a.o", "b.o", "a.h.processed"])]
+        kept_of = {outs[0]: {"stderr": "/h/cc4/ph/CppCompile-1.stderr"}, outs[1]: {"stderr": "/h/cc4/ph/CppCompile-2.stderr"}, outs[2]: {"stderr": "/h/cc4/ph/CppCompile-3.stderr"}}
+        for flip in [False, True]:
+            records = [_act("//cc4:ph", "CppCompile", o, 1) for o in outs]
+            got, _ = _entries(records[::-1] if flip else records, ph_errs, ph_logs, kept_of)
+            _eq("ph objects %s flipped %s" % (objects, flip), sorted([(e[1][0], e[2]) for e in got]), [
+                ("In file included from cc4/a.cc:1:", ["/h/cc4/ph/CppCompile-1.stderr"]),
+                ("cc4/a.h:1:26: error: use of undeclared identifier 'xh'", ["/h/cc4/ph/CppCompile-3.stderr"]),
+                ("cc4/b.cc:1:18: error: use of undeclared identifier 'xb'", ["/h/cc4/ph/CppCompile-2.stderr"]),
+            ])
+
+    # rules_cc 0.2.25's objects: `sub/z.cc` is `_objs/subz/z.o`; a.cc,
+    # x/a.cc and y/a.cc are `_objs/lib/0/a.o` to `2/a.o`, which tell none
+    # apart, so only what each says does.
+    z_logs = {"/h/cc4/subz/CppCompile-1.stderr": "cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'\n"}
+    got, _ = _entries([_act("//cc4:subz", "CppCompile", "bazel-out/bin/cc4/_objs/subz/z.o", 1), _act("//cc4:subz", "CppCompile", "bazel-out/bin/cc4/_objs/subz/y.o", 1)], [
+        {"header": "ERROR: cc4/BUILD.bazel:7:11: Compiling cc4/sub/z.cc failed: (Exit 1)", "body": ["cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'"], "log": None, "label": None, "target": "//cc4:subz"},
+        {"header": "ERROR: cc4/BUILD.bazel:7:11: Compiling cc4/y.cc failed: (Exit 1)", "body": ["cc4/y.cc:1:18: error: use of undeclared identifier 'xy'"], "log": None, "label": None, "target": "//cc4:subz"},
+    ], {}, {})
+    _eq("sub/z.cc's object is _objs/subz/z.o", [(e[0], e[1][:1]) for e in got], [
+        ("✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11", ["cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'"]),
+        ("✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11", ["cc4/y.cc:1:18: error: use of undeclared identifier 'xy'"]),
+    ])
+    numbered = [_act("//cc3:lib", "CppCompile", "bazel-out/bin/cc3/_objs/lib/%d/a.o" % n, 1) for n in range(2)]
+    got, _ = _entries(numbered, [
+        {"header": "ERROR: cc3/BUILD.bazel:2:11: Compiling cc3/a.cc failed: (Exit 1)", "body": ["cc3/a.cc:1:1: error: one"], "log": None, "label": None, "target": "//cc3:lib"},
+        {"header": "ERROR: cc3/BUILD.bazel:2:11: Compiling cc3/x/a.cc failed: (Exit 1)", "body": ["cc3/x/a.cc:1:1: error: two"], "log": None, "label": None, "target": "//cc3:lib"},
+    ], {}, {})
+    _eq("numbered objects tell neither apart", got, [("✗ //cc3:lib  CppCompile · exit 1", [], []), ("✗ //cc3:lib  CppCompile · exit 1", [], [])])
+
+    # ws4/sh (Bazel 9.3.3): two actions of one target whose first lines are
+    # the same, a long one cut at 300 bytes, and `\r` progress before the
+    # error. What tells them apart is past the first line, or before the
+    # `…`.
+    words = " ".join(["w%d" % n for n in range(120)])
+    long_logs = {"/h/sh/long/Tool-1.stderr": "ONE: " + words + "\n", "/h/sh/long/Tool-2.stderr": "TWO: " + words + "\n"}
+    cr_logs = {"/h/sh/long/Tool-1.stderr": "working 10%\rworking 90%\rerror: cr one broke\n", "/h/sh/long/Tool-2.stderr": "working 10%\rworking 90%\rerror: cr two broke\n"}
+    sh_kept = {"bazel-out/sh/one": {"stderr": "/h/sh/long/Tool-1.stderr"}, "bazel-out/sh/two": {"stderr": "/h/sh/long/Tool-2.stderr"}}
+    for name, logs, ones, twos in [
+        ("long", long_logs, [("ONE: " + words)[:299] + "…"], [("TWO: " + words)[:299] + "…"]),
+        ("cr", cr_logs, ["working 10%", "working 90%", "error: cr one broke"], ["working 10%", "working 90%", "error: cr two broke"]),
+    ]:
+        errs = [
+            {"header": "ERROR: sh/BUILD.bazel:13:6: Two for //sh:t failed: (Exit 2)", "body": twos, "log": None, "label": None, "target": "//sh:t"},
+            {"header": "ERROR: sh/BUILD.bazel:13:6: One for //sh:t failed: (Exit 1)", "body": ones, "log": None, "label": None, "target": "//sh:t"},
+        ]
+        for flip in [False, True]:
+            records = [_act("//sh:t", "Tool", "bazel-out/sh/one"), _act("//sh:t", "Tool", "bazel-out/sh/two")]
+            got, _ = _entries(records[::-1] if flip else records, errs, logs, sh_kept)
+            _eq("sh %s flipped %s" % (name, flip), sorted([(e[0], e[2]) for e in got]), [
+                ("✗ //sh:t  Tool · exit 1 · sh/BUILD.bazel:13:6", ["/h/sh/long/Tool-1.stderr"]),
+                ("✗ //sh:t  Tool · exit 2 · sh/BUILD.bazel:13:6", ["/h/sh/long/Tool-2.stderr"]),
+            ])
+
+    # An error at a/b/BUILD.bazel naming no target is //a/b's, never
+    # //b's; an absolute one only under the workspace.
+    nested = [{"header": "ERROR: a/b/BUILD.bazel:1:8: output 'a/b/x' was not created", "body": [], "log": None, "label": None, "target": None}]
+    got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], nested, {}, {})
+    _eq("a/b/BUILD.bazel is not //b's", [e[0] for e in got], ["✗ error · a/b/BUILD.bazel:1:8", "✗ //b:x  Gen · exit 1"])
+    absolute = [{"header": "ERROR: /ws/b/BUILD.bazel:1:8: Making x failed: (Exit 1)", "body": ["x broke"], "log": None, "label": None, "target": None}]
+    x_log = ({"/h/b/x/Gen-1.stderr": "x broke\n"}, {"bazel-out/b/x": {"stderr": "/h/b/x/Gen-1.stderr"}})
+    got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], absolute, x_log[0], x_log[1], inv = {"build_started": struct(workspace_directory = "/ws")})
+    _eq("an absolute path under the workspace", [e[0] for e in got], ["✗ //b:x  Gen · exit 1 · /ws/b/BUILD.bazel:1:8"])
+    got, _ = _entries([_act("//b:x", "Gen", "bazel-out/b/x", 1)], absolute, x_log[0], x_log[1], inv = {"build_started": struct(workspace_directory = "/other/ws")})
+    _eq("outside it", [e[0] for e in got], ["✗ error · exit 1 · /ws/b/BUILD.bazel:1:8", "✗ //b:x  Gen · exit 1"])
+
+    # A tab in an excerpt: spaces to the next 8-column stop, in the summary
+    # and the tab alike.
+    got, tab_rows = _entries([_act("//t:t", "Gen", "bazel-out/t", 1)], [{"header": "ERROR: t/BUILD.bazel:1:1: Making t failed: (Exit 1)", "body": ["ab\tc"], "log": None, "label": "//t:t", "target": None}], {}, {})
+    _eq("a tab in the summary", got[0][1], ["ab      c"])
+    tabbed = dict(kinds, counts = dict(kinds["counts"], failures = ["//t:t"], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = [_act("//t:t", "Gen", "bazel-out/t", 1)], kept_errors = {"errors": [{"header": "ERROR: t/BUILD.bazel:1:1: Making t failed: (Exit 1)", "body": ["ab\tc"], "log": None, "label": "//t:t", "target": None}], "distinct": 1}, read = None, build = None, excerpts = {}, listed_cache = None, action_errors_cache = None, focus = "console", selected = 0)
+    _eq("and in the tab", [_visible(r).rstrip() for r in failure_rows(tabbed, 10, 80)][1], "  │ ab      c")
+
     # An analysis failure Bazel reports as its own (an Aborted
     # configured_label): what Bazel gave, when no error names it.
     analysed = dict(kinds, fails = [{"kind": "action", "label": "//anal:broken", "detail": "analysis failed", "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], kept_errors = None, counts = new_counts(), root_causes = {})
