@@ -45,7 +45,7 @@ fi
 # requiring a full aspect-cli bring-up.
 #
 # Uses a bash array to preserve spaces in values (e.g. "Bootstrap CLI",
-# `Greg Magolan <greg@aspect.build>`). The ${ARR[@]+"${ARR[@]}"} expansion
+# `Ada Lovelace <ada.l@example.com>`). The ${ARR[@]+"${ARR[@]}"} expansion
 # at the invocation site keeps this set -u-safe even when empty.
 METADATA_ARGS=()
 if [ -n "${ASPECT_WORKFLOWS_BES_BACKEND:-}" ]; then

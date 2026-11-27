@@ -1019,12 +1019,12 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r9b["bazel"]["invocation_id"] = "id-for-cpu-mode"
     r9b["bazel"]["cpu_arch"] = "aarch64"
     r9b["bazel"]["compilation_mode"] = "opt"
-    r9b["bazel"]["workspace_status"] = {"BUILD_USER": "greg", "BUILD_HOST": "MacBook-Pro-2.local"}
+    r9b["bazel"]["workspace_status"] = {"BUILD_USER": "ada", "BUILD_HOST": "build-host-01.local"}
     out9b = render_check_output(ctx, r9b, "passed", render_ctx, links)
     tc = test_case(tc, "**CPU Target:** `aarch64`" in out9b["text"], "invocation: CPU Target row (matches TARGET_CPU source)")
     tc = test_case(tc, "**Mode:** `opt`" in out9b["text"], "invocation: compilation mode row")
-    tc = test_case(tc, "**Host name:** `MacBook-Pro-2.local`" in out9b["text"], "invocation: host name row (from BUILD_HOST)")
-    tc = test_case(tc, "**User:** `greg`" in out9b["text"], "invocation: user row (from BUILD_USER)")
+    tc = test_case(tc, "**Host name:** `build-host-01.local`" in out9b["text"], "invocation: host name row (from BUILD_HOST)")
+    tc = test_case(tc, "**User:** `ada`" in out9b["text"], "invocation: user row (from BUILD_USER)")
 
     # Test 9c: Aspect Workflows Runner row + details section
     # Set the runner env vars locally, render, assert the new summary row
@@ -1128,8 +1128,8 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r10["bazel"]["options_parsed"] = {
         "explicit_cmd_line": [
             "--config=ci",  # safe, unchanged
-            "--build_metadata=COMMIT_AUTHOR=Greg Magolan",  # value-only quoting
-            "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build",  # safe, unchanged
+            "--build_metadata=COMMIT_AUTHOR=Ada Lovelace",  # value-only quoting
+            "--build_metadata=COMMIT_AUTHOR_EMAIL=ada.l@example.com",  # safe, unchanged
             "--build_event_binary_file /var/folders/zm/build-event-out-fbd8f66b.bin",  # whole-token quoting
         ],
         "startup_options": [],
@@ -1138,8 +1138,8 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     out10 = render_check_output(ctx, r10, "passed", render_ctx, links)
 
     # Value-only quoting for --flag=value with unsafe value.
-    tc = test_case(tc, "--build_metadata=&#x27;COMMIT_AUTHOR=Greg Magolan&#x27;" in out10["text"], "flag quoting: --flag='value with space'")
-    tc = test_case(tc, "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build" in out10["text"], "flag quoting: safe --flag=value stays unquoted")
+    tc = test_case(tc, "--build_metadata=&#x27;COMMIT_AUTHOR=Ada Lovelace&#x27;" in out10["text"], "flag quoting: --flag='value with space'")
+    tc = test_case(tc, "--build_metadata=COMMIT_AUTHOR_EMAIL=ada.l@example.com" in out10["text"], "flag quoting: safe --flag=value stays unquoted")
     tc = test_case(tc, "--config=ci" in out10["text"], "flag quoting: safe --config=ci stays unquoted")
 
     # Whole-token quoting for flag-with-space token (no `=`).
@@ -1208,7 +1208,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
 
     # Metadata takes precedence over workspace_status when both set a key.
     r13["bazel"]["workspace_status"] = {
-        "BUILD_HOST": "MacBook-Pro-2.local",
+        "BUILD_HOST": "build-host-01.local",
         "REPO_OWNER": "DIFFERENT_FROM_METADATA",  # should be overridden by metadata below
     }
     r13["bazel"]["metadata"] = {
@@ -1218,8 +1218,8 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
         "BRANCH_NAME": "bazel_status_checks",
         "COMMIT_SHA": "417a65c1234567890abc",
         "COMMIT_MESSAGE": "GitHub status checks",
-        "COMMIT_AUTHOR_NAME": "Greg Magolan",
-        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_AUTHOR_NAME": "Ada Lovelace",
+        "COMMIT_AUTHOR_EMAIL": "ada.l@example.com",
         "RUN_TYPE": "BRANCH_PUSH",
         "PR_NUMBER": "1102",
         "PR_ID": "1102",
@@ -1276,14 +1276,14 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r_ua["bazel"]["build_command"] = "test"
     r_ua["bazel"]["targets_total"] = 1
     r_ua["bazel"]["metadata"] = {
-        "COMMIT_AUTHOR_NAME": "Greg Magolan",
-        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Ada Lovelace",
+        "COMMIT_AUTHOR": "Ada Lovelace <ada.l@example.com>",
         "COMMIT_AUTHOR_EMAIL": "ignored@example.com",
         "USER": "also-ignored",
     }
     r_ua["bazel"]["workspace_status"] = {"BUILD_USER": "ignored-too"}
     out_ua = render_check_output(ctx, r_ua, "passed", render_ctx, links)
-    tc = test_case(tc, "👤 Greg Magolan" in out_ua["summary"], "user fallback: NAME wins")
+    tc = test_case(tc, "👤 Ada Lovelace" in out_ua["summary"], "user fallback: NAME wins")
     tc = test_case(tc, "@" not in out_ua["summary"], "user fallback: no '@' in summary (prevents GFM autolink)")
     tc = test_case(tc, "ignored" not in out_ua["summary"], "user fallback: email / lower-precedence sources not rendered")
 

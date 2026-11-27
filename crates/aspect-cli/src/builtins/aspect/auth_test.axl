@@ -46,9 +46,9 @@ def _summary(
     )
 
 def _test_identity(_):
-    _eq("name + email", identity(_summary(display_name = "Greg Magolan", email = "g@x.io")), "Greg Magolan <g@x.io>")
+    _eq("name + email", identity(_summary(display_name = "Ada Lovelace", email = "g@x.io")), "Ada Lovelace <g@x.io>")
     _eq("email only", identity(_summary(email = "g@x.io")), "g@x.io")
-    _eq("name only", identity(_summary(display_name = "Greg")), "Greg")
+    _eq("name only", identity(_summary(display_name = "Ada")), "Ada")
     _eq("neither", identity(_summary()), "")
 
 def _test_login_command(_):
@@ -79,8 +79,8 @@ def _test_status_line(_):
     _eq("logged out → bare", status_line(_summary(name = "gcp")), "logged out")
     _eq(
         "logged in with identity + expiry",
-        status_line(_summary(logged_in = True, display_name = "Greg", email = "g@x.io", status = "expires in 2h")),
-        "logged in as Greg <g@x.io>, expires in 2h",
+        status_line(_summary(logged_in = True, display_name = "Ada", email = "g@x.io", status = "expires in 2h")),
+        "logged in as Ada <g@x.io>, expires in 2h",
     )
     _eq(
         "logged in, no identity, no status",

@@ -55,11 +55,11 @@ def _make_base():
         "BRANCH_NAME": "main",
         "COMMIT_SHA": "abc123def456789abcdef",
         "COMMIT_MESSAGE": "feat: add new Go service",
-        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
-        "COMMIT_AUTHOR_NAME": "Greg Magolan",
-        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_AUTHOR": "Ada Lovelace <ada.l@example.com>",
+        "COMMIT_AUTHOR_NAME": "Ada Lovelace",
+        "COMMIT_AUTHOR_EMAIL": "ada.l@example.com",
         "COMMIT_TIMESTAMP": "2026-04-28 10:12:34 -0700",
-        "USER": "Greg Magolan",
+        "USER": "Ada Lovelace",
         "CI_HOST": "GITHUB",
         "VCS": "GITHUB",
         "REPO_OWNER": "aspect-build",
@@ -217,7 +217,7 @@ def _make_failing_with_drift():
 
 def _render_ctx(task_kind = "gazelle"):
     return {
-        "triggered_by": "Greg Magolan (pull_request)",
+        "triggered_by": "Ada Lovelace (pull_request)",
         "subject": "",
         "started_ms": 1744630000000,
         "ended_ms": 1744630005800,
