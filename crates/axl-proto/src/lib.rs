@@ -224,7 +224,13 @@ mod tests {
         );
     }
 
-    /// Bazel 9 added `DIGEST_MISMATCH` (7) after this proto was vendored.
+    /// Bazel 9's `DIGEST_MISMATCH` (7) reads by its name, the build event
+    /// protos being Bazel 9.3.3's.
+    #[test]
+    fn bazel_9s_newest_miss_reason_reads_as_its_name() {
+        assert_eq!(reason_of(7).to_uppercase(), "DIGEST_MISMATCH");
+    }
+
     #[test]
     fn an_enum_value_the_proto_does_not_know_reads_as_its_number() {
         assert_eq!(reason_of(99), "99");
