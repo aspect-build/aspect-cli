@@ -2222,12 +2222,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// Bazel's errors as a `recap_errors(summary = True)` stage kept them,
     /// for a failure summary, once the console has ended: `{"errors": [...],
-    /// "distinct": n}`, each error `{"header", "body", "log", "label"}`: its
+    /// "distinct": n}`, each error `{"header", "body", "log", "label",
+    /// "target"}`: its
     /// `ERROR:` line as Bazel wrote it (cut after a failed action's exit
     /// code), what the recap picks of its body, unstyled and unlinked (each
     /// count of the rest a `… N more lines` line), the path of the output
     /// the history kept of the action (its stderr, else its other stream) or
-    /// None, and that action's label, else None; `distinct` counts them all.
+    /// None, and that action's label, else None (both only where one kept
+    /// action alone can be the error's), and the target the whole `ERROR:`
+    /// line names (`rule target //cc:lib`) or None; `distinct` counts them
+    /// all.
     /// None without such a stage, or before the console ends.
     fn output_errors<'v>(
         this: values::Value<'v>,
@@ -2246,6 +2250,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                     "body": e.body,
                     "log": e.log,
                     "label": e.label,
+                    "target": e.target,
                 })
             })
             .collect();

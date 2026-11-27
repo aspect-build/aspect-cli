@@ -369,6 +369,11 @@ const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the
 static KEPT_NOTE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^INFO: \S+ \S+ std(?:err|out): ").unwrap());
 
+/// The target a failed action's whole `ERROR:` line names: `(from
+/// cc_library rule target //cc:lib)`.
+static RULE_TARGET: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"rule target (\S+?)\)").unwrap());
+
 /// Bazel's status row with nothing after its label (`FAILED:`), as curses
 /// draws it: never part of an error's body.
 static BARE_STATUS: std::sync::LazyLock<Regex> =
@@ -417,6 +422,9 @@ type LineLinks = Vec<Known>;
 /// ([`RECAP_BODY_HELD`]), each line with the links it went by with.
 struct Recapped {
     header: (String, LineLinks),
+    /// The target its whole `ERROR:` line names (`… (from cc_library rule
+    /// target //cc:lib)`, past where the header is cut), when it does.
+    target: Option<String>,
     first: Vec<(String, LineLinks)>,
     last: VecDeque<(String, LineLinks)>,
     /// Lines between `first` and `last`, held by neither.
@@ -431,9 +439,10 @@ enum Part<'a> {
 }
 
 impl Recapped {
-    fn new(header: (String, LineLinks)) -> Self {
+    fn new(header: (String, LineLinks), target: Option<String>) -> Self {
         Recapped {
             header,
+            target,
             first: vec![],
             last: VecDeque::new(),
             dropped: 0,
@@ -594,7 +603,8 @@ impl LineProcessor for RecapErrors {
             let quoted = quote(short);
             if self.distinct.insert(quoted.clone()) && self.errors.len() < self.max {
                 let links = self.links(record, &quoted);
-                self.errors.push(Recapped::new((quoted, links)));
+                let target = RULE_TARGET.captures(text).map(|c| c[1].to_string());
+                self.errors.push(Recapped::new((quoted, links), target));
                 self.body = Some(self.errors.len() - 1);
             }
         } else if let Some(i) = body
@@ -636,6 +646,7 @@ impl LineProcessor for RecapErrors {
                         body: e.body,
                         log: e.log,
                         label: e.label,
+                        target: e.target,
                     })
                     .collect(),
                 distinct: self.distinct.len(),
@@ -689,7 +700,13 @@ impl RecapErrors {
         let mut out = vec![];
         for e in &self.errors {
             let mut lines = vec![style.error_label(line(&e.header.0, &e.header.1))];
-            let found = kept_for(&e.header.0, &kept, &mut used, self.bases.as_ref());
+            let found = kept_for(
+                &e.header.0,
+                e.target.as_deref(),
+                &kept,
+                &mut used,
+                self.bases.as_ref(),
+            );
             let mut body = vec![];
             for part in e.excerpt() {
                 match part {
@@ -730,6 +747,7 @@ impl RecapErrors {
                         .map(|(_, path)| path.to_string())
                 }),
                 label: found.map(|i| kept[i].0.clone()),
+                target: e.target.clone(),
             });
         }
         self.linker = linker;
@@ -749,18 +767,21 @@ struct Rendered {
     /// other stream.
     log: Option<String>,
     label: Option<String>,
+    /// The target the whole `ERROR:` line names, when it does.
+    target: Option<String>,
 }
 
 /// Which of `kept` (the history's failed actions, in order) is the action
-/// the error `header` reports, not yet `used`: the one the header names by
-/// its label (a genrule's); for a header naming no label (`Compiling a.cc
-/// failed`), the first from the package of the BUILD file its location is
-/// in; a header naming another label, none,
-/// that file's path made absolute from the task's directory and taken
-/// relative to the workspace (`bases`); outside it, or without `bases`,
-/// none.
+/// the error `header` reports, not yet `used`, when only one can be: the one
+/// action of the label the header (or its whole line's `rule target`,
+/// `target`) names; for an error naming no label, the one action from the
+/// package of the BUILD file its location is in (that file's path made
+/// absolute from the task's directory and taken relative to the workspace,
+/// `bases`). Two of them (a cc_library's two failed compiles), a label with
+/// none, or no `bases`: none, rather than another action's log.
 fn kept_for(
     header: &str,
+    target: Option<&str>,
     kept: &[(String, Vec<(String, String)>)],
     used: &mut [bool],
     bases: Option<&(PathBuf, PathBuf)>,
@@ -801,15 +822,20 @@ fn kept_for(
         Some(pkg.to_string_lossy().replace('\\', "/"))
     });
     let in_dir = |label: &str| dir.as_ref().is_some_and(|dir| *dir == package(label));
-    let pick =
-        |want: &dyn Fn(&str) -> bool| (0..kept.len()).find(|&i| !used[i] && want(&kept[i].0));
+    let only = |want: &dyn Fn(&str) -> bool| {
+        let mut found = (0..kept.len()).filter(|&i| !used[i] && want(&kept[i].0));
+        let first = found.next();
+        if found.next().is_some() { None } else { first }
+    };
     static LABEL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?:^|[\s'\x60(])@{0,2}[\w.-]*//[\w./+-]*:[\w./+=,@~-]+").unwrap()
     });
-    let found = match pick(&|l| names(l)) {
-        Some(found) => found,
-        None if LABEL.is_match(header) => return None,
-        None => pick(&|l| in_dir(l))?,
+    let named = |l: &str| names(l) || target == Some(l);
+    let found = if target.is_some() || LABEL.is_match(header) || kept.iter().any(|(l, _)| names(l))
+    {
+        only(&named)?
+    } else {
+        only(&in_dir)?
     };
     used[found] = true;
     Some(found)
@@ -956,7 +982,7 @@ mod tests {
 
     /// An error is matched to the action the history kept: by its label when
     /// it names one, else, for an error naming no label, by its BUILD file's
-    /// package, each action once.
+    /// package, each action once, and only where one alone can be it.
     #[test]
     fn an_error_is_matched_to_its_kept_action() {
         let kept = vec![
@@ -977,23 +1003,77 @@ mod tests {
         let bases = (PathBuf::from("/ws"), PathBuf::from("/ws"));
         let b = Some(&bases);
         let genrule = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)";
-        assert_eq!(super::kept_for(genrule, &kept, &mut used, b), Some(0));
+        assert_eq!(super::kept_for(genrule, None, &kept, &mut used, b), Some(0));
         let compile = "ERROR: b/BUILD.bazel:3:1: Compiling b/x.cc failed: (Exit 1)";
-        assert_eq!(super::kept_for(compile, &kept, &mut used, b), Some(1));
         assert_eq!(
-            super::kept_for(compile, &kept, &mut used, b),
-            Some(2),
-            "the next in the package"
+            super::kept_for(compile, None, &kept, &mut used, b),
+            None,
+            "two in the package: neither"
+        );
+        used[2] = true;
+        assert_eq!(
+            super::kept_for(compile, None, &kept, &mut used, b),
+            Some(1),
+            "the one left"
         );
         assert_eq!(
-            super::kept_for(compile, &kept, &mut used, b),
+            super::kept_for(compile, None, &kept, &mut used, b),
             None,
             "each once"
+        );
+
+        // ws3/cc (rules_cc 0.2.25, Bazel 9.3.3): two failed compiles of one
+        // cc_library, their headers cut before the `rule target` that names
+        // it. Neither may take the other's log, in either order.
+        let cc = vec![
+            (
+                "//cc:lib".to_string(),
+                vec![(
+                    "stderr".to_string(),
+                    "/h/cc/lib/CppCompile-1.stderr".to_string(),
+                )],
+            ),
+            (
+                "//cc:lib".to_string(),
+                vec![(
+                    "stderr".to_string(),
+                    "/h/cc/lib/CppCompile-2.stderr".to_string(),
+                )],
+            ),
+        ];
+        let ws = (PathBuf::from("/ws"), PathBuf::from("/ws"));
+        for header in [
+            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1)",
+            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/b.cc failed: (Exit 1)",
+        ] {
+            let mut fresh = vec![false, false];
+            assert_eq!(
+                super::kept_for(header, Some("//cc:lib"), &cc, &mut fresh, Some(&ws)),
+                None,
+                "{header}"
+            );
+            assert_eq!(
+                super::kept_for(header, None, &cc, &mut fresh, Some(&ws)),
+                None,
+                "{header}, no target"
+            );
+        }
+        let mut one = vec![false, true];
+        assert_eq!(
+            super::kept_for(
+                "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1)",
+                Some("//cc:lib"),
+                &cc,
+                &mut one,
+                Some(&ws)
+            ),
+            Some(0),
+            "by its line's target, the one left"
         );
         let prefix = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:generate failed: (Exit 1)";
         let mut fresh = vec![false; kept.len()];
         assert_eq!(
-            super::kept_for(prefix, &kept[..1], &mut fresh[..1], b),
+            super::kept_for(prefix, None, &kept[..1], &mut fresh[..1], b),
             None,
             "another label's action, not one whose label is a prefix of it"
         );
@@ -1009,12 +1089,12 @@ mod tests {
         let loud = "ERROR: min2/BUILD.bazel:2:8: Executing genrule //min2:b_loud failed: (Exit 1)";
         let mut fresh = vec![false];
         assert_eq!(
-            super::kept_for(a, &silent, &mut fresh, b),
+            super::kept_for(a, None, &silent, &mut fresh, b),
             None,
             "another target's log"
         );
         assert_eq!(
-            super::kept_for(loud, &silent, &mut fresh, b),
+            super::kept_for(loud, None, &silent, &mut fresh, b),
             Some(0),
             "its own"
         );
@@ -1023,17 +1103,26 @@ mod tests {
         // root package by its own BUILD file.
         let mut fresh = vec![false; kept.len()];
         let nested = "ERROR: /ws/c/b/BUILD.bazel:3:1: Compiling c/b/x.cc failed: (Exit 1)";
-        assert_eq!(super::kept_for(nested, &kept, &mut fresh, b), None);
+        assert_eq!(super::kept_for(nested, None, &kept, &mut fresh, b), None);
         let root_kept = vec![(
             "//:gen".to_string(),
             vec![("stderr".to_string(), "/h/gen.stderr".to_string())],
         )];
         let root = "ERROR: /ws/BUILD.bazel:1:8: Compiling gen.cc failed: (Exit 1)";
-        assert_eq!(super::kept_for(root, &root_kept, &mut [false], b), Some(0));
+        assert_eq!(
+            super::kept_for(root, None, &root_kept, &mut [false], b),
+            Some(0)
+        );
         let ends_in_b = (PathBuf::from("/x/b"), PathBuf::from("/x/b"));
         let root_b = "ERROR: /x/b/BUILD.bazel:1:8: Compiling x.cc failed: (Exit 1)";
         assert_eq!(
-            super::kept_for(root_b, &kept[1..], &mut [false, false], Some(&ends_in_b)),
+            super::kept_for(
+                root_b,
+                None,
+                &kept[1..],
+                &mut [false, false],
+                Some(&ends_in_b)
+            ),
             None,
             "a workspace ending in a package's name"
         );
@@ -1042,11 +1131,11 @@ mod tests {
         let sub = (PathBuf::from("/ws"), PathBuf::from("/ws/c"));
         let relative = "ERROR: ../b/BUILD:3:1: Compiling b/x.cc failed: (Exit 1)";
         assert_eq!(
-            super::kept_for(relative, &kept, &mut [false; 3], Some(&sub)),
+            super::kept_for(relative, None, &kept, &mut [false, false, true], Some(&sub)),
             Some(1)
         );
         assert_eq!(
-            super::kept_for(compile, &kept, &mut [false; 3], None),
+            super::kept_for(compile, None, &kept, &mut [false; 3], None),
             None,
             "without the workspace, by label only"
         );
@@ -1238,6 +1327,26 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A failed compile's whole `ERROR:` line names its target past where
+    /// the header is cut (ws3/cc, rules_cc 0.2.25 on Bazel 9.3.3).
+    #[test]
+    fn a_kept_error_knows_its_lines_target() {
+        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
+        let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
+        let records = [
+            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1): wrapped_clang_pp failed: error executing CppCompile command (from cc_library rule target //cc:lib) /usr/bin/xcrun clang++ -c cc/a.cc",
+            "cc/a.cc:1:18: error: use of undeclared identifier 'x'",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ];
+        feed(&mut p, &records);
+        let kept = observations.errors().expect("kept");
+        assert_eq!(
+            kept.errors[0].header,
+            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1)"
+        );
+        assert_eq!(kept.errors[0].target.as_deref(), Some("//cc:lib"));
     }
 
     /// With the failure summary naming the raw log, the end of the console

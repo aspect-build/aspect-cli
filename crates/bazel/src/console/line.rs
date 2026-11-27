@@ -344,11 +344,13 @@ impl Classifier {
             was_tail = tail;
             let opens = ACTION_OUTPUT.is_match(&text) && !GRAPH_ERROR.is_match(&text);
             // A possible tail is taken for a message only if it opens more
-            // output, as bazel's next `INFO: From …` does.
+            // output, as bazel's next `INFO: From …` does, or is an
+            // `ERROR:` in Bazel's colours (`ERROR: package contains
+            // errors`, right after a curses redraw).
             if label
                 && !self.in_action_output
                 && !self.streamed
-                && (opens || !tail)
+                && (opens || !tail || text.starts_with("ERROR: "))
                 && HEADER.is_match(&text)
             {
                 opens_output = opens;

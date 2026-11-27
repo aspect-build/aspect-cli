@@ -358,14 +358,16 @@ pub struct KeptErrors {
 /// One error: its header as Bazel wrote it (cut after a failed action's exit
 /// code), what the recap picked of its body as quoted (no style, no links),
 /// each count of the rest a line (`… 3 more lines`), where the history kept
-/// the action's output, and the label of that kept action, when one was
-/// matched.
+/// the action's output and the label of that kept action, when one alone
+/// could be it, and the target its whole line names.
 #[derive(Debug, Clone, Default)]
 pub struct KeptError {
     pub header: String,
     pub body: Vec<String>,
     pub log: Option<String>,
     pub label: Option<String>,
+    /// The target its whole `ERROR:` line names (`rule target //cc:lib`).
+    pub target: Option<String>,
 }
 
 impl Observations {

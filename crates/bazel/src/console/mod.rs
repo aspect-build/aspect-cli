@@ -1585,6 +1585,48 @@ mod tests {
         assert_eq!(pipeline.links_written.get(), 0, "with no URL written out");
     }
 
+    /// `test //syntax:all` under curses (Bazel 9.3.3): the syntax error, a
+    /// redraw of the progress area, then Bazel's `ERROR: package contains
+    /// errors`, which a possible tail of the first is not: both kept.
+    #[test]
+    fn an_error_after_a_redraw_is_kept() {
+        let input: &[u8] = b"\r\x1b[1A\x1b[K\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpackage contains errors: syntax: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 1 packages loaded\r\n";
+        for lines in [false, true] {
+            let mut config =
+                Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default());
+            if lines {
+                config.output = Output::Lines { status_every: None };
+            }
+            let mut pipeline = config.pipeline();
+            let sink = SharedSink::default();
+            let mut forwarder = Forwarder::spawn(
+                Box::new(std::io::Cursor::new(input.to_vec())),
+                Box::new(sink.clone()),
+                std::mem::take(&mut pipeline.chain),
+            )
+            .unwrap();
+            forwarder.join().unwrap();
+            let headers: Vec<String> = pipeline
+                .observations
+                .errors()
+                .expect("kept")
+                .errors
+                .into_iter()
+                .map(|e| e.header)
+                .collect();
+            assert_eq!(
+                headers,
+                vec![
+                    "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"
+                        .to_string(),
+                    "ERROR: package contains errors: syntax: syntax error at 'newline': expected ,"
+                        .to_string(),
+                ],
+                "lines {lines}"
+            );
+        }
+    }
+
     /// Every error is kept for the summary, past the console recap's 10:
     /// r44's twelve failing genrules each keep their own (the Failures tab
     /// reads a row's exit code and location off them).
