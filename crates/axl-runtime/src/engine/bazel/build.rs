@@ -2242,14 +2242,21 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     /// What a `collect_errors()` stage kept of the console for the failure
     /// summary, once the console has ended: `{"blocks": [{"kind", "text",
-    /// "body_len", "last_line"}], "not_kept": n, "stdout": bool}`, each block
-    /// one of Bazel's own `ERROR:` messages (`error`), an action's `INFO:
-    /// From …:` header with its body's length and last line (`from`), or a
-    /// record that may be an output's held last line (`tail`), with what
-    /// followed it before Bazel's next message or redraw, as Bazel wrote it;
-    /// `not_kept` counts the bytes of Bazel's own the caps left out; `stdout` whether
-    /// the console's stream carried Bazel's stdout too (a terminal both
-    /// share). None without such a stage, or before the console ends.
+    /// "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
+    /// "stdout": bool, "color": bool}`, each block one of Bazel's own
+    /// `ERROR:` messages (`error`), an action's `INFO: From …:` header with
+    /// its body's length (`body_len`) and last line (`last_line`) (`from`),
+    /// or a record that may be an output's held last line (`tail`), with
+    /// what followed it before Bazel's next message or redraw, as Bazel
+    /// wrote it. A block whose first line is an `ERROR:` also has that
+    /// line's `location` (as Bazel wrote it, "" for none), `message` (the
+    /// text after the location), `coloured` (Bazel coloured its `ERROR:`)
+    /// and `boilerplate` (one of Bazel's closing lines). `not_kept` counts
+    /// the bytes of Bazel's own the caps left out and `froms_not_kept` the
+    /// `INFO: From` blocks; `stdout` says whether the console's stream
+    /// carried Bazel's stdout too (a terminal both share), `color` whether
+    /// Bazel coloured its console (not `--color=no`). None without such a
+    /// stage, or before the console ends.
     fn output_bazel_errors<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,

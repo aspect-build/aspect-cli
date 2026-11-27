@@ -362,6 +362,9 @@ pub struct BazelBlocks {
     pub blocks: Vec<Block>,
     pub not_kept: u64,
     pub froms_not_kept: u64,
+    /// Whether Bazel coloured its console: a line in its colours came, so
+    /// it was not run with `--color=no`.
+    pub color: bool,
 }
 
 /// One kept block: what starts it ([`BlockKind`]), and its text: its
@@ -377,6 +380,67 @@ pub struct Block {
     /// (with its ending): what telling a held last line needs.
     pub body_len: u64,
     pub last_line: String,
+}
+
+/// What a block's first line says when it is an `ERROR:`: an
+/// [`BlockKind::Error`] block's header, or a [`BlockKind::Tail`] that is
+/// Bazel's next message. Read from the line with escape sequences, what a
+/// carriage return wrote over and a `--show_timestamps` prefix left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorHeader {
+    /// Where the error is, as Bazel wrote it: what comes before the first
+    /// `: ` after `ERROR: ` when it has no space and reads as a place
+    /// (`/ws/pkg/BUILD.bazel:3:8`, a path then a line number; or a path
+    /// ending in `/BUILD` or `/BUILD.bazel`); empty for none.
+    pub location: String,
+    /// The header's text after `ERROR: ` and its location.
+    pub message: String,
+    /// Whether Bazel coloured the `ERROR: ` (`ESC[31mESC[1mERROR: `), as it
+    /// does its own unless `--color=no`: one uncoloured in a coloured
+    /// console is a tool's.
+    pub coloured: bool,
+    /// Whether it is one of Bazel's closing lines, which say only that the
+    /// build failed ([`super::report::is_boilerplate`]).
+    pub boilerplate: bool,
+}
+
+/// How Bazel colours its own `ERROR: `.
+const BAZEL_ERROR: &str = "\x1b[31m\x1b[1mERROR: ";
+
+impl Block {
+    /// What this block's first line says, for an `error` or `tail` block
+    /// whose first line is an `ERROR: `; None for any other.
+    pub fn error_header(&self) -> Option<ErrorHeader> {
+        if self.kind == BlockKind::From {
+            return None;
+        }
+        let line = self.text.split('\n').next().unwrap_or_default();
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let plain = ansi::text(line.as_bytes());
+        let plain = plain.rsplit('\r').next().unwrap_or_default();
+        let said = super::line::message(plain).strip_prefix("ERROR: ")?;
+        let (location, message) = match said.split_once(": ") {
+            Some((head, rest)) if is_location(head) => (head, rest),
+            _ => ("", said),
+        };
+        Some(ErrorHeader {
+            location: location.to_string(),
+            message: message.to_string(),
+            coloured: line.contains(BAZEL_ERROR),
+            boilerplate: super::report::is_boilerplate(said),
+        })
+    }
+}
+
+/// Whether `head`, what an `ERROR: ` says before its first `: `, is where
+/// the error is: no space in it, and a line number after its first `:`
+/// (`pkg/BUILD.bazel:3:8`) or a BUILD file's path.
+fn is_location(head: &str) -> bool {
+    let line = head.split(':').nth(1).unwrap_or_default();
+    !head.contains(' ')
+        && ((!line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()))
+            || head.ends_with("/BUILD")
+            || head.ends_with("/BUILD.bazel"))
 }
 
 /// What starts a [`Block`].

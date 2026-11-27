@@ -335,11 +335,20 @@ pub fn quote(text: &str) -> String {
     }
 }
 
-/// Bazel's own closing lines, which a recap would only repeat.
-static BOILERPLATE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^ERROR: (?:Build did NOT complete successfully|Build failed\. Not running tests|command succeeded, but )")
-        .unwrap()
-});
+/// Bazel's own closing `ERROR:` lines, which say only that the build failed
+/// (a recap would only repeat them), by how their text after `ERROR: `
+/// starts.
+const BOILERPLATE: &[&str] = &[
+    "Build did NOT complete successfully",
+    "Build failed. Not running tests",
+    "command succeeded, but ",
+];
+
+/// Whether `message`, an `ERROR:` line's text after `ERROR: `, is one of
+/// Bazel's closing lines ([`BOILERPLATE`]).
+pub fn is_boilerplate(message: &str) -> bool {
+    BOILERPLATE.iter().any(|b| message.starts_with(b))
+}
 
 /// [`RecapErrors`]' `after` by default: lines after the first error for a
 /// recap to be worth printing, below which the error is likely still on
@@ -606,6 +615,7 @@ impl LineProcessor for CollectErrors {
 
     fn finish(&mut self) -> Option<Vec<u8>> {
         self.close();
+        self.kept.color = self.coloured;
         self.observations.set_blocks(std::mem::take(&mut self.kept));
         None
     }
@@ -834,7 +844,10 @@ impl LineProcessor for RecapErrors {
         // bazel's next progress line, so a recap may miss it, never invent one.
         let body = self.body.take();
         let held = self.held.take();
-        if line.kind == Kind::Header && text.starts_with("ERROR: ") && !BOILERPLATE.is_match(text) {
+        if line.kind == Kind::Header
+            && let Some(said) = text.strip_prefix("ERROR: ")
+            && !is_boilerplate(said)
+        {
             let short = EXIT_TAIL
                 .captures(text)
                 .map_or(text, |c| c.get(1).unwrap().as_str());
@@ -1220,6 +1233,62 @@ mod tests {
                 "error",
                 "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline'\n"
             )]
+        );
+    }
+
+    /// A kept `ERROR:` header says where and what, whether Bazel coloured
+    /// it and whether it is a closing line; a coloured console says so
+    /// (`color`), a `--color=no` one does not.
+    #[test]
+    fn an_error_header_says_where_and_what() {
+        use super::super::processors::ErrorHeader;
+        let header = |location: &str, message: &str, coloured, boilerplate| ErrorHeader {
+            location: location.into(),
+            message: message.into(),
+            coloured,
+            boilerplate,
+        };
+        let kept = collected(
+            "\x1b[32mINFO: \x1b[0mStarting\n\
+             \x1b[31m\x1b[1mERROR: \x1b[0m/ws/a/BUILD.bazel:3:8: Compiling a.cc failed: (Exit 1)\n\
+             \x1b[32m[1 / 9]\x1b[0m running\n\
+             \x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m/ws/b/BUILD: no such package\n\
+             \x1b[32m[1 / 9]\x1b[0m running\n\
+             \x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\n",
+            MAX_BLOCK_BYTES,
+            MAX_BLOCKS_BYTES,
+        );
+        assert!(kept.color);
+        let headers: Vec<_> = kept
+            .blocks
+            .iter()
+            .filter_map(|b| b.error_header())
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                header(
+                    "/ws/a/BUILD.bazel:3:8",
+                    "Compiling a.cc failed: (Exit 1)",
+                    true,
+                    false
+                ),
+                header("/ws/b/BUILD", "no such package", true, false),
+                header("", "Build did NOT complete successfully", true, true),
+            ]
+        );
+
+        let observations = Arc::new(super::super::processors::Observations::default());
+        collect(
+            CollectErrors::new(false, observations.clone()),
+            b"(12:00:01) ERROR: in r rule //rf:x: refused\n".to_vec(),
+        );
+        let kept = observations.blocks().expect("kept");
+        assert!(!kept.color, "--color=no");
+        assert_eq!(
+            kept.blocks[0].error_header(),
+            Some(header("", "in r rule //rf:x: refused", false, false)),
+            "a timestamp left out, `in r rule //rf:x` no location"
         );
     }
 

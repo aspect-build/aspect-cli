@@ -643,9 +643,14 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
 }
 
 /// What `observations` kept for the failure summary, as AXL reads it
-/// (`build.output_bazel_errors()`): `{"blocks": [{"kind", "text"}],
-/// "not_kept": n, "stdout": bool}`, None before the console has ended or
-/// without a `collect_errors()` stage.
+/// (`build.output_bazel_errors()`): `{"blocks": [{"kind", "text",
+/// "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
+/// "stdout": bool, "color": bool}`, each block whose first line is an `ERROR:` (an `error`, or a
+/// `tail` that is Bazel's next message) with that line's `location`,
+/// `message`, `coloured` and `boilerplate` too ([`ErrorHeader`]); None before the
+/// console has ended or without a `collect_errors()` stage.
+///
+/// [`ErrorHeader`]: bazel::console::processors::ErrorHeader
 pub(crate) fn bazel_blocks(
     observations: &bazel::console::processors::Observations,
 ) -> Option<serde_json::Value> {
@@ -654,13 +659,22 @@ pub(crate) fn bazel_blocks(
         .blocks
         .iter()
         .map(|b| {
-            serde_json::json!({"kind": b.kind.as_str(), "text": b.text, "body_len": b.body_len, "last_line": b.last_line})
+            let mut block = serde_json::json!({"kind": b.kind.as_str(), "text": b.text, "body_len": b.body_len, "last_line": b.last_line});
+            if let Some(h) = b.error_header() {
+                block["location"] = h.location.into();
+                block["message"] = h.message.into();
+                block["coloured"] = h.coloured.into();
+                block["boilerplate"] = h.boilerplate.into();
+            }
+            block
         })
         .collect();
     Some(serde_json::json!({
         "blocks": blocks,
         "not_kept": kept.not_kept,
+        "froms_not_kept": kept.froms_not_kept,
         "stdout": observations.stdout_shared(),
+        "color": kept.color,
     }))
 }
 
@@ -1902,6 +1916,26 @@ def _twice(ctx, line):
                 "{err}"
             );
         }
+    }
+
+    /// The collected errors of a replayed console: each `ERROR:` block with
+    /// what its header says, the counts of what the caps left out, and
+    /// whether Bazel coloured the console.
+    #[test]
+    fn collected_errors_carry_their_headers_and_the_consoles_colour() {
+        let got = crate::test::eval(
+            r#"
+r = bazel.output.bazel_errors("\x1b[31m\x1b[1mERROR: \x1b[0m/ws/a/BUILD:1:2: bad\n")
+b = r["blocks"][0]
+(b["kind"], b["location"], b["message"], b["coloured"], b["boilerplate"], r["color"], r["not_kept"], r["froms_not_kept"])
+"#,
+        )
+        .repr()
+        .unwrap();
+        assert_eq!(
+            got,
+            r#"("error", "/ws/a/BUILD:1:2", "bad", True, False, True, 0, 0)"#
+        );
     }
 
     #[test]
