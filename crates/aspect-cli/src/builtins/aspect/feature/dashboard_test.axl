@@ -1882,6 +1882,12 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the raw log a bare path", seen[-2].endswith("Bazel's raw log: /h/console.log"), True)
     _eq("through report_lines too", report_lines(dict(tested, log_path = "/h/console.log", closing = [], closing_tail = [], bes_base = "", bazel_uuid = "", update = {}), "t-9", True, linked = lambda l: "L")[-1], "L")
 
+    # At 60 columns, r44's 17 failures: every tab, the shown one whole
+    # (it lost its first letters to the tabs before it).
+    narrow = dict(kinds, tab = "failures", counts = dict(kinds["counts"], failures = ["//f:%d" % i for i in range(17)], failed_labels = {"//f:%d" % i: True for i in range(17)}), fails = [], root_causes = {"//b:b": ["//f:0"]}, logged_index = None, view = None)
+    top = [r for r in _visible(render(narrow, 60, 20)).split("\n") if r.startswith("┌─ Console")]
+    _eq("the shown tab whole at 60 columns", len(top) == 1 and "Failures ✗" in top[0], True)
+
     # Test excerpts, from real Bazel 9.3.3 test.log shapes (w44's //t
     # package): Bazel's preamble left out, the last attempt of the first
     # failed shard, the other shards a line each, a timeout's two lines, a

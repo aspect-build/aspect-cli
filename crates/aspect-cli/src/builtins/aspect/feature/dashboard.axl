@@ -4117,7 +4117,8 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
                 label = (" Tips " + _c(tips_role(state)) + "%d" % count + _RESET + " ") if count else (_c("muted") + " Tips " + _RESET)
             text += (_c("muted") + label + _RESET) if tab in muted else label
             continue
-        room = cols - at - 2 - (0 if len(tabs) == 1 else text_width("".join([" " + names[t] + " " for t in tabs if t != shown])))
+        after = tabs[tabs.index(shown) + 1:]
+        room = cols - at - 2 - text_width("".join([" " + names[t] + " " for t in after]))
         drawn = _shown_parts(parts, room)
         text += _c("active") + " "
         at += 1
