@@ -795,20 +795,41 @@ def actions_text(split: dict) -> list:
     share = " (%d%%)" % pct if pct != None else ""
     return ["%s · %s cache hits%s" % (actions, hits, share), "%s · %s hits%s" % (n, hits, share), actions, n]
 
-# The bar's segments, in order: glyph (each its own shape, apart without
-# colour), role, and the keys in `action_split` they sum. `rest` is the
-# rest of the done count while a build runs with only the execution log;
-# `failed` only a failed build's.
-_SEGMENTS = [
-    ("█", "accent", ["ran"]),
-    ("▓", "success", ["disk", "remote"]),
-    ("▒", "muted", ["local", "memory"]),
-    ("▌", "muted", ["other"]),
-    ("░", "subtle", ["internal"]),
-    ("╳", "error", ["failed"]),
-    ("○", "muted", ["not_run"]),
-    ("┈", "border", ["unreported"]),
+# The words of the actions up to date in Bazel's memory (its graph's
+# cleaned values), a cache hit, and of those Bazel counted done without
+# running them or checking its action cache (an identical action of another
+# target made their outputs, or an input failed), each here alone.
+MEMORY_WORD = "in memory"
+
+NOT_RUN_WORD = "skipped"
+
+# Each kind of action the bar and the Actions rows tell apart: its key in
+# `action_split`, its glyph (each its own shape, apart without colour), its
+# role and the words its part says.
+_ACTION_KINDS = [
+    ("ran", "█", "accent", "ok"),
+    ("failed", "╳", "error", "failed"),
+    ("memory", "▒", "muted", MEMORY_WORD),
+    ("local", "▒", "muted", "local action cache"),
+    ("disk", "▓", "success", "disk"),
+    ("remote", "▓", "success", "remote"),
+    ("not_run", "○", "muted", NOT_RUN_WORD),
+    ("internal", "░", "subtle", "internal"),
+    ("other", "▌", "muted", "other"),
 ]
+
+_KIND = {key: (glyph, role, words) for key, glyph, role, words in _ACTION_KINDS}
+
+def _part(key: str, n: int, how = "", glyph = None) -> tuple:
+    """An Actions row part of kind `key` (`_ACTION_KINDS`) counting `n`;
+    `glyph` where it shares its kind's with the part before it ("")."""
+    kind_glyph, role, words = _KIND[key]
+    return (kind_glyph if glyph == None else glyph, n, words, role, how)
+
+# The bar's segments, in order: glyph, role, and the keys in
+# `action_split` they sum; `unreported` the done count no event or log says
+# the kind of yet.
+_SEGMENTS = [(_KIND[keys[0]][0], _KIND[keys[0]][1], keys) for keys in (["ran"], ["disk", "remote"], ["local", "memory"], ["other"], ["internal"], ["failed"], ["not_run"])] + [("┈", "border", ["unreported"])]
 
 # A done count nothing tells apart: no execution log to read.
 _DONE = ("━", "")
@@ -917,31 +938,23 @@ def action_parts(split: dict) -> list:
     if not split["known"]:
         return [(_DONE[0], split["done"], "done", _DONE[1], "")] + remaining
     final = split["final"]
-    parts = [("█", split["ran"], "ok", "accent", "")]
+    parts = [_part("ran", split["ran"])]
     if split["failed"]:
-        parts.append(("╳", split["failed"], "failed", "error", ""))
+        parts.append(_part("failed", split["failed"]))
     if split.get("memory"):
-        parts.append(("▒", split["memory"], MEMORY_WORD, "muted", ""))
+        parts.append(_part("memory", split["memory"]))
     if final or split["local"]:
-        parts.append(("▒" if not split.get("memory") else "", split["local"], "local action cache", "muted", "estimate" if split.get("estimated") else ""))
-    glyph = "▓"
+        parts.append(_part("local", split["local"], "estimate" if split.get("estimated") else "", "" if split.get("memory") else None))
+    glyph = None
     for key, on in (("disk", split["disk_on"]), ("remote", split["remote_on"])):
         if split[key] or (final and on):
-            parts.append((glyph, split[key], key, "success", "" if split[key] else "dim"))
+            parts.append(_part(key, split[key], "" if split[key] else "dim", glyph))
             glyph = ""
-    parts.append(("○", split.get("not_run", 0), NOT_RUN_WORD, "muted", ""))
-    parts.append(("░", split["internal"], "internal", "subtle", ""))
-    parts.append(("▌", split["other"], "other", "muted", ""))
+    parts.append(_part("not_run", split.get("not_run", 0)))
+    parts.append(_part("internal", split["internal"]))
+    parts.append(_part("other", split["other"]))
     parts.append(("?", split["unreported"], "unreported", "", "muted"))
     return [p for p in parts if p[1] or p[4] == "dim" or (p[2] == "local action cache" and final)] + remaining
-
-# The words of the actions up to date in Bazel's memory (its graph's
-# cleaned values), a cache hit, and of those Bazel counted done without
-# running them or checking its action cache (an identical action of another
-# target made their outputs, or an input failed), each here alone.
-MEMORY_WORD = "in memory"
-
-NOT_RUN_WORD = "skipped"
 
 # The two groups of parts, each with its subtotal on its header: what ran,
 # and the cache hits.
@@ -978,7 +991,7 @@ def _part_text(part: tuple, level: int) -> tuple:
 _PART_ORDER = ["done", "ok", "failed", MEMORY_WORD, "local action cache", "disk", "remote", NOT_RUN_WORD, "internal", "other", "unreported", "running", "pending"]
 
 # The live parts that keep their place at 0 once shown: glyph and role.
-_HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", ""), "internal": ("░", "subtle")}
+_HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", ""), "internal": _KIND["internal"][:2]}
 
 # What goes first where the Actions rows have no room for every part: what
 # counts nothing (the end's `0 local` too) and the caches with no hits,
