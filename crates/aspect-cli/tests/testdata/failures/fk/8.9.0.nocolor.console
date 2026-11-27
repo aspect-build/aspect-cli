@@ -1,26 +1,16 @@
 Computing main repo mapping: 
 Loading: 
 Loading: 0 packages loaded
+WARNING: Build option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
 Analyzing: 9 targets (0 packages loaded, 0 targets configured)
 Analyzing: 9 targets (0 packages loaded, 0 targets configured)
-[0 / 1] checking cached actions
-INFO: Analyzed 9 targets (0 packages loaded, 0 targets configured).
+
+INFO: Analyzed 9 targets (5 packages loaded, 16 targets configured).
 ERROR: ${WORKSPACE}/fk/BUILD.bazel:7:8: Executing genrule //fk:loc1 failed: (Exit 1): bash failed: error executing Genrule command (from target //fk:loc1) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo same >&2; exit 1'
 same
-ERROR: ${WORKSPACE}/fk/BUILD.bazel:8:8: Executing genrule //fk:loc2 failed: (Exit 1): bash failed: error executing Genrule command (from target //fk:loc2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo same >&2; exit 1'
-same
-ERROR: ${WORKSPACE}/fk/BUILD.bazel:3:8: Executing genrule //fk:crlf failed: (Exit 2): bash failed: error executing Genrule command (from target //fk:crlf) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''crlf one\r\ncrlf two\r\n'\'' >&2; exit 2'
+ERROR: ${WORKSPACE}/fk/BUILD.bazel:5:8: Executing genrule //fk:outonly failed: (Exit 4): bash failed: error executing Genrule command (from target //fk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''only on stdout'\''; exit 4'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
-crlf one
-crlf two
-ERROR: ${WORKSPACE}/fk/BUILD.bazel:6:8: Executing genrule //fk:empty failed: (Exit 5): bash failed: error executing Genrule command (from target //fk:empty) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 5'
-
-Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
-ERROR: ${WORKSPACE}/fk/BUILD.bazel:4:8: Executing genrule //fk:both failed: (Exit 3): bash failed: error executing Genrule command (from target //fk:both) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''to stdout first'\''; echo '\''to stderr second'\'' >&2; echo '\''stdout again'\''; exit 3'
-
-Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
-to stderr second
 ERROR: ${WORKSPACE}/fk/BUILD.bazel:9:8: Executing genrule //fk:cr failed: (Exit 6): bash failed: error executing Genrule command (from target //fk:cr) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''progress 10%%\rprogress 100%%\nreal error\n'\'' >&2; exit 6'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
@@ -32,14 +22,28 @@ Use --sandbox_debug to see verbose messages from the sandbox and retain the sand
 ERROR: /elsewhere/BUILD:1:1: Executing genrule //fk:ghost failed: (Exit 9): fake
 ERROR: coloured fake from liar
 FAIL: //fk:phantom (see /tmp/nowhere/test.log)
-ERROR: ${WORKSPACE}/fk/BUILD.bazel:5:8: Executing genrule //fk:outonly failed: (Exit 4): bash failed: error executing Genrule command (from target //fk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''only on stdout'\''; exit 4'
+ERROR: ${WORKSPACE}/fk/BUILD.bazel:6:8: Executing genrule //fk:empty failed: (Exit 5): bash failed: error executing Genrule command (from target //fk:empty) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 5'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ERROR: ${WORKSPACE}/fk/BUILD.bazel:8:8: Executing genrule //fk:loc2 failed: (Exit 1): bash failed: error executing Genrule command (from target //fk:loc2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo same >&2; exit 1'
+same
+ERROR: ${WORKSPACE}/fk/BUILD.bazel:4:8: Executing genrule //fk:both failed: (Exit 3): bash failed: error executing Genrule command (from target //fk:both) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''to stdout first'\''; echo '\''to stderr second'\'' >&2; echo '\''stdout again'\''; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+to stderr second
+ERROR: ${WORKSPACE}/fk/BUILD.bazel:3:8: Executing genrule //fk:crlf failed: (Exit 2): bash failed: error executing Genrule command (from target //fk:crlf) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''crlf one\r\ncrlf two\r\n'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+crlf one
+crlf two
+INFO: From Executing genrule //fk:okliar:
+ERROR: success but says error
+ERROR: coloured fake from okliar
 INFO: Build succeeded for only 1 of 9 top-level targets
 INFO: Found 9 targets...
 Use --verbose_failures to see the command lines of failed build steps.
-INFO: Elapsed time: 0.083s, Critical Path: 0.03s
-INFO: 9 processes: 9 internal.
+INFO: Elapsed time: 0.116s, Critical Path: 0.04s
+INFO: 10 processes: 9 internal, 1 darwin-sandbox.
 ERROR: Build did NOT complete successfully
 FAILED: 
 INFO: Build Event Protocol files produced successfully.

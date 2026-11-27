@@ -1,1 +1,1 @@
-error: BBB mismatch in b
+/bin/bash: $@: ambiguous redirect

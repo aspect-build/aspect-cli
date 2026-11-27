@@ -1,0 +1,12 @@
+exit 1
+── Failures (1) ──
+✗ //ct:nlfail  Genrule · exit 2 · ct/BUILD.bazel:4:8
+  │ fail out
+  │ ERROR: held in failure
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+4 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //ct:nlfail  Genrule · exit 2 · ct/BUILD.bazel:4:8
+  │ fail out
+  │ ERROR: held in failure

@@ -1,2 +1,3 @@
-crlf one
-crlf two
+ERROR: /elsewhere/BUILD:1:1: Executing genrule //fk:ghost failed: (Exit 9): fake
+[31m[1mERROR: [0mcoloured fake from liar
+FAIL: //fk:phantom (see /tmp/nowhere/test.log)

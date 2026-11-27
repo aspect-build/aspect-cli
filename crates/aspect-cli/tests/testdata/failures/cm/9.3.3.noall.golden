@@ -1,0 +1,44 @@
+exit 1
+── Failures (4) ──
+✗ //cm:failwarn  Genrule · exit 2 · cm/BUILD.bazel:3:8
+  │ fw before
+  │ WARNING: fw tool warn
+  │ fw after
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //cm:failinfo  Genrule · exit 3 · cm/BUILD.bazel:4:8
+  │ fi before
+  │ INFO: From fake thing:
+  │ ERROR: fi fake inside
+  │ fi after
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-7
+
+✗ //cm:failred  Genrule · exit 5 · cm/BUILD.bazel:9:8
+  │ red error text
+  │ ERROR: fr fake last
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-9
+
+✗ //cm:faildebug  Genrule · exit 4 · cm/BUILD.bazel:8:8
+  │ fd one
+  │ DEBUG: fd debug line
+  │ fd three
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-10
+5 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.noall.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //cm:failwarn  Genrule · exit 2 · cm/BUILD.bazel:3:8
+  │ fw before
+  │ WARNING: fw tool warn
+  │ fw after
+✗ //cm:failinfo  Genrule · exit 3 · cm/BUILD.bazel:4:8
+  │ fi before
+  │ INFO: From fake thing:
+  │ ERROR: fi fake inside
+  │ fi after
+✗ //cm:failred  Genrule · exit 5 · cm/BUILD.bazel:9:8
+  │ red error text
+  │ ERROR: fr fake last
+✗ //cm:faildebug  Genrule · exit 4 · cm/BUILD.bazel:8:8
+  │ fd one
+  │ DEBUG: fd debug line
+  │ fd three

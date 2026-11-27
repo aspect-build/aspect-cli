@@ -1,17 +1,18 @@
 [32mComputing main repo mapping:[0m 
 [1A[K[32mLoading:[0m 
 [1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 5 targets (0 packages loaded)
 [1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
 [1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
 
-[1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 0 targets configured).
-[32m[0 / 5][0m 5 actions, 1 running
+[1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 5 targets configured).
+[32m[1 / 5][0m 4 actions running
     Executing genrule //actk:outonly; 0s darwin-sandbox
     Executing genrule //actk:silent; 0s darwin-sandbox
     Executing genrule //actk:loc; 0s local
-    [Prepa] BazelWorkspaceStatusAction stable-status.txt
-    [Sched] Executing genrule //actk:sbx
-[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:3:8: Executing genrule //actk:loc failed: (Exit 7): bash failed: error executing Genrule command (from genrule rule target //actk:loc) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''local action broke'\'' >&2; exit 7'
+    Executing genrule //actk:sbx; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:3:8: Executing genrule //actk:loc failed: (Exit 7): bash failed: error executing Genrule command (from genrule rule target //actk:loc) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''local action broke'\'' >&2; exit 7'
 local action broke
 [32m[1 / 6][0m 5 actions running
     Executing genrule //actk:outonly; 0s darwin-sandbox
@@ -48,7 +49,7 @@ sandboxed action broke
 [32m[6 / 6][0m no actions running
 [1A[KUse --verbose_failures to see the command lines of failed build steps.
 [32m[6 / 6][0m no actions running
-[1A[K[32mINFO: [0mElapsed time: 0.071s, Critical Path: 0.02s
+[1A[K[32mINFO: [0mElapsed time: 0.073s, Critical Path: 0.02s
 [32m[6 / 6][0m no actions running
 [1A[K[32mINFO: [0m6 processes: 6 internal.
 [32m[6 / 6][0m no actions running

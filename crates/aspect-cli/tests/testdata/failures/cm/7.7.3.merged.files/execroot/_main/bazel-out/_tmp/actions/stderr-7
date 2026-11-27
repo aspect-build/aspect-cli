@@ -1,0 +1,4 @@
+fi before
+[32mINFO: [0mFrom fake thing:
+[31m[1mERROR: [0mfi fake inside
+fi after

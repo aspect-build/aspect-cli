@@ -1,0 +1,126 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 9 targets (0 packages loaded)
+[1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+    currently loading: @@bazel_tools//tools
+
+[1A[K[1A[K[1A[K[32mINFO: [0mAnalyzed 9 targets (5 packages loaded, 16 targets configured).
+[32m[1 / 9][0m 8 actions running
+    Executing genrule //cm:okdup1; 0s darwin-sandbox
+    Executing genrule //cm:failred; 0s darwin-sandbox
+    Executing genrule //cm:okdup2; 0s darwin-sandbox
+    Executing genrule //cm:failinfo; 0s darwin-sandbox
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:failwarn; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //cm:okdup2:
+dup line
+[31m[1mERROR: [0mdup tail
+[32m[1 / 10][0m 9 actions running
+    Executing genrule //cm:okdup1; 0s darwin-sandbox
+    Executing genrule //cm:failred; 0s darwin-sandbox
+    Executing genrule //cm:okdup2; 0s darwin-sandbox
+    Executing genrule //cm:failinfo; 0s darwin-sandbox
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:failwarn; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //cm:okdup1:
+dup line
+[31m[1mERROR: [0mdup tail
+[32m[1 / 10][0m 8 actions running
+    Executing genrule //cm:okdup1; 0s darwin-sandbox
+    Executing genrule //cm:failred; 0s darwin-sandbox
+    Executing genrule //cm:failinfo; 0s darwin-sandbox
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:failwarn; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cm/BUILD.bazel:3:8: Executing genrule //cm:failwarn failed: (Exit 2): bash failed: error executing Genrule command (from target //cm:failwarn) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''fw before'\'' >&2; printf '\''\033[35mWARNING: \033[0mfw tool warn\n'\'' >&2; echo '\''fw after'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+fw before
+[35mWARNING: [0mfw tool warn
+fw after
+[32m[2 / 10][0m 7 actions running
+    Executing genrule //cm:failred; 0s darwin-sandbox
+    Executing genrule //cm:failinfo; 0s darwin-sandbox
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:failwarn; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cm/BUILD.bazel:9:8: Executing genrule //cm:failred failed: (Exit 5): bash failed: error executing Genrule command (from target //cm:failred) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''\033[31mred error text\033[0m\n'\'' >&2; printf '\''\033[31m\033[1mERROR: \033[0mfr fake last\n'\'' >&2; exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[31mred error text[0m
+[31m[1mERROR: [0mfr fake last
+[32m[4 / 10][0m 6 actions running
+    Executing genrule //cm:failred; 0s darwin-sandbox
+    Executing genrule //cm:failinfo; 0s darwin-sandbox
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cm/BUILD.bazel:4:8: Executing genrule //cm:failinfo failed: (Exit 3): bash failed: error executing Genrule command (from target //cm:failinfo) /bin/bash -c ... (remaining 1 argument skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+fi before
+[32mINFO: [0mFrom fake thing:
+[31m[1mERROR: [0mfi fake inside
+fi after
+[32m[5 / 10][0m 5 actions running
+    Executing genrule //cm:failinfo; 0s darwin-sandbox
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cm/BUILD.bazel:8:8: Executing genrule //cm:faildebug failed: (Exit 4): bash failed: error executing Genrule command (from target //cm:faildebug) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''fd one'\'' >&2; echo '\''DEBUG: fd debug line'\'' >&2; echo '\''fd three'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+fd one
+DEBUG: fd debug line
+fd three
+[32m[6 / 10][0m 4 actions running
+    Executing genrule //cm:faildebug; 0s darwin-sandbox
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //cm:okwarn:
+warn one
+[35mWARNING: [0mtool warn
+[31m[1mERROR: [0mafter warn fake
+warn four
+[32m[7 / 10][0m 3 actions running
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okwarn; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //cm:okcr:
+spin 1spin 2done
+[31m[1mERROR: [0mcr tail fake
+[32m[8 / 10][0m 2 actions running
+    Executing genrule //cm:okcr; 0s darwin-sandbox
+    Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //cm:okmid:
+mid one
+[31m[1mERROR: [0mmid fake
+mid three
+[32m[9 / 10][0m Executing genrule //cm:okmid; 0s darwin-sandbox
+[1A[K[32mINFO: [0mBuild succeeded for only 5 of 9 top-level targets
+[32m[10 / 10][0m no actions running
+[1A[K[32mINFO: [0mFound 9 targets...
+[32m[10 / 10][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.104s, Critical Path: 0.04s
+[32m[10 / 10][0m no actions running
+[1A[K[32mINFO: [0m10 processes: 5 internal, 5 darwin-sandbox.
+[32m[10 / 10][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

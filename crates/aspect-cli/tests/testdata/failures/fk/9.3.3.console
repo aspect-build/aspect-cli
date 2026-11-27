@@ -1,92 +1,94 @@
 [32mComputing main repo mapping:[0m 
 [1A[K[32mLoading:[0m 
 [1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 9 targets (0 packages loaded)
 [1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
 [1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
-[32m[0 / 1][0m checking cached actions
-[1A[K[1A[K[32mINFO: [0mAnalyzed 9 targets (0 packages loaded, 0 targets configured).
-[32m[0 / 8][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 9 targets (0 packages loaded, 9 targets configured).
+[32m[0 / 9][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
 [1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:6:8: Executing genrule //fk:empty failed: (Exit 5): bash failed: error executing Genrule command (from genrule rule target //fk:empty) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 5'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 [32m[1 / 10][0m 9 actions running
-    Executing genrule //fk:both; 0s darwin-sandbox
-    Executing genrule //fk:liar; 0s darwin-sandbox
-    Executing genrule //fk:crlf; 0s darwin-sandbox
-    Executing genrule //fk:outonly; 0s darwin-sandbox
     Executing genrule //fk:okliar; 0s darwin-sandbox
-    Executing genrule //fk:cr; 0s darwin-sandbox
     Executing genrule //fk:loc1; 0s local
-    Executing genrule //fk:empty; 0s darwin-sandbox ...
-[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:5:8: Executing genrule //fk:outonly failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //fk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''only on stdout'\''; exit 4'
-
-Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
-[32m[2 / 10][0m 8 actions running
-    Executing genrule //fk:both; 0s darwin-sandbox
-    Executing genrule //fk:liar; 0s darwin-sandbox
     Executing genrule //fk:crlf; 0s darwin-sandbox
-    Executing genrule //fk:outonly; 0s darwin-sandbox
-    Executing genrule //fk:okliar; 0s darwin-sandbox
-    Executing genrule //fk:cr; 0s darwin-sandbox
-    Executing genrule //fk:loc1; 0s local
     Executing genrule //fk:loc2; 0s local
+    Executing genrule //fk:outonly; 0s darwin-sandbox
+    Executing genrule //fk:empty; 0s darwin-sandbox
+    Executing genrule //fk:cr; 0s darwin-sandbox
+    Executing genrule //fk:liar; 0s darwin-sandbox ...
 [1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:1:8: Executing genrule //fk:liar failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //fk:liar) /bin/bash -c ... (remaining 1 argument skipped)
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ERROR: /elsewhere/BUILD:1:1: Executing genrule //fk:ghost failed: (Exit 9): fake
 [31m[1mERROR: [0mcoloured fake from liar
 FAIL: //fk:phantom (see /tmp/nowhere/test.log)
-[32m[3 / 10][0m 7 actions running
-    Executing genrule //fk:both; 0s darwin-sandbox
-    Executing genrule //fk:liar; 0s darwin-sandbox
-    Executing genrule //fk:crlf; 0s darwin-sandbox
+[32m[2 / 10][0m 8 actions running
     Executing genrule //fk:okliar; 0s darwin-sandbox
-    Executing genrule //fk:cr; 0s darwin-sandbox
     Executing genrule //fk:loc1; 0s local
+    Executing genrule //fk:crlf; 0s darwin-sandbox
     Executing genrule //fk:loc2; 0s local
+    Executing genrule //fk:outonly; 0s darwin-sandbox
+    Executing genrule //fk:cr; 0s darwin-sandbox
+    Executing genrule //fk:liar; 0s darwin-sandbox
+    Executing genrule //fk:both; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:8:8: Executing genrule //fk:loc2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //fk:loc2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo same >&2; exit 1'
+same
+[32m[3 / 10][0m 7 actions running
+    Executing genrule //fk:okliar; 0s darwin-sandbox
+    Executing genrule //fk:loc1; 0s local
+    Executing genrule //fk:crlf; 0s darwin-sandbox
+    Executing genrule //fk:loc2; 0s local
+    Executing genrule //fk:outonly; 0s darwin-sandbox
+    Executing genrule //fk:cr; 0s darwin-sandbox
+    Executing genrule //fk:both; 0s darwin-sandbox
 [1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:7:8: Executing genrule //fk:loc1 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //fk:loc1) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo same >&2; exit 1'
 same
 [32m[4 / 10][0m 6 actions running
-    Executing genrule //fk:both; 0s darwin-sandbox
-    Executing genrule //fk:crlf; 0s darwin-sandbox
     Executing genrule //fk:okliar; 0s darwin-sandbox
-    Executing genrule //fk:cr; 0s darwin-sandbox
     Executing genrule //fk:loc1; 0s local
-    Executing genrule //fk:loc2; 0s local
-[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:4:8: Executing genrule //fk:both failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //fk:both) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''to stdout first'\''; echo '\''to stderr second'\'' >&2; echo '\''stdout again'\''; exit 3'
-
-Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
-to stderr second
-[32m[5 / 10][0m 5 actions running
-    Executing genrule //fk:both; 0s darwin-sandbox
     Executing genrule //fk:crlf; 0s darwin-sandbox
-    Executing genrule //fk:okliar; 0s darwin-sandbox
+    Executing genrule //fk:outonly; 0s darwin-sandbox
     Executing genrule //fk:cr; 0s darwin-sandbox
-    Executing genrule //fk:loc2; 0s local
-[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:3:8: Executing genrule //fk:crlf failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //fk:crlf) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''crlf one\r\ncrlf two\r\n'\'' >&2; exit 2'
+    Executing genrule //fk:both; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:3:8: Executing genrule //fk:crlf failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //fk:crlf) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''crlf one\r\ncrlf two\r\n'\'' >&2; exit 2'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 crlf one
 crlf two
-[32m[6 / 10][0m 4 actions running
+[32m[5 / 10][0m 5 actions running
+    Executing genrule //fk:okliar; 0s darwin-sandbox
     Executing genrule //fk:crlf; 0s darwin-sandbox
-    Executing genrule //fk:okliar; 0s darwin-sandbox
+    Executing genrule //fk:outonly; 0s darwin-sandbox
     Executing genrule //fk:cr; 0s darwin-sandbox
-    Executing genrule //fk:loc2; 0s local
-[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:8:8: Executing genrule //fk:loc2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //fk:loc2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo same >&2; exit 1'
-same
-[32m[7 / 10][0m 3 actions running
+    Executing genrule //fk:both; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:5:8: Executing genrule //fk:outonly failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //fk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''only on stdout'\''; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[32m[6 / 10][0m 4 actions running
     Executing genrule //fk:okliar; 0s darwin-sandbox
+    Executing genrule //fk:outonly; 0s darwin-sandbox
     Executing genrule //fk:cr; 0s darwin-sandbox
-    Executing genrule //fk:loc2; 0s local
-[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:9:8: Executing genrule //fk:cr failed: (Exit 6): bash failed: error executing Genrule command (from genrule rule target //fk:cr) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''progress 10%%\rprogress 100%%\nreal error\n'\'' >&2; exit 6'
+    Executing genrule //fk:both; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:9:8: Executing genrule //fk:cr failed: (Exit 6): bash failed: error executing Genrule command (from genrule rule target //fk:cr) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''progress 10%%\rprogress 100%%\nreal error\n'\'' >&2; exit 6'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 progress 10%progress 100%
 real error
-[32m[8 / 10][0m 2 actions running
+[32m[7 / 10][0m 3 actions running
     Executing genrule //fk:okliar; 0s darwin-sandbox
     Executing genrule //fk:cr; 0s darwin-sandbox
+    Executing genrule //fk:both; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/fk/BUILD.bazel:4:8: Executing genrule //fk:both failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //fk:both) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''to stdout first'\''; echo '\''to stderr second'\'' >&2; echo '\''stdout again'\''; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+to stderr second
+[32m[8 / 10][0m 2 actions running
+    Executing genrule //fk:okliar; 0s darwin-sandbox
+    Executing genrule //fk:both; 0s darwin-sandbox
 [1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //fk:okliar:
 ERROR: success but says error
 [31m[1mERROR: [0mcoloured fake from okliar
@@ -97,7 +99,7 @@ ERROR: success but says error
 [32m[10 / 10][0m no actions running
 [1A[KUse --verbose_failures to see the command lines of failed build steps.
 [32m[10 / 10][0m no actions running
-[1A[K[32mINFO: [0mElapsed time: 0.329s, Critical Path: 0.22s
+[1A[K[32mINFO: [0mElapsed time: 0.429s, Critical Path: 0.31s
 [32m[10 / 10][0m no actions running
 [1A[K[32mINFO: [0m10 processes: 9 internal, 1 darwin-sandbox.
 [32m[10 / 10][0m no actions running
