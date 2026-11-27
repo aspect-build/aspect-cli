@@ -373,6 +373,10 @@ pub struct Config {
     /// recoloured with ([`recolour`]), where colour is shown; None styles
     /// and recolours nothing.
     pub palette: Option<Arc<aspect_theme::Palette>>,
+    /// The most of an action's stdout or stderr Bazel relays to the console
+    /// ([`report::relay_cap`] of the build's flags), which the error
+    /// collector keeps and reports; None for all of it.
+    pub relay_cap: Option<u64>,
 }
 
 impl Config {
@@ -394,6 +398,7 @@ impl Config {
             link_text: false,
             colour: false,
             palette: None,
+            relay_cap: Some(report::BAZEL_UI_MAX_STDOUTERR_BYTES),
         }
     }
 
@@ -547,10 +552,9 @@ impl Config {
             .iter()
             .any(|s| matches!(s, Stage::CollectErrors))
         {
-            chain.push(Box::new(report::CollectErrors::new(
-                self.pty,
-                observations.clone(),
-            )));
+            chain.push(Box::new(
+                report::CollectErrors::new(self.pty, observations.clone()).relaying(self.relay_cap),
+            ));
         }
         // First, so every stage after it, a user's `rewrite` included, sees
         // the theme's colours. Each record is classified from Bazel's own

@@ -1526,6 +1526,7 @@ impl Build {
         // stages folded beside it; without a folder, in a private temp one,
         // and with neither, none: never at a name another user could take.
         let console = console.map(|mut config| {
+            config.relay_cap = bazel::console::report::relay_cap(&flags, verb);
             if config.keeps_log() {
                 config.log = history_dir
                     .clone()
@@ -2243,7 +2244,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// What a `collect_errors()` stage kept of the console for the failure
     /// summary, once the console has ended: `{"blocks": [{"kind", "text",
     /// "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
-    /// "stdout": bool, "color": bool}`, each block one of Bazel's own
+    /// "stdout": bool, "color": bool, "relay_cap": n}`, each block one of Bazel's own
     /// `ERROR:` messages (`error`), an action's `INFO: From …:` header with
     /// its body's length (`body_len`) and last line (`last_line`) (`from`),
     /// or a record that may be an output's held last line (`tail`), with
@@ -2255,8 +2256,11 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// the bytes of Bazel's own the caps left out and `froms_not_kept` the
     /// `INFO: From` blocks; `stdout` says whether the console's stream
     /// carried Bazel's stdout too (a terminal both share), `color` whether
-    /// Bazel coloured its console (not `--color=no`). None without such a
-    /// stage, or before the console ends.
+    /// Bazel coloured its console (not `--color=no`), and `relay_cap` the
+    /// most of an action's stdout or stderr Bazel relays to it (the build's
+    /// `--experimental_ui_max_stdouterr_bytes`, else Bazel's default of 1
+    /// MiB; None for no limit). None without such a stage, or before the
+    /// console ends.
     fn output_bazel_errors<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,

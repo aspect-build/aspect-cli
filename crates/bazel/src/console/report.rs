@@ -387,10 +387,48 @@ static KEPT_NOTE: std::sync::LazyLock<Regex> =
 static BARE_STATUS: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^[A-Z]+:$").unwrap());
 
-/// The most a [`CollectErrors`] block keeps: Bazel's own cap on the action
-/// output it relays (`--experimental_ui_max_stdouterr_bytes`, 1 MiB by
-/// default), and room for its message.
-pub const MAX_BLOCK_BYTES: usize = 1024 * 1024 + 64 * 1024;
+/// Bazel's default `--experimental_ui_max_stdouterr_bytes`: the most of an
+/// action's stdout or stderr Bazel relays to its console, past which it
+/// writes a line saying it skipped that file instead.
+pub const BAZEL_UI_MAX_STDOUTERR_BYTES: u64 = 1024 * 1024;
+
+/// The flag that sets what Bazel relays of an action's output
+/// ([`BAZEL_UI_MAX_STDOUTERR_BYTES`]).
+pub const UI_MAX_STDOUTERR_FLAG: &str = "--experimental_ui_max_stdouterr_bytes";
+
+/// The most of an action's stdout or stderr Bazel relays to the console of
+/// a `command` given `flags`: the last value they give
+/// [`UI_MAX_STDOUTERR_FLAG`] ([`crate::rc::last_flag_value`]), else Bazel's
+/// default; None for no limit (`-1`). A value that is no number is
+/// Bazel's to refuse, and leaves the default.
+pub fn relay_cap(flags: &[String], command: &str) -> Option<u64> {
+    let given = crate::rc::last_flag_value(flags, UI_MAX_STDOUTERR_FLAG, command)
+        .and_then(|v| v.trim().parse::<i64>().ok());
+    match given {
+        Some(n) if n < 0 => None,
+        Some(n) => Some(n as u64),
+        None => Some(BAZEL_UI_MAX_STDOUTERR_BYTES),
+    }
+}
+
+/// What a [`CollectErrors`] block keeps beyond what Bazel relays of an
+/// action's output: room for its message.
+const BLOCK_ROOM: usize = 64 * 1024;
+
+/// The most a [`CollectErrors`] block keeps: what Bazel relays of an
+/// action's output ([`relay_cap`], all of it with no limit) and room for
+/// its message.
+fn block_cap(relay: Option<u64>) -> usize {
+    relay.map_or(MAX_BLOCKS_BYTES, |n| {
+        (n as usize)
+            .saturating_add(BLOCK_ROOM)
+            .min(MAX_BLOCKS_BYTES)
+    })
+}
+
+/// The most a [`CollectErrors`] block keeps by default
+/// ([`BAZEL_UI_MAX_STDOUTERR_BYTES`] relayed).
+pub const MAX_BLOCK_BYTES: usize = BAZEL_UI_MAX_STDOUTERR_BYTES as usize + BLOCK_ROOM;
 
 /// The most every [`CollectErrors`] block together keeps.
 pub const MAX_BLOCKS_BYTES: usize = 64 * 1024 * 1024;
@@ -418,9 +456,10 @@ pub const MAX_FROM_BYTES: usize = 16 * 1024 * 1024;
 /// `INFO: From …:` output it keeps the header, the body's length and its
 /// last line (up to [`MAX_HELD_LINE_BYTES`]), never the body, so a chatty
 /// build costs no more than its errors, within [`MAX_FROM_BYTES`]. One of
-/// Bazel's blocks keeps at most [`MAX_BLOCK_BYTES`] and all of them
-/// [`MAX_BLOCKS_BYTES`]; what of Bazel's the caps leave out is counted
-/// ([`BazelBlocks::not_kept`]). A tail whose last record ended in a bare
+/// Bazel's blocks keeps at most what Bazel relays of an action's output
+/// ([`CollectErrors::relaying`], [`BAZEL_UI_MAX_STDOUTERR_BYTES`] by
+/// default) and room for its message, and all of them [`MAX_BLOCKS_BYTES`];
+/// what of Bazel's the caps leave out is counted ([`BazelBlocks::not_kept`]). A tail whose last record ended in a bare
 /// `\r` goes on with the next record when no redraw came between: Bazel
 /// ends a held line only with the newline it adds. It writes
 /// nothing, and reads each record as Bazel wrote it
@@ -437,8 +476,11 @@ pub struct CollectErrors {
     kept: super::processors::BazelBlocks,
     bytes: usize,
     from_bytes: usize,
-    /// [`MAX_BLOCK_BYTES`] and [`MAX_BLOCKS_BYTES`], but in a test.
+    /// The most one block and all of them keep: [`block_cap`] and
+    /// [`MAX_BLOCKS_BYTES`], but in a test.
     caps: (usize, usize),
+    /// What Bazel relays of an action's output ([`relay_cap`]).
+    relay_cap: Option<u64>,
     /// [`MAX_FROM_BYTES`], but in a test.
     from_cap: usize,
     /// Whether Bazel has coloured a line yet.
@@ -472,11 +514,21 @@ impl CollectErrors {
             bytes: 0,
             from_bytes: 0,
             caps: (MAX_BLOCK_BYTES, MAX_BLOCKS_BYTES),
+            relay_cap: Some(BAZEL_UI_MAX_STDOUTERR_BYTES),
             from_cap: MAX_FROM_BYTES,
             coloured: false,
             after_block: false,
             observations,
         }
+    }
+
+    /// This collector for a console where Bazel relays `cap` bytes of an
+    /// action's stdout or stderr (None: all of it), each block keeping as
+    /// much and room for its message.
+    pub fn relaying(mut self, cap: Option<u64>) -> Self {
+        self.relay_cap = cap;
+        self.caps.0 = block_cap(cap);
+        self
     }
 
     /// This collector with its caps at `block` and `all` bytes.
@@ -616,6 +668,7 @@ impl LineProcessor for CollectErrors {
     fn finish(&mut self) -> Option<Vec<u8>> {
         self.close();
         self.kept.color = self.coloured;
+        self.kept.relay_cap = self.relay_cap;
         self.observations.set_blocks(std::mem::take(&mut self.kept));
         None
     }
@@ -1234,6 +1287,70 @@ mod tests {
                 "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline'\n"
             )]
         );
+    }
+
+    /// What Bazel relays of an action's output: the last value the flags
+    /// give, an rc entry's for the command too; Bazel's default without
+    /// one; no limit for `-1`.
+    #[test]
+    fn the_relay_cap_is_the_flags_last_word() {
+        let flags = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(relay_cap(&[], "build"), Some(BAZEL_UI_MAX_STDOUTERR_BYTES));
+        assert_eq!(
+            relay_cap(
+                &flags(&[
+                    "--experimental_ui_max_stdouterr_bytes=10",
+                    "--experimental_ui_max_stdouterr_bytes=20"
+                ]),
+                "build"
+            ),
+            Some(20)
+        );
+        assert_eq!(
+            relay_cap(
+                &flags(&["--experimental_ui_max_stdouterr_bytes=-1"]),
+                "test"
+            ),
+            None
+        );
+        assert_eq!(
+            relay_cap(
+                &flags(&["--default_override=0:build=--experimental_ui_max_stdouterr_bytes=7"]),
+                "build"
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            relay_cap(
+                &flags(&["--experimental_ui_max_stdouterr_bytes=x"]),
+                "build"
+            ),
+            Some(BAZEL_UI_MAX_STDOUTERR_BYTES)
+        );
+    }
+
+    /// A block keeps what Bazel relays and room for its message: a smaller
+    /// relay cap counts the rest as not kept, and the cap is reported.
+    #[test]
+    fn a_block_keeps_what_bazel_relays() {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let body = "x".repeat(100);
+        let input = format!(
+            "ERROR: a failed\n{}\n",
+            vec![body.as_str(); 2000].join("\n")
+        );
+        collect(
+            CollectErrors::new(false, observations.clone()).relaying(Some(0)),
+            input.into_bytes(),
+        );
+        let kept = observations.blocks().expect("kept");
+        assert_eq!(kept.relay_cap, Some(0));
+        assert!(
+            kept.blocks[0].text.len() <= BLOCK_ROOM,
+            "{}",
+            kept.blocks[0].text.len()
+        );
+        assert!(kept.not_kept > 0);
     }
 
     /// A kept `ERROR:` header says where and what, whether Bazel coloured

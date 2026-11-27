@@ -365,6 +365,9 @@ pub struct BazelBlocks {
     /// Whether Bazel coloured its console: a line in its colours came, so
     /// it was not run with `--color=no`.
     pub color: bool,
+    /// The most of an action's stdout or stderr Bazel relayed to the
+    /// console ([`crate::console::report::relay_cap`]); None for all of it.
+    pub relay_cap: Option<u64>,
 }
 
 /// One kept block: what starts it ([`BlockKind`]), and its text: its

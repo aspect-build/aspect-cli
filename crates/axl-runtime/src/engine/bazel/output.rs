@@ -645,7 +645,7 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
 /// What `observations` kept for the failure summary, as AXL reads it
 /// (`build.output_bazel_errors()`): `{"blocks": [{"kind", "text",
 /// "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
-/// "stdout": bool, "color": bool}`, each block whose first line is an `ERROR:` (an `error`, or a
+/// "stdout": bool, "color": bool, "relay_cap": n | None}`, each block whose first line is an `ERROR:` (an `error`, or a
 /// `tail` that is Bazel's next message) with that line's `location`,
 /// `message`, `coloured` and `boilerplate` too ([`ErrorHeader`]); None before the
 /// console has ended or without a `collect_errors()` stage.
@@ -675,6 +675,7 @@ pub(crate) fn bazel_blocks(
         "froms_not_kept": kept.froms_not_kept,
         "stdout": observations.stdout_shared(),
         "color": kept.color,
+        "relay_cap": kept.relay_cap,
     }))
 }
 
@@ -1390,6 +1391,24 @@ BazelTrait = trait(
         "recap_errors", "collapse_similar",
     ]: return 1
     if o.drop(["x"]).name != "drop": return 2
+    return 0"#)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// The collected errors report what Bazel relays of an action's output:
+    /// the build's own `--experimental_ui_max_stdouterr_bytes`, its last.
+    #[test]
+    fn collected_errors_report_the_builds_relay_cap() {
+        let exit = run(r#"
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.collect_errors()])
+    flags = ["--scenario=success", "--experimental_ui_max_stdouterr_bytes=9", "--experimental_ui_max_stdouterr_bytes=5"]
+    build = ctx.bazel.build(flags = flags + processor.flags, output = processor)
+    if not build.wait().success: return 1
+    if build.output_bazel_errors()["relay_cap"] != 5: return 2
+    plain = ctx.bazel.build(flags = ["--scenario=success"] + processor.flags, output = processor)
+    if not plain.wait().success: return 3
+    if plain.output_bazel_errors()["relay_cap"] != 1024 * 1024: return 4
     return 0"#)
         .expect("run_task");
         assert_eq!(exit, Some(0));
