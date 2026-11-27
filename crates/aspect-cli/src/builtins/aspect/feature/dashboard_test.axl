@@ -510,10 +510,12 @@ def _actions_tests(ctx):
         note_progress(half, half["progress"])
         if row.startswith("[20"):
             fresh = action_split(half)
-            _eq("a fresh gap is not done yet", [fresh[k] for k in ("ran", "disk", "internal", "failed", "local", "done", "total")], [0, 10, 1, 0, 0, 11, 30])
-            _eq("the parts: Bazel's running, the rest pending", [(p[2], p[1]) for p in action_parts(fresh) if p[1]], [("disk", 10), ("internal", 1), ("running", 3), ("pending", 16)])
+            _eq("a fresh gap is done but unreported", [fresh[k] for k in ("ran", "disk", "internal", "failed", "local", "unreported", "done", "total")], [0, 10, 1, 0, 0, 9, 20, 30])
+            _eq("the parts: unreported, Bazel's running, the rest truly pending", [(p[2], p[1]) for p in action_parts(fresh) if p[1]], [("disk", 10), ("internal", 1), ("unreported", 9), ("running", 3), ("pending", 7)])
+            _eq("dimmed, after the hits, before running", [_visible(r) for r in action_results(fresh, 90, 2)], ["cache hits 10: ▓ 10 disk", "░ 1 internal · ? 9 unreported · ─ 3 running · 7 pending"])
+            _eq("on the bar, done", [_visible(action_bar(fresh, 30)).count(g) for g in ("┈", "─")], [9, 10])
     told = action_split(half)
-    _eq("part told: what outlasted a count the local action cache's", [told[k] for k in ("ran", "disk", "internal", "failed", "local", "done", "estimated")], [0, 10, 1, 0, 9, 20, True])
+    _eq("part told: what outlasted a count the local action cache's", [told[k] for k in ("ran", "disk", "internal", "failed", "local", "unreported", "done", "estimated")], [0, 10, 1, 0, 9, 1, 21, True])
     _eq("estimated, dimmed, `~`", [_visible(r) for r in action_results(told, 90)], ["█ 0 ran · cache hits ~19: ▒ ~9 local action cache · ▓ 10 disk · ░ 1 internal", "─ 3 running · 7 pending"][:0] + [_visible(r) for r in action_results(told, 90)])
     _eq("the estimate", "▒ ~9 local action cache" in _visible(action_results(told, 90)[0]), True)
     _eq("a hit-less live cache hidden", "remote" in _visible(" ".join(action_results(told, 90))), False)
@@ -556,6 +558,8 @@ def _actions_tests(ctx):
     live["exec_log_read"] = True
     end = action_split(live)
     _eq("converges on BuildMetrics' split", [end[k] for k in ("ran", "disk", "internal", "failed", "local", "done")], [mid_split[k] for k in ("ran", "disk", "internal", "failed", "local", "done")])
+    _eq("nothing unreported at the end", end["unreported"], 0)
+    _eq("every frame sums to Bazel's count", [told["ran"] + told["disk"] + told["remote"] + told["local"] + told["internal"] + told["failed"] + told["other"] + told["unreported"]], [21])
     _eq("the final local action cache: shown at 0, no `~`", "▒ 0 local action cache" in _visible(action_results(end, 90)[0]), True)
     _eq("the ? key: the local action cache", any(["▒ local action cache: Bazel's local action cache, or what it already knew in memory" in " ".join(help_rows(dict(live, all_actions = True), 300)) for r in help_rows(dict(live, all_actions = True), 200)]), True)
 

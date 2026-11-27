@@ -14,7 +14,8 @@ It takes the screen when the task starts and shows:
   build runs, or `p` asks, its panes:
   - a bar of the build's actions (`action_split`, one unit throughout):
     ran `█`, disk and remote cache hits `▓`, the local action cache `▒`,
-    internal `░`, failed `╳`, blocked `○`, then not done `─`, each kind
+    internal `░`, failed `╳`, blocked `○`, done but not reported yet `┈`,
+    then not done `─`, each kind
     its own glyph so they stay apart without colour; while it runs from
     the actions Bazel reports with every one published
     (`--dashboard:actions=all`, the default: internal ones have no command
@@ -3252,7 +3253,7 @@ def action_split(state: dict) -> dict:
     summary = _get(inv.get("build_metrics"), "action_summary")
     executed = _get(summary, "actions_executed")
     caches = cache_kinds(inv)
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, rest = 0, failed = 0, blocked = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, rest = 0, failed = 0, blocked = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
     kinds = c.get("log_kinds") or {}
     logged = state.get("exec_log_read") and not own_execution_log(inv) and (kinds.get("ran", 0) + kinds.get("disk", 0) + kinds.get("remote", 0) + kinds.get("mixed", 0)) > 0
     if not state.get("building") and type(executed) == "int":
@@ -3351,8 +3352,8 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     from the others. A gap is the action cache's only as far as it
     outlasted the count it opened at (`settled`, `note_progress`): Bazel's
     count can lead the events by a frame, and until it has, that part is
-    not done yet, so the done count lags Bazel's by at most one update and
-    what is pending takes it."""
+    `unreported` (done, its kind not said yet), so the estimate rarely
+    drops and the done count is Bazel's."""
     c = state.get("counts") or {}
     kinds = c.get("log_kinds") or {}
     failed = len(failed_actions(state))
@@ -3374,7 +3375,7 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     # which no event tells from the action cache's.
     local = settled if not failed else 0
     other += settled - local
-    split.update(known = True, published = True, estimated = True, ran = ran, disk = disk, remote = remote, other = other, internal = internal, failed = failed, local = local, done = max(done, seen) - (gap - settled))
+    split.update(known = True, published = True, estimated = True, ran = ran, disk = disk, remote = remote, other = other, internal = internal, failed = failed, local = local, unreported = gap - settled, done = max(done, seen))
     split["total"] = max(split["total"], split["done"])
     return split
 
@@ -3451,6 +3452,7 @@ _SEGMENTS = [
     ("░", "subtle", ["internal"]),
     ("╳", "error", ["failed"]),
     ("○", "muted", ["blocked"]),
+    ("┈", "border", ["unreported"]),
 ]
 
 # A done count nothing tells apart: no execution log to read.
@@ -3550,10 +3552,12 @@ def action_parts(split: dict) -> list:
     """The Actions rows' parts, each `(glyph, count, words, role, how)`,
     the bar's glyphs their legend, `how` "" or `dim` (a configured cache
     with no hits, at the end) or `estimate` (the local action cache while
-    a build runs, `~`): ran; the cache hits (`hits`: the local action
+    a build runs, `~`) or `muted` (`unreported`): ran; the cache hits (`hits`: the local action
     cache, always at the end; disk and remote where the build was given
     that cache, or hit it, live only once they have a hit, `▓` once before
-    the first); failed, blocked, internal, `other` where there is any; while it
+    the first); failed, blocked, internal, `other` where there is any, and
+    while it runs what Bazel counted done with no event yet (`? 3
+    unreported`); while it
     runs with only the execution log, the rest of the done count as
     `other`; with nothing to tell them apart, the done count; while it
     runs, what is not done yet, the bar's `─`: the actions running now
@@ -3582,6 +3586,7 @@ def action_parts(split: dict) -> list:
     parts.append(("○", split["blocked"], "blocked", "muted", ""))
     parts.append(("░", split["internal"], "internal", "subtle", ""))
     parts.append(("", split["other"] + split["rest"], "other", "", ""))
+    parts.append(("?", split["unreported"], "unreported", "", "muted"))
     return [p for p in parts if p[1] or p[4] == "dim" or (p[2] == "local action cache" and final)] + remaining
 
 def _part_text(part: tuple, level: int) -> tuple:
@@ -5663,6 +5668,7 @@ _ACTIONS_KEY = [
     "○ blocked: counted done but never run, as an action they need failed",
     "░ internal: Bazel bookkeeping with no command (runfiles trees, file writes, workspace status)",
     "other: actions whose spawns had mixed results; while a build where an action failed runs, also what Bazel counted done with no event (blocked, or the local action cache's)",
+    "? unreported: Bazel counted these done but hasn't said how yet; they settle into ran, a cache hit or failed (┈ on the bar)",
     "─ not done: running or pending",
     "actions: what Bazel checked this build. Targets whose inputs didn't change are skipped before this count, so it isn't the whole graph",
     "%: cache hits ÷ actions; targets Bazel skipped without checking aren't counted, so a warm and a fresh server aren't comparable",
