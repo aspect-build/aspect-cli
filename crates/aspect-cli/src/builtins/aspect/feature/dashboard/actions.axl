@@ -742,14 +742,9 @@ def cache_kinds(inv: dict) -> tuple:
     `--remote_executor`), each flag's last value counting, from the whole
     command line Bazel parsed (rc files' flags in it); an empty value is
     none."""
-    options = inv.get("options_parsed")
-    flags = bes_get(options, "cmd_line") or bes_get(options, "explicit_cmd_line") or []
-    last = {}
-    for flag in flags:
-        name, eq, value = str(flag).partition("=")
-        if name in ("--disk_cache", "--remote_cache", "--remote_executor") and eq:
-            last[name] = value != ""
-    return (bool(last.get("--disk_cache")), bool(last.get("--remote_cache") or last.get("--remote_executor")))
+    last = _last_flags(inv, ["--disk_cache", "--remote_cache", "--remote_executor"])
+    given = {name: type(value) == "string" and value != "" for name, value in last.items()}
+    return (given.get("--disk_cache", False), given.get("--remote_cache", False) or given.get("--remote_executor", False))
 
 def _events_seen(state: dict) -> int:
     """The actions a build's events have reported so far, every action
@@ -1261,18 +1256,24 @@ def own_execution_log(inv: dict):
     form are none (the way to clear one an rc file set; Bazel 9 takes
     `=false` as a path and refuses `--no`, Bazel 10 reads both as off), the
     bare flag, a true value or a path one."""
+    last = _last_flags(inv, _OWN_EXEC_LOGS)
+    named = [name for name in _OWN_EXEC_LOGS if last.get(name) == True or (type(last.get(name)) == "string" and last[name] != "" and last[name].lower() not in _FALSE_WORDS)]
+    return named[0] if named else None
+
+def _last_flags(inv: dict, names: list) -> dict:
+    """The last value each flag of `names` was given on the whole command
+    line Bazel parsed (rc files' flags in it), by name: its value, True
+    for the bare flag, False for its `--no` form."""
     options = inv.get("options_parsed")
     flags = bes_get(options, "cmd_line") or bes_get(options, "explicit_cmd_line") or []
     last = {}
     for flag in flags:
         name, eq, value = str(flag).partition("=")
-        for own in _OWN_EXEC_LOGS:
-            if name == "--no" + own[2:] and not eq:
-                last[own] = False
-            elif name == own:
-                last[own] = not eq or (value != "" and value.lower() not in _FALSE_WORDS)
-    named = [name for name in _OWN_EXEC_LOGS if last.get(name)]
-    return named[0] if named else None
+        if name in names:
+            last[name] = value if eq else True
+        elif not eq and name.startswith("--no") and "--" + name[4:] in names:
+            last["--" + name[4:]] = False
+    return last
 
 # Bazel's action cache miss reasons newer than the CLI's protos, which read
 # as their numbers.
@@ -1355,8 +1356,8 @@ def action_lines(state: dict) -> list:
         # A reason newer than the CLI's protos reads as its number.
         for reason, n in _by_count(reasons):
             reason = _NEWER_MISS_REASONS.get(reason, reason)
-            said = ("reason " + reason) if reason.isdigit() else reason.lower().replace("_", " ")
-            out.append("    " + said + " " * max(1, column - len(said)) + _thousands(n))
+            why = ("reason " + reason) if reason.isdigit() else reason.lower().replace("_", " ")
+            out.append("    " + why + " " * max(1, column - len(why)) + _thousands(n))
     if c.get("spawns"):
         pct = c["spawn_hits"] * 100 // c["spawns"]
         out.append(_row_of("spawns", _counts("%d · %d from a cache (%d%%) · %d run", (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"]))))

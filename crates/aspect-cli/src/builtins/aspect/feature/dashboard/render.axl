@@ -126,30 +126,22 @@ def failure_rows(state: dict, room: int, width: int) -> list:
         what, label = extras[pos - len(listed)]
         if what == "other":
             text = _middle("! " + label["lines"][0], width)
-            if pos == at and state["focus"] == "failures":
-                return _c("active") + fit(text, width) + _RESET
-            return _c("warning") + "!" + _RESET + _c("muted") + text[1:] + _RESET
+            return _list_row(state, text, width, pos == at, _c("warning") + "!" + _RESET + _c("muted") + text[1:] + _RESET)
         if what == "entry":
-            said = entry_text(state, label)
-            text = _middle("✗ " + " · ".join(([label["label"]] if label["label"] else []) + ([said["kind"]] if said["kind"] else []) + said["details"]) + ("" if label.get("exited") != None else "  no log"), width)
-            if pos == at and state["focus"] == "failures":
-                return _c("active") + fit(text, width) + _RESET
-            return _c("error") + "✗" + _RESET + text[1:]
+            heading = entry_text(state, label)
+            text = _middle("✗ " + " · ".join(([label["label"]] if label["label"] else []) + ([heading["kind"]] if heading["kind"] else []) + heading["details"]) + ("" if label.get("exited") != None else "  no log"), width)
+            return _list_row(state, text, width, pos == at, _c("error") + "✗" + _RESET + text[1:])
         roots = blocked.get(label)
         text = _middle(("○ " + label + "  " + blocked_text(label, roots)) if roots else ("✗ " + label + "  no log"), width)
-        if pos == at and state["focus"] == "failures":
-            return _c("active") + fit(text, width) + _RESET
-        return _c("muted") + text + _RESET if roots else _c("error") + "✗" + _RESET + text[1:]
+        return _list_row(state, text, width, pos == at, _c("muted") + text + _RESET if roots else _c("error") + "✗" + _RESET + text[1:])
 
     def row(i, chosen):
         rec = fails[i]
         flaky = rec["kind"] == "test" and state["counts"].get("flaky", {}).get(rec["label"])
         mark = "~" if flaky else "✗"
-        said = " · ".join(record_excerpt(state, i)[0])
-        text = _middle(mark + " " + rec["label"] + "  " + said, width)
-        if chosen and state["focus"] == "failures":
-            return _c("active") + fit(text, width) + _RESET
-        return (_c("warning") if flaky else _c("error")) + mark + _RESET + " " + _c("strong") + rec["label"] + _RESET + _c("muted") + text[2 + len(rec["label"]):] + _RESET
+        details = " · ".join(record_excerpt(state, i)[0])
+        text = _middle(mark + " " + rec["label"] + "  " + details, width)
+        return _list_row(state, text, width, chosen, (_c("warning") if flaky else _c("error")) + mark + _RESET + " " + _c("strong") + rec["label"] + _RESET + _c("muted") + text[2 + len(rec["label"]):] + _RESET)
 
     # A window of whole entries around the chosen one, as many as fit with
     # a line each for what is hidden above and below; too short for those,
@@ -209,6 +201,13 @@ def record_excerpt(state: dict, i: int) -> tuple:
             return (details, excerpt_rows(text["lines"])[0])
     return ([], [])
 
+def _list_row(state: dict, text: str, width: int, chosen: bool, drawn: str) -> str:
+    """A list's row: `text` highlighted whole (`active`) where it is the
+    chosen one and the list has the keys, else as `drawn`."""
+    if chosen and state["focus"] == "failures":
+        return _c("active") + fit(text, width) + _RESET
+    return drawn
+
 def _window(total: int, room: int, selected: int):
     """Which of a list's `total` rows `room` lines show: `(start, shown,
     above, below)`, a window around the `selected` row, a line on each side
@@ -244,10 +243,7 @@ def action_rows(state: dict, room: int, width: int) -> list:
     for i in range(start, start + shown):
         rec = outputs[i]
         text = fit("• " + rec["label"] + "  " + rec["detail"], width).rstrip(" ")
-        if i == picked and state["focus"] == "failures":
-            rows.append(_c("active") + fit(text, width) + _RESET)
-        else:
-            rows.append(_c("accent") + "•" + _RESET + text[1:])
+        rows.append(_list_row(state, text, width, i == picked, _c("accent") + "•" + _RESET + text[1:]))
     return _counted(rows, above, below)
 
 def links_row(pages: list, cols: int) -> str:

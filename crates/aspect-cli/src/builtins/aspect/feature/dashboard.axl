@@ -426,6 +426,18 @@ def _dashboard_impl(ctx: FeatureContext):
     def _add_lines(lines, links = None, colours = None, cli = False):
         add_lines(state, lines, links, colours, cli)
 
+    def _keys_and_draw(screen):
+        """Every key waiting, then one frame: a burst of wheel or drag
+        reports costs one render, never a backlog."""
+        cols, rows = screen.size()
+        page = console_height(state, cols, rows)
+        for _ in range(_MAX_KEYS):
+            key = screen.key()
+            if key == None:
+                break
+            on_key(state, key, page)
+        _draw(screen, render(state, cols, rows))
+
     def _draw(screen, frame):
         """Write `frame` unless it is the one on the screen; whether it was
         written."""
@@ -502,14 +514,7 @@ def _dashboard_impl(ctx: FeatureContext):
         state["now_ms"] = int(monotonic() * 1000)
         state["frames"] += 1
         _add_output(screen)
-        cols, rows = screen.size()
-        page = console_height(state, cols, rows)
-        for _ in range(_MAX_KEYS):
-            key = screen.key()
-            if key == None:
-                break
-            on_key(state, key, page)
-        _draw(screen, render(state, cols, rows))
+        _keys_and_draw(screen)
         state["ticking"] = False
 
     def _idle(task_ctx):
@@ -556,17 +561,7 @@ def _dashboard_impl(ctx: FeatureContext):
         _add_output(screen)
         if state["frames"] % 10 == 0:
             _tips()
-        cols, rows = screen.size()
-        page = console_height(state, cols, rows)
-
-        # Every key waiting, then one frame: a burst of wheel or drag
-        # reports costs one render, never a backlog.
-        for _ in range(_MAX_KEYS):
-            key = screen.key()
-            if key == None:
-                break
-            on_key(state, key, page)
-        _draw(screen, render(state, cols, rows))
+        _keys_and_draw(screen)
 
     def _event(task_ctx, event):
         kind = event.kind

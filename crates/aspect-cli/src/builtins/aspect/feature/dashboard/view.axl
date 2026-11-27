@@ -194,9 +194,9 @@ def _open_unlogged(state: dict, i: int):
         lines = item["lines"]
         title = "Other error from Bazel"
     else:
-        said = entry_text(state, item)
-        lines = said["lines"] if item.get("exited") != None else ["(" + _NO_REASON + ")"]
-        title = item["label"] or said["kind"]
+        text = entry_text(state, item)
+        lines = text["lines"] if item.get("exited") != None else ["(" + _NO_REASON + ")"]
+        title = item["label"] or text["kind"]
     _show_failure_view(state, {"title": title, "lines": lines, "cut": False, "record": None})
 
 def listed_failures(state: dict) -> list:
