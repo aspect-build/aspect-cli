@@ -110,7 +110,6 @@ def _action_record(label: str, payload, event_id = None) -> dict:
         "config": _config_id(event_id),
         "success": bool(bes_get(payload, "success", False)),
         "exit_code": spawn_exit_code(payload),
-        "counted_internal": counted_internal(payload),
     }
 
 def spawn_exit_code(payload) -> int:
@@ -126,7 +125,7 @@ def counted_internal(payload):
     failed finalizing (`failure_detail`'s `ACTION_OUTPUTS_NOT_CREATED`,
     `ACTION_FINALIZATION_FAILURE`), which it counts under the runner its
     spawn ran in; None when it said nothing. Only where not every action's
-    events say it (`action_split`)."""
+    events say it (the Dashboard's `action_split`)."""
     category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
     if category == None:
         return None
@@ -523,6 +522,7 @@ def new_counts() -> dict:
         "test_resulted": {},
         "test_finished": {},
         "test_uncached": {},
+        "action_failures": [],
         "spawns": 0,
         "spawn_hits": 0,
         "runners": {},
@@ -619,7 +619,10 @@ def count_aborted(counts: dict, label: str, reason: str):
 def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
     """Tally one build event into `counts`. `build_started` says whether the
     command tests (`testing`: `test` or `coverage`), which gates counting a
-    test target that failed to build. A target that failed to build arrives
+    test target that failed to build. Each action the events say failed,
+    a test's own (`TestRunner`) too, is in `action_failures`, `(primary
+    output, counted_internal, mnemonic)`, once per event, whatever the
+    Failures list makes of it. A target that failed to build arrives
     as `target_completed` without `success`; one that never got that far
     (failed in loading or analysis, skipped, interrupted) as an Aborted
     payload under its own id (`count_aborted`). An Aborted `configured_label`
@@ -639,6 +642,9 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
         counts["actions_seen"] = counts.get("actions_seen", 0) + 1
         if not (bes_get(payload, "command_line", None) or []):
             counts["actions_internal"] = counts.get("actions_internal", 0) + 1
+        return
+    if kind == "action_completed" and not aborted:
+        counts["action_failures"].append((str(bes_get(event_id, "primary_output", "") or ""), counted_internal(payload), str(bes_get(payload, "type", "") or "")))
         return
     if kind == "build_started":
         # Only a test or coverage run tests what it builds.

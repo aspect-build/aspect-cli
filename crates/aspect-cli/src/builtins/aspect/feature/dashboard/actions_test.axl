@@ -175,6 +175,10 @@ def _failed_records(n):
     """`n` failed genrules as the Failures list has them."""
     return [{"kind": "action", "label": "//x:f%d" % i, "detail": "Genrule", "files": [], "output": "", "success": False} for i in range(n)]
 
+def _failed_counts(counts: dict, n: int) -> dict:
+    """`counts` with `n` failed genrules' events tallied (`action_failures`)."""
+    return dict(counts, action_failures = [("bazel-out/f%d" % i, True, "Genrule") for i in range(n)])
+
 # The code a decoded failure's category had, where a fixture names only it.
 _CODES = {"spawn": "NON_ZERO_EXIT", "execution": "ACTION_OUTPUTS_NOT_CREATED"}
 
@@ -190,7 +194,10 @@ def _fail_event(st, kind, i):
     code = parts[2] if len(parts) > 2 else _CODES.get(how, "")
     category = struct(code = code, spawn_exit_code = 1) if how == "spawn" else struct(code = code)
     detail = struct(message = "failed", category = category) if how else None
-    note_event(st, "action_completed", struct(label = "//x:f%d" % i, primary_output = "bazel-out/f%d" % i, configuration = None), struct(success = False, type = mnemonic, stderr = None, stdout = None, failure_detail = detail), False)
+    event_id = struct(label = "//x:f%d" % i, primary_output = "bazel-out/f%d" % i, configuration = None)
+    payload = struct(success = False, type = mnemonic, stderr = None, stdout = None, failure_detail = detail)
+    count_event(st["counts"], "action_completed", event_id, payload, False)
+    note_event(st, "action_completed", event_id, payload, False)
 
 def _commas(n):
     """`n` with commas between its thousands."""
@@ -269,12 +276,12 @@ def _actions_tests(ctx):
 
     # Final: BuildMetrics' exact split, as real builds gave it. A large one:
     # 2,000 genrules failed (Failures lists each), 611 action cache hits.
-    big = _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(2000), done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
+    big = _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(2000), counts = _failed_counts(new_counts(), 2000), done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
     _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, local = 611, internal = 2390, failed = 2000, not_run = 1700))
 
     # Real Bazel 9.3.3 builds (`_REAL`): the local action cache is the
     # action cache's hits; failed are the actions the event stream says
-    # failed (a test is none: Tests counts it), taken out of the internal
+    # failed (a test's too, where Bazel failed it), taken out of the internal
     # ones Bazel counts them among; what the done count has past the parts
     # is blocked where actions failed (Bazel counts done what needed one
     # and never ran), else other.
@@ -295,12 +302,11 @@ def _actions_tests(ctx):
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
 
     # The parts sum to Bazel's count, ╳ is the stream's failed actions, as
-    # decoded, a test's aside; and the label's count and % agree with them.
+    # decoded; and the label's count and % agree with them.
     for name in _REAL:
         st = _real(ctx, name)
         split = action_split(st)
-        decoded = [k for k in _REAL[name][8] if not k.startswith("TestRunner")]
-        _eq("╳ is the stream's failed actions: " + name, split["failed"], len(decoded))
+        _eq("╳ is the stream's failed actions: " + name, split["failed"], len(_REAL[name][8]))
         _eq("the parts sum to the done count: " + name, split["ran"] + split["local"] + split["disk"] + split["remote"] + split["memory"] + split["internal"] + split["failed"] + split["not_run"] + split["other"] + split["unreported"], split["done"])
         label = actions_text(split)[0]
         hits = hit_count(split)
@@ -405,7 +411,7 @@ def _actions_tests(ctx):
     ahead = action_split(dict(late_log, progress = ["[8 / 14] 3 actions running"]))
     _eq("events ahead of the count take from ran", [ahead[k] for k in ("ran", "disk", "internal", "local", "done")], [1, 6, 1, 0, 8])
 
-    failing = dict(half, fails = list(half["fails"]))
+    failing = dict(half, fails = list(half["fails"]), counts = dict(half["counts"], action_failures = half["counts"]["action_failures"] + [("bazel-out/bad", True, "Genrule")]))
     failing["fails"].append({"kind": "action", "label": "//dc:bad", "detail": "Genrule", "files": [], "output": "", "success": False})
     _eq("once one failed, the gap is still the local action cache's, estimated", [action_split(failing)[k] for k in ("local", "other", "failed")], [9, 0, 1])
     _eq("none running: no `0 running`", "0 running" in _visible(" ".join(action_results(dict(told, running_now = 0), 90))), False)
@@ -428,9 +434,30 @@ def _actions_tests(ctx):
     _eq("the final local action cache: shown at 0, no `~`", "▒ 0 local action cache" in _visible(" ".join(action_results(end, 90))), True)
     _eq("the ? key: in memory and the local action cache", "▒ in memory / local: outputs already known valid on this machine" in " ".join(help_rows(dict(live, all_actions = True), 300)), True)
 
-    tested = _real(ctx, "failing test")
-    _fail_event(tested, "TestRunner:spawn", 9)
-    _eq("a test's failed action is no ╳", action_split(tested)["failed"], 0)
+    # A test Bazel failed itself (a sharded test whose runner never touched
+    # TEST_SHARD_STATUS_FILE, `LOCAL_TEST_PREREQ_UNMET`), as Bazel 9.3.3
+    # ran `test //tx:tnoshard` (`shard_count = 2`) to `[8 / 8]`: its two
+    # TestRunner actions failed, their spawns in the execution log by the
+    # `test.xml` beside their `test.log` (one not created, one created) and
+    # among `runner_count`'s 8 internal; 6 successful spawnless actions.
+    noshard = _screen(ctx, ["x"], building = False, ended = True, exec_log_read = True, done_total = (8, 8, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
+        actions_executed = 8,
+        actions_created = 13,
+        runner_count = [struct(name = "total", count = 8), struct(name = "internal", count = 8)],
+        action_cache_statistics = struct(hits = 0, misses = 8),
+    ))})
+    for i in range(6):
+        _action(noshard, 20 + i, "SymlinkTree", True, False)
+    shards = "bazel-out/darwin_arm64-fastbuild/testlogs/tx/tnoshard/shard_%d_of_2/"
+    note_log_file(noshard["counts"], 8, struct(path = shards % 2 + "test.xml"))
+    count_spawn(noshard["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = shards % 1 + "test.xml")]))
+    count_spawn(noshard["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = 8)]))
+    for shard in (1, 2):
+        runner_id = struct(label = "//tx:tnoshard", primary_output = shards % shard + "test.log", configuration = None)
+        runner_payload = struct(success = False, type = "TestRunner", stderr = None, stdout = None, failure_detail = struct(message = "Testing //tx:tnoshard (shard %d of 2) failed: Sharding requested" % shard, test_action = struct(code = "LOCAL_TEST_PREREQ_UNMET")))
+        count_event(noshard["counts"], "action_completed", runner_id, runner_payload)
+        note_event(noshard, "action_completed", runner_id, runner_payload, False)
+    _eq("a test Bazel failed itself: ╳, out of ran and internal, the parts Bazel's count", _split_of(action_split(noshard)), dict(done = 8, total = 8, internal = 6, failed = 2))
 
     # A failed build with no action failed never draws a full bar.
     for name in ["failing test", "analysis failure", "loading failure, no count"]:
@@ -456,7 +483,7 @@ def _actions_tests(ctx):
     logged = _runners(10, [("disk cache hit", 3), ("darwin-sandbox", 12)], logged = {"ran": 7, "disk": 3, "remote": 0})
     _eq("logged actions never more than executed", logged["ran"] + logged["disk"] + logged["remote"] + logged["internal"] <= 10, True)
     _eq("an action cache hit runner without the statistics", _runners(9, [("action cache hit", 7), ("linux-sandbox", 9)], stats = False)["local"], 7)
-    kg = _screen(ctx, ["x"], building = False, fails = _failed_records(1), done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
+    kg = _screen(ctx, ["x"], building = False, fails = _failed_records(1), counts = _failed_counts(new_counts(), 1), done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
     _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, local = 4, internal = 4, failed = 1, not_run = 1))
     ok = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
     _eq("a real successful one", _split_of(action_split(ok)), dict(done = 2, total = 2, ran = 1, internal = 1))
@@ -635,7 +662,7 @@ def _actions_tests(ctx):
     _eq("a group's header says its total", _visible(action_results(measured, 89, 2)[0]).startswith("ran 5,709: "), True)
     _eq("the groups and the rest add up to the actions", measured["ran"] + measured["failed"] + measured["local"] + measured["disk"] + measured["remote"] + measured["internal"], measured["done"] - measured["not_run"] - measured["other"])
     _eq("k", [short_count(n) for n in (526, 1999, 48123, 1250000)], ["526", "1.9k", "48k", "1.2M"])
-    greg_screen = dict(cached, fails = _failed_records(4), done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
+    greg_screen = dict(cached, fails = _failed_records(4), counts = _failed_counts(cached["counts"], 4), done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
         actions_executed = 5649,
         runner_count = [struct(name = "total", count = 5649), struct(name = "internal", count = 37), struct(name = "linux-sandbox", count = 5612)],
         action_cache_statistics = struct(hits = 2834, misses = 5649),

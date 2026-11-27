@@ -535,8 +535,8 @@ def action_split(state: dict) -> dict:
     still valid), `memory` (up to date in Bazel's memory: its graph's
     cleaned action keys), `disk` and `remote` (a cache served every spawn
     of the action), `internal` (no spawn: symlinks, manifests, file
-    writes), `failed` (the actions the event stream says failed,
-    `failed_actions`), `not_run` (what Bazel counted done without running
+    writes), `failed` (every action the event stream says failed, a
+    test's own too: `action_failures`), `not_run` (what Bazel counted done without running
     it or checking its action cache: an identical action of another target
     made its outputs, or an input failed), `unreported` (done, its kind
     not reported: no event or execution log says it) and, at the end,
@@ -597,7 +597,7 @@ def action_split(state: dict) -> dict:
             elif name != "total":
                 ran += n
         spawned = max(0, executed - internal)
-        failures = failed_actions(state)
+        failures = c.get("action_failures") or []
         failed = len(failures)
         if logged:
             # The log's actions, by action, the failed ones counted apart.
@@ -624,7 +624,7 @@ def action_split(state: dict) -> dict:
             from_internal = max(0, min(in_total, internal - c.get("actions_internal", 0)))
         else:
             in_total = failed
-            from_internal = min(internal, len([r for r in failures if r.get("counted_internal") != False]))
+            from_internal = min(internal, len([f for f in failures if f[1] != False]))
         internal -= from_internal
         left = in_total - from_internal
         other = 0
@@ -664,7 +664,7 @@ def action_split(state: dict) -> dict:
     # Ended without its BuildMetrics (the stream cut short), the actions it
     # said failed apart; while it runs, the log can lead Bazel's count by a
     # redraw. The rest, which nothing reported the kind of, is `unreported`.
-    failures = [] if state.get("building") else failed_actions(state)
+    failures = [] if state.get("building") else c.get("action_failures") or []
     kinds = _logged_kinds(c, failures)
     failed = len(failures)
     disk = min(kinds.get("disk", 0), done)
@@ -677,17 +677,21 @@ def action_split(state: dict) -> dict:
 
 def _logged_kinds(counts: dict, failures: list) -> dict:
     """The execution log's actions by kind (`log_kinds`) without the
-    actions the event stream says failed: their spawns are in the log
-    too, by their primary output's path (`count_spawn`), but they count as
-    failed. A failed action whose spawn created its first output is keyed
-    by that file's id and stays."""
+    actions the event stream says failed (`action_failures`): their spawns
+    are in the log too, by their first output's path (`count_spawn`), but
+    they count as failed. That is an action's primary output where it was
+    not created; a test's (`TestRunner`) spawns' first is the `test.xml`
+    beside its primary output, its `test.log`, as Bazel lays out every
+    test's outputs. A failed action whose spawn created its first output
+    is keyed by that file's id and stays."""
     kinds = dict(counts.get("log_kinds") or {})
     actions = counts.get("log_actions") or {}
     seen = {}
-    for r in failures:
-        kind = actions.get(r.get("output"))
-        if kind and r["output"] not in seen:
-            seen[r["output"]] = True
+    for output, _, mnemonic in failures:
+        key = output.rpartition("/")[0] + "/test.xml" if mnemonic == "TestRunner" and output.endswith("/test.log") else output
+        kind = actions.get(key)
+        if kind and key not in seen:
+            seen[key] = True
             kinds[kind] -= 1
     return kinds
 
@@ -719,7 +723,7 @@ def _published_split(state: dict, split: dict, done: int) -> dict:
     drops and the done count is Bazel's."""
     c = state.get("counts") or {}
     kinds = c.get("log_kinds") or {}
-    failed = len(failed_actions(state))
+    failed = len(c.get("action_failures") or [])
     internal = c.get("actions_internal", 0)
     spawned = max(0, c.get("actions_seen", 0) - internal)
     disk = min(kinds.get("disk", 0), spawned)
@@ -750,13 +754,8 @@ def cache_kinds(inv: dict) -> tuple:
 def _events_seen(state: dict) -> int:
     """The actions a build's events have reported so far, every action
     published: those executed and those that failed."""
-    return (state.get("counts") or {}).get("actions_seen", 0) + len(failed_actions(state))
-
-def failed_actions(state: dict) -> list:
-    """The build's actions its event stream reports failed, as the
-    Failures list has them: not a test's (`TestRunner`, which Tests
-    counts), nor a target's analysis failure."""
-    return [r for r in state.get("fails") or [] if r.get("kind") == "action" and r.get("detail") != "TestRunner"]
+    c = state.get("counts") or {}
+    return c.get("actions_seen", 0) + len(c.get("action_failures") or [])
 
 def hit_count(split: dict) -> int:
     """The actions whose results were reused: the local action cache's,
