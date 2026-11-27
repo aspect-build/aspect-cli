@@ -344,7 +344,7 @@ pub struct Observations {
     tallies: Mutex<Vec<Tally>>,
     /// Bazel's own error blocks and action output blocks, for the task's
     /// failure summary ([`crate::console::report::CollectErrors`]).
-    blocks: Mutex<Option<BazelBlocks>>,
+    blocks: Mutex<Option<std::sync::Arc<BazelBlocks>>>,
     /// Whether the console's stream carried Bazel's stdout too (a terminal
     /// both share), so an action's stdout is among its output there.
     stdout_shared: std::sync::atomic::AtomicBool,
@@ -369,7 +369,12 @@ pub struct BazelBlocks {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub kind: BlockKind,
+    /// For an `INFO: From`, its header alone.
     pub text: String,
+    /// For an `INFO: From`, its body's length in bytes and its last line
+    /// (with its ending): what telling a held last line needs.
+    pub body_len: u64,
+    pub last_line: String,
 }
 
 /// What starts a [`Block`].
@@ -379,11 +384,11 @@ pub enum BlockKind {
     Error,
     /// An action's output, under Bazel's `INFO: From …:`.
     From,
-    /// An `ERROR:` in Bazel's colours right after an action's output ended:
-    /// Bazel's next message, or the output's last line Bazel held until its
-    /// next redraw, which the bytes cannot tell apart (see
-    /// [`crate::console::line`]); the summary tells them by the action's own
-    /// output.
+    /// The first record Bazel wrote after its redraw once a block ended, or
+    /// one the classifier calls an output's held last line: Bazel's next
+    /// message, or that held line, which Bazel writes after its next
+    /// redraw and the bytes cannot tell apart (see [`crate::console::line`]);
+    /// the summary tells them by the action's own output.
     Tail,
 }
 
@@ -400,11 +405,12 @@ impl BlockKind {
 impl Observations {
     /// Keep the console's blocks for the failure summary.
     pub fn set_blocks(&self, blocks: BazelBlocks) {
-        *self.blocks.lock().unwrap() = Some(blocks);
+        *self.blocks.lock().unwrap() = Some(std::sync::Arc::new(blocks));
     }
 
-    /// The console's blocks once it has ended, when a stage kept them.
-    pub fn blocks(&self) -> Option<BazelBlocks> {
+    /// The console's blocks once it has ended, when a stage kept them:
+    /// shared, never copied.
+    pub fn blocks(&self) -> Option<std::sync::Arc<BazelBlocks>> {
         self.blocks.lock().unwrap().clone()
     }
 

@@ -540,7 +540,7 @@ impl Config {
             .any(|s| matches!(s, Stage::ErrorsForSummary))
         {
             chain.push(Box::new(report::CollectErrors::new(
-                self.pty || self.mode == Mode::Pty,
+                self.pty,
                 observations.clone(),
             )));
         }

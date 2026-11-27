@@ -653,7 +653,9 @@ pub(crate) fn bazel_blocks(
     let blocks: Vec<serde_json::Value> = kept
         .blocks
         .iter()
-        .map(|b| serde_json::json!({"kind": b.kind.as_str(), "text": b.text}))
+        .map(|b| {
+            serde_json::json!({"kind": b.kind.as_str(), "text": b.text, "body_len": b.body_len, "last_line": b.last_line})
+        })
         .collect();
     Some(serde_json::json!({
         "blocks": blocks,
