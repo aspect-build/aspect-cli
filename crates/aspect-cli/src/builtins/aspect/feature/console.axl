@@ -224,11 +224,18 @@ task starts.
 
 load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "console_tip_rules", "default_stages", "emit_tips", "tip_stages")
 load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//feature/dashboard.axl", "ANSI", "collect_event", "failure_summary", "summary_state")
+load("@aspect//feature/dashboard.axl", "summary_state")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/environment.axl", "warn")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
+load("../private/lib/term_text.axl", "term_text")
+
+ANSI = term_text.ANSI
+collect_event = failure_records.collect_event
+failure_summary = failures.failure_summary
 
 def _console_impl(ctx: FeatureContext):
     profile = ctx.args.profile

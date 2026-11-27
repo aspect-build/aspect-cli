@@ -1,0 +1,565 @@
+"""The Dashboard's mouse and links: link spans, selection and copy, peeks,
+and opening a file or a web link (`mouse_key`)."""
+
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("@std//base64.axl", "base64")
+load("@std//theme.axl", "theme")
+load("@std//time.axl", "monotonic")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/term_text.axl", "term_text")
+
+_c = term_text.c
+_cell_slice = term_text.cell_slice
+_cells = term_text.cells
+_cut_escaped = term_text.cut_escaped
+_escape_state = term_text.escape_state
+_RESET = term_text.RESET
+_widths = term_text.widths
+text_width = term_text.text_width
+_log_paths = failure_records.record_logs
+say_note = dashboard_log.say_note
+toggle_fold = dashboard_log.toggle_fold
+_keep_view = dashboard_view.keep_view
+back_to = dashboard_view.back_to
+show_tab = dashboard_view.show_tab
+
+# The link under the pointer is lit in its text (`link.hover`), a
+# selection in its background (`selection`): each turned off alone, so
+# the rest of the cell's colour stays.
+_NO_FOREGROUND = "\x1b[39m"
+
+_NO_BACKGROUND = "\x1b[49m"
+
+def _selection_colour(state: dict):
+    """How a selection is drawn, `(on, off)`: its background, or where the
+    theme draws it otherwise (reverse, at 16 colours or in `mono`), that,
+    then a full reset."""
+    bg = theme.bg("selection", stream = True)
+    return (bg, _NO_BACKGROUND) if bg else (_c("selection"), _RESET)
+
+def _hover_colour(state: dict):
+    """How the link under the pointer is drawn, `(on, off)`, as a
+    selection's is."""
+    fg = theme.fg("link.hover", stream = True)
+    return (fg, _NO_FOREGROUND) if fg else (_c("link.hover"), _RESET)
+
+# How a link the console made is drawn: an OSC 8 link, which a terminal
+# with the mouse opens on a click, underlined so it shows as one where the
+# terminal does not draw them (the macOS Terminal).
+_UNDERLINE = "\x1b[4m"
+
+_NO_UNDERLINE = "\x1b[24m"
+
+def _peek_paint(highlighted: str):
+    """A colour for `_box_row` drawing a peek's row: its highlighted line,
+    as wide as the text `fit` kept of it (its `…` too)."""
+
+    def paint(shown):
+        cut = shown.endswith("…")
+        return _cut_escaped(highlighted, text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
+
+    return paint
+
+# How many lines a peek reads around the line it shows, and before them for
+# the highlighter to start a comment or a string where the file does.
+_PEEK_LINES = 5000
+
+_PEEK_CONTEXT = 40
+
+# What a peek highlights, at most: past it (generated or minified code) the
+# lines are shown plain, as highlighting them would hold the screen.
+_HIGHLIGHT_BYTES = 512 * 1024
+
+_HIGHLIGHT_LINE = 1000
+
+def highlightable(lines: list) -> bool:
+    """Whether `lines` are few and short enough to highlight at once."""
+    total = 0
+    for text in lines:
+        if len(text) > _HIGHLIGHT_LINE:
+            return False
+        total += len(text) + 1
+        if total > _HIGHLIGHT_BYTES:
+            return False
+    return True
+
+def open_peek(state: dict, path: str, line: int) -> bool:
+    """Show `path` in the console pane around `line` (`_PEEK_LINES` of it),
+    highlighted (unless too large to, `highlightable`), numbered, `line` marked and in the middle; `o` opens it in
+    the editor. Each
+    line is drawable, as a log's: escapes stripped, a carriage return's
+    redraw resolved, other controls dropped, a tab two spaces. Whether it
+    could be read (a directory, a binary file past reading, cannot)."""
+    fs = state.get("fs")
+    syntax = state.get("syntax")
+    if fs == None:
+        return False
+    span = _PEEK_LINES
+    first = max(1, line - span // 4)
+    start = max(1, first - _PEEK_CONTEXT)
+    got = fs.try_read_lines(path, start, (first - start) + span)
+    if got == None:
+        return False
+    lines, more = got
+    ansi, controls = state.get("ansi"), state.get("controls")
+    clean = []
+    for text in lines:
+        if ansi != None:
+            text = ansi.replace(text, "")
+        text = text.rstrip("\r").rpartition("\r")[2].replace("\t", "  ")
+        if controls != None:
+            text = controls.replace(text, "")
+        clean.append(text)
+    lines = clean
+    env = state.get("env")
+    truecolor = env != None and (env.var("COLORTERM") or "") in ("truecolor", "24bit")
+    hl = syntax.highlight(lines, path, truecolor = truecolor) if syntax != None and highlightable(lines) else lines
+    plain = []
+    painted = []
+    for i in range(first - start, len(lines)):
+        n = start + i
+        mark = "▸" if n == line else " "
+        number = " " * max(0, 5 - len(str(n))) + str(n)
+        plain.append(mark + number + "  " + lines[i])
+        painted.append((_c("marker") + "▸" + _RESET if n == line else " ") + _c("border") + number + "  " + _RESET + hl[i])
+    if not plain:
+        plain, painted = ["(line %d is past the end of the file)" % line], ["(line %d is past the end of the file)" % line]
+    name = path.rpartition("/")[2]
+    _keep_view(state)
+    state["view"] = {"title": "%s:%d" % (name, line), "lines": plain, "hl": painted, "cut": more, "record": None, "path": path, "line": line, "peek": True}
+    state["search"]["back"] = -1
+    state["focus"] = "console"
+
+    # The line in the middle of the pane.
+    target = line - first
+    state["scroll"] = max(0, len(plain) - 1 - target - state.get("page_h", 20) // 2)
+    return True
+
+def link_spans(row: str, url: str) -> list:
+    """The cells `(start, end)` of each OSC 8 link to `url` drawn in `row`."""
+    out = []
+    at = 0
+    esc = 0
+    seq = []
+    current = ""
+    start = 0
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            seq.append(chr(c))
+            esc = _escape_state(esc, c)
+            if esc == 0:
+                text = "".join(seq)
+                seq = []
+                if text.startswith("\x1b]8;"):
+                    if current == url and start < at:
+                        out.append((start, at))
+                    current = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\").partition(";")[2]
+                    start = at
+            continue
+        at += 1 if c < 0x0300 else _cells(c)
+    if current == url and start < at:
+        out.append((start, at))
+    return out
+
+def link_span_at(row: str, col: int):
+    """The cells `(start, end)` of the OSC 8 link drawn at cell `col` of
+    `row`, or None."""
+    at = 0
+    esc = 0
+    seq = []
+    url = ""
+    start = -1
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            seq.append(chr(c))
+            esc = _escape_state(esc, c)
+            if esc == 0:
+                text = "".join(seq)
+                seq = []
+                if text.startswith("\x1b]8;"):
+                    body = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\")
+                    if url and start <= col and col < at:
+                        return (start, at)
+                    url = body.partition(";")[2]
+                    start = at
+            continue
+        at += 1 if c < 0x0300 else _cells(c)
+    if url and start <= col and col < at:
+        return (start, at)
+    return None
+
+def link_at(row: str, col: int):
+    """The URL of the OSC 8 link drawn at cell `col` of `row`, or None."""
+    at = 0
+    esc = 0
+    seq = []
+    url = ""
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            seq.append(chr(c))
+            esc = _escape_state(esc, c)
+            if esc == 0:
+                text = "".join(seq)
+                seq = []
+                if text.startswith("\x1b]8;"):
+                    body = text[len("\x1b]8;"):].rstrip("\x07").removesuffix("\x1b\\")
+                    url = body.partition(";")[2]
+            continue
+        n = 1 if c < 0x0300 else _cells(c)
+        if url and at <= col and col < at + n:
+            return url
+        at += n
+    return None
+
+def link_marks(text: str, links, room: int) -> list:
+    """`links` (`[start, end, url]` by character of `text`) as `mark_cells`
+    marks in cells, as `fit` draws `text` (a tab as two spaces), clipped to
+    `room` cells."""
+    if not links:
+        return []
+    cells = [0]
+    for c, n in _widths(text):
+        cells.append(cells[-1] + (2 if c == 0x09 else n))
+    marks = []
+    for start, end, url in sorted(links):
+        if start >= len(text) or end > len(text) or start >= end:
+            continue
+        c0, c1 = cells[start], min(cells[end], room)
+        if c0 < c1 and (not marks or c0 >= marks[-1][1]):
+            # A web page's link in the theme's `link`; a file's underlined
+            # alone, in the line's own colour.
+            web = url.startswith("http://") or url.startswith("https://")
+            on = _UNDERLINE + (_c("link") if web else "")
+            off = _NO_UNDERLINE + (_NO_FOREGROUND if web else "")
+            marks.append((c0, c1, "\x1b]8;;" + url + "\x1b\\" + on, off + "\x1b]8;;\x1b\\", on))
+    return marks
+
+def selection_rows(state: dict, cols: int) -> list:
+    """The selection as `(row, start, end)` in cells, its rows in order:
+    from where the drag began to where it is, across rows as text reads,
+    within the console pane's text when it began there."""
+    sel = state.get("select")
+    if sel == None or not sel["dragged"]:
+        return []
+    a, b = sel["from"], sel["to"]
+    if (a[1], a[0]) > (b[1], b[0]):
+        a, b = b, a
+    left, right = sel["bounds"]
+    top, bottom = sel.get("rows", (0, 1 << 30))
+    out = []
+    for row in range(max(a[1], top), min(b[1], bottom) + 1):
+        start = a[0] if row == a[1] else left
+        end = b[0] + 1 if row == b[1] else right
+        start, end = max(start, left), min(end, right)
+        if start < end:
+            out.append((row, start, end))
+    return out
+
+def selected_text(state: dict, cols: int) -> str:
+    """What the selection covers, as the rows were drawn, each row's
+    trailing spaces dropped and a wrapped line's rows joined again."""
+    frame = state.get("frame") or []
+    continued = state.get("continued", {})
+    lines = []
+    for row, start, end in selection_rows(state, cols):
+        if row < len(frame):
+            plain = state["ansi"].replace(frame[row], "") if state.get("ansi") != None else frame[row]
+            text = _cell_slice(plain, start, end, overhang = True).rstrip(" ")
+            if lines and row in continued:
+                # A wrapped line's next row: the same line.
+                lines[-1] += text
+            else:
+                lines.append(text)
+    return "\n".join(lines)
+
+def _remote(env) -> bool:
+    return env != None and (env.var("SSH_CONNECTION") != None or env.var("SSH_TTY") != None)
+
+def copy_text(state: dict, text: str) -> str:
+    """Put `text` on the clipboard: by OSC 52 with the next frame, which a
+    terminal that allows it takes (over SSH too), and on this machine's own
+    (`pbcopy`, `wl-copy`, `xclip`, `xsel`) unless it is a remote session.
+    What happened, for the keys row."""
+    state["osc"] = "\x1b]52;c;" + base64.encode(text) + "\x07"
+    process = state.get("process")
+    if process == None or _remote(state.get("env")):
+        return "copied"
+    env = state["env"]
+    wayland = env.var("WAYLAND_DISPLAY") != None
+    x11 = env.var("DISPLAY") != None
+    for argv in (["pbcopy"], ["wl-copy"] if wayland else [], ["xclip", "-selection", "clipboard"] if x11 else [], ["xsel", "--clipboard", "--input"] if x11 else []):
+        if argv and process.which(argv[0]) != None:
+            child = _detached(state, process.command(argv[0]).args(argv[1:]).stdin("piped").stdout("null").stderr("null"))
+            stdin = child.stdin()
+            stdin.write(text)
+            stdin.close()
+            child.wait()
+            return "copied"
+    return "copied (if the terminal allows OSC 52)"
+
+# What a click opens: a web page, or a file in an editor, by the URLs
+# `--console:file-hyperlink-format`'s editors open a file at (not their
+# other handlers, an extension's or a clone's). Any other link, which output
+# a build ran could have written (a `file://` script, `-a App`), is copied
+# rather than handed to the system's opener.
+_OPENED_PREFIXES = [
+    "http://",
+    "https://",
+    "vscode://file/",
+    "vscode-insiders://file/",
+    "vscodium://file/",
+    "cursor://file/",
+    "zed://file/",
+    "idea://open?file=",
+    "mvim://open?url=file://",
+    "txmt://open?url=file://",
+]
+
+def opens(url: str) -> bool:
+    """Whether a click opens `url`: one of `_OPENED_PREFIXES` and more,
+    printable ASCII with no space, so the opener reads it as one URL."""
+    for c in url.codepoints():
+        if c <= 0x20 or c >= 0x7f:
+            return False
+    for prefix in _OPENED_PREFIXES:
+        if url.startswith(prefix) and len(url) > len(prefix):
+            return True
+    return False
+
+def _detached(state: dict, command):
+    """`command` spawned in a process group of its own, on a token nothing
+    cancels, so the screen's `q` (its group's SIGINT) and a cancel leave a
+    browser it started or a clipboard daemon running. Its streams are set
+    (`"null"`), as a process that outlives the CLI sets them."""
+    command = command.process_group(0)
+    cancellation = state.get("cancellation")
+    return command.spawn(cancellation = cancellation.new()) if cancellation != None else command.spawn()
+
+def _editor(state: dict):
+    """The editor `o` opens a file in, `(format, name)`: the one `O` chose
+    this session, else the console's (`--console:file-hyperlink-format`)."""
+    io = state.get("io")
+    if io == None:
+        return ("none", "")
+    choice = state.get("editor_choice")
+    if choice:
+        for alias, name in io.editors():
+            if alias == choice:
+                return (alias, name)
+    return io.editor()
+
+_KEEP_EDITOR = "to keep it, set ctx.features[Console].args.file_hyperlink_format = \"%s\" in .aspect/config.axl (or ASPECT_FILE_HYPERLINK_FORMAT=%s)"
+
+def open_in_editor(state: dict, path: str, line = 1) -> str:
+    """Open `path` at `line` in `_editor`'s editor; what happened, for the
+    keys row. An editor's link only: never a `file://` one, which would have
+    the system run the file."""
+    io = state.get("io")
+    if io == None or not path:
+        return "no file to open"
+    alias, name = _editor(state)
+    url = io.editor_url(path, line = line, format = "" if alias in ("none", "template") else alias) if alias != "none" else None
+    if url == None:
+        return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
+    if url.startswith("file:"):
+        return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
+    return open_link(state, url, trusted = True).replace("opened " + url, "opened in " + name)
+
+def next_editor(state: dict) -> str:
+    """`O`: the next installed editor for `o`, this session; how to keep it."""
+    io = state.get("io")
+    editors = io.editors() if io != None else []
+    if not editors:
+        return "no editor found: install one, or set --console:file-hyperlink-format"
+    aliases = [alias for alias, _ in editors]
+    current = _editor(state)[0]
+    i = (aliases.index(current) + 1) % len(aliases) if current in aliases else 0
+    state["editor_choice"] = aliases[i]
+    return "o opens in %s now; %s" % (editors[i][1], _KEEP_EDITOR % (aliases[i], aliases[i]))
+
+def _view_file(state: dict):
+    """The file `o` opens, `(path, line)`: the peek's, the log shown's, or
+    for the console the task's whole output (`output.log` in its history
+    folder, beside its builds' `bazel/<n>/`), else Bazel's console log."""
+    view = state["view"]
+    if view != None and view.get("path"):
+        return (view["path"], view.get("line", 1))
+    if view != None and view.get("record") != None:
+        paths = _log_paths(state, view["record"])
+        return (paths[0][1] if paths else "", 1)
+    console = state.get("log_path", "")
+    task_dir = console.rpartition("/bazel/")[0]
+    output = task_dir + "/output.log" if task_dir else ""
+    if output and state.get("read") != None and state["read"](output, 0) != None:
+        return (output, 1)
+    return (console, 1)
+
+def open_link(state: dict, url: str, trusted = False) -> str:
+    """Open `url` as this machine does (`open`, `xdg-open`) when a click
+    opens it (`opens`); copy it instead in a remote session, which would
+    open it there, and for any other link. The opener is waited on for
+    `_OPEN_WAIT_MS` at most: one that fails by then (no app for a
+    `cursor://` link) has the link copied instead; one still running (a
+    browser taking it) has opened it. What happened, for the keys row."""
+    process = state.get("process")
+    if process == None or _remote(state.get("env")) or not (trusted or opens(url)):
+        copy_text(state, url)
+        return "link copied: " + url
+    for opener in ("open", "xdg-open"):
+        if process.which(opener) != None:
+            child = _detached(state, process.command(opener).args([url]).stdin("null").stdout("null").stderr("null"))
+            status = None
+            for _ in range(_OPEN_WAIT_MS // _OPEN_POLL_MS):
+                status = child.try_wait(timeout_ms = _OPEN_POLL_MS)
+                if status != None:
+                    break
+            if status != None and not status.success:
+                copy_text(state, url)
+                return "couldn't open %s, copied it" % url
+            return "opened " + url
+    copy_text(state, url)
+    return "link copied: " + url
+
+# How long a click waits to see whether the opener failed, in slices.
+_OPEN_WAIT_MS = 300
+
+_OPEN_POLL_MS = 50
+
+# How soon a second press on the same cell makes a double click.
+_DOUBLE_CLICK_MS = 400
+
+# What ends a word a double click selects: a space, a bracket, a quote, a
+# comma, so a path (`src/a.cc:12`), a label or a URL is one word.
+_WORD_ENDS = " \t()[]{}<>\"'`,;|"
+
+def _select_word(state: dict, col: int, row: int) -> bool:
+    """Select the word drawn at `col` of `row` and copy it, as a drag would."""
+    frame = state.get("frame") or []
+    if row >= len(frame):
+        return True
+    plain = state["ansi"].replace(frame[row], "") if state.get("ansi") != None else frame[row]
+    cells = []
+    at = 0
+    for c, n in _widths(plain):
+        cells.append((at, at + n, chr(c)))
+        at += n
+    hit = [i for i, (a, b, _) in enumerate(cells) if a <= col and col < b]
+    if not hit or cells[hit[0]][2] in _WORD_ENDS:
+        return True
+    first = hit[0]
+    for i in range(hit[0], -1, -1):
+        if cells[i][2] in _WORD_ENDS:
+            break
+        first = i
+    last = hit[0]
+    for i in range(hit[0], len(cells)):
+        if cells[i][2] in _WORD_ENDS:
+            break
+        last = i
+    word = "".join([c for _, _, c in cells[first:last + 1]])
+    cols = state.get("cols", 80)
+    state["select"] = {"from": (cells[first][0], row), "to": (cells[last][1] - 1, row), "dragged": True, "done": True, "bounds": (0, cols), "rows": (0, 1 << 30)}
+    say_note(state, "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s"))
+    return True
+
+def mouse_key(state: dict, key: str) -> bool:
+    """A left button's `mouse-press`, `mouse-drag` or `mouse-release` key:
+    a drag selects (within the console pane's text when it starts there)
+    and its release copies, the selection then shown until the next press;
+    a click on a link opens it (`open_link`). Whether `key` was one."""
+    kind, _, at = key.partition(":")
+    if kind not in ("mouse-press", "mouse-drag", "mouse-release", "mouse-move"):
+        return False
+    col, _, row = at.partition(":")
+    if not col.isdigit() or not row.isdigit():
+        return True
+    col, row = int(col), int(row)
+    if kind == "mouse-move":
+        # Where the pointer is, for `render` to light the link under it.
+        state["hover"] = (col, row)
+        return True
+    cols = state.get("cols", 80)
+    if kind == "mouse-press":
+        # A second press on the cell within `_DOUBLE_CLICK_MS`: the word
+        # under it, selected and copied.
+        now = int(monotonic() * 1000)
+        last = state.get("last_press")
+        state["last_press"] = (col, row, now)
+        if last != None and last[0] == col and last[1] == row and now - last[2] <= _DOUBLE_CLICK_MS:
+            state["last_press"] = None
+            return _select_word(state, col, row)
+        top, bottom = state.get("pane", (-1, -1))
+        inside = top <= row and row <= bottom
+        state["select"] = {
+            "from": (col, row),
+            "to": (col, row),
+            "dragged": False,
+            "bounds": (2, max(2, cols - 2)) if inside else (0, cols),
+            "rows": (top, bottom) if inside else (0, 1 << 30),
+        }
+        return True
+    sel = state.get("select")
+    if sel == None or sel.get("done"):
+        # No press since the last release (a legacy report names any
+        # button's release as the left's).
+        return True
+    if kind == "mouse-drag":
+        sel["to"] = (col, row)
+        sel["dragged"] = sel["dragged"] or (col, row) != sel["from"]
+        return True
+    sel["to"] = (col, row)
+    sel["done"] = True
+    if sel["dragged"]:
+        text = selected_text(state, cols)
+        if text:
+            say_note(state, "%s %d character%s" % (copy_text(state, text), len(text), "" if len(text) == 1 else "s"))
+        return True
+    state["select"] = None
+    if row == state.get("tab_row"):
+        for a, b, tab in state.get("tab_spans", []):
+            if a <= col and col < b:
+                if type(tab) == "tuple":
+                    back_to(state, tab[1])
+                else:
+                    show_tab(state, tab)
+                return True
+    failed_at = state.get("failed_at")
+    if failed_at != None and row == failed_at[0] and col >= failed_at[1]:
+        show_tab(state, "failures")
+        return True
+    frame = state.get("frame") or []
+    url = link_at(frame[row], col) if row < len(frame) else None
+    if url != None:
+        # A file's link shows the file here (`o` opens it in the editor);
+        # any other opens.
+        io = state.get("io")
+        target = io.editor_target(url) if io != None else None
+        if target != None and open_peek(state, target[0], target[1]):
+            say_note(state, "o opens it in " + (_editor(state)[1] or "your editor") + ", Esc goes back")
+        else:
+            say_note(state, open_link(state, url))
+        return True
+    toggle_fold(state, row)
+    return True
+
+dashboard_pointer = namespace(
+    copy_text = copy_text,
+    editor = _editor,
+    highlightable = highlightable,
+    hover_colour = _hover_colour,
+    link_at = link_at,
+    link_marks = link_marks,
+    link_span_at = link_span_at,
+    link_spans = link_spans,
+    mouse_key = mouse_key,
+    next_editor = next_editor,
+    open_in_editor = open_in_editor,
+    open_link = open_link,
+    open_peek = open_peek,
+    opens = opens,
+    peek_paint = _peek_paint,
+    selection_colour = _selection_colour,
+    selection_rows = selection_rows,
+    view_file = _view_file,
+)

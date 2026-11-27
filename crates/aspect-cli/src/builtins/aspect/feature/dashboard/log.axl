@@ -1,0 +1,848 @@
+"""The Dashboard's Console tab: the task's lines with their kinds and folds
+(`add_lines`), the search over them, and what it leaves in the scrollback
+(`replay_lines`, `report_lines`)."""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/failure_ties.axl", "failure_ties")
+load("../../private/lib/failures.axl", "failures")
+load("../../private/lib/results_pages.axl", "results_pages")
+load("../../private/lib/term_text.axl", "term_text")
+
+_c = term_text.c
+_counts = term_text.counts
+_RESET = term_text.RESET
+_slice_escaped = term_text.slice_escaped
+_tail = term_text.tail
+fit = term_text.fit
+link = term_text.link
+mark_cells = term_text.mark_cells
+text_width = term_text.text_width
+wrap_line = term_text.wrap_line
+_flaky = failure_records.flaky
+_log_path = failure_records.log_path
+_MAX_LOG_SIZE = failure_records.MAX_LOG_SIZE
+bazel_line = failure_records.bazel_line
+_HEADERS = failure_ties.HEADERS
+_REPORT_FAILURES = failures.REPORT_FAILURES
+failure_detail = failures.failure_detail
+failure_summary = failures.failure_summary
+cache_hits = dashboard_actions.cache_hits
+note_phase = dashboard_actions.note_phase
+
+# Console lines kept for scrolling back; older ones are counted in the
+# pane's title, and Bazel's console log has them all.
+_MAX_LOG = 20000
+
+_MAX_LINE = 8 * 1024
+
+# Errors repeated in the scrollback once the screen goes.
+_MAX_ERRORS = 20
+
+# What `e` cycles the console through, in order.
+_FILTERS = ["all", "warnings", "errors"]
+
+_FILTER_TITLES = {"all": "", "warnings": " (errors and warnings)", "errors": " (errors only)"}
+
+def new_search() -> dict:
+    """The search bar's state: closed, empty, smart case, jumping to matches
+    (`mode`, or `filter` to show only them). `origin` is where the console
+    was scrolled when the bar opened, `anchored` when that was not following
+    the newest line (scrolled up, or held on a match), and `back` the current
+    match, as lines from the newest shown (-1 for none): both counted from
+    the end, so new lines arriving keep them on the same line."""
+    return {"open": False, "query": "", "case": False, "word": False, "pattern": None, "error": "", "mode": "jump", "origin": 0, "anchored": False, "back": -1}
+
+def has_capital(query: str) -> bool:
+    """Whether `query` has a capital letter of its own: not one naming an
+    escape (`\\W`, `\\pL`, `\\p{Lu}`), a hex digit of one (`\\x4A`,
+    `\\u{00C9}`, `\\U0001F600`), a flag (`(?U)`, `(?iR:…)`) or a group
+    (`(?P<Name>…)`, `(?<Name>…)`)."""
+    at = ""
+    end = ""
+    need = 0
+    full = 0
+    recent = ""
+    for c in query.elems():
+        prev = recent
+        recent = (recent + c)[-3:]
+        if at == "skip":
+            if c == end:
+                at = ""
+            continue
+        if at == "flags":
+            if c in "imsxURu-":
+                continue
+            at = ""
+            if c in "):":
+                continue
+        if at == "hex":
+            if c == "{" and need == full:
+                at = "skip"
+                end = "}"
+                continue
+            if need > 0 and c in "0123456789abcdefABCDEF":
+                need -= 1
+                if need == 0:
+                    at = ""
+                continue
+            at = ""
+        if at == "escape":
+            # An escaped character opens nothing: `\\(?U` is no flag group.
+            at = ""
+            recent = ""
+            if c in ("p", "P"):
+                at = "class"
+            elif c in ("x", "u", "U"):
+                at = "hex"
+                need = {"x": 2, "u": 4, "U": 8}[c]
+                full = need
+            continue
+        if at == "class":
+            at = ""
+            if c == "{":
+                at = "skip"
+                end = "}"
+            continue
+        if c == "\\":
+            at = "escape"
+            continue
+        if prev.endswith("(?") or prev.endswith("(?P"):
+            if c == "<":
+                at = "skip"
+                end = ">"
+                continue
+            if c == "P" and prev.endswith("(?"):
+                continue
+            if c in "imsxURu-" and prev.endswith("(?"):
+                at = "flags"
+                continue
+        if c != c.lower():
+            return True
+    return False
+
+def case_sensitive(search: dict) -> bool:
+    """Whether the search matches case: when Ctrl+T says so, else, smart case
+    as in fzf and ripgrep, when its query has a capital (`has_capital`)."""
+    return search["case"] or has_capital(search["query"])
+
+def _search_update(state: dict):
+    """Recompile the search's pattern from its query and toggles. A query
+    that does not compile (one still being typed) keeps the last pattern that
+    did, its error shown in the bar."""
+    search = state["search"]
+    if not search["query"]:
+        search["pattern"] = None
+        search["error"] = ""
+        return
+    case = case_sensitive(search)
+    error = state["re"].check(search["query"], case_sensitive = case, whole_word = search["word"])
+    if error != None:
+        search["error"] = error
+        return
+    search["error"] = ""
+    search["pattern"] = state["re"].compile(search["query"], case_sensitive = case, whole_word = search["word"])
+
+def _search_key(state: dict, key: str, page: int) -> bool:
+    """Apply `key` to an open search bar; False for a key it leaves to the
+    console (the arrows and the wheel, which scroll). A change finds anew:
+    jumping, the newest match at or above where the bar opened (`_find`);
+    filtering, the newest line, or with no query where the bar opened."""
+    search = state["search"]
+    if key == "enter":
+        search["open"] = False
+        return True
+    if key == "esc":
+        state["search"] = new_search()
+        state["scroll"] = search.get("origin_rows", search["origin"]) if folding(state) else search["origin"]
+        return True
+    if key == "tab":
+        search["mode"] = "filter" if search["mode"] == "jump" else "jump"
+        search["back"] = -1
+    elif key in ("ctrl-t", "alt-c"):
+        search["case"] = not search["case"]
+    elif key in ("ctrl-b", "alt-w"):
+        search["word"] = not search["word"]
+    elif key in ("ctrl-w", "alt-backspace"):
+        # The last word, as readline deletes it: the spaces after it too.
+        search["query"] = search["query"].rstrip(" ").rpartition(" ")[0] + (" " if " " in search["query"].rstrip(" ") else "")
+    elif key == "ctrl-u":
+        search["query"] = ""
+    elif key == "backspace":
+        search["query"] = search["query"][:-1]
+    elif key.startswith("paste:"):
+        search["query"] += paste_text(key)
+    elif len(key) == 1:
+        search["query"] += key
+    else:
+        return key not in ("up", "down", "shift-up", "shift-down", "wheel-up", "wheel-down")
+    _search_update(state)
+    if search["mode"] == "jump":
+        _find(state, page)
+    else:
+        # Filtering shows the newest match; with no query, where it opened.
+        state["scroll"] = 0 if search["pattern"] != None else _origin_scroll(state)
+    return True
+
+def shown_lines(state: dict) -> list:
+    """What the console pane lists: a log's lines or the console's, through
+    the `e` filter and a filtering search (`console_lines`)."""
+    view = state["view"]
+    if view != None:
+        return console_lines(state, view["lines"])
+    if folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and state.get("folded"):
+        # The folded view, when it is of the lines kept (`add_lines`).
+        return state["folded"]
+    log, kinds = state.get("log", []), state.get("kinds")
+    early = state.get("early")
+    if early and state["filter"] != "all" and kinds != None:
+        # Errors and warnings from before `_MAX_LOG`, kept for `e`.
+        log = [line for line, _ in early] + log
+        kinds = [kind for _, kind in early] + kinds
+    return console_lines(state, log, kinds)
+
+def _match_from(pattern, lines: list, start: int, step: int) -> int:
+    """The first of `lines` from `start` on, going `step` (-1 older, 1
+    newer), that `pattern` matches; -1 for none."""
+    i = start
+    for _ in range(len(lines)):
+        if i < 0 or i >= len(lines):
+            break
+        if pattern.search(lines[i]):
+            return i
+        i += step
+    return -1
+
+def _show_match(state: dict, lines: list, i: int, page: int):
+    """Make line `i` of `lines` the current match, scrolled to the middle of
+    a console `page` lines high."""
+    state["search"]["back"] = len(lines) - 1 - i
+    state["scroll"] = max(0, len(lines) - i - 1 - (page - 1) // 2)
+
+    # Wrapped, `render` centres it in rows on its next frame, once.
+    state["search"]["centre"] = True
+
+def _origin_scroll(state: dict) -> int:
+    """Where the bar opened, as the view now scrolls: in folded rows when it
+    is folded (no query shown), else in lines."""
+    search = state["search"]
+    return search.get("origin_rows", search["origin"]) if folding(state) else search["origin"]
+
+def _find(state: dict, page: int):
+    """Jump to the newest match at or above the bottom of the console as the
+    bar found it (its `origin`), else the newest of all; with none, or no
+    query, back to that `origin`. A query that does not compile moves
+    nothing."""
+    search = state["search"]
+    if search["error"]:
+        return
+    lines = shown_lines(state)
+    at = -1
+    if search["pattern"] != None:
+        at = _match_from(search["pattern"], lines, len(lines) - 1 - search["origin"], -1)
+        if at < 0:
+            at = _match_from(search["pattern"], lines, len(lines) - 1, -1)
+    if at < 0:
+        search["back"] = -1
+        state["scroll"] = _origin_scroll(state)
+        return
+    _show_match(state, lines, at, page)
+
+def step_match(state: dict, step: int, page: int):
+    """`N` (`step` -1) and `n` (1): the next older or newer match from the
+    current one, or from the bottom of the console without one; past the
+    newest or the oldest, round to the other end, the keys row saying so."""
+    search = state["search"]
+    if search["pattern"] == None or search["mode"] != "jump":
+        return
+    lines = shown_lines(state)
+    back = search["back"]
+    if back >= 0 and back < len(lines):
+        start = len(lines) - 1 - back + step
+    else:
+        # The bottom of the console as `render` draws it, a scroll past the
+        # top (`K`) at the top page.
+        bottom = max(min(len(lines) - state["scroll"], len(lines)), min(len(lines), page)) - 1
+        start = bottom + (1 if step > 0 else 0)
+    at = _match_from(search["pattern"], lines, start, step)
+    if at < 0:
+        at = _match_from(search["pattern"], lines, 0 if step > 0 else len(lines) - 1, step)
+        if at >= 0:
+            say_note(state, "wrapped round to the oldest match" if step > 0 else "wrapped round to the newest match")
+    if at >= 0:
+        _show_match(state, lines, at, page)
+
+def paste_text(key: str) -> str:
+    """A `paste:` key's text for the search bar: on one line, without control
+    characters, which would move the cursor or count as columns they are not."""
+    out = []
+    for c in key[len("paste:"):].elems():
+        if c in "\r\n\t":
+            out.append(" ")
+        elif c >= " " and not ("\x7f" <= c and c <= "\x9f"):
+            out.append(c)
+    return "".join(out)
+
+def console_lines(state: dict, log: list, kinds = None) -> list:
+    """The console's lines `state` shows: by its `e` filter, by `kinds`
+    (`classify`'s, of `log`, worked out when not given), then its search
+    when that filters (a search that jumps shows every line)."""
+    if state["filter"] != "all":
+        kinds = kinds if kinds != None and len(kinds) == len(log) else classify(log)[0]
+        log = [l for l, k in zip(log, kinds) if _shows(state["filter"], k)]
+    search = state["search"]
+    return search["pattern"].filter(log) if search["pattern"] != None and search["mode"] == "filter" else log
+
+def _console_row(state: dict, pattern, current = False):
+    """How a console row is painted, for the piece of a line `at` characters
+    into it: the line as written, its colour kept (`colour_of`), cut to the
+    cells `fit` kept of it; then its search matches, found in the plain
+    text and laid over those cells (`mark_cells`)."""
+    colour_of = state.get("colour_of", {})
+    on = _c("search.current" if current else "search.match")
+
+    def paint_for(line, at = 0):
+        coloured = colour_of.get(line)
+
+        def paint(shown):
+            base = shown
+            if coloured != None:
+                cut = shown.endswith("…")
+                base = _slice_escaped(coloured, at, text_width(shown) - (1 if cut else 0)) + ("…" if cut else "")
+            if pattern == None:
+                return base
+            marked = pattern.highlight(shown, "\x01", "\x02")
+            if marked == shown:
+                return base
+            marks = []
+            cell = 0
+            start = 0
+            for c in marked.elems():
+                if c == "\x01":
+                    start = cell
+                elif c == "\x02":
+                    marks.append((start, cell, on, _RESET, on))
+                else:
+                    cell += text_width(c)
+            return mark_cells(base, marks)
+
+        return paint
+
+    return paint_for
+
+def _piece_links(links, start: int, length: int):
+    """`links` (`[start, end, url]` by character of a line) as those of its
+    piece of `length` characters from `start`."""
+    if not links:
+        return None
+    out = []
+    for a, b, url in links:
+        a, b = max(a, start) - start, min(b, start + length) - start
+        if a < b:
+            out.append([a, b, url])
+    return out
+
+def _search_bar(search: dict, matches: int, cols: int) -> str:
+    """The bar's row, `cols` wide at most: whether it finds or filters, the
+    query, its toggles lit when on (case when it matches case, by Ctrl+T or
+    a capital), what it found (nothing for an empty query) or what is wrong
+    with it, and its keys while they fit (the query's start goes before the
+    toggles do)."""
+    found = search["error"] or ("%d match%s" % (matches, "" if matches == 1 else "es") if search["query"] else "")
+    jump = search["mode"] == "jump"
+    hints = " · Tab %s · ^T case · ^B word · Enter keep · Esc back" % ("filter" if jump else "find")
+    toggles = " Aa W "
+    head = " Find: " if jump else " Filter: "
+
+    # Measured as plain text, the escape sequences added after.
+    room = cols - len(toggles) - text_width(found) - 1
+    if room - len(hints) >= len(head) + text_width(search["query"]) + 1:
+        room -= len(hints)
+    else:
+        hints = ""
+    query = search["query"]
+    if len(head) + text_width(query) + 1 > room:
+        head = " /"
+        keep = max(0, room - len(head) - 2)
+        if text_width(query) > keep + 1:
+            query = ("…" + _tail(query, keep)) if keep > 0 else ""
+    if len(head) + text_width(query) + 1 > room:
+        return fit(" /" + search["query"], cols)
+
+    def toggle(on, label):
+        return (_c("active") if on else _c("muted")) + label + _RESET
+
+    return (
+        head + query + "▏" + " " + toggle(case_sensitive(search), "Aa") + " " + toggle(search["word"], "W") + " " +
+        (_c("error") + found + _RESET if search["error"] else found) + _c("muted") + hints + _RESET
+    )
+
+def shown_by(filter: str, line: str) -> bool:
+    """Whether the console's `filter` (one of `_FILTERS`) shows `line`, by
+    itself (`severity`)."""
+    return _shows(filter, severity(line))
+
+def severity(line: str) -> str:
+    """`error`, `warning` or `` for a console line by itself: Bazel's
+    `ERROR:`, `FAIL:` and `TIMEOUT:` (indented too, as the console's recap
+    of the errors lists them), a test summary's `FAILED`, `TIMEOUT` and
+    `FAILED TO BUILD`, and its `WARNING:`; with or without the timestamp
+    `--show_timestamps` puts before it."""
+    line = bazel_line(line).lstrip(" ")
+    for head in ("ERROR:", "FAIL:", "TIMEOUT:"):
+        if line.startswith(head):
+            return "error"
+    if " FAILED " in line or line.endswith(" FAILED") or " TIMEOUT " in line or " FAILED TO BUILD" in line:
+        return "error"
+    if line.startswith("WARNING:"):
+        return "warning"
+    return ""
+
+def _starts_block(line: str) -> bool:
+    line = bazel_line(line).lstrip(" ")
+    for head in _HEADERS:
+        if line.startswith(head):
+            return True
+    return False
+
+def classify(lines: list, block = "") -> tuple:
+    """Each of `lines`' kind (`severity`), the lines after an `ERROR:`
+    taking its kind until another line of Bazel's own, so a compiler's
+    diagnostic under its action's `ERROR:` is an error too; a `WARNING:`
+    (Bazel's are one line, a tool's own among its output, `INFO: From`'s)
+    is its line alone; and the kind the last line leaves for the next, from
+    `block`, the one the lines before them left."""
+    kinds = []
+    for line in lines:
+        kind = severity(line)
+        if _starts_block(line):
+            plain = bazel_line(line).lstrip(" ")
+            block = kind if plain.startswith("ERROR:") else ""
+        elif not kind:
+            kind = block
+        kinds.append(kind)
+    return kinds, block
+
+def _shows(filter: str, kind: str) -> bool:
+    return filter == "all" or kind == "error" or (kind == "warning" and filter == "warnings")
+
+def keep_links(state: dict, line: str, links):
+    """Note the console's `links` on `line` (`[start, end, url]` by
+    character), for its rows to draw them: by the line's text, so a filtered
+    or scrolled view finds them as the console pane does."""
+    if links:
+        state.setdefault("line_links", {})[line] = links
+
+# Where Bazel's closing block starts: the lines a reader of the
+# scrollback wants after the screen is gone (`report_lines`), its first
+# `_CLOSING_HEAD` and last `_CLOSING_TAIL` (where `Executed N out of M
+# tests` is) of them.
+_CLOSING = ["INFO: Elapsed time:", "INFO: Build completed", "ERROR: Build did NOT complete", "INFO: Errors Bazel reported", "── Error recap (", "Executed "]
+
+_CLOSING_HEAD = 5
+
+_CLOSING_TAIL = 40
+
+# The most lines of an error block kept for the scrollback.
+_MAX_BLOCK = 20
+
+# Errors and warnings kept past `_MAX_LOG`, so `e` finds them all.
+_MAX_EARLY = 5000
+
+def _closing(line: str) -> bool:
+    line = bazel_line(line).lstrip(" ")
+    for head in _CLOSING:
+        if line.startswith(head):
+            return True
+    return False
+
+def _folded_line(state: dict, n: int) -> str:
+    """A fold's row: how many lines it holds and how to show them (a click
+    while the screen has the mouse, Ctrl+O for every fold)."""
+    how = "click or Ctrl+O shows them" if state.get("mouse") else "Ctrl+O shows them"
+    return "  … +%d line%s (%s)" % (n, "" if n == 1 else "s", how)
+
+def _tools_own(coloured) -> bool:
+    """Whether a line as written (`coloured`) is coloured as a tool colours
+    `INFO:` (the colon inside the colour, the space after), not as Bazel
+    colours its own message (`INFO: ` inside): a tool's line, which no
+    block of Bazel's starts with."""
+    if not coloured:
+        return False
+    rest = coloured
+    for _ in range(8):
+        if not rest.startswith("\x1b["):
+            break
+        end = rest.find("m")
+        if end < 0:
+            return False
+        rest = rest[end + 1:]
+    head, colon, after = rest.partition(":")
+    return bool(colon) and head.isalpha() and head.isupper() and after.startswith("\x1b[0m")
+
+def _fold_line(state: dict, line: str):
+    """Take `line` into the console's folded view (`folded`): the lines
+    under an `INFO: From` (a successful action's output) counted on one
+    row after it rather than shown, a tool's line coloured like one of
+    Bazel's (`_tools_own`, from its colours) among them; a block a click
+    opened (`fold_open`, by its `INFO: From` line's number since the
+    console began) shown whole. Each row's block (`fold_head`) is its
+    `INFO: From` line's index in `log` on that line's row and the count's,
+    else -1: what a click on it toggles."""
+    folded = state.setdefault("folded", [])
+    src = state.setdefault("fold_src", [])
+    head = state.setdefault("fold_head", [])
+    at = state.get("fold_seen", 0)
+    state["fold_seen"] = at + 1
+    if bazel_line(line).startswith("INFO: From "):
+        folded.append(line)
+        src.append(at)
+        head.append(at)
+        state["fold_n"] = 0
+        state["fold_at"] = at
+        state["fold_shown"] = (state.get("log_base", 0) + at) in state.get("fold_open", {})
+        return
+    if state.get("fold_n", -1) >= 0 and (not _starts_block(line) or _tools_own(state.get("colour_of", {}).get(line))):
+        state["fold_n"] += 1
+        if state.get("fold_shown"):
+            folded.append(line)
+            src.append(at)
+            head.append(-1)
+        elif state["fold_n"] == 1:
+            folded.append(_folded_line(state, 1))
+            src.append(at)
+            head.append(state["fold_at"])
+        else:
+            folded[-1] = _folded_line(state, state["fold_n"])
+            src[-1] = at
+        return
+    state["fold_n"] = -1
+    folded.append(line)
+    src.append(at)
+    head.append(-1)
+
+def refold(state: dict):
+    """The console's folded view built again from the lines kept, as a
+    trim, a click on a fold or the mouse's toggle leaves it."""
+    state["folded"] = []
+    state["fold_src"] = []
+    state["fold_head"] = []
+    state["fold_n"] = -1
+    state["fold_seen"] = 0
+    for line in state.get("log", []):
+        _fold_line(state, line)
+
+def _rows_of(state: dict, lines: list) -> int:
+    """How many screen rows `lines` take in the console, wrapped as drawn."""
+    if not state.get("wrap", True):
+        return len(lines)
+    width = max(1, state.get("cols", 80) - 4)
+    rows = 0
+    for line in lines:
+        rows += len(wrap_line(line, width))
+    return rows
+
+def toggle_fold(state: dict, row: int) -> bool:
+    """A click on the console's `row`: on an `INFO: From` with lines folded
+    under it, or on their count, shows them; on an open one's `INFO: From`,
+    folds them again. That line stays on its row of the screen (the view
+    moved by the rows that came or went below it; a row off at most where a
+    wrapped line straddles the bottom), unless the console was following,
+    which it goes on doing. Not in another tab, nor on an `INFO:
+    From` with nothing under it yet. Whether it was one."""
+    if state.get("tab", "console") != "console" or not folding(state):
+        return False
+    at = state.get("row_lines", {}).get(row)
+    heads = state.get("fold_head", [])
+    if at == None or at >= len(heads) or heads[at] < 0:
+        return False
+    head = heads[at]
+    key = state.get("log_base", 0) + head
+    opened = state.setdefault("fold_open", {})
+    shown = key in opened
+    folded = state.get("folded", [])
+    if not shown and not (at + 1 < len(heads) and heads[at + 1] == head) and not folded[at].startswith("  … +"):
+        # An `INFO: From` with nothing under it yet.
+        return False
+
+    # The rows between the clicked block's line and the view's bottom.
+    scroll = state.get("scroll", 0)
+    line_at = [i for i, h in enumerate(heads) if h == head][0]
+    end = len(folded) - scroll
+    below = _rows_of(state, folded[line_at + 1:end])
+    if shown:
+        opened.pop(key)
+    else:
+        opened[key] = True
+    refold(state)
+    folded = state["folded"]
+    if scroll > 0:
+        # As many rows below the line: the view's new bottom where they end,
+        # or a row off where a wrapped line straddles that.
+        filled, end, short, short_end = 0, line_at + 1, 0, line_at + 1
+        for i in range(line_at + 1, len(folded)):
+            if filled >= below:
+                break
+            short, short_end = filled, end
+            filled += _rows_of(state, [folded[i]])
+            end = i + 1
+        if filled - below > below - short:
+            end = short_end
+        state["scroll"] = max(0, len(folded) - end)
+    state["search"]["anchored_view"] = False
+    say_note(state, "expanded · click again to fold" if not shown else "folded · click to expand")
+    return True
+
+def folded_to_lines(state: dict, scroll: int) -> int:
+    """A scroll of the folded view (rows from its newest) as one of the
+    lines kept, for a search, which reads them all: the bottom row's line,
+    the last of a fold for its count's row."""
+    src = state.get("fold_src", [])
+    if not src:
+        return scroll
+    row = max(0, min(len(src) - 1, len(src) - 1 - scroll))
+    return max(0, len(state.get("log", [])) - 1 - src[row])
+
+def folding(state: dict) -> bool:
+    """Whether the console shows its folded view: every line shown (`e`
+    on all, no search filtering nor jumping), not opened with Ctrl+O, and
+    not a log."""
+    search = state["search"]
+    return state.get("view") == None and state["filter"] == "all" and search["pattern"] == None and not state.get("unfolded")
+
+def add_lines(state: dict, lines: list, links = None, colours = None, cli = False):
+    """Take the console's new `lines`, and with them their `links` (each
+    line's `[start, end, url]`s, as `output_feed()` gives them): kept (the
+    newest `_MAX_LOG`, with each one's kind, `classify`'s, its errors and
+    warnings past that kept for `e`, the rest counted in `dropped`), the
+    first `_MAX_ERRORS` error blocks noted for the scrollback, Bazel's
+    closing block from where it starts (`_CLOSING`), Bazel's cache tally
+    read (`cache_hits`). Scrolled up, the console stays on the lines it
+    shows, counting the new ones and the errors among them (`unseen`,
+    `unseen_errors`); a log being viewed does not move. Counted from the
+    end, the current match and where the bar opened move with them, the
+    latter in lines the `e` filter shows, as a search that jumps lists
+    them. `colours` are the lines as written, colour kept (the same text),
+    drawn in their place (`colour_of`); `cli` lines are the CLI's own, each
+    its own kind (never under an error of Bazel's), not Bazel's closing
+    block."""
+    shown = 0
+    shown_errors = 0
+    unsearched = 0
+    folded_before = len(state.get("folded", []))
+    if cli:
+        kinds = [severity(line) for line in lines]
+        state["block"] = ""
+        for line in lines:
+            note_phase(state, line)
+    else:
+        kinds, state["block"] = classify(lines, state.get("block", ""))
+    colour_of = state.setdefault("colour_of", {})
+    state.setdefault("kinds", [])
+    closing = state.setdefault("closing", [])
+    for i, line in enumerate(lines):
+        kind = kinds[i]
+        if len(line) > _MAX_LINE:
+            # The rest is in Bazel's console log, on disk.
+            line = line[:_MAX_LINE] + "… (%d more characters in the console log)" % (len(line) - _MAX_LINE)
+        state["log_size"] = state.get("log_size", 0) + len(line)
+        state["log"].append(line)
+        state["kinds"].append(kind)
+        coloured = colours[i] if colours != None and i < len(colours) else None
+        if coloured and coloured != line and len(line) <= _MAX_LINE:
+            colour_of[line] = coloured
+        _fold_line(state, line)
+        if links != None and i < len(links):
+            keep_links(state, line, links[i])
+
+        # Errors after Bazel's closing block began are its recap's.
+        if kind == "error" and severity(line) == "error" and not _closing(line) and not closing:
+            state["error_count"] += 1
+            if len(state["errors"]) < _MAX_ERRORS:
+                state["errors"].append([line])
+        elif kind == "error" and severity(line) != "error" and state["errors"] and len(state["errors"][-1]) < _MAX_BLOCK and state["error_count"] <= _MAX_ERRORS:
+            state["errors"][-1].append(line)
+        if (closing or _closing(line)) and not cli:
+            # Bazel's, not the CLI's own lines, which the scrollback
+            # gets as they were printed: the head, and a tail kept short.
+            if len(closing) < _CLOSING_HEAD:
+                closing.append(line)
+            else:
+                tail = state.setdefault("closing_tail", [])
+                tail.append(line)
+                if len(tail) > 2 * _CLOSING_TAIL:
+                    state["closing_cut"] = state.get("closing_cut", 0) + len(tail) - _CLOSING_TAIL
+                    state["closing_tail"] = tail[-_CLOSING_TAIL:]
+        if _shows(state["filter"], kind):
+            unsearched += 1
+            if console_lines(state, [line], [kind]):
+                shown += 1
+                if kind == "error":
+                    shown_errors += 1
+        cache = cache_hits(line)
+        if cache != None:
+            state["cache"] = cache
+        plain = bazel_line(line)
+        if plain.startswith("INFO: Elapsed time:") and "Critical Path: " in plain:
+            state["critical"] = plain.partition("Critical Path: ")[2].strip().split(" ")[0]
+
+    if folding(state):
+        # Folded, a line under an `INFO: From` adds no row.
+        shown = len(state["folded"]) - folded_before
+
+    # The console parked under another tab, scrolled up: held where it was.
+    parked = state.get("parked", {}).get("console")
+    if parked != None and parked[0] == None and parked[2] > 0:
+        state["parked"]["console"] = (parked[0], parked[1], parked[2] + shown)
+    if state["view"] == None and state.get("tab", "console") == "console":
+        search = state["search"]
+        held = search["back"] >= 0 and search["mode"] == "jump" and search["pattern"] != None
+        if search["open"] and search.get("anchored"):
+            search["origin"] += unsearched
+            search["origin_rows"] = search.get("origin_rows", 0) + (len(state["folded"]) - folded_before if state.get("folded") != None else unsearched)
+        if state["scroll"] > 0:
+            state["scroll"] += shown
+            state["unseen"] += shown
+            state["unseen_errors"] = state.get("unseen_errors", 0) + shown_errors
+        if search["back"] >= 0:
+            search["back"] += shown
+
+            # A match jumped to holds the view, even one near the newest
+            # line, until `J` follows again.
+            if state["scroll"] == 0 and held:
+                state["scroll"] = shown
+                state["unseen"] += shown
+    over = len(state["log"]) - _MAX_LOG
+    if state.get("log_size", 0) > _MAX_LOG_SIZE:
+        # Long lines: as many of the oldest as bring the text a tenth under
+        # its budget, if that is more than the line count asks.
+        excess = state["log_size"] - _MAX_LOG_SIZE * 9 // 10
+        drop = 0
+        for line in state["log"]:
+            if excess <= 0:
+                break
+            excess -= len(line)
+            drop += 1
+        if drop > 0:
+            over = max(over, drop - _MAX_LOG // 10, 1)
+    if over > 0:
+        # A tenth more than over, so what follows (refolding) runs once in
+        # that many lines, not on every batch.
+        over = min(len(state["log"]), over + _MAX_LOG // 10)
+        state["trims"] = state.get("trims", 0) + 1
+        early = state.setdefault("early", [])
+        for line, kind in zip(state["log"][:over], state["kinds"][:over]):
+            if kind:
+                early.append((line, kind))
+        if len(early) > _MAX_EARLY:
+            state["early"] = early[-_MAX_EARLY:]
+        for line in state["log"][:over]:
+            state["log_size"] = state.get("log_size", 0) - len(line)
+        state["log"] = state["log"][over:]
+        state["kinds"] = state["kinds"][over:]
+        kept = state.get("colour_of", {})
+        state["colour_of"] = {line: kept[line] for line in state["log"] if line in kept}
+        state["dropped"] = state.get("dropped", 0) + over
+        state["log_base"] = state.get("log_base", 0) + over
+
+        # Trimmed seed lines are still on the main screen: neither replayed
+        # nor counted as not kept on leaving.
+        cut = min(over, state.get("seeded", 0))
+        state["seeded"] = state.get("seeded", 0) - cut
+        state["seed_trimmed"] = state.get("seed_trimmed", 0) + cut
+        refold(state)
+    if len(state.get("line_links", {})) > _MAX_LOG:
+        kept = {line: True for line in state["log"]}
+        state["line_links"] = {line: spans for line, spans in state["line_links"].items() if line in kept}
+
+# How long the keys row says what a toggle did.
+_SAID_MS = 2000
+
+def say_note(state: dict, text: str, ms = None):
+    """Have the keys row say `text` (`""` for nothing), until the next key,
+    or for `ms` when given: the one way a note is set, so none keeps an
+    older one's deadline."""
+    state["note"] = text
+    state["note_until"] = _clock(state) + ms if ms != None else None
+
+def _clock(state: dict) -> int:
+    """The time notes are timed by, in milliseconds: the screen's own clock
+    (`clock`), which runs on the finished screen too, whose header time
+    stays; else the frame's `now_ms`."""
+    clock = state.get("clock")
+    return clock() if clock != None else state.get("now_ms", 0)
+
+def replay_lines(state: dict, tty: bool) -> list:
+    """The console as the screen showed it, for the scrollback once the
+    screen is gone: every line it kept, Bazel's labels coloured on a
+    terminal, the CLI's own as it wrote them (unmarked), after a line
+    counting the oldest it did not keep; not what the task wrote before the
+    screen was taken (`seeded`), which the main screen shows already."""
+    out = []
+    not_kept = state.get("dropped", 0) - state.get("seed_trimmed", 0)
+    if not_kept > 0:
+        out.append(_counts("… %d older lines not kept: aspect history show for all of it", not_kept))
+    for line in state["log"][state.get("seeded", 0):]:
+        out.append(state.get("colour_of", {}).get(line, line) if tty else line)
+    return out
+
+def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked = None, excerpt = None) -> list:
+    """What the scrollback keeps once the screen is gone, for a person and
+    for an agent reading a cut capture's tail alike: Bazel's closing block
+    as it wrote it (its test summary, `Elapsed time`, `Build completed`),
+    its head and its tail, unless the console was `replayed` just above it
+    (`replay_lines`); the flaky tests' failed attempts; the results pages;
+    and last the failure summary (`failure_summary`, as the console prints
+    it without the Dashboard: each failure once with what Bazel said of
+    it, the counts, Bazel's raw log and `aspect history show`). The summary
+    goes only here, never to the console the screen shows nor to the task's
+    output it dumps, so a run replayed from the history shows it no more
+    than the screen did. `linked` links the summary's paths and `excerpt`
+    picks a test log's lines (`failure_summary`), in the screen's width."""
+    out = []
+    bold = _c("strong") if tty else ""
+    reset = _RESET if tty else ""
+    tail = state.get("closing_tail", [])
+    cut = state.get("closing_cut", 0) + max(0, len(tail) - _CLOSING_TAIL)
+    closing = state.get("closing", []) + ([_counts("… %d more of Bazel's lines", cut)] if cut else []) + tail[-_CLOSING_TAIL:]
+    if not replayed:
+        out.extend(closing)
+    flaky = [rec for rec in state["fails"] if _flaky(state, rec)]
+    if flaky:
+        yellow = _c("warning") if tty else ""
+        out.append(bold + "Flaky" + reset + " (passed on a later attempt):")
+        for rec in flaky[:_REPORT_FAILURES]:
+            path = _log_path(state, rec)
+            out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
+    for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
+        out.append("%s: %s" % (label, link(url, url) if tty else url))
+    return out + failure_summary(state, task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100, state.get("bazel_exit"))
+
+dashboard_log = namespace(
+    add_lines = add_lines,
+    classify = classify,
+    clock = _clock,
+    console_lines = console_lines,
+    console_row = _console_row,
+    FILTER_TITLES = _FILTER_TITLES,
+    FILTERS = _FILTERS,
+    folded_to_lines = folded_to_lines,
+    folding = folding,
+    has_capital = has_capital,
+    MAX_LOG = _MAX_LOG,
+    new_search = new_search,
+    paste_text = paste_text,
+    piece_links = _piece_links,
+    refold = refold,
+    replay_lines = replay_lines,
+    report_lines = report_lines,
+    SAID_MS = _SAID_MS,
+    say_note = say_note,
+    search_bar = _search_bar,
+    search_key = _search_key,
+    severity = severity,
+    shown_by = shown_by,
+    shown_lines = shown_lines,
+    step_match = step_match,
+    toggle_fold = toggle_fold,
+)

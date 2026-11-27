@@ -17,7 +17,19 @@ so the goldens hold no path of this machine. `--update` rewrites the
 goldens; review the diff.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "action_split", "collect_event", "failure_entries", "failure_rows", "failure_summary", "summary_state")
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard.axl", "summary_state")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
+load("../private/lib/term_text.axl", "term_text")
+
+ANSI = term_text.ANSI
+collect_event = failure_records.collect_event
+failure_entries = failures.failure_entries
+failure_summary = failures.failure_summary
+action_split = dashboard_actions.action_split
+failure_rows = dashboard_render.failure_rows
 
 _FIXTURES = "crates/aspect-cli/tests/testdata/failures"
 

@@ -1,0 +1,1111 @@
+"""The Dashboard's frame (`render`): its header, the build panes, the tabs
+and their rows."""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/failures.axl", "failures")
+load("../../private/lib/term_text.axl", "term_text")
+
+_c = term_text.c
+_counts = term_text.counts
+_cut_escaped = term_text.cut_escaped
+_middle = term_text.middle
+_plain = term_text.plain
+_RESET = term_text.RESET
+_row_of = term_text.row_of
+_tail = term_text.tail
+elapsed = term_text.elapsed
+fit = term_text.fit
+link = term_text.link
+mark_cells = term_text.mark_cells
+text_width = term_text.text_width
+wrap_line = term_text.wrap_line
+_get = failure_records.get
+blocked_targets = failure_records.blocked_targets
+blocked_text = failure_records.blocked_text
+_expand_tabs = failures.expand_tabs
+_failure_counts = failures.failure_counts
+_GAP_ROW = failures.GAP_ROW
+_tab_extras = failures.tab_extras
+entry_text = failures.entry_text
+excerpt_rows = failures.excerpt_rows
+failure_entries = failures.failure_entries
+target_counts = failures.target_counts
+_aged = dashboard_actions.aged
+_has_tests = dashboard_actions.has_tests
+_NOTHING_RAN = dashboard_actions.NOTHING_RAN
+_SPINNER = dashboard_actions.SPINNER
+_tests_words = dashboard_actions.tests_words
+action_counts = dashboard_actions.action_counts
+action_lines = dashboard_actions.action_lines
+action_results = dashboard_actions.action_results
+action_row = dashboard_actions.action_row
+action_seconds = dashboard_actions.action_seconds
+action_split = dashboard_actions.action_split
+bar_row = dashboard_actions.bar_row
+built = dashboard_actions.built
+phase_status = dashboard_actions.phase_status
+running_actions = dashboard_actions.running_actions
+slowest_rows = dashboard_actions.slowest_rows
+slowest_title = dashboard_actions.slowest_title
+target_rows = dashboard_actions.target_rows
+test_progress = dashboard_actions.test_progress
+tests_cached_text = dashboard_actions.tests_cached_text
+tests_text = dashboard_actions.tests_text
+_console_row = dashboard_log.console_row
+_FILTER_TITLES = dashboard_log.FILTER_TITLES
+_piece_links = dashboard_log.piece_links
+_search_bar = dashboard_log.search_bar
+folding = dashboard_log.folding
+severity = dashboard_log.severity
+shown_lines = dashboard_log.shown_lines
+_BUILD_TABS = dashboard_view.BUILD_TABS
+_listed_position = dashboard_view.listed_position
+_TABS = dashboard_view.TABS
+build_view = dashboard_view.build_view
+crumbs = dashboard_view.crumbs
+listed_failures = dashboard_view.listed_failures
+panes_shown = dashboard_view.panes_shown
+picked_build = dashboard_view.picked_build
+shown_tips = dashboard_view.shown_tips
+tips_count = dashboard_view.tips_count
+_hover_colour = dashboard_pointer.hover_colour
+_peek_paint = dashboard_pointer.peek_paint
+_selection_colour = dashboard_pointer.selection_colour
+link_at = dashboard_pointer.link_at
+link_marks = dashboard_pointer.link_marks
+link_spans = dashboard_pointer.link_spans
+selection_rows = dashboard_pointer.selection_rows
+help_rows = dashboard_keys.help_rows
+keys_row = dashboard_keys.keys_row
+
+# Folded builds shown above the tabs, the older counted on a row.
+_MAX_FOLDED = 3
+
+def failure_rows(state: dict, room: int, width: int) -> list:
+    """The Failures list's rows, `room` at most, each `width` wide: a row per
+    failed action and per failed test (`listed_failures`: a test's chosen
+    attempt stands for it), headed as the failure summary heads it (`✗
+    //pkg:t  Genrule · exit 1 · pkg/BUILD:3:8`, `✗ //t:x  test · failed 2 of
+    2 attempts`, `record_excerpt`), the selected one in reverse video while
+    the list has focus and kept in sight with its excerpt under it behind a
+    `│` (every row's with Ctrl+O, `expand_failures`); then the rows of no
+    record of their own (`_tab_extras`): a failed target no event says
+    more of, each blocked target (`○`), Bazel's other errors (`!`). What
+    is hidden above and below is
+    counted in rows of the list, an excerpt never cut from its row."""
+    fails = state["fails"]
+    listed = listed_failures(state)
+    extras = _tab_extras(state)
+    total = len(listed) + len(extras)
+    if room <= 0 or total == 0:
+        return []
+    selected = state["selected"]
+    at = _listed_position(state, listed, selected)
+    expand_all = state.get("expand_failures", False)
+
+    def block(pos):
+        # The rows of the list's `pos`th entry: its row, its excerpt under
+        # it when shown.
+        if pos >= len(listed):
+            return [unlogged_row(pos)]
+        i = listed[pos]
+        rows = [row(i, pos == at)]
+        if expand_all or pos == at:
+            rows.extend([_excerpt_row(line, width) for line in record_excerpt(state, i)[1]])
+        return rows
+
+    blocked = blocked_targets(state)
+
+    def unlogged_row(pos):
+        what, label = extras[pos - len(listed)]
+        if what == "other":
+            text = _middle("! " + label["lines"][0], width)
+            if pos == at and state["focus"] == "failures":
+                return _c("active") + fit(text, width) + _RESET
+            return _c("warning") + "!" + _RESET + _c("muted") + text[1:] + _RESET
+        if what == "entry":
+            said = entry_text(state, label)
+            text = _middle("✗ " + " · ".join(([label["label"]] if label["label"] else []) + ([said["kind"]] if said["kind"] else []) + said["details"]) + ("" if label.get("exited") != None else "  no log"), width)
+            if pos == at and state["focus"] == "failures":
+                return _c("active") + fit(text, width) + _RESET
+            return _c("error") + "✗" + _RESET + text[1:]
+        roots = blocked.get(label)
+        text = _middle(("○ " + label + "  " + blocked_text(label, roots)) if roots else ("✗ " + label + "  no log"), width)
+        if pos == at and state["focus"] == "failures":
+            return _c("active") + fit(text, width) + _RESET
+        return _c("muted") + text + _RESET if roots else _c("error") + "✗" + _RESET + text[1:]
+
+    def row(i, chosen):
+        rec = fails[i]
+        flaky = rec["kind"] == "test" and state["counts"].get("flaky", {}).get(rec["label"])
+        mark = "~" if flaky else "✗"
+        said = " · ".join(record_excerpt(state, i)[0])
+        text = _middle(mark + " " + rec["label"] + "  " + said, width)
+        if chosen and state["focus"] == "failures":
+            return _c("active") + fit(text, width) + _RESET
+        return (_c("warning") if flaky else _c("error")) + mark + _RESET + " " + _c("strong") + rec["label"] + _RESET + _c("muted") + text[2 + len(rec["label"]):] + _RESET
+
+    # A window of whole entries around the chosen one, as many as fit with
+    # a line each for what is hidden above and below; too short for those,
+    # the chosen one and what follows.
+    chosen = block(at)
+    if room < 3:
+        rows = list(chosen)
+        for pos in range(at + 1, total):
+            if len(rows) >= room:
+                break
+            rows.extend(block(pos))
+        for pos in range(at - 1, -1, -1):
+            if len(rows) >= room:
+                break
+            rows = block(pos)[-(room - len(rows)):] + rows
+        return rows[:room]
+    start, end = at, at + 1
+    used = len(chosen)
+    for _ in range(total):
+        grew = False
+        if start > 0:
+            more = len(block(start - 1)) if expand_all else 1
+            if used + more + (1 if start - 1 > 0 else 0) + (1 if end < total else 0) <= room:
+                used += more
+                start -= 1
+                grew = True
+        if end < total:
+            more = len(block(end)) if expand_all else 1
+            if used + more + (1 if start > 0 else 0) + (1 if end + 1 < total else 0) <= room:
+                used += more
+                end += 1
+                grew = True
+        if not grew:
+            break
+    rows = []
+    for pos in range(start, end):
+        rows.extend(chosen if pos == at else block(pos))
+    rows = rows[:max(1, room - (1 if start > 0 else 0) - (1 if end < total else 0))]
+    return _counted(rows, start, total - end)
+
+def _excerpt_row(line: str, width: int) -> str:
+    """An excerpt's line in the Failures list, behind its `│`; a gap `│ …`."""
+    if line == _GAP_ROW:
+        return "  " + _c("muted") + "│ …" + _RESET
+    return "  " + _c("muted") + "│" + _RESET + " " + fit(_expand_tabs(line), max(1, width - 4)).rstrip()
+
+def record_excerpt(state: dict, i: int) -> tuple:
+    """`(details, rows)` of the Failures list's row for record `i`, as the
+    failure summary heads and quotes its entry (`entry_text`): `([], [])`
+    for a record that is no entry's."""
+    for e in failure_entries(state)["entries"]:
+        if e["index"] == i:
+            text = entry_text(state, e)
+            details = ([text["kind"]] if text["kind"] else []) + text["details"]
+            if e["flaky"]:
+                details.append("flaky, passed on a later attempt")
+            return (details, excerpt_rows(text["lines"])[0])
+    return ([], [])
+
+def _window(total: int, room: int, selected: int):
+    """Which of a list's `total` rows `room` lines show: `(start, shown,
+    above, below)`, a window around the `selected` row, a line on each side
+    counting what is hidden there (`above`, `below`); one with nothing to
+    count gives its line back."""
+    if total <= room:
+        return (0, total, 0, 0)
+    if room < 3:
+        return (min(max(0, selected - room + 1), total - room), room, 0, 0)
+    shown = room - 2
+    start = min(max(0, selected - shown // 2), total - shown)
+    if start == 0:
+        shown += 1
+    elif start + shown >= total:
+        start -= 1
+        shown += 1
+    return (start, shown, start, total - start - shown)
+
+def _counted(rows: list, above: int, below: int) -> list:
+    """A list's `rows` with how many are hidden above and below them."""
+    return ([_c("muted") + _counts("… %d earlier", above) + _RESET] if above else []) + rows + ([_c("muted") + _counts("… %d more", below) + _RESET] if below else [])
+
+def action_rows(state: dict, room: int, width: int) -> list:
+    """The actions list's rows, `room` at most, each `width` wide: a • and
+    the label with its mnemonic, the chosen one in reverse video while the
+    list has focus, kept in sight."""
+    outputs = state.get("outputs", [])
+    if room <= 0 or not outputs:
+        return []
+    picked = state.get("picked", 0)
+    start, shown, above, below = _window(len(outputs), room, picked)
+    rows = []
+    for i in range(start, start + shown):
+        rec = outputs[i]
+        text = fit("• " + rec["label"] + "  " + rec["detail"], width).rstrip(" ")
+        if i == picked and state["focus"] == "failures":
+            rows.append(_c("active") + fit(text, width) + _RESET)
+        else:
+            rows.append(_c("accent") + "•" + _RESET + text[1:])
+    return _counted(rows, above, below)
+
+def links_row(pages: list, cols: int) -> str:
+    """One row of `(label, url)` results pages, each cut to its share of the
+    width but linked to its whole url; `""` without pages."""
+    if not pages:
+        return ""
+    lead = " "
+    room = max(0, cols - len(lead) - 3 * (len(pages) - 1))
+    each = room // len(pages)
+    parts = []
+    for label, url in pages:
+        shown = fit(label + ": " + url, each).rstrip(" ")
+        parts.append(_c("link") + link(url, shown) + _RESET)
+    return lead + " · ".join(parts)
+
+def _box_top(title: str, width: int) -> str:
+    title = fit(title, width - 5).rstrip(" ")
+    return _c("border") + "┌─ " + _RESET + _c("strong") + title + _RESET + _c("border") + " " + "─" * max(0, width - text_width(title) - 5) + "┐" + _RESET
+
+def _box_row(text: str, width: int, coloured = None, mark = False, edge = None, links = None) -> str:
+    """A row of a box `width` wide, `coloured` (a function of its text) when
+    given, `mark`ed in its left margin (the current match), its right border
+    `edge` when given (a scrollbar's), `links` (`[start, end, url]` by
+    character of `text`) drawn as links."""
+    body = fit(text, width - 4)
+    if coloured != None:
+        # Coloured before the padding, so a highlight never lights it.
+        shown = body.rstrip(" ")
+        body = coloured(shown) + " " * (len(body) - len(shown))
+    body = mark_cells(body, link_marks(text, links, width - 4))
+
+    # The current match marked by its row's left edge, as the scrollbar's
+    # thumb marks the view: `▹` begins the CLI's own update lines.
+    left = (_c("marker") + "┃" if mark else _c("border") + "│") + _RESET + " "
+    return left + body + (" " + edge if edge != None else _c("border") + " │" + _RESET)
+
+def scrollbar(total: int, height: int, up: int):
+    """The right border of a pane `height` rows tall showing the lines
+    `up` from the end of `total`: a thumb as tall as the share shown, at the
+    bottom when following, at the top at the oldest line; None, the plain
+    border, when everything fits."""
+    if total <= height or height < 1:
+        return None
+    size = max(1, height * height // total)
+    top = height - size - (up * (height - size)) // max(1, total - height)
+    return [(_c("scrollbar") + "┃" + _RESET) if top <= i and i < top + size else (_c("border") + "│" + _RESET) for i in range(height)]
+
+def _box_bottom(width: int) -> str:
+    return _c("border") + "└" + "─" * max(0, width - 2) + "┘" + _RESET
+
+def build_row(build: dict, cols: int) -> str:
+    """A folded build's row: its verdict, command, its actions as the
+    finished bar says them (`actions_text`: from its `BuildMetrics`, else
+    the last count Bazel drew), failures and time, muted but for the
+    counts' colours."""
+    mark = (_c("verdict.success") + "✓") if build["ok"] else (_c("verdict.failure") + "✗")
+    parts = [build["command"]]
+    if build.get("actions"):
+        parts.append(build["actions"][0])
+    if build["failed"]:
+        parts.append(_c("error") + _counts("✗%d", build["failed"]) + _RESET + _c("muted"))
+    if build["blocked"]:
+        parts.append(_counts("○%d", build["blocked"]))
+    if build.get("outcome"):
+        parts.append(build["outcome"])
+    parts.append(elapsed(build["ms"]))
+    row = " " + mark + _RESET + " " + _c("muted") + " · ".join(parts)
+    return _cut_escaped(row, cols) + _RESET
+
+def _header(state: dict, cols: int, bar: bool) -> str:
+    """The header: the task, how long it has run, and at its right end the
+    first of `phase_status` that fits whole (`bar` whether the bar is
+    drawn, which then has the count)."""
+    spin = _SPINNER[state["frames"] % len(_SPINNER)] if not state["ended"] else ("✔" if state.get("verdict", True) else "✗")
+    took = elapsed(state["now_ms"] - state.get("task_start_ms", state["start_ms"]))
+    title = " %s aspect %s · %s " % (spin, state["task"], took)
+
+    # The task and how long it has run whole; the status in what is left,
+    # shortened first.
+    title = fit(title, min(text_width(title), cols)).rstrip(" ")
+    if text_width(title) < cols:
+        title += " "
+    room = max(0, cols - text_width(title))
+
+    # Whole or not at all: a status cut to a bare number says nothing.
+    right = ""
+    for shown in phase_status(state, bar):
+        if shown and text_width(shown) <= room - 2:
+            right = shown + " "
+            break
+
+    # A status bar: the whole row, the time it has run included, in the
+    # theme's `status_bar`.
+    pad = " " * max(0, room - text_width(right))
+    return _c("status_bar") + title + pad + right + _RESET
+
+def _top(state: dict, cols: int, rows: int) -> list:
+    """The rows above the console: the header (`_header`), then, unless
+    zoomed (`z`) or showing the keys (`?`), the builds that ended folded to
+    a row each, and while the panes are open, the bar of the build's
+    actions (`bar_row`, the picked build's), the links, and the running
+    actions, oldest first and coloured by age, beside the Results pane, the
+    list (failures or actions) under its counts."""
+    out = [""]
+    if state.get("zoom") or state.get("help"):
+        out[0] = _header(state, cols, False)
+        return out
+
+    # The builds that ended, a row each, the newest last, the older
+    # counted; not the one whose panes are open.
+    open_panes = panes_shown(state)
+    folded = list(state.get("builds", []))
+    if open_panes and not state.get("building") and folded:
+        folded = folded[:-1]
+    if len(folded) > _MAX_FOLDED:
+        out.append(_c("muted") + fit(_counts(" +%d earlier", (len(folded) - _MAX_FOLDED + 1)), cols) + _RESET)
+        folded = folded[len(folded) - _MAX_FOLDED + 1:]
+    state["folded_at"] = len(out)
+    for b in folded:
+        out.append(build_row(b, cols))
+    state["folded_rows"] = len(folded)
+    out[0] = _header(state, cols, False)
+    if not open_panes:
+        return out
+
+    # The panes get what the console pane and the keys row leave (the bar,
+    # while a build runs or once it counted, and the links row going first
+    # under `_SHORT_ROWS`), and go when that is not two rows.
+    limit = rows - len(out) - 2 - 4
+    if limit < 2:
+        return out
+    view = build_view(state)
+    if rows >= _SHORT_ROWS and limit >= 3 and (state.get("building") or action_split(view)["counted"]):
+        limit -= 1
+        out.append(bar_row(view, cols))
+        out[0] = _header(state, cols, True)
+
+    if state["pages"] and (rows >= _SHORT_ROWS or limit >= 6):
+        limit -= 1
+        out.append(links_row(state["pages"], cols))
+
+    # Running actions | targets and tests.
+    actions = sorted(running_actions(state["progress"]), key = lambda r: -action_seconds(r))
+    running, started = action_counts(state["progress"])
+    running = max(len(actions), running)
+    finished = state["ended"] and not actions and (state.get("slowest") or state.get("critical"))
+    if finished:
+        actions = slowest_rows(state)
+    right_w = min(46 if cols >= 140 else 44, max(cols // 3, 39 if cols >= 80 else (32 if cols >= 70 else cols // 2)))
+    left_w = cols - right_w
+    c = state["counts"]
+    built_n, targets_failed, targets_blocked = target_counts(state)
+    failed = _c("error") if targets_failed else ""
+    tests_failed = _c("error") if c["tests_failed"] else ""
+    blocked_text_ = (_counts(", %d blocked", targets_blocked)) if targets_blocked else ""
+    summary = [
+        _counts("Targets  %d configured", c["configured"]),
+        _counts("         %s%d built%s, %s%d failed%s%s", (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_)),
+    ] + (["Tests    " + _tests_words(c)] if _has_tests(c) else [])
+    wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
+    if not wide:
+        # Narrow: the failures first, as what matters is what failed.
+        summary = target_rows(failed, targets_failed, built_n, targets_blocked, c["configured"], right_w - 4) + ([
+            "Tests   " + " ".join([p for p in [
+                _counts("%s✗%d%s", (tests_failed, c["tests_failed"], _RESET)) if c["tests_failed"] else "",
+                _counts("%s✓%d%s", (_c("success"), c["tests_passed"], _RESET)) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
+                _counts("%s~%d%s", (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "",
+                _counts("⊘%d", c["tests_skipped"]) if c.get("tests_skipped") else "",
+            ] if p]) + tests_cached_text(c),
+        ] if _has_tests(c) else [])
+
+    # As tall as the most Results rows there can be, for the whole build;
+    # the list scrolls in it (`actions_scroll`, the wheel over it), and
+    # unscrolled counts the rest, Bazel's unlisted ones too, on its last row.
+    pane = max(1, min(limit, rows // 3, results_capacity(wide)))
+
+    # Tests running and pending while a build runs, the actions' `─`
+    # words: on the Tests row where it has room, else on a row under it.
+    tests_rows = []
+    tests_now = tests_text(test_progress(state))
+    if tests_now:
+        indent = " " * (9 if wide else 8)
+        if text_width(_plain(summary[-1]) + " · " + _plain(tests_now)) <= right_w - 4:
+            summary[-1] += " · " + tests_now
+        elif text_width(indent + _plain(tests_now)) <= right_w - 4:
+            tests_rows = [indent + tests_now]
+        else:
+            # Too narrow for one row: running on one, pending under it.
+            tests_rows = [indent + part for part in tests_now.split(" · ")]
+
+    # The build's actions, one unit with the bar's, its glyphs their keys;
+    # the critical path; the failures, whose row a click takes to them.
+    lead = "Actions  " if wide else "Actions "
+    split = action_split(state)
+    critical = (("Critical path %s" if wide else "Crit %s") % state["critical"]) if state.get("critical") else None
+    failed_n, blocked_n = _failure_counts(state)
+    failed_row = None
+    if failed_n or blocked_n:
+        failed_row = _counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n))
+
+    # The actions get every row the pane has free; too many for it (a short
+    # terminal): the critical path goes first, then the actions fold to
+    # fewer rows, then the tests' running rows; the failures' row stays,
+    # last.
+    most = max(1, pane - len(summary) - len(tests_rows) - (1 if failed_row != None else 0))
+
+    # Too narrow for a part beside the lead (40 columns): the lead on a
+    # row of its own, the parts under it.
+    apart = right_w - 4 - len(lead) < 12
+    for _ in range(most + 4):
+        room_now = right_w - 5 if apart else right_w - 4 - len(lead)
+        rows_now = max(1, most - 1) if apart else most
+        actions_rows = action_results(split, room_now, rows_now, short = cols < 100, stack = cols < 70, memory = None if split["final"] else _actions_memory(state, room_now, rows_now, pane))
+        if apart and actions_rows:
+            actions_rows = [""] + actions_rows
+        wanted = len(summary) + len(actions_rows) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])
+        if wanted <= pane:
+            break
+        if critical != None:
+            critical = None
+        elif most > 1:
+            most -= 1
+        elif tests_rows:
+            tests_rows = []
+        else:
+            break
+    rest = tests_rows + [(("Actions" if apart else lead) if i == 0 else (" " if apart else " " * len(lead))) + row for i, row in enumerate(actions_rows)] + ([critical] if critical != None else [])
+    summary = (summary + rest)[:max(0, pane - (1 if failed_row != None else 0))]
+    failed_i = -1
+    if failed_row != None:
+        failed_i = len(summary)
+        summary.append(failed_row)
+
+    listed, edge = scrolled_rows(actions, pane, state.get("actions_scroll", 0), 0 if finished else running)
+    state["actions_scroll"] = min(state.get("actions_scroll", 0), max(0, len(actions) - pane))
+    actions = listed
+    results = "Results"
+
+    # Started but not yet running (queued for a remote executor or a full
+    # local pool) are counted beside the running ones, as Bazel's line has.
+    head = "Running (%d of %d started)" % (running, started) if started > running else "Running (%d)" % running
+    if finished:
+        head = slowest_title(state)
+    out.append(_box_top(head, left_w) + _box_top(results, right_w))
+
+    # Where the failures' count is drawn, for a click to show their tab;
+    # where the list is, for the wheel over it.
+    state["failed_at"] = None
+    state["actions_at"] = (len(out), len(out) + pane - 1, left_w)
+    for i in range(pane):
+        if i == failed_i:
+            state["failed_at"] = (len(out), left_w)
+        a = actions[i] if i < len(actions) else ""
+        s = summary[i] if i < len(summary) else ""
+
+        # `summary` rows carry colour: pad them by their visible length.
+        visible = text_width(_plain(s))
+        s_cell = _c("border") + "│ " + _RESET + s + " " * max(0, right_w - 4 - visible) + _c("border") + " │" + _RESET
+        if visible > right_w - 4:
+            s_cell = _box_row(_plain(s), right_w)
+        colour = (lambda text: _c("muted") + text + _RESET) if a == _NOTHING_RAN else _aged(a)
+        out.append(_box_row(action_row(a, left_w - 4), left_w, colour, edge = edge[i] if edge else None) + s_cell)
+    out.append(_box_bottom(left_w) + _box_bottom(right_w))
+
+    return out
+
+# The Results rows a build may come to have past its targets and tests: the
+# tests running and pending (one or two where the Tests row has no room for
+# them), its actions (as many as its free rows hold: ran, the cache hits,
+# the rest, what runs and is pending), critical path and failures.
+_OPTIONAL_RESULTS = 8
+
+def _actions_memory(state: dict, room: int, rows: int, pane: int) -> dict:
+    """The build's Actions-rows `memory` (`action_results`): what each part
+    has been widest, which have been shown and how many stages have gone,
+    holding while the Results pane (`room` cells, `pane` rows) is no
+    bigger; the next build, or a bigger pane, starts over."""
+    memory = state.get("actions_memory")
+    if memory == None or room > memory["room"] or pane > memory["pane"] or memory["build"] != state.get("build_start_ms"):
+        memory = {"room": room, "pane": pane, "widest": {}, "dropped": 0, "shown": [], "build": state.get("build_start_ms")}
+    memory.update(room = room, pane = pane)
+    state["actions_memory"] = memory
+    return memory
+
+def results_capacity(wide: bool) -> int:
+    """The most rows the Results pane can have: targets (two rows wide) and
+    tests, then every optional one (`_OPTIONAL_RESULTS`). The panes are
+    that tall for the whole build, so nothing below them moves."""
+    return (3 if wide else 2) + _OPTIONAL_RESULTS
+
+def scrolled_rows(rows: list, height: int, scroll: int, total = 0):
+    """`(shown, edge)`: `rows` scrolled `scroll` from the top in a pane
+    `height` tall, and its scrollbar (None when they fit). Unscrolled with
+    more than fit, the last shown row counts the rest, of `total` when that
+    is more (rows Bazel did not list)."""
+    total = max(total, len(rows))
+    scroll = max(0, min(scroll, max(0, len(rows) - height)))
+    edge = scrollbar(len(rows), height, max(0, len(rows) - scroll - height))
+    if scroll == 0 and total > height:
+        shown = rows[:height - 1]
+        return (shown + [_counts("… and %d more", (total - len(shown)))], edge)
+    return (rows[scroll:scroll + height], edge)
+
+def tips_role(state: dict) -> str:
+    """The role the tab's count is drawn in: its most urgent tip's."""
+    rows = [t for t, silenced in shown_tips(state) if not silenced]
+    return "tip." + rows[0].get("severity", "note") if rows else "muted"
+
+def tips_lines(state: dict, width: int) -> list:
+    """The Tips tab: each tip as `TIP[id] severity: title`, the chosen one
+    lit with its body under it, a silenced one muted saying so (or why it
+    could not be), then how to silence a tip."""
+    rows = shown_tips(state)
+    if not rows:
+        return [_c("muted") + "No tips" + _RESET]
+    at = max(0, min(state.get("tip_selected", 0), len(rows) - 1))
+    out = []
+    for i, (tip, silenced) in enumerate(rows):
+        mark = "▸ " if i == at else "  "
+        error = state.get("silence_errors", {}).get(tip["id"])
+        if silenced:
+            line = _c("muted") + "%sTIP[%s] silenced on this machine · s to undo: %s" % (mark, tip["id"], tip.get("title", "")) + _RESET
+        else:
+            severity = tip.get("severity", "note")
+            line = "%s%s[%s]%s %s%s%s: %s" % (mark + _c("tip.label") + "TIP" + _RESET, _c("tip.id"), tip["id"], _RESET, _c("tip." + severity), severity, _RESET, tip.get("title", ""))
+        out.append(line)
+        if error:
+            out.append("    " + _c("error") + "couldn't save to ~/.aspect/config.json: " + error + _RESET)
+        if i == at and not silenced:
+            for body in (tip.get("body") or "").split("\n"):
+                if body:
+                    out.append("    " + _c("muted") + body + _RESET)
+    out += ["", _c("muted") + "s silences a tip on this machine · for everyone: --tips:silence=<id> or .aspect/config.axl · aspect.build/go/tips" + _RESET]
+    return out
+
+def console_height(state: dict, cols: int, rows: int) -> int:
+    """How many lines the console shows at `cols` by `rows`: a page, for the
+    keys that scroll by one."""
+    return max(1, rows - len(_top(state, cols, rows)) - 3)
+
+def render(state: dict, cols: int, rows: int) -> str:
+    """The whole screen for `state`, `cols` by `rows`, as one string: `_top`,
+    then the console pane (the console or a log, scrolled, or the keys while
+    `?` shows them) and the search bar, or the keys row while it is closed,
+    the keys shown or the countdown running."""
+    out = _top(state, cols, rows)
+
+    # Which console rows hold which folded line: none but the console's.
+    state["row_lines"] = {}
+    if state.get("tab", "console") != "console" and state["view"] == None and not state.get("help"):
+        return _frame_of(state, _tab_pane(state, out, cols, rows), rows, cols)
+
+    # The console, scrolled; the keys over whatever is open, which is left
+    # as it is for when they close.
+    at_top = False
+    view = None if state.get("help") else state["view"]
+    search = state["search"]
+    log = shown_lines(state)
+    log_h = max(1, rows - len(out) - 3)
+    pattern = search["pattern"]
+    scroll = 0
+    body_w = max(1, cols - 4)
+    wrapping = state.get("wrap", True) and not state.get("help") and not (view != None and view.get("peek"))
+    if state.get("help"):
+        # From the row ↑↓ have scrolled them to, a last row counting the rest
+        # when they do not fit; the console's scroll left as it is.
+        log = help_rows(state, body_w)
+        top = min(state.get("help_top", 0), max(0, len(log) - log_h))
+        state["help_top"] = top
+        log = log[top:]
+        if len(log) > log_h:
+            rest = len(log) - log_h + 1
+            log = log[:log_h - 1] + [_counts("… %d more: ↓", rest)]
+        pattern = None
+        scroll = max(0, len(log) - log_h)
+    else:
+        # Scrolled no further than the top: wrapped, as far as the oldest
+        # lines that fill the pane.
+        top_lines = log_h
+        if wrapping:
+            filled = 0
+            for i, line in enumerate(log):
+                filled += len(wrap_line(line, body_w))
+                if filled >= log_h:
+                    top_lines = i + 1
+                    break
+        state["scroll"] = min(state["scroll"], max(0, len(log) - top_lines))
+        scroll = state["scroll"]
+        at_top = scroll > 0 and scroll == max(0, len(log) - top_lines)
+        if scroll == 0:
+            state["unseen"] = 0
+            state["unseen_errors"] = 0
+        if search["back"] >= len(log):
+            search["back"] = -1
+    end = len(log) - scroll
+    end = max(min(end, len(log)), min(len(log), log_h))
+    start = max(0, end - log_h)
+    jumped = len(log) - 1 - search["back"] if search["back"] >= 0 and pattern != None and search["mode"] == "jump" and not state.get("help") else -1
+    centred = False
+    if jumped >= 0 and state.get("last_size") not in (None, (cols, rows)):
+        # Resized under a held match: centred on it again.
+        search["centre"] = True
+    state["last_size"] = (cols, rows)
+    if wrapping:
+        # The lines whose rows fill the pane up to `end`; at the top, the
+        # oldest from their first row on.
+        end = max(0, min(len(log), len(log) - scroll))
+        filled = 0
+        start = end
+        for i in range(end - 1, -1, -1):
+            # At the top, every line from the oldest: one taller than the
+            # pane does not hide those above it.
+            if filled >= log_h and not at_top:
+                break
+            filled += len(wrap_line(log[i], body_w))
+            start = i
+        for i in range(end, len(log)):
+            if filled >= log_h:
+                break
+            filled += len(wrap_line(log[i], body_w))
+            end = i + 1
+
+        # A match jumped to, scrolled to in lines, may sit above the rows
+        # that fill the pane: centred on it in rows instead.
+        if jumped >= 0 and search.get("centre") and (jumped <= start or jumped >= end) and jumped < len(log):
+            filled = len(wrap_line(log[jumped], body_w))
+            start = jumped
+            for i in range(jumped - 1, -1, -1):
+                rows_i = len(wrap_line(log[i], body_w))
+                if filled + rows_i > log_h // 2:
+                    break
+                filled += rows_i
+                start = i
+
+            # Below it only whole lines, so the next frame, filling back
+            # from `end`, has it in view still.
+            end = jumped + 1
+            for i in range(jumped + 1, len(log)):
+                rows_i = len(wrap_line(log[i], body_w))
+                if filled + rows_i > log_h:
+                    break
+                filled += rows_i
+                end = i + 1
+            state["scroll"] = len(log) - end
+            centred = True
+
+            # Until a key moves the view, a frame keeps the match's first
+            # row in it.
+            search["anchored_view"] = True
+    search["centre"] = False
+    up = len(log) - end
+    held = search["back"] >= 0 and search["pattern"] != None and search["mode"] == "jump" and view == None
+    where = ("on the match, J to follow" if held else "following") if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
+    if state.get("unseen") and view == None:
+        errors = state.get("unseen_errors", 0)
+        where += _counts(" · %d new%s, J to follow", (state["unseen"], (_counts(" (%d error%s)", (errors, "" if errors == 1 else "s"))) if errors else ""))
+    if state.get("dropped") and view == None:
+        where += _counts(" · %d older not kept", state["dropped"])
+
+    # The pattern finding or filtering, which a query that does not compile
+    # is not; a match found, which of them it is, oldest first.
+    found = ""
+    matches = len(log)
+    current = len(log) - 1 - search["back"] if search["back"] >= 0 and pattern != None and search["mode"] == "jump" else -1
+    if pattern != None and search["mode"] == "jump":
+        matches = len(pattern.filter(log))
+        found = " · /%s/ %s%d" % (pattern.pattern, ("%d of " % len(pattern.filter(log[:current + 1]))) if current >= 0 else "", matches)
+    elif pattern != None:
+        found = " · /%s/ %d" % (pattern.pattern, matches)
+    name = ("the end" if view["cut"] and not view.get("peek") else "") if view != None else "Console"
+    title = "%s%s%s · %s" % (name, _FILTER_TITLES[state["filter"]], found, where)
+    if state.get("help"):
+        title = "Keys · ↑↓ scroll · any other key closes"
+        out.append(_box_top(title, cols))
+    else:
+        # The tab names the console; its status follows.
+        status = title.removeprefix("Console").lstrip(" ·")
+        out.append(tab_top(state, status, cols, len(out)))
+    state["pane"] = (len(out), len(out) + log_h - 1)
+    line_links = {} if state.get("help") else state.get("line_links", {})
+    shown = log[start:end]
+    colour = _console_row(state, pattern)
+    colour_current = _console_row(state, pattern, True)
+    bar_edge = scrollbar(len(log), log_h, up) if not state.get("help") else None
+    drawn = []
+    drawn_at = []
+    first_row = -1
+    for i, line in enumerate(shown):
+        links = line_links.get(line)
+        if view != None and view.get("peek"):
+            # A peek's rows, highlighted, cut as `fit` cut their text.
+            drawn.append((line, _peek_paint(view["hl"][start + i]), False, None, False))
+            drawn_at.append(start + i)
+            continue
+        if not wrapping:
+            drawn.append((line, (colour_current if start + i == current else colour)(line), start + i == current, links, False))
+            drawn_at.append(start + i)
+            continue
+        kind = severity(line)
+        if start + i == jumped:
+            first_row = len(drawn)
+        for j, (piece, at) in enumerate(wrap_line(line, body_w)):
+            paint = colour_current if start + i == current else colour
+            drawn.append((piece, paint(line, at), j == 0 and start + i == current, _piece_links(links, at, len(piece)), j > 0))
+            drawn_at.append(start + i)
+
+    # Wrapped, more rows than fit: the newest, but for the top of the
+    # console, where the oldest line shows from its first row.
+    if len(drawn) > log_h:
+        top_first = (start == 0 and up > 0) or centred
+        window = 0 if top_first else len(drawn) - log_h
+        if first_row >= 0 and first_row < window and search.get("anchored_view"):
+            # Never below a held match's first row while the view is where
+            # its jump put it.
+            window = first_row
+        drawn = drawn[window:window + log_h]
+        drawn_at = drawn_at[window:window + log_h]
+
+    # Which rows go on from the one above, for a copy to join them again.
+    state["continued"] = {}
+    state["page_h"] = log_h
+
+    # Which of the folded view's lines each row is, for a click on a fold.
+    folded_view = view == None and not state.get("help") and folding(state) and state.get("fold_seen", 0) == len(state.get("log", [])) and bool(state.get("folded"))
+    first = len(out)
+    for i in range(log_h):
+        if folded_view and i < len(drawn_at):
+            state["row_lines"][first + i] = drawn_at[i]
+        text, paint, mark, links, more = drawn[i] if i < len(drawn) else ("", None, False, None, False)
+        if more:
+            state["continued"][len(out)] = True
+        out.append(_box_row(text, cols, paint, mark, bar_edge[i] if bar_edge else None, links))
+    out.append(_box_bottom(cols))
+    if search["open"] and not state.get("help") and state.get("countdown_ms") == None:
+        out.append(_search_bar(search, matches, cols))
+    else:
+        out.append(keys_line(state, cols))
+
+    return _frame_of(state, out, rows, cols)
+
+# A heading in the Metrics and Invocation tabs.
+
+def _shown_parts(parts: list, room: int) -> list:
+    """The shown tab's name and crumbs, `(text, level)`, to fit `room`
+    cells: whole, else the middle crumbs as `…`, else the root too, else
+    the last crumb cut from its left, so the deepest always shows."""
+    whole = [(p, i) for i, p in enumerate(parts)]
+    tries = [whole]
+    if len(parts) > 2:
+        tries.append([whole[0], ("…", None), whole[-1]])
+    if len(parts) > 1:
+        tries.append([("…", None), whole[-1]])
+    for parts_tried in tries:
+        if 2 + text_width(" ▹ ".join([p for p, _ in parts_tried])) <= room:
+            return parts_tried
+    return [(_tail(parts[-1], max(1, room - 2)), len(parts) - 1)]
+
+def tab_top(state: dict, status: str, cols: int, row: int) -> str:
+    """The main pane's top border: its tabs, always in the same order, the
+    shown one in reverse video (the failures counted, `✗` failed and `○`
+    blocked) and named by its crumbs (a log or a file opened in it, the
+    current one bold); then, at the border's right end, set off by dashes
+    so it never reads as a tab, muted (`muted`), what the shown one says
+    of itself
+    (`status`: following, lines up, a run replayed). Where each tab and
+    crumb is drawn is kept (`tab_spans`, on row `row`) for a click to take
+    it, or go back to it, and the pointer to light it. Too narrow, the
+    status is cut, then goes, then the other tabs, then the shown one's
+    middle crumbs."""
+    failed, blocked = _failure_counts(state)
+    shown = state.get("tab", "console")
+    names = {}
+    for tab, name in _TABS:
+        if tab == "failures" and (failed or blocked):
+            name += _counts(" ✗%d", failed) + (_counts(" ○%d", blocked) if blocked else "")
+        if tab == "tips" and tips_count(state):
+            name += " %d" % tips_count(state)
+        names[tab] = name
+    muted = [] if built(state) else _BUILD_TABS
+    parts = [names[shown]] + crumbs(state)
+    whole = 3 + text_width("".join([" " + names[t] + " " for t, _ in _TABS if t != shown])) + text_width(" " + " ▹ ".join(parts) + " ")
+
+    # Every tab where the shown one keeps the room it is drawn in: `room`
+    # below leaves it the row but its own two cells and the others'.
+    tabs = [t for t, _ in _TABS] if whole < cols else [shown]
+    text = _c("border") + "┌─" + _RESET
+    at = 2
+    spans = []
+    for tab in tabs:
+        if tab != shown:
+            label = " " + names[tab] + " "
+            spans.append((at, at + text_width(label), tab))
+            at += text_width(label)
+            if tab == "tips":
+                count = tips_count(state)
+                label = (" Tips " + _c(tips_role(state)) + "%d" % count + _RESET + " ") if count else (_c("muted") + " Tips " + _RESET)
+            text += (_c("muted") + label + _RESET) if tab in muted else label
+            continue
+        after = tabs[tabs.index(shown) + 1:]
+        room = cols - at - 2 - text_width("".join([" " + names[t] + " " for t in after]))
+        drawn = _shown_parts(parts, room)
+        text += _c("active") + " "
+        at += 1
+        for k, (part, level) in enumerate(drawn):
+            if k:
+                text += " ▹ "
+                at += 3
+            last = k == len(drawn) - 1
+            width = text_width(part)
+            if level == 0 and len(parts) == 1:
+                spans.append((at, at + width, shown))
+            elif level != None and not last:
+                spans.append((at, at + width, ("crumb", level)))
+            text += (_c("strong") + part) if last and len(parts) > 1 else part
+            at += width
+        text += " " + _RESET
+        at += 1
+    state["tab_row"] = row
+    state["tab_spans"] = spans
+
+    # At least a dash on each side of the status, so it never touches a tab.
+    rest = max(0, cols - at - 1)
+    info = (" " + fit(status, rest - 4).rstrip(" ") + " ") if status and rest > 7 else ""
+    lead = rest - text_width(info) - (1 if info else 0)
+    return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("muted") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
+
+_SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
+
+def _secret_name(name: str) -> bool:
+    """Whether a flag's or setting's `name` names what may be a secret."""
+    lower = name.lower()
+    return any([word in lower for word in _SECRET_WORDS])
+
+def _redacted(flag: str) -> str:
+    """`flag` with what may be a secret's value hidden: a header's, a
+    token's, a password's or a key's, an env var's value, a URL's
+    user and password. A value that is itself a setting named so
+    (`--define=API_TOKEN=x`, `--test_arg=--password=x`, `--copt=-DKEY=x`)
+    has its own value hidden, as is what follows one with a space
+    (`--test_arg=--token x`)."""
+    name, eq, value = flag.partition("=")
+    if not eq:
+        return flag
+    lower = name.lower()
+    if _secret_name(name):
+        return name + "=<REDACTED>"
+    if lower.endswith("_env") or lower in ("--client_env", "--action_env", "--repo_env", "--test_env", "--host_action_env"):
+        return name + "=" + value.partition("=")[0] + ("=<REDACTED>" if "=" in value else "")
+    inner, inner_eq, _ = value.partition("=")
+    if inner_eq and "://" not in inner and _secret_name(inner):
+        return name + "=" + inner + "=<REDACTED>"
+    head, space, _ = value.partition(" ")
+    if space and "://" not in head and _secret_name(head):
+        return name + "=" + head + " <REDACTED>"
+    scheme, sep, rest = value.partition("://")
+    if sep and "@" in rest.partition("/")[0]:
+        value = scheme + "://<REDACTED>@" + rest.partition("@")[2]
+    return name + "=" + value
+
+def _redacted_args(flags: list) -> list:
+    """`flags` each `_redacted`, and the one after a secret-named flag
+    passed in another's value that left its own value to the next argument
+    (`--test_arg=--password` then `--test_arg=hunter2`) hidden too, where
+    it is that same flag again. A bare flag is never taken to own the next
+    argument: a boolean one (`--google_default_credentials`) takes none."""
+    out = []
+    owner = None
+    for flag in flags:
+        name, eq, value = flag.partition("=")
+        if owner != None and eq and name == owner:
+            out.append(name + "=<REDACTED>")
+            owner = None
+            continue
+        out.append(_redacted(flag))
+        secret = eq and "=" not in value and " " not in value and value.startswith("-") and _secret_name(value)
+        owner = name if secret else None
+    return out
+
+def metrics_lines(state: dict) -> list:
+    """The Metrics tab: the build's actions (`action_lines`), tests (what
+    a cache served from their results), targets, timing and memory."""
+    c = state["counts"]
+    bm = state.get("inv", {}).get("build_metrics")
+    out = action_lines(state)
+    out += ["", _c("heading") + "Tests" + _RESET]
+    runs = c.get("test_runs", 0)
+    out.append(_row_of("runs", _counts("%d · %d from a cache%s", (runs, c.get("test_cached", 0), (_counts(" (%d%%)", (c["test_cached"] * 100 // runs))) if runs else ""))))
+    out.append(_row_of("results", _counts("%d passed · %d failed · %d flaky · %d skipped", (c["tests_passed"], c["tests_failed"], c.get("tests_flaky", 0), c.get("tests_skipped", 0)))))
+    built_n, failed, blocked = target_counts(state)
+    shown, _ = _failure_counts(state)
+    out += ["", _c("heading") + "Targets" + _RESET]
+    out.append(_row_of("configured", c["configured"]))
+    out.append(_row_of("built", _counts("%d · %d failed · %d blocked by a dependency", (built_n, failed, blocked))))
+    out.append(_row_of("failures listed", _counts("%d (failed actions and test attempts, in Failures)", shown)))
+    timing = _get(bm, "timing_metrics")
+    out += ["", _c("heading") + "Time" + _RESET]
+
+    # A folded build's own time; the running one's since it started.
+    picked = picked_build(state)
+    builds = state.get("builds", [])
+    took = builds[picked]["ms"] if 0 <= picked and picked < len(builds) else state["now_ms"] - state.get("build_start_ms", state["start_ms"])
+    out.append(_row_of("elapsed", elapsed(took)))
+    if state.get("critical"):
+        out.append(_row_of("critical path", state["critical"]))
+    for field, name in (("analysis_phase_time_in_ms", "analysis"), ("execution_phase_time_in_ms", "execution"), ("cpu_time_in_ms", "CPU")):
+        ms = _get(timing, field, 0) or 0
+        if ms:
+            out.append(_row_of(name, elapsed(ms)))
+    heap = _get(_get(bm, "memory_metrics"), "peak_post_gc_heap_size", 0) or 0
+    if heap:
+        out += ["", _c("heading") + "Memory" + _RESET, _row_of("peak heap after GC", "%d MiB" % (heap // (1024 * 1024)))]
+    slow = [] if state.get("building") else slowest_rows(state)
+    if slow:
+        out += ["", _c("heading") + "Slowest" + _RESET] + ["  " + r for r in slow]
+    return out
+
+def invocation_lines(state: dict) -> list:
+    """The Invocation tab: what Bazel was asked to do, by whom and where,
+    as its build events say, flags that may hold a secret redacted."""
+    inv = state.get("inv", {})
+    started = inv.get("build_started")
+    out = [_c("heading") + "Invocation" + _RESET]
+    out.append(_row_of("command", str(_get(started, "command", "") or state["task"])))
+    out.append(_row_of("invocation id", str(_get(started, "uuid", "") or state.get("bazel_uuid", "") or "")))
+    out.append(_row_of("Bazel", str(_get(started, "build_tool_version", "") or "")))
+    out.append(_row_of("workspace", str(_get(started, "workspace_directory", "") or "")))
+    finished = inv.get("build_finished")
+    if finished != None:
+        code = _get(finished, "exit_code")
+        out.append(_row_of("exit", "%s (%d)" % (str(_get(code, "name", "") or ""), _get(code, "code", 0) or 0)))
+    for label, url in state.get("pages", []):
+        out.append(_row_of(label, url))
+    options = inv.get("options_parsed")
+    explicit = _redacted_args([str(f) for f in (_get(options, "explicit_cmd_line") or [])])
+    if explicit:
+        out += ["", _c("heading") + "Flags given" + _RESET] + ["  " + f for f in explicit]
+    startup = _redacted_args([str(f) for f in (_get(options, "explicit_startup_options") or [])])
+    if startup:
+        out += ["", _c("heading") + "Startup options given" + _RESET] + ["  " + f for f in startup]
+    status = _get(inv.get("workspace_status"), "item") or []
+    if status:
+        out += ["", _c("heading") + "Workspace status" + _RESET]
+        out += [_row_of(str(_get(i, "key", "")), _redacted(str(_get(i, "key", "")) + "=" + str(_get(i, "value", ""))).partition("=")[2]) for i in status]
+    metadata = _get(inv.get("build_metadata"), "metadata")
+    if metadata:
+        out += ["", _c("heading") + "Build metadata" + _RESET]
+        out += [_row_of(str(k), _redacted(str(k) + "=" + str(metadata[k])).partition("=")[2]) for k in sorted(metadata)]
+    return out
+
+def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
+    """`out` with the main pane showing the Failures, Metrics or Invocation
+    tab, and the keys row under it. The failures as their list, chosen with
+    ↑↓, Enter showing one's log; the others scrolled with ↑↓."""
+    tab = state.get("tab", "console")
+    log_h = max(1, rows - len(out) - 3)
+    width = cols - 4
+    if tab == "tips":
+        lines = tips_lines(state, width)
+        title = "↑↓ choose · s silence on this machine" if shown_tips(state) else ""
+    elif not built(state):
+        lines = [_c("muted") + "No build yet" + _RESET]
+        title = ""
+    elif tab == "failures":
+        lines = (action_rows if state.get("list") == "actions" else failure_rows)(state, log_h, width)
+        title = "Actions with output · ↑↓ choose · Enter show its log" if state.get("list") == "actions" else "↑↓ choose · Enter log · ^O " + ("one" if state.get("expand_failures") else "all")
+    else:
+        view = build_view(state)
+        lines = metrics_lines(view) if tab == "metrics" else invocation_lines(view)
+        top = min(state.get("tab_scroll", 0), max(0, len(lines) - log_h))
+        state["tab_scroll"] = top
+        lines = lines[top:]
+        title = "↑↓ scroll" if len(lines) > log_h or top else ""
+    out.append(tab_top(state, title, cols, len(out)))
+    state["pane"] = (len(out), len(out) + log_h - 1)
+    for i in range(log_h):
+        line = lines[i] if i < len(lines) else ""
+        visible = text_width(_plain(line))
+        if visible > width:
+            out.append(_box_row(_plain(line), cols))
+        else:
+            out.append(_c("border") + "│ " + _RESET + line + " " * (width - visible) + _c("border") + " │" + _RESET)
+    out.append(_box_bottom(cols))
+    out.append(keys_line(state, cols))
+    return out
+
+def keys_line(state: dict, cols: int) -> str:
+    """The bottom row: the keys (`keys_row`), and at its right end the CLI's
+    version, when it leaves the keys room (60 cells, as many as fit at
+    once in that much)."""
+    version = state.get("cli_version", "")
+    tag = (" aspect " + version + " ") if version else ""
+    if not tag or cols - len(tag) < 60:
+        return _c("muted") + keys_row(state, cols) + _RESET
+    return _c("muted") + keys_row(state, cols - len(tag)) + _RESET + _c("subtle") + tag + _RESET
+
+def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
+    """The frame of `out`'s rows: the link under the pointer lit, the
+    selection drawn, each row cleared as it is written."""
+
+    # Home, each row cleared before it is written: cleared after, a row as
+    # wide as the screen would lose its last column, where the cursor waits.
+    # No newline after the last row, which would scroll.
+    shown = out[:rows]
+
+    # As drawn, for a click's link and the selection's text; the selection
+    # reversed over it.
+    state["frame"] = shown
+    state["cols"] = cols
+    selected = {row: (a, b) for row, a, b in selection_rows(state, cols)}
+    hover = state.get("hover")
+    if hover != None and hover[1] == state.get("tab_row") and hover[1] < len(shown):
+        for a, b, tab in state.get("tab_spans", []):
+            if a <= hover[0] and hover[0] < b and tab != state.get("tab", "console"):
+                shown = list(shown)
+                on = _c("hover")
+                shown[hover[1]] = mark_cells(shown[hover[1]], [(a, b, on, _RESET, on)])
+    url = link_at(shown[hover[1]], hover[0]) if hover != None and hover[1] < len(shown) else None
+    if url != None:
+        # The whole link lit: its row, and the rows above and below a wrap
+        # carried it onto.
+        shown = list(shown)
+        lit = [hover[1]]
+        for step in (-1, 1):
+            r = hover[1] + step
+            for _ in range(len(shown)):
+                if r < 0 or r >= len(shown) or not link_spans(shown[r], url):
+                    break
+                lit.append(r)
+                r += step
+        on, off = _hover_colour(state)
+        for r in lit:
+            shown[r] = mark_cells(shown[r], [(a, b, on, off, on) for a, b in link_spans(shown[r], url)])
+    if selected:
+        on, off = _selection_colour(state)
+        shown = [mark_cells(row, [(selected[i][0], selected[i][1], on, off, on)]) if i in selected else row for i, row in enumerate(shown)]
+    frame = state.get("osc", "") + "\x1b[H" + "\r\n".join(["\x1b[K" + row for row in shown])
+    state["osc"] = ""
+    if len(shown) < rows:
+        frame += "\r\n\x1b[J"
+    return frame
+
+# Under this many rows the links row goes first, so the panes, the console
+# and the keys row keep their place.
+_SHORT_ROWS = 16
+
+dashboard_render = namespace(
+    action_rows = action_rows,
+    build_row = build_row,
+    console_height = console_height,
+    failure_rows = failure_rows,
+    invocation_lines = invocation_lines,
+    keys_line = keys_line,
+    links_row = links_row,
+    metrics_lines = metrics_lines,
+    render = render,
+    results_capacity = results_capacity,
+    scrollbar = scrollbar,
+    scrolled_rows = scrolled_rows,
+    tips_lines = tips_lines,
+    tips_role = tips_role,
+)

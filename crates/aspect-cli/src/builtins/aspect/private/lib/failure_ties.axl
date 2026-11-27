@@ -1,0 +1,555 @@
+"""What of Bazel's console ties exactly to a failure record
+(`console_ties`): an action's relayed output, a target's location, and
+Bazel's other errors."""
+
+load("./failure_records.axl", "failure_records")
+
+_action_logs = failure_records.action_logs
+_MAX_LOG_BYTES = failure_records.MAX_LOG_BYTES
+_own_labels = failure_records.own_labels
+_referrers = failure_records.referrers
+_workspace = failure_records.workspace
+log_paths = failure_records.log_paths
+repaired = failure_records.repaired
+
+# What starts a line of Bazel's own: a line that starts none, a tool's
+# (a compiler's diagnostic under an `ERROR:`), takes the kind of the one
+# it follows (`classify`).
+_HEADERS = ["INFO:", "WARNING:", "ERROR:", "DEBUG:", "FAIL:", "TIMEOUT:", "Target ", "Loading:", "Analyzing:", "Executed ", "Build ", "//", "@", "["]
+
+# Bazel's own lines that say only that the build failed: in no entry and
+# not among the other errors.
+_BOILERPLATE = ("Build did NOT complete successfully", "Build failed. Not running tests", "command succeeded, but ")
+
+# A Bazel `ERROR:` line in its colours.
+_BAZEL_ERROR = "\x1b[31m\x1b[1mERROR: "
+
+def _bazel_headers(state: dict, text: str) -> list:
+    """Bazel's `ERROR:` lines in `text`, the console's kept blocks in
+    order (`console_ties`), each `{start, end, plain, location, said}`: where
+    the line starts and ends, its text without escapes and before the last
+    CR (a redraw), its location (`pkg/BUILD.bazel:3:8`, `pkg/BUILD.bazel`,
+    made relative to the workspace) and what it says after that. Where
+    Bazel coloured its own (`_BAZEL_ERROR`) an uncoloured one is a tool's
+    and left out."""
+    ansi = state.get("ansi")
+    workspace = _workspace(state)
+    found = []
+    at = 0
+    for _ in range(len(text)):
+        p = text.find("ERROR: ", at)
+        if p < 0:
+            break
+        start = text.rfind("\n", 0, p) + 1
+        end = text.find("\n", p)
+        end = len(text) if end < 0 else end
+        at = end + 1
+        line = text[start:end]
+        plain = (ansi.replace(line, "") if ansi != None else line).rpartition("\r")[2]
+        if not plain.startswith("ERROR: "):
+            continue
+        plain = plain[len("ERROR: "):]
+        head, sep, rest = plain.partition(": ")
+        pieces = head.split(":")
+        location = ""
+        said = plain
+        if sep and " " not in head and ((len(pieces) >= 2 and pieces[1].isdigit()) or head.endswith(("/BUILD", "/BUILD.bazel"))):
+            location = head[len(workspace) + 1:] if workspace and head.startswith(workspace + "/") else head
+            said = rest
+        found.append({"start": start, "end": end, "plain": plain, "location": location, "said": said, "coloured": _BAZEL_ERROR in line})
+    if [h for h in found if h["coloured"]]:
+        found = [h for h in found if h["coloured"]]
+    return found
+
+def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool):
+    """An action's output as Bazel relays it to the console, from its logs
+    as they read now: its stderr, then, where the console carried Bazel's
+    stdout too (`stdout`), its stdout, each `(stream, text, paths)`, `text`
+    None for one past Bazel's cap (cut as read) and `paths` what Bazel
+    names it by (its event's URI, decoded); None where one is gone. In a
+    console Bazel wrote without colour (`plain`, `--color=no`) Bazel strips
+    the escapes from what it relays, and so does this."""
+    paths = dict(_action_logs(state, rec))
+    out = []
+    for name in (("stderr", "stdout") if stdout else ("stderr",)):
+        if name not in paths:
+            continue
+        got = state["read"](paths[name], _MAX_LOG_BYTES)
+        if got == None:
+            return None
+        named = []
+        for stream, value in rec["files"]:
+            if stream == name and type(value) == "string":
+                named += [p for p in log_paths(state, rec, value) if p not in named]
+        body = got[0] if got[1] == 0 else None
+        ansi = state.get("ansi")
+        if body and plain and ansi != None:
+            body = ansi.replace(body, "")
+        out.append((name, body, named))
+    return out
+
+def _past_redraw(text: str, at: int) -> int:
+    """Where `text` goes on past Bazel's erase of its progress area at
+    `at` (`\\r`, `ESC[1A`, `ESC[K`)."""
+    for _ in range(64):
+        lead = [p for p in ("\r", "\x1b[1A", "\x1b[K") if text.startswith(p, at)]
+        if not lead:
+            break
+        at += len(lead[0])
+    return at
+
+def _relayed(text: str, at: int, lead: str, pieces: list, tails: dict) -> int:
+    """Where what Bazel relayed of an action ends in `text`, when what
+    starts at `at` is exactly `lead` (its `failure_detail` message and a
+    newline, or nothing) and then each of its output's pieces
+    (`_relay_pieces`) as Bazel relays it: the text; for one past Bazel's
+    cap, Bazel's own line saying it skipped that very file (`stderr
+    (<path>) <n> exceeds maximum size of …; skipping`); for a last one with
+    no final newline, up to its last newline, then the rest with a newline
+    added as the line Bazel wrote after its next redraw, a tail block of
+    its own (`tails`, by where each starts). -1 when it is not."""
+    if text[at:at + len(lead)] != lead:
+        return -1
+    pos = at + len(lead)
+    for i, (name, body, named) in enumerate(pieces):
+        if body == None:
+            end = text.find("\n", pos)
+            end = len(text) if end < 0 else end
+            line = text[pos:end]
+            if not [p for p in named if line.startswith("%s (%s) " % (name, p))] or " exceeds maximum size of " not in line or not line.endswith(" bytes; skipping"):
+                return -1
+            pos = end + 1
+        elif not body or body.endswith("\n") or i + 1 < len(pieces):
+            if text[pos:pos + len(body)] != body:
+                return -1
+            pos += len(body)
+        else:
+            head = body[:body.rfind("\n") + 1]
+            rest = body[len(head):] + "\n"
+            if text[pos:pos + len(head)] != head or pos + len(head) not in tails:
+                return -1
+            pos = _past_redraw(text, pos + len(head))
+            if text[pos:pos + len(rest)] != rest:
+                return -1
+            pos += len(rest)
+    return pos
+
+# How much of Bazel's `ERROR:` blocks after an output, without colour, may be
+# the tool's (`_absorb_tails`).
+_MAX_PLAIN_REST = 64 * 1024
+
+def _relayed_logs(state: dict, rec: dict, stdout: bool) -> list:
+    """The paths of the logs Bazel relays of a successful action's output:
+    its stderr, and its stdout where the console carried Bazel's stdout too
+    (`stdout`)."""
+    paths = dict(_action_logs(state, rec))
+    return [paths[name] for name in (("stderr", "stdout") if stdout else ("stderr",)) if name in paths]
+
+def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool):
+    """Extend `spans` over the blocks after an action's `INFO: From` output
+    (`froms`: each one's index in `blocks`, `(start, end, kind)` in `text`,
+    its header, its body's length and last line) that are the rest of a
+    successful action's output (`outputs`, which Bazel reports with
+    `--build_event_publish_all_actions`): one whose label the header names,
+    else, for a header that names none (a rule's own progress message,
+    Starlark's default `<mnemonic> <output>`, `Compiling a.cc`), any. One
+    such action is enough, and which it is does not matter: the lines are a
+    tool's, not Bazel's.
+
+    - The line after the output where it is a log's last line with no
+      newline, which Bazel writes after its next redraw (a tail) or, without
+      colour, with a newline added: only a log that does not end in a
+      newline has one, and each stream Bazel relays holds its own, so each
+      successful action's relayed logs are found and read for their last
+      bytes alone (a character), once, and only one that ends otherwise is
+      read further, from its end, as far as that line is long. It is the
+      tool's where that log's last line is exactly that line.
+    - Without colour (`plain`, `--color=no`), where a tool's own `ERROR:`
+      lines read as Bazel's: the blocks after the output, up to a line's
+      end, are the tool's where the output, escapes stripped as Bazel strips
+      them, ends exactly with the body's last line and those lines. Only
+      the actions the header names are read, from the end, as far as those
+      lines are long (at most `_MAX_PLAIN_REST`)."""
+    ansi = state.get("ansi")
+    outputs = state.get("outputs") or []
+    if not outputs:
+        return
+    by_label = {}
+    for k, rec in enumerate(outputs):
+        by_label.setdefault(rec["label"], []).append(k)
+    open_logs = {}
+
+    # An output's relayed logs that end without a newline: found, and their
+    # last bytes read, once.
+    def open_logs_of(k):
+        if k not in open_logs:
+            found = []
+            for path in _relayed_logs(state, outputs[k], stdout):
+                got = state["read"](path, 4)
+                if got != None and got[0] != "" and not got[0].endswith("\n"):
+                    found.append(path)
+            open_logs[k] = found
+        return open_logs[k]
+
+    for i, header, body_len, last in froms:
+        if i + 1 >= len(blocks) or blocks[i + 1][2] not in (("tail", "error") if plain else ("tail",)):
+            continue
+        said = (ansi.replace(header, "") if ansi != None else header).rpartition("\r")[2].rstrip("\n")
+        named = []
+        for word in said.split(" ")[1:]:
+            for label in (word, word[:-1] if word.endswith(":") else None):
+                if label and label in by_label:
+                    named += [k for k in by_label[label] if k not in named]
+        start, end, kind = blocks[i + 1]
+        at = _past_redraw(text, start)
+        stop = text.find("\n", at, end)
+        held = text[at:stop if stop >= 0 else end]
+        found = False
+        for k in named or range(len(outputs)):
+            for path in open_logs_of(k):
+                # From the last line's start where it fits, else from a
+                # character's in it: longer than `held` then.
+                got = state["read"](path, 4 * len(held) + 4)
+                line = got[0].rpartition("\n")[2] if got != None else None
+                if line != None and plain and ansi != None:
+                    line = ansi.replace(line, "")
+                if line == held:
+                    spans.append((start, stop + 1 if stop >= 0 else end))
+                    found = True
+                    break
+            if found:
+                break
+
+        # A last line past what the console stage keeps is kept as none.
+        if found or not plain or not named or (body_len > 0 and last == ""):
+            continue
+
+        # Without colour: the error blocks after the output, up to a line's
+        # end, that the output ends with.
+        joined = ""
+        for b in blocks[i + 1:]:
+            if b[2] != "error" or len(joined) > _MAX_PLAIN_REST:
+                break
+            joined += text[b[0]:b[1]]
+        ends = []
+        for _ in range(len(joined)):
+            e = joined.find("\n", ends[-1] if ends else 0)
+            if e < 0:
+                break
+            ends.append(e + 1)
+        for k in named:
+            logs = dict(_action_logs(state, outputs[k]))
+            path = logs.get("stdout") if stdout and "stdout" in logs else logs.get("stderr")
+            got = state["read"](path, 4 * (len(last) + len(joined)) + 4096) if path else None
+            if got == None:
+                continue
+            tail = ansi.replace(got[0], "") if ansi != None else got[0]
+            tail = tail if tail.endswith("\n") else tail + "\n"
+            for e in reversed(ends):
+                want = last + joined[:e]
+                whole = len(tail) == len(want) and got[1] == 0
+                if tail.endswith(want) and (whole or (last != "" and len(tail) > len(want) and tail[-len(want) - 1] == "\n")):
+                    spans.append((start, start + e))
+                    found = True
+                    break
+            if found:
+                break
+
+def _status_word(status: str) -> str:
+    """How a heading says Bazel's `(Exit 3)` or `(Killed)`: `exit 3`,
+    `killed`."""
+    return "exit " + status[len("Exit "):] if status.startswith("Exit ") else status.lower()
+
+def console_ties(state: dict) -> dict:
+    """What Bazel's console adds to the failure entries, by exact ties
+    alone, once the build has ended: from the blocks a `collect_errors()`
+    stage kept as Bazel wrote them (`bazel_errors`, from
+    `build.output_bazel_errors()`: each of Bazel's `ERROR:` messages, each
+    action's `INFO: From` header with its body's length and last line, each
+    record that may be an output's held last line), however long the
+    console was. An action's `INFO: From` output is a tool's, never
+    Bazel's, the blocks Bazel wrote after it too when they are the rest of
+    a successful action's output (`_absorb_tails`). Each Bazel `ERROR:` line
+    (`_bazel_headers`) is given to at most one entry and never one of
+    several that match:
+
+    - a sandboxed action: the line's text from `failed: (<status>): ` on,
+      and what follows it, are exactly its `failure_detail` message, a
+      newline and its own output as Bazel relays it (its stderr, then its
+      stdout where the console carried Bazel's stdout too), or, past
+      Bazel's cap, Bazel's line saying it skipped that stderr (`_relayed`),
+      at one line only; the line gives its location and status (`killed`);
+    - a local or worker action (its message `local spawn failed for …`):
+      the one line naming `target <label>)` with `(Exit <code>)` whose next
+      lines are exactly its own output;
+    - an action's outputs not created: the one `output '<path>' was not
+      created` line for its primary output, quoted, and its location;
+    - every action of a target: the location every line naming `target
+      <label>)` gives, when they all give one;
+    - an analysis or loading root: the one line with a location whose
+      text after it is its description's first line (every line saying
+      just that, a pattern's after `Skipping '<pattern>': ` too, claimed);
+    - a target named by its own error (`<label>: …`, an attribute error):
+      those lines, quoted, and their location when they all give one;
+    - a target that failed with no action of its own: the one line ending
+      `<label> failed: <message>`, else the one ending `failed:
+      <message>`;
+    - a root cause no line ties: the one line ending `and referenced by
+      '<target>'` of the first target naming it alone, quoted without that
+      end, and its location.
+
+    Each line tied, saying exactly what an entry quotes (`package contains
+    errors: <pkg>: <text>` too, where an entry of that package quotes
+    `<text>`, or, with no text, says its package has an error), or naming a listed
+    target as what failed (`… <label> failed: …`, `Analysis of target
+    '<label>' … failed`), is claimed, with the output an action's tie spans; every
+    other one but Bazel's boilerplate (`_BOILERPLATE`) is among `others`,
+    `_other_errors`'. `actions` and `targets` hold each tie, by record
+    index and by label; `not_kept` the bytes of Bazel's errors the stage's
+    caps left out. Nothing before the build ends, or without the stage."""
+    kept = state.get("bazel_errors")
+    key = (len(state["fails"]), len((kept or {}).get("blocks") or []), bool(state.get("building")))
+    cached = state.get("ties_cache")
+    if cached != None and cached[0] == key:
+        return cached[1]
+    result = {"actions": {}, "targets": {}, "others": [], "not_kept": 0}
+    if kept == None or state.get("building"):
+        state["ties_cache"] = (key, result)
+        return result
+    result["not_kept"] = kept.get("not_kept", 0) or 0
+    stdout = bool(kept.get("stdout"))
+
+    # The blocks in Bazel's order, one text (an `INFO: From` as its header
+    # alone: its output is a tool's, whatever it says), joined once.
+    blocks = kept.get("blocks") or []
+    parts = []
+    spans = []
+    froms = []
+    bounds = []
+    tails = {}
+    at = 0
+    for k, b in enumerate(blocks):
+        parts.append(b["text"])
+        if b["kind"] == "tail":
+            tails[at] = True
+        bounds.append((at, at + len(b["text"]), b["kind"]))
+        at += len(b["text"])
+        if b["kind"] == "from":
+            froms.append((k, b["text"], b.get("body_len", 0) or 0, b.get("last_line", "") or ""))
+    text = "".join(parts)
+
+    # Bazel colours its own lines unless `--color=no`, where it strips the
+    # escapes from what it relays too.
+    plain = "\x1b[31m" not in text and "\x1b[32m" not in text and "\x1b[35m" not in text
+    _absorb_tails(state, text, bounds, froms, spans, stdout, plain)
+    headers = [h for h in _bazel_headers(state, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
+    claimed = {}
+
+    # The lines by what each says, so every tie is a lookup.
+    by = {"status": {}, "target": {}, "said": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}, "declared": {}}
+    for k, h in enumerate(headers):
+        said = h["said"]
+        what, failed, reason = said.partition(" failed: ")
+        if failed:
+            by["reason"].setdefault(reason, []).append(k)
+            by["failed"].setdefault(what.rpartition(" ")[2], []).append(k)
+            if reason.startswith("("):
+                by["status"].setdefault(reason.partition("): ")[2], []).append(k)
+        for marker in (" rule target ", "(from target "):
+            at = said.find(marker)
+            if at >= 0:
+                named = said[at + len(marker):].partition(")")[0]
+                by["target"].setdefault(named, []).append(k)
+                break
+        by["said"].setdefault(said, []).append(k)
+        by["plain"].setdefault(h["plain"], []).append(k)
+        if said.endswith("'") and " and referenced by '" in said:
+            by["referrer"].setdefault(said.rpartition(" and referenced by '")[2][:-1], []).append(k)
+        by["prefix"].setdefault(said.partition(": ")[0], []).append(k)
+        if said.startswith("declared output '") and "' was not created by genrule" in said:
+            by["declared"].setdefault(said[len("declared output '"):].partition("' was not created by genrule")[0], []).append(k)
+
+    def tie(found):
+        return found[0] if len(found) == 1 else None
+
+    def common(found):
+        places = {headers[k]["location"]: True for k in found}
+        return list(places.keys())[0] if len(places) == 1 else ""
+
+    fails = state["fails"]
+    for i, rec in enumerate(fails):
+        if rec["kind"] != "action":
+            continue
+        out = {"location": "", "status": "", "lines": []}
+        label = rec["label"]
+        pieces = _relay_pieces(state, rec, stdout, plain)
+        message = rec.get("failure", "")
+        first = message.partition("\n")[0]
+        if message and pieces != None:
+            found = []
+            for k in by["status"].get(first, []):
+                h = headers[k]
+                at = text.find(first, h["start"], h["end"] + 1)
+                end = _relayed(text, at, message + "\n", pieces, tails) if at >= 0 else -1
+                if end >= 0:
+                    found.append((k, end))
+            got = tie(found)
+            if got != None:
+                k, end = got
+                claimed[k] = True
+                spans.append((headers[k]["end"], end))
+                out["location"] = headers[k]["location"]
+                out["status"] = headers[k]["said"].partition(" failed: (")[2].partition("): ")[0]
+        if not out["status"] and pieces and [p for p in pieces if p[1] != ""]:
+            found = []
+            for k in by["target"].get(label, []):
+                h = headers[k]
+                end = _relayed(text, h["end"] + 1, "", pieces, tails)
+                if ("failed: (Exit %d)" % rec.get("exit_code", 0)) in h["said"] and end >= 0:
+                    found.append((k, end))
+            got = tie(found)
+            if got != None:
+                k, end = got
+                claimed[k] = True
+                spans.append((headers[k]["end"], end))
+                out["location"] = headers[k]["location"]
+                out["status"] = "Exit %d" % rec.get("exit_code", 0)
+
+        # The history keys an action by its output as Bazel's events spell
+        # it; Bazel's line says it as meant.
+        made = repaired(rec.get("output", "")).partition("/bin/")[2]
+        if made:
+            k = tie(by["said"].get("output '%s' was not created" % made, []) + by["declared"].get(made, []))
+            if k != None:
+                claimed[k] = True
+                out["location"] = out["location"] or headers[k]["location"]
+                out["lines"].append(headers[k]["said"])
+
+        # Every action of a target where its own lines name it alike.
+        named = by["target"].get(label, [])
+        for k in named:
+            claimed[k] = True
+        out["location"] = out["location"] or common(named)
+        for k in by["reason"].get(first, []) if first and out["location"] else []:
+            if headers[k]["location"] == out["location"]:
+                claimed[k] = True
+        result["actions"][i] = out
+
+    referrers = _referrers(state)
+    causes = state.get("root_causes") or {}
+    for rec in fails:
+        if rec["kind"] != "target":
+            continue
+        label = rec["label"]
+        out = {"location": "", "lines": []}
+        first = rec.get("description", "").partition("\n")[0]
+        if first and rec["detail"] != "target":
+            found = by["said"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get("Skipping '%s': %s" % (label, first), []) if headers[k]["said"] != first]
+            for k in found:
+                claimed[k] = True
+            k = tie([k for k in found if headers[k]["location"]])
+            if k != None:
+                out["location"] = headers[k]["location"]
+        own = by["prefix"].get(label, [])
+        for k in own:
+            claimed[k] = True
+            if headers[k]["said"] not in out["lines"]:
+                out["lines"].append(headers[k]["said"])
+        out["location"] = out["location"] or common(own)
+        if rec["detail"] == "target" and first:
+            k = tie([k for k in by["failed"].get(label, []) if headers[k]["said"].endswith(" failed: " + first)])
+            if k == None:
+                k = tie(by["reason"].get(first, []))
+            if k != None:
+                claimed[k] = True
+                out["location"] = headers[k]["location"]
+        for name in referrers.get(label, []):
+            if name == label or causes.get(name) != [label]:
+                continue
+            found = by["referrer"].get(name, [])
+            for k in found:
+                claimed[k] = True
+            k = tie(found)
+            if k != None and not out["location"] and not first and not own:
+                out["location"] = headers[k]["location"]
+                out["lines"].append(headers[k]["said"].rpartition(" and referenced by '")[0])
+        for line in out["lines"]:
+            for k in by["said"].get(line, []):
+                claimed[k] = True
+        result["targets"][label] = out
+
+    # Bazel's `package contains errors: <pkg>: <text>` repeats a line an
+    # entry of that package quotes; with no text, it says what an entry of
+    # that package Bazel names as its own root cause says already.
+    quoted = {}
+    for rec in fails:
+        if rec["kind"] != "target":
+            continue
+        pkg = rec["label"].partition("//")[2].partition(":")[0]
+        said = quoted.setdefault(pkg, {})
+        for line in (result["targets"].get(rec["label"]) or {}).get("lines", []):
+            said[line] = True
+        first = rec.get("description", "").partition("\n")[0]
+        if first:
+            said[first] = True
+        if not rec.get("description") and causes.get(rec["label"]) == [rec["label"]]:
+            said[""] = True
+    for k, h in enumerate(headers):
+        if h["said"].startswith("package contains errors: "):
+            pkg, _, rest = h["said"][len("package contains errors: "):].partition(": ")
+            if rest in quoted.get(pkg, {}):
+                claimed[k] = True
+
+    # A line naming a listed target as what failed (`Executing genrule
+    # //an:missing failed: 1 input file(s) do not exist`, `Analysis of
+    # target '//vis:vis' (config: 2d89340) failed`) is that entry's.
+    for label in _own_labels(state).keys():
+        for k in by["failed"].get(label, []):
+            claimed[k] = True
+        for k, h in enumerate(headers):
+            if h["said"].startswith("Analysis of target '%s' " % label) and h["said"].endswith(" failed"):
+                claimed[k] = True
+    result["others"] = _other_errors(state, text, headers, claimed, spans)
+    state["ties_cache"] = (key, result)
+    return result
+
+def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: list) -> list:
+    """Bazel's `ERROR:` blocks no tie claimed (`console_ties`), in its
+    order, each once: `{"lines": [...]}`, its line (the workspace's path
+    left out of it) then the lines Bazel wrote with it (a `Traceback`'s
+    frames), up to a blank line, a redraw, one in Bazel's colours or a
+    line of Bazel's own (`_HEADERS`); never one inside an action's tied
+    output, nor Bazel's boilerplate (`_BOILERPLATE`)."""
+    workspace = _workspace(state)
+    ansi = state.get("ansi")
+    out = []
+    seen = {}
+    for k, h in enumerate(headers):
+        if k in claimed or h["plain"].startswith(_BOILERPLATE) or [s for s in spans if s[0] <= h["start"] and h["start"] < s[1]]:
+            continue
+        lines = [h["plain"]]
+        at = h["end"] + 1
+        for _ in range(200):
+            if at >= len(text):
+                break
+            end = text.find("\n", at)
+            end = len(text) if end < 0 else end
+            raw = text[at:end]
+            plain = ansi.replace(raw, "") if ansi != None else raw
+            if not plain.strip() or raw.startswith(("\x1b", "\r")) or plain.startswith(tuple(_HEADERS)) or plain.startswith(("FAILED:", "Use --")):
+                break
+            lines.append(plain)
+            at = end + 1
+        if workspace:
+            lines = [l.replace(workspace + "/", "") for l in lines]
+        said = "\n".join(lines)
+        if said not in seen:
+            seen[said] = True
+            out.append({"lines": lines})
+    return out
+
+failure_ties = namespace(
+    console_ties = console_ties,
+    HEADERS = _HEADERS,
+    status_word = _status_word,
+)

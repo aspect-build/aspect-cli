@@ -8,9 +8,133 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_log_file", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refresh_test_view", "refusal", "render", "repaired", "replay_lines", "report_lines", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "summary_state", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
+load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("@aspect//feature/dashboard.axl", "attempt_state", "end_build", "fold_build", "new_build", "refusal", "summary_state")
 load("@std//theme.axl", "theme")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
+load("../private/lib/term_text.axl", "term_text")
+
+ANSI = term_text.ANSI
+CONTROLS = term_text.CONTROLS
+elapsed = term_text.elapsed
+fit = term_text.fit
+link = term_text.link
+mark_cells = term_text.mark_cells
+short_count = term_text.short_count
+text_width = term_text.text_width
+wrap_line = term_text.wrap_line
+bazel_line = failure_records.bazel_line
+bep_progress = failure_records.bep_progress
+blocked_targets = failure_records.blocked_targets
+blocked_text = failure_records.blocked_text
+bounded_log = failure_records.bounded_log
+count_aborted = failure_records.count_aborted
+count_aborted_test = failure_records.count_aborted_test
+count_event = failure_records.count_event
+count_spawn = failure_records.count_spawn
+cut_text = failure_records.cut_text
+failure_of = failure_records.failure_of
+local_test_logs = failure_records.local_test_logs
+new_counts = failure_records.new_counts
+note_blocked = failure_records.note_blocked
+note_event = failure_records.note_event
+note_log_file = failure_records.note_log_file
+output_of = failure_records.output_of
+progress_counts = failure_records.progress_counts
+repaired = failure_records.repaired
+excerpt_rows = failures.excerpt_rows
+failure_detail = failures.failure_detail
+failure_summary = failures.failure_summary
+quoted_rows = failures.quoted_rows
+summary_counts = failures.summary_counts
+test_group = failures.test_group
+action_bar = dashboard_actions.action_bar
+action_counts = dashboard_actions.action_counts
+action_parts = dashboard_actions.action_parts
+action_results = dashboard_actions.action_results
+action_row = dashboard_actions.action_row
+action_seconds = dashboard_actions.action_seconds
+action_split = dashboard_actions.action_split
+actions_text = dashboard_actions.actions_text
+aged_time = dashboard_actions.aged_time
+analysing = dashboard_actions.analysing
+build_progress = dashboard_actions.build_progress
+built = dashboard_actions.built
+cache_hits = dashboard_actions.cache_hits
+cache_kinds = dashboard_actions.cache_kinds
+hit_count = dashboard_actions.hit_count
+hit_percent = dashboard_actions.hit_percent
+note_phase = dashboard_actions.note_phase
+note_progress = dashboard_actions.note_progress
+note_spawn_time = dashboard_actions.note_spawn_time
+own_execution_log = dashboard_actions.own_execution_log
+phase_status = dashboard_actions.phase_status
+running_actions = dashboard_actions.running_actions
+shares = dashboard_actions.shares
+slowest_rows = dashboard_actions.slowest_rows
+slowest_title = dashboard_actions.slowest_title
+status_row = dashboard_actions.status_row
+target_rows = dashboard_actions.target_rows
+test_progress = dashboard_actions.test_progress
+tests_cached_text = dashboard_actions.tests_cached_text
+tests_text = dashboard_actions.tests_text
+add_lines = dashboard_log.add_lines
+classify = dashboard_log.classify
+console_lines = dashboard_log.console_lines
+has_capital = dashboard_log.has_capital
+new_search = dashboard_log.new_search
+paste_text = dashboard_log.paste_text
+replay_lines = dashboard_log.replay_lines
+report_lines = dashboard_log.report_lines
+say_note = dashboard_log.say_note
+severity = dashboard_log.severity
+shown_by = dashboard_log.shown_by
+shown_lines = dashboard_log.shown_lines
+step_match = dashboard_log.step_match
+crumbs = dashboard_view.crumbs
+fit_logs = dashboard_view.fit_logs
+listed_failures = dashboard_view.listed_failures
+log_view = dashboard_view.log_view
+panes_shown = dashboard_view.panes_shown
+picked_build = dashboard_view.picked_build
+refresh_test_view = dashboard_view.refresh_test_view
+shown_tips = dashboard_view.shown_tips
+tips_count = dashboard_view.tips_count
+copy_text = dashboard_pointer.copy_text
+highlightable = dashboard_pointer.highlightable
+link_at = dashboard_pointer.link_at
+link_marks = dashboard_pointer.link_marks
+link_span_at = dashboard_pointer.link_span_at
+link_spans = dashboard_pointer.link_spans
+open_in_editor = dashboard_pointer.open_in_editor
+open_link = dashboard_pointer.open_link
+open_peek = dashboard_pointer.open_peek
+opens = dashboard_pointer.opens
+help_rows = dashboard_keys.help_rows
+KEYS = dashboard_keys.KEYS
+keys_row = dashboard_keys.keys_row
+on_key = dashboard_keys.on_key
+action_rows = dashboard_render.action_rows
+build_row = dashboard_render.build_row
+console_height = dashboard_render.console_height
+failure_rows = dashboard_render.failure_rows
+invocation_lines = dashboard_render.invocation_lines
+keys_line = dashboard_render.keys_line
+links_row = dashboard_render.links_row
+metrics_lines = dashboard_render.metrics_lines
+render = dashboard_render.render
+results_capacity = dashboard_render.results_capacity
+scrollbar = dashboard_render.scrollbar
+scrolled_rows = dashboard_render.scrolled_rows
+tips_lines = dashboard_render.tips_lines
+tips_role = dashboard_render.tips_role
 
 # The style the console's state is drawn in, muted, at the border's end.
 ANSI_MUTED = theme.sgr("muted", stream = True)

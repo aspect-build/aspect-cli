@@ -1,0 +1,392 @@
+"""What the Dashboard shows: the tab, its stack of views (a failure's log,
+a peek), the lists' chosen rows and the tips."""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/failures.axl", "failures")
+load("../../private/lib/tips.axl", "severity_rank")
+
+_get = failure_records.get
+_MAX_LOG_BYTES = failure_records.MAX_LOG_BYTES
+blocked_targets = failure_records.blocked_targets
+blocked_text = failure_records.blocked_text
+cut_text = failure_records.cut_text
+log_paths = failure_records.log_paths
+repaired = failure_records.repaired
+_NO_REASON = failures.NO_REASON
+_tab_extras = failures.tab_extras
+entry_text = failures.entry_text
+failure_detail = failures.failure_detail
+failure_entries = failures.failure_entries
+built = dashboard_actions.built
+
+# The lines a record's logs share in its view (`fit_logs`).
+_MAX_VIEW = 5000
+
+# The tasks whose finished screen keeps their last build's panes open; the
+# others keep their builds folded to a row each.
+_ONE_BUILD_KINDS = ["build", "test"]
+
+def log_view(state: dict, record: dict) -> dict:
+    """The view of a failure's logs: its title, the lines (the end of each
+    log, escape sequences stripped, a divider between an action's stderr and
+    stdout) and whether any was cut. The logs share `_MAX_VIEW` lines (`fit_logs`).
+    An action's log is read from the history's copy (`kept_action_log()`,
+    kept as it failed) before Bazel's own file, which Bazel replaces as the
+    build goes on: a log gone from both says so, and how to keep one when
+    the history keeps no action logs."""
+    blocks = []
+    cut = False
+    build = state.get("build")
+    copies = build.kept_action_log(record.get("output", "")) if build != None and record["kind"] == "action" else None
+    keeping = copies != None
+    copies = copies or {}
+    for name, value in record["files"]:
+        text = None
+        if type(value) == "tuple":
+            contents, inline_cut = value
+            text = str(contents)
+            cut = cut or inline_cut
+            if inline_cut:
+                text = cut_text(text)
+        for path in ([copies[name]] if name in copies else []) + log_paths(state, record, value):
+            got = state["read"](path, _MAX_LOG_BYTES)
+            if got != None:
+                text, skipped = got
+                cut = cut or skipped > 0
+                break
+        if text == None:
+            pending = record["kind"] == "test" and (record["label"], record["config"]) not in state["test_counts"]
+            remote = type(value) == "string" and value.startswith("bytestream://")
+            if pending and remote:
+                blocks.append((name, ["(%s is found once the test has finished: a remote cache names it)" % name]))
+            elif remote:
+                blocks.append((name, ["(%s is not on this machine: only in the remote cache)" % name]))
+            elif record["kind"] == "action" and not keeping:
+                blocks.append((name, ["(%s is gone: Bazel removed it, and the history keeps no action logs; --history:action-logs=failed keeps a copy)" % name]))
+            elif record["kind"] == "action" and record.get("success"):
+                blocks.append((name, ["(%s is gone: Bazel removed it; the history keeps a successful action's only with --history:action-logs=all)" % name]))
+            elif record["kind"] == "action":
+                blocks.append((name, ["(%s is gone: Bazel removed it, and the history has no copy)" % name]))
+            else:
+                blocks.append((name, ["(%s is gone: Bazel removed it)" % name]))
+            continue
+        if not text.strip():
+            blocks.append((name, ["(empty)"]))
+            continue
+
+        # A line's last carriage return wins, as on a terminal (a progress
+        # bar redrawing itself, a CRLF line end); no control is left to move
+        # the cursor off its row.
+        own = []
+        for line in state["ansi"].replace(text, "").rstrip("\n").split("\n"):
+            line = line.rstrip("\r").rpartition("\r")[2]
+            own.append(state["controls"].replace(line, ""))
+        blocks.append((name, own))
+    kept = fit_logs([own for _, own in blocks], _MAX_VIEW)
+    lines = []
+    for (name, own), keep in zip(blocks, kept):
+        if len(blocks) > 1:
+            lines.append("── " + name + " ──")
+        if keep < len(own):
+            cut = True
+        lines.extend(own[len(own) - keep:])
+    if not record["files"]:
+        lines.append("(Bazel reported no log for it)")
+    return {"title": record["label"] + " · " + failure_detail(state, record), "lines": lines, "cut": cut, "record": record}
+
+def refresh_test_view(state: dict, event):
+    """A test's summary arriving (not Aborted, as `collect_event` reads it)
+    shows the test's open log anew, now findable, from its end."""
+    if event.kind != "test_summary" or (_get(event, "payload_kind") or type(_get(event, "payload"))) == "aborted":
+        return
+    event_id = _get(event, "id")
+    key = (repaired(str(_get(event_id, "label", "") or "")), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+    view = state["view"]
+    if view != None and view.get("record") != None and view["record"]["kind"] == "test" and (view["record"]["label"], view["record"]["config"]) == key:
+        state["view"] = log_view(state, view["record"])
+        state["scroll"] = 0
+        state["search"]["back"] = -1
+
+def fit_logs(logs: list, room: int) -> list:
+    """How many of each log's last lines to keep for `room` lines in all:
+    every log whole when they fit, else each over a fair share cut to it,
+    the share of a log under it passed to the others."""
+    keep = [len(log) for log in logs]
+    total = 0
+    for n in keep:
+        total += n
+    if total <= room:
+        return keep
+    left = room
+    order = sorted(range(len(logs)), key = lambda i: keep[i])
+    for n, i in enumerate(order):
+        share = left // (len(order) - n)
+        keep[i] = min(keep[i], share)
+        left -= keep[i]
+    return keep
+
+def _items(state: dict) -> list:
+    """The records of the list the Results pane shows: the failures, or,
+    after `a`, the actions that wrote output."""
+    return state.get("outputs", []) if state.get("list") == "actions" else state["fails"]
+
+def _pick(state: dict) -> str:
+    """The key of `state` that holds the chosen row of the list shown: each
+    list keeps its own."""
+    return "picked" if state.get("list") == "actions" else "selected"
+
+def _keep_view(state: dict):
+    """Before showing a view deeper in the shown tab's stack (a file opened
+    from a log): keep the one shown, and where it was scrolled, for Esc and
+    the breadcrumb to go back to."""
+    view = state["view"]
+    if view != None:
+        back = state.setdefault("views", [])
+        back.append((view, state["scroll"]))
+        if len(back) > 32:
+            state["views"] = back[-32:]
+
+def _show_failure_view(state: dict, view: dict):
+    """`view`, a failure's log, as the Failures tab's: the tab shown, its
+    stack only this log (stepping is sideways, so a peek from the last one
+    goes)."""
+    show_tab(state, "failures")
+    state["views"] = []
+    state["view"] = view
+    state["scroll"] = 0
+    state["search"]["back"] = -1
+    state["focus"] = "console"
+
+def _open_failure(state: dict, index: int):
+    """Show the record at `index` of the list shown in the console pane, at
+    its end."""
+    state[_pick(state)] = index
+    _show_failure_view(state, log_view(state, _items(state)[index]))
+
+def _failure_total(state: dict) -> int:
+    """How many rows the Failures list has: its records, then the rows of
+    no record of their own (`_tab_extras`)."""
+    return len(state["fails"]) + len(_tab_extras(state))
+
+def _open_unlogged(state: dict, i: int):
+    """Enter on a row of no record of its own (`_tab_extras`): a blocked
+    target shows what blocks it (its first root cause's record, chosen in
+    the list); another shows what Bazel said of it."""
+    extras = _tab_extras(state)
+    k = i - len(state["fails"])
+    if k < 0 or k >= len(extras):
+        return
+    what, item = extras[k]
+    if what == "blocked":
+        for root in blocked_targets(state).get(item, []):
+            for j, rec in enumerate(state["fails"]):
+                if rec["label"] == root:
+                    _open_failure(state, j)
+                    return
+    state["selected"] = i
+    if what == "blocked":
+        lines = ["(" + blocked_text(item, blocked_targets(state).get(item, [])) + ", which has no log here)"]
+        title = item
+    elif what == "other":
+        lines = item["lines"]
+        title = "Other error from Bazel"
+    else:
+        said = entry_text(state, item)
+        lines = said["lines"] if item.get("exited") != None else ["(" + _NO_REASON + ")"]
+        title = item["label"] or said["kind"]
+    _show_failure_view(state, {"title": title, "lines": lines, "cut": False, "record": None})
+
+def listed_failures(state: dict) -> list:
+    """The indexes of `state["fails"]` the Failures list has a row for, in
+    the failure summary's order (`failure_entries`): every entry's record,
+    a flaky test's too (marked, never counted); a test's other attempts,
+    shards and runs are reached with `}` `{` from its row."""
+    return [e["index"] for e in failure_entries(state)["entries"] if e["index"] != None]
+
+def _listed_position(state: dict, listed: list, selected: int) -> int:
+    """Where the chosen record is in the list: its own row, its test's row
+    for another attempt of it, past the records for a target with none."""
+    fails = state["fails"]
+    if selected >= len(fails):
+        return len(listed) + selected - len(fails)
+    if selected in listed:
+        return listed.index(selected)
+    label = fails[selected]["label"] if selected < len(fails) else ""
+    for pos, i in enumerate(listed):
+        if fails[i]["label"] == label:
+            return pos
+    return 0
+
+def panes_shown(state: dict) -> bool:
+    """Whether the build panes are open: while a build runs, and on the
+    finished screen of a task that ran one build of its own (`build`,
+    `test`); else folded to a row a build, unless `p` asked for them."""
+    if not built(state):
+        return False
+    if state.get("panes") != None:
+        return state["panes"]
+    if state.get("building") or not state.get("builds"):
+        return True
+    return state["ended"] and state.get("task") in _ONE_BUILD_KINDS and len(state["builds"]) == 1
+
+def shown_tips(state: dict) -> list:
+    """The Tips tab's rows, most urgent first: the task's tips the screen
+    shows (`SURFACE_DASHBOARD`), and in its place each silenced this run,
+    as `(tip, silenced)`."""
+    silenced = state.get("silenced_tips", {})
+    stored = state.get("tips", [])
+    ids = [t["id"] for t in stored]
+
+    # A tip silenced and then undone here: the Tips feature dropped it on
+    # silencing, so it is shown from what was kept until it is stored again.
+    restored = [t for id, t in state.get("restored_tips", {}).items() if id not in ids and id not in silenced]
+    rows = [(t, False) for t in stored + restored if t["id"] not in silenced]
+    rows += [(t, True) for t in silenced.values()]
+    return sorted(rows, key = lambda r: severity_rank(r[0].get("severity")))
+
+def tips_count(state: dict) -> int:
+    """How many tips the tab shows, the silenced not counted."""
+    return len([1 for _, silenced in shown_tips(state) if not silenced])
+
+def toggle_silence(state: dict, row):
+    """Silence the tip of `row` on this machine, or undo it, through
+    `state["silencer"]` (`silence_tip`/`unsilence_tip`, `~/.aspect/config.json`);
+    a write that fails says why on its row and changes nothing."""
+    tip, silenced = row
+    silencer = state.get("silencer")
+    if silencer == None:
+        return
+    error = silencer(tip["id"], not silenced)
+    errors = state.setdefault("silence_errors", {})
+    if error:
+        errors[tip["id"]] = error
+        return
+    errors.pop(tip["id"], None)
+    gone = state.setdefault("silenced_tips", {})
+    restored = state.setdefault("restored_tips", {})
+    if silenced:
+        gone.pop(tip["id"], None)
+        restored[tip["id"]] = tip
+    else:
+        gone[tip["id"]] = tip
+        restored.pop(tip["id"], None)
+
+# The main pane's tabs, by the number key that shows each.
+_TABS = [("console", "Console"), ("failures", "Failures"), ("metrics", "Metrics"), ("invocation", "Invocation"), ("tips", "Tips")]
+
+# The tabs about a build, muted before one starts.
+_BUILD_TABS = ["failures", "metrics", "invocation"]
+
+def show_tab(state: dict, tab: str):
+    """Show the main pane's `tab`, as it was left: each tab keeps what it
+    shows (a log or a file opened in it, its stack, its scroll). The
+    failures' list takes the keys when nothing is open over it."""
+    shown = state.get("tab", "console")
+    if shown != tab:
+        parked = state.setdefault("parked", {})
+        parked[shown] = (state["view"], state.get("views", []), state["scroll"])
+        state["view"], state["views"], state["scroll"] = parked.pop(tab, (None, [], 0))
+        state["search"]["back"] = -1
+    state["tab"] = tab
+    state["focus"] = "failures" if tab == "failures" and state["view"] == None else "console"
+
+def _crumb(state: dict, view: dict) -> str:
+    """A view's crumb in the tab bar: a file's name and line; a failure's
+    target, then its shard, run and attempt where there are several."""
+    record = view.get("record")
+    if view.get("peek") or record == None:
+        return view["title"]
+    if record["kind"] != "test":
+        return record["label"] + (" ▹ " + record["detail"] if record.get("detail") else "")
+    key = (record["label"], record["config"])
+    runs, shards = state["test_counts"].get(key, (0, 0))
+    seen_runs, seen_shards = state["spread"].get(key, (1, 1))
+    runs, shards = max(runs, seen_runs), max(shards, seen_shards)
+    attempts = state["last_attempts"].get((record["label"], record["config"], record["run"], record["shard"]), 1)
+    parts = [record["label"]]
+    if shards > 1:
+        parts.append("shard %d/%d" % (record["shard"], shards))
+    if runs > 1:
+        parts.append("run %d/%d" % (record["run"], runs))
+    if attempts > 1:
+        parts.append("attempt %d/%d" % (record["attempt"], attempts))
+    return " ▹ ".join(parts)
+
+def _shown_record(state: dict):
+    """The failure whose log the shown tab has open, under any file
+    peeked from it; None for none."""
+    first = state.get("views", [])
+    view = first[0][0] if first else state["view"]
+    return view.get("record") if view != None else None
+
+def crumbs(state: dict) -> list:
+    """The shown tab's views as crumbs, its root first: what the tab bar
+    names it by."""
+    out = [_crumb(state, v) for v, _ in state.get("views", [])]
+    if state["view"] != None:
+        out.append(_crumb(state, state["view"]))
+    builds = len(state.get("builds", [])) + (1 if state.get("building") else 0)
+    if state.get("tab") in _PICKED_TABS and builds > 1 and state["view"] == None:
+        out.append("%d of %d" % (picked_build(state) + 1, builds))
+    return out
+
+# The tabs that show one build, picked with `<`/`>`.
+_PICKED_TABS = ["metrics", "invocation"]
+
+def picked_build(state: dict) -> int:
+    """Which build the Metrics and Invocation tabs show, oldest 0: the one
+    `<`/`>` picked, else the newest (the running one, while one runs)."""
+    newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
+    picked = state.get("picked_build")
+    return newest if picked == None else max(0, min(picked, newest))
+
+def build_view(state: dict) -> dict:
+    """`state` as the picked build's tabs read it: an older build's own
+    counts, invocation and timings over the newest's."""
+    i = picked_build(state)
+    builds = state.get("builds", [])
+    if i >= len(builds) or (i == len(builds) - 1 and not state.get("building")):
+        return state
+    view = dict(state)
+    view.update(builds[i]["snapshot"])
+    return view
+
+def back_to(state: dict, level: int):
+    """The shown tab back to its `level`th view (0 its own: the list or
+    the console), as it was scrolled."""
+    views = state.get("views", [])
+    if level <= 0:
+        state["view"], state["views"], state["scroll"] = None, [], 0
+    elif level <= len(views):
+        state["view"], state["scroll"] = views[level - 1]
+        state["views"] = views[:level - 1]
+    state["search"]["back"] = -1
+    state["focus"] = "failures" if state.get("tab") == "failures" and state["view"] == None else "console"
+
+dashboard_view = namespace(
+    back_to = back_to,
+    BUILD_TABS = _BUILD_TABS,
+    build_view = build_view,
+    crumbs = crumbs,
+    failure_total = _failure_total,
+    fit_logs = fit_logs,
+    items = _items,
+    keep_view = _keep_view,
+    listed_failures = listed_failures,
+    listed_position = _listed_position,
+    log_view = log_view,
+    open_failure = _open_failure,
+    open_unlogged = _open_unlogged,
+    panes_shown = panes_shown,
+    pick = _pick,
+    picked_build = picked_build,
+    PICKED_TABS = _PICKED_TABS,
+    refresh_test_view = refresh_test_view,
+    show_tab = show_tab,
+    shown_record = _shown_record,
+    shown_tips = shown_tips,
+    TABS = _TABS,
+    tips_count = tips_count,
+    toggle_silence = toggle_silence,
+)
