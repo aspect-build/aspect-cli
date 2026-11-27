@@ -222,9 +222,13 @@ pub enum Stage {
     /// followed the first.
     RecapErrors { max: usize, after: usize },
     /// No recap: the task's failure summary tells Bazel's errors, from the
-    /// blocks [`report::CollectErrors`] keeps ([`processors::Observations::blocks`]),
-    /// and names the raw log itself ([`report::Summary::log_named_elsewhere`]).
+    /// blocks a [`Stage::CollectErrors`] keeps, and names the raw log itself
+    /// ([`report::Summary::log_named_elsewhere`]).
     ErrorsForSummary,
+    /// [`report::CollectErrors`], at the chain's front, for the failure
+    /// summary and the Dashboard ([`processors::Observations::blocks`]): one
+    /// however many stages ask for it.
+    CollectErrors,
     /// [`processors::CollapseRepeats`].
     CollapseRepeats,
     /// [`filters::CollapseSimilar`].
@@ -285,6 +289,7 @@ impl Stage {
             Stage::RelativizePaths { .. } => "relativize_paths",
             Stage::Drop(_) => "drop",
             Stage::RecapErrors { .. } | Stage::ErrorsForSummary => "recap_errors",
+            Stage::CollectErrors => "collect_errors",
             Stage::CollapseRepeats => "collapse_repeats",
             Stage::CollapseSimilar { .. } => "collapse_similar",
         }
@@ -292,7 +297,9 @@ impl Stage {
 
     pub fn phase(&self) -> Phase {
         match self {
-            Stage::Observe(_) | Stage::Aggregate(_) | Stage::Fatal(_) => Phase::Observe,
+            Stage::Observe(_) | Stage::Aggregate(_) | Stage::Fatal(_) | Stage::CollectErrors => {
+                Phase::Observe
+            }
             Stage::Intercept { .. } => Phase::Intercept,
             Stage::Rewrite { .. } | Stage::RelativizePaths { .. } => Phase::Rewrite,
             Stage::Drop(_) => Phase::Drop,
@@ -312,6 +319,7 @@ impl Stage {
                 | Stage::Fatal(_)
                 | Stage::RecapErrors { .. }
                 | Stage::ErrorsForSummary
+                | Stage::CollectErrors
         )
     }
 
@@ -537,7 +545,7 @@ impl Config {
         if self
             .stages
             .iter()
-            .any(|s| matches!(s, Stage::ErrorsForSummary))
+            .any(|s| matches!(s, Stage::CollectErrors))
         {
             chain.push(Box::new(report::CollectErrors::new(
                 self.pty,
@@ -608,7 +616,7 @@ impl Config {
                 ),
                 // No recap: the task's failure summary tells the errors,
                 // from what the collector at the chain's front keeps.
-                Stage::ErrorsForSummary => continue,
+                Stage::ErrorsForSummary | Stage::CollectErrors => continue,
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
                         .under_pty(pty)
@@ -821,12 +829,21 @@ mod tests {
         }
     }
 
-    /// For the failure summary, no recap at all: it tells Bazel's errors.
+    /// For the failure summary, no recap at all: it tells Bazel's errors,
+    /// from the one collector however many stages ask for it.
     #[test]
     fn errors_for_the_summary_write_no_recap() {
         let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: boom\r\n";
-        let mut pipeline =
-            Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
+        let mut pipeline = Config::new(
+            Mode::Pty,
+            vec![
+                Stage::ErrorsForSummary,
+                Stage::CollectErrors,
+                Stage::CollectErrors,
+            ],
+            Style::default(),
+        )
+        .pipeline();
         let sink = SharedSink::default();
         let mut forwarder = Forwarder::spawn(
             Box::new(std::io::Cursor::new(input.to_vec())),
@@ -836,6 +853,8 @@ mod tests {
         .unwrap();
         forwarder.join().unwrap();
         assert!(!sink.text().contains("Error recap"), "{}", sink.text());
+        let kept = pipeline.observations.blocks().expect("collected");
+        assert_eq!(kept.blocks.len(), 1, "one collector however many asked");
     }
 
     /// `input` as bazel writes it, its messages coloured.

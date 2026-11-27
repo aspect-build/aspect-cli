@@ -249,6 +249,10 @@ def _console_impl(ctx: FeatureContext):
     trait = ctx.traits[BazelTrait]
     trait.output_stages.extend(got.stages)
 
+    # What the failure summary ties Bazel's lines from, whichever of the
+    # console's stages are on.
+    trait.output_stages.append(bazel.output.collect_errors())
+
     # The tip rules are read as each build starts and ends, not now: a feature
     # whose implementation runs after this one may still append some.
     tips = ctx.traits[TipsTrait]

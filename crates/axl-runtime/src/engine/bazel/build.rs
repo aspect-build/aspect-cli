@@ -2240,13 +2240,14 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc(serde_json::Value::Object(streams)))
     }
 
-    /// What a `recap_errors(summary = True)` stage kept of the console for a
-    /// failure summary, once the console has ended: `{"blocks": [{"kind",
-    /// "text"}], "not_kept": n, "stdout": bool}`, each block one of Bazel's
-    /// own `ERROR:` messages (`error`), an action's `INFO: From …:` output
-    /// (`from`) or a coloured `ERROR:` right after an output (`tail`), with
-    /// what followed it before Bazel's next message or redraw, as Bazel wrote
-    /// it; `not_kept` counts the bytes the caps left out; `stdout` whether
+    /// What a `collect_errors()` stage kept of the console for the failure
+    /// summary, once the console has ended: `{"blocks": [{"kind", "text",
+    /// "body_len", "last_line"}], "not_kept": n, "stdout": bool}`, each block
+    /// one of Bazel's own `ERROR:` messages (`error`), an action's `INFO:
+    /// From …:` header with its body's length and last line (`from`), or a
+    /// record that may be an output's held last line (`tail`), with what
+    /// followed it before Bazel's next message or redraw, as Bazel wrote it;
+    /// `not_kept` counts the bytes of Bazel's own the caps left out; `stdout` whether
     /// the console's stream carried Bazel's stdout too (a terminal both
     /// share). None without such a stage, or before the console ends.
     fn output_bazel_errors<'v>(

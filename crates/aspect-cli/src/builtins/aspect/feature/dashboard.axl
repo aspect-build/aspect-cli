@@ -6788,8 +6788,8 @@ def _status_word(status: str) -> str:
 
 def console_ties(state: dict) -> dict:
     """What Bazel's console adds to the failure entries, by exact ties
-    alone, once the build has ended: from the blocks a `recap_errors(summary
-    = True)` stage kept as Bazel wrote them (`bazel_errors`, from
+    alone, once the build has ended: from the blocks a `collect_errors()`
+    stage kept as Bazel wrote them (`bazel_errors`, from
     `build.output_bazel_errors()`: each of Bazel's `ERROR:` messages, each
     action's `INFO: From` header with its body's length and last line, each
     record that may be an output's held last line), however long the
@@ -7589,8 +7589,9 @@ def _dashboard_impl(ctx: FeatureContext):
         # Every action reported to this task alone, not to its BES sinks.
         publish_all_actions_unless_sent_out(t, state)
 
-    # A processor needs a stage; the console's defaults may be off.
-    t.output_stages.append(bazel.output.observe({"dashboard:error": r"^ERROR:"}))
+    # What the Failures tab and the summary tie Bazel's lines from, with the
+    # Console's stages off too.
+    t.output_stages.append(bazel.output.collect_errors())
     t.output_frame.append(_frame)
     t.output_end.append(_end)
     t.build_event.append(_event)

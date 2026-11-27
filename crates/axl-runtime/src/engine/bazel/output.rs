@@ -645,7 +645,7 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
 /// What `observations` kept for the failure summary, as AXL reads it
 /// (`build.output_bazel_errors()`): `{"blocks": [{"kind", "text"}],
 /// "not_kept": n, "stdout": bool}`, None before the console has ended or
-/// without a `recap_errors(summary = True)` stage.
+/// without a `collect_errors()` stage.
 pub(crate) fn bazel_blocks(
     observations: &bazel::console::processors::Observations,
 ) -> Option<serde_json::Value> {
@@ -976,9 +976,10 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// `Build failed. Not running tests` are never repeated.
     ///
     /// With `summary = True` it writes nothing: a failure summary tells the
-    /// errors instead (the Console feature's reads Bazel's build events and
-    /// `build.output_bazel_errors()`), and the end of the console leaves
-    /// naming Bazel's raw log to that summary.
+    /// errors instead (the Console feature's reads Bazel's build events and,
+    /// through a `collect_errors()` stage, `build.output_bazel_errors()`),
+    /// and the end of the console leaves naming Bazel's raw log to that
+    /// summary.
     fn recap_errors(
         #[starlark(require = named, default = bazel::console::report::RECAP_MAX as i32)] max: i32,
         #[starlark(require = named, default = bazel::console::report::RECAP_AFTER_RECORDS as i32)]
@@ -1003,7 +1004,18 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         })
     }
 
-    /// What a `recap_errors(summary = True)` stage keeps of a console `text`
+    /// Keep, for the failure summary and the Dashboard, Bazel's own `ERROR:`
+    /// messages and what may be an action's held last line, as Bazel wrote
+    /// them, and of each action's `INFO: From` output its header, length
+    /// and last line: `build.output_bazel_errors()`. It writes nothing and
+    /// changes nothing shown; however many are added, one collects.
+    fn collect_errors() -> anyhow::Result<OutputStage> {
+        Ok(OutputStage {
+            stage: Stage::CollectErrors,
+        })
+    }
+
+    /// What a `collect_errors()` stage keeps of a console `text`
     /// written as Bazel would write it (through a PTY unless `pty = False`),
     /// as `build.output_bazel_errors()` gives it for a build's: for a test
     /// that replays a recorded console. `stdout` is what that gives as
@@ -1016,7 +1028,7 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<starlark::values::Value<'v>> {
         let mode = if pty { Mode::Pty } else { Mode::Pipe };
         let mut pipeline =
-            Config::new(mode, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
+            Config::new(mode, vec![Stage::CollectErrors], Style::default()).pipeline();
         let mut forwarder = bazel::console::forward::Forwarder::spawn(
             Box::new(std::io::Cursor::new(text.as_bytes().to_vec())),
             Box::new(std::io::sink()),
