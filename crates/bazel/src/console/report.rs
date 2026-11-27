@@ -369,10 +369,11 @@ const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the
 static KEPT_NOTE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^INFO: \S+ \S+ std(?:err|out): ").unwrap());
 
-/// The target a failed action's whole `ERROR:` line names: `(from
-/// cc_library rule target //cc:lib)`.
+/// The target a failed action's whole `ERROR:` line names: `(from target
+/// //cc:lib)` (Bazel 7 and 8), `(from cc_library rule target //cc:lib)`
+/// (Bazel 9).
 static RULE_TARGET: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"rule target (\S+?)\)").unwrap());
+    std::sync::LazyLock::new(|| Regex::new(r"\(from (?:\S+ rule )?target (\S+?)\)").unwrap());
 
 /// Bazel's status row with nothing after its label (`FAILED:`), as curses
 /// draws it: never part of an error's body.
@@ -399,6 +400,10 @@ pub struct RecapErrors {
     errors: Vec<Recapped>,
     /// The error whose body the lines now coming are, while they are.
     body: Option<usize>,
+    /// The error whose body bazel's progress area broke off: its output's
+    /// held last line ([`Line::tail`]), an `ERROR:` in bazel's colours that
+    /// is not bazel's own, is still its.
+    held: Option<usize>,
     distinct: HashSet<String>,
     after_first: usize,
     /// Links what the repeated lines name, for a terminal, with what
@@ -422,8 +427,8 @@ type LineLinks = Vec<Known>;
 /// ([`RECAP_BODY_HELD`]), each line with the links it went by with.
 struct Recapped {
     header: (String, LineLinks),
-    /// The target its whole `ERROR:` line names (`… (from cc_library rule
-    /// target //cc:lib)`, past where the header is cut), when it does.
+    /// The target its whole `ERROR:` line names (`… (from target
+    /// //cc:lib)`, past where the header is cut), when it does.
     target: Option<String>,
     first: Vec<(String, LineLinks)>,
     last: VecDeque<(String, LineLinks)>,
@@ -512,6 +517,7 @@ impl RecapErrors {
             given: Given::default(),
             errors: vec![],
             body: None,
+            held: None,
             distinct: HashSet::new(),
             after_first: 0,
             linker: None,
@@ -596,6 +602,7 @@ impl LineProcessor for RecapErrors {
         // an error right after a failed action's output is not one until
         // bazel's next progress line, so a recap may miss it, never invent one.
         let body = self.body.take();
+        let held = self.held.take();
         if line.kind == Kind::Header && text.starts_with("ERROR: ") && !BOILERPLATE.is_match(text) {
             let short = EXIT_TAIL
                 .captures(text)
@@ -623,6 +630,18 @@ impl LineProcessor for RecapErrors {
             }
             self.body = Some(i);
             self.after_first += usize::from(line.kind == Kind::Other);
+        } else if let Some(i) = held.or(body)
+            && line.tail
+            && line.kind == Kind::Other
+            && text.starts_with("ERROR: ")
+        {
+            // An `ERROR:` the classifier did not take for bazel's own is
+            // the output's held last line; any other tail may be bazel's
+            // next message.
+            let quoted = quote(text);
+            let links = self.links(record, &quoted);
+            self.errors[i].body_line(quoted, links);
+            self.after_first += 1;
         } else if !self.distinct.is_empty()
             && matches!(line.kind, Kind::Header | Kind::Other)
             && !line.drawn
@@ -631,6 +650,9 @@ impl LineProcessor for RecapErrors {
             // off screen, and are gone from plain lines, which must count
             // the same.
             self.after_first += 1;
+        }
+        if line.drawn || line.kind == Kind::Blank {
+            self.held = held.or(body);
         }
         Some(record.to_vec())
     }
@@ -773,7 +795,7 @@ struct Rendered {
 
 /// Which of `kept` (the history's failed actions, in order) is the action
 /// the error `header` reports, not yet `used`, when only one can be: the one
-/// action of the label the header (or its whole line's `rule target`,
+/// action of the label the header (or its whole line's `(from target …)`,
 /// `target`) names; for an error naming no label, the one action from the
 /// package of the BUILD file its location is in (that file's path made
 /// absolute from the task's directory and taken relative to the workspace,
@@ -1023,7 +1045,7 @@ mod tests {
         );
 
         // ws3/cc (rules_cc 0.2.25, Bazel 9.3.3): two failed compiles of one
-        // cc_library, their headers cut before the `rule target` that names
+        // cc_library, their headers cut before the `(from … target)` that names
         // it. Neither may take the other's log, in either order.
         let cc = vec![
             (
@@ -1069,6 +1091,34 @@ mod tests {
             ),
             Some(0),
             "by its line's target, the one left"
+        );
+        // ws4/xt (Bazel 7.7.3 and 8.9.0): two targets of one package, their
+        // lines naming each by `(from target //xt:b)`; each its own.
+        let xt = vec![
+            (
+                "//xt:a".to_string(),
+                vec![("stderr".to_string(), "/h/xt/a/Proc-1.stderr".to_string())],
+            ),
+            (
+                "//xt:b".to_string(),
+                vec![("stderr".to_string(), "/h/xt/b/Proc-1.stderr".to_string())],
+            ),
+        ];
+        let b_header = "ERROR: xt/BUILD.bazel:3:5: Processing xt/b.out failed: (Exit 4)";
+        let a_header = "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3)";
+        let mut both = vec![false, false];
+        assert_eq!(
+            super::kept_for(b_header, Some("//xt:b"), &xt, &mut both, b),
+            Some(1)
+        );
+        assert_eq!(
+            super::kept_for(a_header, Some("//xt:a"), &xt, &mut both, b),
+            Some(0)
+        );
+        assert_eq!(
+            super::kept_for(b_header, None, &xt, &mut [false, false], b),
+            None,
+            "without the target, neither"
         );
         let prefix = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:generate failed: (Exit 1)";
         let mut fresh = vec![false; kept.len()];
@@ -1329,24 +1379,54 @@ mod tests {
         }
     }
 
-    /// A failed compile's whole `ERROR:` line names its target past where
-    /// the header is cut (ws3/cc, rules_cc 0.2.25 on Bazel 9.3.3).
+    /// A failed action's whole `ERROR:` line names its target past where
+    /// the header is cut, as Bazel 7.7.3, 8.9.0 and 9.3.3 each write it
+    /// (`//xt:a`'s Proc, `//cc4:s1`'s compile under rules_cc 0.2.25).
     #[test]
     fn a_kept_error_knows_its_lines_target() {
-        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
-        let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
-        let records = [
-            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1): wrapped_clang_pp failed: error executing CppCompile command (from cc_library rule target //cc:lib) /usr/bin/xcrun clang++ -c cc/a.cc",
-            "cc/a.cc:1:18: error: use of undeclared identifier 'x'",
-            "\x1b[32m[1 / 9]\x1b[0m running",
+        let cases = [
+            (
+                "ERROR: xt/BUILD.bazel:2:5: Processing bazel-out/darwin_arm64-fastbuild/bin/xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from target //xt:a) /bin/bash -c 'echo '\\''proc 1.0 starting'\\'' >&2; echo '\\''error: AAA broke in a.dat'\\'' >&2; exit 3'",
+                "//xt:a",
+            ),
+            (
+                "ERROR: cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:s1) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)",
+                "//cc4:s1",
+            ),
+            (
+                "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from target //xt:a) /bin/bash -c 'echo '\\''proc 1.0 starting'\\'' >&2; echo '\\''error: AAA broke in a.dat'\\'' >&2; exit 3'",
+                "//xt:a",
+            ),
+            (
+                "ERROR: cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:s1) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)",
+                "//cc4:s1",
+            ),
+            (
+                "ERROR: xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from proc rule target //xt:a) /bin/bash -c 'echo '\\''proc 1.0 starting'\\'' >&2; echo '\\''error: AAA broke in a.dat'\\'' >&2; exit 3'",
+                "//xt:a",
+            ),
+            (
+                "ERROR: cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): wrapped_clang_pp failed: error executing CppCompile command (from cc_library rule target //cc4:s1) bazel-out/darwin_arm64-opt-exec/bin/external/apple_support+/crosstool/wrapped_clang_pp '-D_FORTIFY_SOURCE=1' -fstack-protector -fcolor-diagnostics -Wall -Wthread-safety -Wself-assign ... (remaining 28 arguments skipped)",
+                "//cc4:s1",
+            ),
         ];
-        feed(&mut p, &records);
-        let kept = observations.errors().expect("kept");
-        assert_eq!(
-            kept.errors[0].header,
-            "ERROR: cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1)"
-        );
-        assert_eq!(kept.errors[0].target.as_deref(), Some("//cc:lib"));
+        for (line, target) in cases {
+            let observations =
+                std::sync::Arc::new(super::super::processors::Observations::default());
+            let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
+            feed(
+                &mut p,
+                &[line, "error: it broke", "\x1b[32m[1 / 9]\x1b[0m running"],
+            );
+            let kept = observations.errors().expect("kept");
+            assert!(
+                kept.errors[0].header.ends_with("failed: (Exit 3)")
+                    || kept.errors[0].header.ends_with("failed: (Exit 1)"),
+                "{}",
+                kept.errors[0].header
+            );
+            assert_eq!(kept.errors[0].target.as_deref(), Some(target), "{line}");
+        }
     }
 
     /// With the failure summary naming the raw log, the end of the console

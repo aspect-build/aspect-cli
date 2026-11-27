@@ -366,7 +366,7 @@ pub struct KeptError {
     pub body: Vec<String>,
     pub log: Option<String>,
     pub label: Option<String>,
-    /// The target its whole `ERROR:` line names (`rule target //cc:lib`).
+    /// The target its whole `ERROR:` line names (`(from target //cc:lib)`).
     pub target: Option<String>,
 }
 

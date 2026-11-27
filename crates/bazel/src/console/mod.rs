@@ -1627,6 +1627,48 @@ mod tests {
         }
     }
 
+    /// `//tl:inner2` (Bazel 9.3.3): a genrule's last line, written in
+    /// Bazel's `ERROR: ` colours with no newline, which Bazel flushes after
+    /// its next progress line. It is the tool's, not Bazel's, so it stays in
+    /// the genrule's error, under curses and in a pipe alike.
+    #[test]
+    fn a_tools_held_error_line_stays_in_its_body() {
+        let pty: &[u8] = b"\x1b[90m[1 / 3]\x1b[0m 2 actions running\r\r\n    Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\r\r\n\r\r\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\r\r\nrunning inner bazel 2\r\r\n\x1b[90m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mthe inner build failed\r\r\r\n\x1b[1;90mINFO: \x1b[0mFound 2 targets...\r\r\n\x1b[90m[3 / 3]\x1b[0m no actions running\r\r\n";
+        let pipe: &[u8] = b"\x1b[32m[1 / 3]\x1b[0m 2 actions running\n\x1b[31m\x1b[1mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\n\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nrunning inner bazel 2\n\x1b[32m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\n\x1b[31m\x1b[1mERROR: \x1b[0mthe inner build failed\n\x1b[32mINFO: \x1b[0mFound 2 targets...\n\x1b[32m[3 / 3]\x1b[0m no actions running\n";
+        for (mode, input) in [(Mode::Pty, pty), (Mode::Pipe, pipe)] {
+            let mut pipeline =
+                Config::new(mode, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
+            let sink = SharedSink::default();
+            let mut forwarder = Forwarder::spawn(
+                Box::new(std::io::Cursor::new(input.to_vec())),
+                Box::new(sink.clone()),
+                std::mem::take(&mut pipeline.chain),
+            )
+            .unwrap();
+            forwarder.join().unwrap();
+            let kept: Vec<(String, Vec<String>)> = pipeline
+                .observations
+                .errors()
+                .expect("kept")
+                .errors
+                .into_iter()
+                .map(|e| (e.header, e.body))
+                .collect();
+            assert_eq!(
+                kept,
+                vec![(
+                    "ERROR: tl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1)"
+                        .to_string(),
+                    vec![
+                        "running inner bazel 2".to_string(),
+                        "ERROR: the inner build failed".to_string()
+                    ],
+                )],
+                "{mode:?}"
+            );
+        }
+    }
+
     /// Every error is kept for the summary, past the console recap's 10:
     /// r44's twelve failing genrules each keep their own (the Failures tab
     /// reads a row's exit code and location off them).

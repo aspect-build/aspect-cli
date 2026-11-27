@@ -33,7 +33,8 @@
 //! Right after bazel ends an action's output, the next line may still be
 //! the output's: a last line without a newline, which bazel flushes only
 //! before its next event. So that line is a message only if it opens more
-//! action output. Under `--noshow_progress` nothing ends an action's output,
+//! action output or is an `ERROR:` only bazel writes (at a BUILD or `.bzl`
+//! file's location, or `package contains errors`). Under `--noshow_progress` nothing ends an action's output,
 //! and nothing after the first is hidden.
 //!
 //! Each errs on the side of a line staying visible. Two cases are beyond
@@ -155,6 +156,16 @@ fn is_bare_status(text: &str) -> bool {
     text.split_once(':')
         .is_some_and(|(_, rest)| rest.trim().is_empty())
 }
+
+/// An `ERROR:` only bazel writes: at a BUILD or `.bzl` file's location, or
+/// that a package contains errors. A tool's held last line in bazel's
+/// colours (a nested bazel's `ERROR: the build failed`) is not one.
+static OWN_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^ERROR: (?:(?:\S*/)?(?:BUILD(?:\.bazel)?|[^\s/:]+\.bzl):\d+(?::\d+)?: |package contains errors)",
+    )
+    .unwrap()
+});
 
 /// A header whose body is an action's or a test's output: `INFO: From …`,
 /// or an `ERROR:` at a BUILD file's location or saying what failed. One with
@@ -343,14 +354,13 @@ impl Classifier {
             let tail = std::mem::take(&mut self.maybe_tail);
             was_tail = tail;
             let opens = ACTION_OUTPUT.is_match(&text) && !GRAPH_ERROR.is_match(&text);
-            // A possible tail is taken for a message only if it opens more
-            // output, as bazel's next `INFO: From …` does, or is an
-            // `ERROR:` in Bazel's colours (`ERROR: package contains
-            // errors`, right after a curses redraw).
+            // A possible tail is a message only if it opens more output, as
+            // bazel's next `INFO: From …` does, or reads as bazel's own
+            // error (`ERROR: package contains errors` after a redraw).
             if label
                 && !self.in_action_output
                 && !self.streamed
-                && (opens || !tail || text.starts_with("ERROR: "))
+                && (opens || !tail || OWN_ERROR.is_match(&text))
                 && HEADER.is_match(&text)
             {
                 opens_output = opens;

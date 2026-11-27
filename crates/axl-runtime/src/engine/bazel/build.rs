@@ -2230,7 +2230,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// the history kept of the action (its stderr, else its other stream) or
     /// None, and that action's label, else None (both only where one kept
     /// action alone can be the error's), and the target the whole `ERROR:`
-    /// line names (`rule target //cc:lib`) or None; `distinct` counts them
+    /// line names (`(from target //cc:lib)`) or None; `distinct` counts them
     /// all.
     /// None without such a stage, or before the console ends.
     fn output_errors<'v>(
