@@ -11,6 +11,7 @@ exit 1
 
 ── Other errors from Bazel ──
 ERROR: package contains errors: at: //at:t: expected value of type 'list(output)' for attribute
+         'outs' in 'genrule' rule, but got "notalist.txt" (string)
 0 built, 2 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab

@@ -8,6 +8,8 @@ exit 1
 
 ── Other errors from Bazel ──
 ERROR: ad/BUILD.bazel:2:2: every rule of type r implicitly depends upon the target
+         '//nowhere2:tool', but this target could not be found because of: no such package
+         'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file…
   │  - nowhere2
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay

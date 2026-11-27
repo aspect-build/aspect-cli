@@ -7006,7 +7006,8 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
         out.append(red + bold + "── Other errors from Bazel ──" + reset)
         for i, block in enumerate(others[:_SUMMARY_MAX]):
             lines = _traceback_lines(block["lines"])
-            out.append(red + "ERROR:" + reset + " " + quoted_rows(lines[0], max(20, width - 7))[0])
+            for j, row in enumerate(quoted_rows(lines[0], max(20, width - 9))):
+                out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
             if i < _EXCERPTED:
                 rows, more = excerpt_rows(lines[1:])
                 for line in rows:
