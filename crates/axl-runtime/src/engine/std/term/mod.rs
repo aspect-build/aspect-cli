@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use allocative::Allocative;
-use bazel::console::feed::{Feed, Source};
+use bazel::console::feed::{Drained, Feed, Source};
 use derive_more::Display;
 use nix::sys::termios::{self, InputFlags, LocalFlags, SetArg, SpecialCharacterIndices, Termios};
 use starlark::StarlarkResultExt;
@@ -82,8 +82,6 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 struct Held {
     /// Which `take()` this is: a [`Screen`] acts only on its own.
     generation: u64,
-    /// Whether `take()` entered the alternate screen, to leave it on release.
-    alt_screen: bool,
     tty: File,
     saved_termios: Termios,
     /// The modes the screen reads keys in, for a resume to set again.
@@ -134,7 +132,7 @@ fn gone_is_fine(done: std::io::Result<()>) -> anyhow::Result<NoneType> {
 
 /// Take the terminal; see the module docs. Its generation. Refused while
 /// this process runs in the background (another job has the terminal).
-fn take(alt_screen: bool) -> anyhow::Result<u64> {
+fn take() -> anyhow::Result<u64> {
     // Stdout is not flushed: a writer waiting on a stdout nobody reads may
     // hold its lock, and the take would wait on it. The CLI's own output
     // goes to the screen from here on ([`route`]), not through std's
@@ -181,13 +179,9 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         )));
     }
     let capture = Arc::new(Feed::default());
-    // A screen of its own shows the task's output from its start: what it
-    // wrote before Bazel's console began, handed over apart (`earlier()`).
-    let earlier = if alt_screen {
-        crate::out::output_before_console_ansi(MAX_CAPTURED_BYTES as u64)
-    } else {
-        vec![]
-    };
+    // The screen shows the task's output from its start: what it wrote
+    // before Bazel's console began, handed over apart (`earlier()`).
+    let earlier = crate::out::output_before_console_ansi(MAX_CAPTURED_BYTES as u64);
     let forget_tty = || {
         mark_captured(None);
         crate::out::set_capture_copies(false);
@@ -195,10 +189,10 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     };
     // No write half to the terminal and half to the capture.
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
-    let stdout = Redirect::new(1, capture.clone(), Source::Stdout, alt_screen)
+    let stdout = Redirect::new(1, capture.clone(), Source::Stdout, true)
         .inspect_err(|_| forget_tty())
         .map_err(undo_termios)?;
-    let stderr = match Redirect::new(2, capture.clone(), Source::Stderr, alt_screen) {
+    let stderr = match Redirect::new(2, capture.clone(), Source::Stderr, true) {
         Ok(r) => r,
         Err(e) => {
             stdout.restore();
@@ -207,21 +201,15 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         }
     };
     // Once both are captured, the capture copies them, and the CLI's own
-    // output goes to the screen instead ([`route`]). A screen of its own is
-    // dumped on leaving, from here on.
-    if alt_screen {
-        crate::out::set_capture_copies(true);
-        set_sink(Some((&capture, &stdout, &stderr)));
-        set_dump_mark();
-    }
+    // output goes to the screen instead ([`route`]). The screen is dumped on
+    // leaving, from here on.
+    crate::out::set_capture_copies(true);
+    set_sink(Some((&capture, &stdout, &stderr)));
+    set_dump_mark();
     drop(moving);
 
     let mut tty = tty;
-    let enter: &[u8] = if alt_screen {
-        b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H"
-    } else {
-        b"\x1b[?25l\x1b[?2004h"
-    };
+    let enter: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H";
     if let Err(e) = tty.write_all(enter).and_then(|()| tty.flush()) {
         stderr.restore();
         stdout.restore();
@@ -230,11 +218,7 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
         return Err(e.into());
     }
     // Asked once the modes are set, so the answer is read, not echoed.
-    let (dark, typed) = if alt_screen {
-        query_background(&mut tty, BACKGROUND_WAIT)
-    } else {
-        (None, vec![])
-    };
+    let (dark, typed) = query_background(&mut tty, BACKGROUND_WAIT);
     if let Some(dark) = dark {
         crate::theme::learn_background(if dark {
             aspect_theme::Appearance::Dark
@@ -246,18 +230,14 @@ fn take(alt_screen: bool) -> anyhow::Result<u64> {
     remember_for_crash(
         tty.as_raw_fd(),
         &saved_termios,
-        alt_screen,
         stdout.saved.as_raw_fd(),
         stderr.saved.as_raw_fd(),
     );
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
     axl_types::stream::set_terminal_input(suspend, resume);
-    if alt_screen {
-        stop_with_the_screen();
-    }
+    stop_with_the_screen();
     *held = Some(Held {
         generation,
-        alt_screen,
         tty,
         saved_termios,
         cbreak,
@@ -318,7 +298,7 @@ pub fn release_all() -> bool {
     }
 }
 
-/// Give a held screen of its own back for a while, for something that needs
+/// Give a held screen back for a while, for something that needs
 /// the real terminal (a prompt reading stdin, an interactive child): the
 /// task's output so far dumped to it ([`dump_output`]) and stdout's captured
 /// lines to a stdout that is not the terminal, the main screen (the screen's
@@ -327,7 +307,7 @@ pub fn release_all() -> bool {
 /// for the child to read ([`drop_answers_due`]). Whether
 /// one was given back, for [`resume`], which each true needs once: a screen
 /// already suspended counts another, and comes back with the last resume.
-/// One not of its own, or none: false.
+/// None held: false.
 pub(crate) fn suspend() -> bool {
     let finishing;
     let moving;
@@ -340,7 +320,7 @@ pub(crate) fn suspend() -> bool {
             err: lock_until(&OUTPUT_ORDER[1], deadline),
         };
         let mut held = HELD.lock().unwrap();
-        let Some(h) = held.as_mut().filter(|h| h.alt_screen) else {
+        let Some(h) = held.as_mut() else {
             return false;
         };
         if h.suspended {
@@ -353,7 +333,7 @@ pub(crate) fn suspend() -> bool {
         // in its input, no frame left on the screen it leaves.
         drop_answers_due(&mut h.tty);
         let _ = h.tty.write_all(b"\x1b[2J\x1b[H");
-        let _ = h.tty.write_all(leave_sequence(true));
+        let _ = h.tty.write_all(leave_sequence());
         let _ = h.tty.write_all(wheel_restore());
         let _ = h.tty.flush();
         let _ = termios::tcsetattr(&h.tty, SetArg::TCSANOW, &h.saved_termios);
@@ -409,7 +389,7 @@ fn relinked(bytes: &[u8]) -> Vec<u8> {
 /// back first ([`suspend`]: the main screen, the shell's modes), then the
 /// process stops (SIGSTOP); once continued (`fg`) the screen is taken again,
 /// redrawn ([`resume`]). With no screen held it just stops, as by default.
-/// Installed once, with the first screen of its own; the signal handler only
+/// Installed once, with the first screen; the signal handler only
 /// writes a byte to a pipe a thread reads.
 fn stop_with_the_screen() {
     static ONCE: Once = Once::new();
@@ -456,12 +436,12 @@ fn stop_with_the_screen() {
     });
 }
 
-/// Whether a full screen of its own holds the terminal now, not given back:
-/// a child spawned meanwhile has no terminal of its own.
+/// Whether a screen holds the terminal now, not given back: a child spawned
+/// meanwhile has no terminal of its own.
 pub(crate) fn screen_holds_terminal() -> bool {
     HELD.lock()
         .ok()
-        .is_some_and(|h| h.as_ref().is_some_and(|h| h.alt_screen && !h.suspended))
+        .is_some_and(|h| h.as_ref().is_some_and(|h| !h.suspended))
 }
 
 /// Take a screen [`suspend`] gave back again: its modes, the alternate
@@ -530,7 +510,6 @@ pub(crate) fn resume() {
         remember_for_crash(
             h.tty.as_raw_fd(),
             &h.saved_termios,
-            true,
             out.saved.as_raw_fd(),
             err.saved.as_raw_fd(),
         );
@@ -586,8 +565,7 @@ fn release(
     // Both descriptors back first, so a crash during the replays below
     // reports to the terminal.
     let moving = give_back_descriptors([held.stdout.as_mut(), held.stderr.as_mut()]);
-    let leave = leave_sequence(held.alt_screen);
-    let _ = held.tty.write_all(leave);
+    let _ = held.tty.write_all(leave_sequence());
     let _ = held.tty.write_all(wheel_restore());
     let _ = held.tty.flush();
     WHEEL.store(WHEEL_UNTOUCHED, Ordering::SeqCst);
@@ -638,15 +616,24 @@ fn synchronized(frame: &[u8]) -> Vec<u8> {
 }
 
 /// What gives the terminal back its cursor, the mouse (`mouse(True)`), a
-/// synchronized update a frame cut short left open (`?2026`), and,
-/// for a screen that took it, the main screen and wrapping; its wheel
-/// (`wheel_keys`) is put back as it was apart ([`wheel_restore`]).
-fn leave_sequence(alt_screen: bool) -> &'static [u8] {
-    if alt_screen {
-        b"\x1b[?2026l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l"
-    } else {
-        b"\x1b[?2026l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h"
-    }
+/// synchronized update a frame cut short left open (`?2026`), bracketed
+/// paste, wrapping and the main screen; its wheel (`wheel_keys`) is put back
+/// as it was apart ([`wheel_restore`]).
+fn leave_sequence() -> &'static [u8] {
+    b"\x1b[?2026l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l"
+}
+
+/// What a feed drained, as `[line, links, coloured]` a line: what
+/// `screen.output()` and `screen.earlier()` hand out.
+fn lines_linked_and_coloured(got: Drained) -> serde_json::Value {
+    serde_json::json!(
+        got.lines
+            .into_iter()
+            .zip(got.links)
+            .zip(got.colours)
+            .map(|((line, links), coloured)| serde_json::json!([line, links, coloured]))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// Run `f` on the screen `this` took, when it still holds the terminal.
@@ -692,7 +679,7 @@ fn term_methods(registry: &mut MethodsBuilder) {
         Ok(NoneOr::from_option(terminal_size()))
     }
 
-    /// Write to stderr, once a screen of its own is given back, the task's
+    /// Write to stderr, once a screen is given back, the task's
     /// output since it was taken, as the task's `output.ansi` keeps it
     /// (redacted, its colour kept, its links made again): the scrollback a
     /// run without the screen would have. Its newest `max_lines`, after a
@@ -749,19 +736,13 @@ fn term_methods(registry: &mut MethodsBuilder) {
         Ok(HELD.lock().unwrap().is_some())
     }
 
-    /// Take the terminal for a screen of your own; see `std.term`. Fails
-    /// when there is no terminal, another screen holds it, or this process
-    /// runs in the background (another job has the terminal).
-    ///
-    /// # Arguments
-    /// * `alt_screen` - Draw on the terminal's alternate screen, leaving the
-    ///   scrollback as it was. Default True.
-    fn take<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = true)] alt_screen: bool,
-    ) -> anyhow::Result<Screen> {
+    /// Take the terminal for a screen of your own, drawn on the terminal's
+    /// alternate screen, leaving the scrollback as it was; see `std.term`.
+    /// Fails when there is no terminal, another screen holds it, or this
+    /// process runs in the background (another job has the terminal).
+    fn take<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Screen> {
         Ok(Screen {
-            generation: take(alt_screen)?,
+            generation: take()?,
         })
     }
 }
@@ -828,7 +809,7 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// `alt-<key>` (where the terminal sends Alt as Meta, and for an Esc
     /// typed just before a key), `alt-backspace`, `paste:<text>` (pasted text: bracketed
     /// paste is on while the screen is held; a long paste comes as several,
-    /// the last maybe empty, `pasting` True until it has), `wheel-up` and
+    /// the last maybe empty), `wheel-up` and
     /// `wheel-down` (the mouse's wheel, once `mouse(True)`), and its left
     /// button's `mouse-press:<col>:<row>`, `mouse-move:<col>:<row>` (the
     /// pointer moved, no button held), `mouse-drag:<col>:<row>` (moved
@@ -872,43 +853,24 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The lines the process wrote to its stdout and stderr since the last
-    /// call, escape sequences stripped: the CLI's own lines, `print()` and
-    /// diagnostics, which `release()` also writes to the scrollback.
-    /// With `with_colour`, each as `[line, links, coloured]`, `coloured` the
-    /// line with its colour kept, the same text. With `with_links`, each as
-    /// `[line, links]`, `links` the line's OSC 8
-    /// links (`print()` links URLs and paths) as `[start, end, url]` by
-    /// character, as `output_feed()` gives a build's.
+    /// call, each as `[line, links, coloured]`: `line` with its escape
+    /// sequences stripped, `links` its OSC 8 links (`print()` links URLs and
+    /// paths) as `[start, end, url]` by character, as `output_feed()` gives
+    /// a build's, and `coloured` the same text with its colour kept. The
+    /// CLI's own lines, `print()` and diagnostics, which `release()` also
+    /// writes to the scrollback.
     fn output<'v>(
         this: values::Value<'v>,
-        #[starlark(require = named, default = false)] with_links: bool,
-        #[starlark(require = named, default = false)] with_colour: bool,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let got = with_held(this, |h| Ok(h.capture.drain()))?;
-        Ok(if with_colour {
-            heap.alloc(serde_json::json!(
-                got.lines
-                    .into_iter()
-                    .zip(got.links)
-                    .zip(got.colours)
-                    .map(|((line, links), coloured)| serde_json::json!([line, links, coloured]))
-                    .collect::<Vec<_>>()
-            ))
-        } else if with_links {
-            heap.alloc(serde_json::json!(
-                got.lines.into_iter().zip(got.links).collect::<Vec<_>>()
-            ))
-        } else {
-            heap.alloc(got.lines)
-        })
+        Ok(heap.alloc(lines_linked_and_coloured(got)))
     }
 
     /// What the task wrote before Bazel's console began, as `[line, links,
-    /// coloured]` like `output(with_colour = True)`, its links made again
-    /// (the banner's URL among them): for a screen that shows the task's
-    /// output from its start, before any of Bazel's lines. Once: a second
-    /// call gives none.
+    /// coloured]` like `output()`, its links made again (the banner's URL
+    /// among them): for a screen that shows the task's output from its
+    /// start, before any of Bazel's lines. Once: a second call gives none.
     fn earlier<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,
@@ -917,15 +879,7 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         let feed = Feed::default();
         feed.write(Source::Stderr, &relinked(&bytes));
         feed.finish(Source::Stderr);
-        let got = feed.drain();
-        Ok(heap.alloc(serde_json::json!(
-            got.lines
-                .into_iter()
-                .zip(got.links)
-                .zip(got.colours)
-                .map(|((line, links), coloured)| serde_json::json!([line, links, coloured]))
-                .collect::<Vec<_>>()
-        )))
+        Ok(heap.alloc(lines_linked_and_coloured(feed.drain())))
     }
 
     /// Give the terminal back: its modes, the main screen, and the process's
@@ -1053,19 +1007,6 @@ fn screen_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// Whether a paste `key()` has handed out part of is not over yet: the
-    /// terminal has sent its start and not its end (a long or slow one
-    /// comes as several `paste:` keys). False with no screen held.
-    #[starlark(attribute)]
-    fn pasting<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        let generation = generation_of(this)?;
-        Ok(HELD
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|h| h.generation == generation && h.keys.in_paste))
-    }
-
     /// Whether this screen still holds the terminal.
     #[starlark(attribute)]
     fn held<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
@@ -1128,7 +1069,6 @@ mod tests {
     fn a_frame_is_one_synchronized_update() {
         assert_eq!(synchronized(b"ab"), b"\x1b[?2026hab\x1b[?2026l");
         // One cut short is closed when the terminal is given back.
-        assert!(leave_sequence(true).starts_with(b"\x1b[?2026l"));
-        assert!(leave_sequence(false).starts_with(b"\x1b[?2026l"));
+        assert!(leave_sequence().starts_with(b"\x1b[?2026l"));
     }
 }

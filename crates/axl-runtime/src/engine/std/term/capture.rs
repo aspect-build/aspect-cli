@@ -31,7 +31,7 @@ pub(super) struct Redirect {
 impl Redirect {
     /// Send `fd` into a pipe whose reader keeps what is written, for the
     /// replay, and hands it to `capture` as lines.
-    /// With `copies` (a screen of its own's), what it reads is copied to
+    /// With `copies` (a screen's, not a test's), what it reads is copied to
     /// the task's output files, all of it, as it is drained on release too.
     pub(super) fn new(
         fd: RawFd,
@@ -332,14 +332,14 @@ pub(crate) fn forwarding<T>(stderr: bool, f: impl FnOnce() -> T) -> T {
 /// go to the screen's console here, and are kept for its replay as the
 /// capture's are, not through the process's own stderr, where the capture
 /// would copy them a second time and splice them with the CLI's. Whether a
-/// screen took them (one of its own, not given back); `bytes` empty asks
+/// screen took them (one held, not given back); `bytes` empty asks
 /// only that. Its first `shown` bytes, a line's start written before the
 /// screen was taken, are on the main screen already: not kept to replay.
 pub(crate) fn feed_screen(stderr: bool, bytes: &[u8], shown: usize) -> bool {
     let Ok(held) = HELD.lock() else {
         return false;
     };
-    let Some(h) = held.as_ref().filter(|h| h.alt_screen && !h.suspended) else {
+    let Some(h) = held.as_ref().filter(|h| !h.suspended) else {
         return false;
     };
     if !bytes.is_empty() {
@@ -361,8 +361,8 @@ pub(crate) fn feed_screen(stderr: bool, bytes: &[u8], shown: usize) -> bool {
     true
 }
 
-/// Where the CLI's own output goes while a screen of its own holds the
-/// terminal ([`route`]): its console's feed, and what its captures keep for
+/// Where the CLI's own output goes while a screen holds the terminal
+/// ([`route`]): its console's feed, and what its captures keep for
 /// the replay. Set and cleared with every target held, where the capture's
 /// copies go on and off, so a write is routed exactly when fds 1 and 2 are
 /// captured.
@@ -385,7 +385,7 @@ pub(super) fn set_sink(sink: Option<(&Arc<Feed>, &Redirect, &Redirect)>) {
 }
 
 /// The route the CLI's own writes are offered ([`axl_types::terminal`]):
-/// while a screen of its own holds the terminal, `bytes` for fd 1 or 2 go to
+/// while a screen holds the terminal, `bytes` for fd 1 or 2 go to
 /// its console and are kept for its replay, as its capture would have them,
 /// without passing through the captured descriptors; the writer copies them
 /// to the output files itself. Whether it took them.

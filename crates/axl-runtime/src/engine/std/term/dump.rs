@@ -21,14 +21,14 @@ pub(super) fn older_lines_note() -> String {
 
 /// Where `output.ansi` stood when the screen was taken (or came back from a
 /// suspend): what a dump on leaving writes from, the main screen showing
-/// what came before. None once dumped, or with no screen of its own.
+/// what came before. None once dumped, or with no screen taken.
 static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Whether the screen given back last had its dump written, or is having it
 /// written (set as the mark is taken): by its release ([`release`] with a
 /// dump), by a suspend still in force, or by a dump of its own. A later
 /// [`dump_output`] says so rather than write it again. Cleared when a screen
-/// of its own (the alternate screen) is taken or comes back from a suspend.
+/// is taken or comes back from a suspend.
 pub(super) static DUMPED: AtomicBool = AtomicBool::new(false);
 
 /// The dump's mark from here on (at a take, or back from a suspend): what

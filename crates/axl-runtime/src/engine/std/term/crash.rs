@@ -16,7 +16,6 @@ use super::{HELD, leave_sequence, release};
 pub(super) struct CrashState {
     tty: RawFd,
     termios: libc::termios,
-    alt_screen: bool,
     stdout: RawFd,
     stderr: RawFd,
     /// `output: <output.ansi>\n`, written to stderr after the restore: the
@@ -43,13 +42,7 @@ fn crash_note() -> ([u8; CRASH_NOTE], usize) {
 pub(super) static CRASH: std::sync::atomic::AtomicPtr<CrashState> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-pub(super) fn remember_for_crash(
-    tty: RawFd,
-    termios: &Termios,
-    alt_screen: bool,
-    stdout: RawFd,
-    stderr: RawFd,
-) {
+pub(super) fn remember_for_crash(tty: RawFd, termios: &Termios, stdout: RawFd, stderr: RawFd) {
     /// The one state every take reuses, its descriptors kept at the same
     /// numbers, so a handler that loaded it never writes to a closed one.
     static SLOT: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
@@ -66,16 +59,11 @@ pub(super) fn remember_for_crash(
     };
     let mut slot = SLOT.lock().unwrap();
     CRASH.store(std::ptr::null_mut(), Ordering::SeqCst);
-    let (note, note_len) = if alt_screen {
-        crash_note()
-    } else {
-        ([0u8; CRASH_NOTE], 0)
-    };
+    let (note, note_len) = crash_note();
     let state = if *slot == 0 {
         let state = Box::into_raw(Box::new(CrashState {
             tty: keep(tty),
             termios: termios.clone().into(),
-            alt_screen,
             stdout: keep(stdout),
             stderr: keep(stderr),
             note,
@@ -90,7 +78,6 @@ pub(super) fn remember_for_crash(
             let s = &mut *state;
             s.tty = renew(s.tty, tty);
             s.termios = termios.clone().into();
-            s.alt_screen = alt_screen;
             s.stdout = renew(s.stdout, stdout);
             s.stderr = renew(s.stderr, stderr);
             s.note = note;
@@ -115,7 +102,7 @@ pub fn restore_terminal_after_crash() {
     unsafe {
         let s = &*state;
         libc::tcsetattr(s.tty, libc::TCSANOW, &s.termios);
-        let leave = leave_sequence(s.alt_screen);
+        let leave = leave_sequence();
         libc::write(s.tty, leave.as_ptr().cast(), leave.len());
         let wheel = wheel_restore();
         libc::write(s.tty, wheel.as_ptr().cast(), wheel.len());
@@ -156,23 +143,29 @@ mod tests {
     use super::*;
 
     /// Taking the screen again and again keeps the same three descriptors
-    /// for a crash, rather than three more each time.
+    /// for a crash, rather than three more each time, and the modes of the
+    /// latest take.
     #[test]
     fn the_crash_state_is_reused_across_takes() {
         let pty = private_pty();
         let tty = pty.slave.as_raw_fd();
         let termios = nix::sys::termios::tcgetattr(&pty.slave).unwrap();
+        let mut later = termios.clone();
+        later
+            .local_flags
+            .toggle(nix::sys::termios::LocalFlags::ECHO);
         let kept = || {
             // SAFETY: the one leaked state, not written meanwhile.
             let s = unsafe { &*CRASH.load(Ordering::SeqCst) };
-            (s.tty, s.stdout, s.stderr, s.alt_screen)
+            (s.tty, s.stdout, s.stderr, s.termios.c_lflag)
         };
-        remember_for_crash(tty, &termios, true, 1, 2);
+        remember_for_crash(tty, &termios, 1, 2);
         let (t, o, e, _) = kept();
         for _ in 0..20 {
-            remember_for_crash(tty, &termios, false, 1, 2);
+            remember_for_crash(tty, &later, 1, 2);
         }
-        assert_eq!(kept(), (t, o, e, false));
+        let later_lflag = libc::termios::from(later).c_lflag;
+        assert_eq!(kept(), (t, o, e, later_lflag));
         for fd in [t, o, e] {
             assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
         }
