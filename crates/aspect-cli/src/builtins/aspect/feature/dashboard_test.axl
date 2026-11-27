@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1964,7 +1964,17 @@ def _impl(ctx: TaskContext) -> int:
     _eq("three rows at most", quoted_rows("x" * 200, 40), ["x" * 40, "x" * 38, "x" * 37 + "…"])
     words = "E: " + " ".join(["word%d" % i for i in range(12)])
     _eq("broken at a space", quoted_rows(words, 30), ["E: word0 word1 word2 word3", "word4 word5 word6 word7", "word8 word9 word10 word11"])
-    _eq("a word wider than the row split", quoted_rows("short " + "w" * 40, 20), ["short", "w" * 18, "w" * 17 + "…"])
+    _eq("a word wider than a row fills it, so the end is kept", quoted_rows("short " + "w" * 40, 20), ["short " + "w" * 14, "w" * 18, "w" * 8])
+
+    # //t:long at 100 columns (r45's long100): the message after the long
+    # name stays.
+    long_fail = "FAIL: TestLongName/case_with_a_very_long_name" + "_that_goes_on_and_on" * 9 + ": expected the frobnicator to return 42 but it returned 41"
+    _eq("the end of a long line kept", quoted_rows(long_fail, 96)[-1].endswith("it returned 41"), True)
+
+    # //two:tabs at 60 columns: tabs to 8-column stops, never past the row.
+    tabbed = quoted_rows("E:\t" + "\t".join(["col%d" % i for i in range(1, 21)]), 56)
+    _eq("tabs as spaces", ("\t" in "".join(tabbed), tabbed[0].startswith("E:      col1    col2")), (False, True))
+    _eq("each row fits", [text_width(r) <= (56 if i == 0 else 54) for i, r in enumerate(tabbed)], [True for _ in tabbed])
 
     # Lines left out between two shown: a `│ …` row among them, counted
     # into the one total.
@@ -2010,6 +2020,39 @@ def _impl(ctx: TaskContext) -> int:
     on_key(tab, "ctrl-o", 10)
     _eq("^O again: the chosen one's", len([r for r in [_visible(r) for r in failure_rows(tab, 30, 80)] if r.startswith("  │")]), 1)
 
+    # `test //t:sharded //t:fails --runs_per_test=2` (r45's dsh4): ↑↓ go a
+    # row at a time, Enter opens the record the row heads, } { go in
+    # shard and run order.
+    rows_of = [
+        _t("//t:fails", "/out/t/fails/test.log", run = 2),
+        _t("//t:s", "/out/t/s/shard_3_of_3/test.log", shard = 3, run = 1),
+        _t("//t:fails", "/out/t/fails/test.log", run = 1),
+        _t("//t:s", "/out/t/s/shard_1_of_3/test.log", shard = 1, run = 2),
+        _t("//t:s", "/out/t/s/shard_1_of_3/test.log", shard = 1, run = 1),
+    ]
+    walk = dict(tab, fails = rows_of, test_counts = {("//t:fails", ""): (2, 1), ("//t:s", ""): (2, 3)}, selected = 0, excerpts = {}, listed_cache = None, logged_index = None, counts = new_counts(), view = None, views = [], ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS))
+    listed = listed_failures(walk)
+    _eq("a row a test, its first shard and run", [(rows_of[i]["label"], rows_of[i]["shard"], rows_of[i]["run"]) for i in listed], [("//t:fails", 1, 1), ("//t:s", 1, 1)])
+    walk["selected"] = listed[0]
+    on_key(walk, "down", 10)
+    _eq("down: the next row", walk["selected"], listed[1])
+    on_key(walk, "down", 10)
+    _eq("and stays on the last", walk["selected"], listed[1])
+    on_key(walk, "up", 10)
+    on_key(walk, "enter", 10)
+    shown = walk["view"]["record"] if walk.get("view") else None
+    _eq("Enter: the row's own record", (shown["label"], shown["run"]) if shown else None, ("//t:fails", 1))
+    on_key(walk, "}", 10)
+    _eq("}: the next run", walk["view"]["record"]["run"], 2)
+    walk.update(selected = listed[1], view = None, views = [], focus = "failures")
+    on_key(walk, "enter", 10)
+    _eq("Enter on the sharded row", (walk["view"]["record"]["shard"], walk["view"]["record"]["run"]), (1, 1))
+    order = []
+    for _ in range(4):
+        on_key(walk, "}", 10)
+        order.append((walk["view"]["record"]["shard"], walk["view"]["record"]["run"]))
+    _eq("} in shard and run order", order, [(1, 2), (3, 1), (1, 1), (1, 2)])
+
     # One target, two failed actions (r44's ws2/two, Bazel 9.3.3: Alpha
     # exits 2, Beta exits 3; the console said Beta's first, the stream
     # posted Alpha's first). Each record its own error, mnemonic, exit,
@@ -2052,6 +2095,62 @@ def _impl(ctx: TaskContext) -> int:
     got = [_visible(l) for l in failure_summary(min2, min2_errors, "t-9", False)]
     _eq("a silent action: its own exit, no other's log", got[1:3], ["✗ //min2:a_silent  Genrule · exit 4 · min2/BUILD.bazel:1:8", ""])
     _eq("the loud one its own", got[3:6], ["✗ //min2:b_loud  Genrule · exit 1 · min2/BUILD.bazel:2:8", "  │ b_loud: real error text", "  log /h/min2/b_loud/Genrule-1.stderr"])
+
+    # ws3/cc (rules_cc 0.2.25, Bazel 9.3.3): two failed compiles of one
+    # cc_library, their cut headers naming no label, the console's kept
+    # logs unmatched; with the whole line's target and without (the kept
+    # list incomplete when the recap matched), in both orders. Each pairs
+    # with its own by what its log says.
+    cc_logs = {
+        "/h/cc/lib/CppCompile-1.stderr": "cc/a.cc:1:18: error: use of undeclared identifier 'x'\n    1 | int a() { return x; }\n1 error generated.\n",
+        "/h/cc/lib/CppCompile-2.stderr": "cc/b.cc:1:19: error: expected ';' after return statement\n    1 | int b() { return 1 }\n1 error generated.\n",
+    }
+    cc_kept = {"bazel-out/_objs/lib/a.o": {"stderr": "/h/cc/lib/CppCompile-1.stderr"}, "bazel-out/_objs/lib/b.o": {"stderr": "/h/cc/lib/CppCompile-2.stderr"}}
+
+    def _cc_error(src, said, target):
+        return {"header": "ERROR: cc/BUILD.bazel:2:11: Compiling cc/%s failed: (Exit 1)" % src, "body": said, "log": None, "label": None, "target": target}
+
+    for target in ["//cc:lib", None]:
+        for flip in [False, True]:
+            records = [
+                {"kind": "action", "label": "//cc:lib", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/_objs/lib/a.o", "success": False},
+                {"kind": "action", "label": "//cc:lib", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/_objs/lib/b.o", "success": False},
+            ]
+            errs = [
+                _cc_error("b.cc", ["cc/b.cc:1:19: error: expected ';' after return statement", "    1 | int b() { return 1 }"], target),
+                _cc_error("a.cc", ["cc/a.cc:1:18: error: use of undeclared identifier 'x'", "    1 | int a() { return x; }"], target),
+            ]
+            if flip:
+                records = records[::-1]
+            cc_state = dict(kinds, counts = dict(kinds["counts"], failures = ["//cc:lib"], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = records, read = lambda p, n: (cc_logs[p], 0) if p in cc_logs else None, build = struct(kept_action_log = lambda output: cc_kept.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None)
+            got = [_visible(l) for l in failure_summary(cc_state, {"errors": errs, "distinct": 2}, "t-9", False)]
+            entries = [got[k:k + 4] for k, l in enumerate(got) if l.startswith("✗")]
+            name = "cc, target %s, flipped %s" % (target, flip)
+            _eq(name + ": two entries", (got[0], len(entries)), ("── Failures (2) ──", 2))
+            for e in entries:
+                src = "a" if "a.cc:" in e[1] else "b"
+                _eq(name + ": " + src + "'s own log", e[0:3] + [e[3] if e[3].startswith("  log") else e[2]], [e[0], e[1], e[2], "  log /h/cc/lib/CppCompile-%d.stderr" % (1 if src == "a" else 2)])
+
+    # //two:three (r45): Step exits 5 with no output, Step exits 6 with
+    # stderr, Pack exits 7. The silent Step gets no log, never its
+    # sibling's.
+    three_logs = {"/h/two/three/Step-1.stderr": "step two broke\n", "/h/two/three/Pack-1.stderr": "pack broke\n"}
+    three_kept = {"bazel-out/three.b": {"stderr": "/h/two/three/Step-1.stderr"}, "bazel-out/three.c": {"stderr": "/h/two/three/Pack-1.stderr"}}
+    three_recs = [
+        {"kind": "action", "label": "//two:three", "detail": "Step", "files": [("stderr", "file:///gone")], "output": "bazel-out/three.a", "success": False},
+        {"kind": "action", "label": "//two:three", "detail": "Step", "files": [("stderr", "file:///gone")], "output": "bazel-out/three.b", "success": False},
+        {"kind": "action", "label": "//two:three", "detail": "Pack", "files": [("stderr", "file:///gone")], "output": "bazel-out/three.c", "success": False},
+    ]
+    three_errs = {"errors": [
+        {"header": "ERROR: two/BUILD.bazel:7:6: Making step two for //two:three failed: (Exit 6)", "body": ["step two broke"], "log": "/h/two/three/Step-1.stderr", "label": "//two:three", "target": None},
+        {"header": "ERROR: two/BUILD.bazel:7:6: Making step one for //two:three failed: (Exit 5)", "body": [], "log": "/h/two/three/Step-1.stderr", "label": "//two:three", "target": None},
+        {"header": "ERROR: two/BUILD.bazel:7:6: Packing //two:three failed: (Exit 7)", "body": ["pack broke"], "log": "/h/two/three/Pack-1.stderr", "label": "//two:three", "target": None},
+    ], "distinct": 3}
+    three = dict(kinds, counts = dict(kinds["counts"], failures = ["//two:three"], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = three_recs, read = lambda p, n: (three_logs[p], 0) if p in three_logs else None, build = struct(kept_action_log = lambda output: three_kept.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None)
+    got = [_visible(l) for l in failure_summary(three, three_errs, "t-9", False)]
+    _eq("the silent Step: its exit, no log", got[1:3], ["✗ //two:three  Step · exit 5 · two/BUILD.bazel:7:6", ""])
+    _eq("the loud Step its own", got[3:6], ["✗ //two:three  Step · exit 6 · two/BUILD.bazel:7:6", "  │ step two broke", "  log /h/two/three/Step-1.stderr"])
+    _eq("Pack its own", got[7:10], ["✗ //two:three  Pack · exit 7 · two/BUILD.bazel:7:6", "  │ pack broke", "  log /h/two/three/Pack-1.stderr"])
 
     # An analysis failure Bazel reports as its own (an Aborted
     # configured_label): what Bazel gave, when no error names it.

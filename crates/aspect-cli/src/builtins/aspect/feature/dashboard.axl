@@ -5181,24 +5181,31 @@ def _k_other_list(state, key, page):
     return False
 
 def _k_list(state, key, page):
-    # The Failures list also has the failed targets without a log of their
-    # own (a blocked one opens what blocks it).
+    # The Failures list's rows (`listed_failures`, then the failed targets
+    # without a log of their own: a blocked one opens what blocks it); a
+    # row's record is the one its heading and excerpt tell.
     items = _items(state)
     pick = _pick(state)
     chosen = state.get(pick, 0)
-    rows = _failure_total(state) if state.get("list") != "actions" else len(items)
-    if rows == 0:
+    if state.get("list") == "actions":
+        order = list(range(len(items)))
+        at = min(chosen, len(order) - 1)
+    else:
+        listed = listed_failures(state)
+        order = listed + [len(items) + k for k in range(_failure_total(state) - len(items))]
+        at = min(_listed_position(state, listed, chosen), len(order) - 1)
+    if not order:
         return False
     if key in ("up", "k", "wheel-up"):
-        state[pick] = max(0, chosen - 1)
+        state[pick] = order[max(0, at - 1)]
     elif key in ("down", "j", "wheel-down"):
-        state[pick] = min(rows - 1, chosen + 1)
+        state[pick] = order[min(len(order) - 1, at + 1)]
     elif key in ("K", "home", "J", "end"):
-        state[pick] = 0 if key in ("K", "home") else rows - 1
-    elif chosen >= len(items):
-        _open_unlogged(state, chosen)
+        state[pick] = order[0] if key in ("K", "home") else order[-1]
+    elif order[at] >= len(items):
+        _open_unlogged(state, order[at])
     else:
-        _open_failure(state, chosen)
+        _open_failure(state, order[at])
     return False
 
 def _k_step_record(state, key, page):
@@ -5231,7 +5238,7 @@ def _k_step_attempt(state, key, page):
         _open_failure(state, same[0] if same else chosen)
         return False
     at = items.index(shown) if shown != None else chosen
-    same = [i for i, r in enumerate(items) if r["label"] == items[at]["label"]]
+    same = sorted([i for i, r in enumerate(items) if r["label"] == items[at]["label"]], key = lambda i: (items[i].get("shard", 1), items[i].get("run", 1), items[i].get("attempt", 1), i))
     _open_failure(state, same[(same.index(at) + (1 if key == "}" else -1)) % len(same)])
     return False
 
@@ -5716,10 +5723,12 @@ def error_parts(header: str):
     return (location, exit, reason)
 
 def quoted_rows(line: str, width: int) -> list:
-    """`line` as the summary quotes it in `width` cells: cut to
-    `_MAX_QUOTED_BYTES`, wrapped at the last space that fits (mid-word only
-    for a word wider than the row), at most `_EXCERPT_ROWS` rows, `…` where
-    it was cut; each row after the first two cells further in."""
+    """`line` as the summary quotes it in `width` cells: its tabs spaces to
+    the next 8-column stop of its text, cut to `_MAX_QUOTED_BYTES`, wrapped
+    at the last space that fits where the word after it fits a row (one
+    wider than a row fills it mid-word), at most `_EXCERPT_ROWS` rows, `…`
+    where it was cut; each row after the first two cells further in."""
+    line = _expand_tabs(line)
     cut = len(line) > _MAX_QUOTED_BYTES
     if cut:
         line = line[:_MAX_QUOTED_BYTES]
@@ -5732,7 +5741,8 @@ def quoted_rows(line: str, width: int) -> list:
         piece = wrap_line(rest, room)[0][0]
         if len(piece) < len(rest):
             space = piece.rfind(" ")
-            if space > 0:
+            word = rest[space + 1:].partition(" ")[0] if space > 0 else ""
+            if space > 0 and text_width(word) <= max(1, width - 2):
                 piece = piece[:space + 1]
             rows.append(piece.rstrip())
         else:
@@ -5749,6 +5759,16 @@ def quoted_rows(line: str, width: int) -> list:
             last = last[:-1]
         rows[-1] = last + "…"
     return rows
+
+def _expand_tabs(line: str) -> str:
+    """`line` with each tab spaces to the next 8-column stop."""
+    if "\t" not in line:
+        return line
+    pieces = line.split("\t")
+    out = pieces[0]
+    for piece in pieces[1:]:
+        out += " " * (8 - text_width(out) % 8) + piece
+    return out
 
 def excerpt_rows(lines: list) -> tuple:
     """`(rows, more)` of an excerpt's `lines` as the summary and the
@@ -5791,7 +5811,9 @@ def _test_excerpt(text: str, excerpt, timed_out: bool) -> tuple:
     (`std.excerpt`, the console recap's choice) picks once Bazel's preamble
     is left out, its last lines where nothing reads as an error; at most
     two of a timed-out test's. Its `… N more lines` between two spans stay
-    in `lines`; `more` counts the lines before the first and after the last."""
+    in `lines`, for `excerpt_rows` to count with what it cuts; `more`
+    counts the lines before the first span and after the last, so the two
+    counts together are every line left out."""
     lines = [l for l in text.split("\n") if not any([l.startswith(p) for p in _TEST_LOG_PREAMBLE])]
     for _ in range(len(lines)):
         if lines[-1].strip():
@@ -5835,53 +5857,121 @@ def header_labels(header: str) -> list:
 
 def _error_names(e: dict, label: str) -> bool:
     """Whether the kept error `e` is about `label`: its `ERROR:` line names
-    it, or names no label and the console matched it to that label's kept
-    log; never one naming another label."""
+    it (in the header, or as its whole line's `rule target`), or names no
+    label and the console matched it to that label's one kept log; never
+    one naming another label."""
     named = header_labels(e.get("header", ""))
     if named:
         return label in named
+    if e.get("target"):
+        return e["target"] == label
     return (e.get("label") or "") == label
+
+def _unlabelled_in(e: dict, label: str) -> bool:
+    """Whether `e` names no target at all and is at a BUILD file of
+    `label`'s package: a candidate for that label's failed actions."""
+    if header_labels(e.get("header", "")) or e.get("target") or e.get("label"):
+        return False
+    location = error_parts(e.get("header", ""))[0]
+    if not location:
+        return False
+    package = label.partition("//")[2].partition(":")[0]
+    build = location.rpartition(":")[0].rpartition(":")[0] if location.count(":") >= 2 else location.rpartition(":")[0]
+    directory = build.rpartition("/")[0]
+    return directory == package or directory.endswith("/" + package) if package else "/" not in build
+
+def _compiled(e: dict) -> str:
+    """The source an error's action compiled, by its name's stem
+    (`Compiling cc/a.cc failed` gives `a`), else ""."""
+    header = e.get("header", "")
+    at = header.find("Compiling ")
+    if at < 0:
+        return ""
+    source = header[at + len("Compiling "):].partition(" ")[0]
+    return source.rpartition("/")[2].partition(".")[0]
 
 def action_errors(state: dict) -> dict:
     """Each failed action's own kept error, by its index in `state["fails"]`
-    (`kept_errors`): one per record, a record taking the error about its
-    label whose kept log is the one the history kept of it, else one whose
-    log Bazel named for its mnemonic (`Genrule-1.stderr`), else the next
-    about its label; a second error about the same action (Bazel's `1
-    input file(s) do not exist` after `missing input file`) goes with it.
-    Worked out once the console's errors are in, and kept."""
+    (`kept_errors`), one per record, paired by what it says once the build
+    has ended and every kept log is known: an error is a candidate for a
+    record when it is about the record's label (`_error_names`) or names no
+    target and is at its package's BUILD file; a record and a candidate
+    pair when the error's body is in the record's own kept log and in no
+    other's, else when the source it compiled is the record's output's,
+    else when the console matched it to that very log, else when each is
+    the other's only one left. Two compiles of one cc_library, in either
+    order, each get their own. One left that no rule tells apart still
+    pairs, in order, but `ambiguous`. A second error about the same action
+    (Bazel's `1 input file(s) do not exist` after `missing input file`)
+    goes with it."""
     kept = state.get("kept_errors")
     errors = list((kept or {}).get("errors", []) or [])
-    key = (len(state["fails"]), len(errors))
+    key = (len(state["fails"]), len(errors), bool(state.get("building")))
     cached = state.get("action_errors_cache")
     if cached != None and cached[0] == key:
         return cached[1]
     used = [False] * len(errors)
     out = {}
     build = state.get("build")
-    for i, rec in enumerate(state["fails"]):
-        if rec["kind"] != "action" or rec.get("detail") == "analysis failed":
-            continue
-        candidates = [j for j, e in enumerate(errors) if not used[j] and _error_names(e, rec["label"])]
-        if not candidates:
-            continue
-        own = ""
+    records = [i for i, rec in enumerate(state["fails"]) if rec["kind"] == "action" and rec.get("detail") != "analysis failed"]
+    own = {}
+    text = {}
+    for i in records:
+        rec = state["fails"][i]
+        path = ""
         if build != None:
             got = build.kept_action_log(rec.get("output", "")) or {}
-            own = got.get("stderr") or got.get("stdout") or ""
-        pick = [j for j in candidates if own and errors[j].get("log") == own]
-        pick = pick or [j for j in candidates if (errors[j].get("log") or "").rpartition("/")[2].startswith(rec["detail"] + "-")]
-        pick = pick or candidates
-        j = pick[0]
+            path = got.get("stderr") or got.get("stdout") or ""
+        own[i] = path
+        text[i] = _tail_text(state, path) or ""
+
+    def candidates(i):
+        label = state["fails"][i]["label"]
+        return [j for j, e in enumerate(errors) if not used[j] and (_error_names(e, label) or _unlabelled_in(e, label))]
+
+    def said(e):
+        for line in e.get("body") or []:
+            if line.strip() and not _is_gap(line):
+                return line.strip()
+        return ""
+
+    def pair(i, j, ambiguous = False):
         used[j] = True
+        e = dict(errors[j], ambiguous = ambiguous)
+        out[i] = e
         what = _failed_action(errors[j].get("header", ""))
-        for k in candidates:
-            if not used[k] and what and _failed_action(errors[k].get("header", "")) == what:
+        for k in candidates(i):
+            if what and _failed_action(errors[k].get("header", "")) == what:
                 used[k] = True
-        out[i] = errors[j]
-    out_used = [j for j in range(len(errors)) if used[j]]
+
+    def by(rule):
+        # Pair each record and candidate the rule picks for each other alone.
+        for _ in range(len(records)):
+            picks = {}
+            for i in records:
+                if i in out:
+                    continue
+                picks[i] = [j for j in candidates(i) if rule(i, errors[j])]
+            paired = False
+            for i, js in picks.items():
+                if len(js) == 1 and len([k for k, ks in picks.items() if js[0] in ks]) == 1:
+                    pair(i, js[0])
+                    paired = True
+            if not paired:
+                return
+
+    by(lambda i, e: bool(said(e)) and bool(text[i]) and said(e) in text[i])
+    by(lambda i, e: bool(_compiled(e)) and state["fails"][i].get("output", "").rpartition("/")[2].partition(".")[0] == _compiled(e))
+    by(lambda i, e: bool(own[i]) and e.get("log") == own[i])
+    by(lambda i, e: True)
+    for i in records:
+        if i not in out:
+            left = candidates(i)
+            if left:
+                pair(i, left[0], ambiguous = True)
     state["action_errors_cache"] = (key, out)
-    state["action_errors_used"] = out_used
+    state["action_errors_used"] = [j for j in range(len(errors)) if used[j]]
+    state["action_logs"] = own
     return out
 
 def test_group(state: dict, recs: list) -> dict:
@@ -6020,16 +6110,20 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
     entries = []
 
     # Failed actions, a test's aside: each its own error.
+    owned = [p for p in (state.get("action_logs") or {}).values() if p]
     for i, rec in enumerate(state["fails"]):
         if rec["kind"] != "action" or rec.get("detail") == "analysis failed":
             continue
         e = mine.get(i)
         details, lines, log = from_errors([(0, e)]) if e != None else ([], [], "")
 
-        # Its own log: the history's copy of it, else the one the console
-        # matched to this very label.
+        # Its own log: the history's copy of it, else Bazel's; the console's
+        # match only where no other failed action owns that log; none for
+        # an error no rule tells apart from a sibling's.
         own = _log_path(state, rec) if state.get("read") != None else ""
-        log = own or (log if e != None and (e.get("label") or "") == rec["label"] else "")
+        if not own and e != None and log and log in owned:
+            log = ""
+        log = "" if e != None and e.get("ambiguous") else (own or log)
         entries.append(entry(1, i, rec["label"], rec["detail"], details, lines, log))
 
     # Failed tests: the last attempt of the first failed shard or run.
