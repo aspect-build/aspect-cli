@@ -355,8 +355,8 @@ def console_ties(state: dict) -> dict:
     text = "".join(parts)
 
     # Bazel colours its own lines unless `--color=no`, where it strips the
-    # escapes from what it relays too.
-    plain = "\x1b[31m" not in text and "\x1b[32m" not in text and "\x1b[35m" not in text
+    # escapes from what it relays too: the collector says which it saw.
+    plain = not kept.get("color")
     _absorb_tails(state, text, bounds, froms, spans, stdout, plain)
     headers = [h for h in _bazel_headers(state, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
     claimed = {}
