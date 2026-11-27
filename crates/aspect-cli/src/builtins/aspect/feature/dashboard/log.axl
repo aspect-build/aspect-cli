@@ -29,9 +29,10 @@ failure_summary = failures.failure_summary
 cache_hits = dashboard_actions.cache_hits
 note_phase = dashboard_actions.note_phase
 
-# Console lines kept for scrolling back; older ones are counted in the
-# pane's title, and Bazel's console log has them all.
-_MAX_LOG = 20000
+# Console lines kept for scrolling back, as many as the scrollback gets
+# when the screen goes; older ones are counted in the pane's title, and
+# Bazel's console log has them all.
+_MAX_LOG = std.term.dump_lines
 
 # The console's text kept, in characters, whatever its lines' length (a
 # minified bundle's), and the most of one line: the rest is on disk.

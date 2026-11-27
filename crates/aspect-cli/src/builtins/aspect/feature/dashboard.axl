@@ -449,7 +449,7 @@ def _dashboard_impl(ctx: FeatureContext):
 
     def _add_output(screen):
         # The CLI's own lines, marked as such, their links moved with them.
-        got = screen.output(with_links = True, with_colour = True)
+        got = screen.output()
         _add_lines([line for line, _, _ in got], [links for _, links, _ in got], [coloured for _, _, coloured in got], cli = True)
 
     def _take(task_ctx):

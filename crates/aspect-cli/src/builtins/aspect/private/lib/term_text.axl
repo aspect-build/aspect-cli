@@ -21,113 +21,9 @@ ANSI = "\\x1b\\[[0-?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)|\\x1
 # (a tab is spaced by `fit`).
 CONTROLS = "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]"
 
-# The keys, for the `?` overlay.
-# The code points a terminal draws two cells wide (East Asian Wide and
-# Fullwidth, emoji among them) and none (combining marks, zero-width spaces,
-# variation selectors), as `(first, last, cells)`, in order.
-_CELLS = [
-    (0x0300, 0x036F, 0),
-    (0x1100, 0x115F, 2),
-    (0x200B, 0x200F, 0),
-    (0x20D0, 0x20FF, 0),
-    (0x231A, 0x231B, 2),
-    (0x2329, 0x232A, 2),
-    (0x23E9, 0x23EC, 2),
-    (0x23F0, 0x23F0, 2),
-    (0x23F3, 0x23F3, 2),
-    (0x25FD, 0x25FE, 2),
-    (0x2614, 0x2615, 2),
-    (0x2648, 0x2653, 2),
-    (0x267F, 0x267F, 2),
-    (0x2693, 0x2693, 2),
-    (0x26A1, 0x26A1, 2),
-    (0x26AA, 0x26AB, 2),
-    (0x26BD, 0x26BE, 2),
-    (0x26C4, 0x26C5, 2),
-    (0x26CE, 0x26CE, 2),
-    (0x26D4, 0x26D4, 2),
-    (0x26EA, 0x26EA, 2),
-    (0x26F2, 0x26F3, 2),
-    (0x26F5, 0x26F5, 2),
-    (0x26FA, 0x26FA, 2),
-    (0x26FD, 0x26FD, 2),
-    (0x2705, 0x2705, 2),
-    (0x270A, 0x270B, 2),
-    (0x2728, 0x2728, 2),
-    (0x274C, 0x274C, 2),
-    (0x274E, 0x274E, 2),
-    (0x2753, 0x2755, 2),
-    (0x2757, 0x2757, 2),
-    (0x2795, 0x2797, 2),
-    (0x27B0, 0x27B0, 2),
-    (0x27BF, 0x27BF, 2),
-    (0x2B1B, 0x2B1C, 2),
-    (0x2B50, 0x2B50, 2),
-    (0x2B55, 0x2B55, 2),
-    (0x2E80, 0x303E, 2),
-    (0x3041, 0x33FF, 2),
-    (0x3400, 0x4DBF, 2),
-    (0x4E00, 0x9FFF, 2),
-    (0xA000, 0xA4CF, 2),
-    (0xAC00, 0xD7A3, 2),
-    (0xF900, 0xFAFF, 2),
-    (0xFE00, 0xFE0F, 0),
-    (0xFE20, 0xFE2F, 0),
-    (0xFE30, 0xFE4F, 2),
-    (0xFF00, 0xFF60, 2),
-    (0xFFE0, 0xFFE6, 2),
-    (0x16FE0, 0x18AFF, 2),
-    (0x1B000, 0x1B2FF, 2),
-    (0x1F004, 0x1F004, 2),
-    (0x1F0CF, 0x1F0CF, 2),
-    (0x1F18E, 0x1F18E, 2),
-    (0x1F191, 0x1F19A, 2),
-    (0x1F200, 0x1F251, 2),
-    (0x1F300, 0x1F320, 2),
-    (0x1F32D, 0x1F335, 2),
-    (0x1F337, 0x1F37C, 2),
-    (0x1F37E, 0x1F393, 2),
-    (0x1F3A0, 0x1F3CA, 2),
-    (0x1F3CF, 0x1F3D3, 2),
-    (0x1F3E0, 0x1F3F0, 2),
-    (0x1F3F4, 0x1F3F4, 2),
-    (0x1F3F8, 0x1F43E, 2),
-    (0x1F440, 0x1F440, 2),
-    (0x1F442, 0x1F4FC, 2),
-    (0x1F4FF, 0x1F53D, 2),
-    (0x1F54B, 0x1F54E, 2),
-    (0x1F550, 0x1F567, 2),
-    (0x1F57A, 0x1F57A, 2),
-    (0x1F595, 0x1F596, 2),
-    (0x1F5A4, 0x1F5A4, 2),
-    (0x1F5FB, 0x1F64F, 2),
-    (0x1F680, 0x1F6C5, 2),
-    (0x1F6CC, 0x1F6CC, 2),
-    (0x1F6D0, 0x1F6D2, 2),
-    (0x1F6D5, 0x1F6D7, 2),
-    (0x1F6DC, 0x1F6DF, 2),
-    (0x1F6EB, 0x1F6EC, 2),
-    (0x1F6F4, 0x1F6FC, 2),
-    (0x1F7E0, 0x1F7EB, 2),
-    (0x1F7F0, 0x1F7F0, 2),
-    (0x1F90C, 0x1F93A, 2),
-    (0x1F93C, 0x1F945, 2),
-    (0x1F947, 0x1F9FF, 2),
-    (0x1FA70, 0x1FAFF, 2),
-    (0x20000, 0x3FFFD, 2),
-    (0xE0100, 0xE01EF, 0),
-]
-
 def _cells(c: int) -> int:
-    """How many cells a terminal draws code point `c` in (see `_CELLS`)."""
-    if c < 0x0300:
-        return 1
-    for first, last, cells in _CELLS:
-        if c < first:
-            return 1
-        if c <= last:
-            return cells
-    return 1
+    """How many cells a terminal draws code point `c` in (`std.term.width`)."""
+    return std.term.width(chr(c))
 
 def _widths(text: str) -> list:
     """Each code point of `text` and the cells it adds: as `_cells` has it,
@@ -145,52 +41,14 @@ def _widths(text: str) -> list:
 
 def text_width(text: str) -> int:
     """How many cells a terminal draws `text` in: a wide character (`✅`,
-    `⚠️`) two, a combining mark none."""
-    n = 0
-    last = 0
-    for c in text.codepoints():
-        if c < 0x0300:
-            n += 1
-            last = 1
-            continue
-        cells = _cells(c)
-        if c == 0xFE0F and last == 1:
-            cells = 1
-        n += cells
-        last = cells if cells else last
-    return n
+    `⚠️`) two, a combining mark none (`std.term.width`)."""
+    return std.term.width(text)
 
 def fit(text: str, width: int) -> str:
-    """`text` cut or padded with spaces to `width` cells: a row wider than
-    the screen would wrap and scroll the screen up. Only as much of a long
-    line is measured as could show."""
-    if width <= 0:
-        return ""
-
-    # A tab would move the cursor off the row.
-    text = text.replace("\t", "  ")
-
-    # Every code point but a zero-width one is a cell or more, so a line
-    # longer than this is cut, but for one of zero-width marks, measured
-    # whole.
-    head = text[:2 * width + 2]
-    cells = text_width(head)
-    if len(head) < len(text) and cells <= width:
-        head = text
-        cells = text_width(text)
-    if cells <= width and len(head) == len(text):
-        return text + " " * (width - cells)
-    room = width - 1 if width > 1 else width
-    kept, used = [], 0
-    for c, n in _widths(head):
-        if used + n > room:
-            break
-        kept.append(chr(c))
-        used += n
-    if width > 1:
-        kept.append("…")
-        used += 1
-    return "".join(kept) + " " * (width - used)
+    """`text` cut (with `…`) or padded with spaces to `width` cells, a tab
+    as two spaces (`std.term.fit`): a row wider than the screen would wrap
+    and scroll the screen up."""
+    return std.term.fit(text, width)
 
 def wrap_line(text: str, width: int) -> list:
     """`text` as the rows it wraps to at `width` cells, each `(piece,

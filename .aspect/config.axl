@@ -743,7 +743,6 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
 
-
     # Run with: aspect dev test-lint-comments
     ctx.tasks.add(lint_comments_tests)
 
