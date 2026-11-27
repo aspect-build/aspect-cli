@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "repaired", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "repaired", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "summary_state", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -36,6 +36,47 @@ def _visible(row):
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _held_line_reads(ctx):
+    """Telling a held last line reads, of each successful action's output
+    that ends in a newline, its last byte alone, once, however many of
+    Bazel's errors follow an output; of one that does not, its end, as far
+    as the held line is long, once for each line it is checked against."""
+    files = {}
+    outputs = []
+    for i in range(200):
+        path = "/fx/out-%d" % i
+        files[path] = ("tool line %d\n" % i) * 50
+        outputs.append({"kind": "action", "label": "//o:o%d" % i, "detail": "Work", "files": [("stderr", "file://" + path)], "output": "o%d" % i, "success": True})
+    files["/fx/open"] = "open out\n\x1b[31m\x1b[1mERROR: \x1b[0mheld open"
+    outputs.append({"kind": "action", "label": "//o:open", "detail": "Work", "files": [("stderr", "file:///fx/open")], "output": "open", "success": True})
+    reads = []
+
+    def read(path, n):
+        reads.append((path, n))
+        if path not in files:
+            return None
+        text = files[path]
+        return (text[max(0, len(text) - n):], max(0, len(text) - n))
+
+    blocks = []
+    for i in range(30):
+        # A header naming no label, then Bazel's own coloured error.
+        blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing work %d:\n" % i, "body_len": 12, "last_line": "tool line 0\n"})
+        blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpkg/BUILD:%d:1: bazel's own %d\n" % (i + 1, i)})
+    blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing more work:\n", "body_len": 9, "last_line": "open out\n"})
+    blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mheld open\n"})
+    state = summary_state(read, ctx.std.env, ctx.std.re.compile(ANSI))
+    state.update(outputs = outputs, building = False, ended = True, bazel_errors = {"blocks": blocks, "not_kept": 0, "stdout": False})
+    tab = dict(state, log_path = "", bazel_exit = 0, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
+    ansi = ctx.std.re.compile(ANSI)
+    others = [r for r in [ansi.replace(r, "") for r in failure_rows(tab, 400, 120)] if r.startswith("! ")]
+    _eq("held: Bazel's own errors listed, the tool's held line not", (len(others), [r for r in others if "held open" in r]), (30, []))
+    closed = [r for r in reads if r[0].startswith("/fx/out-")]
+    _eq("held: an output ending in a newline read for its last byte alone", [r for r in closed if r[1] > 1], [])
+    _eq("held: and once", len([r for r in closed if r[1] == 1]), 200)
+    opened = [r[1] for r in reads if r[0] == "/fx/open" and r[1] > 1]
+    _eq("held: the open one read from its end, once for each line, as far as that line is long", (len(opened), [n for n in opened if n > 256]), (31, []))
 
 def _screen(ctx, log, **kw):
     """A dashboard's whole state, as the feature keeps it, over `log`."""
@@ -3274,6 +3315,7 @@ def _impl(ctx: TaskContext) -> int:
             if text_width(cut) > width:
                 fail("action_row(%r, %d) is %d cells" % (text[:6], width, text_width(cut)))
     _goldens(ctx, view_state, act, ctx.args.update)
+    _held_line_reads(ctx)
     print("dashboard_test.axl: OK")
     return 0
 

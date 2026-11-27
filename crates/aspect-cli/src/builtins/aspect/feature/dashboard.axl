@@ -6668,42 +6668,58 @@ def _relayed(text: str, at: int, lead: str, pieces: list, tails: dict) -> int:
             pos += len(rest)
     return pos
 
+# How much of Bazel's `ERROR:` blocks after an output, without colour, may be
+# the tool's (`_absorb_tails`).
+_MAX_PLAIN_REST = 64 * 1024
+
+def _last_piece(state: dict, rec: dict, stdout: bool):
+    """The path of the log Bazel relays last of a successful action's output:
+    its stdout where the console carried Bazel's stdout too (`stdout`) and
+    it wrote some, else its stderr; None for none."""
+    paths = dict(_action_logs(state, rec))
+    for name in (("stdout", "stderr") if stdout else ("stderr",)):
+        if name in paths:
+            return paths[name]
+    return None
+
 def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool):
     """Extend `spans` over the blocks after an action's `INFO: From` output
     (`froms`: each one's index in `blocks`, `(start, end, kind)` in `text`,
-    its header, its body's length and last line) that are the rest of that
-    output: Bazel's line holding an output's last line, which it writes
-    after its next redraw (a tail), or, without colour (`plain`), a tool's
-    own `ERROR:` lines. They are when the body and those blocks are,
-    exactly, the output (with a newline added, where it has no final one)
-    of a successful action that wrote some (`outputs`, which Bazel reports
-    with `--build_event_publish_all_actions`): one whose label the header
-    names, else, for a header that names none (a rule's own progress
-    message, Starlark's default `<mnemonic> <output>`, `Compiling a.cc`),
-    any. One such action is enough, and which it is does not matter: the
-    lines are a tool's, not Bazel's. Logs are read only where such a block
-    follows."""
+    its header, its body's length and last line) that are the rest of a
+    successful action's output (`outputs`, which Bazel reports with
+    `--build_event_publish_all_actions`): one whose label the header names,
+    else, for a header that names none (a rule's own progress message,
+    Starlark's default `<mnemonic> <output>`, `Compiling a.cc`), any. One
+    such action is enough, and which it is does not matter: the lines are a
+    tool's, not Bazel's.
+
+    - The line after the output where it is the output's last line with no
+      newline, which Bazel writes after its next redraw (a tail) or, without
+      colour, with a newline added: only an output that does not end in a
+      newline has one, so each successful action's last log is read for its
+      last byte alone, once, and only one that ends otherwise is read
+      further, from its end, as far as that line is long. It is the tool's
+      where the log's last line is exactly that line.
+    - Without colour (`plain`, `--color=no`), where a tool's own `ERROR:`
+      lines read as Bazel's: the blocks after the output, up to a line's
+      end, are the tool's where the output, escapes stripped as Bazel strips
+      them, ends exactly with the body's last line and those lines. Only
+      the actions the header names are read, from the end, as far as those
+      lines are long (at most `_MAX_PLAIN_REST`)."""
     ansi = state.get("ansi")
     outputs = state.get("outputs") or []
+    if not outputs:
+        return
     by_label = {}
     for k, rec in enumerate(outputs):
         by_label.setdefault(rec["label"], []).append(k)
-    if not by_label:
-        return
-    read = {}
+    last_byte = {}
 
-    # A short output is kept for the next header; a long one read again.
-    def output_of(k):
-        if k in read:
-            return read[k]
-        pieces = _relay_pieces(state, outputs[k], stdout, plain)
-        out = None
-        if pieces and not [p for p in pieces if p[1] == None]:
-            out = "".join([p[1] for p in pieces])
-            out = out if out.endswith("\n") else out + "\n"
-        if out == None or len(out) <= 4096:
-            read[k] = out
-        return out
+    def ends_open(path):
+        if path not in last_byte:
+            got = state["read"](path, 1)
+            last_byte[path] = got != None and got[0] != "" and got[0] != "\n"
+        return last_byte[path]
 
     for i, header, body_len, last in froms:
         if i + 1 >= len(blocks) or blocks[i + 1][2] not in (("tail", "error") if plain else ("tail",)):
@@ -6714,28 +6730,57 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
             for label in (word, word[:-1] if word.endswith(":") else None):
                 if label and label in by_label:
                     named += [k for k in by_label[label] if k not in named]
+        start, end, kind = blocks[i + 1]
+        at = _past_redraw(text, start)
+        stop = text.find("\n", at, end)
+        held = text[at:stop if stop >= 0 else end]
+        found = False
         for k in named or range(len(outputs)):
-            out = output_of(k)
-            if out == None or len(out) <= body_len or not out[:body_len].endswith(last):
+            path = _last_piece(state, outputs[k], stdout)
+            if path == None or not ends_open(path):
                 continue
-            rest = out[body_len:]
-            pos = 0
-            got = []
-            for start, end, _ in blocks[i + 1:]:
-                at = _past_redraw(text, start)
-                seg = text[at:end]
-                if rest.startswith(seg, pos):
-                    got.append((start, end))
-                    pos += len(seg)
-                elif seg.startswith(rest[pos:]):
-                    got.append((start, at + len(rest) - pos))
-                    pos = len(rest)
-                else:
+            got = state["read"](path, 4 * len(held) + 4)
+            if got == None:
+                continue
+            line = got[0].rpartition("\n")[2]
+            if plain and ansi != None:
+                line = ansi.replace(line, "")
+            if line == held and ("\n" in got[0] or got[1] == 0):
+                spans.append((start, stop + 1 if stop >= 0 else end))
+                found = True
+                break
+        if found or not plain or not named:
+            continue
+
+        # Without colour: the error blocks after the output, up to a line's
+        # end, that the output ends with.
+        joined = ""
+        for b in blocks[i + 1:]:
+            if b[2] != "error" or len(joined) > _MAX_PLAIN_REST:
+                break
+            joined += text[b[0]:b[1]]
+        ends = []
+        for _ in range(len(joined)):
+            e = joined.find("\n", ends[-1] if ends else 0)
+            if e < 0:
+                break
+            ends.append(e + 1)
+        for k in named:
+            logs = dict(_action_logs(state, outputs[k]))
+            path = logs.get("stdout") if stdout and "stdout" in logs else logs.get("stderr")
+            got = state["read"](path, 4 * (len(last) + len(joined)) + 4096) if path else None
+            if got == None:
+                continue
+            tail = ansi.replace(got[0], "") if ansi != None else got[0]
+            tail = tail if tail.endswith("\n") else tail + "\n"
+            for e in reversed(ends):
+                want = last + joined[:e]
+                whole = len(tail) == len(want) and got[1] == 0
+                if tail.endswith(want) and (whole or (last != "" and len(tail) > len(want) and tail[-len(want) - 1] == "\n")):
+                    spans.append((start, start + e))
+                    found = True
                     break
-                if pos == len(rest):
-                    break
-            if pos == len(rest):
-                spans.extend(got)
+            if found:
                 break
 
 def _status_word(status: str) -> str:
