@@ -99,6 +99,14 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
         Ok(syntax::Syntax)
     }
 
+    /// The terminal, for a feature that draws the whole screen: `take()`
+    /// hands it out as a `std.term.Screen` (the alternate screen, keys read
+    /// one at a time, the mouse when the screen takes it, the CLI's output
+    /// kept off it), `size()` and `taken` read it without taking it, and
+    /// `dump_output()` and `keep_output()` write the scrollback a screen
+    /// leaves. What needs no terminal is in the `std.term` namespace, which
+    /// a module's top level reads too: `dump_lines`, the dump's size, and
+    /// `width` and `fit`, which measure text in cells.
     #[starlark(attribute)]
     fn term<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<term::Term> {
         Ok(term::Term)

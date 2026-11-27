@@ -1,3 +1,8 @@
+//! The terminal's answers to the screen's queries: its background (OSC 11,
+//! with DA1 to end the wait), and its alternate scroll mode (DECRQM), read
+//! as they come or late among the keys, and dropped before the terminal
+//! goes to a child.
+
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;

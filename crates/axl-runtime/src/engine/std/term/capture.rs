@@ -1,3 +1,10 @@
+//! The screen's hold on fds 1 and 2: each sent into a pipe a thread reads
+//! ([`Redirect`]), what it read kept for the replay and handed to the
+//! screen's console, and put back on release; the order a release and a
+//! child's forwarder keep between them ([`OUTPUT_ORDER`]); and the route
+//! the CLI's own output takes to the screen past the captured descriptors
+//! ([`ROUTER`]).
+
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -429,7 +436,8 @@ fn route(fd: i32, bytes: &[u8]) -> bool {
     ROUTER.route(fd, bytes)
 }
 
-/// Install [`route`] for the CLI's own output. Once, at start-up.
+/// Install the route the CLI's own output is offered first, the process's
+/// router's. Once, at start-up.
 pub fn route_cli_output() {
     axl_types::terminal::route_to(route);
 }

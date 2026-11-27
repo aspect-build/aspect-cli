@@ -1,3 +1,7 @@
+//! The terminal given back when the process ends without a release: a
+//! crash handler's async-signal-safe restore from state set aside at each
+//! take ([`CrashState`]), and the panic hook's release.
+
 use std::os::fd::RawFd;
 use std::sync::Once;
 use std::sync::atomic::Ordering;

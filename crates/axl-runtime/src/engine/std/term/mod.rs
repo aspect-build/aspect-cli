@@ -11,12 +11,12 @@
 //! or asks for the wheel as arrow keys with the mouse still the terminal's
 //! (`screen.wheel_keys(True)`). While it is held, nothing is drawn over
 //! the screen: the CLI's own output (its lines, `print()`, diagnostics, the
-//! AXL streams, the build console) is routed to it ([`route`]), and what
-//! else reaches fds 1 and 2 (a stray writer, a child that inherited them)
-//! is captured. `screen.output()` hands both to the feature, and
-//! `release()` puts the terminal back and writes them to the scrollback
-//! (the newest 8 MiB of each stream, or the task's `output.ansi` dumped),
-//! so what was printed while the screen was up is not lost.
+//! AXL streams, the build console) is routed to it ([`capture::ROUTER`]),
+//! and what else reaches fds 1 and 2 (a stray writer, a child that
+//! inherited them) is captured. `screen.output()` hands both to the
+//! feature, and `release()` puts the terminal back and writes them to the
+//! scrollback (the newest 8 MiB of each stream, or the task's `output.ansi`
+//! dumped), so what was printed while the screen was up is not lost.
 //!
 //! One screen at a time, process-wide. [`release_all`] restores a screen
 //! still held when the CLI's run returns and on its forced exit; a panic
@@ -26,6 +26,19 @@
 //! a process killed outright leaves the terminal as the screen had it
 //! (`reset` fixes it). The replay writes stdout's capture, then stderr's, so
 //! the order between the two is lost.
+//!
+//! The `std.term` namespace holds what needs no terminal, for a module's
+//! top level as much as a task: `dump_lines`, the dump's size, and `width`
+//! and `fit`, which measure text in cells ([`register_globals`]).
+//!
+//! Here: the held screen, its Starlark `Term` and `Screen`, and taking,
+//! suspending, resuming and releasing it. Beside it: [`capture`] (fds 1
+//! and 2 sent into pipes, their replay, the CLI output's route), [`fd`]
+//! (raw descriptor helpers), [`keys`] (keys, the mouse and pastes as
+//! `key()` names them), [`replies`] (the terminal's answers to the screen's
+//! queries), [`dump`] (the task's output written to the scrollback),
+//! [`crash`] (the terminal given back after a crash or a panic) and
+//! [`width`] (text in cells).
 
 mod capture;
 mod crash;
@@ -289,7 +302,7 @@ const LOCK_WAIT: Duration = Duration::from_millis(500);
 ///
 /// Bounded unless the terminal itself stops taking output (the leave sequence
 /// and the mode restore wait on it), so the forced exit ends: the lock is
-/// waited on for [`LOCK_WAIT`],
+/// waited on for `LOCK_WAIT`,
 /// and the replay, run without it, gives up on a destination that takes
 /// nothing for `STALL_LIMIT`. A frame still holding the lock after that (stuck
 /// in a write) gets the crash path's restore instead, with nothing replayed.
@@ -767,9 +780,6 @@ fn term_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] text: &str,
     ) -> anyhow::Result<NoneType> {
-        // Decided, and copied, under stderr's turn: a screen is taken or
-        // given back only with it held, so the copy lands on the side of
-        // the dump that matches where the text went.
         let _turn = axl_types::terminal::turn(2);
         if !ROUTER.is_set() {
             use std::io::Write as _;
@@ -863,8 +873,10 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// not at all); None when none was, or the terminal is gone (closed, a
     /// hangup, which the task's cancellation says). A printable character is itself;
     /// otherwise `up`, `down`, `left`, `right`, `shift-up`, `shift-down`,
-    /// `shift-left`, `shift-right`, `pageup`, `pagedown`, `home`,
-    /// `end`, `enter`, `tab`, `backspace`, `esc`, `ctrl-<letter>`,
+    /// `shift-left`, `shift-right`, `alt-up`, `alt-down`, `alt-left`,
+    /// `alt-right` (xterm's Alt, or Option as Meta), `pageup`, `pagedown`,
+    /// `home`, `end`, `enter`, `tab`, `shift-tab`, `backspace`, `esc`,
+    /// `ctrl-<letter>`,
     /// `alt-<key>` (where the terminal sends Alt as Meta, and for an Esc
     /// typed just before a key), `alt-backspace`, `paste:<text>` (pasted text: bracketed
     /// paste is on while the screen is held; a long paste comes as several,
@@ -1046,7 +1058,7 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// its left button's presses, drags and releases arrive from `key()`, so
     /// the screen selects, lights and opens links itself; the terminal's own selection then
     /// takes a modifier it names (Shift, Option or Fn with the drag), and
-    /// its wheel no longer scrolls past the screen. `release()` turns it off.
+    /// its wheel does not scroll past the screen. `release()` turns it off.
     /// For the wheel with the mouse left to the terminal, see `wheel_keys`.
     fn mouse<'v>(
         this: values::Value<'v>,

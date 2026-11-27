@@ -1,3 +1,8 @@
+//! What the terminal sends, as `key()` names it: keys and escape sequences,
+//! mouse reports, and bracketed pastes, read whole across reads ([`Keys`]),
+//! and the answers to the screen's queries that arrive late kept out of
+//! them.
+
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;

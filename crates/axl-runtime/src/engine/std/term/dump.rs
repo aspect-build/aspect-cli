@@ -1,3 +1,7 @@
+//! The dump: the task's output since the screen was taken, from
+//! `output.ansi`, written to the scrollback when the screen is given back,
+//! its links made again; once a screen.
+
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::sync::Mutex;
@@ -25,7 +29,7 @@ pub(super) fn older_lines_note() -> String {
 static DUMP_MARK: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Whether the screen given back last had its dump written, or is having it
-/// written (set as the mark is taken): by its release ([`release`] with a
+/// written (set as the mark is taken): by its release ([`release`](super::release) with a
 /// dump), by a suspend still in force, or by a dump of its own. A later
 /// [`dump_output`] says so rather than write it again. Cleared when a screen
 /// is taken or comes back from a suspend.

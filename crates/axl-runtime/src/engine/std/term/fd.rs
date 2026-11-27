@@ -1,3 +1,7 @@
+//! Raw descriptor helpers: copies closed on exec, waits for a descriptor to
+//! be readable or writable (`select`, which macOS's terminals need), and
+//! writes that never block or stall for good.
+
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
