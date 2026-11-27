@@ -105,12 +105,13 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     """What the summary and the Failures tab say of one recording."""
     fs = ctx.std.fs
     folder = "%s/%s/%s" % (ctx.std.env.aspect_root_dir(), _FIXTURES, case)
+    files = "%s/%s.files" % (folder, prefix)
 
     def resolve(path):
         if path.startswith("${FIXTURE}/"):
             return folder + "/" + path[len("${FIXTURE}/"):]
         if path.startswith("${OUTPUT_BASE}/"):
-            return "%s/%s.files/%s" % (folder, prefix, path[len("${OUTPUT_BASE}/"):])
+            return files + "/" + path[len("${OUTPUT_BASE}/"):]
         return path
 
     def read(path, n):
@@ -122,7 +123,9 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     if fs.exists(bep):
         for line in fs.read_to_string(bep).split("\n"):
             if line.strip():
-                collect_event(state, _event(line))
+                # A log's URI names the recording's own file, so the runtime
+                # finds it on disk as in a build (`local_path`).
+                collect_event(state, _event(line.replace("file://${OUTPUT_BASE}/", "file://" + files + "/")))
     exit = fs.read_to_string(folder + "/" + prefix + ".exit").strip()
     code = int(exit) if exit.isdigit() else None
     console = "${FIXTURE}/" + prefix + ".console"
@@ -177,7 +180,7 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
             parts += split[key]
         if parts != split["done"]:
             fail("%s/%s: the actions' parts add up to %d of %d" % (case, prefix, parts, split["done"]))
-    return "\n".join(out) + "\n"
+    return "\n".join([l.replace(files, "${OUTPUT_BASE}") for l in out]) + "\n"
 
 def _prefixes(names: list) -> list:
     """The recordings of a case's files: `9.3.3`, `9.3.3.noall`, …"""

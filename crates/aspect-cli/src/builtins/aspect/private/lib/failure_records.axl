@@ -34,6 +34,10 @@ def progress_counts(status: str):
         return None
     return (int(done), int(total))
 
+# `text` from a build event as Bazel meant it: a non-ASCII string's UTF-8
+# bytes come each as a Latin-1 character.
+repaired = bazel.build_events.repaired
+
 def _label_of(event_id) -> str:
     """The label a build event's id names, decoded (`repaired`)."""
     return repaired(str(bes_get(event_id, "label", "") or ""))
@@ -179,28 +183,19 @@ def local_test_logs(state: dict, record: dict) -> list:
 
 def log_paths(state: dict, record: dict, uri) -> list:
     """Where a log named by `uri` may be on disk, likeliest first: a
-    `file://` one's path, decoded (`percent_decoded`, then `repaired`
-    too); a remote cache's (`bytestream://`) a test's own in the output
-    tree, then under the runner's bb_clientd mount (`state["bb_root"]`)
-    where there is one."""
+    `file://` one's path (`bazel.build_events.local_path`: decoded, in the
+    spelling on disk); a remote cache's (`bytestream://`) a test's own in
+    the output tree, then under the runner's bb_clientd mount
+    (`state["bb_root"]`) where there is one."""
     if type(uri) != "string" or not uri:
         return []
-    paths = []
-    if uri.startswith("bytestream://") and record["kind"] == "test":
-        paths.extend(local_test_logs(state, record))
-    paths.append(uri_to_path_under_root(uri, state.get("bb_root")))
-
-    # A `file://` path is percent-encoded, a non-ASCII name's UTF-8 in it
-    # spelled as Latin-1 (`Ñ%C2%82` for `т`), and the file on disk is named
-    # that way or as meant, by Bazel version: both, as written first.
+    if uri.startswith("file://"):
+        local = bazel.build_events.local_path(uri)
+        return [local] if local else []
+    paths = local_test_logs(state, record) if uri.startswith("bytestream://") and record["kind"] == "test" else []
     out = []
-    for p in paths:
-        if p and uri.startswith("file://"):
-            decoded = percent_decoded(p)
-            for candidate in (decoded, repaired(decoded)):
-                if candidate not in out:
-                    out.append(candidate)
-        elif p and p not in out:
+    for p in paths + [uri_to_path_under_root(uri, state.get("bb_root"))]:
+        if p and p not in out:
             out.append(p)
     return out
 
@@ -791,81 +786,6 @@ def _workspace(state: dict) -> str:
     """The workspace directory Bazel's `build_started` names, else ""."""
     started = (state.get("inv") or {}).get("build_started")
     return str(bes_get(started, "workspace_directory", "") or "")
-
-def _utf8(codes: list):
-    """The text UTF-8 bytes `codes` decode to, or None where they are no
-    UTF-8."""
-    out = []
-    i = 0
-    for _ in range(len(codes)):
-        if i >= len(codes):
-            break
-        b = codes[i]
-        if b < 0x80:
-            out.append(chr(b))
-            i += 1
-            continue
-        if b >= 0xf0 and b < 0xf5:
-            size, cp = 4, b & 0x07
-        elif b >= 0xe0 and b < 0xf0:
-            size, cp = 3, b & 0x0f
-        elif b >= 0xc2 and b < 0xe0:
-            size, cp = 2, b & 0x1f
-        else:
-            return None
-        if i + size > len(codes):
-            return None
-        for k in range(1, size):
-            c = codes[i + k]
-            if c < 0x80 or c > 0xbf:
-                return None
-            cp = (cp << 6) | (c & 0x3f)
-        out.append(chr(cp))
-        i += size
-    return "".join(out)
-
-def _utf8_bytes(cp: int) -> list:
-    """Code point `cp`'s UTF-8 bytes."""
-    if cp < 0x80:
-        return [cp]
-    if cp < 0x800:
-        return [0xc0 | (cp >> 6), 0x80 | (cp & 0x3f)]
-    if cp < 0x10000:
-        return [0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)]
-    return [0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)]
-
-def repaired(text: str) -> str:
-    """`text` as Bazel meant it. Its build events carry a non-ASCII
-    string's UTF-8 bytes each as a Latin-1 character (`ÐµÐ` for `е`): one
-    whose characters are all such bytes and decode as UTF-8 is given back
-    decoded; any other text as it is."""
-    if not text:
-        return text
-    codes = list(text.codepoints())
-    if max(codes) > 255 or max(codes) < 128:
-        return text
-    return _utf8(codes) or text
-
-def percent_decoded(text: str) -> str:
-    """A URI's path with its `%XX` escapes decoded, as UTF-8; as it is
-    where they decode to no UTF-8."""
-    if "%" not in text:
-        return text
-    codes = []
-    chars = [chr(c) for c in text.codepoints()]
-    i = 0
-    hexes = "0123456789abcdefABCDEF"
-    for _ in range(len(chars)):
-        if i >= len(chars):
-            break
-        c = chars[i]
-        if c == "%" and i + 2 < len(chars) and chars[i + 1] in hexes and chars[i + 2] in hexes:
-            codes.append(int(chars[i + 1] + chars[i + 2], 16))
-            i += 3
-            continue
-        codes += _utf8_bytes(ord(c))
-        i += 1
-    return _utf8(codes) or text
 
 def _referrers(state: dict) -> dict:
     """Each root cause Bazel names (`root_causes`) with the targets that
