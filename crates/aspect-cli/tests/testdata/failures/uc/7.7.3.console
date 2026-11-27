@@ -1,0 +1,69 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/p2/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by ${WORKSPACE}/mt/BUILD.bazel and referenced by '//p2:e'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/mt/BUILD.bazel: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by ${WORKSPACE}/mt/BUILD.bazel
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel: no such target '//le:y': target 'y' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/p1/BUILD.bazel:2:8: no such target '//le:y': target 'y' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel and referenced by '//p1:b'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/p1/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by ${WORKSPACE}/mt/BUILD.bazel and referenced by '//p1:c'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/p2/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel and referenced by '//p2:a'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/p1/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel and referenced by '//p1:a'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//p1:b', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//p2:d', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//p2:a', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//p1:c', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//p1:a', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 6 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//p2:e', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were loading phase errors
+
+[1A[K[32mINFO: [0mElapsed time: 0.046s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

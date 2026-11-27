@@ -1,0 +1,187 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 10 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 10 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 10 targets (0 packages loaded, 0 targets configured).
+[32m[1 / 13][0m 12 actions, 10 running
+    Compiling anon_a.c; 0s darwin-sandbox
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:empty; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:2:4: Making alpha for //two:two failed: (Exit 2): bash failed: error executing Alpha command (from target //two:two) /bin/bash -c 'echo '\''first action broke: alpha.c:1: bad alpha'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+first action broke: alpha.c:1: bad alpha
+[32m[1 / 15][0m 14 actions running
+    Compiling anon_a.c; 0s darwin-sandbox
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:empty; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:2:4: Making beta for //two:two failed: (Exit 3): bash failed: error executing Beta command (from target //two:two) /bin/bash -c 'printf '\''\033[31merror:\033[0m beta.c:9: bad beta\r\nsecond line\r\n'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[31merror:[0m beta.c:9: bad beta
+second line
+[32m[2 / 15][0m 13 actions running
+    Compiling anon_a.c; 0s darwin-sandbox
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:empty; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:7:8: Compiling anon_a.c failed: (Exit 2): bash failed: error executing CcLike command (from target //two:nolabel) /bin/bash -c 'echo '\''first anon'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+first anon
+[32m[3 / 15][0m 12 actions running
+    Compiling anon_a.c; 0s darwin-sandbox
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:empty; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:4:8: Executing genrule //two:empty failed: (Exit 4): bash failed: error executing Genrule command (from target //two:empty) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[32m[4 / 15][0m 11 actions running
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:empty; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox
+    Step one for //two:three; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:6:6: Step one for //two:three failed: (Exit 5): bash failed: error executing Step command (from target //two:three) /bin/bash -c 'exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[32m[5 / 15][0m 10 actions running
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox
+    Step one for //two:three; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:9:8: Executing genrule //two:nospace failed: (Exit 1): bash failed: error executing Genrule command (from target //two:nospace) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; python3 -c "print('\''X'\'' * 290)" >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+[32m[6 / 15][0m 9 actions running
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Executing genrule //two:nospace; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:11:8: Executing genrule //two:tabcjk failed: (Exit 1): bash failed: error executing Genrule command (from target //two:tabcjk) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; printf '\''漢字\tA\t漢\tBB\t漢字漢字漢字\tC\n'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+漢字	A	漢	BB	漢字漢字漢字	C
+[32m[7 / 15][0m 8 actions running
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Executing genrule //two:tabcjk; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:10:8: Executing genrule //two:cjkspace failed: (Exit 1): bash failed: error executing Genrule command (from target //two:cjkspace) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; python3 -c "print('\'' '\''.join(['\''漢字漢字漢字'\''] * 30))" >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字 漢字漢字漢字
+[32m[8 / 15][0m 7 actions running
+    Executing genrule //two:cjkspace; 0s darwin-sandbox
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:8:8: Executing genrule //two:tabs failed: (Exit 1): bash failed: error executing Genrule command (from target //two:tabs) /bin/bash -c ... (remaining 1 argument skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+E:	col1	col2	col3	col4	col5	col6	col7	col8	col9	col10	col11	col12	col13	col14	col15	col16	col17	col18	col19	col20
+[32m[9 / 15][0m 6 actions running
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Executing genrule //two:tabs; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:5:8: Executing genrule //two:unicode failed: (Exit 1): bash failed: error executing Genrule command (from target //two:unicode) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''エラー: ファイルが見つかりません '\'' >&2; python3 -c "print('\''漢字'\'' * 120)" >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+エラー: ファイルが見つかりません 
+漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字
+[32m[10 / 15][0m 5 actions running
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Executing genrule //two:unicode; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:3:8: Executing genrule //two:longline failed: (Exit 1): bash failed: error executing Genrule command (from target //two:longline) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; python3 -c "print('\''E: '\'' + '\'' '\''.join(['\''word%d'\'' % i for i in range(200)]))" >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+E: word0 word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word22 word23 word24 word25 word26 word27 word28 word29 word30 word31 word32 word33 word34 word35 word36 word37 word38 word39 word40 word41 word42 word43 word44 word45 word46 word47 word48 word49 word50 word51 word52 word53 word54 word55 word56 word57 word58 word59 word60 word61 word62 word63 word64 word65 word66 word67 word68 word69 word70 word71 word72 word73 word74 word75 word76 word77 word78 word79 word80 word81 word82 word83 word84 word85 word86 word87 word88 word89 word90 word91 word92 word93 word94 word95 word96 word97 word98 word99 word100 word101 word102 word103 word104 word105 word106 word107 word108 word109 word110 word111 word112 word113 word114 word115 word116 word117 word118 word119 word120 word121 word122 word123 word124 word125 word126 word127 word128 word129 word130 word131 word132 word133 word134 word135 word136 word137 word138 word139 word140 word141 word142 word143 word144 word145 word146 word147 word148 word149 word150 word151 word152 word153 word154 word155 word156 word157 word158 word159 word160 word161 word162 word163 word164 word165 word166 word167 word168 word169 word170 word171 word172 word173 word174 word175 word176 word177 word178 word179 word180 word181 word182 word183 word184 word185 word186 word187 word188 word189 word190 word191 word192 word193 word194 word195 word196 word197 word198 word199
+[32m[11 / 15][0m 4 actions running
+    Executing genrule //two:longline; 0s darwin-sandbox
+    Compiling anon_b.c; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[32m[12 / 15][0m 3 actions running
+    Compiling anon_b.c; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:7:8: Compiling anon_b.c failed: (Exit 3): bash failed: error executing CcLike command (from target //two:nolabel) /bin/bash -c 'sleep 0.5; echo '\''second anon'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+second anon
+[32m[12 / 15][0m 3 actions running
+    Compiling anon_b.c; 0s darwin-sandbox
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:6:6: Step two for //two:three failed: (Exit 6): bash failed: error executing Step command (from target //two:three) /bin/bash -c 'sleep 0.5; echo '\''step two broke: s2.c:2'\'' >&2; exit 6'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+step two broke: s2.c:2
+[32m[13 / 15][0m 2 actions running
+    Packing //two:three; 0s darwin-sandbox
+    Step two for //two:three; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[14 / 15][0m Packing //two:three; 0s darwin-sandbox
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/two/BUILD.bazel:6:6: Packing //two:three failed: (Exit 7): bash failed: error executing Pack command (from target //two:three) /bin/bash -c 'sleep 1; echo '\''pack broke: p.c:3'\'' >&2; exit 7'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+pack broke: p.c:3
+[32m[14 / 15][0m Packing //two:three; 1s darwin-sandbox
+[1A[K[32mINFO: [0mFound 10 targets...
+[32m[15 / 15][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[15 / 15][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 1.097s, Critical Path: 1.05s
+[32m[15 / 15][0m no actions running
+[1A[K[32mINFO: [0m15 processes: 15 internal.
+[32m[15 / 15][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

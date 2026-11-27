@@ -1,0 +1,208 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 9 targets (0 packages loaded, 0 targets configured).
+[32m[1 / 14][0m [Prepa] Compiling cc4/sub/z.cc
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc2/BUILD.bazel:2:11: Compiling cc2/d.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc2:stems) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc2/d.cc:1:19: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'q'[0m
+    1 | [0;34mint[0m d1() { [0;34mreturn[0m q; }[0m
+      | [0;1;32m                  ^
+[0m1 error generated.
+[32m[1 / 21][0m 13 actions running
+    Compiling cc4/sub/z.cc; 0s darwin-sandbox
+    Compiling cc2/d.cc; 0s darwin-sandbox
+    Compiling cc2/sub/d.cc; 0s darwin-sandbox
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc2/e.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc2/BUILD.bazel:2:11: Compiling cc2/sub/d.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc2:stems) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc2/sub/d.cc:1:19: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'r'[0m
+    1 | [0;34mint[0m d2() { [0;34mreturn[0m r }[0m
+      | [0;1;32m                  ^
+[0m1 error generated.
+[32m[2 / 21][0m 12 actions running
+    Compiling cc4/sub/z.cc; 0s darwin-sandbox
+    Compiling cc2/sub/d.cc; 0s darwin-sandbox
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc2/e.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc2/BUILD.bazel:2:11: Compiling cc2/e.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc2:stems) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc2/e.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'x'[0m
+    1 | [0;34mint[0m e() { [0;34mreturn[0m x; }[0m
+      | [0;1;32m                 ^
+[0m1 error generated.
+[32m[3 / 21][0m 11 actions running
+    Compiling cc4/sub/z.cc; 0s darwin-sandbox
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc2/e.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc4/BUILD.bazel:7:11: Compiling cc4/sub/z.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:subz) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc4/sub/z.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xz'[0m
+    1 | [0;34mint[0m z() { [0;34mreturn[0m xz; }[0m
+      | [0;1;32m                 ^~
+[0m1 error generated.
+[32m[4 / 21][0m 10 actions running
+    Compiling cc4/sub/z.cc; 0s darwin-sandbox
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc/b.cc; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc2/BUILD.bazel:2:11: Compiling cc2/f.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc2:stems) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc2/f.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'x'[0m
+    1 | [0;34mint[0m f() { [0;34mreturn[0m x; }[0m
+      | [0;1;32m                 ^
+[0m1 error generated.
+[32m[6 / 21][0m 9 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc/b.cc; 0s darwin-sandbox
+    Compiling cc2/g.cc; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc4/BUILD.bazel:5:11: Compiling cc4/shared.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:s1) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc4/shared.cc:1:19: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xs'[0m
+    1 | [0;34mint[0m sh() { [0;34mreturn[0m xs; }[0m
+      | [0;1;32m                  ^~
+[0m1 error generated.
+[32m[7 / 21][0m 8 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc/b.cc; 0s darwin-sandbox
+    Compiling cc2/g.cc; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc/BUILD.bazel:2:11: Compiling cc/b.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc:lib) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc/b.cc:1:19: [0m[0;1;31merror: [0m[1mexpected ';' after return statement[0m
+    1 | [0;34mint[0m b() { [0;34mreturn[0m [0;32m1[0m }[0m
+      | [0;1;32m                  ^
+[0m      | [0;32m                  ;
+[0m1 error generated.
+[32m[10 / 21][0m 7 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+    Compiling cc/b.cc; 0s darwin-sandbox
+    Compiling cc2/g.cc; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc2/BUILD.bazel:3:11: Compiling cc2/g.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc2:other) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc2/g.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'y'[0m
+    1 | [0;34mint[0m g() { [0;34mreturn[0m y; }[0m
+      | [0;1;32m                 ^
+[0m1 error generated.
+[32m[11 / 21][0m 6 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+    Compiling cc2/g.cc; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc4/BUILD.bazel:3:11: Compiling cc4/b.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:ph) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc4/b.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xb'[0m
+    1 | [0;34mint[0m b() { [0;34mreturn[0m xb; }[0m
+      | [0;1;32m                 ^~
+[0m1 error generated.
+[32m[13 / 21][0m 5 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc4/b.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc/BUILD.bazel:2:11: Compiling cc/a.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc:lib) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc/a.cc:1:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'x'[0m
+    1 | [0;34mint[0m a() { [0;34mreturn[0m x; }[0m
+      | [0;1;32m                 ^
+[0m1 error generated.
+[32m[14 / 21][0m 4 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Compiling cc/a.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc4/BUILD.bazel:3:11: Compiling cc4/a.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:ph) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+In file included from cc4/a.cc:1:
+[1m./cc4/a.h:1:26: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xh'[0m
+    1 | [0;34minline[0m [0;34mint[0m ah() { [0;34mreturn[0m xh; }[0m
+      | [0;1;32m                         ^~
+[0m[1mcc4/a.cc:2:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xa'[0m
+    2 | [0;34mint[0m a() { [0;34mreturn[0m xa; }[0m
+      | [0;1;32m                 ^~
+[0m2 errors generated.
+[32m[16 / 21][0m 3 actions running
+    Compiling cc4/a.cc; 0s darwin-sandbox
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc4/BUILD.bazel:6:11: Compiling cc4/shared.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from target //cc4:s2) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 22 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mcc4/shared.cc:1:19: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xs'[0m
+    1 | [0;34mint[0m sh() { [0;34mreturn[0m xs; }[0m
+      | [0;1;32m                  ^~
+[0m1 error generated.
+[32m[18 / 21][0m 2 actions running
+    Compiling cc4/shared.cc; 0s darwin-sandbox
+    Linking cc2/linkfail; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/cc2/BUILD.bazel:5:10: Linking cc2/linkfail failed: (Exit 1): cc_wrapper.sh failed: error executing CppLink command (from target //cc2:linkfail) external/rules_cc~~cc_configure_extension~local_config_cc/cc_wrapper.sh @bazel-out/darwin_arm64-fastbuild/bin/cc2/linkfail-2.params
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+Undefined symbols for architecture arm64:
+  "missing_fn()", referenced from:
+      u() in libundef.a[2](u.o)
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+[32m[20 / 21][0m Linking cc2/linkfail; 0s darwin-sandbox
+[1A[K[32mINFO: [0mAnalysis succeeded for only 1 of 9 top-level targets
+[32m[21 / 21][0m no actions running
+[1A[K[32mINFO: [0mFound 9 targets...
+[32m[21 / 21][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[21 / 21][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.166s, Critical Path: 0.11s
+[32m[21 / 21][0m no actions running
+[1A[K[32mINFO: [0m14 processes: 14 internal.
+[32m[21 / 21][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

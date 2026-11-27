@@ -1,0 +1,7 @@
+load(":defs.bzl", "wk")
+exports_files(["worker.py"])
+genrule(name = "loc", outs = ["loc.txt"], cmd = "echo 'local action broke' >&2; exit 7", tags = ["no-sandbox"])
+genrule(name = "sbx", outs = ["sbx.txt"], cmd = "echo 'sandboxed action broke' >&2; exit 8")
+genrule(name = "silent", outs = ["silent.txt"], cmd = "exit 9")
+genrule(name = "outonly", outs = ["outonly.txt"], cmd = "echo 'stdout only text'; exit 6")
+wk(name = "wk")

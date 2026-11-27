@@ -1,0 +1,3 @@
+load(":defs.bzl", "outer")
+outer(name = "m")
+genrule(name = "x", outs = ["x.txt"], cmd = "true")

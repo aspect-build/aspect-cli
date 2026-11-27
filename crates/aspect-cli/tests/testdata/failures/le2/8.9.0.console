@@ -1,0 +1,30 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/le2/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: le2: syntax error at 'newline': expected ,
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //q:on_le2 (0 packages loaded, 0 targets configured)
+[1A[K[32mINFO: [0mAnalyzed target //q:on_le2 (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/le2/BUILD.bazel: no such target '//le2:x': target 'x' not declared in package 'le2' defined by ${WORKSPACE}/le2/BUILD.bazel
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/q/BUILD.bazel:1:8: no such target '//le2:x': target 'x' not declared in package 'le2' defined by ${WORKSPACE}/le2/BUILD.bazel and referenced by '//q:on_le2'
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q:on_le2', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+
+[1A[K[32mINFO: [0mElapsed time: 0.041s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -1,0 +1,2 @@
+genrule(name = "a_silent", outs = ["a.txt"], cmd = "exit 4")
+genrule(name = "b_loud", outs = ["b.txt"], cmd = "sleep 1; echo 'b_loud: real error text' >&2; exit 1")

@@ -1,0 +1,5 @@
+load(":defs.bzl", "chk")
+chk(name = "docs", msg = "Building docs for api", cmd = "true")
+chk(name = "api", msg = "Packaging", cmd = "echo 'api broke' >&2; exit 2")
+genrule(name = "gen", outs = ["gen.txt"], cmd = "echo 'gen broke' >&2; exit 3")
+chk(name = "after", msg = "Checking gen output", cmd = "true")

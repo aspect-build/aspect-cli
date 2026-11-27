@@ -1,0 +1,15 @@
+//t:ok0                                                                  [0m[32mPASSED[0m in 1.0s
+//t:fail                                                                 [0m[31m[1mFAILED[0m in 0.6s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/fail/test.log
+//t:flaky                                                                 [0m[35mFLAKY[0m, failed in 1 out of 2 in 0.4s
+  Stats over 2 runs: max = 0.4s, min = 0.0s, avg = 0.2s, dev = 0.2s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/flaky/test_attempts/attempt_1.log
+//t:rpt                                                                  [0m[31m[1mFAILED[0m in 1 out of 3 in 0.8s
+  Stats over 3 runs: max = 0.8s, min = 0.8s, avg = 0.8s, dev = 0.0s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/rpt/run_3_of_3/test.log
+//t:shard                                                                [0m[31m[1mFAILED[0m in 1 out of 3 in 1.2s
+  Stats over 3 runs: max = 1.2s, min = 1.2s, avg = 1.2s, dev = 0.0s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/shard/shard_2_of_3/test.log
+
+Executed 5 out of 5 tests: 2 tests pass and [0m[31m[1m3 fail locally[0m.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.

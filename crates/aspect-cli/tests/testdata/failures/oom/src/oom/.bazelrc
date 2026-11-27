@@ -1,0 +1,1 @@
+startup --host_jvm_args=-Xmx24m

@@ -1,0 +1,2 @@
+genrule(name = "x", srcs = ["missing.txt"], outs = ["x.txt"], cmd = "cat $< > $@")
+genrule(name = "y", outs = ["y.txt"] cmd = "true")

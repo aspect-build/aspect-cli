@@ -1,0 +1,54 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[1A[K[32mINFO: [0mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/sp/BUILD.bazel:2:4: output 'sp/docs.out' was not created
+[32m[1 / 5][0m 4 actions running
+    Packaging; 0s darwin-sandbox
+    Building docs for api; 0s darwin-sandbox
+    Executing genrule //sp:gen; 0s darwin-sandbox
+    Checking gen output; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sp/BUILD.bazel:3:4: Packaging failed: (Exit 2): bash failed: error executing Check command (from target //sp:api) /bin/bash -c 'echo '\''api broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+api broke
+[32m[1 / 5][0m 4 actions running
+    Packaging; 0s darwin-sandbox
+    Building docs for api; 0s darwin-sandbox
+    Executing genrule //sp:gen; 0s darwin-sandbox
+    Checking gen output; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sp/BUILD.bazel:2:4: Building docs for api failed: not all outputs were created or valid
+[32m[1 / 5][0m 3 actions running
+    Building docs for api; 0s darwin-sandbox
+    Executing genrule //sp:gen; 0s darwin-sandbox
+    Checking gen output; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sp/BUILD.bazel:5:4: output 'sp/after.out' was not created
+[32m[3 / 5][0m 2 actions running
+    Executing genrule //sp:gen; 0s darwin-sandbox
+    Checking gen output; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sp/BUILD.bazel:5:4: Checking gen output failed: not all outputs were created or valid
+[32m[3 / 5][0m 2 actions running
+    Executing genrule //sp:gen; 0s darwin-sandbox
+    Checking gen output; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sp/BUILD.bazel:4:8: Executing genrule //sp:gen failed: (Exit 3): bash failed: error executing Genrule command (from target //sp:gen) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''gen broke'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+gen broke
+[32m[4 / 5][0m Executing genrule //sp:gen; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 4 targets...
+[32m[5 / 5][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.068s, Critical Path: 0.02s
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0m5 processes: 3 internal, 2 darwin-sandbox.
+[32m[5 / 5][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

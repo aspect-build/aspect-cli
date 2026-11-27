@@ -1,0 +1,13 @@
+WARNING: Running Bazel server needs to be killed, because the startup options are different.
+Starting local Bazel server and connecting to it...
+[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/rules_cc/0.0.1/MODULE.bazel
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+    Fetching https://bcr.bazel.build/modules/stardoc/0.5.1/MODULE.bazel
+[1A[K[1A[K[32mComputing main repo mapping:[0m 
+[1A[K[32mComputing main repo mapping:[0m 
+[31m[1mFATAL: [0mbazel ran out of memory and crashed. Printing stack trace:
+java.lang.OutOfMemoryError: Java heap space

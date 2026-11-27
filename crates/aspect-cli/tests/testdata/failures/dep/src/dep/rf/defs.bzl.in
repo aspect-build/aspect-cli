@@ -1,0 +1,3 @@
+def _impl(ctx):
+    fail("impl refuses " + ctx.label.name)
+r = rule(implementation = _impl)

@@ -1,0 +1,39 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/dep/rf/BUILD.bazel:2:2: in r rule //dep/rf:x: 
+Traceback (most recent call last):
+	File "${WORKSPACE}/dep/rf/defs.bzl", line 2, column 9, in _impl
+		fail("impl refuses " + ctx.label.name)
+Error in fail: impl refuses x
+[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/dep/rf/BUILD.bazel:2:2: Analysis of target '//dep/rf:x' (config: 2d89340) failed
+[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/dep/BUILD.bazel:1:8: Executing genrule //dep:bad failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //dep:bad) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''bad broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+bad broke
+[32m[1 / 3][0m Executing genrule //dep:bad; 0s darwin-sandbox
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//dep:top', it will not be built.
+Analysis failed
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[3 / 3][0m no actions running
+[1A[KTarget //dep:mid failed to build
+[32m[3 / 3][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.136s, Critical Path: 0.03s
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0m2 processes: 2 internal.
+[32m[3 / 3][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

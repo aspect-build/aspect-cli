@@ -1,0 +1,7 @@
+def _impl(ctx):
+    a = ctx.actions.declare_file(ctx.label.name + ".a")
+    b = ctx.actions.declare_file(ctx.label.name + ".b")
+    ctx.actions.run_shell(outputs = [a], command = "exit 1", progress_message = "Working", mnemonic = "W")
+    ctx.actions.run_shell(outputs = [b], command = "sleep 0.5; echo 'loud one broke' >&2; exit 1", progress_message = "Working", mnemonic = "W")
+    return [DefaultInfo(files = depset([a, b]))]
+sl = rule(implementation = _impl)

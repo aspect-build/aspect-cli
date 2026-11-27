@@ -1,0 +1,2 @@
+genrule(name = "missing", srcs = ["nope.txt"], outs = ["x.txt"], cmd = "cat $< > $@")
+genrule(name = "boom", outs = ["boom.txt"], cmd = "echo 'boom broke' >&2; exit 1")

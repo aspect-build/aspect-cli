@@ -1,0 +1,34 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' in 'genrule' rule, but got "notalist.txt" (string)
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: at: //at:t: expected value of type 'list(output)' for attribute 'outs' in 'genrule' rule, but got "notalist.txt" (string)
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//at:t', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//at:ok', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+
+[1A[K[32mINFO: [0mElapsed time: 0.052s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

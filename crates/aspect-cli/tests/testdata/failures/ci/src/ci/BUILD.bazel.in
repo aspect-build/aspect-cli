@@ -1,0 +1,2 @@
+genrule(name = "info", outs = ["i.txt"], cmd = "echo 'INFO: tool says hello' >&2; echo 'ERROR: tool says it broke' >&2; echo 'detail line' >&2; exit 1")
+genrule(name = "plain", outs = ["p.txt"], cmd = "echo 'plain broke' >&2; exit 2")

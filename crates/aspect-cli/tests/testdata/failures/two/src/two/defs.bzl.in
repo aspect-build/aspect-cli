@@ -1,0 +1,29 @@
+def _impl(ctx):
+    a = ctx.actions.declare_file(ctx.label.name + ".a")
+    b = ctx.actions.declare_file(ctx.label.name + ".b")
+    ctx.actions.run_shell(outputs = [a], command = "echo 'first action broke: alpha.c:1: bad alpha' >&2; exit 2", progress_message = "Making alpha for %{label}", mnemonic = "Alpha")
+    ctx.actions.run_shell(outputs = [b], command = "printf '\\033[31merror:\\033[0m beta.c:9: bad beta\\r\\nsecond line\\r\\n' >&2; exit 3", progress_message = "Making beta for %{label}", mnemonic = "Beta")
+    return [DefaultInfo(files = depset([a, b]))]
+two = rule(implementation = _impl)
+
+def _three_impl(ctx):
+    outs = []
+    specs = [
+        ("s1", "Step", "exit 5", "Step one for %{label}"),
+        ("s2", "Step", "sleep 0.5; echo 'step two broke: s2.c:2' >&2; exit 6", "Step two for %{label}"),
+        ("p", "Pack", "sleep 1; echo 'pack broke: p.c:3' >&2; exit 7", "Packing %{label}"),
+    ]
+    for name, mnem, cmd, msg in specs:
+        o = ctx.actions.declare_file(ctx.label.name + "." + name)
+        ctx.actions.run_shell(outputs = [o], command = cmd, progress_message = msg, mnemonic = mnem)
+        outs.append(o)
+    return [DefaultInfo(files = depset(outs))]
+three = rule(implementation = _three_impl)
+
+def _nolabel_impl(ctx):
+    a = ctx.actions.declare_file(ctx.label.name + ".a")
+    b = ctx.actions.declare_file(ctx.label.name + ".b")
+    ctx.actions.run_shell(outputs = [a], command = "echo 'first anon' >&2; exit 2", progress_message = "Compiling anon_a.c", mnemonic = "CcLike")
+    ctx.actions.run_shell(outputs = [b], command = "sleep 0.5; echo 'second anon' >&2; exit 3", progress_message = "Compiling anon_b.c", mnemonic = "CcLike")
+    return [DefaultInfo(files = depset([a, b]))]
+nolabel = rule(implementation = _nolabel_impl)

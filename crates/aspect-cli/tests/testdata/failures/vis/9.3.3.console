@@ -1,0 +1,47 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0mno such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nosuchpkg
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/vis/BUILD.bazel:3:8: no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nosuchpkg and referenced by '//vis:mp'
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/vis/BUILD.bazel:1:8: in genrule rule //vis:vis: Visibility error:
+target '//priv:priv' is not visible from
+target '//vis:vis'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/vis/BUILD.bazel:1:8: Analysis of target '//vis:vis' (config: 2d89340) failed
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/vis/BUILD.bazel:2:8: Executing genrule //vis:mt failed: missing input file '//vis:nothere'
+[32m[1 / 2][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/vis/BUILD.bazel:2:8: Executing genrule //vis:mt failed: 1 input file(s) do not exist
+[32m[1 / 2][0m checking cached actions
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//vis:mp', it will not be built.
+Analysis failed
+[32m[2 / 2][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//vis:vis', it will not be built.
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[2 / 2][0m no actions running
+[1A[KTarget //vis:mt failed to build
+[32m[2 / 2][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.046s, Critical Path: 0.00s
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0m1 process: 1 internal.
+[32m[2 / 2][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

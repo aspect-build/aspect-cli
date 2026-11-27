@@ -1,0 +1,78 @@
+"""Scrub one recorded run and copy the files its BEP refers to.
+
+usage: fxpost.py <fixture_dir> <prefix> <raw_dir> <output_base> <install_base> <workspace> <fake_home>
+
+Reads <raw_dir>/{bep.json,console,stdout,exit}; writes <fixture_dir>/<prefix>.{bep.json,console,
+stdout,exit} and copies every action stderr/stdout and test.log/test.xml the BEP names into
+<fixture_dir>/<prefix>.files/<path relative to the output base>. The BEP is trimmed of the
+events the failure summary never reads (`DROPPED`): progress chunks, the command lines, the
+build tool logs; an Aborted one of those stays.
+"""
+import json, os, re, shutil, socket, sys, getpass
+fx, prefix, raw, ob, ib, ws, fakehome = sys.argv[1:8]
+home = os.path.expanduser("~")
+def spellings(p):  # macOS reports /private/var and /private/tmp paths both ways
+    return [p, p[len("/private"):]] if p.startswith("/private/") else [p]
+subs = []
+for p, name in ((ib, "${INSTALL_BASE}"), (ob, "${OUTPUT_BASE}"), (os.path.dirname(ob), "${OUTPUT_USER_ROOT}")):
+    subs += [(x, name) for x in spellings(p)]
+for w in sorted({ws, os.path.realpath(ws), ws.replace("/private/tmp/", "/tmp/", 1)}, key=len, reverse=True):
+    subs.append((w, "${WORKSPACE}"))
+subs.append((raw, "${RAW}"))
+subs.append((fakehome, "${HOME}"))
+subs.append((home, "${HOME}"))
+host = socket.gethostname(); user = getpass.getuser()
+def scrub(s):
+    for a, b in subs:
+        if a: s = s.replace(a, b)
+    s = s.replace(host.split(".")[0] if host else "\0", "${HOST}")
+    s = re.sub(r"/var/folders/[^/]+/[^/]+/", "${DARWIN_USER_DIR}/", s)
+    for k in ("USER", "LOGNAME"):
+        s = s.replace(k + "=" + user, k + "=${USER}")
+    return s
+def scrub_status(e):
+    # BuildStarted and workspaceStatus carry the user and host as values.
+    if "user" in e.get("started", {}): e["started"]["user"] = "${USER}"
+    for it in e.get("workspaceStatus", {}).get("item", []):
+        if it.get("key") == "BUILD_USER": it["value"] = "${USER}"
+        if it.get("key") == "BUILD_HOST": it["value"] = "${HOST}"
+    return e
+def copy(uri):
+    if not uri.startswith("file://" + ob + "/"): return
+    rel = uri[len("file://" + ob + "/"):]
+    dst = os.path.join(fx, prefix + ".files", rel)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copyfile(uri[7:], dst)
+    except OSError as x:
+        print("fxpost: cannot copy", rel, x, file=sys.stderr)
+# Event kinds the failure summary never reads; they are most of a fixture's bytes.
+DROPPED = ("progress", "structuredCommandLine", "unstructuredCommandLine", "buildToolLogs")
+def kept(e):
+    return "aborted" in e or list(e["id"])[0] not in DROPPED
+out = []
+bep = os.path.join(raw, "bep.json")
+if os.path.exists(bep):
+    for line in open(bep):
+        e = json.loads(line)
+        a = e.get("action", {})
+        for k in ("stderr", "stdout"):
+            if k in a: copy(a[k].get("uri", ""))
+        for f in e.get("testResult", {}).get("testActionOutput", []):
+            if f.get("name") in ("test.log", "test.xml"): copy(f.get("uri", ""))
+        if not kept(e): continue
+        out.append(scrub(json.dumps(scrub_status(e), ensure_ascii=False)))
+    open(os.path.join(fx, prefix + ".bep.json"), "w").write("\n".join(out) + "\n")
+for k in ("console", "stdout", "exit"):
+    p = os.path.join(raw, k)
+    if not os.path.exists(p): continue
+    data = open(p, "rb").read().decode("utf-8", "surrogateescape")
+    if k == "stdout" and not data: continue
+    if k == "console" and data.startswith("^D"):
+        data = data[2:].lstrip("\b")  # BSD script(1) echoes EOF of its /dev/null stdin
+    open(os.path.join(fx, prefix + "." + k), "w", encoding="utf-8", errors="surrogateescape").write(scrub(data))
+filesdir = os.path.join(fx, prefix + ".files")
+for root, _, names in os.walk(filesdir):
+    for n in names:
+        p = os.path.join(root, n)
+        b = open(p, "rb").read().decode("utf-8", "surrogateescape")
+        open(p, "w", encoding="utf-8", errors="surrogateescape").write(scrub(b))

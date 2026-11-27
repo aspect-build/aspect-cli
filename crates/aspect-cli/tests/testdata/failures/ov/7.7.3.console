@@ -1,0 +1,74 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ov/BUILD.bazel:6:4: Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.0 failed: (Exit 2): bash failed: error executing Proc command (from target //ov:d) /bin/bash -c 'echo '\''same line'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+same line
+[32m[1 / 7][0m 6 actions running
+    Executing genrule //ov:g1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.0; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.0; 0s darwin-sandbox
+    Executing genrule //ov:g2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ov/BUILD.bazel:2:4: Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.0 failed: (Exit 1): bash failed: error executing Proc command (from target //ov:c) /bin/bash -c 'echo '\''error: x'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: x
+[32m[2 / 7][0m 5 actions running
+    Executing genrule //ov:g1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.0; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1; 0s darwin-sandbox
+    Executing genrule //ov:g2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ov/BUILD.bazel:10:8: Executing genrule //ov:g1 failed: (Exit 1): bash failed: error executing Genrule command (from target //ov:g1) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''error: shared'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: shared
+[32m[3 / 7][0m 4 actions running
+    Executing genrule //ov:g1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1; 0s darwin-sandbox
+    Executing genrule //ov:g2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ov/BUILD.bazel:11:8: Executing genrule //ov:g2 failed: (Exit 1): bash failed: error executing Genrule command (from target //ov:g2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''error: shared'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: shared
+[32m[4 / 7][0m 3 actions running
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1; 0s darwin-sandbox
+    Executing genrule //ov:g2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32m[5 / 7][0m 2 actions running
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ov/BUILD.bazel:6:4: Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1 failed: (Exit 2): bash failed: error executing Proc command (from target //ov:d) /bin/bash -c 'sleep 0.5; echo '\''same line'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+same line
+[32m[5 / 7][0m 2 actions running
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/ov/d.1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ov/BUILD.bazel:2:4: Processing bazel-out/darwin_arm64-fastbuild/bin/ov/c.1 failed: (Exit 1): bash failed: error executing Proc command (from target //ov:c) /bin/bash -c 'sleep 0.5; echo '\''error: x is bad'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: x is bad
+[32m[6 / 7][0m //ov:c; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 4 targets...
+[32m[7 / 7][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[7 / 7][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.663s, Critical Path: 0.55s
+[32m[7 / 7][0m no actions running
+[1A[K[32mINFO: [0m7 processes: 7 internal.
+[32m[7 / 7][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

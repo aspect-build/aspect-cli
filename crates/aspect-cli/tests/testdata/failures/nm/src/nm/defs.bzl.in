@@ -1,0 +1,4 @@
+def inner(name):
+    fail("inner refuses " + name)
+def outer(name):
+    inner(name = name + "_i")

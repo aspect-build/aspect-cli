@@ -1,0 +1,6 @@
+genrule(name = "a", srcs = ["shared_missing.txt"], outs = ["a.txt"], cmd = "cat $< > $@")
+genrule(name = "b", srcs = ["shared_missing.txt"], outs = ["b.txt"], cmd = "cat $< > $@")
+genrule(name = "c", srcs = ["//other:file.txt"], outs = ["c.txt"], cmd = "cat $< > $@")
+genrule(name = "d", srcs = ["mine_missing.txt"], outs = ["d1.txt"], cmd = "cat $< > $@")
+genrule(name = "e", outs = ["e.txt"], cmd = "echo 'e broke' >&2; exit 3")
+genrule(name = "f", srcs = [":d"], outs = ["f.txt"], cmd = "true")

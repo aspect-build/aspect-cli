@@ -1,0 +1,2 @@
+def bad_macro(name):
+    fail("bad_macro refuses " + name)

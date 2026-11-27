@@ -1,0 +1,103 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 8 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 8 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[1A[K[32mINFO: [0mAnalyzed 8 targets (0 packages loaded, 0 targets configured).
+[32m[1 / 8][0m 7 actions, 6 running
+    Executing genrule //sig:s11; 0s darwin-sandbox
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s10; 0s darwin-sandbox
+    Executing genrule //sig:s24; 0s darwin-sandbox
+    Executing genrule //sig:s5; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s10 failed: (User defined signal 1): bash failed: error executing Genrule command (from target //sig:s10) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 10'\'' >&2; kill -10 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 10
+[32m[1 / 9][0m 8 actions running
+    Executing genrule //sig:s11; 0s darwin-sandbox
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s10; 0s darwin-sandbox
+    Executing genrule //sig:s24; 0s darwin-sandbox
+    Executing genrule //sig:s5; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+    Executing genrule //sig:s30; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s11 failed: (Segmentation fault): bash failed: error executing Genrule command (from target //sig:s11) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 11'\'' >&2; kill -11 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 11
+[32m[2 / 9][0m 7 actions running
+    Executing genrule //sig:s11; 0s darwin-sandbox
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s24; 0s darwin-sandbox
+    Executing genrule //sig:s5; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+    Executing genrule //sig:s30; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s5 failed: (Trace/breakpoint trap): bash failed: error executing Genrule command (from target //sig:s5) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 5'\'' >&2; kill -5 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 5
+[32m[3 / 9][0m 6 actions running
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s24; 0s darwin-sandbox
+    Executing genrule //sig:s5; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+    Executing genrule //sig:s30; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s30 failed: (Power failure): bash failed: error executing Genrule command (from target //sig:s30) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 30'\'' >&2; kill -30 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 30
+[32m[4 / 9][0m 5 actions running
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s24; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+    Executing genrule //sig:s30; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s24 failed: (CPU time limit exceeded): bash failed: error executing Genrule command (from target //sig:s24) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 24'\'' >&2; kill -24 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 24
+[32m[5 / 9][0m 4 actions running
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s24; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s6 failed: (Aborted): bash failed: error executing Genrule command (from target //sig:s6) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 6'\'' >&2; kill -6 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 6
+[32m[6 / 9][0m 3 actions running
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+    Executing genrule //sig:s6; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s9 failed: (Killed): bash failed: error executing Genrule command (from target //sig:s9) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 9'\'' >&2; kill -9 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 9
+[32m[7 / 9][0m 2 actions running
+    Executing genrule //sig:s31; 0s darwin-sandbox
+    Executing genrule //sig:s9; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/sig/BUILD.bazel:1:9: Executing genrule //sig:s31 failed: (Bad system call): bash failed: error executing Genrule command (from target //sig:s31) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''dying by 31'\'' >&2; kill -31 $$'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+dying by 31
+[32m[8 / 9][0m Executing genrule //sig:s31; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 8 targets...
+[32m[9 / 9][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[9 / 9][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.092s, Critical Path: 0.04s
+[32m[9 / 9][0m no actions running
+[1A[K[32mINFO: [0m9 processes: 9 internal.
+[32m[9 / 9][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

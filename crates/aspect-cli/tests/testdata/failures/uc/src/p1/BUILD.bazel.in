@@ -1,0 +1,3 @@
+genrule(name = "a", srcs = ["//le:x"], outs = ["a.txt"], cmd = "true")
+genrule(name = "b", srcs = ["//le:y"], outs = ["b.txt"], cmd = "true")
+genrule(name = "c", srcs = ["//mt:gone"], outs = ["c.txt"], cmd = "true")

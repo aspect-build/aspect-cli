@@ -1,0 +1,2 @@
+genrule(name = "t", outs = "notalist.txt", cmd = "true")
+genrule(name = "ok", outs = ["ok.txt"], cmd = "true")

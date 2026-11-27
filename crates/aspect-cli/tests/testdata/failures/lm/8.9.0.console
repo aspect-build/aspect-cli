@@ -1,0 +1,28 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mSkipping '//lm:all': while parsing '//lm:all': error loading package 'lm': cannot load '//lm:nope.bzl': no such file
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //q:on_lm (0 packages loaded, 0 targets configured)
+[1A[K[32mINFO: [0mAnalyzed target //q:on_lm (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0merror loading package 'lm': cannot load '//lm:nope.bzl': no such file
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/q/BUILD.bazel:1:8: error loading package 'lm': cannot load '//lm:nope.bzl': no such file and referenced by '//q:on_lm'
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q:on_lm', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+
+[1A[K[32mINFO: [0mElapsed time: 0.045s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -1,0 +1,17 @@
+def _wk_impl(ctx):
+    o = ctx.actions.declare_file(ctx.label.name + ".out")
+    args = ctx.actions.args()
+    args.add(o.path)
+    args.add("fail")
+    args.use_param_file("@%s", use_always = True)
+    args.set_param_file_format("multiline")
+    ctx.actions.run(
+        outputs = [o],
+        executable = ctx.executable._w,
+        arguments = [args],
+        mnemonic = "PyWork",
+        progress_message = "Working on %{label} in a worker",
+        execution_requirements = {"supports-workers": "1", "requires-worker-protocol": "json"},
+    )
+    return [DefaultInfo(files = depset([o]))]
+wk = rule(implementation = _wk_impl, attrs = {"_w": attr.label(default = "worker.py", allow_single_file = True, executable = True, cfg = "exec")})

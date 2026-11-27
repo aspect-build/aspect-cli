@@ -1,0 +1,1 @@
+genrule(name = "priv", outs = ["priv.txt"], cmd = "echo > $@", visibility = ["//visibility:private"])

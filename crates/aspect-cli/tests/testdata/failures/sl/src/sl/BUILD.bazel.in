@@ -1,0 +1,2 @@
+load(":defs.bzl", "sl")
+sl(name = "s")

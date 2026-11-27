@@ -1,0 +1,5 @@
+def _impl(ctx):
+    o = ctx.actions.declare_file(ctx.label.name + ".out")
+    ctx.actions.run_shell(outputs = [o], command = ctx.attr.cmd, progress_message = ctx.attr.msg, mnemonic = "Check")
+    return [DefaultInfo(files = depset([o]))]
+chk = rule(implementation = _impl, attrs = {"cmd": attr.string(), "msg": attr.string()})

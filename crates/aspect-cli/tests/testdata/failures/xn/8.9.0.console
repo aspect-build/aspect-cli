@@ -1,0 +1,58 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 3][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/xn/BUILD.bazel:4:4: Checking against //xn:d failed: (Exit 5): bash failed: error executing Check command (from target //xn:c) /bin/bash -c 'echo '\''error: CCC alone'\'' >&2; exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: CCC alone
+[32m[1 / 5][0m 4 actions running
+    Checking against //xn:a; 0s darwin-sandbox
+    Checking against //xn:d; 0s darwin-sandbox
+    Checking against //xn:b; 0s darwin-sandbox
+    Checking d; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Checking d:
+/bin/bash: $@: ambiguous redirect
+[32m[2 / 5][0m 3 actions running
+    Checking against //xn:a; 0s darwin-sandbox
+    Checking against //xn:b; 0s darwin-sandbox
+    Checking d; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xn/BUILD.bazel:5:4: output 'xn/d.out' was not created
+[32m[2 / 5][0m 3 actions running
+    Checking against //xn:a; 0s darwin-sandbox
+    Checking against //xn:b; 0s darwin-sandbox
+    Checking d; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xn/BUILD.bazel:5:4: Checking d failed: not all outputs were created or valid
+[32m[2 / 5][0m 3 actions running
+    Checking against //xn:a; 0s darwin-sandbox
+    Checking against //xn:b; 0s darwin-sandbox
+    Checking d; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xn/BUILD.bazel:2:4: Checking against //xn:b failed: (Exit 3): bash failed: error executing Check command (from target //xn:a) /bin/bash -c 'echo '\''error: AAA mismatch in a'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: AAA mismatch in a
+[32m[3 / 5][0m 2 actions running
+    Checking against //xn:a; 0s darwin-sandbox
+    Checking against //xn:b; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xn/BUILD.bazel:3:4: Checking against //xn:a failed: (Exit 3): bash failed: error executing Check command (from target //xn:b) /bin/bash -c 'sleep 0.3; echo '\''error: BBB mismatch in b'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error: BBB mismatch in b
+[32m[4 / 5][0m Checking against //xn:a; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 4 targets...
+[32m[5 / 5][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.374s, Critical Path: 0.33s
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0m5 processes: 4 internal, 1 darwin-sandbox.
+[32m[5 / 5][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

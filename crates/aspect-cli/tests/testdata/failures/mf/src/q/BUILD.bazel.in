@@ -1,0 +1,1 @@
+genrule(name = "on_mf", srcs = ["//mf:x"], outs = ["a.txt"], cmd = "true")

@@ -1,0 +1,1 @@
+genrule(name = "ok", outs = ["ok.txt"], cmd = "true")

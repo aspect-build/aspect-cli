@@ -1,0 +1,1 @@
+build --build_event_publish_all_actions --nosuch_flag_here //ci:plain

@@ -1,0 +1,68 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 0 targets configured).
+[32m[1 / 7][0m 5 actions, 0 running
+    [Prepa] Testing //t:flaky
+    [Prepa] Testing //t:fail
+    [Prepa] Testing //t:rpt (run 2 of 3)
+    [Prepa] Testing //t:rpt (run 3 of 3)
+    [Prepa] Testing //t:rpt (run 1 of 3)
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:flaky (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/flaky/test_attempts/attempt_1.log)
+[32m[4 / 10][0m 1 / 5 tests;[0m 6 actions running[0m; last test: [32m//t:ok0[0m
+    Testing //t:fail; 0s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:rpt (run 2 of 3) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/rpt/run_2_of_3/test.log)
+[32m[4 / 10][0m 1 / 5 tests;[0m 6 actions running[0m; last test: [32m//t:ok0[0m
+    Testing //t:fail; 0s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:fail (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/fail/test.log)
+[32m[4 / 10][0m 1 / 5 tests;[0m 5 actions running[0m; last test: [32m//t:ok0[0m
+    Testing //t:fail; 0s darwin-sandbox
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:shard (shard 2 of 3) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/shard/shard_2_of_3/test.log)
+[32m[8 / 10][0m 3 / 5 tests, [31m[1m2 failed[0m;[0m 2 actions running[0m; last test: [31m[1m//t:rpt[0m
+    Testing //t:flaky; 0s local
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K
+[35mFLAKY: [0m//t:flaky (Summary)
+      ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/flaky/test_attempts/attempt_1.log
+[32m[9 / 10][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m  1 action[0m; last test: [31m[1m//t:flaky[0m[0m
+    Testing //t:flaky; 0s local
+[1A[K[1A[K[32mINFO: [0mFound 5 test targets...
+[32m[10 / 10][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m no actions running[0m; last test: [31m[1m//t:flaky[0m
+[1A[K[32mINFO: [0mElapsed time: 0.186s, Critical Path: 0.14s
+[32m[10 / 10][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m no actions running[0m; last test: [31m[1m//t:flaky[0m
+[1A[K[32mINFO: [0m7 processes: 3 action cache hit, 10 darwin-sandbox, 4 local.
+[32m[10 / 10][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m no actions running[0m; last test: [31m[1m//t:flaky[0m
+[1A[K[32mINFO: [0mBuild completed, 3 tests FAILED, 7 total actions
+[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -1,0 +1,3 @@
+genrule(name = "missing", srcs = ["nope.txt"], outs = ["x.txt"], cmd = "cat $< > $@")
+genrule(name = "dep", srcs = [":missing"], outs = ["y.txt"], cmd = "cat $< > $@")
+genrule(name = "badlabel", srcs = ["//nowhere:x"], outs = ["z.txt"], cmd = "true")

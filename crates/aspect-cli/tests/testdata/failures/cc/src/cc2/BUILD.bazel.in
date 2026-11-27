@@ -1,0 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary")
+cc_library(name = "stems", srcs = ["d.cc", "sub/d.cc", "e.cc", "f.cc"])
+cc_library(name = "other", srcs = ["g.cc"])
+cc_library(name = "undef", srcs = ["u.cc"])
+cc_binary(name = "linkfail", srcs = ["main.cc"], deps = [":undef"])

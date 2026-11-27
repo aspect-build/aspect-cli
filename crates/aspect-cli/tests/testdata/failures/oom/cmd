@@ -1,0 +1,1 @@
+--host_jvm_args=-Xmx24m build --keep_going --build_event_publish_all_actions //oom:all

@@ -1,0 +1,1 @@
+test --keep_going --build_event_publish_all_actions //t:fail //t:shard //t:flaky //t:rpt //t:ok0 --runs_per_test=//t:rpt@3 --flaky_test_attempts=//t:flaky@2

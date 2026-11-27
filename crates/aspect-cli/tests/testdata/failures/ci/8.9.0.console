@@ -1,0 +1,35 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 2][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ci/BUILD.bazel:1:8: Executing genrule //ci:info failed: (Exit 1): bash failed: error executing Genrule command (from target //ci:info) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''INFO: tool says hello'\'' >&2; echo '\''ERROR: tool says it broke'\'' >&2; echo '\''detail line'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+INFO: tool says hello
+ERROR: tool says it broke
+detail line
+[32m[1 / 3][0m 2 actions running
+    Executing genrule //ci:plain; 0s darwin-sandbox
+    Executing genrule //ci:info; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ci/BUILD.bazel:2:8: Executing genrule //ci:plain failed: (Exit 2): bash failed: error executing Genrule command (from target //ci:plain) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''plain broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+plain broke
+[32m[2 / 3][0m Executing genrule //ci:plain; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 2 targets...
+[32m[3 / 3][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.071s, Critical Path: 0.02s
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0m3 processes: 3 internal.
+[32m[3 / 3][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

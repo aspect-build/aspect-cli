@@ -1,0 +1,78 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/no/BUILD.bazel:4:6: Working failed: (Exit 1): bash failed: error executing W command (from target //no:n) /bin/bash -c 'echo '\''same'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+same
+[32m[7 / 16][0m 9 actions running
+    Working; 0s darwin-sandbox
+    Working; 0s darwin-sandbox
+    Preparing no/x.b; 0s darwin-sandbox
+    Finishing no/x.a; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.10; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.6; 0s darwin-sandbox
+    //no:p; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/no/BUILD.bazel:3:6: Preparing no/x.b failed: (Exit 1): bash failed: error executing Prep command (from target //no:x) /bin/bash -c 'echo '\''A side broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+A side broke
+[32m[10 / 16][0m 6 actions running
+    Working; 0s darwin-sandbox
+    Preparing no/x.b; 0s darwin-sandbox
+    Finishing no/x.a; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.10; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.6; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/no/BUILD.bazel:2:4: Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.1 failed: (Exit 1): bash failed: error executing Proc command (from target //no:p) /bin/bash -c 'echo '\''same text'\'' >&2; exit 1' '' bazel-out/darwin_arm64-fastbuild/bin/no/p.1
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+same text
+[32m[12 / 16][0m 4 actions running
+    Working; 0s darwin-sandbox
+    Finishing no/x.a; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.1; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.10; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[32m[13 / 16][0m 3 actions running
+    Working; 0s darwin-sandbox
+    Finishing no/x.a; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.10; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/no/BUILD.bazel:2:4: Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.10 failed: (Exit 1): bash failed: error executing Proc command (from target //no:p) /bin/bash -c 'sleep 0.5; echo '\''same text'\'' >&2; exit 1' '' bazel-out/darwin_arm64-fastbuild/bin/no/p.10
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+same text
+[32m[13 / 16][0m 3 actions running
+    Working; 0s darwin-sandbox
+    Finishing no/x.a; 0s darwin-sandbox
+    Processing bazel-out/darwin_arm64-fastbuild/bin/no/p.10; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/no/BUILD.bazel:3:6: Finishing no/x.a failed: (Exit 1): bash failed: error executing Fin command (from target //no:x) /bin/bash -c 'sleep 0.5; echo '\''B side broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+B side broke
+[32m[14 / 16][0m 2 actions running
+    Working; 0s darwin-sandbox
+    Finishing no/x.a; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/no/BUILD.bazel:4:6: Working failed: (Exit 1): bash failed: error executing W command (from target //no:n) /bin/bash -c 'sleep 0.5; echo '\''same'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+same
+[32m[15 / 16][0m Working; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 3 targets...
+[32m[16 / 16][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[16 / 16][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.610s, Critical Path: 0.56s
+[32m[16 / 16][0m no actions running
+[1A[K[32mINFO: [0m16 processes: 7 internal, 9 darwin-sandbox.
+[32m[16 / 16][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

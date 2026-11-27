@@ -1,0 +1,2 @@
+load(":defs.bzl", "chk")
+[chk(name = "n%d" % i, msg = "Checking item", cmd = "true" if i % 2 else "echo 'n%d broke' >&2; exit %d" % (i, i + 1)) for i in range(6)]
