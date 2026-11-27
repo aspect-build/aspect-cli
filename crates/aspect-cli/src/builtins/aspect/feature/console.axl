@@ -296,8 +296,9 @@ def _console_impl(ctx: FeatureContext):
             summary[0] = _fresh(task_ctx)
         failures.collect_event(summary[0], event)
 
-    # The summary lists as many failures as the recap would repeat errors.
-    summary_max = ctx.args.recap_max
+    # The summary lists as many failures as the recap would repeat errors,
+    # with or without the Dashboard.
+    trait.failure_summary_max = ctx.args.recap_max
 
     def _summarize(task_ctx, build):
         if trait.output_display == "none":
@@ -308,7 +309,7 @@ def _console_impl(ctx: FeatureContext):
         state["cancelling"] = task_ctx.cancellation.root.cancelled
         err = task_ctx.std.io.stderr
         size = task_ctx.std.term.size() if err.is_tty else None
-        for line in failures.failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code, max_entries = summary_max):
+        for line in failures.failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code, max_entries = trait.failure_summary_max):
             err.write(line + "\n")
         summary[0] = None
 

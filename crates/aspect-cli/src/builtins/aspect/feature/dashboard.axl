@@ -713,7 +713,7 @@ def _dashboard_impl(ctx: FeatureContext):
         if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = _older(task_ctx)):
             for line in replay_lines(state, err.is_tty):
                 err.write(line + "\n", copy = False)
-        for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True, linked = task_ctx.std.io.linked, excerpt = task_ctx.std.excerpt):
+        for line in report_lines(state, task_ctx.task.id, err.is_tty, replayed = True, linked = task_ctx.std.io.linked, excerpt = task_ctx.std.excerpt, max_entries = task_ctx.traits[BazelTrait].failure_summary_max):
             err.write(line + "\n")
         gone = sorted(state.get("silenced_tips", {}).keys())
         if gone:

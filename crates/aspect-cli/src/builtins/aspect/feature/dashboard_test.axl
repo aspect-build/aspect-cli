@@ -2293,6 +2293,7 @@ def _impl(ctx: TaskContext) -> int:
 
     many = dict(done, fails = [dict(done["fails"][0], label = "//a:b%d" % i) for i in range(14)], kept_errors = None)
     _eq("capped, counted", [l for l in report_lines(many, "t-1", False) if l.startswith("──")], ["── Failures (first 10 of 14) ──"])
+    _eq("under the Dashboard too, by --console:recap-max", [l for l in report_lines(many, "t-1", False, max_entries = 4) if l.startswith("──")], ["── Failures (first 4 of 14) ──"])
     stopped = dict(done, inv = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}, cancelling = False)
     _eq("an interrupted build's counts say so", [l for l in report_lines(stopped, "t-3", False) if " built, " in l][0].startswith("interrupted · "), True)
     late = dict(done, cancelling = True, inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))})

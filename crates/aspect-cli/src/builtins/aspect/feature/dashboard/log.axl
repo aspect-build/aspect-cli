@@ -768,7 +768,7 @@ def replay_lines(state: dict, tty: bool) -> list:
         out.append(state.get("colour_of", {}).get(line, line) if tty else line)
     return out
 
-def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked = None, excerpt = None) -> list:
+def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked = None, excerpt = None, max_entries = None) -> list:
     """What the scrollback keeps once the screen is gone, for a person and
     for an agent reading a cut capture's tail alike: Bazel's closing block
     as it wrote it (its test summary, `Elapsed time`, `Build completed`),
@@ -779,8 +779,9 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
     it, the counts, Bazel's raw log and `aspect history show`). The summary
     goes only here, never to the console the screen shows nor to the task's
     output it dumps, so a run replayed from the history shows it no more
-    than the screen did. `linked` links the summary's paths and `excerpt`
-    picks a test log's lines (`failure_summary`), in the screen's width."""
+    than the screen did. `linked` links the summary's paths, `excerpt`
+    picks a test log's lines and `max_entries` caps its entries
+    (`failure_summary`), in the screen's width."""
     out = []
     bold = _c("strong") if tty else ""
     reset = _RESET if tty else ""
@@ -798,7 +799,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
             out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
         out.append("%s: %s" % (label, link(url, url) if tty else url))
-    return out + failure_summary(state, task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100, state.get("bazel_exit"))
+    return out + failure_summary(state, task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100, state.get("bazel_exit"), max_entries = max_entries)
 
 dashboard_log = namespace(
     add_lines = add_lines,

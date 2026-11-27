@@ -490,7 +490,7 @@ def _last_words(state: dict) -> list:
         said = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
     return said[-_EXCERPT_LINES:]
 
-def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None, max_entries = _SUMMARY_MAX) -> list:
+def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None, max_entries = None) -> list:
     """The end of a build's console, the same with the Dashboard or
     without: a `── Failures (N) ──` rule when anything failed, then an
     entry for each failure Bazel's build events report (`failure_entries`,
@@ -516,13 +516,14 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     quoting the raw log's last `ERROR:` lines, else, a crashed server's,
     its last lines but progress.
 
-    Past `max_entries` entries (and as many of Bazel's other errors) `… and
-    N more failures · aspect history
-    show <id>`; then the counts, Bazel's raw log (`log_path`), and where
+    Past `max_entries` entries (`_SUMMARY_MAX` when None), and as many of
+    Bazel's other errors, `… and N more failures · aspect history show
+    <id>`; then the counts, Bazel's raw log (`log_path`), and where
     the rest is. Every line goes through `linked` (`ctx.std.io.linked`)
     when given, so its paths are links as the CLI's own lines on that
     terminal are. The `mono` theme (`NO_COLOR` too) draws `x` and `|` for
     `✗` and `│`."""
+    max_entries = max_entries or _SUMMARY_MAX
     bold = _c("strong") if tty else ""
     red = _c("error") if tty else ""
     muted = _c("muted") if tty else ""
