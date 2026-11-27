@@ -7,7 +7,8 @@ differ, or checks the environment it runs in (in a nested run, its stdin a
 pipe); a stand-in copies' directory plays a disk that takes two names as
 one. A few cases need what only some hosts have, and are probed for: a disk
 that folds case or Unicode (and, where it doesn't, a case-only rename that
-applies), permissions a root user ignores, and macOS's `uchg` flag.
+applies), permissions a root user ignores, and the `uchg` flag (set through
+`sh`, so a host with no `chflags`, such as Linux, skips the case).
 
 Run with:
   aspect dev test-fix-patch
@@ -46,6 +47,10 @@ def _restore(env, values):
             env.remove_var(name)
         else:
             env.set_var(name, value)
+
+def _chflags(ctx: TaskContext, flag: str, path: str) -> bool:
+    """Whether `chflags flag path` worked; false where there is no `chflags`."""
+    return ctx.std.process.command("sh").args(["-c", 'chflags "$1" "$2" 2>/dev/null', "sh", flag, path]).spawn().wait().success
 
 def _sides(text):
     files, why = testonly_scan(text)
@@ -556,13 +561,12 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         _eq("the rest is written", (fs.exists(tree + "/src/ro/new.txt"), fs.read_to_string(tree + "/src/ok.txt")), (False, "B\n"))
     fs.set_permissions(tree + "/src/ro", 0o755)
 
-    # macOS's `uchg` flag: the copy is made without it, so patch changes it
-    # and it goes with the rest; the file it stands for can't be replaced,
-    # and is named.
+    # The `uchg` flag: the copy is made without it, so patch changes it and
+    # it goes with the rest; the file it stands for can't be replaced, and
+    # is named. Set through `sh`, so a host with no `chflags` skips it.
     fs.write(tree + "/src/locked.txt", "u\n")
-    locked = ctx.std.process.command("chflags").args(["uchg", tree + "/src/locked.txt"]).stderr("null").spawn().wait()
-    if locked.success:
-        ctx.defer(lambda: ctx.std.process.command("chflags").args(["nouchg", tree + "/src/locked.txt"]).spawn().wait())
+    if _chflags(ctx, "uchg", tree + "/src/locked.txt"):
+        ctx.defer(_chflags, ctx, "nouchg", tree + "/src/locked.txt")
         copies = []
 
         def kept_copies():
